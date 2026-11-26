@@ -1797,6 +1797,18 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     sac.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
+    sac.create_index(
+        IndexModel::builder()
+            .keys(doc! {"approver_grants_pending": 1})
+            .options(
+                IndexOptions::builder()
+                    .partial_filter_expression(doc! {"approver_grants_pending": true})
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+
     // ── user_provider_credentials ──
     let user_creds = db.collection::<mongodb::bson::Document>("user_provider_credentials");
     user_creds

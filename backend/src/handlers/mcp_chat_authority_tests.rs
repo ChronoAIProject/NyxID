@@ -1523,6 +1523,7 @@ async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
     // to the usual checks (what guests may do with a service is decided
     // before, from the owner's guest access).
     let target = crate::services::mcp_approval::McpApprovalTarget {
+        connection_id: None,
         service_id: uuid::Uuid::new_v4().to_string(),
         service_name: "Example".into(),
         service_slug: "example".into(),
@@ -1724,6 +1725,7 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.clone(),
@@ -1782,6 +1784,7 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
             crate::models::approval_grant::COLLECTION_NAME,
         )
         .insert_one(crate::models::approval_grant::ApprovalGrant {
+            org_policy: None,
             execution_review: None,
             execution_last_used_at: None,
             execution_use: None,
@@ -3088,6 +3091,7 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: catalog.id.clone(),
@@ -3112,6 +3116,7 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
                     crate::models::approval_grant::COLLECTION_NAME,
                 )
                 .insert_one(crate::models::approval_grant::ApprovalGrant {
+                    org_policy: None,
                     execution_review: None,
                     execution_last_used_at: None,
                     execution_use: None,
@@ -5235,6 +5240,7 @@ async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
             .db
             .collection::<ServiceApprovalConfig>(CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.clone(),
@@ -5509,6 +5515,7 @@ async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_disp
                 .db
                 .collection(configs::COLLECTION_NAME)
                 .insert_one(configs::ServiceApprovalConfig {
+                    approvers: Default::default(),
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),
                     service_id: service_id.clone(),

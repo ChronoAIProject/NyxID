@@ -177,6 +177,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::execution_permission_channel::READINESS,
     super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
+    super::org_service_approvers::FLAG,
     // Older transport writers do not wait for relay sockets before remote setup.
     "channel:discord-gateway",
     super::nyxbot_gateway_source::READINESS,

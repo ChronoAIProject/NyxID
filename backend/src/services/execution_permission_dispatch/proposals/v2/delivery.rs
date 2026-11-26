@@ -258,7 +258,12 @@ pub(super) async fn complete_response(
                 .or_else(|| value.pointer("/result/execution/request_id"))
                 .and_then(|v| v.as_str());
             if let Some(id) = pending {
-                if state.db.collection::<Document>(REQUESTS).find_one(doc! {"_id":id,"execution_proposal":null,"$or":[{"user_id":&row.user_id},{"notify_user_ids":&row.user_id}]}).await?.is_none() {return Err(refused());}
+                if independent_review(&state.db, &row.user_id, id)
+                    .await?
+                    .is_none()
+                {
+                    return Err(refused());
+                }
                 state.db.collection::<Document>(REQUESTS).update_one(doc! {"_id":&row.id,"execution_proposal.v2.claim_id":&resume.claim_id,"execution_proposal.v2.state":"preparing"},doc! {"$set":{"execution_proposal.v2.state":"waiting","execution_proposal.v2.independent_request_id":id}}).await?;
                 return Ok(None);
             }
@@ -403,6 +408,52 @@ pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
     state.db.collection::<Document>(REQUESTS).update_many(doc!{"execution_proposal.version":2,"created_at":{"$lt":bson::DateTime::from_chrono(Utc::now()-Duration::days(1))}},doc!{"$unset":Slot::V2.unset(&[Field::Payload, Field::Result])}).await?;
     Ok(())
 }
+/// Check the live review only after finding an actual independent org-policy request.
+async fn independent_review(
+    db: &mongodb::Database,
+    actor: &str,
+    id: &str,
+) -> AppResult<Option<Document>> {
+    let candidate=db.collection::<Document>(REQUESTS).find_one(doc!{"_id":id,"execution_proposal":null,"$or":[{"user_id":actor},{"notify_user_ids":actor}]}).await?;
+    if let Some(row) = &candidate
+        && row.get_bool("from_org_policy") == Ok(true)
+    {
+        let request = bson::from_document::<ApprovalRequest>(row.clone()).map_err(encoding)?;
+        let mut tx = db.client().start_session().await?;
+        let policy = crate::services::org_service_approvers::config(
+            db,
+            &request.user_id,
+            &request.service_id,
+            &mut tx,
+        )
+        .await?;
+        let Some(cfg) = policy else { return Ok(None) };
+        use crate::services::org_service_approvers as approvers;
+        if request
+            .assistant_group
+            .as_ref()
+            .is_some_and(|g| g.actor_user_id != actor)
+            || !approvers::revision_live(
+                &cfg,
+                request.org_policy.as_ref(),
+                request.status == "pending",
+            )
+            || approvers::eligible(
+                db,
+                &cfg,
+                approvers::connection(&request),
+                Some(actor),
+                false,
+                &mut tx,
+            )
+            .await?
+            .is_empty()
+        {
+            return Ok(None);
+        }
+    }
+    Ok(candidate)
+}
 async fn maintain(state: &crate::AppState, row: &ApprovalRequest) -> AppResult<()> {
     let p = proposal(row)?;
     if !p.background_allowed
@@ -472,11 +523,7 @@ async fn maintain(state: &crate::AppState, row: &ApprovalRequest) -> AppResult<(
     }
     if p.state == "waiting" {
         let review = if let Some(id) = &p.independent_request_id {
-            state
-                .db
-                .collection::<Document>(REQUESTS)
-                .find_one(doc! {"_id":id,"execution_proposal":null,"$or":[{"user_id":&row.user_id},{"notify_user_ids":&row.user_id}]})
-                .await?
+            independent_review(&state.db, &row.user_id, id).await?
         } else if let Some(id) = &p.independent_card_id {
             state
                 .db

@@ -6077,7 +6077,8 @@ async fn chat_approvals(
     include_decided: bool,
     linked_ids: &[&str],
 ) -> AppResult<Vec<ChatApproval>> {
-    use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVALS};
+    use crate::models::approval_request::ApprovalRequest;
+    use mongodb::options::FindOptions;
     if credential_api_key_id.is_empty() {
         return Ok(Vec::new());
     }
@@ -6092,26 +6093,36 @@ async fn chat_approvals(
         ],
     };
     let now = Utc::now();
+    let mut visibility = super::org_service_approvers::CardVisibility::default();
     let mut pending = scope.clone();
     pending.extend(doc! {"status":"pending","expires_at":{"$gt":bson::DateTime::from_chrono(now)}});
-    let collection = db.collection::<ApprovalRequest>(APPROVALS);
-    let mut rows: Vec<ApprovalRequest> = collection
-        .find(pending)
-        .sort(doc! {"created_at":1})
-        .limit(10)
-        .await?
-        .try_collect()
+    let mut rows = visibility
+        .find(
+            db,
+            user_id,
+            pending,
+            FindOptions::builder()
+                .sort(doc! {"created_at":1})
+                .limit(10)
+                .build(),
+            |r: &ApprovalRequest| r.from_org_policy,
+        )
         .await?;
     if include_decided {
         let terminal = doc! {"$and":[scope, {"$or":[
             {"status":{"$ne":"pending"}}, {"expires_at":{"$lte":bson::DateTime::from_chrono(now)}},
         ]}]};
-        let recent: Vec<ApprovalRequest> = collection
-            .find(terminal)
-            .sort(doc! {"created_at":-1})
-            .limit(20)
-            .await?
-            .try_collect()
+        let recent = visibility
+            .find(
+                db,
+                user_id,
+                terminal,
+                FindOptions::builder()
+                    .sort(doc! {"created_at":-1})
+                    .limit(20)
+                    .build(),
+                |r: &ApprovalRequest| r.from_org_policy,
+            )
             .await?;
         // A decision can commit between the pending and history reads.
         rows.retain(|pending| !recent.iter().any(|later| later.id == pending.id));
@@ -6126,14 +6137,18 @@ async fn chat_approvals(
             .filter(|id| !present.contains(id))
             .collect();
         if !missing.is_empty() {
-            let linked: Vec<ApprovalRequest> = collection
-                .find(doc! {
-                    "_id":{"$in":missing}, "execution_proposal":null,
-                    "requester_type":"api_key", "requester_id":user_id,
-                    "$or":[{"user_id":user_id},{"notify_user_ids":user_id}],
-                })
-                .await?
-                .try_collect()
+            let linked = visibility
+                .find(
+                    db,
+                    user_id,
+                    doc! {
+                        "_id":{"$in":missing}, "execution_proposal":null,
+                        "requester_type":"api_key", "requester_id":user_id,
+                        "$or":[{"user_id":user_id},{"notify_user_ids":user_id}],
+                    },
+                    FindOptions::default(),
+                    |r: &ApprovalRequest| r.from_org_policy,
+                )
                 .await?;
             rows.extend(linked);
         }

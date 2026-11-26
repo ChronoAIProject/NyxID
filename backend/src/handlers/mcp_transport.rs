@@ -4413,6 +4413,7 @@ async fn authorize_mcp_operation(
             &approval_owner_user_id,
             &target.service_owner_user_id,
             &target.service_id,
+            target.connection_id.as_deref(),
             operation,
             auth.approval_requester_type(),
             &approval_requester_id,
@@ -4509,6 +4510,7 @@ async fn wait_for_mcp_approval(
         operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.org_policy = pending.resolution.policy_stamp();
     request_operation.assistant_group = crate::services::org_group_service::approval_binding(
         &state.db,
         auth.assistant_group_id.as_deref(),
@@ -7214,19 +7216,6 @@ async fn handle_mcp_ssh_exec(
         Ok(service) => service,
         Err(e) => return tool_result(request_id, &format!("SSH service error: {e}"), true),
     };
-    let approval_owner_user_id = auth.effective_approval_owner_user_id();
-    let service_owner_user_id = match proxy_service::find_effective_service_owner(
-        &state.db,
-        &approval_owner_user_id,
-        None,
-        Some(&service_id),
-    )
-    .await
-    {
-        Ok(Some(owner)) => owner,
-        Ok(None) => approval_owner_user_id.clone(),
-        Err(e) => return tool_result(request_id, &format!("SSH service error: {e}"), true),
-    };
     let operation = operation_descriptor::build_ssh_descriptor(
         operation_descriptor::SshOperationKind::Exec,
         Some(command),
@@ -7235,10 +7224,11 @@ async fn handle_mcp_ssh_exec(
         state,
         auth,
         crate::services::mcp_approval::McpApprovalTarget {
+            connection_id: Some(connection.id.clone()),
             service_id: service_id.clone(),
             service_name: service.name.clone(),
             service_slug: service.slug.clone(),
-            service_owner_user_id,
+            service_owner_user_id: connection.user_id.clone(),
             // SSH services are not auto-provisioned.
             is_auto_connected: false,
         },
@@ -8914,6 +8904,7 @@ mod tests {
         .await
         .unwrap();
         let target = crate::services::mcp_approval::McpApprovalTarget {
+            connection_id: None,
             service_id: uuid::Uuid::new_v4().to_string(),
             service_owner_user_id: f.owner.clone(),
             service_name: "Drive".into(),
@@ -9110,6 +9101,7 @@ mod tests {
 
         let now = chrono::Utc::now();
         let config = ServiceApprovalConfig {
+            approvers: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: org_id.clone(),
             service_id: catalog_service_id.clone(),
@@ -9144,6 +9136,7 @@ mod tests {
 
         db.collection::<ApprovalGrant>(APPROVAL_GRANTS)
             .insert_one(ApprovalGrant {
+                org_policy: None,
                 execution_review: None,
                 execution_last_used_at: None,
                 execution_use: None,
@@ -9332,6 +9325,7 @@ mod tests {
             .expect("insert allowlisted cancellation endpoint");
         db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: actor_id.clone(),
                 service_id: service.id.clone(),

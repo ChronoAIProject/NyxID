@@ -506,14 +506,20 @@ async fn refresh_scoped(
     if !approval_ids.is_empty() {
         approval_ids.sort();
         approval_ids.dedup();
-        let mut rows: Vec<Document> = db
-            .collection(APPROVALS)
-            .find(doc! {
-                "_id":{"$in":approval_ids}, "$or":[{"user_id":user},{"notify_user_ids":user}],
-            })
-            .projection(projection())
-            .await?
-            .try_collect()
+        let mut fields = projection();
+        fields.insert("from_org_policy", 1);
+        let mut rows = super::org_service_approvers::CardVisibility::default()
+            .find(
+                db,
+                user,
+                doc! {
+                    "_id":{"$in":approval_ids}, "$or":[{"user_id":user},{"notify_user_ids":user}],
+                },
+                mongodb::options::FindOptions::builder()
+                    .projection(fields)
+                    .build(),
+                |row: &Document| row.get_bool("from_org_policy") == Ok(true),
+            )
             .await?;
         refresh_machines(db, user, &mut rows).await?;
         refresh_incomplete(db, user, &mut rows).await?;

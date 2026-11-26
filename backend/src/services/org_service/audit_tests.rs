@@ -377,12 +377,24 @@ async fn org_audit_request_command_counts() {
         let expected = match action {
             Action::Add => 20,
             Action::Update => 19,
-            Action::Revoke => 15,
+            Action::Revoke => 16,
             Action::Issue => 10,
             Action::Cancel => 6,
             Action::Join => 19,
         };
         assert_eq!(commands.len(), expected, "{action:?}");
+        let policy_commands: Vec<_> = commands
+            .iter()
+            .filter(|(_, collection)| {
+                collection == crate::models::service_approval_config::COLLECTION_NAME
+            })
+            .map(|(command, _)| command.as_str())
+            .collect();
+        if matches!(action, Action::Revoke) {
+            assert_eq!(policy_commands, ["update"]);
+        } else {
+            assert!(policy_commands.is_empty());
+        }
         let specialist_commands: Vec<_> = commands
             .iter()
             .filter(|(_, collection)| collection == crate::models::assistant_agent::COLLECTION_NAME)

@@ -539,10 +539,13 @@ pub(crate) fn inventory_owner_fields(
 
     let mut fields = std::collections::BTreeMap::new();
     let acl_filter = super::super::org_agent_service::member_list_filter(owner);
-    for (collection, filter) in inventory(owner)
-        .into_iter()
-        .chain([(crate::models::assistant_agent::COLLECTION_NAME, acl_filter)])
-    {
+    for (collection, filter) in inventory(owner).into_iter().chain([
+        (crate::models::assistant_agent::COLLECTION_NAME, acl_filter),
+        (
+            crate::models::service_approval_config::COLLECTION_NAME,
+            super::super::org_service_approvers::member_list_filter(owner),
+        ),
+    ]) {
         let mut row = std::collections::BTreeSet::new();
         collect(&bson::Bson::Document(filter), None, owner, &mut row);
         fields
@@ -1203,6 +1206,17 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
     let clear = remote_cleanup_clear(&db, &job.user_id, &mut tx).await?;
     tx.abort_transaction().await?;
     if !clear {
+        return Ok(false);
+    }
+    if redact_page(
+        &db,
+        &job.user_id,
+        crate::models::service_approval_config::COLLECTION_NAME,
+        super::super::org_service_approvers::member_list_filter(&job.user_id),
+        super::super::org_service_approvers::prune_update(&job.user_id),
+    )
+    .await?
+    {
         return Ok(false);
     }
     if redact_page(

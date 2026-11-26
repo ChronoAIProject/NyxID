@@ -454,6 +454,7 @@ pub(super) async fn create(
     )
     .await?;
     let request = ApprovalRequest {
+        org_policy: None,
         activity_outcome: None,
         activity_execution: None,
         execution_proposal: Some(version.envelope(p)),
@@ -723,7 +724,7 @@ pub(crate) async fn decide(
             if input.approved {
                 let choice=p.choices.iter().find(|c|Some(&c.id)==input.choice_id.as_ref()&&Some(&c.digest)==input.choice_digest.as_ref()).ok_or_else(conflict)?;
                 let contract=v3::selected_contract(version,&p,choice)?;
-                let grant=ApprovalGrant{execution_use:None,execution_review:Some(p.review.clone()),execution_last_used_at:None,execution:Some(ExecutionPermission{version:VERSION,v1:Some(contract.clone())}),id:(*grant_id).clone(),user_id:actor.to_string(),service_id:row.service_id.clone(),service_name:row.service_name.clone(),requester_type:row.requester_type.clone(),requester_id:row.requester_id.clone(),requester_label:row.requester_label.clone(),approval_request_id:row.id.clone(),scope:Some(LEGACY_SCOPE.into()),granted_at:now,expires_at:contract::legacy_expiry(&contract.validity),revoked:false,org_scoped:false};
+                let grant=ApprovalGrant{org_policy:None,execution_use:None,execution_review:Some(p.review.clone()),execution_last_used_at:None,execution:Some(ExecutionPermission{version:VERSION,v1:Some(contract.clone())}),id:(*grant_id).clone(),user_id:actor.to_string(),service_id:row.service_id.clone(),service_name:row.service_name.clone(),requester_type:row.requester_type.clone(),requester_id:row.requester_id.clone(),requester_label:row.requester_label.clone(),approval_request_id:row.id.clone(),scope:Some(LEGACY_SCOPE.into()),granted_at:now,expires_at:contract::legacy_expiry(&contract.validity),revoked:false,org_scoped:false};
                 db.collection::<ApprovalGrant>("approval_grants").insert_one(grant).session(&mut *session).await?;
                 updated.grant_id=Some((*grant_id).clone());updated.selected_choice=input.choice_id.clone();updated.selected_choice_digest=input.choice_digest.clone();updated.state="queued".into();updated.wake_at=Some(now);
             } else {

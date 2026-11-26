@@ -6,6 +6,8 @@ pub const COLLECTION_NAME: &str = "approval_grants";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalGrant {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_policy: Option<super::service_approval_config::OrgPolicyStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_review: Option<super::execution_proposal::Review>,
     #[serde(default, with = "super::bson_datetime::optional")]
     pub execution_last_used_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -92,6 +94,7 @@ mod tests {
 
     fn make_approval_grant() -> ApprovalGrant {
         ApprovalGrant {
+            org_policy: None,
             execution_review: None,
             execution_last_used_at: None,
             execution_use: None,

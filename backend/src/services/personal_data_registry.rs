@@ -2963,11 +2963,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "service_approval_configs",
-        owner: OwnerSelector::Fields(&["user_id"]),
+        owner: OwnerSelector::Fields(&["user_id", "approver_user_ids"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
         export_selector: ExportSelector::Person("user_id"),
-        why: "service_approval_configs stores the person-owned service approval configs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "Erasure deletes service_approval_configs by personal owner and prunes named approver IDs from organization policies, advancing the policy revision and grant cutoff.",
     },
     Entry {
         collection: "service_change_events",
@@ -3338,6 +3338,7 @@ pub(crate) const EXPORT_SELECTOR_INDEX_GAPS: &[(&str, &str)] = &[
 /// their first key covers the predicate.
 pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
     ("assistant_agents", "org_maintainer_user_ids"),
+    ("service_approval_configs", "approver_user_ids"),
     ("assistant_agents", "org_user_ids"),
     ("assistant_group_mention_notifications", "user_id"),
     ("assistant_group_messages", "author_user_id"),

@@ -308,6 +308,7 @@ async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.id.clone(),
@@ -2549,6 +2550,7 @@ async fn authored_approval_uses_signed_person_and_pins_exact_post_then_put_versi
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.id.clone(),
@@ -5886,6 +5888,7 @@ async fn pending_source_read_timeout_keeps_retryable_reservation_without_a_card(
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.id.clone(),

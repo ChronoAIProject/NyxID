@@ -764,6 +764,7 @@ async fn llm_proxy_request_inner(
         owner_for_approval.as_deref(),
         is_auto_connected_for_approval,
         llm_scope.guest,
+        operation_user_service_id.as_deref(),
         crate::services::mcp_service::http_carries_method_override(
             method.as_str(),
             &headers,
@@ -1724,6 +1725,7 @@ async fn gateway_provider_request(
         effective_owner_for_approval.as_deref(),
         is_auto_connected_for_approval,
         llm_scope.guest,
+        operation_user_service_id.as_deref(),
         crate::services::mcp_service::http_carries_method_override(
             method.as_str(),
             &headers,
@@ -2942,6 +2944,7 @@ pub(crate) async fn check_llm_approval(
     service_owner_user_id: Option<&str>,
     is_auto_connected: bool,
     operation_guest: bool,
+    connection_id: Option<&str>,
     method_override: bool,
 ) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
     let mut operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
@@ -2965,6 +2968,7 @@ pub(crate) async fn check_llm_approval(
         service_owner_user_id,
         is_auto_connected,
         operation_guest,
+        connection_id,
     )
     .await
 }
@@ -2981,6 +2985,7 @@ pub(super) async fn check_llm_approval_descriptor(
     service_owner_user_id: Option<&str>,
     is_auto_connected: bool,
     operation_guest: bool,
+    connection_id: Option<&str>,
 ) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
@@ -2990,6 +2995,7 @@ pub(super) async fn check_llm_approval_descriptor(
         &approval_owner_user_id,
         owner_for_resolution,
         service_id,
+        connection_id,
         &operation,
         auth_user.approval_requester_type(),
         &auth_user.approval_requester_id(),
@@ -3037,6 +3043,7 @@ pub(super) async fn check_llm_approval_descriptor(
         &operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.org_policy = pending.resolution.policy_stamp();
     request_operation.assistant_group = crate::services::org_group_service::approval_binding(
         &state.db,
         auth_user.assistant_group_id.as_deref(),
@@ -3283,6 +3290,7 @@ mod tests {
                 None,
                 false,
                 false,
+                None,
                 false,
             ),
         )
@@ -3332,6 +3340,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             method_override,
         );
         tokio::pin!(request);
