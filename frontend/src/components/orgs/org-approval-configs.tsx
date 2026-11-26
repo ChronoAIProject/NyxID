@@ -37,6 +37,7 @@ import {
 import { useKeys } from "@/hooks/use-keys";
 import { ServiceIcon } from "@/components/service-icon";
 import { formatDate } from "@/lib/utils";
+import { OrgServiceApprovers } from "./org-service-approvers";
 import { ApprovalPolicyEditor } from "@/components/shared/approval-policy-editor";
 import {
   approvalPolicyLabel,
@@ -58,13 +59,6 @@ interface OrgApprovalConfigsProps {
   readonly orgId: string;
 }
 
-/**
- * Admin-only UI for setting per-service approval policies on org-owned
- * services. When a policy is set on an org service, the org's policy is
- * dominant over any actor's personal gate: every member of the org will
- * require approval by the primary admin(s) of the org before their proxy
- * call goes through.
- */
 export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
   useUiTranslation();
   const { data: keys, isLoading: isKeysLoading } = useKeys();
@@ -297,7 +291,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                 <span className="flex h-8 w-8 items-center justify-center rounded-[8px] border border-hairline bg-overlay">
                   <Shield className="h-4 w-4" aria-hidden="true" />
                 </span>{translateUi("Org Approval Policies")}</CardTitle>
-              <CardDescription>{translateUi("Require approval when members of this org use shared services. When an org policy is set, it takes precedence over the member’s personal approval settings, and admins of this org are notified to decide.")}</CardDescription>
+              <CardDescription>{translateUi("Organization policies take precedence over members’ personal approval settings. Eligible approvers are notified when a request needs a decision.")}</CardDescription>
             </div>
             <Button
               variant="outline"
@@ -369,6 +363,7 @@ export function OrgApprovalConfigs({ orgId }: OrgApprovalConfigsProps) {
                       </Button>
                     </div>
                   </div>
+                  <OrgServiceApprovers key={orgId} orgId={orgId} serviceId={config.service_id} serviceName={config.service_name} />
                   {hasPolicy && (
                     <Tabs defaultValue="simple" className="mt-3 border-t border-border pt-3">
                       <TabsList>

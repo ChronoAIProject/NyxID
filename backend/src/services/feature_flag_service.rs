@@ -1158,6 +1158,24 @@ pub(crate) fn resolve_personal_definitions<'a>(
     enabled_keys
 }
 
+/// Authoring requires both the org Admin's effective flag and live rollout readiness.
+pub(crate) async fn org_admin_authoring_available(
+    db: &mongodb::Database,
+    actor: &str,
+    org: &str,
+    key: &str,
+) -> AppResult<bool> {
+    let enabled = resolve_enabled_features(db, org, actor, OrgRole::Admin).await?;
+    if !enabled.iter().any(|candidate| candidate == key) {
+        return Ok(false);
+    }
+    match super::security_readiness_service::require_serving(db, key).await {
+        Ok(()) => Ok(true),
+        Err(AppError::SecurityReadinessUnavailable) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Resolve enabled-flag keys for a member of an org (org context). Applies the
 /// platform-global baseline, the org's own overrides, and platform user overrides.
 pub async fn resolve_enabled_features(

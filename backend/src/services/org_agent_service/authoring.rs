@@ -4,13 +4,14 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_agent::{AssistantAgent, COLLECTION_NAME as AGENTS},
-        org_membership::{COLLECTION_NAME as MEMBERS, OrgRole},
+        org_membership::COLLECTION_NAME as MEMBERS,
         user::COLLECTION_NAME as USERS,
     },
     services::{
         audit_service::{AuditActor, required},
-        feature_flag_service as flags, security_effect_service, security_readiness_service,
-        transaction_service,
+        feature_flag_service as flags,
+        org_access_list::ListChange,
+        security_effect_service, transaction_service,
     },
 };
 use bson::{Document, doc};
@@ -19,18 +20,7 @@ use serde_json::json;
 use std::collections::BTreeSet;
 
 pub(crate) async fn available(db: &Database, actor: &str, org: &str) -> AppResult<bool> {
-    let enabled = flags::resolve_enabled_features(db, org, actor, OrgRole::Admin).await?;
-    if !enabled
-        .iter()
-        .any(|key| key == flags::ORG_AGENT_ACCESS_FLAG_KEY)
-    {
-        return Ok(false);
-    }
-    match security_readiness_service::require_serving(db, flags::ORG_AGENT_ACCESS_FLAG_KEY).await {
-        Ok(()) => Ok(true),
-        Err(AppError::SecurityReadinessUnavailable) => Ok(false),
-        Err(error) => Err(error),
-    }
+    flags::org_admin_authoring_available(db, actor, org, flags::ORG_AGENT_ACCESS_FLAG_KEY).await
 }
 
 const MAX_SUBJECTS: usize = 128;
@@ -75,38 +65,6 @@ impl Replacement {
             }
         }
         Ok(())
-    }
-}
-
-struct ListChange {
-    added: usize,
-    removed: usize,
-    inherited_before: bool,
-    inherited_after: bool,
-    self_added: bool,
-}
-
-impl ListChange {
-    fn between(before: &Option<Vec<String>>, after: &Option<Vec<String>>, actor: &str) -> Self {
-        let prior: BTreeSet<_> = before.iter().flatten().map(String::as_str).collect();
-        let next: BTreeSet<_> = after.iter().flatten().map(String::as_str).collect();
-        Self {
-            added: next.difference(&prior).count(),
-            removed: prior.difference(&next).count(),
-            inherited_before: before.is_none(),
-            inherited_after: after.is_none(),
-            self_added: next.contains(actor) && !prior.contains(actor),
-        }
-    }
-    fn changed(&self) -> bool {
-        self.inherited_after != self.inherited_before || self.added > 0 || self.removed > 0
-    }
-    fn narrowed(&self) -> bool {
-        !self.inherited_after && (self.inherited_before || self.removed > 0)
-    }
-    fn audit(&self) -> serde_json::Value {
-        json!({"added":self.added,"removed":self.removed,"inherited_before":self.inherited_before,
-            "inherited_after":self.inherited_after,"self_added":self.self_added})
     }
 }
 

@@ -7,11 +7,15 @@ Author: design exploration, 2026-05-29
 
 An org-owned service policy inherits all live Admins entitled to the selected connection. A saved list restricts review to the people on it who still meet those conditions. A group request also requires the original participant. If pruning removes the last named Admin, required review returns `org_approval_no_admin`. Mobile and web apply the same eligibility checks to the inbox and to decisions.
 
+Any first-party human Admin entitled to manage the config can name 1–128 live, entitled Admins or reset to inheritance. This includes selecting themselves and repairing a list after its last eligible approver leaves. A shared catalog config covers its sibling connections. Naming an Admin with narrower scope lets that person review operations only within their own scope.
+
+The edit checks both the config UUID and the expected revision. Reordering the same valid set leaves the revision intact. A real change commits one `org_service_approvers_changed` audit intent in the policy transaction with actor, organization, service, config UUID, revision, added and removed counts, inheritance transitions and self-selection. The counts describe changes to explicit entries.
+
 A Telegram decision requires a private callback from a uniquely linked, eligible NyxID person. Use web or mobile for shared chats or ambiguous account links. Only one Telegram message is updated after a decision. Other Admins may still see buttons. An eligible Admin tapping an old button receives the existing already-decided response.
 
 A reusable grant covers sibling connections of the same service when the deciding Admin can approve all of them. If their scope covers only some siblings, the grant covers the specific connection they approved. Historical requests retain their connection identity after disable or deletion. Group participants can see pending group cards. Only the eligible triggering person can decide them.
 
-Every list change expires earlier pending prompts. Narrowing also retires earlier reusable approvals for the policy, including operation-scoped grants. A widening preserves reusable approvals. Requests and grants carry the config UUID and revision so replacing a config cannot restore its authority. Exact-service retries keep their original effect identity and terminal receipt.
+Every list change expires earlier pending prompts. Narrowing also retires earlier reusable approvals for the policy, including operation-scoped grants. Moving from inheritance to a named list or removing any named person counts as narrowing, including when another person is added in the same edit. Adding people to a named list or resetting it to inheritance preserves reusable approvals. Requests and grants carry the config UUID and revision so replacing a config cannot restore its authority. Exact-service retries keep their original effect identity and terminal receipt.
 
 During a rolling upgrade, old and new replicas can issue separate grant-mode prompts for the same call because their deduplication keys differ. A call that already read the previous config can reuse a grant while narrowing commits. Subsequent calls see the new cutoff.
 

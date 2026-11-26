@@ -215,6 +215,7 @@ pub mod oracle_task_service;
 pub mod oracle_worker_bundle_service;
 pub mod oracle_worker_enrollment_service;
 pub mod oracle_worker_service;
+pub(crate) mod org_access_list;
 pub mod org_invite_service;
 pub(crate) mod org_membership_authority;
 pub mod org_role_scope_service;

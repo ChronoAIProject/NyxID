@@ -1,6 +1,7 @@
 //! Only the outer server envelope is observable. Preserve the established
 //! pool/profile/generation/revision AAD; the inner recipient-sealed browser
 //! payload never becomes an OAuth-token holder or server-readable plaintext.
+use crate::crypto::record_field::oracle::OracleOuter;
 use crate::{
     crypto::aes::EncryptionKeys,
     errors::{AppError, AppResult},
@@ -18,7 +19,7 @@ fn invalid() -> AppError {
 }
 
 struct Outer {
-    aad: String,
+    binding: OracleOuter,
     ciphertext: Vec<u8>,
     size: u64,
     expired_profile: bool,
@@ -47,7 +48,7 @@ fn outer(collection: &str, source: &Document) -> AppResult<Outer> {
                 return Err(invalid());
             }
             Outer {
-                aad: super::oracle_login_profile_service::aad(&row),
+                binding: OracleOuter::profile(&row),
                 ciphertext: row.encrypted_envelope,
                 size: row.envelope_size,
                 expired_profile: row.expires_at <= chrono::Utc::now(),
@@ -60,11 +61,7 @@ fn outer(collection: &str, source: &Document) -> AppResult<Outer> {
                 return Err(invalid());
             }
             Outer {
-                aad: super::oracle_login_snapshot_service::snapshot_aad(
-                    &row.pool_id,
-                    &row.id,
-                    row.format_version,
-                ),
+                binding: OracleOuter::snapshot(&row.pool_id, &row.id, row.format_version),
                 ciphertext: row.encrypted_envelope,
                 size: row.envelope_size,
                 expired_profile: false,
@@ -99,18 +96,11 @@ pub(crate) async fn verify_current_snapshot(
     if row.ciphertext.is_empty() {
         return Ok(());
     }
-    // Rewrap authenticates the data and original AAD even for a current KEK,
-    // and detects fallback-provider use despite colliding key selectors.
-    let current = keys
-        .rewrap_with_aad(&row.ciphertext, row.aad.as_bytes())
+    let size = row
+        .binding
+        .authenticate_current(keys, &row.ciphertext)
         .await?;
-    if current != row.ciphertext {
-        return Err(invalid());
-    }
-    let sealed = keys
-        .decrypt_with_aad(&row.ciphertext, row.aad.as_bytes())
-        .await?;
-    if sealed.len() as u64 != row.size {
+    if size.map(|size| size as u64) != Some(row.size) {
         return Err(invalid());
     }
     Ok(())
@@ -125,9 +115,7 @@ pub(crate) async fn decrypt(
     if row.ciphertext.is_empty() {
         return Err(invalid());
     }
-    let sealed = keys
-        .decrypt_with_aad(&row.ciphertext, row.aad.as_bytes())
-        .await?;
+    let sealed = row.binding.open(keys, &row.ciphertext).await?;
     if sealed.len() as u64 != row.size {
         return Err(invalid());
     }
@@ -144,18 +132,15 @@ pub(crate) async fn migrate_snapshot(
     if row.ciphertext.is_empty() {
         return Ok(false);
     }
-    let sealed = keys
-        .decrypt_with_aad(&row.ciphertext, row.aad.as_bytes())
-        .await?;
+    let sealed = row.binding.open(keys, &row.ciphertext).await?;
     if sealed.len() as u64 != row.size {
         return Err(invalid());
     }
     let encrypted = if row.ciphertext.first() == Some(&2) {
-        keys.rewrap_with_aad(&row.ciphertext, row.aad.as_bytes())
-            .await?
+        row.binding.rewrap(keys, &row.ciphertext).await?
     } else {
         // Historical outer formats keep the same established binding too.
-        keys.encrypt_with_aad(&sealed, row.aad.as_bytes()).await?
+        row.binding.seal(keys, &sealed).await?
     };
     let mut candidate = source.clone();
     candidate.insert(
@@ -225,15 +210,12 @@ mod tests {
             } else {
                 row.insert("created_by_user_id", uuid::Uuid::new_v4().to_string());
             }
-            let binding = outer(collection, &row).unwrap();
+            let outer = outer(collection, &row).unwrap();
             row.insert(
                 FIELD,
                 bson::Binary {
                     subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: old
-                        .encrypt_with_aad(sealed, binding.aad.as_bytes())
-                        .await
-                        .unwrap(),
+                    bytes: outer.binding.seal(&old, sealed).await.unwrap(),
                 },
             );
             row.insert("future_metadata", doc! {"preserve":true});

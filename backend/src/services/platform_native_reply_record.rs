@@ -1,5 +1,6 @@
 //! Storage for the Discord capability issued with an authenticated native receipt.
 use super::{DiscordReplySecret, NativeSendAuthority, binding_digest, refused};
+use crate::crypto::record_field::historical::HistoricalAad;
 use crate::{
     crypto::{aes::EncryptionKeys, record_field::RecordContext},
     errors::{AppError, AppResult},
@@ -71,6 +72,10 @@ impl<'a> Binding<'a> {
         Ok(binding)
     }
 
+    fn historical(&self) -> AppResult<HistoricalAad<'_>> {
+        HistoricalAad::native_reply(&self.digest).ok_or_else(refused)
+    }
+
     fn path(&self) -> [&str; 6] {
         [
             "ciphertext",
@@ -88,7 +93,7 @@ impl<'a> Binding<'a> {
             let context = RecordContext::new(COLLECTION_NAME, id, "platform", &parts)?;
             keys.encrypt_record(plain, &context).await
         } else {
-            keys.encrypt_with_aad(plain, self.digest.as_bytes()).await
+            self.historical()?.seal(keys, plain).await
         }
     }
 
@@ -104,8 +109,7 @@ impl<'a> Binding<'a> {
                 keys.decrypt_record(&handle.ciphertext, &context).await
             }
             None if keys.allow_legacy_record_reads() => {
-                keys.decrypt_with_aad(&handle.ciphertext, self.digest.as_bytes())
-                    .await
+                self.historical()?.open(keys, &handle.ciphertext).await
             }
             _ => Err(refused()),
         }
