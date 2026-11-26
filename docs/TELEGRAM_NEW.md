@@ -349,7 +349,9 @@ formatting. The block retains authored styles, preformatted code and
 supported HTTP, HTTPS and mailto links. Link labels retain their text and
 style. Inline code inside a label is a text run and surrounding label
 runs link to the authored destination. Unsupported destinations appear
-as visible text. Mention-like text remains literal.
+as visible text. Bare URLs preserve CommonMark character-reference decoding
+in their display text and destination. Authored angle autolinks preserve
+their original bytes. Mention-like text remains literal.
 
 The block part also carries entity-escaped plain display text and
 `mrkdwn: false`. Masked destinations appear once in that fallback text

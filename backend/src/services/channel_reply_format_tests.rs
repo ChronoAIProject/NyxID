@@ -602,6 +602,85 @@ fn slack_literal_url_protection_retains_commonmark_destinations_and_html() {
 }
 
 #[test]
+fn slack_bare_urls_keep_commonmark_character_references() {
+    for (source, label, target, fallback) in [
+        (
+            "https://example.test/A&#66;C",
+            "https://example.test/ABC",
+            "https://example.test/ABC",
+            "https://example.test/ABC",
+        ),
+        (
+            "https://example.test/?a=1&amp;b=2",
+            "https://example.test/?a=1&b=2",
+            "https://example.test/?a=1&b=2",
+            "https://example.test/?a=1&amp;b=2",
+        ),
+        (
+            "https://example.test/?a=1&b=2",
+            "https://example.test/?a=1&b=2",
+            "https://example.test/?a=1&b=2",
+            "https://example.test/?a=1&amp;b=2",
+        ),
+        (
+            "https://example.test/A&#x1F989;.",
+            "https://example.test/A🦉",
+            "https://example.test/A🦉",
+            "https://example.test/A🦉.",
+        ),
+        (
+            "https://example.test/A&amp;#66;C",
+            "https://example.test/A&#66;C",
+            "https://example.test/A&#66;C",
+            "https://example.test/A&amp;#66;C",
+        ),
+        (
+            r"https://example.test/my\_page?a=1&amp;b=2",
+            "https://example.test/my_page?a=1&b=2",
+            "https://example.test/my_page?a=1&b=2",
+            "https://example.test/my_page?a=1&amp;b=2",
+        ),
+        (
+            r"https://example.test/my\_page?a=1\&amp;b=2",
+            "https://example.test/my_page?a=1&amp;b=2",
+            "https://example.test/my_page?a=1&amp;b=2",
+            "https://example.test/my_page?a=1&amp;amp;b=2",
+        ),
+        (
+            "<https://example.test/?a=1&amp;b=2>",
+            "https://example.test/?a=1&amp;b=2",
+            "https://example.test/?a=1&amp;b=2",
+            "https://example.test/?a=1&amp;amp;b=2",
+        ),
+        (
+            "[guide](https://example.test/?a=1&amp;b=2)",
+            "guide",
+            "https://example.test/?a=1&b=2",
+            "guide (https://example.test/?a=1&amp;b=2)",
+        ),
+    ] {
+        let input = format!(r"\*x\* {source}");
+        let part = assistant_parts(&input, "slack", "").remove(0);
+        let metadata = part.metadata.unwrap();
+        let runs = metadata["blocks"][0]["elements"][0]["elements"]
+            .as_array()
+            .unwrap();
+        let links: Vec<_> = runs.iter().filter(|run| run["type"] == "link").collect();
+        assert_eq!(links.len(), 1, "{input}");
+        assert_eq!(links[0]["text"], label, "{input}");
+        assert_eq!(links[0]["url"], target, "{input}");
+        assert_eq!(part.text.unwrap(), format!("*x* {fallback}"), "{input}");
+    }
+
+    let part = assistant_parts(r"\*x\* https://example.test/A&NewLine;B", "slack", "").remove(0);
+    assert_eq!(part.text.as_deref(), Some("*x* https://example.test/A\nB"));
+    assert_eq!(
+        part.metadata.unwrap()["blocks"][0]["elements"][0]["elements"],
+        serde_json::json!([{"type":"text","text":"*x* https://example.test/A\nB"}])
+    );
+}
+
+#[test]
 fn slack_bare_url_terminators_keep_only_literal_backslashes() {
     for (source, expected) in [
         (r"https://e.com/a\. next", "https://e.com/a. next"),

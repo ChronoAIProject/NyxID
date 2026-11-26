@@ -723,7 +723,7 @@ fn telegram_text(source: &str) -> (String, Vec<serde_json::Value>) {
 
 fn commonmark_text(
     source: &str,
-    slack_bare_starts: Option<&[usize]>,
+    slack_bare_urls: Option<&[(usize, Option<String>)]>,
     rich: bool,
 ) -> (String, Vec<serde_json::Value>) {
     use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
@@ -741,19 +741,23 @@ fn commonmark_text(
         let before = text.len();
         match event {
             Event::Start(tag) => {
+                let bare_url = match &tag {
+                    Tag::Link {
+                        link_type: LinkType::Autolink,
+                        ..
+                    } => slack_bare_urls.and_then(|urls| {
+                        urls.binary_search_by_key(&range.start, |(start, _)| *start)
+                            .ok()
+                            .map(|index| &urls[index].1)
+                    }),
+                    _ => None,
+                };
                 let kind = match &tag {
                     Tag::Strong | Tag::Heading { .. } => Some("bold"),
                     Tag::Emphasis => Some("italic"),
                     Tag::Strikethrough => Some("strikethrough"),
                     Tag::CodeBlock(_) => Some("pre"),
-                    Tag::Link {
-                        link_type: LinkType::Autolink,
-                        ..
-                    } if slack_bare_starts
-                        .is_some_and(|starts| starts.binary_search(&range.start).is_ok()) =>
-                    {
-                        Some("url")
-                    }
+                    Tag::Link { .. } if bare_url.is_some() => Some("url"),
                     Tag::Link { .. } | Tag::Image { .. } => Some("text_link"),
                     _ => None,
                 };
@@ -764,8 +768,12 @@ fn commonmark_text(
                             link_type: LinkType::Email,
                             dest_url,
                             ..
-                        } if slack_bare_starts.is_some() => {
+                        } if slack_bare_urls.is_some() => {
                             entity["url"] = format!("mailto:{dest_url}").into();
+                        }
+                        Tag::Link { dest_url, .. } if kind == "url" => {
+                            let target = bare_url.and_then(Option::as_deref).unwrap_or(dest_url);
+                            entity["url"] = target.into();
                         }
                         Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
                             entity["url"] = dest_url.to_string().into();
@@ -823,7 +831,7 @@ fn commonmark_text(
                 }
             }
             Event::Text(value) => {
-                if slack_bare_starts.is_some()
+                if slack_bare_urls.is_some()
                     && let Some(length) = slack::escaped_delimiter(source, range.start, &value)
                     && !stack.iter().any(|(_, _, e)| {
                         matches!(e["type"].as_str(), Some("pre" | "text_link" | "url"))
@@ -833,7 +841,12 @@ fn commonmark_text(
                         "type":"slack_literal", "offset":units, "length":length
                     }));
                 }
-                text.push_str(&value);
+                let display = stack
+                    .last()
+                    .filter(|(_, _, e)| e["type"] == "url")
+                    .and_then(|(_, _, e)| e["url"].as_str())
+                    .unwrap_or(&value);
+                text.push_str(display);
             }
             Event::Html(value) | Event::InlineHtml(value) => text.push_str(&value),
             Event::Code(value) => {

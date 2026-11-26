@@ -1,6 +1,6 @@
 //! Slack's text-only mrkdwn for NyxID-owned assistant plans.
 use super::{commonmark_text, supported_link_target};
-use pulldown_cmark::{Event, Options, Parser, Tag};
+use pulldown_cmark::{CowStr, Event, Options, Parser, Tag};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::ops::Range;
@@ -28,6 +28,7 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
     let mut keycaps = Vec::new();
     let mut code_block = false;
     let mut escape_slashes = Vec::new();
+    let mut character_references = Vec::new();
     let mut has_literal = false;
     for (event, range) in parser.into_offset_iter() {
         match event {
@@ -46,6 +47,10 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
                 if let Some(delimiter) = escaped_punctuation(source, range.start, &value) {
                     escape_slashes.push(range.start - 1);
                     has_literal |= matches!(delimiter, b'*' | b'_' | b'~');
+                }
+                let raw = &source[range.clone()];
+                if raw.starts_with('&') && raw.ends_with(';') && raw != value.as_ref() {
+                    character_references.push((range, value));
                 }
             }
             Event::HardBreak if source.as_bytes()[range.start] == b'\\' => {
@@ -92,6 +97,7 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
     }
     escape_slashes.sort_unstable();
     escape_slashes.dedup();
+    character_references.sort_unstable_by_key(|(range, _)| range.start);
 
     let mut finder = linkify::LinkFinder::new();
     finder.kinds(&[linkify::LinkKind::Url]);
@@ -118,6 +124,14 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
         if end > start && escape_slashes.binary_search(&(end - 1)).is_ok() {
             end -= 1;
         }
+        let first_reference =
+            character_references.partition_point(|(range, _)| range.start < start);
+        let after_references = character_references.partition_point(|(range, _)| range.start < end);
+        let references = &character_references[first_reference..after_references];
+        // Linkify can trim the semicolon from a trailing character reference.
+        if let Some((reference, _)) = references.last() {
+            end = end.max(reference.end);
+        }
         let first_opaque = opaque.partition_point(|range| range.end <= start);
         if opaque
             .get(first_opaque)
@@ -125,35 +139,37 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
             && !source[start..end].contains(['<', '>'])
             && supported_link_target(&source[start..end])
         {
-            urls.push(start..end);
+            urls.push((start..end, references));
         }
     }
     let mut edits = Vec::new();
-    for range in &urls {
+    let mut decoded_urls = Vec::with_capacity(urls.len());
+    for (range, references) in &urls {
         edits.push((range.start, Some('<')));
         edits.push((range.end, Some('>')));
         // Autolinks retain backslashes verbatim. Consume only slashes whose
         // following punctuation was escaped by the original CommonMark parse.
         let first = escape_slashes.partition_point(|&at| at < range.start);
-        edits.extend(
-            escape_slashes[first..]
-                .iter()
-                .copied()
-                .take_while(|&at| at + 1 < range.end)
-                .map(|at| (at, None)),
+        let count = escape_slashes[first..].partition_point(|&at| at + 1 < range.end);
+        let slashes = &escape_slashes[first..first + count];
+        edits.extend(slashes.iter().copied().map(|at| (at, None)));
+        decoded_urls.push(
+            (!references.is_empty())
+                .then(|| decode_bare_url(source, range.clone(), references, slashes)),
         );
     }
+    let mut decoded_urls = decoded_urls.into_iter();
     keycaps.sort_unstable();
     keycaps.dedup();
     for at in keycaps {
-        let next_url = urls.partition_point(|url| url.end <= at);
-        if urls.get(next_url).is_none_or(|url| !url.contains(&at)) {
+        let next_url = urls.partition_point(|(url, _)| url.end <= at);
+        if urls.get(next_url).is_none_or(|(url, _)| !url.contains(&at)) {
             edits.push((at, Some('\\')));
         }
     }
     edits.sort_unstable();
     let mut marked = String::with_capacity(source.len() + edits.len());
-    let mut bare_starts = Vec::new();
+    let mut bare_urls = Vec::new();
     let mut next = 0;
     for (at, replacement) in edits {
         marked.push_str(&source[next..at]);
@@ -165,7 +181,7 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
                 if preceding_backslashes(source, at) % 2 != 0 {
                     marked.push('\\');
                 }
-                bare_starts.push(marked.len());
+                bare_urls.push((marked.len(), decoded_urls.next().unwrap()));
             }
             marked.push(ch);
         } else {
@@ -173,7 +189,32 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
         }
     }
     marked.push_str(&source[next..]);
-    Some(commonmark_text(&marked, Some(&bare_starts), rich))
+    Some(commonmark_text(&marked, Some(&bare_urls), rich))
+}
+
+fn decode_bare_url(
+    source: &str,
+    url: Range<usize>,
+    references: &[(Range<usize>, CowStr<'_>)],
+    slashes: &[usize],
+) -> String {
+    // Reuse the original CommonMark text events. Inserting their values into
+    // the markup would let decoded angle brackets or whitespace change syntax.
+    let mut replacements: Vec<_> = references
+        .iter()
+        .map(|(range, value)| (range.clone(), value.as_ref()))
+        .chain(slashes.iter().map(|&at| (at..at + 1, "")))
+        .collect();
+    replacements.sort_unstable_by_key(|(range, _)| range.start);
+    let mut decoded = String::with_capacity(url.len());
+    let mut next = url.start;
+    for (range, replacement) in replacements {
+        decoded.push_str(&source[next..range.start]);
+        decoded.push_str(replacement);
+        next = range.end;
+    }
+    decoded.push_str(&source[next..url.end]);
+    decoded
 }
 
 pub(super) fn escaped_delimiter(source: &str, at: usize, value: &str) -> Option<usize> {
