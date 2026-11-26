@@ -350,10 +350,9 @@ pub(crate) async fn execute(
     execute_owned(
         db,
         session,
-        permit.bot_id(),
+        permit,
         bot.ownership_version,
         owner,
-        permit.read_fields(),
         meta_grant_id,
         request,
     )
@@ -418,13 +417,14 @@ fn entry(row: &Document) -> AppResult<Value> {
 async fn execute_owned(
     db: &Database,
     session: &mut ClientSession,
-    bot_id: &str,
+    permit: &GuestDataPermit,
     bot_ownership_version: i64,
     owner_id: &str,
-    read_fields: &[String],
     meta_grant_id: Option<&str>,
     request: PersonalRecordRequest,
 ) -> AppResult<Value> {
+    let bot_id = permit.bot_id();
+    let read_fields = permit.read_fields();
     let rows = db.collection::<Document>(COLLECTION_NAME);
     let mut filter = owned(
         bot_id,

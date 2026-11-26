@@ -3693,7 +3693,7 @@ async fn start_chat_turn(
         .await
         {
             Ok(GuestAdmission::Legacy) => None,
-            Ok(GuestAdmission::AddOn(turn)) => Some(turn),
+            Ok(GuestAdmission::AddOn(turn)) => Some(*turn),
             Err(AppError::Forbidden(_)) => return Ok(Inbound::Silent("refused_guest_policy")),
             Err(error) => return Err(error),
         }

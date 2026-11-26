@@ -1012,15 +1012,13 @@ async fn resolve_reply_token_message_context_classified(
             .into());
         }
         let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
-        if adapter.persists_reply_attempt() {
-            if original.agent_api_key_id.as_deref() != Some(&claims.api_key_id)
-                || conversation.agent_api_key_id != claims.api_key_id
-            {
-                return Err((AppError::Unauthorized(
-                    "Email reply route has been reassigned".into(),
-                ))
-                .into());
-            }
+        if adapter.persists_reply_attempt()
+            && (original.agent_api_key_id.as_deref() != Some(&claims.api_key_id)
+                || conversation.agent_api_key_id != claims.api_key_id)
+        {
+            return Err(
+                (AppError::Unauthorized("Email reply route has been reassigned".into())).into(),
+            );
         }
 
         Ok(ReplyRequestContext {

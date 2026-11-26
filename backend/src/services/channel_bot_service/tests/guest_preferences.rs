@@ -102,7 +102,7 @@ async fn prepare_turn(db: &mongodb::Database, bot_id: &str, event: &str) -> gues
     .unwrap() else {
         panic!("expected add-on admission");
     };
-    turn
+    *turn
 }
 
 #[tokio::test]

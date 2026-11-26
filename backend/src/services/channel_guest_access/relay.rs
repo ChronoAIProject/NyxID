@@ -144,7 +144,7 @@ pub(crate) async fn prepare(
         return Err(refused());
     };
     metadata.id = stable_source;
-    metadata.guest_relay = Some(turn);
+    metadata.guest_relay = Some(*turn);
     if let Some(thread) = metadata
         .thread_id
         .as_deref()

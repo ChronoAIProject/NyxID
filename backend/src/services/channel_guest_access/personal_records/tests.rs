@@ -431,7 +431,7 @@ async fn start_guest(
         platform: "discord".into(),
     });
     start.channel_context = Some(ChannelTurnContext {
-        channel_guest: Some(turn),
+        channel_guest: Some(*turn),
         meta_grant: None,
         text_completeness: None,
         org_origin: None,

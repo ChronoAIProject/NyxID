@@ -250,7 +250,7 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
     claim_source_event(db, &event_id, &channel, &origin, "verified-sender").await;
     start.channel = Some(origin);
     start.channel_context = Some(ChannelTurnContext {
-        channel_guest: Some(guest_turn),
+        channel_guest: Some(*guest_turn),
         meta_grant: None,
         text_completeness: None,
         org_origin: None,
@@ -600,7 +600,7 @@ async fn channel_guest_skill_org_capability_uses_live_payer_and_maintainer() {
             .unwrap(),
     );
     start.channel_context = Some(ChannelTurnContext {
-        channel_guest: Some(turn),
+        channel_guest: Some(*turn),
         meta_grant: None,
         text_completeness: None,
         org_origin: Some(Box::new(origin.clone())),

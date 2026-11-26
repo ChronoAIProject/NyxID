@@ -102,7 +102,7 @@ impl HostedAdmission {
 
 pub(crate) enum GuestAdmission {
     Legacy,
-    AddOn(GuestTurn),
+    AddOn(Box<GuestTurn>),
 }
 
 #[derive(Deserialize)]
@@ -583,7 +583,7 @@ pub(crate) async fn classify_with_meta(
         meta_grant_id: input.meta_grant_id.map(str::to_owned),
     };
     check_turn(&turn)?;
-    Ok(GuestAdmission::AddOn(turn))
+    Ok(GuestAdmission::AddOn(Box::new(turn)))
 }
 
 async fn observe_verified_guest(
