@@ -7,9 +7,84 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestIndexQuery {
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestHistoryQuery {
+    limit: Option<i64>,
+    before_seq: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct GuestIndex {
+    conversations: Vec<org::guest_history::Conversation>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct GuestHistory {
+    conversation: org::guest_history::Conversation,
+    messages: Vec<org::guest_history::Message>,
+    before_seq: Option<i64>,
+}
+
+pub async fn guest_conversations(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(agent): Path<String>,
+    Query(query): Query<GuestIndexQuery>,
+) -> AppResult<Json<GuestIndex>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &actor).await?;
+    let limit = super::assistant_nyxagent::limit(query.limit)?;
+    let (conversations, next_cursor) =
+        org::guest_history::list(&state.db, &actor, &agent, limit, query.cursor.as_deref()).await?;
+    Ok(Json(GuestIndex {
+        conversations,
+        next_cursor,
+    }))
+}
+
+pub async fn guest_history(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Query(query): Query<GuestHistoryQuery>,
+) -> AppResult<Json<GuestHistory>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let actor = auth.user_id.to_string();
+    crate::services::assistant_nyxagent::require_enabled(&state.db, &actor).await?;
+    let limit = super::assistant_nyxagent::limit(query.limit)?;
+    if query.before_seq.is_some_and(|seq| seq <= 0) {
+        return Err(AppError::BadRequest("Invalid before_seq".into()));
+    }
+    let (org, conversation, messages, before_seq) =
+        org::guest_history::history(&state.db, &actor, &id, limit, query.before_seq).await?;
+    crate::services::audit_service::log_actor_event(
+        state.db.clone(),
+        &crate::services::audit_service::AuditActor::from_auth_user(&auth),
+        "org_channel_guest_history_read",
+        Some(json!({"org_id": org, "conversation_id": conversation.id})),
+    )
+    .await?;
+    Ok(Json(GuestHistory {
+        conversation,
+        messages,
+        before_seq,
+    }))
+}
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]

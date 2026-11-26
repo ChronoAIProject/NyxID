@@ -3091,6 +3091,10 @@ pub async fn list_channel_chats(
     if let Some(binding) = &row.org_specialist {
         let access =
             crate::services::org_agent_service::access(&state.db, &owner, &binding.org_id).await?;
+        let admin = matches!(
+            access,
+            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
+        );
         if !crate::services::org_agent_service::can_use(&access) && row.user_id != owner {
             return Err(crate::services::org_channel_service::denied());
         }
@@ -3105,11 +3109,42 @@ pub async fn list_channel_chats(
             .as_ref()
             .is_some_and(|id| manageable.contains(id))
         {
-            return Ok(Json(member_chat_settings(&state, &row).await?));
+            let mut view = member_chat_settings(&state, &row).await?;
+            if admin {
+                add_guest_history_links(&state, &owner, &binding.org_id, &id, &mut view).await?;
+            }
+            return Ok(Json(view));
         }
+        let chats = list_chats(&state, &owner, Some(&id)).await?;
+        let mut view = json!({"chats": chats, "can_manage":true});
+        if admin {
+            add_guest_history_links(&state, &owner, &binding.org_id, &id, &mut view).await?;
+        }
+        return Ok(Json(view));
     }
     let chats = list_chats(&state, &owner, Some(&id)).await?;
     Ok(Json(json!({"chats": chats, "can_manage":true})))
+}
+
+async fn add_guest_history_links(
+    state: &AppState,
+    actor: &str,
+    org: &str,
+    channel: &str,
+    view: &mut Value,
+) -> AppResult<()> {
+    let chats = view["chats"].as_array_mut().expect("serialized chat list");
+    let ids: Vec<_> = chats.iter().filter_map(|chat| chat["id"].as_str()).collect();
+    let links = crate::services::org_channel_service::guest_history::latest_by_chat(
+        &state.db, actor, org, channel, &ids,
+    )
+    .await?;
+    for chat in chats {
+        if let Some(id) = chat["id"].as_str().and_then(|id| links.get(id)) {
+            chat["guest_conversation_id"] = json!(id);
+        }
+    }
+    Ok(())
 }
 
 // Filter before sorting/limiting. The bounded list has no total, cursor or

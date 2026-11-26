@@ -2861,6 +2861,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_nyxagent::list),
         )
         .route(
+            "/nyxagent/agents/{id}/guest-conversations",
+            get(handlers::org_specialist_channels::guest_conversations),
+        )
+        .route(
+            "/nyxagent/guest-conversations/{id}",
+            get(handlers::org_specialist_channels::guest_history),
+        )
+        .route(
             "/nyxagent/conversations/{id}",
             get(handlers::assistant_nyxagent::history).patch(handlers::assistant_nyxagent::rename),
         )

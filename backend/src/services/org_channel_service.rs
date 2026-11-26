@@ -26,6 +26,7 @@ pub(crate) mod preview;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod transcript;
+pub(crate) mod guest_history;
 
 pub const GUEST_GRANTS_READINESS: &str = "nyxbot:org-guest-grants-v1";
 
