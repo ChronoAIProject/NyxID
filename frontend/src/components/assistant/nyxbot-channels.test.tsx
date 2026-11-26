@@ -284,11 +284,11 @@ it.each([
   ],
   [
     "gateway_provider_not_registered",
-    "The Agent Event Gateway has not registered NyxBot as a provider yet (operator step). Telegram bots cannot use NyxBot until it is.",
+    "The gateway has not registered NyxBot as a provider yet (operator step). Ask an administrator to register the nyxbot provider, then reconnect after the 60-second retry delay.",
   ],
   [
     "gateway_rejected_request",
-    "The channel gateway rejected this connection request. Contact an administrator.",
+    "The gateway rejected the connection request (HTTP 400). Ask an administrator to check the gateway request contract before reconnecting. Bot verification and owner pairing do not fix this rejection.",
   ],
   [
     "gateway_conflict",

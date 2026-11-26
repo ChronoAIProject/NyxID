@@ -1075,6 +1075,43 @@ async fn discord_transport_round_trip_drains_ingress_and_refusal_restores_relay(
     }
 }
 
+#[test]
+fn gateway_create_refusal_classification_preserves_transport_contract() {
+    for platform in [
+        "telegram",
+        "telegram-new",
+        "discord",
+        "whatsapp",
+        "lark",
+        "feishu",
+        "slack",
+        "x",
+        "aurinko",
+    ] {
+        for status in [400, 401, 403, 409, 422, 429, 500, 502] {
+            for body in [
+                json!({}),
+                json!({"code":"invalid_request"}),
+                json!({"code":"invalid_request","detail":"nyxbot"}),
+                json!({"code":"provider_rejected"}),
+                json!({"code":"invalid_request","detail":"/name: must contain 1..=80 bytes"}),
+            ] {
+                let expected = if matches!(platform, "telegram" | "telegram-new") {
+                    matches!(status, 401 | 403)
+                        || (status == 400 && body["detail"] == "/name: must contain 1..=80 bytes")
+                } else {
+                    matches!(status, 400 | 401 | 403 | 422)
+                };
+                assert_eq!(
+                    gateway_create_refused(platform, &GatewayResponse { status, body }),
+                    expected,
+                    "{platform} HTTP {status}"
+                );
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn discord_definitive_create_refusal_restores_relay_after_bounded_drain() {
     use wiremock::{

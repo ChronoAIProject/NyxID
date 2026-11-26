@@ -829,6 +829,7 @@ export const nyxAgentChannelConnectSchema = z.object({
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
 /** A chat a channel bot is in: a private chat, group, channel or topic. */
 export const nyxAgentChannelChatSchema = z.object({
+  guest_conversation_id: z.string().optional(),
   can_manage: z.boolean().optional(),
   guest_readiness: guestReadinessSchema.nullish(),
   parent_chat_id: z.string().nullable().optional(),

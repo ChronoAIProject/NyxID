@@ -20,7 +20,14 @@ use serde_json::json;
 use std::collections::BTreeSet;
 
 pub(crate) async fn available(db: &Database, actor: &str, org: &str) -> AppResult<bool> {
-    flags::org_admin_authoring_available(db, actor, org, flags::ORG_AGENT_ACCESS_FLAG_KEY).await
+    Ok(flags::org_admin_authoring_unavailable_reason(
+        db,
+        actor,
+        org,
+        flags::ORG_AGENT_ACCESS_FLAG_KEY,
+    )
+    .await?
+    .is_none())
 }
 
 const MAX_SUBJECTS: usize = 128;

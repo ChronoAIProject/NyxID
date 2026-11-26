@@ -10,6 +10,7 @@ import { OrgServiceApprovers } from "./org-service-approvers";
 const alice = "00000000-0000-4000-8000-000000000001";
 const bob = "00000000-0000-4000-8000-000000000002";
 const retired = "00000000-0000-4000-8000-000000000003";
+const shortRetired = "00000000…0003";
 const inherited: ServiceApprovers = {
   config_id: "config-one", revision: 2, approver_user_ids: null, authoring_available: true,
   eligible_candidates: [{ user_id: alice, display_name: "Alice" }, { user_id: bob, display_name: null }],
@@ -64,14 +65,20 @@ it("keeps the named draft on conflict until reload, then uses the replacement co
 });
 
 it("retains unavailable selections until removed and saves only server candidates", async () => {
-  const { user, save, put, get } = await open({ ...inherited, approver_user_ids: [retired] });
-  const unavailable = screen.getByRole("checkbox", { name: retired + " Unavailable" });
+  const { user, put, get } = await open({
+    ...inherited, approver_user_ids: [retired],
+    unavailable: [{ user_id: retired, display_name: "Lee", reason: "not_admin" }],
+  });
+  const unavailable = screen.getByRole("checkbox", { name: "Lee (no longer eligible: Admin role required)" });
   expect(unavailable).toBeChecked();
   await user.click(screen.getByRole("checkbox", { name: "Alice" }));
   expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
   await user.click(unavailable);
   put.mockResolvedValueOnce({ ...inherited, revision: 3, approver_user_ids: [alice] });
-  await save();
+  await user.click(screen.getByRole("button", { name: "Save changes" }));
+  const review = await screen.findByRole("dialog", { name: "Review changes" });
+  expect(within(review).getByText("Lee (no longer eligible: Admin role required)")).toBeVisible();
+  await user.click(within(review).getByRole("button", { name: "Save changes" }));
   expect(get).toHaveBeenCalledWith(path, expect.anything());
   expect(put).toHaveBeenCalledWith(path, { config_id: "config-one", expected_revision: 2, approver_user_ids: [alice] }, expect.anything());
 });
@@ -82,7 +89,7 @@ it.each([{ ids: [] }, { ids: [retired] }])("shows the saved read-only restrictio
   expect(screen.getByText("No Admins are eligible for this service.")).toBeVisible();
   expect(screen.getByRole("radio", { name: "Selected Admins" })).toBeChecked();
   expect(screen.getByRole("radio", { name: "All eligible Admins" })).toBeDisabled();
-  if (ids.length) expect(screen.getByRole("checkbox", { name: retired + " Unavailable" })).toBeDisabled();
+  if (ids.length) expect(screen.getByRole("checkbox", { name: shortRetired + " (no longer eligible: reason unknown)" })).toBeDisabled();
   else expect(screen.getByText(/No Admins are selected/)).toBeVisible();
   expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
   expect(put).not.toHaveBeenCalled();
@@ -99,6 +106,30 @@ it("shows the saved policy when authoring closes during an edit", async () => {
   expect(screen.queryByRole("checkbox", { name: "Alice" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
   expect(put).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  ["flag_off", "Selecting approvers isn't enabled for this organization yet."],
+  ["readiness_missing", "The servers aren't ready for approver changes yet."],
+] as const)("explains %s alongside the saved settings", async (reason, message) => {
+  await open({ ...inherited, approver_user_ids: [retired], authoring_available: false,
+    authoring_unavailable_reason: reason,
+    unavailable: [{ user_id: retired, display_name: null, reason: "not_member" }] });
+  expect(screen.getByText(message)).toBeVisible();
+  expect(screen.getByRole("checkbox", { name: shortRetired + " (no longer eligible: no current organization membership)" })).toBeDisabled();
+  expect(screen.queryByText(retired)).toBeNull();
+});
+
+it("explains a permission refusal without exposing the previously visible list", async () => {
+  const { user, get, put, save } = await open({ ...inherited, approver_user_ids: [alice] });
+  await user.click(screen.getByRole("checkbox", { name: bob }));
+  const refused = new ApiError(403, { error: "org_role_insufficient", error_code: 8103, message: "Denied" });
+  get.mockRejectedValue(refused);
+  put.mockRejectedValue(refused);
+  await save();
+  expect(await screen.findByText("You don't manage this service's approvals.")).toBeVisible();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.queryByText("Alice")).toBeNull();
 });
 
 it("scopes each policy fetch by organization and service", async () => {

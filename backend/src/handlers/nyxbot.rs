@@ -76,7 +76,7 @@ use crate::services::nyxbot_channel_connection_service::{
 };
 use crate::services::nyxbot_channel_connection_service::{
     bot_creator, connect_direct, create_gateway_agent_key, gateway_diagnostic_audit,
-    gateway_enabled,
+    gateway_enabled, record_setup_diagnostic,
 };
 
 fn canonical_platform(platform: &str) -> &str {
@@ -388,6 +388,7 @@ pub(crate) fn org_restore_error_reason(error: &AppError) -> &'static str {
             "gateway_configuration_required" => "gateway_configuration_required",
             "gateway_not_authenticated" => "gateway_not_authenticated",
             "gateway_permission_required" => "gateway_permission_required",
+            "gateway_rejected_request" => "gateway_rejected_request",
             "gateway_provider_not_registered" => "gateway_provider_not_registered",
             "gateway_invalid_response" => "gateway_invalid_response",
             "creator_unavailable" => "creator_unavailable",
@@ -443,19 +444,15 @@ fn gateway_error_code(response: &GatewayResponse) -> &'static str {
     match response.status {
         401 => "gateway_not_authenticated",
         403 => "gateway_permission_required",
-        400 if response.body["code"].as_str() == Some("invalid_request")
-            && response.body["detail"].as_str().is_some_and(|detail| {
-                detail.trim() == PROVIDER_SLUG || detail.contains("provider")
-            }) =>
-        {
-            "gateway_provider_not_registered"
-        }
+        400 if unknown_nyxbot_provider(&response.body) => "gateway_provider_not_registered",
         400 => "gateway_rejected_request",
         409 => "gateway_conflict",
         502 => "gateway_provider_rejected",
         _ => "gateway_unavailable",
     }
 }
+
+use crate::services::nyxbot_gateway_service::unknown_nyxbot_provider;
 
 fn gateway_problem_code(body: &Value) -> Option<&str> {
     body["code"].as_str().filter(|code| {
@@ -476,10 +473,22 @@ async fn record_gateway_rejection(
     response: &GatewayResponse,
     operation: &'static str,
 ) -> Result<(), &'static str> {
+    record_setup_diagnostic(state, row, Some(release_id), operation, Some(response))
+        .await
+        .map_err(|_| "storage_unavailable")?;
+    if operation == "create"
+        && canonical_platform(&row.platform) == "telegram"
+        && response.status == 400
+        && unknown_nyxbot_provider(&response.body)
+    {
+        releases::record_provider_refusal(&state.db, row, release_id)
+            .await
+            .map_err(|_| "storage_unavailable")?;
+    }
     if row.gateway_source.is_none() {
         return Ok(());
     }
-    record_gateway_failure(
+    record_gateway_failure_inner(
         state,
         row,
         release_id,
@@ -491,6 +500,22 @@ async fn record_gateway_rejection(
 }
 
 async fn record_gateway_failure(
+    state: &AppState,
+    row: &NyxbotChannel,
+    release_id: &str,
+    code: &'static str,
+    detail: Option<&str>,
+    operation: &'static str,
+) -> Result<(), &'static str> {
+    if code == "gateway_unavailable" {
+        record_setup_diagnostic(state, row, Some(release_id), operation, None)
+            .await
+            .map_err(|_| "storage_unavailable")?;
+    }
+    record_gateway_failure_inner(state, row, release_id, code, detail, operation).await
+}
+
+async fn record_gateway_failure_inner(
     state: &AppState,
     row: &NyxbotChannel,
     release_id: &str,
@@ -512,10 +537,27 @@ async fn record_gateway_failure(
     Ok(())
 }
 
-/// Validation/authentication refusals establish that this create was rejected.
-/// Conflicts, timeouts and provider/server failures can follow a remote effect.
-fn gateway_create_refused(response: &GatewayResponse) -> bool {
-    matches!(response.status, 400 | 401 | 403 | 422)
+/// Telegram keeps post-reservation and unknown 400s for record-based recovery.
+/// Other transports retain their established definitive-refusal/fallback contract.
+fn gateway_create_refused(platform: &str, response: &GatewayResponse) -> bool {
+    if canonical_platform(platform) != "telegram" {
+        return matches!(response.status, 400 | 401 | 403 | 422);
+    }
+    if matches!(response.status, 401 | 403) {
+        return true;
+    }
+    response.status == 400
+        && response.body["code"] == "invalid_request"
+        && matches!(
+            response.body["detail"].as_str(),
+            Some(
+                "/name: must contain 1..=80 bytes"
+                    | "/profile/metadata/name: must contain at most 80 bytes"
+                    | "/sources/0/issuer: must be an HTTPS origin"
+                    | "request does not match the channel schema"
+                    | "/routing: not accepted in channel create or full update; use PUT /v1/channels/{channel_id}/routing with {expected_version,routing} after creation"
+            )
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -770,10 +812,14 @@ fn gateway_policy(
             source["bot_id"] = json!(bot.platform_bot_id);
         }
     }
-    let name: String = format!("NyxBot {}", row.bot_label)
+    // CMAEG bounds both channel name and profile.metadata.name to 80 UTF-8
+    // bytes. Keep the historical 60-character display cap as well.
+    let mut name: String = format!("NyxBot {}", row.bot_label)
         .chars()
         .take(60)
         .collect();
+    let end = name.floor_char_boundary(80.min(name.len()));
+    name.truncate(end);
     let mut policy = json!({
         "schema_version": 1,
         "name": name,
@@ -885,7 +931,7 @@ async fn connect_gateway(
     };
     if created.status != 201 && created.status != 200 {
         record_gateway_rejection(state, row, &release.id, &created, "create").await?;
-        if gateway_create_refused(&created) {
+        if gateway_create_refused(&row.platform, &created) {
             releases::not_created(&state.db, &release)
                 .await
                 .map_err(|_| "storage_unavailable")?;
@@ -1436,7 +1482,7 @@ async fn move_to_gateway(state: &AppState, row: &NyxbotChannel) -> Result<(), &'
             {
                 return Err(discard(code).await);
             }
-            if gateway_create_refused(&refused) {
+            if gateway_create_refused(&next.platform, &refused) {
                 releases::not_created(&state.db, &release)
                     .await
                     .map_err(|_| "storage_unavailable")?;
@@ -2528,6 +2574,8 @@ fn error_code(error: &AppError) -> &'static str {
         AppError::NotFound(_) => "not_found",
         AppError::Conflict(_) => "conflict",
         AppError::ValidationError(code) => match code.as_str() {
+            "gateway_rejected_request" => "gateway_rejected_request",
+            "gateway_provider_not_registered" => "gateway_provider_not_registered",
             "gateway_configuration_required" => "gateway_configuration_required",
             "gateway_not_authenticated" => "gateway_not_authenticated",
             "gateway_permission_required" => "gateway_permission_required",

@@ -20,6 +20,10 @@ use serde_json::json;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
 
+mod unavailable;
+
+const MAX_APPROVERS: usize = 128;
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Replacement {
@@ -42,7 +46,9 @@ pub(crate) struct Policy {
     revision: i64,
     approver_user_ids: Option<Vec<String>>,
     authoring_available: bool,
+    authoring_unavailable_reason: Option<feature_flag_service::AuthoringUnavailableReason>,
     eligible_candidates: Vec<Candidate>,
+    unavailable: Vec<unavailable::UnavailableApprover>,
 }
 
 impl Replacement {
@@ -55,7 +61,7 @@ impl Replacement {
         self.approver_user_ids
             .as_ref()
             .map(|ids| {
-                if !(1..=128).contains(&ids.len()) {
+                if !(1..=MAX_APPROVERS).contains(&ids.len()) {
                     return Err(AppError::ValidationError(
                         "Select 1 to 128 approvers or reset to inheritance".into(),
                     ));
@@ -139,14 +145,15 @@ impl Access<'_> {
                 "An administrator entitled to this service is required".into(),
             ));
         }
-        let available = feature_flag_service::org_admin_authoring_available(
-            db,
-            &self.actor.user_id,
-            self.org,
-            FLAG,
-        )
-        .await?;
-        if self.replacement.is_some() && !available {
+        let authoring_unavailable_reason =
+            feature_flag_service::org_admin_authoring_unavailable_reason(
+                db,
+                &self.actor.user_id,
+                self.org,
+                FLAG,
+            )
+            .await?;
+        if self.replacement.is_some() && authoring_unavailable_reason.is_some() {
             return Err(AppError::Forbidden(
                 "Organization service approver authoring is unavailable".into(),
             ));
@@ -193,12 +200,25 @@ impl Access<'_> {
             .projection(doc! {"_id":1,"display_name":1})
             .session(&mut *tx)
             .await?;
-        let eligible_candidates = people.stream(tx).try_collect().await?;
+        let eligible_candidates: Vec<Candidate> = people.stream(&mut *tx).try_collect().await?;
+        let unavailable = unavailable::for_saved_list(
+            db,
+            tx,
+            self.org,
+            cfg.approvers
+                .approver_user_ids
+                .as_deref()
+                .unwrap_or_default(),
+            &eligible_candidates,
+        )
+        .await?;
         Ok(Policy {
             config_id: cfg.id,
             revision: cfg.approvers.approver_revision,
             approver_user_ids: cfg.approvers.approver_user_ids,
-            authoring_available: available,
+            authoring_available: authoring_unavailable_reason.is_none(),
+            authoring_unavailable_reason,
+            unavailable,
             eligible_candidates,
         })
     }

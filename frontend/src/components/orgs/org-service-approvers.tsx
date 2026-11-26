@@ -12,10 +12,28 @@ import { Label } from "@/components/ui/label";
 import { useOrgServiceApprovers } from "@/hooks/use-approvals";
 import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { ApiError } from "@/lib/api-client";
-import { MAX_SERVICE_APPROVERS, serviceApproversDraft, type ServiceApprovers, type ServiceApproversDraft } from "@/schemas/service-approvers";
+import { MAX_SERVICE_APPROVERS, serviceApproversDraft, type ApproverIneligibility, type ServiceApprovers, type ServiceApproversDraft } from "@/schemas/service-approvers";
 
 function mode(ids: string[] | null) {
   return ids === null ? translateUi("All eligible Admins") : translateUi("Selected Admins");
+}
+
+function ineligibilityLabel(reason?: ApproverIneligibility) {
+  switch (reason) {
+    case "not_admin": return translateUi("Admin role required");
+    case "not_member": return translateUi("no current organization membership");
+    case "out_of_scope": return translateUi("outside this Admin’s service scope");
+    case "inactive": return translateUi("inactive account");
+    default: return translateUi("reason unknown");
+  }
+}
+
+function readOnlyMessage(reason: ServiceApprovers["authoring_unavailable_reason"]) {
+  switch (reason) {
+    case "flag_off": return translateUi("Selecting approvers isn't enabled for this organization yet.");
+    case "readiness_missing": return translateUi("The servers aren't ready for approver changes yet.");
+    default: return translateUi("Editing is unavailable");
+  }
 }
 
 export function OrgServiceApprovers({ orgId, serviceId, serviceName }: {
@@ -26,7 +44,10 @@ export function OrgServiceApprovers({ orgId, serviceId, serviceName }: {
   const [open, setOpen] = useState(false);
   const { data, error } = policy;
   // Older replicas lack this resource. The parent policy remains usable.
-  if (error instanceof ApiError && [403, 404].includes(error.status)) return null;
+  if (error instanceof ApiError && error.status === 404) return null;
+  if (error instanceof ApiError && error.status === 403) {
+    return <p className="mt-3 type-secondary">{t("You don't manage this service's approvals.")}</p>;
+  }
   if (!data) return error
     ? <ErrorBanner message={t("Could not load service approvers.")} onRetry={() => void policy.refetch()} />
     : <p role="status" className="mt-3 type-secondary">{t("Loading service approvers…")}</p>;
@@ -67,6 +88,14 @@ function ApproverSettings({ saved, policy, replace, close }: ReturnType<typeof u
   const ids = readOnly ? saved.approver_user_ids : watched;
   const candidates = saved.eligible_candidates;
   const names = new Map(candidates.map((p) => [p.user_id, p.display_name || p.user_id]));
+  const unavailablePeople = new Map(saved.unavailable?.map((person) => [person.user_id, person]));
+  function unavailableLabel(id: string) {
+    const person = unavailablePeople.get(id);
+    return t("{{name}} (no longer eligible: {{reason}})", {
+      name: person?.display_name ?? `${id.slice(0, 8)}…${id.slice(-4)}`,
+      reason: ineligibilityLabel(person?.reason),
+    });
+  }
   const unavailable = ids?.filter((id) => !names.has(id)) ?? [];
   const searchable = !readOnly && candidates.length > 8;
   const term = searchable ? search.trim().toLowerCase() : "";
@@ -103,12 +132,12 @@ function ApproverSettings({ saved, policy, replace, close }: ReturnType<typeof u
     }
   });
   function describe(value: string[] | null) {
-    return value === null ? mode(null) : value.map((id) => names.get(id) ?? id).join(", ") || t("Nobody");
+    return value === null ? mode(null) : value.map((id) => names.get(id) ?? unavailableLabel(id)).join(", ") || t("Nobody");
   }
 
   return <>
     <DialogBody className="space-y-4 py-4">
-      {readOnly && <p className="type-secondary">{t("Editing is unavailable")}</p>}
+      {readOnly && <p className="type-secondary">{readOnlyMessage(saved.authoring_unavailable_reason)}</p>}
       <fieldset disabled={readOnly || replace.isPending} className="space-y-4">
         <Label asChild><legend className="sr-only">{t("Service approvers")}</legend></Label>
         <GroupedList>
@@ -128,8 +157,7 @@ function ApproverSettings({ saved, policy, replace, close }: ReturnType<typeof u
           <div className="max-h-64 overflow-y-auto">
             {unavailable.map((id) => <GroupedRow asChild key={id}>
               <Label><input type="checkbox" checked onChange={() => form.setValue("approver_user_ids", ids.filter((v) => v !== id))} />
-                <span className="min-w-0 break-all">{id}</span>
-                <span className="ml-auto text-muted-foreground">{t("Unavailable")}</span>
+                <span className="min-w-0 break-words">{unavailableLabel(id)}</span>
               </Label>
             </GroupedRow>)}
             {visible.map(({ user_id }) => <GroupedRow asChild key={user_id}>

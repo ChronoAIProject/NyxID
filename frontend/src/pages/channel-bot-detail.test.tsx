@@ -176,6 +176,14 @@ it.each([
   expect(screen.getByText(message)).toBeVisible();
 });
 
+
+it.each(["telegram", "telegram-new"])("shows connection health to the personal owner for %s", (platform) => {
+  Object.assign(botFixture, { platform, owner: "member" });
+  render(<ChannelBotDetailPage />);
+  expect(screen.getByText("Bot health")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Verify Bot" })).toBeVisible();
+});
+
 vi.mock("@/components/channels/meta-customer-setup", () => ({ MetaCustomerSetup: () => null }));
 
 it.each(["messenger", "instagram"])("guides manual %s credential repair according to the delivery hold", (platform) => {

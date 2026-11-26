@@ -4646,13 +4646,29 @@ async fn mock_gateway_with_routing(
     refuse: Arc<std::sync::atomic::AtomicBool>,
     routing_behavior: Arc<routing_tests::RoutingBehavior>,
 ) -> (GatewayCalls, tokio::task::JoinHandle<()>) {
+    mock_gateway_with_creator_auth(state, refuse, routing_behavior, None).await
+}
+
+async fn mock_gateway_with_creator_auth(
+    state: &mut AppState,
+    refuse: Arc<std::sync::atomic::AtomicBool>,
+    routing_behavior: Arc<routing_tests::RoutingBehavior>,
+    creator_auth: Option<telegram_connect_tests::CreatorAuth>,
+) -> (GatewayCalls, tokio::task::JoinHandle<()>) {
     use axum::{
         extract::Path,
         http::{HeaderMap, StatusCode},
     };
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
-    state.config.jwt_issuer = "http://localhost:3001".into();
+    state.config.jwt_issuer = if creator_auth.is_some() {
+        "https://nyxid.test"
+    } else {
+        "http://localhost:3001"
+    }
+    .into();
+    let strict_contract = creator_auth.is_some();
+    let refusal = creator_auth.as_ref().map(|auth| auth.refusal.clone());
     let calls: GatewayCalls = Arc::new(Mutex::new(Vec::new()));
     let remote: GatewayRecords = Arc::new(Mutex::new(HashMap::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4661,82 +4677,107 @@ async fn mock_gateway_with_routing(
     let create = {
         let (calls, remote, nyxid) = (calls.clone(), remote.clone(), state.clone());
         let create_behavior = routing_behavior.clone();
-        move |headers: HeaderMap, Json(body): Json<Value>| async move {
-            if !routing_tests::request_matches_schema("ChannelCreateRequest", &body) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"code":"invalid_request"})),
-                );
-            }
-            let creator = headers["authorization"]
-                .to_str()
-                .unwrap()
-                .strip_prefix("Bearer ")
-                .unwrap();
-            let claims =
-                crate::crypto::jwt::verify_token(&nyxid.jwt_keys, &nyxid.config, creator).unwrap();
-            assert!(crate::services::nyxbot_gateway_service::is_creator_claims(
-                &claims
-            ));
-            assert_eq!(claims.sub, body["profile"]["metadata"]["owner"]["subject"]);
-            let mut recorded_body = body.clone();
-            recorded_body["_test_creator_subject"] = json!(claims.sub.clone());
-            calls
-                .lock()
-                .await
-                .push(("POST".into(), "/channels".into(), recorded_body));
-            if create_behavior.pause_create.load(Ordering::SeqCst) {
-                create_behavior.arrived.notify_one();
-                create_behavior.resume.notified().await;
-            }
-            let key = Zeroizing::new(
-                body["credentials"]["agent_key"]
-                    .as_str()
+        move |headers: HeaderMap, Json(body): Json<Value>| {
+            let refusal = refusal.clone();
+            async move {
+                if !routing_tests::request_matches_schema("ChannelCreateRequest", &body) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"code":"invalid_request"})),
+                    );
+                }
+                if strict_contract && telegram_connect_tests::request_refusal(&body).is_some() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(
+                            json!({"code":"invalid_request", "detail":telegram_connect_tests::request_refusal(&body).unwrap()}),
+                        ),
+                    );
+                }
+                let creator = headers["authorization"]
+                    .to_str()
                     .unwrap()
-                    .to_owned(),
-            );
-            let binding = format!(
-                "bnd_{}",
-                Uuid::parse_str(body["record_id"].as_str().unwrap())
-                    .unwrap()
-                    .simple()
-            );
-            let bound = put_binding(
-                State(nyxid.clone()),
-                Path(binding.clone()),
-                bearer(&key),
-                Json(json!({"agent_key":key.as_str(),"profile":body["profile"]})),
-            )
-            .await;
-            if bound.status() != StatusCode::OK {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({"code":"provider_rejected"})),
+                    .strip_prefix("Bearer ")
+                    .unwrap();
+                let claims =
+                    crate::crypto::jwt::verify_token(&nyxid.jwt_keys, &nyxid.config, creator)
+                        .unwrap();
+                assert!(crate::services::nyxbot_gateway_service::is_creator_claims(
+                    &claims
+                ));
+                assert_eq!(claims.sub, body["profile"]["metadata"]["owner"]["subject"]);
+                let mut recorded_body = body.clone();
+                recorded_body["_test_creator_subject"] = json!(claims.sub.clone());
+                calls
+                    .lock()
+                    .await
+                    .push(("POST".into(), "/channels".into(), recorded_body));
+                if create_behavior.pause_create.load(Ordering::SeqCst) {
+                    create_behavior.arrived.notify_one();
+                    create_behavior.resume.notified().await;
+                }
+                let key = Zeroizing::new(
+                    body["credentials"]["agent_key"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned(),
                 );
-            }
-            let channel_id = format!("cmaeg1.ch.{}", body["record_id"].as_str().unwrap());
-            if body["sources"][0]["type"] == "discord" {
-                // Remote auto-activation can race the local transport swap.
-                let pending = respond(&nyxid, &key, &json!({}), "preparation-probe").await;
-                assert_eq!(pending.status(), StatusCode::TOO_MANY_REQUESTS);
-            }
-            let mut response = json!({"channel_id":channel_id,"record_id":body["record_id"],"version":1,
+                let binding = format!(
+                    "bnd_{}",
+                    Uuid::parse_str(body["record_id"].as_str().unwrap())
+                        .unwrap()
+                        .simple()
+                );
+                if let Some(refusal) = &refusal
+                    && let Some((status, problem, retained)) = refusal.lock().await.clone()
+                {
+                    if let Some(version) = retained {
+                        let channel_id =
+                            format!("cmaeg1.ch.{}", body["record_id"].as_str().unwrap());
+                        let response = json!({"channel_id":channel_id,"record_id":body["record_id"],"version":version,
+                        "provider":{"slug":"nyxbot","binding_id":binding},
+                        "definition":{"owner":{"kind":"human","subject":claims.sub},"sources":body["sources"]}});
+                        remote.lock().await.insert(channel_id, (response, key));
+                    }
+                    return (StatusCode::from_u16(status).unwrap(), Json(problem));
+                }
+                let bound = put_binding(
+                    State(nyxid.clone()),
+                    Path(binding.clone()),
+                    bearer(&key),
+                    Json(json!({"agent_key":key.as_str(),"profile":body["profile"]})),
+                )
+                .await;
+                if bound.status() != StatusCode::OK {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({"code":"provider_rejected"})),
+                    );
+                }
+                let channel_id = format!("cmaeg1.ch.{}", body["record_id"].as_str().unwrap());
+                if body["sources"][0]["type"] == "discord" {
+                    // Remote auto-activation can race the local transport swap.
+                    let pending = respond(&nyxid, &key, &json!({}), "preparation-probe").await;
+                    assert_eq!(pending.status(), StatusCode::TOO_MANY_REQUESTS);
+                }
+                let mut response = json!({"channel_id":channel_id,"record_id":body["record_id"],"version":1,
                 "endpoints":{"nyxid_callback_url":format!("{callback_base}/callbacks/{channel_id}")},"provider":{"slug":"nyxbot","binding_id":binding},
                 "definition":{"owner":{"kind":"human","subject":claims.sub},"sources":body["sources"],
                     "reply":body["reply"],"partition":body["partition"],"profile":body["profile"]}});
-            if body["sources"][0]["type"] == "discord" {
-                response["native_discord_activation"] = json!({"state":"pending_discovery"});
-                // Creation seeds its own default-only policy, not NyxID's policy.
-                response["definition"]["routing"] = json!({"version":1,
+                if body["sources"][0]["type"] == "discord" {
+                    response["native_discord_activation"] = json!({"state":"pending_discovery"});
+                    // Creation seeds its own default-only policy, not NyxID's policy.
+                    response["definition"]["routing"] = json!({"version":1,
                     "default_consumer":{"name":"default","mentionable":true},
                     "default_targets":["default"],"max_targets":1,"reply_label":"auto",
                     "addressing":{"mentions":true,"command":true,"event_field":true,"unknown_target_notice":true}});
+                }
+                remote
+                    .lock()
+                    .await
+                    .insert(channel_id, (response.clone(), key));
+                (StatusCode::CREATED, Json(response))
             }
-            remote
-                .lock()
-                .await
-                .insert(channel_id, (response.clone(), key));
-            (StatusCode::CREATED, Json(response))
         }
     };
     let attach = {
@@ -4746,6 +4787,14 @@ async fn mock_gateway_with_routing(
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(json!({"code":"invalid_request"})),
+                );
+            }
+            if strict_contract && telegram_connect_tests::request_refusal(&body).is_some() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        json!({"code":"invalid_request", "detail":telegram_connect_tests::request_refusal(&body).unwrap()}),
+                    ),
                 );
             }
             let expected = body["expected_version"].as_i64().unwrap_or_default();
@@ -4923,6 +4972,13 @@ async fn mock_gateway_with_routing(
             "/channels/{id}",
             axum::routing::put(attach).get(read).delete(delete),
         );
+    let routes = if let Some(auth) = creator_auth {
+        routes.layer(axum::middleware::from_fn(move |request, next| {
+            telegram_connect_tests::authorize(auth.clone(), request, next)
+        }))
+    } else {
+        routes
+    };
     let server = tokio::spawn(async move {
         axum::serve(listener, routes).await.unwrap();
     });
@@ -5969,6 +6025,8 @@ mod late_delivery_tests;
 mod gateway_thread_tests;
 #[path = "nyxbot_gateway_topic_tests.rs"]
 mod gateway_topic_tests;
+#[path = "nyxbot_telegram_connect_tests.rs"]
+mod telegram_connect_tests;
 #[path = "nyxbot_telegram_relay_tests.rs"]
 mod telegram_relay_tests;
 
@@ -6888,6 +6946,22 @@ async fn gateway_connect_reports_unregistered_nyxbot_to_owner_and_audit() {
         .unwrap();
     assert_eq!(data["error_code"], "gateway_provider_not_registered");
     assert!(!data.to_string().contains("nyxbot"));
+    let observed = state
+        .db
+        .collection::<AuditLog>(AUDIT)
+        .find_one(doc! {
+            "user_id":OWNER,"event_type":"nyxbot_gateway_setup_observed"
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .event_data
+        .unwrap();
+    assert_eq!(observed["diagnostic"]["problem_code"], "invalid_request");
+    assert_eq!(observed["diagnostic"]["operation"], "create");
+    assert_eq!(observed["diagnostic"]["http_status"], 400);
+    assert!(observed["diagnostic"].get("detail").is_none());
+
     assert!(
         envelope["message"]
             .as_str()

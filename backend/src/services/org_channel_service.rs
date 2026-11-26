@@ -19,6 +19,7 @@ use crate::{
 pub(crate) mod adoption;
 pub(crate) mod budget;
 pub(crate) mod defaults;
+pub(crate) mod guest_history;
 pub(crate) mod lifecycle;
 pub(crate) mod links;
 pub(crate) mod management;
@@ -878,6 +879,13 @@ pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> 
             )
             .await?;
     }
+    db.collection::<Document>(LANES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"conversation_id": 1})
+                .build(),
+        )
+        .await?;
     db.collection::<Document>(CHALLENGES)
         .create_index(
             IndexModel::builder()

@@ -80,6 +80,12 @@ in a short caption. Source-group headers explicitly say Source chat above the
 external chat name and bot metadata, distinguishing the expandable container from
 the indented saved conversations inside it.
 
+For organization specialists, eligible admins see retained guest conversations
+under the existing Connected bot chats source groups. A guest conversation
+opens a read-only transcript with guest messages, retained replies, and
+available outcome codes. Source chat identity keeps conversations from the
+same shared chat together.
+
 In individual NyxBot and specialist threads, scrolling beyond 160px collapses
 the agent row into a compact pill at the upper right, with icon buttons for
 Working context and Details. Taller thread notices raise that threshold to
