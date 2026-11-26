@@ -287,3 +287,6 @@ pub(super) const NODE_DEVICE_BASE_DIGEST: &str =
 
 pub(super) const NATIVE_REPLY_BASE_DIGEST: &str =
     "c9160176c797bce8a685fbe1525b33093a611b56b2d9f0568523c478b3f57e50";
+
+pub(super) const MOBILE_SOCIAL_BASE_DIGEST: &str =
+    "72058b48a651932bcd6db8e41c61501152380812f83bdcbdd31d1273a982126b";

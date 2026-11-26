@@ -65,6 +65,7 @@ enum Adapter {
     ApprovalProposal,
     Setup,
     NativeReplyHandle,
+    MobileSocialDelivery,
     AgentLogin,
     NodeDevice,
     AuthDevice,
@@ -272,7 +273,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "mobile_social_deliveries",
-        adapter: Adapter::Pending,
+        adapter: Adapter::MobileSocialDelivery,
         fields: &["ciphertext"],
     },
     Entry {
@@ -583,6 +584,7 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
         Some(
             previous_labels::EVENT_REPLY_DIGEST
             | previous_labels::EVENT_WRITERS_DIGEST
+            | previous_labels::MOBILE_SOCIAL_BASE_DIGEST
             | previous_labels::NATIVE_REPLY_BASE_DIGEST
             | previous_labels::NODE_DEVICE_BASE_DIGEST
             | previous_labels::DEVICE_BASE_DIGEST,
@@ -857,6 +859,9 @@ async fn verify(
         Adapter::NodeDevice => {
             Box::pin(super::device_code_service::record::verify(keys, row)).await
         }
+        Adapter::MobileSocialDelivery => {
+            Box::pin(super::mobile_social_service::record::verify(keys, row)).await
+        }
         Adapter::NativeReplyHandle => {
             Box::pin(super::platform_native_reply_service::record::verify(
                 db, keys, row,
@@ -1041,6 +1046,9 @@ async fn migrate(
         }
         Adapter::NodeDevice => {
             Box::pin(super::device_code_service::record::migrate(db, keys, row)).await
+        }
+        Adapter::MobileSocialDelivery => {
+            Box::pin(super::mobile_social_service::record::migrate(db, keys, row)).await
         }
         Adapter::NativeReplyHandle => {
             Box::pin(super::platform_native_reply_service::record::migrate(
