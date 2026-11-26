@@ -414,22 +414,26 @@ fn channel_format_slack_payloads_and_fingerprints_remain_frozen() {
             true,
         ),
     ] {
-        let parts = assistant_parts(source, "slack", "https://nyxid.test/thread");
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0].text.as_deref(), Some(expected));
-        assert_eq!(
-            parts[0].metadata,
-            plain.then(|| serde_json::json!({"mrkdwn":false}))
-        );
-        assert_eq!(fingerprint(&parts), digest);
-        assert_eq!(slack_read(expected, plain).text, display);
-        assert_eq!(
-            fingerprint(
-                &recorded_assistant_parts(source, "slack", "https://nyxid.test/thread", None)
-                    .unwrap()
-            ),
-            digest
-        );
+        for version in [None, Some(1)] {
+            let parts =
+                recorded_assistant_parts(source, "slack", "https://nyxid.test/thread", version)
+                    .unwrap();
+            assert_eq!(parts.len(), 1);
+            assert_eq!(parts[0].text.as_deref(), Some(expected));
+            assert_eq!(
+                parts[0].metadata,
+                plain.then(|| serde_json::json!({"mrkdwn":false}))
+            );
+            assert_eq!(fingerprint(&parts), digest);
+            assert_eq!(slack_read(expected, plain).text, display);
+            let new = assistant_parts(source, "slack", "https://nyxid.test/thread");
+            assert_ne!(fingerprint(&new), digest);
+            assert_eq!(new[0].metadata.as_ref().unwrap()["nyxid_text_renderer"], 3);
+            assert_eq!(
+                new[0].metadata.as_ref().unwrap()["mrkdwn"].as_bool(),
+                plain.then_some(false)
+            );
+        }
     }
     assert_eq!(
         slack_read(
@@ -446,6 +450,113 @@ fn channel_format_slack_payloads_and_fingerprints_remain_frozen() {
         )
         .urls,
         ["https://example.test/a?x=1&y=2"]
+    );
+}
+
+#[test]
+fn slack_literals_preserve_styles_code_glyphs_and_destinations() {
+    for (source, expected) in [
+        (
+            r"\*stars\* \_under\_ \~\~strike\~\~",
+            "`*`stars`*` `_`under`_` `~~`strike`~~`",
+        ),
+        (
+            r"**bold \*literal\* tail** and _italics_ ~~strike~~",
+            "*bold* `*`*literal*`*` *tail* and _italics_ ~strike~",
+        ),
+        (
+            r"**bold \_literal\_ tail**",
+            "*bold* `_`*literal*`_` *tail*",
+        ),
+        (
+            r"中文🦉 မြန်မာ \*️⃣x\*️⃣ \*word\* *️⃣x*️⃣",
+            "中文🦉 မြန်မာ `*️⃣`x`*️⃣` `*`word`*` `*️⃣`x`*️⃣`",
+        ),
+        (
+            r"foo\_ab\_baz and foo\_\_bar\_\_baz",
+            "foo`_`ab`_`baz and foo`__`bar`__`baz",
+        ),
+        (
+            "\\*two\nlines\\* and **style**",
+            "`*`two\nlines`*` and *style*",
+        ),
+        (
+            r"literal \***bold** and **bold**\*",
+            "literal `*`*bold* and *bold*`*`",
+        ),
+        (r"\*`x`\*", "`*x*`"),
+        (
+            r"\*literal\* (https://example.test/a_*b*_~x~?z=1&y=2), and https://example.com/a*b*.",
+            "`*`literal`*` (https://example.test/a_*b*_~x~?z=1&amp;y=2), and https://example.com/a*b*.",
+        ),
+        (
+            r"\*literal\* _https://example.test/a*b_c~d?x=1&y=2_.",
+            "`*`literal`*` _<https://example.test/a*b_c~d?x=1&amp;y=2>_.",
+        ),
+        (
+            r"\*literal\* [guide](https://example.test/a*b_c~d?x=1&y=2).",
+            "`*`literal`*` <https://example.test/a*b_c~d?x=1&y=2|guide>.",
+        ),
+    ] {
+        assert_eq!(wire(source, "slack"), expected, "{source}");
+    }
+}
+
+#[test]
+fn slack_literal_controls_keep_the_recorded_wire() {
+    for (source, expected) in [
+        ("*️⃣ x *️⃣", "*️⃣ x *️⃣"),
+        ("*️⃣x*️⃣", "_️⃣x_️⃣"),
+        (
+            r"ordinary \\*star* and *️⃣ x *️⃣",
+            r"ordinary \_star_ and *️⃣ x *️⃣",
+        ),
+        ("a `\\*code` and **bold**", "a ` \\*code ` and *bold*"),
+        ("https://example.com/a*b*.", "https://example.com/a_b_."),
+        (
+            r"[\*literal\*](https://example.test/a*b_c~d?x=1&y=2).",
+            "<https://example.test/a*b_c~d?x=1&y=2|*literal*>.",
+        ),
+        (
+            "[use `*x*` here](https://example.test/a?x=1&y=2)",
+            "<https://example.test/a?x=1&y=2|use >` *x* `<https://example.test/a?x=1&y=2| here>",
+        ),
+    ] {
+        assert_eq!(wire(source, "slack"), expected);
+        let old = recorded_assistant_parts(source, "slack", "", None).unwrap();
+        assert_eq!(old[0].text.as_deref(), Some(expected));
+    }
+    for (platform, version) in [
+        ("slack", 2),
+        ("discord", 3),
+        ("whatsapp", 3),
+        ("telegram", 3),
+    ] {
+        assert!(recorded_assistant_parts("plain", platform, "", Some(version)).is_err());
+    }
+}
+
+#[test]
+fn slack_literal_parts_fit_the_scalar_budget_and_keep_keycaps_whole() {
+    let limit = TextLimit::for_platform("slack");
+    let source = format!(
+        "{}\\*️⃣x\\*️⃣ (https://example.test/a_*b*_~x~?x=1&y=2).",
+        "🦉".repeat(limit.budget() - 1)
+    );
+    let parts = assistant_parts(&source, "slack", "https://nyxid.test/thread");
+    assert!(parts.len() > 1);
+    assert!(
+        parts
+            .iter()
+            .all(|part| limit.measure(part.text.as_deref().unwrap()) <= limit.budget())
+    );
+    let wire: String = parts.into_iter().filter_map(|part| part.text).collect();
+    assert_eq!(
+        wire,
+        format!(
+            "{}`*️⃣`x`*️⃣` (https://example.test/a_*b*_~x~?x=1&amp;y=2).",
+            "🦉".repeat(limit.budget() - 1)
+        )
     );
 }
 

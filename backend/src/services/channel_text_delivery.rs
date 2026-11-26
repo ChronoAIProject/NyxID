@@ -485,8 +485,13 @@ mod tests {
         version: Option<u32>,
         platform: &str,
     ) -> AppResult<(Vec<super::super::channel_platform::OutboundReply>, String)> {
+        let text = if platform == "slack" {
+            "Plain Slack text. ".repeat(4_800)
+        } else {
+            "A literal (value). https://example.test/a-b?x=1&y=2\n\n".repeat(250)
+        };
         let parts = super::super::channel_reply_plan::recorded_assistant_parts(
-            &"A literal (value). https://example.test/a-b?x=1&y=2\n\n".repeat(250),
+            &text,
             platform,
             "https://nyxid.test/thread",
             version,
@@ -575,17 +580,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renderer_versions_resume_only_the_pending_suffix_and_old_workers_refuse_v2() {
+    async fn renderer_versions_resume_only_the_pending_suffix_and_old_workers_refuse_new_plans() {
         let db = crate::test_utils::connect_transaction_test_database("text_renderer_resume").await;
         ensure_indexes(&db).await.unwrap();
-        for platform in ["discord", "whatsapp"] {
-            for version in [None, Some(2)] {
+        for (platform, current) in [("discord", 2), ("whatsapp", 2), ("slack", 3)] {
+            for version in [None, Some(1), Some(current)] {
                 let key = format!("{platform}-{version:?}");
                 let (parts, fingerprint) = rendered(version, platform).unwrap();
                 let row = if version.is_none() {
                     begin(&db, &key, "owner", "source", &fingerprint, parts.len())
                         .await
                         .unwrap()
+                } else if version == Some(1) {
+                    begin_versioned(
+                        &db,
+                        &key,
+                        "owner",
+                        "source",
+                        &fingerprint,
+                        parts.len(),
+                        None,
+                        version,
+                        None,
+                    )
+                    .await
+                    .unwrap()
                 } else {
                     assistant_plan(&db, &key, "owner", "source", platform, None, |v, _| {
                         rendered(v, platform)
@@ -624,7 +643,7 @@ mod tests {
                 assert!(
                     matches!(claim(&db, &resumed, 0).await.unwrap(), PartClaim::Sent(part) if part.platform_message_id.as_deref() == Some("accepted-prefix"))
                 );
-                if version.is_some() {
+                if version == Some(current) {
                     let (old_parts, old_fingerprint) = rendered(None, platform).unwrap();
                     assert!(matches!(
                         begin(
@@ -679,6 +698,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                assert!(
+                    matches!(claim(&db, &resumed, 1).await.unwrap(), PartClaim::Sent(part) if part.platform_message_id.as_deref() == Some("accepted-suffix"))
+                );
                 let raw = db
                     .collection::<bson::Document>(COLLECTION_NAME)
                     .find_one(doc! {"_id":&row.id})
@@ -748,7 +770,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renderer_new_plans_converge_without_changing_slack_or_telegram() {
+    async fn renderer_new_plans_converge_and_keep_the_telegram_fingerprint() {
         let db = crate::test_utils::connect_transaction_test_database("text_renderer_new").await;
         ensure_indexes(&db).await.unwrap();
         for platform in ["discord", "whatsapp", "slack", "telegram"] {
@@ -781,7 +803,7 @@ mod tests {
                 .await
                 .is_err()
             );
-            if matches!(platform, "slack" | "telegram") {
+            if platform == "telegram" {
                 assert_eq!(a.fingerprint, rendered(None, platform).unwrap().1);
             }
         }

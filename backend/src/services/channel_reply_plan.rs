@@ -7,6 +7,9 @@ use crate::errors::{AppError, AppResult};
 #[path = "channel_reply_format.rs"]
 mod format;
 
+#[path = "channel_reply_slack.rs"]
+mod slack;
+
 #[cfg(test)]
 #[path = "channel_reply_format_tests.rs"]
 pub(crate) mod format_tests;
@@ -205,16 +208,15 @@ pub fn ordinary(
 /// parsing fragments of Markdown. One entity can continue across messages;
 /// offsets and lengths are clipped in UTF-16 units for each part.
 pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<OutboundReply> {
-    assistant_parts_impl(
-        text,
-        platform,
-        overflow_url,
-        renderer_version(platform).is_some(),
-    )
+    assistant_parts_impl(text, platform, overflow_url, renderer_version(platform))
 }
 
 pub fn renderer_version(platform: &str) -> Option<u32> {
-    matches!(platform, "discord" | "whatsapp").then_some(2)
+    match platform {
+        "discord" | "whatsapp" => Some(2),
+        "slack" => Some(3),
+        _ => None,
+    }
 }
 
 pub fn recorded_assistant_parts(
@@ -224,9 +226,10 @@ pub fn recorded_assistant_parts(
     version: Option<u32>,
 ) -> AppResult<Vec<OutboundReply>> {
     match version {
-        // Replay only: v1 Discord/WhatsApp rendering finishes already-recorded plans.
-        None | Some(1) => Ok(assistant_parts_impl(text, platform, overflow_url, false)),
-        Some(2) => Ok(assistant_parts(text, platform, overflow_url)),
+        None | Some(1) => Ok(assistant_parts_impl(text, platform, overflow_url, None)),
+        Some(_) if version == renderer_version(platform) => {
+            Ok(assistant_parts_impl(text, platform, overflow_url, version))
+        }
         _ => Err(AppError::Conflict("Multipart delivery plan changed".into())),
     }
 }
@@ -235,8 +238,10 @@ fn assistant_parts_impl(
     text: &str,
     platform: &str,
     overflow_url: &str,
-    modern: bool,
+    version: Option<u32>,
 ) -> Vec<OutboundReply> {
+    let modern = version == Some(2);
+    let slack_literals = version == Some(3);
     let telegram = matches!(platform, "telegram" | "telegram-new");
     let markdown = matches!(platform, "discord" | "slack" | "whatsapp");
     let (mut body, mut entities) = if modern {
@@ -248,10 +253,26 @@ fn assistant_parts_impl(
     };
     let limit = TextLimit::for_platform(platform);
     let slack_plain = platform == "slack" && body.contains('`');
+    let slack_plan = if slack_literals && !slack_plain {
+        slack::parse(text)
+    } else {
+        None
+    };
+    let slack_format = slack_plan.is_some();
     if modern {
         format::expand_links(&mut body, &mut entities, limit, platform);
+    } else if let Some((display, spans)) = slack_plan {
+        (body, entities) = (display, spans);
+        expand_long_links(&mut body, &mut entities, limit, true, false, true);
     } else if telegram || markdown {
-        expand_long_links(&mut body, &mut entities, limit, markdown, slack_plain);
+        expand_long_links(
+            &mut body,
+            &mut entities,
+            limit,
+            markdown,
+            slack_plain,
+            false,
+        );
     }
     let mut rest = body.as_str();
     let mut offset = 0;
@@ -259,17 +280,36 @@ fn assistant_parts_impl(
     while !rest.is_empty() && parts.len() <= MAX_REPLY_PARTS {
         let mut budget = limit.budget();
         let (chunk, rendered, local) = loop {
-            let minimum = if telegram || modern {
+            let whole_entity = |e: &serde_json::Value| {
+                if slack_format {
+                    matches!(
+                        e["type"].as_str(),
+                        Some("url" | "text_link" | "slack_literal")
+                    )
+                } else {
+                    !modern || e["type"] == "url" || e["type"] == "text_link"
+                }
+            };
+            let boundary_units = |utf16| {
+                if slack_format {
+                    slack::scalar_offset(rest, utf16)
+                } else {
+                    utf16
+                }
+            };
+            let minimum = if telegram || modern || slack_format {
                 entities
                     .iter()
+                    .filter(|e| whole_entity(e))
                     .filter_map(|e| {
-                        if modern && e["type"] != "url" && e["type"] != "text_link" {
-                            return None;
-                        }
                         let start = e["offset"].as_u64()? as usize;
                         let size = e["length"].as_u64()? as usize;
-                        (start <= offset && size <= budget)
-                            .then_some((start + size).saturating_sub(offset))
+                        let remaining = start.checked_add(size)?.checked_sub(offset)?;
+                        if start > offset || (!slack_format && size > budget) {
+                            return None;
+                        }
+                        let minimum = boundary_units(remaining);
+                        (minimum <= budget).then_some(minimum)
                     })
                     .max()
                     .unwrap_or_default()
@@ -280,24 +320,26 @@ fn assistant_parts_impl(
             let length = chunk.encode_utf16().count();
             // Keep a fitting entity whole. Oversized spans are intentionally
             // represented by independent continuation entities in each part.
-            if (telegram || modern)
+            if (telegram || modern || slack_format)
                 && let Some(start) = entities
                     .iter()
+                    .filter(|e| whole_entity(e))
                     .filter_map(|e| {
-                        if modern && e["type"] != "url" && e["type"] != "text_link" {
-                            return None;
-                        }
                         let start = e["offset"].as_u64()? as usize;
                         let size = e["length"].as_u64()? as usize;
                         (start > offset
                             && start < offset + length
                             && start + size > offset + length
-                            && size <= limit.budget())
+                            && (size <= limit.budget()
+                                || (slack_format
+                                    && slack::scalar_offset(rest, start + size - offset)
+                                        - boundary_units(start - offset)
+                                        <= limit.budget())))
                         .then_some(start)
                     })
                     .min()
             {
-                budget = start - offset;
+                budget = boundary_units(start - offset);
                 continue;
             }
             let mut local = local_entities(&entities, offset, length);
@@ -307,6 +349,8 @@ fn assistant_parts_impl(
             }
             let mut rendered = if modern {
                 format::render(chunk, &local, platform)
+            } else if slack_format {
+                slack::render(chunk, &local)
             } else if markdown && !slack_plain {
                 render_markdown(chunk, &local, platform)
             } else {
@@ -337,10 +381,14 @@ fn assistant_parts_impl(
                 // scalar. Retain the link; long/nested targets were expanded.
                 let links: Vec<_> = local
                     .into_iter()
-                    .filter(|e| e["type"] == "text_link" || (modern && e["type"] == "url"))
+                    .filter(|e| {
+                        e["type"] == "text_link" || ((modern || slack_format) && e["type"] == "url")
+                    })
                     .collect();
                 let rendered = if modern {
                     format::render(chunk, &links, platform)
+                } else if slack_format {
+                    slack::render(chunk, &links)
                 } else {
                     render_markdown(chunk, &links, platform)
                 };
@@ -375,10 +423,10 @@ fn assistant_parts_impl(
             metadata: Some(if telegram { serde_json::json!({"entities":[],"text_format":"telegram_entities","text_overflow":true}) } else { serde_json::json!({"text_overflow":true}) }),
         });
     }
-    if modern {
+    if let Some(version) = version {
         for part in &mut parts {
             part.metadata.get_or_insert_with(|| serde_json::json!({}))["nyxid_text_renderer"] =
-                2.into();
+                version.into();
         }
     }
     parts
@@ -390,6 +438,7 @@ fn expand_long_links(
     limit: TextLimit,
     markdown: bool,
     expand_all: bool,
+    preserve_urls: bool,
 ) {
     let links = entities
         .iter()
@@ -421,7 +470,7 @@ fn expand_long_links(
         })
         .map(|(_, link)| link.clone())
         .collect::<Vec<_>>();
-    expand_selected_links(body, entities, links, false);
+    expand_selected_links(body, entities, links, preserve_urls);
 }
 
 fn expand_selected_links(
@@ -524,11 +573,21 @@ fn local_entities(
 }
 
 fn render_markdown(text: &str, entities: &[serde_json::Value], platform: &str) -> String {
+    render_markdown_impl(text, entities, platform, false)
+}
+
+fn render_markdown_impl(
+    text: &str,
+    entities: &[serde_json::Value],
+    platform: &str,
+    slack_literals: bool,
+) -> String {
     let mut spans = entities.to_vec();
     spans.sort_by_key(|e| {
         (
             e["offset"].as_u64().unwrap_or(0),
             std::cmp::Reverse(e["length"].as_u64().unwrap_or(0)),
+            slack_literals && e["type"] == "url",
         )
     });
     let markers = |e: &serde_json::Value| -> (String, String) {
@@ -542,6 +601,7 @@ fn render_markdown(text: &str, entities: &[serde_json::Value], platform: &str) -
                 let m = if platform == "discord" { "~~" } else { "~" };
                 (m.into(), m.into())
             }
+            "slack_literal" => ("`".into(), "`".into()),
             "code" | "pre" => {
                 let longest = text.split(|ch| ch != '`').map(str::len).max().unwrap_or(0);
                 let fence = "`".repeat(if e["type"] == "pre" {
@@ -562,6 +622,9 @@ fn render_markdown(text: &str, entities: &[serde_json::Value], platform: &str) -
                 } else {
                     ("[".into(), format!("]({url})"))
                 }
+            }
+            "url" if slack_literals && slack::url_touches_style(e, &spans) => {
+                ("<".into(), ">".into())
             }
             _ => (String::new(), String::new()),
         }
@@ -617,15 +680,21 @@ fn markdown_link_url(url: &str) -> String {
 }
 
 fn telegram_text(source: &str) -> (String, Vec<serde_json::Value>) {
-    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+    commonmark_text(source, false)
+}
+
+fn commonmark_text(source: &str, slack_literals: bool) -> (String, Vec<serde_json::Value>) {
+    use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
     let mut text = String::new();
     let mut entities = Vec::new();
     let mut stack: Vec<(TagEnd, usize, serde_json::Value)> = Vec::new();
     let mut lists: Vec<Option<u64>> = Vec::new();
-    for event in Parser::new_ext(
+    for (event, range) in Parser::new_ext(
         source,
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
-    ) {
+    )
+    .into_offset_iter()
+    {
         match event {
             Event::Start(tag) => {
                 let kind = match &tag {
@@ -633,6 +702,10 @@ fn telegram_text(source: &str) -> (String, Vec<serde_json::Value>) {
                     Tag::Emphasis => Some("italic"),
                     Tag::Strikethrough => Some("strikethrough"),
                     Tag::CodeBlock(_) => Some("pre"),
+                    Tag::Link {
+                        link_type: LinkType::Autolink,
+                        ..
+                    } if slack_literals => Some("url"),
                     Tag::Link { .. } | Tag::Image { .. } => Some("text_link"),
                     _ => None,
                 };
@@ -691,9 +764,20 @@ fn telegram_text(source: &str) -> (String, Vec<serde_json::Value>) {
                     _ => {}
                 }
             }
-            Event::Text(value) | Event::Html(value) | Event::InlineHtml(value) => {
-                text.push_str(&value)
+            Event::Text(value) => {
+                if slack_literals
+                    && let Some(length) = slack::escaped_delimiter(source, range.start, &value)
+                    && !stack.iter().any(|(_, _, e)| {
+                        matches!(e["type"].as_str(), Some("pre" | "text_link" | "url"))
+                    })
+                {
+                    entities.push(serde_json::json!({
+                        "type":"slack_literal", "offset":text.encode_utf16().count(), "length":length
+                    }));
+                }
+                text.push_str(&value);
             }
+            Event::Html(value) | Event::InlineHtml(value) => text.push_str(&value),
             Event::Code(value) => {
                 let offset = text.encode_utf16().count();
                 text.push_str(&value);

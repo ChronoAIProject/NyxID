@@ -340,12 +340,19 @@ label-plus-URL text. WhatsApp uses its native style markers and `label (URL)`;
 unsafe literal markers use the smallest code span. Colliding backticks that its
 documented code syntax cannot represent pass through unchanged. Formatting never
 adds a refusal; URLs exceeding one message retain the existing split behavior.
-Slack and Telegram output remain unchanged.
+New Slack assistant text plans use renderer v3. Outside code and masked link
+labels, CommonMark-escaped `*`, `_` and `~` runs use Slack inline code for
+their punctuation. Enclosed words retain their authored style. In affected
+messages, the parser preserves bare URL delimiters and star keycaps that would
+otherwise be consumed as CommonMark syntax. Slack receives the existing
+text-only message fields, including the plain-text fallback for literal
+backticks. Raw Slack edits and upload captions use their existing adapter
+formats. Telegram continues to use its native entities.
 
 The journal pins the renderer version with its fingerprint and notice inputs.
 An absent version means v1, retained only to finish recorded plans. New workers
 resume each version's pending suffix without replaying accepted parts. An old
-worker encountering v2 refuses its different fingerprint before claiming a part;
+worker without the pinned renderer refuses its different fingerprint before claiming a part;
 the recipient keeps the accepted prefix. Normal source-specific failure/recovery
 reporting still applies. Never reset a journal to change its renderer.
 

@@ -69,7 +69,7 @@ pub(super) fn parse(source: &str) -> (String, Vec<Value>) {
     (body, entities)
 }
 
-fn byte_range(text: &str, entity: &Value) -> Range<usize> {
+pub(super) fn byte_range(text: &str, entity: &Value) -> Range<usize> {
     let offset = entity["offset"].as_u64().unwrap_or(0) as usize;
     let end = offset + entity["length"].as_u64().unwrap_or(0) as usize;
     let mut units = 0;
