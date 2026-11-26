@@ -335,7 +335,9 @@ mod tests {
             }
         });
         (
-            ApiClient::new(&format!("http://{address}"), "test-fixture".into()).unwrap(),
+            ApiClient::new(&format!("http://{address}"), "test-fixture".into())
+                .unwrap()
+                .without_token_refresh(),
             task,
         )
     }
