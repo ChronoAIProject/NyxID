@@ -3,9 +3,14 @@
 Claude Fable 5.2 completed the pre-implementation review against source at
 `575c5f596`. The findings in the original implementation and the agreed
 estimates below refer to that revision. The six streams produced an uncommitted
-runtime prototype based on `575c5f596`. The integration baseline is `dev` at
-`c03a6637d`. The [compatibility assessment](#compatibility-with-dev-at-c03a6637d)
-records the additional port and test work.
+runtime prototype based on `575c5f596`. The initial compatibility assessment used `dev` at
+`c03a6637d`. PR #3004 ports the runtime to `c267f3dcf` and incorporates
+subsequent `dev` changes through `4f828cc49`. The per-bot setting, explicit
+pilot selection and global switch control rollout. Existing installations
+stay on their ordinary path until an owner opts in and the platform selects
+the bot. Fable cleared the earlier static compatibility findings on the port.
+Live provider acceptance remains outstanding.
+[Compatibility assessment](#compatibility-with-dev-at-c03a6637d) · [Runtime PR](https://github.com/ChronoAIProject/NyxID/pull/3004)
 
 This plan records the requested behavior for all channel bots. It does not change
 runtime permissions or activate a rollout. Its requirements below describe the enabled

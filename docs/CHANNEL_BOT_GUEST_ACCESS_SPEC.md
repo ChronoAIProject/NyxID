@@ -1,6 +1,6 @@
 # Channel bot guest access add-on
 
-Proposed runtime contract for the default-off NyxID add-on. The compatibility baseline is NyxID `dev` at `c03a6637d`. The [implementation plan](plans/channel-bot-audience-boundaries.md) records implementation and review status.
+PR #3004 implements this contract on NyxID `dev` at `4f828cc49`. The platform flag defaults to off. The implementation plan records the earlier prototype and compatibility reviews. [Implementation plan](plans/channel-bot-audience-boundaries.md)
 
 ## Runtime contract
 

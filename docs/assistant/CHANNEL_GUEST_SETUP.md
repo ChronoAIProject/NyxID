@@ -10,6 +10,16 @@ for fresh messages across all bots. During a named pilot, only selected bots
 with the setting on can use the new rules. For an external route, setup must
 also assign a dedicated, compatible key.
 
+For a single-bot test, leave the global flag off while a platform admin saves
+the pilot with `PUT /api/v1/admin/feature-flags/nyxbot-guest-audience/pilot`
+and the body `{"bot_ids":["<test-bot-id>"],"fleet":false}`. Read the selection
+back with `GET` on the same endpoint. In the test bot's settings, check
+**Use guest access v1** and prepare any required data grants and pin audiences.
+Once the serving replicas are ready, enable the global flag. An empty pilot
+selects zero bots. Turning off the test bot restores ordinary handling for its
+fresh requests. Turning off the flag does the same across all bots. Both actions
+invalidate affected guest work already in flight.
+
 Use the explicit bot IDs from the proposed pilot selection. Run the inventory from the repository root against the NyxID database with a read-only MongoDB account. The script accepts up to 100 bot IDs and returns JSON.
 
 ```sh
