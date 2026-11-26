@@ -139,6 +139,14 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
         "route_api_key_id":id(), "private_chats":"everyone",
         "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now()
     }).await.unwrap();
+    db.collection::<Document>("nyxbot_threads")
+        .insert_one(doc! {
+            "_id": id(), "user_id": &f.owner, "channel_id": &binding_id,
+            "partition": "private-chat", "kind": "private", "platform_chat_id": "private-chat",
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
     let root_contents = archive("public pinned guide", "root supporting file");
     let dependency_contents = archive("dependency instructions", "dependency supporting file");
     let root = SkillReference {
@@ -205,7 +213,7 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
             bot_id: &bot_id,
             binding_id: &binding_id,
             platform: "telegram",
-            conversation_id: "private-chat",
+            conversation_id: &guest::transport::destination("private-chat", None),
             source_event_id: &event_id,
             sender_id: Some("verified-sender"),
             audience: AnswerAudience::Private,
@@ -567,7 +575,7 @@ async fn channel_guest_skill_org_capability_uses_live_payer_and_maintainer() {
             bot_id,
             binding_id,
             platform: "lark",
-            conversation_id: &origin.partition,
+            conversation_id: &guest::transport::destination("chat", None),
             source_event_id: &event_id,
             sender_id: Some("channel-visitor"),
             audience: AnswerAudience::Private,

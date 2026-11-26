@@ -26,12 +26,18 @@ test("maintainer approves a current pinned skill for private guest replies", asy
     sha256: "a".repeat(64),
     dependencies: [],
   };
+  const specialistSkill = {
+    ...skill,
+    skill_id: "25373ff6-45f6-4b80-9ea1-da3f56e20249",
+    name: "Room specialist",
+  };
   let revision = 0;
   let attachments: GuestSkillAttachment[] = [];
   await page.route(api + "/guest-skills", (route) => {
     if (route.request().method() === "PUT") {
       const input = route.request().postDataJSON();
       expect(input).toEqual({
+        agent_id: "default-agent",
         expected_revision: 0,
         skills_revision: 3,
         attachments: [{
@@ -44,11 +50,18 @@ test("maintainer approves a current pinned skill for private guest replies", asy
       revision = 1;
     }
     return route.fulfill({
-      json: { revision, skills_revision: 3, available: [skill], attachments },
+      json: {
+        revision, skills_revision: 3, available: [skill, specialistSkill], attachments,
+        agent_id: "default-agent",
+        standing_approval_skill_ids: [skill.skill_id],
+      },
     });
   });
 
   await page.goto("/channel-bots/" + botId);
+  const specialistEntry = page.getByRole("group", { name: "Room specialist 1.2" });
+  await expect(specialistEntry.getByRole("checkbox", { name: "Shared replies" })).toBeEnabled();
+  await expect(specialistEntry.getByRole("checkbox", { name: /Approve reads/ })).toHaveCount(0);
   const skillEntry = page.getByRole("group", { name: "Help Center 1.2" });
   const privateAudience = skillEntry.getByRole("checkbox", { name: "Private replies" });
   const sharedAudience = skillEntry.getByRole("checkbox", { name: "Shared replies" });

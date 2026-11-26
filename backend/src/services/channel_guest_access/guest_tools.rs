@@ -538,6 +538,7 @@ mod tests {
                 activation_epoch: 2,
                 bot_revision: 1,
                 meta_grant_id: None,
+                hosted_assignment: None,
             },
             catalog_slug: "api-google-sheets".into(),
             connection_id: "connection".into(),

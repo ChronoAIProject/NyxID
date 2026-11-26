@@ -353,7 +353,10 @@ async fn successful_blank_stream_and_detached_duplicate_destinations_are_termina
         f.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        rx,
+        InboundTurn {
+            receiver: rx,
+            hosted_reply: None,
+        },
         Utc::now(),
     );
     let body = body_text(response).await;

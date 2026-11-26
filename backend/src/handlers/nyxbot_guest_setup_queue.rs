@@ -434,7 +434,13 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
     ))
     .await?
     {
-        Started::Turn { receiver, .. } => Ok(Some(Inbound::Turn(receiver))),
+        Started::Turn {
+            conversation,
+            receiver,
+        } => Ok(Some(Inbound::Turn(InboundTurn::new(
+            &conversation,
+            receiver,
+        )))),
         Started::Busy | Started::PoolFull => Ok(None),
     }
 }

@@ -428,6 +428,7 @@ mod tests {
             activation_epoch: 1,
             bot_revision: 1,
             meta_grant_id: None,
+            hosted_assignment: None,
         }
     }
 

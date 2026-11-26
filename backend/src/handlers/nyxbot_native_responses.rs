@@ -606,9 +606,14 @@ async fn snapshot_inner(
         Err(error) => return provider_refusal::error(error),
     };
     match current(&state, &row, &id, !output).await {
-        Ok(Some((stored, body, trace))) => {
+        Ok(Some((stored, body, trace, hosted))) => {
             if let Err(error) = recovery::observe_answer_output(&state.db, &stored, &body).await {
                 return provider_refusal::error(error);
+            }
+            if let Some(hosted) = &hosted
+                && !late_delivery::hosted_stream_allowed(&state, &stored.event_key, hosted).await
+            {
+                return problem(StatusCode::NOT_FOUND, "response_not_found");
             }
             if let Some(trace) = trace {
                 crate::turn_trace::associate(trace);
@@ -677,7 +682,7 @@ async fn events_inner(
         Err(error) => return provider_refusal::error(error),
     };
     match current(&state, &row, &id, !output).await {
-        Ok(Some((_, body, trace))) if after.is_none_or(|n| n < body.frames.len() as u64) => {
+        Ok(Some((_, body, trace, _))) if after.is_none_or(|n| n < body.frames.len() as u64) => {
             if let Some(trace) = trace {
                 crate::turn_trace::associate(trace);
             }
@@ -698,6 +703,7 @@ async fn current(
         StoredResponse,
         recovery::Payload,
         Option<crate::turn_trace::TurnContext>,
+        Option<late_delivery::HostedReply>,
     )>,
 > {
     if row.transport != "gateway"
@@ -714,6 +720,9 @@ async fn current(
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"_id":&stored.event_key})
         .await?;
+    let hosted = event
+        .as_ref()
+        .and_then(late_delivery::HostedReply::for_event);
     if stored
         .conversation_id
         .as_deref()
@@ -758,6 +767,7 @@ async fn current(
         }
     }
     drop(event);
+    let original_event_key = stored.event_key.clone();
     let event_key = &stored.event_key;
     recovery::refresh(
         &state.db,
@@ -778,14 +788,36 @@ async fn current(
         return Ok(None);
     };
     let mut payload = recovery::payload(&state.encryption_keys, &stored).await?;
-    if stored
-        .conversation_id
-        .as_deref()
-        .is_some_and(crate::services::channel_guest_access::is_hosted_conversation)
-        && !late_delivery::stream_allowed(state, &stored.event_key).await
-    {
-        return Ok(None);
-    }
+    let hosted = match hosted {
+        Some(hosted) => {
+            if stored.event_key != original_event_key
+                || !hosted.is_for_conversation(stored.conversation_id.as_deref())
+            {
+                return Ok(None);
+            }
+            Some(hosted)
+        }
+        None if stored
+            .conversation_id
+            .as_deref()
+            .is_some_and(crate::services::channel_guest_access::is_hosted_conversation) =>
+        {
+            // The first event read may precede the transaction that admits the turn.
+            let Some(event) = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .find_one(
+                    doc! {"_id": &original_event_key, "conversation_id": &stored.conversation_id},
+                )
+                .await?
+                .filter(|event| event.id == stored.event_key)
+            else {
+                return Ok(None);
+            };
+            late_delivery::HostedReply::for_event(&event)
+        }
+        None => None,
+    };
     if row.gateway_source.is_none() && stored.terminal {
         let event = state
             .db
@@ -803,7 +835,12 @@ async fn current(
             relay_responses::suppress_output(&mut payload);
         }
     }
-    Ok(Some((stored, payload, trace)))
+    if let Some(hosted) = &hosted
+        && !late_delivery::hosted_stream_allowed(state, &stored.event_key, hosted).await
+    {
+        return Ok(None);
+    }
+    Ok(Some((stored, payload, trace, hosted)))
 }
 pub(super) fn stream(
     state: AppState,
@@ -819,7 +856,7 @@ pub(super) fn stream(
         let deadline=tokio::time::Instant::now()+Duration::from_secs(if row.gateway_source.is_some() {55} else {570});
         let mut next=after.map_or(0,|n|n+1);
         let mut trace_operation: Option<crate::turn_trace::Operation> = None;
-        loop {
+        'responses: loop {
             // Recheck the fresh key and binding, including while a stream waits.
             let live=provider_channel(&state,&headers).await;
             let result=match live {
@@ -827,7 +864,7 @@ pub(super) fn stream(
                 _=>Err(AppError::OAuthAuthorityUnavailable),
             };
             match result {
-                Ok(Some((stored,mut body, trace)))=>{
+                Ok(Some((stored,mut body, trace, hosted)))=>{
                     if trace_operation.is_none() && trace.is_some() {
                         trace_operation = Some(crate::turn_trace::Operation::start(trace, crate::turn_trace::Stage::Replay));
                     }
@@ -841,6 +878,13 @@ pub(super) fn stream(
                         break;
                     }
                     for frame in body.frames.iter().skip(next as usize) {
+                        if let Some(hosted) = &hosted
+                            && late_delivery::frame_has_answer(frame)
+                            && !late_delivery::hosted_stream_allowed(&state, &stored.event_key, hosted).await
+                        {
+                            yield Ok(axum::response::sse::Event::default().event("error").data(r#"{"type":"error","code":"provider_unavailable"}"#));
+                            break 'responses;
+                        }
                         let seq=frame["sequence_number"].as_u64().unwrap_or_default();
                         next=seq+1;
                         yield Ok::<_,Infallible>(axum::response::sse::Event::default()
@@ -1202,12 +1246,8 @@ async fn send_update_impl(
         };
         let mut outcome = "reply_confirmed";
         let replies_path = format!("/events/{}/replies", urlencode(reference));
+        let hosted = late_delivery::HostedReply::new(conversation, event.turn_id.as_deref());
         for (index, part) in reply_parts.into_iter().enumerate() {
-            if crate::services::channel_guest_access::is_hosted_conversation(conversation)
-                && !late_delivery::stream_allowed(state, &event.id).await
-            {
-                return Err(unavailable());
-            }
             let mut part_trace = crate::turn_trace::Operation::part(
                 crate::turn_trace::TurnContext::current(),
                 index,
@@ -1248,6 +1288,11 @@ async fn send_update_impl(
                 if saved_plan.is_some() {
                     crate::services::channel_platform::revalidate_post_effect().await?;
                 }
+            }
+            if let Some(hosted) = &hosted
+                && !late_delivery::hosted_stream_allowed(state, &event.id, hosted).await
+            {
+                return Err(unavailable());
             }
             let attempt = if let Some(plan) = &saved_plan {
                 match preparation::claim(&state.db, plan, index).await? {

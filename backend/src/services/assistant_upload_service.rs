@@ -70,6 +70,7 @@ pub async fn owner_scope(
     user: &str,
     scope: &str,
 ) -> AppResult<Option<super::org_group_service::Access>> {
+    engine::require_public_conversation(scope)?;
     if scope.starts_with("nyxa-") {
         engine::get(db, user, scope).await?;
     } else {

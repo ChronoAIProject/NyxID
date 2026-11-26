@@ -19,14 +19,17 @@ const attachment = z.object({
 export const guestSkillInventorySchema = z.object({
   revision: z.number().int().nonnegative(),
   skills_revision: z.number().int().nonnegative(),
-  available: z.array(pin.extend({ dependencies: z.array(pin).max(16) })).max(16),
-  attachments: z.array(attachment).max(16),
+  available: z.array(pin.extend({ dependencies: z.array(pin).max(16) })),
+  attachments: z.array(attachment),
+  agent_id: z.string().min(1).optional(),
+  standing_approval_skill_ids: z.array(z.uuid()).optional(),
 });
 
 export type GuestSkillAttachment = Readonly<z.infer<typeof attachment>>;
 export type GuestSkillInventory = Readonly<z.infer<typeof guestSkillInventorySchema>>;
 
 export interface GuestSkillSelection {
+  readonly agent_id?: string;
   readonly expected_revision: number;
   readonly skills_revision: number;
   readonly attachments: readonly GuestSkillAttachment[];

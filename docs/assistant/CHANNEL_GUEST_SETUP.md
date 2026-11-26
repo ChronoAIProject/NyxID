@@ -20,6 +20,12 @@ selects zero bots. Turning off the test bot restores ordinary handling for its
 fresh requests. Turning off the flag does the same across all bots. Both actions
 invalidate affected guest work already in flight.
 
+In **Skills available to guests**, choose whether each pinned skill may be read
+in private chats, shared rooms, or both. An audience choice applies across the
+bot, including chats assigned to another specialist that pins the same skill.
+The chat uses the version pinned by its assigned specialist. Standing approval
+applies only to the reviewed version on the default specialist.
+
 For organization specialists, the admin guest-history view shows retained
 ordinary guest conversations. Enrolled bots keep new guest conversations in
 a separate history. During the pilot, the admin view can still link to the last

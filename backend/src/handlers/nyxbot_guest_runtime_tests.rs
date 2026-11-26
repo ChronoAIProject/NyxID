@@ -54,6 +54,265 @@ pub(super) async fn enable_guest_test_bot(state: &AppState, bot_id: &str) {
 }
 
 #[tokio::test]
+async fn nyxbot_guest_skill_reads_follow_the_live_chat_specialist() {
+    use crate::{
+        models::{assistant_agent, catalog_skill_revision::SkillReference},
+        services::{
+            assistant_authority_tests::chat_for_row, assistant_team_service as team,
+            channel_guest_access::skills,
+        },
+    };
+
+    let (state, _, server) = setup("guest_skills_chat_override").await;
+    let db = &state.db;
+    let (row, key) = channel(&state, "gateway").await;
+    crate::services::security_readiness_service::ready_test_replica(db).await;
+    chats::set_private_chats(&state, OWNER, &row.id, "everyone")
+        .await
+        .unwrap();
+    let binding = put_binding(
+        State(state.clone()),
+        Path("bnd_chats".into()),
+        bearer(&key),
+        Json(binding_body(&key, OWNER)),
+    )
+    .await;
+    assert_eq!(binding.status(), StatusCode::OK);
+    ensure_partition(&state, &key, PARTITION).await;
+
+    let default_agent = team::ensure_nyxbot(db, OWNER).await.unwrap();
+    let (specialist, _) = team::create_specialist(
+        db,
+        &state.encryption_keys,
+        OWNER,
+        team::CreateRequest {
+            machines: None,
+            logins: None,
+            name: "support".into(),
+            description: "Help channel visitors".into(),
+            display_name: None,
+            persona: None,
+            voice_instructions: None,
+            targets: Default::default(),
+            account_read: false,
+            specialty: None,
+            created_by: "user",
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let skill_id = Uuid::new_v4().to_string();
+    let agents = db.collection::<bson::Document>(assistant_agent::COLLECTION_NAME);
+    let pin = |skill_id: &str, digest: char| SkillReference {
+        source: "ornn".into(),
+        skill_id: skill_id.into(),
+        name: "Channel guide".into(),
+        version: "1.0.0".into(),
+        sha256: digest.to_string().repeat(64),
+        dependencies: vec![],
+        disabled: false,
+    };
+    let default_pin = pin(&skill_id, 'a');
+    let override_pin = pin(&skill_id, 'b');
+    let private_pin = pin(&Uuid::new_v4().to_string(), 'c');
+    for (agent_id, pins) in [
+        (&default_agent.id, vec![&default_pin]),
+        (&specialist.id, vec![&override_pin, &private_pin]),
+    ] {
+        agents
+            .update_one(
+                doc! {"_id": agent_id},
+                doc! {"$set": {"skills": bson::to_bson(&pins).unwrap(), "skills_revision": 1_i64}},
+            )
+            .await
+            .unwrap();
+    }
+    enable_guest_test_bot(&state, &row.channel_bot_id).await;
+    let thread = db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"channel_id": &row.id, "partition": PARTITION})
+        .await
+        .unwrap()
+        .unwrap();
+    chats::update_chat(
+        &state,
+        OWNER,
+        &thread.id,
+        &chats::ChatSettings {
+            agent_id: Some(specialist.id.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let inventory =
+        serde_json::to_value(skills::get(db, OWNER, &row.channel_bot_id).await.unwrap()).unwrap();
+    assert_eq!(inventory["standing_approval_skill_ids"], json!([&skill_id]));
+    assert!(
+        inventory["available"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["skill_id"] == private_pin.skill_id })
+    );
+    let selection = |approve_override| {
+        serde_json::from_value(json!({
+            "agent_id": &default_agent.id, "expected_revision": 0, "skills_revision": 1,
+            "attachments": [
+                {"skill_id": &skill_id, "audiences": ["shared"], "all_requests_approved": true},
+                {"skill_id": &private_pin.skill_id, "audiences": ["private"], "all_requests_approved": approve_override},
+            ],
+        }))
+        .unwrap()
+    };
+    assert!(matches!(
+        skills::set(
+            &state,
+            &guest_test_actor(),
+            &row.channel_bot_id,
+            selection(true)
+        )
+        .await,
+        Err(AppError::ValidationError(_))
+    ));
+    skills::set(
+        &state,
+        &guest_test_actor(),
+        &row.channel_bot_id,
+        selection(false),
+    )
+    .await
+    .unwrap();
+
+    let staged_clear = skills::prepare(
+        db,
+        OWNER,
+        &row.channel_bot_id,
+        &serde_json::from_value(json!({
+            "agent_id": &default_agent.id, "expected_revision": 1, "skills_revision": 1,
+            "attachments": [],
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let worker = guest::test_hooks::pause_worker(db);
+    let input = event("Show the channel guide", "42", "guest-skill-chat-override");
+    let response = respond(&state, &key, &input, "guest-skill-chat-override").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(30), worker.wait_for_provider())
+        .await
+        .expect("guest reached the provider on the override specialist");
+    let conversation = channel_conversations(&state, &row.id)
+        .await
+        .into_iter()
+        .find(|row| guest::is_hosted_conversation(&row.id))
+        .unwrap();
+    let chat = chat_for_row(&state, OWNER, &conversation).await;
+    assert_eq!(chat.agent_id, specialist.id);
+    assert_eq!(
+        chat.channel_guest.as_ref().unwrap().audience,
+        guest::AnswerAudience::Shared,
+    );
+    let visible = skills::visible_agent(db, &chat).await.unwrap();
+    assert_eq!(visible.skills, [override_pin.clone()]);
+    let path = format!("/api/v1/skills/{skill_id}/versions/1.0.0/download");
+    let permit = skills::authorize(db, &chat, &skill_id, &path)
+        .await
+        .unwrap();
+    assert_eq!(permit.sha256, override_pin.sha256);
+    assert!(!permit.all_requests_approved);
+    assert!(permit.revalidate(db).await.is_ok());
+    let private_path = format!(
+        "/api/v1/skills/{}/versions/1.0.0/download",
+        private_pin.skill_id
+    );
+    assert!(matches!(
+        skills::authorize(db, &chat, &private_pin.skill_id, &private_path).await,
+        Err(AppError::Forbidden(_))
+    ));
+
+    chats::update_chat(
+        &state,
+        OWNER,
+        &thread.id,
+        &chats::ChatSettings {
+            agent_id: Some("default".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        permit.revalidate(db).await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert!(matches!(
+        skills::visible_agent(db, &chat).await,
+        Err(AppError::Forbidden(_))
+    ));
+    let context = (db, row.channel_bot_id.as_str(), &staged_clear);
+    let apply = crate::services::transaction_service::run_db_only(
+        db,
+        &context,
+        |tx, &(db, bot_id, staged_clear)| {
+            Box::pin(skills::apply_prepared_in_session(
+                db,
+                tx,
+                bot_id,
+                staged_clear,
+            ))
+        },
+    )
+    .await;
+    assert!(matches!(apply, Err(AppError::Conflict(_))));
+    let reassigned = event(
+        "Continue with the new specialist",
+        "42",
+        "guest-skill-reassigned",
+    );
+    let fresh = respond(&state, &key, &reassigned, "guest-skill-reassigned").await;
+    assert_eq!(fresh.status(), StatusCode::OK);
+    tokio::time::timeout(Duration::from_secs(30), worker.wait_for_provider())
+        .await
+        .expect("fresh guest work reaches the new specialist while the old turn is settling");
+    let rows = channel_conversations(&state, &row.id).await;
+    let current = rows
+        .iter()
+        .find(|row| {
+            guest::is_hosted_conversation(&row.id)
+                && row.agent_id.as_deref() == Some(default_agent.id.as_str())
+        })
+        .expect("reassignment must start a conversation for the new specialist");
+    assert_ne!(current.id, conversation.id);
+    assert_ne!(
+        current.credential_api_key_id,
+        conversation.credential_api_key_id
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.id == conversation.id && row.active_turn.is_some())
+    );
+    let current_chat = chat_for_row(&state, OWNER, current).await;
+    assert_eq!(
+        skills::visible_agent(db, &current_chat)
+            .await
+            .unwrap()
+            .skills,
+        [default_pin]
+    );
+
+    drop(worker);
+    assert!(!body_text(response).await.contains("Here is your answer"));
+    assert!(body_text(fresh).await.contains("Here is your answer"));
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn nyxbot_guest_runtime_rollback_admits_fresh_legacy_work_while_stale_worker_is_busy() {
     let (state, calls, server) = setup("guest_runtime_active_rollback").await;
     let (row, key) = channel(&state, "gateway").await;

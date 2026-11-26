@@ -258,7 +258,7 @@ pub async fn preview_policy(
     id: &str,
     enabled: Option<bool>,
 ) -> AppResult<bool> {
-    let row = super::assistant_nyxagent::get(db, actor, id).await?;
+    let row = super::assistant_nyxagent::get_public(db, actor, id).await?;
     if row.group_id.is_some() || row.guest_turn {
         return Err(AppError::Forbidden(
             "Machine excerpts are available only in private owner threads".into(),

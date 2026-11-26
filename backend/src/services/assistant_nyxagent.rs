@@ -1845,12 +1845,42 @@ fn owner_filter(user_id: &str, id: &str) -> AppResult<bson::Document> {
     }
     Ok(doc! {"_id": id, "user_id": user_id})
 }
+pub(crate) fn require_public_conversation(id: &str) -> AppResult<()> {
+    if super::channel_guest_access::is_hosted_conversation_namespace(id) {
+        return Err(not_found());
+    }
+    Ok(())
+}
+
+/// Internal lookup for workers that already resolved the channel, turn or credential.
 pub async fn get(db: &Database, user_id: &str, id: &str) -> AppResult<AssistantConversation> {
     get_authorized(db, user_id, id).await.map(|(row, _)| row)
 }
 
+pub(crate) async fn get_public(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<AssistantConversation> {
+    get_public_authorized(db, user_id, id)
+        .await
+        .map(|(row, _)| row)
+}
+
 #[cfg(test)]
 tokio::task_local! { pub(super) static STOP_POLL: (); }
+
+pub(crate) async fn get_public_authorized(
+    db: &Database,
+    user_id: &str,
+    id: &str,
+) -> AppResult<(
+    AssistantConversation,
+    Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
+)> {
+    require_public_conversation(id)?;
+    get_authorized(db, user_id, id).await
+}
 
 pub(crate) async fn get_authorized(
     db: &Database,
@@ -1955,7 +1985,10 @@ pub async fn list(
         None => doc! {"user_id": user_id, "group_id": bson::Bson::Null,
         "voice_parent_conversation_id": bson::Bson::Null},
     };
-    filter.insert("_id", doc! {"$not": {"$regex": "^nyxag-"}});
+    filter.insert(
+        "_id",
+        super::channel_guest_access::exclude_hosted_conversations(),
+    );
     filter.insert("collaboration", bson::Bson::Null);
     filter.insert("guest_model_setup", doc! {"$ne":true});
     filter.insert("channel.org_execution", doc! {"$exists":false});
@@ -2044,7 +2077,8 @@ pub async fn list_shared_history(
         return Err(AppError::NotFound("Agent not found".into()));
     }
     let mut filter = doc! {"user_id": user_id, "agent_id": agent, "shared_agent_thread": true,
-    "collaboration": null, "group_id": null, "voice_parent_conversation_id": null};
+    "collaboration": null, "group_id": null, "voice_parent_conversation_id": null,
+    "_id": super::channel_guest_access::exclude_hosted_conversations()};
     if let Some(cursor) = cursor {
         let (ms, id) = cursor
             .split_once(':')
@@ -2074,7 +2108,8 @@ pub async fn list_shared_history(
             .collection::<bson::Document>(CONVERSATIONS)
             .find_one(
                 doc! {"user_id": user_id, "agent_id": agent, "shared_agent_thread": true,
-                "collaboration": null, "group_id": null, "voice_parent_conversation_id": null},
+                "collaboration": null, "group_id": null, "voice_parent_conversation_id": null,
+                "_id": super::channel_guest_access::exclude_hosted_conversations()},
             )
             .projection(doc! {"_id": 1})
             .await?
@@ -2137,7 +2172,7 @@ pub async fn messages(
 /// checkpoint, so the next turn starts without a recap. Fenced like a model
 /// change: a turn claimed between the read and the write wins.
 pub async fn reset_context(db: &Database, user_id: &str, id: &str) -> AppResult<()> {
-    let (current, _) = get_authorized(db, user_id, id).await?;
+    let (current, _) = get_public_authorized(db, user_id, id).await?;
     authorize_thread_read(db, &current).await?;
     if live_turn(&current, Utc::now()).is_some() {
         return Err(AppError::AssistantTurnActive);
@@ -2197,6 +2232,7 @@ pub async fn history_page(
     limit: i64,
     before: Option<i64>,
 ) -> AppResult<(AssistantConversation, Vec<AssistantMessage>)> {
+    require_public_conversation(id)?;
     let filter = owner_filter(user_id, id)?;
     let mut message_filter = doc! {"conversation_id": id, "user_id": user_id};
     if let Some(before) = before {
@@ -2458,7 +2494,7 @@ pub async fn checkpoint_summary(
     user_id: &str,
     id: &str,
 ) -> AppResult<CheckpointSummary> {
-    let (conversation, _) = get_authorized(db, user_id, id).await?;
+    let (conversation, _) = get_public_authorized(db, user_id, id).await?;
     authorize_thread_read(db, &conversation).await?;
     let checkpoint = checkpoint_for_conversation(db, &conversation).await?;
     let pending_actions = live_turn(&conversation, Utc::now())
@@ -2661,6 +2697,11 @@ pub(crate) async fn begin_owner_turn_in_session(
         {
             return Err(AppError::AssistantTurnRequired);
         }
+        if guest.hosted_assignment.as_ref().is_some_and(|assignment| {
+            start.agent_id.as_deref() != Some(assignment.agent_id.as_str())
+        }) {
+            return Err(AppError::AssistantTurnRequired);
+        }
         super::channel_guest_access::bind_work_in_session(db, session, guest).await?;
     }
     let voice_request_id = voice_request_id.map(str::to_owned);
@@ -2758,6 +2799,16 @@ pub(crate) async fn begin_owner_turn_in_session(
     };
     if row.collaboration.is_some() {
         super::collaboration_group_service::runtime::check_start(&row, start)?;
+    }
+    if channel_guest.is_some()
+        && start
+            .agent_id
+            .as_ref()
+            .is_some_and(|agent| row.agent_id.as_ref() != Some(agent))
+    {
+        return Err(AppError::Forbidden(
+            "Visitor agent assignment changed".into(),
+        ));
     }
     if row.guest_model_setup
         && (start.origin != TurnOrigin::Event
@@ -7361,7 +7412,7 @@ pub async fn recovery_for_message(
     conversation_id: &str,
     message_id: &str,
 ) -> AppResult<RecoveryPreview> {
-    let (row, _) = get_authorized(db, user_id, conversation_id).await?;
+    let (row, _) = get_public_authorized(db, user_id, conversation_id).await?;
     let reply = db
         .collection::<AssistantMessage>(MESSAGES)
         .find_one(doc! {
@@ -7711,6 +7762,7 @@ pub async fn rename(
             "Title must contain 1 to 200 characters".into(),
         ));
     }
+    require_public_conversation(id)?;
     let filter = owner_filter(user_id, id)?;
     let mut session = db.client().start_session().await?;
     let db = db.clone();

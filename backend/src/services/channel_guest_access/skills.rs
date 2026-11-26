@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use futures::TryStreamExt;
 use mongodb::{
     Database,
     bson::{self, Document, doc},
@@ -11,8 +12,10 @@ use super::{AnswerAudience, GuestMode, GuestTurn};
 use crate::{
     errors::{AppError, AppResult},
     models::{
-        assistant_agent::AssistantAgent, catalog_skill_revision::SkillReference,
-        nyxbot_channel::NyxbotChannel, user::User,
+        assistant_agent::AssistantAgent,
+        catalog_skill_revision::SkillReference,
+        nyxbot_channel::{NyxbotChannel, NyxbotThread, THREADS_COLLECTION_NAME},
+        user::User,
     },
     services::{assistant_acknowledgement_service::ChatAuthority, audit_service::AuditActor},
 };
@@ -53,6 +56,8 @@ struct Bot {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Update {
+    #[serde(default)]
+    agent_id: Option<String>,
     expected_revision: i64,
     skills_revision: i64,
     attachments: Vec<Attachment>,
@@ -60,9 +65,11 @@ pub(crate) struct Update {
 
 #[derive(Serialize)]
 pub(crate) struct Inventory {
+    agent_id: String,
     revision: i64,
     skills_revision: i64,
     available: Vec<SkillReference>,
+    standing_approval_skill_ids: Vec<String>,
     attachments: Vec<Attachment>,
 }
 
@@ -88,21 +95,12 @@ pub(crate) fn exact_pin<'a>(
         .find(|pin| !pin.disabled && pin.source == "ornn" && pin.skill_id == skill_id)
 }
 
-async fn hosted_binding(
-    db: &Database,
-    bot_id: &str,
-    binding_id: Option<&str>,
-) -> AppResult<NyxbotChannel> {
-    let mut filter = doc! {"channel_bot_id":bot_id,"status":"active"};
-    if let Some(binding_id) = binding_id {
-        filter.insert("_id", binding_id);
-    }
+async fn hosted_binding(db: &Database, bot_id: &str) -> AppResult<NyxbotChannel> {
     let mut rows = db
         .collection::<NyxbotChannel>(crate::models::nyxbot_channel::COLLECTION_NAME)
-        .find(filter)
+        .find(doc! {"channel_bot_id":bot_id,"status":"active"})
         .limit(2)
         .await?;
-    use futures::TryStreamExt;
     let binding = rows.try_next().await?.ok_or_else(denied)?;
     if rows.try_next().await?.is_some() {
         return Err(stale());
@@ -110,13 +108,7 @@ async fn hosted_binding(
     Ok(binding)
 }
 
-async fn owned_binding(
-    db: &Database,
-    person: &str,
-    bot: &Bot,
-    binding_id: Option<&str>,
-    require_maintenance: bool,
-) -> AppResult<(NyxbotChannel, AssistantAgent)> {
+async fn require_bot_maintainer(db: &Database, person: &str, bot: &Bot) -> AppResult<()> {
     if !bot.is_active {
         return Err(denied());
     }
@@ -138,17 +130,21 @@ async fn owned_binding(
     if maintainer.is_none() {
         return Err(denied());
     }
-    let binding = hosted_binding(db, &bot.id, binding_id).await?;
-    if binding.bot_owner_id.as_deref().unwrap_or(&binding.user_id) != bot.user_id {
-        return Err(denied());
-    }
+    Ok(())
+}
+
+async fn binding_agent(
+    db: &Database,
+    binding: &NyxbotChannel,
+    agent_id: Option<&str>,
+) -> AppResult<AssistantAgent> {
     let agent_owner = binding
         .org_specialist
         .as_ref()
         .map(|org| org.org_id.as_str())
         .unwrap_or(&binding.user_id);
     let mut filter = doc! {"user_id":agent_owner,"destroyed_at":null};
-    match binding.agent_id.as_deref() {
+    match agent_id {
         Some(id) => {
             filter.insert("_id", id);
         }
@@ -156,14 +152,24 @@ async fn owned_binding(
             filter.insert("kind", "nyxbot");
         }
     }
-    let agent = db
-        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+    db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
         .find_one(filter)
         .await?
-        .ok_or_else(denied)?;
-    if require_maintenance {
-        crate::services::org_agent_service::require_maintain(db, person, &agent).await?;
+        .ok_or_else(denied)
+}
+
+async fn owned_binding(
+    db: &Database,
+    person: &str,
+    bot: &Bot,
+) -> AppResult<(NyxbotChannel, AssistantAgent)> {
+    require_bot_maintainer(db, person, bot).await?;
+    let binding = hosted_binding(db, &bot.id).await?;
+    if binding.bot_owner_id.as_deref().unwrap_or(&binding.user_id) != bot.user_id {
+        return Err(denied());
     }
+    let agent = binding_agent(db, &binding, binding.agent_id.as_deref()).await?;
+    crate::services::org_agent_service::require_maintain(db, person, &agent).await?;
     Ok((binding, agent))
 }
 
@@ -194,7 +200,7 @@ pub(crate) async fn maintainer_binding(
     bot_id: &str,
 ) -> AppResult<(NyxbotChannel, AssistantAgent)> {
     let (bot, _) = load(db, bot_id).await?;
-    owned_binding(db, person, &bot, None, true).await
+    owned_binding(db, person, &bot).await
 }
 
 pub(crate) async fn standing_approved(
@@ -205,7 +211,7 @@ pub(crate) async fn standing_approved(
     skill_id: &str,
 ) -> AppResult<bool> {
     let (bot, selection) = load(db, bot_id).await?;
-    let (binding, live) = owned_binding(db, actor, &bot, None, true).await?;
+    let (binding, live) = owned_binding(db, actor, &bot).await?;
     Ok(live.id == agent.id
         && live.skills_revision == agent.skills_revision
         && selection.bot_owner == bot.user_id
@@ -220,56 +226,156 @@ pub(crate) async fn standing_approved(
             .any(|pin| pin.skill_id == skill_id && pin.all_requests_approved))
 }
 
-fn inventory(agent: AssistantAgent, selection: Selection) -> Inventory {
+fn attachment_scope_matches(selection: &Selection, bot: &Bot, binding: &NyxbotChannel) -> bool {
+    selection.binding_id == binding.id
+        && selection.bot_owner == bot.user_id
+        && selection.bot_ownership_version == bot.ownership_version
+}
+
+fn override_threads(binding: &NyxbotChannel) -> Document {
+    doc! {
+        "channel_id": &binding.id, "user_id": &binding.user_id,
+        "record_scope": {"$ne": crate::services::channel_thread_follow_service::SCOPE},
+    }
+}
+
+#[derive(Default)]
+struct OverrideAgents {
+    maintainable: Vec<AssistantAgent>,
+    restricted_skill_ids: HashSet<String>,
+}
+
+async fn override_agents(
+    db: &Database,
+    actor: &str,
+    binding: &NyxbotChannel,
+    default_agent: &AssistantAgent,
+) -> AppResult<OverrideAgents> {
+    use crate::services::org_agent_service;
+    let mut filter = override_threads(binding);
+    filter.insert(
+        "agent_id",
+        doc! {"$type": "string", "$ne": &default_agent.id},
+    );
+    let ids = db
+        .collection::<NyxbotThread>(THREADS_COLLECTION_NAME)
+        .distinct("agent_id", filter)
+        .await?;
+    if ids.is_empty() {
+        return Ok(OverrideAgents::default());
+    }
+    let access = org_agent_service::access(db, actor, &default_agent.user_id).await?;
+    let agents: Vec<AssistantAgent> = db
+        .collection(crate::models::assistant_agent::COLLECTION_NAME)
+        .find(doc! {
+            "_id": {"$in": ids}, "user_id": &default_agent.user_id, "destroyed_at": null,
+            "skills": {"$elemMatch": {"source": "ornn", "disabled": {"$ne": true}}},
+        })
+        .sort(doc! {"_id": 1})
+        .await?
+        .try_collect()
+        .await?;
+    let mut overrides = OverrideAgents::default();
+    for agent in agents {
+        if org_agent_service::specialist_rights(actor, &agent, &access).can_maintain {
+            overrides.maintainable.push(agent);
+        } else {
+            overrides.restricted_skill_ids.extend(
+                agent
+                    .skills
+                    .into_iter()
+                    .filter(|pin| pin.source == "ornn")
+                    .map(|pin| pin.skill_id),
+            );
+        }
+    }
+    Ok(overrides)
+}
+
+fn inventory(
+    agent: AssistantAgent,
+    overrides: Vec<AssistantAgent>,
+    selection: Selection,
+) -> Inventory {
+    let standing_approval_skill_ids: Vec<_> = agent
+        .skills
+        .iter()
+        .filter(|pin| !pin.disabled && pin.source == "ornn")
+        .map(|pin| pin.skill_id.clone())
+        .collect();
+    let mut seen = HashSet::new();
+    let available: Vec<_> = agent
+        .skills
+        .into_iter()
+        .chain(overrides.into_iter().flat_map(|agent| agent.skills))
+        .filter(|pin| !pin.disabled && pin.source == "ornn" && seen.insert(pin.skill_id.clone()))
+        .collect();
     let attachments = selection
         .attachments
         .into_iter()
-        .filter(|entry| {
-            agent.id == selection.agent_id
-                && exact_pin(&agent, agent.skills_revision, &entry.skill_id).is_some()
-        })
+        .filter(|entry| seen.contains(&entry.skill_id))
         .map(|mut entry| {
-            entry.all_requests_approved &= agent.skills_revision == selection.skills_revision;
+            entry.all_requests_approved &= selection.agent_id == agent.id
+                && selection.skills_revision == agent.skills_revision
+                && standing_approval_skill_ids.contains(&entry.skill_id);
             entry
         })
         .collect();
     Inventory {
+        agent_id: agent.id,
         revision: selection.revision,
         skills_revision: agent.skills_revision,
-        available: agent
-            .skills
-            .into_iter()
-            .filter(|pin| !pin.disabled)
-            .collect(),
+        available,
+        standing_approval_skill_ids,
         attachments,
     }
 }
 
 pub(crate) async fn get(db: &Database, person: &str, bot_id: &str) -> AppResult<Inventory> {
-    let (bot, selection) = load(db, bot_id).await?;
-    let (binding, agent) = owned_binding(db, person, &bot, None, true).await?;
-    let selection = if selection.binding_id != binding.id
-        || selection.bot_owner != bot.user_id
-        || selection.bot_ownership_version != bot.ownership_version
-    {
-        Selection {
-            attachments: Vec::new(),
-            ..selection
-        }
-    } else {
-        selection
-    };
-    Ok(inventory(agent, selection))
+    let (bot, mut selection) = load(db, bot_id).await?;
+    let (binding, agent) = owned_binding(db, person, &bot).await?;
+    if !attachment_scope_matches(&selection, &bot, &binding) {
+        selection.attachments.clear();
+    }
+    let overrides = override_agents(db, person, &binding, &agent).await?;
+    Ok(inventory(agent, overrides.maintainable, selection))
 }
 
-fn validate_update(agent: &AssistantAgent, input: &Update) -> AppResult<()> {
-    if input.skills_revision != agent.skills_revision {
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedOverride {
+    agent_id: String,
+    skills_revision: i64,
+    maintain_revision: i64,
+    chat_id: String,
+    binding_generation: i64,
+}
+
+async fn validate_update(
+    db: &Database,
+    binding: &NyxbotChannel,
+    agent: &AssistantAgent,
+    overrides: &[AssistantAgent],
+    input: &Update,
+    previous: Option<&Selection>,
+) -> AppResult<Vec<PreparedOverride>> {
+    if input.skills_revision != agent.skills_revision
+        || input.agent_id.as_ref().is_some_and(|id| id != &agent.id)
+    {
         return Err(stale());
     }
     let mut roots = HashSet::new();
+    let override_for = |skill_id: &str| {
+        overrides
+            .iter()
+            .find(|agent| exact_pin(agent, agent.skills_revision, skill_id).is_some())
+    };
+    let mut touched = Vec::new();
+    let mut agents = HashSet::new();
     for attachment in &input.attachments {
+        let default_pin = exact_pin(agent, agent.skills_revision, &attachment.skill_id).is_some();
         if !roots.insert(&attachment.skill_id)
-            || exact_pin(agent, input.skills_revision, &attachment.skill_id).is_none()
+            || (attachment.all_requests_approved && !default_pin)
             || attachment.audiences.len() > 2
             || matches!(attachment.audiences.as_slice(), [first, second] if first == second)
         {
@@ -277,8 +383,44 @@ fn validate_update(agent: &AssistantAgent, input: &Update) -> AppResult<()> {
                 "Choose current enabled skill pins and unique channel audiences".into(),
             ));
         }
+        if default_pin {
+            continue;
+        }
+        let override_agent = override_for(&attachment.skill_id).ok_or_else(stale)?;
+        if agents.insert(&override_agent.id) {
+            touched.push(override_agent);
+        }
     }
-    Ok(())
+    for attachment in previous
+        .into_iter()
+        .flat_map(|selection| &selection.attachments)
+    {
+        if !roots.contains(&attachment.skill_id)
+            && exact_pin(agent, agent.skills_revision, &attachment.skill_id).is_none()
+            && let Some(override_agent) = override_for(&attachment.skill_id)
+            && agents.insert(&override_agent.id)
+        {
+            touched.push(override_agent);
+        }
+    }
+    let mut prepared = Vec::new();
+    for override_agent in touched {
+        let mut filter = override_threads(binding);
+        filter.insert("agent_id", &override_agent.id);
+        let chat = db
+            .collection::<NyxbotThread>(THREADS_COLLECTION_NAME)
+            .find_one(filter)
+            .await?
+            .ok_or_else(stale)?;
+        prepared.push(PreparedOverride {
+            agent_id: override_agent.id.clone(),
+            skills_revision: override_agent.skills_revision,
+            maintain_revision: override_agent.org_maintain_revision,
+            chat_id: chat.id,
+            binding_generation: chat.follow.binding_generation,
+        });
+    }
+    Ok(prepared)
 }
 
 /// Server-observed binding and rights attached to a maintainer's staged choice.
@@ -292,6 +434,8 @@ pub(crate) struct PreparedSelection {
     binding_agent: Option<String>,
     binding_owner: String,
     binding_org_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    overrides: Vec<PreparedOverride>,
     selection: Selection,
 }
 
@@ -302,11 +446,52 @@ pub(crate) async fn prepare(
     input: &Update,
 ) -> AppResult<PreparedSelection> {
     let (bot, previous) = load(db, bot_id).await?;
-    let (binding, agent) = owned_binding(db, actor, &bot, None, true).await?;
+    let (binding, agent) = owned_binding(db, actor, &bot).await?;
     if previous.revision != input.expected_revision {
         return Err(stale());
     }
-    validate_update(&agent, input)?;
+    let overrides = override_agents(db, actor, &binding, &agent).await?;
+    let same_scope = attachment_scope_matches(&previous, &bot, &binding);
+    if same_scope
+        && previous.agent_id != agent.id
+        && input.agent_id.is_none()
+        && input
+            .attachments
+            .iter()
+            .any(|entry| entry.all_requests_approved)
+    {
+        return Err(stale());
+    }
+    let prepared_overrides = validate_update(
+        db,
+        &binding,
+        &agent,
+        &overrides.maintainable,
+        input,
+        same_scope.then_some(&previous),
+    )
+    .await?;
+    let mut attachments = input.attachments.clone();
+    if same_scope {
+        // Preserve restrictions on live overrides outside the editor's maintenance scope.
+        attachments.extend(previous.attachments.into_iter().filter_map(|mut entry| {
+            if !overrides.restricted_skill_ids.contains(&entry.skill_id)
+                || exact_pin(&agent, agent.skills_revision, &entry.skill_id).is_some()
+                || overrides.maintainable.iter().any(|override_agent| {
+                    exact_pin(
+                        override_agent,
+                        override_agent.skills_revision,
+                        &entry.skill_id,
+                    )
+                    .is_some()
+                })
+            {
+                return None;
+            }
+            entry.all_requests_approved = false;
+            Some(entry)
+        }));
+    }
     Ok(PreparedSelection {
         bot_id: bot.id,
         expected_revision: previous.revision,
@@ -315,6 +500,7 @@ pub(crate) async fn prepare(
         binding_agent: binding.agent_id,
         binding_owner: binding.user_id,
         binding_org_revision: binding.org_specialist.map(|binding| binding.revision),
+        overrides: prepared_overrides,
         selection: Selection {
             revision: previous.revision.checked_add(1).ok_or_else(stale)?,
             skills_revision: agent.skills_revision,
@@ -323,7 +509,7 @@ pub(crate) async fn prepare(
             binding_id: binding.id,
             agent_id: agent.id,
             maintainer: actor.to_owned(),
-            attachments: input.attachments.clone(),
+            attachments,
         },
     })
 }
@@ -336,7 +522,7 @@ pub(crate) async fn apply_prepared_in_session(
     bot_id: &str,
     prepared: &PreparedSelection,
 ) -> AppResult<()> {
-    use crate::services::{org_agent_service, org_membership_authority};
+    use crate::services::org_membership_authority;
     if prepared.bot_id != bot_id {
         return Err(stale());
     }
@@ -357,27 +543,38 @@ pub(crate) async fn apply_prepared_in_session(
             return Err(denied());
         }
     }
-    let agent = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
-        .find_one_and_update(doc! {
-            "_id": &selection.agent_id, "user_id": &prepared.agent_owner, "destroyed_at": null,
-            "$expr": {"$and": [
-                {"$eq": [{"$ifNull": ["$skills_revision", 0_i64]}, selection.skills_revision]},
-                {"$eq": [{"$ifNull": ["$org_maintain_revision", 0_i64]}, prepared.maintain_revision]},
-            ]},
-        }, doc! {"$inc":{"guest_skill_selection_fence":1_i64}})
-        .session(&mut *tx).await?.ok_or_else(stale)?;
-    if agent.user_id != *maintainer
-        && !org_agent_service::member_rights_in_session(
+    fence_maintained_agent(
+        db,
+        tx,
+        maintainer,
+        &prepared.agent_owner,
+        &selection.agent_id,
+        selection.skills_revision,
+        prepared.maintain_revision,
+    )
+    .await?;
+    for override_agent in &prepared.overrides {
+        fence_maintained_agent(
             db,
             tx,
             maintainer,
-            &agent,
-            org_agent_service::MemberFence::MemberAndOrg,
+            &prepared.agent_owner,
+            &override_agent.agent_id,
+            override_agent.skills_revision,
+            override_agent.maintain_revision,
         )
-        .await?
-        .can_maintain
-    {
-        return Err(denied());
+        .await?;
+        let matched = db.collection::<Document>(THREADS_COLLECTION_NAME)
+            .update_one(doc! {
+                "_id": &override_agent.chat_id, "channel_id": &selection.binding_id,
+                "user_id": &prepared.binding_owner, "agent_id": &override_agent.agent_id,
+                "record_scope": {"$ne":crate::services::channel_thread_follow_service::SCOPE},
+                "$expr": {"$eq": [{"$ifNull": ["$binding_generation", 0_i64]}, override_agent.binding_generation]},
+            }, doc! {"$inc": {"guest_skill_selection_fence":1_i64}})
+            .session(&mut *tx).await?;
+        if matched.matched_count != 1 {
+            return Err(stale());
+        }
     }
     let binding = db.collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
         .update_one(doc! {
@@ -413,6 +610,48 @@ pub(crate) async fn apply_prepared_in_session(
         .await?;
     if changed.matched_count != 1 {
         return Err(stale());
+    }
+    Ok(())
+}
+
+async fn fence_maintained_agent(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    maintainer: &str,
+    agent_owner: &str,
+    agent_id: &str,
+    skills_revision: i64,
+    maintain_revision: i64,
+) -> AppResult<()> {
+    use crate::services::org_agent_service;
+
+    let agent = db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {
+                "_id": agent_id, "user_id": agent_owner, "destroyed_at": null,
+                "$expr": {"$and": [
+                    {"$eq": [{"$ifNull": ["$skills_revision", 0_i64]}, skills_revision]},
+                    {"$eq": [{"$ifNull": ["$org_maintain_revision", 0_i64]}, maintain_revision]},
+                ]},
+            },
+            doc! {"$inc":{"guest_skill_selection_fence":1_i64}},
+        )
+        .session(&mut *tx)
+        .await?
+        .ok_or_else(stale)?;
+    if agent.user_id != maintainer
+        && !org_agent_service::member_rights_in_session(
+            db,
+            tx,
+            maintainer,
+            &agent,
+            org_agent_service::MemberFence::MemberAndOrg,
+        )
+        .await?
+        .can_maintain
+    {
+        return Err(denied());
     }
     Ok(())
 }
@@ -460,34 +699,84 @@ pub(crate) async fn set(
 }
 
 async fn current(db: &Database, chat: &ChatAuthority) -> AppResult<(Selection, AssistantAgent)> {
+    use crate::services::{channel_platform::canonical_platform, channel_thread_follow_service};
+
     let turn = chat
         .channel_guest
         .as_ref()
         .filter(|_| chat.guest && chat.turn_live && !chat.turn_stopped)
         .ok_or_else(denied)?;
-    chat.ensure_live_turn(db, None, None, "assistant.channel_guest_skill")
-        .await?;
-    super::revalidate(db, turn).await?;
-    let (bot, mut selection) = load(db, &turn.bot_id).await?;
-    let binding = hosted_binding(db, &bot.id, Some(&turn.binding_id)).await?;
-    let authored = selection.bot_owner == bot.user_id
-        && selection.bot_ownership_version == bot.ownership_version
-        && selection.binding_id == turn.binding_id
-        && selection.agent_id == chat.agent_id;
-    if !authored {
-        selection.attachments.clear();
-        selection.maintainer.clone_from(&binding.user_id);
-    }
-    let (_, agent) = owned_binding(
+    let (conversation, live_turn) = super::require_live_request(
         db,
-        &selection.maintainer,
-        &bot,
-        Some(&turn.binding_id),
-        authored,
+        &chat.user_id,
+        &chat.conversation_id,
+        chat.turn_id.as_deref().ok_or_else(denied)?,
+        &chat.api_key_id,
+    )
+    .await?;
+    if *turn != live_turn || conversation.agent_id.as_deref() != Some(chat.agent_id.as_str()) {
+        return Err(denied());
+    }
+    let origin = conversation.channel.as_ref().ok_or_else(denied)?;
+    let (binding, thread) = Box::pin(crate::services::channel_turn_delivery::target(
+        db,
+        &conversation,
+        origin,
+    ))
+    .await?
+    .ok_or_else(denied)?;
+    let (bot, mut selection) = load(db, &turn.bot_id).await?;
+    if binding.id != turn.binding_id
+        || binding.channel_bot_id != bot.id
+        || binding.bot_owner_id.as_deref().unwrap_or(&binding.user_id) != bot.user_id
+        || canonical_platform(&binding.platform) != turn.platform
+        || super::transport::destination(
+            thread
+                .platform_chat_id
+                .as_deref()
+                .unwrap_or(&thread.partition),
+            thread.platform_thread_id.as_deref(),
+        ) != turn.conversation_id
+    {
+        return Err(denied());
+    }
+    if origin.thread.is_some() {
+        Box::pin(channel_thread_follow_service::validate_delivery(
+            db,
+            &chat.user_id,
+            origin,
+            &chat.conversation_id,
+        ))
+        .await?;
+    }
+    let agent = binding_agent(
+        db,
+        &binding,
+        thread.agent_id.as_deref().or(binding.agent_id.as_deref()),
     )
     .await?;
     if agent.id != chat.agent_id {
         return Err(denied());
+    }
+    let same_scope = attachment_scope_matches(&selection, &bot, &binding);
+    let is_default_agent = binding
+        .agent_id
+        .as_deref()
+        .map_or_else(|| agent.is_nyxbot(), |agent_id| agent_id == agent.id);
+    let authored = same_scope && is_default_agent && selection.agent_id == agent.id;
+    if !same_scope {
+        selection.attachments.clear();
+    }
+    if !authored {
+        for attachment in &mut selection.attachments {
+            attachment.all_requests_approved = false;
+        }
+        selection.maintainer.clone_from(&binding.user_id);
+    }
+    require_bot_maintainer(db, &selection.maintainer, &bot).await?;
+    if authored {
+        crate::services::org_agent_service::require_maintain(db, &selection.maintainer, &agent)
+            .await?;
     }
     Ok((selection, agent))
 }
@@ -574,6 +863,7 @@ impl Permit {
             || live.sha256 != self.sha256
             || live.owner != self.owner
             || live.maintainer != self.maintainer
+            || live.all_requests_approved != self.all_requests_approved
             || live.operation_scopes != self.operation_scopes
             || live.guest_operation_scopes != self.guest_operation_scopes
         {

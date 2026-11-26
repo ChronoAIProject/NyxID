@@ -167,6 +167,9 @@ function Editor({ botId, settings, staging, onPrepared }: {
   useUiTranslation();
   const client = useQueryClient();
   const skills = useGuestSkills(botId);
+  const declarationPins = skills.data?.available.filter((pin) =>
+    skills.data?.standing_approval_skill_ids?.includes(pin.skill_id) ?? true
+  ) ?? [];
   const id = useId();
   const [revision, setRevision] = useState(settings.revision);
   const form = useAppForm({
@@ -325,11 +328,11 @@ function Editor({ botId, settings, staging, onPrepared }: {
                 onChange={(next) => change({ ...configuration, rules: configuration.rules.map((item, position) => position === index ? next : item) })}
                 onRemove={() => change({ ...configuration, rules: configuration.rules.filter((_, position) => position !== index) })} />
             ))}
-            {skills.data && skills.data.available.length > 0 && (
+            {skills.data && declarationPins.length > 0 && (
               <div className="space-y-2">
                 <h3 className="type-card-title">{translateUi("Apply declarations from pinned skills")}</h3>
                 <FieldHelp>{translateUi("Preview checks the structured declaration in the pinned package. Applying it changes guest access.")}</FieldHelp>
-                {skills.data.available.map((pin) => {
+                {declarationPins.map((pin) => {
                   const active = configuration.declarations.some((item) =>
                     item.skill_id === pin.skill_id && item.skill_revision === skills.data.skills_revision);
                   return (

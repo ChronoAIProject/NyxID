@@ -1,4 +1,5 @@
 //! Server-authored admission and rollback fences for channel guest work.
+pub(crate) mod assignment;
 pub(crate) mod google_sheets;
 pub(crate) mod guest_tools;
 pub(crate) mod personal_records;
@@ -341,7 +342,8 @@ pub(crate) async fn fence_in_session(
         turn.activation_epoch,
         turn.bot_revision,
     )
-    .await
+    .await?;
+    assignment::fence(db, session, turn).await
 }
 
 fn digest(parts: &[&str]) -> String {
@@ -369,7 +371,10 @@ impl GuestTurn {
             AnswerAudience::Private => "private",
             AnswerAudience::Shared => "shared",
         };
-        let hash = digest(&[
+        let epoch = self.activation_epoch.to_string();
+        let revision = self.bot_revision.to_string();
+        let policy = self.policy_revision.to_string();
+        let mut scope = vec![
             "channel-guest-session-v1",
             &self.bot_id,
             &self.binding_id,
@@ -377,10 +382,24 @@ impl GuestTurn {
             &self.conversation_id,
             &self.actor.id,
             audience,
-            &self.activation_epoch.to_string(),
-            &self.bot_revision.to_string(),
-            &self.policy_revision.to_string(),
-        ]);
+            &epoch,
+            &revision,
+            &policy,
+        ];
+        let settings_generation;
+        let channel_generation;
+        if let Some(assignment) = &self.hosted_assignment {
+            settings_generation = assignment.settings_generation.to_string();
+            channel_generation = assignment.channel_generation.to_string();
+            scope.extend([
+                "hosted-assignment-v1",
+                assignment.agent_id.as_str(),
+                assignment.settings_chat_id.as_str(),
+                &settings_generation,
+                &channel_generation,
+            ]);
+        }
+        let hash = digest(&scope);
         format!("{CONVERSATION_PREFIX}{}", &hash[..32])
     }
 
@@ -412,6 +431,15 @@ pub(crate) fn is_hosted_conversation(id: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     })
+}
+
+/// The namespace survives settlement and rollback, including rows without an active turn.
+pub(crate) fn is_hosted_conversation_namespace(id: &str) -> bool {
+    id.starts_with(CONVERSATION_PREFIX)
+}
+
+pub(crate) fn exclude_hosted_conversations() -> Document {
+    doc! {"$not": {"$regex": format!("^{CONVERSATION_PREFIX}")}}
 }
 
 fn check_turn(turn: &GuestTurn) -> AppResult<()> {
@@ -485,6 +513,7 @@ async fn revalidate_turn(db: &Database, turn: &GuestTurn, admitted: bool) -> App
         None if !admitted => {}
         _ => return Err(obsolete()),
     }
+    assignment::revalidate(db, turn).await?;
     let verified = (turn.actor.assurance == GuestAssurance::ProviderVerified)
         .then_some(turn.actor.id.as_str());
     if !setup::allows_guest(db, &turn.bot_id, verified).await? {
@@ -581,6 +610,7 @@ pub(crate) async fn classify_with_meta(
         activation_epoch,
         bot_revision,
         meta_grant_id: input.meta_grant_id.map(str::to_owned),
+        hosted_assignment: None,
     };
     check_turn(&turn)?;
     Ok(GuestAdmission::AddOn(Box::new(turn)))
@@ -979,7 +1009,10 @@ pub(crate) async fn require_live_request(
     conversation_id: &str,
     turn_id: &str,
     credential_id: &str,
-) -> AppResult<()> {
+) -> AppResult<(
+    crate::models::assistant_conversation::AssistantConversation,
+    GuestTurn,
+)> {
     use crate::models::assistant_conversation::{AssistantConversation, COLLECTION_NAME};
     let row = db
         .collection::<AssistantConversation>(COLLECTION_NAME)
@@ -990,7 +1023,7 @@ pub(crate) async fn require_live_request(
         .await?
         .ok_or(AppError::AssistantTurnRequired)?;
     let active = super::assistant_nyxagent::live_turn(&row, chrono::Utc::now());
-    live_turn(db, &row, active)
+    let guest = live_turn(db, &row, active)
         .await?
         .ok_or(AppError::AssistantTurnRequired)?;
     let key_live = db
@@ -1005,7 +1038,7 @@ pub(crate) async fn require_live_request(
     if !key_live {
         return Err(AppError::AssistantTurnRequired);
     }
-    Ok(())
+    Ok((row, guest))
 }
 
 pub(crate) async fn list_verified_actors(db: &Database, bot_id: &str) -> AppResult<Vec<String>> {

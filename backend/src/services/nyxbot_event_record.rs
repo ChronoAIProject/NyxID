@@ -334,6 +334,7 @@ mod tests {
             activation_epoch: 1,
             bot_revision: 1,
             meta_grant_id: None,
+            hosted_assignment: None,
         };
         let conversation = turn.hosted_conversation_id();
         let plain = serde_json::to_vec(&serde_json::json!({

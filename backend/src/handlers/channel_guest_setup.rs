@@ -775,6 +775,7 @@ mod tests {
             activation_epoch: 1,
             bot_revision: 1,
             meta_grant_id: None,
+            hosted_assignment: None,
         };
         let mut tx = db.client().start_session().await.unwrap();
         tx.start_transaction().await.unwrap();

@@ -219,7 +219,10 @@ async fn live(f: &Fixture, failed: bool) -> String {
                 f.event.id.clone(),
                 "response".into(),
                 json!({"type":"response.created"}),
-                receiver,
+                InboundTurn {
+                    receiver,
+                    hosted_reply: None,
+                },
                 Utc::now(),
             )),
         )
@@ -1579,7 +1582,10 @@ async fn private_chat_handoff_ordinary_subscriber_close_keeps_failure_copy() {
         fixture.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        closed(),
+        InboundTurn {
+            receiver: closed(),
+            hosted_reply: None,
+        },
         Utc::now(),
     ))
     .await;

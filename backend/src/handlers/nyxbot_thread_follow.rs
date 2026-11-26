@@ -708,8 +708,8 @@ async fn inbound_impl_inner(
         }
         Ok(Inbound::Silent(_)) => None,
         Ok(Inbound::Busy) => Some(Notice::FollowBusy.text(settings.notice_language).into()),
-        Ok(Inbound::Turn(receiver)) => {
-            let _ = final_reply(receiver).await;
+        Ok(Inbound::Turn(turn)) => {
+            let _ = final_reply(turn.receiver).await;
             late_delivery::process(state, event_key).await;
             None
         }

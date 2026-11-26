@@ -214,15 +214,19 @@ Legacy guest turns receive no skill contents and perform no preload reads.
 
 In the channel guest add-on, each currently enabled pin is offered for both
 private and shared replies by default. The bot's maintainer can restrict either
-audience in **Guest access → Skills available to guests**. The model receives
+audience in **Guest access → Skills available to guests**. The editor includes
+pins from the default agent and from maintainable agents assigned to the bot's
+chats. An audience choice applies to the same skill ID across those chats.
+Each turn uses the exact version and dependencies pinned by the agent
+answering that chat. The model receives
 exact skill GUIDs and versions in its instructions. It can fetch the root or
 its pinned dependencies with `nyxid__skill_read`. The same authorization is
 required for a preload, a file listing, or a supporting file. Every package is
 checked against the pin's ZIP hash before its files are used.
 
-A maintainer can explicitly approve reads of a pin under **All Requests**.
-That approval expires when the agent's skill revision changes and covers
-the exact root and its pinned dependencies in the selected audience. Explicit
+A maintainer can explicitly approve reads of a default agent's pin under
+**All Requests**. That approval covers the exact agent, pin and pinned
+dependencies in the selected audience and expires when the skill revision changes. Explicit
 service approval, service denies, operation scopes, billing, and the registry's
 content authorization still apply. The server never queues a guest approval
 request when a read is refused. A bot relink, revoked membership, disabled

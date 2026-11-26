@@ -2596,6 +2596,7 @@ async fn guest_history_routes_limit_live_admins_to_retained_guest_exchanges() {
         activation_epoch: 1,
         bot_revision: 1,
         meta_grant_id: None,
+        hosted_assignment: None,
     };
     let hosted_id = private_turn.hosted_conversation_id();
     let hosted_suffix = hosted_id.strip_prefix("nyxag-").unwrap();

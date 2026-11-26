@@ -44,7 +44,7 @@ export function GuestSkillExposure({ botId, onStage }: {
   }
   return (
     <SkillAudienceForm
-      key={`${botId}:${query.data.revision}:${query.data.skills_revision}`}
+      key={`${botId}:${query.data.agent_id ?? ""}:${query.data.revision}:${query.data.skills_revision}`}
       botId={botId}
       inventory={query.data}
       onStage={onStage}
@@ -65,6 +65,7 @@ function SkillAudienceForm({
   const [updates, setUpdates] = useState<Record<string, GuestSkillAttachment>>({});
   const { t } = useUiTranslation();
   const selection = (value: Record<string, GuestSkillAttachment>): GuestSkillSelection => ({
+    ...(inventory.agent_id && { agent_id: inventory.agent_id }),
     expected_revision: inventory.revision,
     skills_revision: inventory.skills_revision,
     attachments: [
@@ -122,16 +123,18 @@ function SkillAudienceForm({
                 </Label>
               ))}
             </div>
-            <Label className="flex items-center gap-2">
-              <Checkbox
-                checked={attachment.all_requests_approved}
-                disabled={save.isPending}
-                onCheckedChange={(checked) =>
-                  setAttachment({ ...attachment, all_requests_approved: checked === true })
-                }
-              />
-              {t("Approve reads of this exact version and its pinned dependencies under All Requests")}
-            </Label>
+            {(inventory.standing_approval_skill_ids?.includes(pin.skill_id) ?? true) && (
+              <Label className="flex items-center gap-2">
+                <Checkbox
+                  checked={attachment.all_requests_approved}
+                  disabled={save.isPending}
+                  onCheckedChange={(checked) =>
+                    setAttachment({ ...attachment, all_requests_approved: checked === true })
+                  }
+                />
+                {t("Approve reads of this exact version and its pinned dependencies under All Requests")}
+              </Label>
+            )}
           </fieldset>
         );
       })}

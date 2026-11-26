@@ -3018,7 +3018,7 @@ pub async fn disconnect_channel(
 /// What an inbound channel message resolved to.
 enum Inbound {
     /// The owner: a turn with the linked agent is running.
-    Turn(broadcast::Receiver<Value>),
+    Turn(InboundTurn),
     /// A reply without a turn (link confirmation, refusal, busy notice).
     Reply(InboundReply),
     /// Accepted work; its acknowledgement must not clear the original target.
@@ -3027,6 +3027,29 @@ enum Inbound {
     Silent(&'static str),
     /// Retry later: this chat's turn is still running or the pool is full.
     Busy,
+}
+
+struct InboundTurn {
+    receiver: broadcast::Receiver<Value>,
+    hosted_reply: Option<late_delivery::HostedReply>,
+}
+
+impl InboundTurn {
+    fn new(
+        conversation: &crate::models::assistant_conversation::AssistantConversation,
+        receiver: broadcast::Receiver<Value>,
+    ) -> Self {
+        Self {
+            receiver,
+            hosted_reply: late_delivery::HostedReply::new(
+                &conversation.id,
+                conversation
+                    .active_turn
+                    .as_ref()
+                    .map(|turn| turn.turn_id.as_str()),
+            ),
+        }
+    }
 }
 
 struct InboundReply {
@@ -3654,7 +3677,12 @@ async fn start_chat_turn(
     let private = chat.kind.as_deref() == Some("private");
     // An organization's bot never carries the owner's personal thread.
     let shared = private && !guest && (row.bot_owner_id.is_none() || row.org_specialist.is_some());
-    let agent_id = match chat.agent_id.clone().or_else(|| row.agent_id.clone()) {
+    let agent_id = match binding
+        .as_ref()
+        .map(|binding| binding.agent_id.clone())
+        .or_else(|| chat.agent_id.clone())
+        .or_else(|| row.agent_id.clone())
+    {
         Some(agent_id) => agent_id,
         None => {
             crate::services::assistant_team_service::ensure_nyxbot(&state.db, &row.user_id)
@@ -3741,7 +3769,15 @@ async fn start_chat_turn(
         .await
         {
             Ok(GuestAdmission::Legacy) => None,
-            Ok(GuestAdmission::AddOn(turn)) => Some(*turn),
+            Ok(GuestAdmission::AddOn(mut turn)) => {
+                turn.hosted_assignment = Some(guest_runtime::assignment::capture(
+                    row,
+                    chat,
+                    origin.thread.as_deref(),
+                    &agent_id,
+                )?);
+                Some(*turn)
+            }
             Err(AppError::Forbidden(_)) => return Ok(Inbound::Silent("refused_guest_policy")),
             Err(error) => return Err(error),
         }
@@ -4074,7 +4110,10 @@ async fn start_chat_turn(
     ))
     .await
     {
-        Ok(Started::Turn { receiver, .. }) => Ok(Inbound::Turn(receiver)),
+        Ok(Started::Turn {
+            conversation,
+            receiver,
+        }) => Ok(Inbound::Turn(InboundTurn::new(&conversation, receiver))),
         Ok(Started::Busy | Started::PoolFull) => {
             if let Some(binding) = origin.thread.as_deref() {
                 crate::services::channel_thread_follow_service::note_busy(
@@ -5655,13 +5694,13 @@ async fn custom_responses(
     .await;
     let created = json!({"type": "response.created", "response": {"id": &response_id, "status": "in_progress"}});
     match result {
-        Ok(Inbound::Turn(receiver)) => {
+        Ok(Inbound::Turn(turn)) => {
             let mut response = late_delivery::provider_stream_direct(
                 state,
                 event_key,
                 response_id.clone(),
                 created,
-                receiver,
+                turn,
                 now,
             );
             if let Ok(value) = response_id.parse() {
@@ -6479,8 +6518,8 @@ async fn dispatch_relay_response(
                 .insert("retry-after", "5".parse().expect("static header"));
             response
         }
-        Ok(Inbound::Turn(receiver)) => {
-            late_delivery::provider_stream(state, event_key, response_id, created, receiver, now)
+        Ok(Inbound::Turn(turn)) => {
+            late_delivery::provider_stream(state, event_key, response_id, created, turn, now)
         }
         Err(_) => {
             discard_failed_provider_event(&state.db, &event_key).await;
@@ -6919,16 +6958,6 @@ async fn custom_replay(state: &AppState, event_key: &str, response_id: &str) -> 
             .insert("retry-after", "5".parse().expect("static header"));
         return response;
     }
-    if event
-        .conversation_id
-        .as_deref()
-        .is_some_and(crate::services::channel_guest_access::is_hosted_conversation)
-        && !late_delivery::stream_allowed(state, event_key).await
-    {
-        return sse(futures::stream::iter(
-            std::iter::once(created).chain(message_frames(response_id, None)),
-        ));
-    }
     let text = match (&event.conversation_id, &event.turn_id) {
         (Some(conversation_id), Some(turn_id)) => state
             .db
@@ -6948,6 +6977,26 @@ async fn custom_replay(state: &AppState, event_key: &str, response_id: &str) -> 
             .map(|message| message.text),
         _ => None,
     };
+    if let Some(hosted) = late_delivery::HostedReply::for_event(&event) {
+        let state = state.clone();
+        let event_key = event.id;
+        let response_key = response_id.to_owned();
+        return response_sse(
+            async_stream::stream! {
+                yield created;
+                for frame in message_frames(&response_key, text.as_deref()) {
+                    if late_delivery::frame_has_answer(&frame)
+                        && !late_delivery::hosted_stream_allowed(&state, &event_key, &hosted).await
+                    {
+                        for frame in message_frames(&response_key, None) { yield frame; }
+                        return;
+                    }
+                    yield frame;
+                }
+            },
+            response_id,
+        );
+    }
     response_sse(
         futures::stream::iter(
             std::iter::once(created).chain(message_frames(response_id, text.as_deref())),
@@ -7890,8 +7939,8 @@ pub async fn relay_callback(
                 }
                 Inbound::Silent(_) => None,
                 Inbound::Busy => Some(Notice::Capacity.text(chat.notice_language).into()),
-                Inbound::Turn(receiver) => {
-                    let _ = final_reply(receiver).await;
+                Inbound::Turn(turn) => {
+                    let _ = final_reply(turn.receiver).await;
                     late_delivery::process(&state, &admitted.id).await;
                     None
                 }

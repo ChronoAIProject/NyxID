@@ -230,6 +230,51 @@ async fn seed_conversation(f: &Fixture, owner: &str, title: &str) -> String {
     id
 }
 
+#[tokio::test]
+async fn hosted_guest_notifications_are_hidden_from_owner_feeds() {
+    let f = fixture("hosted_guest_notification_visibility").await;
+    let ordinary_id = seed_conversation(&f, &f.owner, "Ordinary thread").await;
+    let hosted_id = "nyxag-11111111111111111111111111111111";
+    f.state
+        .db
+        .collection::<Document>(CONVERSATIONS)
+        .insert_one(doc! {"_id": hosted_id, "user_id": &f.owner, "title": "Private thread"})
+        .await
+        .unwrap();
+    let ordinary = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&ordinary_id),
+    );
+    let hosted = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(hosted_id),
+    );
+    insert_row(&f, &ordinary).await;
+    insert_row(&f, &hosted).await;
+
+    let page = list(&f.state, &f.owner, &page(1)).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, ordinary.id);
+    assert!(page.next_cursor.is_none());
+    let summary = summary(&f.state.db, &f.owner).await.unwrap();
+    assert_eq!(summary.unread_count, 1);
+    assert_eq!(summary.by_source[0].id, ordinary_id);
+    assert!(
+        resolve_items(&f.state, &f.owner, vec![hosted.clone()])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        mark_read(&f.state.db, &f.owner, ReadScope::Ids(vec![hosted.id]))
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 fn conversation_source(id: &str) -> NotificationSource {
     NotificationSource {
         source_type: SourceType::Conversation,
