@@ -71,6 +71,7 @@ impl AppError {
             | Self::SkillRead(_)
             | Self::AssistantMissingAccess(_)
             | Self::Conflict(_)
+            | Self::SkillPublication(_)
             | Self::TriggerOverlapSkip { .. }
             | Self::AssistantTurnActive
             | Self::VoiceQueueFull

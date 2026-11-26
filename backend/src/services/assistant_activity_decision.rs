@@ -7,7 +7,8 @@ use crate::{
         approval_request::COLLECTION_NAME as APPROVALS,
         assistant_acknowledgement::{AuthoredSkillReview, COLLECTION_NAME as ACKS},
         assistant_conversation::{
-            ActivityDecision, ActivityExecution, COLLECTION_NAME as CONVERSATIONS, TurnActivity,
+            ActivityDecision, ActivityExecution, COLLECTION_NAME as CONVERSATIONS, ToolFailure,
+            TurnActivity,
         },
     },
 };
@@ -351,6 +352,25 @@ fn authored_skill(row: &Document) -> Option<AuthoredSkillReview> {
     bson::from_document(row.get_document("authored_skill").ok()?.clone()).ok()
 }
 
+fn authored_save_failure(proposal: &Document) -> Option<ToolFailure> {
+    use super::assistant_learning_publication::FailureCode;
+    if proposal.get_str("status").ok()? != "publication_failed" {
+        return None;
+    }
+    let publication = proposal.get_document("publication").ok()?;
+    let code = FailureCode::parse(proposal.get_str("failure_code").ok()?)?;
+    match (publication.get_str("last_stage").ok()?, code) {
+        ("publish", _) | ("reconcile", FailureCode::PublishUncertain) => {
+            let status = publication
+                .get_i32("last_registry_status")
+                .ok()
+                .and_then(|n| u16::try_from(n).ok());
+            code.save_failure(status).map(|failure| failure.activity())
+        }
+        _ => None,
+    }
+}
+
 /// ID-batched presentation reads only for new linked activities. Legacy rows
 /// cause no extra queries. Never load/decrypt provider results or draft bodies.
 pub async fn refresh(
@@ -406,6 +426,7 @@ async fn refresh_scoped(
         }
     }
     let mut states = HashMap::new();
+    let mut skill_failures = HashMap::new();
     if !ack_ids.is_empty() {
         ack_ids.sort();
         ack_ids.dedup();
@@ -445,7 +466,8 @@ async fn refresh_scoped(
         if !proposals.is_empty() {
             let proposals: Vec<Document> = db.collection(crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME)
                 .find(doc! {"_id":{"$in":proposals}})
-                .projection(doc! {"_id":1,"agent_id":1,"revision":1,"status":1,"publication.acknowledgement_id":1})
+                .projection(doc! {"_id":1,"agent_id":1,"revision":1,"status":1,"publication.acknowledgement_id":1,"failure_code":1,
+                    "publication.last_registry_status":1,"publication.last_stage":1})
                 .await?.try_collect().await?;
             for row in &rows {
                 if let Some(skill) = authored_skill(row)
@@ -466,6 +488,10 @@ async fn refresh_scoped(
                         "used" | "allowed"
                     )
                 {
+                    if let Some(failure) = authored_save_failure(p) {
+                        skill_failures
+                            .insert(row.get_str("_id").unwrap_or_default().to_owned(), failure);
+                    }
                     states.insert(
                         (
                             "acknowledgement".into(),
@@ -535,6 +561,11 @@ async fn refresh_scoped(
     }
     for activity in activities {
         if let Some(d) = &mut activity.decision {
+            if d.kind == "acknowledgement"
+                && let Some(failure) = skill_failures.get(&d.id)
+            {
+                activity.failure = Some(failure.clone());
+            }
             d.state = states
                 .get(&(d.kind.clone(), d.id.clone()))
                 .cloned()

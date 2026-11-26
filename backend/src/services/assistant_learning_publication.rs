@@ -120,7 +120,7 @@ impl PublicationError {
     pub(super) fn into_app_error(self) -> AppError {
         match self {
             Self::Integrity => invalid(),
-            Self::Ambiguous(_) => ambiguous(),
+            Self::Ambiguous(status) => ambiguous(status),
             Self::BaseChanged => AppError::Conflict("base_skill_changed".into()),
             Self::BaseInterfaceIncompatible => {
                 AppError::Conflict("base_interface_incompatible".into())
@@ -192,6 +192,30 @@ impl FailureCode {
             Self::EvidenceUnavailable => "evidence_unavailable",
             Self::OperatorReleased => "operator_released",
         }
+    }
+
+    pub(crate) fn save_failure(
+        self,
+        status: Option<u16>,
+    ) -> Option<crate::errors::skill_publication::SkillPublicationFailure> {
+        use crate::errors::skill_publication::SkillPublicationFailure;
+        let recovery = match self {
+            Self::PublishUncertain => return Some(SkillPublicationFailure::ambiguous(status)),
+            Self::OrnnAuthMissing | Self::OrnnWriteForbidden | Self::OrnnSkillNotFound => {
+                "check_access"
+            }
+            Self::OrnnPackageRejected
+            | Self::OrnnValidationFailed
+            | Self::OrnnInterfaceChangeRequiresMajor
+            | Self::OrnnDependencyRejected
+            | Self::OrnnNameTaken => "revise_draft",
+            _ => return None,
+        };
+        Some(SkillPublicationFailure::refused(
+            self.as_str(),
+            recovery,
+            status?,
+        ))
     }
 
     const ALL: [Self; 22] = [
@@ -288,8 +312,8 @@ impl PublicationStage {
         }
     }
 }
-pub(super) fn ambiguous() -> AppError {
-    AppError::Conflict("publication_ambiguous: retry reconciles the existing operation; it never creates another skill".into())
+pub(super) fn ambiguous(status: Option<u16>) -> AppError {
+    crate::errors::skill_publication::SkillPublicationFailure::ambiguous(status).into()
 }
 
 pub(super) fn next_version(base: Option<&SkillPin>) -> AppResult<String> {

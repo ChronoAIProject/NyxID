@@ -5,6 +5,7 @@ import { activityPresentationStatus } from "@/schemas/assistant-history-compat";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
+import { publicationFailureText } from "@/lib/assistant/skill-publication-copy";
 import { activityDecisionPresentation } from "@/lib/assistant/activity-decision";
 import { useRouter, useRouterState } from "@tanstack/react-router";
 import { ReviewCardTarget, useReviewCardNavigation } from "./review-card-target";
@@ -430,8 +431,17 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
             const retainedRecovery = part && !retainedMemoryFailures.has(part.failed_activity_id)
               ? memoryRecoveries.get(part.failed_activity_id)
               : undefined;
+            const skillReason = status === "error" && tool.name === "nyxid__draft_agent_skill" && tool.failure?.kind === "tool_error"
+              ? tool.failure.reason : undefined;
+            let skillDetail: string | undefined;
+            if (skillReason === "publication_ambiguous") {
+              skillDetail = translateUi("NyxID could not confirm the save and will not repeat it. Check Ornn or use Check again on the review card if you have one.");
+            } else if (skillReason?.startsWith("ornn_")) {
+              skillDetail = translateUi(publicationFailureText(skillReason, "publication_failed", "authored"));
+            }
             let label = decision ? translateUi(decision.label) : describeToolActivity(tool.name || tool.id, tool.status);
-            if (part?.committed) label = describeToolActivity(tool.name, "done");
+            if (skillReason === "publication_ambiguous") label = translateUi("Skill save unconfirmed");
+            else if (part?.committed) label = describeToolActivity(tool.name, "done");
             else if (memoryUnconfirmed) label = translateUi("Memory save unconfirmed");
             else if (status === "skipped") label = toolFailureCopy(tool.failure, tool.name);
             else if (status === "unknown") label = translateUi("Activity details unavailable in this app version.");
@@ -461,7 +471,7 @@ function TurnSummary({ message, selectedDecisionId }: { readonly message: ChatMe
                     /></span> : null}
                   </span>
                 </span>
-                {decision && status !== "skipped" && status !== "unknown" ? <span className="break-words pl-5">{translateUi(decision.detail)}</span> : status === "error" ? (
+                {skillDetail ? <span className="break-words pl-5">{skillDetail}</span> : decision && status !== "skipped" && status !== "unknown" ? <span className="break-words pl-5">{translateUi(decision.detail)}</span> : status === "error" ? (
                   <span className="break-words pl-5 text-destructive opacity-70">
                     {toolFailureCopy(tool.failure, tool.name)}{!recovery && translateUi(" The assistant can continue after a failed step.")}</span>
                 ) : null}
