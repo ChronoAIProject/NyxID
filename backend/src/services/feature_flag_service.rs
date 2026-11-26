@@ -2259,32 +2259,6 @@ mod tests {
                 .await
                 .unwrap();
         }
-        for flag in FEATURE_FLAGS.iter().filter(|flag| {
-            super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
-        }) {
-            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
-                assert!(matches!(
-                    set_platform_override(&db, flag.key, &target, true, &user).await,
-                    Err(AppError::SecurityReadinessUnavailable)
-                ));
-                assert!(
-                    !set_platform_override(&db, flag.key, &target, false, &user)
-                        .await
-                        .unwrap()
-                        .enabled
-                );
-            }
-            assert!(matches!(
-                set_platform_org_override(&db, &org, flag.key, true, &user).await,
-                Err(AppError::SecurityReadinessUnavailable)
-            ));
-            assert!(
-                !set_platform_org_override(&db, &org, flag.key, false, &user)
-                    .await
-                    .unwrap()
-                    .enabled
-            );
-        }
         // Ordinary flags retain enable/disable behavior without readiness.
         for enabled in [true, false] {
             for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
@@ -2304,24 +2278,44 @@ mod tests {
                 enabled
             );
         }
-        super::super::security_readiness_service::ready_test_replica(&db).await;
-        for flag in FEATURE_FLAGS.iter().filter(|flag| {
-            super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
-        }) {
-            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
-                assert!(
-                    set_platform_override(&db, flag.key, &target, true, &user)
-                        .await
-                        .unwrap()
-                        .enabled
-                );
+        for ready in [false, true] {
+            if ready {
+                super::super::security_readiness_service::ready_test_replica(&db).await;
             }
-            assert!(
-                set_platform_org_override(&db, &org, flag.key, true, &user)
-                    .await
-                    .unwrap()
-                    .enabled
-            );
+            for flag in FEATURE_FLAGS.iter().filter(|flag| {
+                super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
+            }) {
+                for enabled in [true, false] {
+                    let global =
+                        set_platform_override(&db, flag.key, &FlagTarget::Global, enabled, &user)
+                            .await;
+                    let personal = set_platform_override(
+                        &db,
+                        flag.key,
+                        &FlagTarget::User(user.clone()),
+                        enabled,
+                        &user,
+                    )
+                    .await;
+                    let organization =
+                        set_platform_org_override(&db, &org, flag.key, enabled, &user).await;
+                    for (scoped, result) in
+                        [(false, global), (true, personal), (true, organization)]
+                    {
+                        if scoped && is_global_only(flag.key) {
+                            assert!(matches!(result, Err(AppError::BadRequest(message))
+                                if message == format!("{} supports only a global override", flag.key)));
+                        } else if enabled && !ready {
+                            assert!(matches!(
+                                result,
+                                Err(AppError::SecurityReadinessUnavailable)
+                            ));
+                        } else {
+                            assert_eq!(result.unwrap().enabled, enabled);
+                        }
+                    }
+                }
+            }
         }
         db.drop().await.unwrap();
     }
@@ -3609,6 +3603,7 @@ mod tests {
                 "auth:oauth-exact-redirects-v1",
                 "auth:app-token-management-v1",
                 "mobile:new-domains",
+                "nyxbot:guest-audience-v1",
                 "auth:mobile-mfa",
                 "auth:staging-qr-login",
                 "assistant:nyxagent-engine",

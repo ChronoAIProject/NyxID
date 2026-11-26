@@ -239,6 +239,7 @@ Every declared registry export view has one subsection; a source collection may 
 | `channels` | `channel_email_receipts` | `user_id`, `created_at` |
 | `channels` | `channel_email_sends` | `user_id`, `status`, `created_at`, `updated_at` |
 | `channels` | `channel_email_subscriptions` | `user_id`, `created_at` |
+| `channels` | `channel_guest_setup` | `owner_id`, `revision`, `pending_activation`, `policy_revision`, `updated_at` |
 | `channels` | `channel_messages` | `user_id`, `conversation_id`, `direction`, `platform`, `content_type`, `callback_status`, `created_at` |
 | `channels` | `channel_reply_deliveries` | `user_id`, `created_at` |
 | `channels` | `channel_text_deliveries` | `user_id`, `created_at` |

@@ -247,8 +247,8 @@ async fn org_deletion_request_command_counts() {
     );
     assert_eq!(
         commands.len(),
-        75,
-        "retry-safe memberships and child-first discovery"
+        76,
+        "includes discovery of bots with guest data before deletion (#3004)"
     );
     f.state.db.drop().await.unwrap();
 }
@@ -343,8 +343,8 @@ async fn org_deletion_retry_reuses_relayed_marker_without_second_requested_event
     );
     assert_eq!(
         commands.len(),
-        74,
-        "existing marker omits requested intent insert"
+        75,
+        "retry repeats guest-data discovery and omits the requested intent insert"
     );
     relay_twice(&f).await;
     assert_eq!(count(&f, "audit_log", REQUESTED).await, 1);

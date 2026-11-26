@@ -485,7 +485,7 @@ async fn supplemental_native_side_messages_progress_preserves_primary_recovery()
         f.gateway.verify().await;
         let calls = f.gateway.received_requests().await.unwrap();
         assert_eq!(calls.len(), 10);
-        for pair in calls.chunks_exact(2) {
+        for pair in calls.as_chunks::<2>().0 {
             let get = &pair[0];
             assert_eq!(get.method.as_str(), "GET");
             assert_eq!(get.url.path(), SIDE);
