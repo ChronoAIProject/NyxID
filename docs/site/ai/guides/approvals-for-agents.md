@@ -137,6 +137,8 @@ nyxid approval approve <REQUEST_ID>
 nyxid approval deny <REQUEST_ID> --reason "Not authorized for production data"
 ```
 
+See the [CLI decision contract](/docs/cli/reference/others#approval) for denial responses, optional `--reason` handling and HTTP 422 recovery.
+
 **API:**
 
 ```bash
