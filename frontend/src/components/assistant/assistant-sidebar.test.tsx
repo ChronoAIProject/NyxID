@@ -675,6 +675,26 @@ describe("NyxBot agents in the sidebar", () => {
     expect(sourceButton).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("groups read-only guest rows by source even when specialist use is restricted", async () => {
+    const source = { platform: "lark", channel_agent_id: "lark-bot", bot_label: "Support bot",
+      chat_kind: "group", chat_id: "support", chat_title: "Shared support" };
+    const first = { ...thread, id: `org-guest-${"a".repeat(32)}`, title: "Guest conversation",
+      read_only: true, channel: source };
+    const second = { ...first, id: `org-guest-${"b".repeat(32)}` };
+    const { onSelect, onNewThread } = renderAgents({
+      selectedAgentId: "agent-researcher",
+      agents: agents.map((row) => row.id === "agent-researcher" ? { ...row, owner_kind: "org", can_use: false } : row),
+      mobileThreadList: true,
+      threads: [first, second, thread],
+    });
+    expect(screen.getByRole("button", { name: "Shared support on Lark, 2 threads" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /Options for Guest conversation/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Morning briefing" })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getAllByRole("button", { name: "Guest conversation" })[0]!);
+    expect(onSelect).toHaveBeenCalledWith(first.id);
+    expect(onNewThread).not.toHaveBeenCalled();
+  });
+
   it("searches every matching source thread beyond the initial five-row limit", async () => {
     const rows = Array.from({ length: 8 }, (_, index) => ({ ...thread, id: `nyxa-source-${index}`, title: `Topic ${index}`,
       channel: { platform: "lark", channel_agent_id: "lark-bot", bot_label: "Office", chat_kind: "group",

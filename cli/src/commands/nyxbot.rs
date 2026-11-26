@@ -15,6 +15,9 @@ const ROOT: &str = "/assistant/nyxagent";
 const MAX_INPUT_BYTES: usize = 131_072;
 const MAX_INPUT_CHARS: usize = 32_768;
 
+#[path = "nyxbot_discovery.rs"]
+mod conversation_discovery;
+
 #[derive(Subcommand)]
 pub enum NyxbotCommands {
     /// Submit owner work; waits unless --no-wait is selected
@@ -32,7 +35,7 @@ pub enum NyxbotCommands {
         #[command(subcommand)]
         command: AccessCommand,
     },
-    /// List conversations, optionally filtered by agent
+    /// List conversations, including readable guest history when filtered by an organization specialist
     Conversations {
         #[arg(long)]
         agent: Option<String>,
@@ -43,7 +46,7 @@ pub enum NyxbotCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Read a conversation's durable messages and owner action cards
+    /// Read a conversation's durable messages, including read-only guest history
     History {
         conversation: String,
         #[arg(long)]
@@ -337,6 +340,8 @@ struct CommandFailure {
     error_code: Option<i64>,
     reason: Option<String>,
     guidance: Option<&'static str>,
+    #[serde(skip)]
+    discovery_refusal: Option<conversation_discovery::Refusal>,
 }
 
 fn classify_failure(error: &anyhow::Error) -> CommandFailure {
@@ -348,6 +353,7 @@ fn classify_failure(error: &anyhow::Error) -> CommandFailure {
         error_code: None,
         reason: None,
         guidance: None,
+        discovery_refusal: None,
     };
     if let Some(auth) = error.downcast_ref::<crate::auth::ReauthRequired>() {
         result.cli_status = "login_required";
@@ -410,6 +416,7 @@ fn classify_failure(error: &anyhow::Error) -> CommandFailure {
         error_code: api.and_then(|e| e.response()).map(|e| e.error_code),
         reason,
         guidance,
+        discovery_refusal: api.and_then(conversation_discovery::refusal),
     }
 }
 fn failure(key: &str, error: &anyhow::Error, last: Option<Receipt>) -> Report {
@@ -663,19 +670,27 @@ async fn read_discovery(
             error_code: None,
             reason: None,
             guidance: Some("Retry discovery later; this command does not submit work."),
+            discovery_refusal: None,
         }),
     }
 }
 
 async fn discovery(auth: AuthArgs, path: String) -> Result<()> {
     let mut api = ApiClient::from_auth(&auth)?;
-    match read_discovery(&mut api, &path).await {
+    emit_discovery(read_discovery(&mut api, &path).await, auth.output)
+}
+
+fn emit_discovery(
+    result: std::result::Result<Value, CommandFailure>,
+    output: OutputFormat,
+) -> Result<()> {
+    match result {
         Ok(value) => {
-            println!("{}", render_discovery(&value, auth.output)?);
+            println!("{}", render_discovery(&value, output)?);
             Ok(())
         }
         Err(failure) => {
-            println!("{}", render_discovery_failure(&failure, auth.output)?);
+            println!("{}", render_discovery_failure(&failure, output)?);
             Err(OutcomeExit(failure.exit_code).into())
         }
     }
@@ -734,26 +749,14 @@ pub async fn run(command: NyxbotCommands) -> Result<()> {
             agent,
             cursor,
             limit,
-        } => {
-            let mut path = format!("{ROOT}/conversations?limit={limit}");
-            if let Some(agent) = agent {
-                path.push_str(&format!("&agent_id={}", urlencoding::encode(&agent)));
-            }
-            if let Some(cursor) = cursor {
-                path.push_str(&format!("&cursor={}", urlencoding::encode(&cursor)));
-            }
-            discovery(auth, path).await
-        }
+        } => conversation_discovery::list(auth, agent, cursor, limit).await,
         NyxbotCommands::History {
             auth,
             conversation,
             before_seq,
             limit,
         } => {
-            let mut path = format!(
-                "{ROOT}/conversations/{}?limit={limit}",
-                urlencoding::encode(&conversation)
-            );
+            let mut path = conversation_discovery::history_path(&conversation, limit);
             if let Some(seq) = before_seq {
                 path.push_str(&format!("&before_seq={seq}"));
             }

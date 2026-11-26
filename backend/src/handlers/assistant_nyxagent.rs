@@ -974,7 +974,7 @@ pub struct HistoryQuery {
     limit: Option<i64>,
     before_seq: Option<i64>,
 }
-fn limit(value: Option<i64>) -> AppResult<i64> {
+pub(super) fn limit(value: Option<i64>) -> AppResult<i64> {
     let value = value.unwrap_or(50);
     if !(1..=100).contains(&value) {
         return Err(AppError::BadRequest(
