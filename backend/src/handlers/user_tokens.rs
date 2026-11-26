@@ -1731,6 +1731,7 @@ mod tests {
 
     use super::*;
     use crate::crypto::aes::EncryptionKeys;
+    use crate::handlers::credential_record_fixtures::set_provider_client;
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::connect_link::{
         COLLECTION_NAME as CONNECT_LINKS, ConnectLink, ConnectLinkStatus,
@@ -1836,51 +1837,6 @@ mod tests {
             revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
-        }
-    }
-
-    async fn set_provider_client(
-        keys: &EncryptionKeys,
-        provider: &mut ProviderConfig,
-        client: &str,
-        secret: Option<&str>,
-    ) {
-        for (field, slot, value) in [
-            (
-                "client_id_encrypted",
-                &mut provider.client_id_encrypted,
-                Some(client),
-            ),
-            (
-                "client_secret_encrypted",
-                &mut provider.client_secret_encrypted,
-                secret,
-            ),
-        ] {
-            *slot = match value {
-                Some(value) => {
-                    let encrypted = credential_record_service::encrypt(
-                        keys,
-                        PROVIDER_CONFIGS,
-                        &provider.id,
-                        credential_record_service::PLATFORM_OWNER,
-                        field,
-                        value.as_bytes(),
-                    )
-                    .await
-                    .unwrap();
-                    credential_record_service::mark_version(
-                        &mut provider.secret_context_versions,
-                        keys,
-                        field,
-                    );
-                    Some(encrypted)
-                }
-                None => {
-                    provider.secret_context_versions.remove(field);
-                    None
-                }
-            };
         }
     }
 

@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::credential_record_fixtures::set_catalog_credential;
 use crate::{
     models::{assistant_settings::AccessMode, org_membership::OrgRole, user::UserType},
     services::{
@@ -152,12 +153,12 @@ async fn actual_job_launch_detached_gateway_and_revocation_preserve_personal_pla
                 audience: crate::models::downstream_service::PlatformKeyAudience::Public,
                 allowed_owner_ids: vec![],
             });
-            catalog.credential_encrypted = f
-                .state
-                .encryption_keys
-                .encrypt(b"platform-test-credential")
-                .await
-                .unwrap();
+            set_catalog_credential(
+                &f.state.encryption_keys,
+                &mut catalog,
+                b"platform-test-credential",
+            )
+            .await;
             assert!(crate::services::platform_key_service::has_platform_key(
                 &catalog
             ));

@@ -4242,6 +4242,9 @@ mod tests {
         validate_master_credential_shape,
     };
     use crate::errors::{AppError, AppResult};
+    use crate::handlers::credential_record_fixtures::{
+        LEGACY_EMPTY_CATALOG, LEGACY_PRIVATE_MASTER, set_catalog_credential,
+    };
     use crate::models::audit_log::COLLECTION_NAME as AUDIT_LOGS;
     use crate::models::billing_rate_cache::BillingRateCache;
     use crate::models::catalog_identity_reconciliation::{
@@ -4568,7 +4571,7 @@ mod tests {
             legacy.service_category = "internal".into();
             legacy.provider_config_id = None;
             legacy.platform_key = None;
-            legacy.credential_encrypted = state.encryption_keys.encrypt(b"").await.unwrap();
+            legacy.credential_encrypted = hex::decode(LEGACY_EMPTY_CATALOG).unwrap();
             db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
                 .insert_one(&legacy)
                 .await
@@ -4630,11 +4633,7 @@ mod tests {
         legacy_private.platform_key = None;
         legacy_private.auth_method = "bearer".into();
         legacy_private.requires_user_credential = false;
-        legacy_private.credential_encrypted = state
-            .encryption_keys
-            .encrypt(b"private-fixture")
-            .await
-            .unwrap();
+        legacy_private.credential_encrypted = hex::decode(LEGACY_PRIVATE_MASTER).unwrap();
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&legacy_private)
             .await
@@ -6542,11 +6541,7 @@ mod tests {
         service.auth_method = nyxid_service_adapters::ifttt::AUTH_METHOD.into();
         service.base_url = "https://maker.ifttt.com".into();
         service.service_category = "internal".into();
-        service.credential_encrypted = state
-            .encryption_keys
-            .encrypt(b"original-fixture")
-            .await
-            .unwrap();
+        set_catalog_credential(&state.encryption_keys, &mut service, b"original-fixture").await;
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&service)
             .await
@@ -6652,7 +6647,7 @@ mod tests {
         service.auth_method = "bearer".into();
         service.service_category = "internal".into();
         service.requires_user_credential = false;
-        service.credential_encrypted = state.encryption_keys.encrypt(b"original").await.unwrap();
+        set_catalog_credential(&state.encryption_keys, &mut service, b"original").await;
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&service)
             .await
