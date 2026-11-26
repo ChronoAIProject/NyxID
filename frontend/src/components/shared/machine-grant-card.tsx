@@ -153,12 +153,17 @@ function MachineGrantCardContent({
   const oauthServiceDisplays = query.data?.oauth_machine_services;
   function assignmentServiceLabel(id: string) {
     if (source.kind === "api_key") return id;
+    const currentDisplay = oauthServiceDisplays?.[id];
     const display = oauthServiceDisplays
-      ? oauthServiceDisplays[id]
+      ? currentDisplay
       : consentServices?.find((service) => service.id === id);
     if (display?.deleted) return translateUi("Deleted service");
-    const label = display?.label?.trim();
-    return label && label !== id ? label : translateUi("Service details unavailable");
+    const trimmed = display?.label?.trim();
+    const label = trimmed === id ? undefined : trimmed;
+    if (display?.disabled) {
+      return label ? label + translateUi(" (disabled)") : translateUi("Service disabled");
+    }
+    return label || translateUi("Service details unavailable");
   }
   const active =
     grant?.status === "active" && new Date(grant.expires_at).getTime() > now;
@@ -580,7 +585,7 @@ function MachineGrantCardContent({
             submitting={save.isPending}
             allowedNodeIds={effectiveNodeIds}
             allowedServiceIds={effectiveServiceIds}
-            hideUnavailableServiceIds={source.kind === "oauth"}
+            unavailableServiceLabel={source.kind === "oauth" ? assignmentServiceLabel : undefined}
           />
         )}
         <Dialog

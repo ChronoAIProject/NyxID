@@ -5649,12 +5649,16 @@ val response = client.newCall(request).execute()
 
 List all OAuth consents the current user has granted to third-party applications.
 
-The `granted_at` and `expires_at` fields describe base OAuth consent. An
-unresolvable entry in `allowed_services` keeps its `id`, has `deleted: true`,
-and uses a label numbered among unresolvable entries in list order (`#1`,
-`#2`, and so on). A missing service and a service outside the owner's inventory
-use the same placeholder format. Use the `deleted` flag to render a localized
-display label.
+The `granted_at` and `expires_at` fields describe base OAuth consent. Explicit
+service allowlists resolve display metadata in one database snapshot. A
+first-party human session can see personally owned services and services
+covered by the person's current organization proxy scope. The read checks
+active organizations, memberships and service-level admin restrictions.
+Labels come from the service's owner-bound endpoint. An eligible disabled
+service with a surviving endpoint has the additive `disabled: true` field.
+Missing, deleted, and inaccessible entries keep their `id` and use
+`deleted: true` with a label numbered in list order (`#1`, `#2`, and so on).
+Use the `deleted` and `disabled` flags to render localized display labels.
 
 **Auth:** Required
 
@@ -5716,9 +5720,12 @@ lookup applies the current consent ceiling and the person's direct ownership
 or proxy access through an active organization and membership, including the
 membership's effective service scope and service-level admin restrictions.
 Removed services and services outside that access use the same placeholder
-with `deleted: true` and a null `label`. An eligible service without an
-available endpoint label has `deleted: false` and a null `label`. The map is
-empty when the source or the assigned service list is unavailable.
+with `deleted: true` and a null `label`. This covers explicit deletion markers
+and older inactive rows whose owner-bound endpoint is gone. An accessible
+disabled service with a surviving owner-bound endpoint has `deleted: false`
+and the additive `disabled: true` field. The `label` is null whenever the
+endpoint label is unavailable. The map is empty when the source or the
+assigned service list is unavailable.
 
 ---
 

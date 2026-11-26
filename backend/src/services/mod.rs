@@ -278,6 +278,7 @@ pub mod role_service;
 pub mod scope_catalog;
 pub mod security_effect_service;
 pub mod security_readiness_service;
+mod service_display;
 pub mod service_account_key_read_service;
 pub mod service_account_service;
 pub(crate) mod service_dispatch_guard;

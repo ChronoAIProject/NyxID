@@ -584,7 +584,7 @@ describe("Machine grant owner management", () => {
     expect(screen.queryByText("No Machine grant")).toBeNull();
   });
   it("shows current assignment names and safe placeholders on all-services OAuth grants", () => {
-    const serviceIds = ["active-id", "deleted-id", "unavailable-id"];
+    const serviceIds = ["active-id", "deleted-id", "unavailable-id", "disabled-id", "disabled-without-name"];
     const read = {
       grant: { ...grant(), assignments: { machine: {
         capabilities: { shell: true, files: false },
@@ -602,12 +602,14 @@ describe("Machine grant owner management", () => {
         "active-id": { label: "Current endpoint name", deleted: false },
         "deleted-id": { label: null, deleted: true },
         "unavailable-id": { label: null, deleted: false },
+        "disabled-id": { label: "Paused endpoint", deleted: false, disabled: true },
+        "disabled-without-name": { label: null, deleted: false, disabled: true },
       },
     };
     const source = { kind: "oauth", id: "client" } as const;
     const view = render(<MachineGrantCard source={source} consentServices={[]} />);
     const ceiling = screen.getByText(/Gateway service ceiling/);
-    expect(ceiling).toHaveTextContent("Current endpoint name, Deleted service, Service details unavailable");
+    expect(ceiling).toHaveTextContent("Current endpoint name, Deleted service, Service details unavailable, Paused endpoint (disabled), Service disabled");
     expect(screen.getByRole("button", { name: "Edit Machine permissions" })).toBeEnabled();
     serviceIds.forEach((id) => expect(ceiling).not.toHaveTextContent(id));
 

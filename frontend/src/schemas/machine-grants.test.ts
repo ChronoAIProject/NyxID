@@ -7,6 +7,19 @@ it("tolerates an older response and distinguishes a future OAuth status", () => 
   expect(machineGrantReadSchema.parse({ ...legacy, oauth_machine_status: "future_status" }).oauth_machine_status).toBe("unknown");
 });
 
+it("accepts both current and legacy OAuth service metadata", () => {
+  const result = machineGrantReadSchema.parse({
+    grant: null,
+    source_and_grant_valid: false,
+    oauth_machine_services: {
+      current: { label: "Paused", deleted: false, disabled: true },
+      legacy: { label: null, deleted: true },
+    },
+  });
+  expect(result.oauth_machine_services?.current?.disabled).toBe(true);
+  expect(result.oauth_machine_services?.legacy?.disabled).toBeUndefined();
+});
+
 const nodeId = "b7b0c3da-5d64-4b90-bbae-9bd7aa42104c";
 const serviceId = "4b49d5a5-b8d2-4bfc-8290-19baf7a5ce7c";
 const assignment = () => ({ capabilities: { shell: true, files: true, browser: false, computer: false, developer_browser: false }, file_roots: ["/workspace"], service_ids: [] as string[] });

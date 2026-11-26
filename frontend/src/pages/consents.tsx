@@ -87,13 +87,19 @@ function ServiceAccess({ consent }: { readonly consent: Consent }) {
 
   return (
     <div className="flex flex-wrap gap-1">
-      {allowedServices.map((service) => (
-        <Badge key={service.id} variant={service.deleted ? "destructive" : "secondary"} className="text-12">
-          {service.deleted
-            ? translateUi("Deleted service")
-            : service.catalog_service_name ?? service.label}
-        </Badge>
-      ))}
+      {allowedServices.map((service) => {
+        const label = [service.catalog_service_name, service.label]
+          .find((value) => value && value.trim() && value.trim() !== service.id);
+        return (
+          <Badge key={service.id} variant={service.deleted ? "destructive" : service.disabled ? "warning" : "secondary"} className="text-12">
+            {service.deleted
+              ? translateUi("Deleted service")
+              : service.disabled
+                ? label ? label + translateUi(" (disabled)") : translateUi("Service disabled")
+                : label || translateUi("Service details unavailable")}
+          </Badge>
+        );
+      })}
     </div>
   );
 }

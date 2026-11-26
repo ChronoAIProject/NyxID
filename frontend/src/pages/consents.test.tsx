@@ -22,11 +22,12 @@ vi.mock("@/hooks/use-consents", () => ({
       scopes: "openid proxy",
       granted_at: "2026-11-11T00:00:00Z",
       expires_at: null,
-      allowed_service_ids: ["active", deletedId],
+      allowed_service_ids: ["active", deletedId, "paused"],
       // Older replicas used the identifier as the placeholder's label.
       allowed_services: fixtures.services ? [
         { id: "active", label: "Example service", deleted: false },
         { id: deletedId, label: deletedId, deleted: true },
+        { id: "paused", label: "Paused shared service", deleted: false, disabled: true },
       ] : undefined,
     }] },
   }),
@@ -47,6 +48,7 @@ it.each(["grid", "table"])("qualifies base consent and masks deleted services in
   expect(screen.getAllByText("Never")).toHaveLength(copies);
   expect(screen.getAllByText("Example service")).toHaveLength(copies);
   expect(screen.getAllByText("Deleted service")).toHaveLength(copies);
+  expect(screen.getAllByText("Paused shared service (disabled)")).toHaveLength(copies);
   expect(container.innerHTML).not.toContain(deletedId);
 });
 

@@ -29,7 +29,6 @@ use crate::{
         node::{COLLECTION_NAME as NODES, Node},
         oauth_client::{COLLECTION_NAME as CLIENTS, OauthClient},
         user::{COLLECTION_NAME as USERS, User},
-        user_endpoint::COLLECTION_NAME as ENDPOINTS,
         user_service::{COLLECTION_NAME as SERVICES, UserService},
     },
 };
@@ -166,6 +165,8 @@ pub struct GrantValidity {
 pub struct OAuthMachineServiceDisplay {
     pub label: Option<String>,
     pub deleted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
 }
 
 pub struct OAuthGrantRead {
@@ -1999,11 +2000,6 @@ async fn oauth_grant_services_in_session(
     oauth_service_ceiling: Option<&[String]>,
     session: &mut ClientSession,
 ) -> AppResult<BTreeMap<String, OAuthMachineServiceDisplay>> {
-    use super::api_key_scope_service::{
-        actor_can_scope_service, resolve_active_owner_access_with_session,
-    };
-    use std::collections::btree_map::Entry;
-
     let mut displays: BTreeMap<_, _> = grant
         .policy
         .assignments
@@ -2016,26 +2012,11 @@ async fn oauth_grant_services_in_session(
                 OAuthMachineServiceDisplay {
                     label: None,
                     deleted: true,
+                    disabled: None,
                 },
             )
         })
         .collect();
-    #[derive(Deserialize)]
-    struct ServiceEndpoint {
-        #[serde(rename = "_id")]
-        id: String,
-        user_id: String,
-        endpoint_id: String,
-        #[serde(default)]
-        admin_only: bool,
-    }
-    #[derive(Deserialize)]
-    struct EndpointLabel {
-        #[serde(rename = "_id")]
-        id: String,
-        user_id: String,
-        label: Option<String>,
-    }
     let ceiling =
         oauth_service_ceiling.map(|ids| ids.iter().map(String::as_str).collect::<BTreeSet<_>>());
     let ids: Vec<_> = displays
@@ -2046,72 +2027,15 @@ async fn oauth_grant_services_in_session(
     if ids.is_empty() {
         return Ok(displays);
     }
-    let mut cursor = db
-        .collection::<ServiceEndpoint>(SERVICES)
-        .find(doc! {"_id": {"$in": ids}, "is_active": true, "deleted_at": null})
-        .projection(doc! {"_id": 1, "user_id": 1, "endpoint_id": 1, "admin_only": 1})
-        .session(&mut *session)
-        .await?;
-    let services: Vec<ServiceEndpoint> = cursor.stream(&mut *session).try_collect().await?;
-    let mut owner_access = BTreeMap::new();
-    let mut authorized = Vec::new();
-    for service in &services {
-        let access = match owner_access.entry(service.user_id.as_str()) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(
-                resolve_active_owner_access_with_session(db, user, &service.user_id, session)
-                    .await?,
-            ),
-        };
-        // The gateway also applies the org service's admin-only restriction.
-        if actor_can_scope_service(access, &service.id)
-            && (!service.admin_only || access.can_write())
-        {
-            authorized.push(service);
-        }
-    }
-    if authorized.is_empty() {
-        return Ok(displays);
-    }
-    let mut endpoints_by_owner = BTreeMap::<_, BTreeSet<_>>::new();
-    for service in &authorized {
-        endpoints_by_owner
-            .entry(service.user_id.as_str())
-            .or_default()
-            .insert(service.endpoint_id.as_str());
-    }
-    let endpoint_filters: Vec<_> = endpoints_by_owner
-        .into_iter()
-        .map(|(owner, ids)| {
-            doc! {"user_id": owner, "_id": {"$in": ids.into_iter().collect::<Vec<_>>()}}
-        })
-        .collect();
-    let mut cursor = db
-        .collection::<EndpointLabel>(ENDPOINTS)
-        .find(doc! {"$or": endpoint_filters, "deleted_at": null})
-        .projection(doc! {"_id": 1, "user_id": 1, "label": 1})
-        .session(&mut *session)
-        .await?;
-    let labels: Vec<EndpointLabel> = cursor.stream(&mut *session).try_collect().await?;
-    let labels: BTreeMap<_, _> = labels
-        .iter()
-        .filter_map(|row| {
-            row.label
-                .as_ref()
-                .map(|label| ((row.user_id.as_str(), row.id.as_str()), label))
-        })
-        .collect();
-    for service in authorized {
-        let label = labels
-            .get(&(service.user_id.as_str(), service.endpoint_id.as_str()))
-            .copied()
-            .filter(|label| !label.trim().is_empty() && label.trim() != service.id)
-            .cloned();
+
+    let services = super::service_display::load_in_session(db, user, &ids, true, session).await?;
+    for (id, display) in services {
         displays.insert(
-            service.id.clone(),
+            id,
             OAuthMachineServiceDisplay {
-                label,
+                label: display.label,
                 deleted: false,
+                disabled: display.disabled.then_some(true),
             },
         );
     }

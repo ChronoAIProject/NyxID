@@ -9,6 +9,7 @@ use crate::{
         machine_external_grant::{COLLECTION_NAME as GRANTS, MachineExternalGrant},
         node::{COLLECTION_NAME as NODES, Node, NodeStatus},
         user::{COLLECTION_NAME as USERS, User, UserType},
+        user_endpoint::COLLECTION_NAME as ENDPOINTS,
         user_service::{COLLECTION_NAME as USER_SERVICES, UserService},
     },
     test_utils::{connect_transaction_test_database, test_user, test_user_service},
@@ -1403,7 +1404,9 @@ async fn oauth_machine_service_labels_are_current_and_owner_scoped_for_all_servi
     let owned_endpoint = Uuid::new_v4().to_string();
     let foreign_endpoint = Uuid::new_v4().to_string();
     let active = Uuid::new_v4().to_string();
+    let disabled = Uuid::new_v4().to_string();
     let deleted = Uuid::new_v4().to_string();
+    let legacy_tombstone = Uuid::new_v4().to_string();
     let unavailable = Uuid::new_v4().to_string();
     let foreign = Uuid::new_v4().to_string();
     let endpoints =
@@ -1430,11 +1433,25 @@ async fn oauth_machine_service_labels_are_current_and_owner_scoped_for_all_servi
         .await
         .unwrap();
     let mut removed = test_user_service(&deleted, &f.user, "removed", &owned_endpoint, None, None);
+    removed.is_active = false;
     removed.deleted_at = Some(Utc::now());
+    let mut paused = test_user_service(&disabled, &f.user, "paused", &owned_endpoint, None, None);
+    paused.is_active = false;
+    let mut legacy = test_user_service(
+        &legacy_tombstone,
+        &f.user,
+        "legacy-removed",
+        &Uuid::new_v4().to_string(),
+        None,
+        None,
+    );
+    legacy.is_active = false;
     f.db.collection::<UserService>(SERVICES)
         .insert_many([
             test_user_service(&active, &f.user, "owner", &owned_endpoint, None, None),
+            paused,
             removed,
+            legacy,
             test_user_service(
                 &unavailable,
                 &f.user,
@@ -1463,7 +1480,9 @@ async fn oauth_machine_service_labels_are_current_and_owner_scoped_for_all_servi
         .unwrap();
     grant.restrictions.get_mut(&f.node.id).unwrap().service_ids = vec![
         active.clone(),
+        disabled.clone(),
         deleted.clone(),
+        legacy_tombstone.clone(),
         unavailable.clone(),
         foreign.clone(),
     ];
@@ -1482,6 +1501,11 @@ async fn oauth_machine_service_labels_are_current_and_owner_scoped_for_all_servi
     assert_eq!(
         wire[deleted.as_str()],
         serde_json::json!({"label": null, "deleted": true})
+    );
+    assert_eq!(wire[legacy_tombstone.as_str()], wire[deleted.as_str()]);
+    assert_eq!(
+        wire[disabled.as_str()],
+        serde_json::json!({"label": "Fresh endpoint name", "deleted": false, "disabled": true})
     );
     assert_eq!(wire[foreign.as_str()], wire[deleted.as_str()]);
     assert_eq!(
@@ -1533,6 +1557,32 @@ async fn oauth_machine_service_labels_respect_live_org_access_in_one_snapshot() 
         },
         test_utils::{test_membership, test_user_endpoint},
     };
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    async fn get(app: &Router, path: &str, token: &str) -> serde_json::Value {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("authorization", format!("Bearer {token}"))
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [127, 0, 0, 1],
+                        0,
+                    ))))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(response.into_body(), 256 * 1024).await.unwrap()).unwrap()
+    }
     let f = fixture("oauth_machine_org_service_labels").await;
     let client = oauth_client(&f).await;
     let (consent, mut grant, _) = approve_oauth(&f, &client).await;
@@ -1553,6 +1603,7 @@ async fn oauth_machine_service_labels_respect_live_org_access_in_one_snapshot() 
         .unwrap();
     let mut inherited = test_membership(&org, &f.user, OrgRole::Member, None);
     inherited.scope_source = MemberScopeSource::Inherit;
+    let membership_id = inherited.id.clone();
     let mut revoked = test_membership(&revoked_org, &f.user, OrgRole::Member, None);
     revoked.revoked_at = Some(Utc::now());
     f.db.collection::<OrgMembership>(MEMBERSHIPS)
@@ -1568,16 +1619,25 @@ async fn oauth_machine_service_labels_respect_live_org_access_in_one_snapshot() 
     let mut endpoints = Vec::new();
     let mut assigned_ids = Vec::new();
     let mut membership_scope = Vec::new();
-    for (slug, owner, label, included, admin_only) in [
-        ("allowed", &org, "Shared team service", true, false),
-        ("narrowed", &org, "Out-of-scope service", false, false),
-        ("admin-only", &org, "Admin-only service", true, true),
+    for (slug, owner, label, included, admin_only, is_active) in [
+        ("allowed", &org, "Shared team service", true, false, true),
+        ("paused", &org, "Paused shared service", true, false, false),
+        ("admin-only", &org, "Admin-only service", true, true, true),
+        (
+            "narrowed",
+            &org,
+            "Out-of-scope service",
+            false,
+            false,
+            false,
+        ),
         (
             "revoked",
             &revoked_org,
             "Revoked membership service",
             false,
             false,
+            true,
         ),
         (
             "nonmember",
@@ -1585,6 +1645,7 @@ async fn oauth_machine_service_labels_respect_live_org_access_in_one_snapshot() 
             "Nonmember service",
             false,
             false,
+            true,
         ),
         (
             "inactive-org",
@@ -1592,12 +1653,14 @@ async fn oauth_machine_service_labels_respect_live_org_access_in_one_snapshot() 
             "Inactive organization service",
             false,
             false,
+            true,
         ),
     ] {
         let service = Uuid::new_v4().to_string();
         let endpoint = Uuid::new_v4().to_string();
         let mut row = test_user_service(&service, owner, slug, &endpoint, None, None);
         row.admin_only = admin_only;
+        row.is_active = is_active;
         rows.push(row);
         endpoints.push(test_user_endpoint(
             &endpoint,
@@ -1655,9 +1718,121 @@ async fn oauth_machine_service_labels_respect_live_org_access_in_one_snapshot() 
         Some("Shared team service")
     );
     assert!(!read.services[allowed].deleted);
-    for denied in &assigned_ids[1..] {
+    let paused = &read.services[&assigned_ids[1]];
+    assert_eq!(paused.label.as_deref(), Some("Paused shared service"));
+    assert_eq!(paused.disabled, Some(true));
+    assert!(!paused.deleted);
+    for denied in &assigned_ids[2..] {
         assert!(read.services[denied].label.is_none());
         assert!(read.services[denied].deleted);
+        assert!(read.services[denied].disabled.is_none());
+    }
+
+    let admin_only = &assigned_ids[2];
+    f.db.collection::<OrgMembership>(MEMBERSHIPS)
+        .update_one(doc! {"_id": &membership_id}, doc! {"$set": {
+            "role": "admin", "scope_source": "override", "allowed_service_ids": vec![admin_only.as_str()],
+        }})
+        .await.unwrap();
+    let admin_read = read_oauth_grant(&f.db, &f.user, &client).await.unwrap();
+    assert_eq!(
+        admin_read.services[admin_only].label.as_deref(),
+        Some("Admin-only service")
+    );
+    assert!(!admin_read.services[admin_only].deleted);
+    assert!(admin_read.services[allowed].label.is_none());
+
+    // Explicit consent allowlists in the public list use the same projection.
+    consents
+        .update_one(
+            doc! {"_id": &consent.id},
+            doc! {"$set": {
+                "allow_all_services": false, "allowed_service_ids": &assigned_ids,
+            }},
+        )
+        .await
+        .unwrap();
+    f.db.collection::<OrgMembership>(MEMBERSHIPS)
+        .update_one(
+            doc! {"_id": &membership_id},
+            doc! {"$set": {
+                "role": "member", "scope_source": "inherit",
+            }},
+        )
+        .await
+        .unwrap();
+    let state = crate::test_utils::test_app_state(f.db.clone());
+    let token = crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::parse_str(&f.user).unwrap(),
+        "read write",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (public, private) = crate::routes::build_router_with_state(state.clone());
+    let app = public.merge(private).with_state(state);
+    let list_path = "/api/v1/users/me/consents";
+    let machine_path = format!("{list_path}/{client}/machine-grant");
+    let list = get(&app, list_path, &token).await;
+    let machine = get(&app, &machine_path, &token).await;
+    let list_services = list["consents"][0]["allowed_services"].as_array().unwrap();
+    assert_eq!(list_services.len(), assigned_ids.len());
+    for (index, row) in list_services.iter().enumerate() {
+        let id = row["id"].as_str().unwrap();
+        assert_eq!(id, assigned_ids[index]);
+        let current = &machine["oauth_machine_services"][id];
+        assert_eq!(row["deleted"], current["deleted"]);
+        assert_eq!(row["disabled"], current["disabled"]);
+        if index < 2 {
+            assert_eq!(row["label"], current["label"]);
+        } else {
+            assert_eq!(row["label"], format!("#{}", index - 1));
+            assert!(current["label"].is_null());
+            assert!(row["slug"].is_null());
+            assert!(row["catalog_service_name"].is_null());
+        }
+    }
+    let mut delegated = crate::test_utils::test_auth_user(&f.user);
+    delegated.oauth_client_id = Some(client.clone());
+    let nonhuman = crate::handlers::consent::list_my_consents(
+        axum::extract::State(crate::test_utils::test_app_state(f.db.clone())),
+        delegated,
+    )
+    .await
+    .unwrap();
+    assert!(
+        nonhuman.0.consents[0]
+            .allowed_services
+            .iter()
+            .all(|entry| entry.deleted)
+    );
+
+    f.db.collection::<OrgMembership>(MEMBERSHIPS)
+        .update_one(
+            doc! {"_id": &membership_id},
+            doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let after_revoke = get(&app, list_path, &token).await;
+    let machine_after_revoke = get(&app, &machine_path, &token).await;
+    let list_services = after_revoke["consents"][0]["allowed_services"]
+        .as_array()
+        .unwrap();
+    for (index, row) in list_services.iter().enumerate() {
+        assert_eq!(row["label"], format!("#{}", index + 1));
+        assert_eq!(row["deleted"], true);
+        assert!(row["disabled"].is_null());
+        let id = row["id"].as_str().unwrap();
+        assert_eq!(
+            machine_after_revoke["oauth_machine_services"][id],
+            serde_json::json!({"label": null, "deleted": true})
+        );
     }
 
     consents
@@ -1671,10 +1846,9 @@ async fn oauth_machine_service_labels_respect_live_org_access_in_one_snapshot() 
         .unwrap();
     let narrowed = read_oauth_grant(&f.db, &f.user, &client).await.unwrap();
     assert!(
-        narrowed
-            .services
-            .values()
-            .all(|service| service.deleted && service.label.is_none())
+        narrowed.services.values().all(|service| service.deleted
+            && service.label.is_none()
+            && service.disabled.is_none())
     );
     f.db.drop().await.unwrap();
 }

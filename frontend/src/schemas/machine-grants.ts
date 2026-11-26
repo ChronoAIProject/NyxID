@@ -95,6 +95,7 @@ export const machineGrantReadSchema = z.object({
   oauth_machine_services: z.record(z.string(), z.object({
     label: z.string().nullable(),
     deleted: z.boolean(),
+    disabled: z.boolean().optional(),
   })).optional(),
   // The independent fields are additive. Their absence remains unknown on
   // older servers; the combined field is not an independent validity result.
