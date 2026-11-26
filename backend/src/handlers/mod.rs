@@ -97,6 +97,7 @@ pub mod node_agent;
 pub mod node_ws;
 pub mod notifications;
 pub mod oauth;
+pub mod oauth_consent_disclosure;
 pub(crate) mod oauth_consent_response;
 pub mod oidc_discovery;
 pub mod openclaw_channel;

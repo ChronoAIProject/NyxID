@@ -106,3 +106,8 @@ which does not include future connections. The server rejects unsupported
 instead of silently granting more access than the page describes. Existing
 grants have no stored read/write distinction; users who intended read-only
 access must revoke those grants and review access again.
+
+The ordinary and incremental consent screens show credential provenance,
+recorded upstream OAuth permissions and known catalog operations when details
+are available. These details describe full service access and do not restrict
+the grant. See [OAuth consent disclosure](OIDC.md#oauth-consent-disclosure).
