@@ -2189,7 +2189,12 @@ appears separately when a typed delivery outcome is available. Member exchanges,
 working context, tool inputs and results, credentials, attachments, and action
 cards are outside the transcript projection. History pages record a
 metadata-only audit entry for the administrator, organization, and conversation.
-The view follows the existing retention and erasure lifecycle.
+Personal erasure removes verified account-linked transcript content and retains
+the sender revocation tombstone described above. Historically anonymous guest
+turns remain under their original channel or provider-grant retention and
+erasure scope. A later member verification does not assign those turns to the
+member's account. Channel, organization, and provider-grant erasure remove the
+associated guest history from the view according to their existing scopes.
 
 Every listed binding has a **Who can talk to this bot** section on web and mobile:
 Allow guests; a localized explanation of guest identity and org payment; named

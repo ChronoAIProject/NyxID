@@ -230,6 +230,7 @@ Members read them without private-chat/history data. Existing amount and bot-det
 responses stay compatible; clients tolerate future absent amounts. This does not
 publish the agent as a shared agent or admit guests to org groups. See
 [the channel contract](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).
+The channel contract also defines the [admin guest transcript read](chat/09-nyxbot-orchestrator.md#guest-settings-and-binding-recovery).
 Outside that enabled path, incompatible links retain
 `organization_agent_channel_unsupported`. Personal bots still cannot target org
 specialists. From their own chat, members may delegate to an org specialist via

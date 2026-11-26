@@ -2863,3 +2863,92 @@ async fn guest_history_routes_limit_live_admins_to_retained_guest_exchanges() {
     assert_eq!(emptied["conversations"], json!([]));
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn guest_history_keeps_retained_meta_generation_until_its_erasure_is_claimed() {
+    use crate::models::channel_meta::GRANT_SCOPES;
+    let mut f = Fixture::new("org_guest_history_meta").await;
+    f.wallet().await;
+    f.guests(vec![]).await;
+    let db = &f.org.state.db;
+    let guest = channel_turn(&f, &f.guest("visitor").await, "guest Meta input").await;
+    let grant_id = uuid::Uuid::new_v4().to_string();
+    let scope = uuid::Uuid::new_v4().to_string();
+    let proof = doc! {"bot_id": &f.bot.id, "grant_id": &grant_id, "generation": 1_i64};
+    db.collection::<Document>("assistant_conversations")
+        .update_one(
+            doc! {"_id": &guest.id},
+            doc! {"$set": {"meta_grant": &proof}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>(crate::models::org_channel::LANES)
+        .update_one(
+            doc! {"conversation_id": &guest.id},
+            doc! {"$set": {"meta_grant": &proof}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>("nyxbot_channels")
+        .update_one(
+            doc! {"_id": &f.channel.id},
+            doc! {"$set": {"platform": "instagram", "status": "pending"}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>("channel_bots")
+        .update_one(
+            doc! {"_id": &f.bot.id},
+            doc! {"$set": {"platform": "instagram", "status": "suspended"}},
+        )
+        .await
+        .unwrap();
+    let scopes = db.collection::<Document>(GRANT_SCOPES);
+    scopes.insert_one(doc! {"_id": &scope, "bot_id": &f.bot.id, "grant_id": &grant_id,
+        "from_generation": 1_i64, "to_generation": 1_i64, "status": "sealed", "erasure_requested": false,
+    }).await.unwrap();
+    let handle = format!("org-guest-{}", guest.id.strip_prefix("nyxa-").unwrap());
+    let list = || guest_history::list(db, &f.org.admin, &f.agent.id, 10, None);
+    assert_eq!(list().await.unwrap().0[0].id, handle);
+    assert!(
+        guest_history::history(db, &f.org.admin, &handle, 10, None)
+            .await
+            .is_ok()
+    );
+
+    scopes
+        .update_one(
+            doc! {"_id": &scope},
+            doc! {"$set": {"erasure_requested": true}},
+        )
+        .await
+        .unwrap();
+    assert!(list().await.unwrap().0.is_empty());
+    assert!(matches!(
+        guest_history::history(db, &f.org.admin, &handle, 10, None).await,
+        Err(AppError::NotFound(_))
+    ));
+
+    scopes
+        .update_one(
+            doc! {"_id": &scope},
+            doc! {"$set": {"erasure_requested": false, "status": "completed"}},
+        )
+        .await
+        .unwrap();
+    assert!(list().await.unwrap().0.is_empty());
+
+    scopes
+        .update_one(doc! {"_id": &scope}, doc! {"$set": {"status": "sealed"}})
+        .await
+        .unwrap();
+    db.collection::<Document>("nyxbot_channels")
+        .update_one(
+            doc! {"_id": &f.channel.id},
+            doc! {"$set": {"status": "failed", "last_error": "org_access_lost"}},
+        )
+        .await
+        .unwrap();
+    assert!(list().await.unwrap().0.is_empty());
+    db.drop().await.unwrap();
+}

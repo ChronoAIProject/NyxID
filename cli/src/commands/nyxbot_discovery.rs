@@ -1,5 +1,5 @@
 use super::{ApiClient, ApiError, AuthArgs, CommandFailure, ROOT, emit_discovery, read_discovery};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -51,19 +51,18 @@ struct Cursor {
 }
 
 impl Cursor {
-    fn decode(token: &str, agent: &str) -> Result<Self> {
+    fn decode(token: &str, agent: &str) -> Option<Self> {
         if token.len() > 4096 {
-            bail!("Invalid conversation cursor");
+            return None;
         }
-        let bytes = URL_SAFE_NO_PAD
-            .decode(token)
-            .map_err(|_| anyhow::anyhow!("Invalid conversation cursor"))?;
-        let cursor: Self = serde_json::from_slice(&bytes)
-            .map_err(|_| anyhow::anyhow!("Invalid conversation cursor"))?;
-        if cursor.agent != agent {
-            bail!("The conversation cursor belongs to another agent");
-        }
-        Ok(cursor)
+        let bytes = URL_SAFE_NO_PAD.decode(token).ok()?;
+        let cursor: Self = serde_json::from_slice(&bytes).ok()?;
+        (cursor.agent == agent
+            && !matches!(
+                (&cursor.owner, &cursor.guest),
+                (Position::End, Position::End)
+            ))
+        .then_some(cursor)
     }
 
     fn next(self) -> Result<Option<String>> {
@@ -74,6 +73,21 @@ impl Cursor {
             "{CURSOR_PREFIX}{}",
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&self)?)
         )))
+    }
+}
+
+fn invalid_cursor() -> CommandFailure {
+    CommandFailure {
+        cli_status: "invalid_request",
+        error: "invalid_conversation_cursor",
+        http_status: None,
+        exit_code: 1,
+        error_code: None,
+        reason: Some("invalid_cursor".into()),
+        guidance: Some(
+            "Run conversations again with the original --agent and the returned next_cursor.",
+        ),
+        discovery_refusal: None,
     }
 }
 
@@ -227,14 +241,17 @@ async fn discover(
 ) -> Result<Result<Value, CommandFailure>> {
     let Some(agent) = agent else {
         if cursor.is_some_and(|cursor| cursor.starts_with(CURSOR_PREFIX)) {
-            bail!("A guest conversation cursor requires the original --agent");
+            return Ok(Err(invalid_cursor()));
         }
         return Ok(read_discovery(api, &owner_path(None, cursor, limit)).await);
     };
     let initial = cursor.is_none();
     let cursor = match cursor {
         Some(cursor) => match cursor.strip_prefix(CURSOR_PREFIX) {
-            Some(token) => Cursor::decode(token, agent)?,
+            Some(token) => match Cursor::decode(token, agent) {
+                Some(cursor) => cursor,
+                None => return Ok(Err(invalid_cursor())),
+            },
             None => {
                 return Ok(
                     read_discovery(api, &owner_path(Some(agent), Some(cursor), limit)).await,
@@ -387,10 +404,14 @@ mod tests {
         assert_eq!(first["conversations"][0]["id"], owner_a);
         assert_eq!(first["conversations"][1]["id"], guest_a);
         let cursor = first["next_cursor"].as_str().unwrap();
-        assert!(
+        assert_eq!(
             discover(&mut api, Some("other"), Some(cursor), 2)
                 .await
-                .is_err()
+                .unwrap()
+                .err()
+                .unwrap()
+                .error,
+            "invalid_conversation_cursor"
         );
         let second = discover(&mut api, Some("agent"), Some(cursor), 2)
             .await
@@ -490,11 +511,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.err().unwrap().http_status, Some(400));
-        assert!(
-            discover(&mut api, Some("agent"), Some("org-guest-v1.!"), 1)
-                .await
-                .is_err()
+        let malformed = discover(&mut api, Some("agent"), Some("org-guest-v1.!"), 1)
+            .await
+            .unwrap()
+            .err()
+            .unwrap();
+        let rendered =
+            super::super::render_discovery_failure(&malformed, crate::cli::OutputFormat::Json)
+                .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&rendered).unwrap()["error"],
+            "invalid_conversation_cursor"
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn guest_only_cursor_does_not_retry_a_finished_owner_stream() {
+        let guest_cursor = "1767225840000:org-guest-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let cursor = Cursor {
+            agent: "agent".into(),
+            owner: Position::End,
+            guest: Position::After(guest_cursor.into()),
+        }
+        .next()
+        .unwrap()
+        .unwrap();
+        let (mut api, server) = fixture(vec![(
+            guest_path("agent", Some(guest_cursor), 1),
+            "404 Not Found",
+            None,
+        )])
+        .await;
+        let unavailable = discover(&mut api, Some("agent"), Some(&cursor), 1)
+            .await
+            .unwrap()
+            .err()
+            .unwrap();
+        assert_eq!(unavailable.http_status, Some(404));
         server.await.unwrap();
     }
 }

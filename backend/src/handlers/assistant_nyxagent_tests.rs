@@ -1833,6 +1833,11 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
         ("POST", "turns".into()),
         ("GET", "models".into()),
         ("GET", format!("agents/{id}/guest-readiness")),
+        ("GET", format!("agents/{id}/guest-conversations")),
+        (
+            "GET",
+            "guest-conversations/org-guest-11111111111111111111111111111111".into(),
+        ),
     ];
     assert!(routes.iter().any(|(_, path)| path.ends_with("/context")));
     assert!(
