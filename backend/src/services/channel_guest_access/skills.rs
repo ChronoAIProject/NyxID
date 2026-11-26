@@ -604,6 +604,17 @@ impl Permit {
         }
     }
 
+    // Bind the publisher-visible capability to this credential record without exposing its ID.
+    fn credential_fingerprint(&self, state: &crate::AppState) -> String {
+        use hmac::{Hmac, Mac};
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(state.audit_chain_hmac_key.as_slice())
+            .expect("HMAC accepts a 32-byte key");
+        mac.update(b"nyxid:ornn-channel-skill:credential-id:v1\0");
+        mac.update(self.chat.api_key_id.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
     pub(crate) fn actor_digest(&self) -> AppResult<String> {
         let raw = serde_json::to_vec(&self.turn.actor)
             .map_err(|_| AppError::Internal("Could not bind channel actor".into()))?;
@@ -726,12 +737,12 @@ struct Claims {
 }
 
 impl Claims {
-    fn matches(&self, permit: &Permit) -> AppResult<bool> {
+    fn matches(&self, state: &crate::AppState, permit: &Permit) -> AppResult<bool> {
         Ok(self.sub == permit.turn.bot_id
             && self.binding == permit.turn.binding_id
             && self.owner == permit.owner
             && self.agent == permit.chat.agent_id
-            && self.key_digest == hex::encode(Sha256::digest(permit.chat.api_key_id.as_bytes()))
+            && self.key_digest == permit.credential_fingerprint(state)
             && Some(self.turn.as_str()) == permit.chat.turn_id.as_deref()
             && self.invocation == permit.chat.invocation_id
             && self.actor == permit.actor_digest()?
@@ -766,7 +777,7 @@ pub(crate) fn issue(
         owner: permit.owner.clone(),
         agent: permit.chat.agent_id.clone(),
         conversation: permit.chat.conversation_id.clone(),
-        key_digest: hex::encode(Sha256::digest(permit.chat.api_key_id.as_bytes())),
+        key_digest: permit.credential_fingerprint(state),
         turn: permit.chat.turn_id.clone().ok_or_else(denied)?,
         invocation: permit.chat.invocation_id.clone(),
         actor: permit.actor_digest()?,
@@ -819,7 +830,7 @@ pub(crate) async fn lookup(state: &crate::AppState, token: &str) -> AppResult<Bo
     }
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        lookup_current(&state.db, &claims),
+        lookup_current(state, &claims),
     )
     .await
     .map_err(|_| AppError::OAuthAuthorityUnavailable)?
@@ -836,8 +847,9 @@ pub(crate) async fn lookup(state: &crate::AppState, token: &str) -> AppResult<Bo
     Ok(result)
 }
 
-async fn lookup_current(db: &Database, claims: &Claims) -> AppResult<BotAuthorization> {
+async fn lookup_current(state: &crate::AppState, claims: &Claims) -> AppResult<BotAuthorization> {
     use crate::{models::assistant_conversation::AssistantConversation, services as svc};
+    let db = &state.db;
     let conversation = db
         .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
         .find_one(doc! {"_id":&claims.conversation,"active_turn.turn_id":&claims.turn})
@@ -862,7 +874,7 @@ async fn lookup_current(db: &Database, claims: &Claims) -> AppResult<BotAuthoriz
         claims.skill, claims.version
     );
     let permit = authorize(db, chat, &claims.root, &path).await?;
-    if !claims.matches(&permit)? {
+    if !claims.matches(state, &permit)? {
         return Err(denied());
     }
     let owner = db
