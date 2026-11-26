@@ -745,6 +745,7 @@ function ThemedAppShell({
       route,
       undefined,
       navigationRef.getRootState(),
+      Platform.OS,
     );
     // The root native modal sits above the whole push shell. Neither its
     // presentation nor its guarded dismissal changes the underlying offset.
@@ -898,7 +899,7 @@ function ThemedAppShell({
         !navigationBlocked &&
         !accessibility.sheetOpen &&
         (Boolean(edgeBackRevision && edgeBacks.current.size) ||
-          isWorkspaceSidebarRoot(currentRouteName))
+          isWorkspaceSidebarRoot(currentRouteName, Platform.OS))
       }
       onEdgeBack={
         edgeBacks.current.size
