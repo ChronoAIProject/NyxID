@@ -233,7 +233,7 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
             if ch == '<' {
                 // A literal odd backslash would escape our inserted '<'.
                 // Pair it so CommonMark emits the original literal slash.
-                if preceding_backslashes(source, at) % 2 != 0 {
+                if !preceding_backslashes(source, at).is_multiple_of(2) {
                     marked.push('\\');
                 }
                 bare_urls.push(BareUrl {
@@ -312,7 +312,7 @@ fn escaped_punctuation(source: &str, at: usize, value: &str) -> Option<u8> {
     let first = value.as_bytes().first().copied()?;
     if !first.is_ascii_punctuation()
         || source.as_bytes().get(at) != Some(&first)
-        || preceding_backslashes(source, at) % 2 == 0
+        || preceding_backslashes(source, at).is_multiple_of(2)
     {
         return None;
     }
