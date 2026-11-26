@@ -503,6 +503,7 @@ async fn process_messages(
         let user_access_token = if notification
             || super::channel_adapters::meta::is_meta(&bot.platform)
             || stored_message.guest_relay.is_some()
+            || stored_message.hosted_guest_selector_unavailable
             || bot.credential_source == "telegram_manager"
             || (bot.platform == "x"
                 && super::channel_adapters::x::is_public_conversation(&inbound.conversation_id))
@@ -702,12 +703,15 @@ async fn process_messages(
             matched.record(Outcome::CallbackPending).await;
         }
         let delivery = channel_relay_service::forward_to_agent(
-            channel_relay_service::callback_request(
+            channel_relay_service::callback_request_for_source(
                 state.db,
                 state.config,
                 Some(&bot.id),
                 &api_key.id,
                 &route.callback_url,
+                stored_message
+                    .hosted_guest_selector_unavailable
+                    .then_some(route.conversation.id.as_str()),
             )
             .await,
             state.config,

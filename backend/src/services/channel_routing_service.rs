@@ -807,7 +807,7 @@ async fn mutate_bot_conversation(
             }
             db.collection::<ChannelConversation>(COLLECTION_NAME).find_one_and_update(
                 filter,
-                doc! {"$set": set.clone()}
+                doc! {"$set": set.clone(), "$inc":{"guest_relay_assignment_revision":1_i64}}
             ).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?
                 .ok_or_else(|| AppError::Conflict("Conversation changed before update".into()))
         }.await;

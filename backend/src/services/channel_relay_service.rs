@@ -251,6 +251,7 @@ pub(crate) fn inbound_metadata(
         },
         guest_transport_audience: None,
         guest_relay: None,
+        hosted_guest_selector_unavailable: false,
         embedded_attachments: inbound.embedded_attachments.clone(),
         embedded_attachments_omitted: inbound.embedded_attachments_omitted,
         duplicate_of_media_key: None,
@@ -392,6 +393,7 @@ pub(crate) async fn store_outbound_with_guest_turn(
         effective_attachment_filenames: Vec::new(),
         guest_transport_audience: None,
         guest_relay: guest_turn.cloned(),
+        hosted_guest_selector_unavailable: false,
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
@@ -513,6 +515,7 @@ pub async fn store_device_event_message(
         effective_attachment_filenames: Vec::new(),
         guest_transport_audience: None,
         guest_relay: None,
+        hosted_guest_selector_unavailable: false,
         embedded_attachments: Vec::new(),
         embedded_attachments_omitted: 0,
         duplicate_of_media_key: None,
@@ -610,6 +613,17 @@ pub(super) async fn callback_request(
     key_id: &str,
     raw: &str,
 ) -> AppResult<reqwest::RequestBuilder> {
+    callback_request_for_source(db, config, bot_id, key_id, raw, None).await
+}
+
+pub(super) async fn callback_request_for_source(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    bot_id: Option<&str>,
+    key_id: &str,
+    raw: &str,
+    required_hosted_route: Option<&str>,
+) -> AppResult<reqwest::RequestBuilder> {
     use super::{nyxbot_gateway_service, proxy_destination::http};
     use crate::models::nyxbot_channel::COLLECTION_NAME as CHANNELS;
 
@@ -630,8 +644,14 @@ pub(super) async fn callback_request(
         && (direct.is_some() || gateway.is_some())
     {
         let mut filter = doc! {"channel_bot_id":bot, "route_api_key_id":key_id, "status":"active"};
+        if let Some(route) = required_hosted_route {
+            filter.insert("route_id", route);
+        }
         if let Some(id) = direct {
             filter.insert("_id", id);
+            if required_hosted_route.is_some() {
+                filter.insert("transport", "direct");
+            }
         } else if let Some(id) = gateway {
             filter.insert("transport", "gateway");
             filter.insert("gateway_channel_id", id);
@@ -656,6 +676,9 @@ pub(super) async fn callback_request(
                 }
             }
         }
+    }
+    if required_hosted_route.is_some() {
+        return Err(AppError::SecurityReadinessUnavailable);
     }
     let (url, client) = http::public_delivery(raw).map_err(|err| match err {
         AppError::ValidationError(_) => AppError::ChannelRelayFailed(
@@ -927,6 +950,8 @@ pub async fn get_message(db: &mongodb::Database, message_id: &str) -> AppResult<
 pub(crate) struct StoredRelaySender {
     pub sender_platform_id: String,
     pub sender_display_name: Option<String>,
+    #[serde(default)]
+    pub hosted_guest_selector_unavailable: bool,
 }
 
 /// Resolve the sender recorded at ingress for this direct channel and signed callback.
@@ -965,7 +990,10 @@ pub(crate) async fn direct_callback_sender(
     Ok(db
         .collection::<StoredRelaySender>(collection)
         .find_one(filter)
-        .projection(doc! {"_id": 0, "sender_platform_id": 1, "sender_display_name": 1})
+        .projection(
+            doc! {"_id": 0, "sender_platform_id": 1, "sender_display_name": 1,
+            "hosted_guest_selector_unavailable": 1},
+        )
         .await?)
 }
 
@@ -1936,6 +1964,7 @@ mod tests {
             effective_attachment_filenames: Vec::new(),
             guest_transport_audience: None,
             guest_relay: None,
+            hosted_guest_selector_unavailable: false,
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,

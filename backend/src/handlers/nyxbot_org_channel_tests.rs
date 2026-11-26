@@ -293,6 +293,18 @@ async fn org_specialist_provider_uses_confirmed_member_thread_dedup_and_live_aut
         )
         .await
         .unwrap();
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    guest_runtime_tests::enable_guest_test_bot(&state, &row.channel_bot_id).await;
+    state
+        .db
+        .collection::<bson::Document>("channel_guest_activation")
+        .delete_one(doc! {"_id": crate::services::channel_guest_access::FLAG})
+        .await
+        .unwrap();
+    assert!(matches!(
+        crate::services::channel_guest_access::select_mode(&state.db, &row.channel_bot_id).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
     let body = event("Summarize today's request", "7", "org-first");
     let answer = body_text(respond(&state, &key, &body, "org-first").await).await;
     assert!(answer.contains("Here is your answer"), "{answer}");

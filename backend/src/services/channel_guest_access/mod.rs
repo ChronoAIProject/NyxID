@@ -52,6 +52,54 @@ pub(crate) enum GuestMode {
     },
 }
 
+/// Stored on the authenticated source before owner or guest admission.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub(crate) enum HostedAdmission {
+    Legacy,
+    AddOn {
+        activation_epoch: i64,
+        bot_revision: i64,
+    },
+    Unavailable,
+}
+
+impl HostedAdmission {
+    pub(crate) fn from_selection(selection: AppResult<GuestMode>) -> Self {
+        match selection {
+            Ok(GuestMode::Legacy) => Self::Legacy,
+            Ok(GuestMode::AddOn {
+                activation_epoch,
+                bot_revision,
+            }) => Self::AddOn {
+                activation_epoch,
+                bot_revision,
+            },
+            Err(error) => {
+                tracing::warn!(
+                    error_code = error.error_code(),
+                    "Channel guest selection unavailable"
+                );
+                Self::Unavailable
+            }
+        }
+    }
+
+    pub(crate) fn guest_mode(self) -> Option<GuestMode> {
+        match self {
+            Self::Legacy => Some(GuestMode::Legacy),
+            Self::AddOn {
+                activation_epoch,
+                bot_revision,
+            } => Some(GuestMode::AddOn {
+                activation_epoch,
+                bot_revision,
+            }),
+            Self::Unavailable => None,
+        }
+    }
+}
+
 pub(crate) enum GuestAdmission {
     Legacy,
     AddOn(GuestTurn),
@@ -172,18 +220,23 @@ async fn select_rollout(db: &Database, bot_id: &str, bot_revision: i64) -> AppRe
     if bot_revision < 1 {
         return Err(unavailable());
     }
-    if !flags::channel_guest_access_enabled(db)
-        .await
-        .map_err(|_| unavailable())?
-    {
+    if !global_rollout_enabled(db).await? {
         return Ok(GuestMode::Legacy);
     }
     let activation = activation_collection(db)
         .find_one(doc! {"_id": FLAG})
         .await
         .map_err(|_| unavailable())?
-        .filter(|record| record.enabled && record.epoch > 0)
-        .ok_or_else(unavailable)?;
+        .filter(|record| record.enabled && record.epoch > 0);
+    let Some(activation) = activation else {
+        // The admin commits both documents together. The two reads may have
+        // straddled a disable. Require a fresh successful read of global off.
+        return if global_rollout_enabled(db).await? {
+            Err(unavailable())
+        } else {
+            Ok(GuestMode::Legacy)
+        };
+    };
     if !activation.fleet
         && !activation
             .pilot_bot_ids
@@ -197,6 +250,12 @@ async fn select_rollout(db: &Database, bot_id: &str, bot_revision: i64) -> AppRe
         activation_epoch: activation.epoch,
         bot_revision,
     })
+}
+
+async fn global_rollout_enabled(db: &Database) -> AppResult<bool> {
+    flags::channel_guest_access_enabled(db)
+        .await
+        .map_err(|_| unavailable())
 }
 
 async fn activate_selected(db: &Database, bot_id: &str, mode: GuestMode) -> AppResult<GuestMode> {
@@ -750,16 +809,16 @@ pub(crate) async fn claim_hosted_delivery(
 
 /// Store the selected path on the existing provider event before asynchronous
 /// execution. Older receipts and duplicates retain the ordinary path.
-pub(crate) async fn stamp_hosted_mode(
+pub(crate) async fn stamp_hosted_admission(
     db: &Database,
     event_id: &str,
     binding_id: &str,
-    mode: GuestMode,
+    admission: HostedAdmission,
 ) -> AppResult<()> {
-    if mode == GuestMode::Legacy {
+    if admission == HostedAdmission::Legacy {
         return Ok(());
     }
-    let mode = bson::to_bson(&mode).map_err(|_| unavailable())?;
+    let mode = bson::to_bson(&admission).map_err(|_| unavailable())?;
     let stored = db.collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
         .update_one(
             doc! {"_id": event_id, "channel_id": binding_id, "channel_guest_admission": {"$exists": false}},
@@ -771,11 +830,11 @@ pub(crate) async fn stamp_hosted_mode(
     Ok(())
 }
 
-pub(crate) async fn hosted_mode(
+pub(crate) async fn hosted_admission(
     db: &Database,
     event_id: &str,
     binding_id: &str,
-) -> AppResult<GuestMode> {
+) -> AppResult<HostedAdmission> {
     let row = db
         .collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
         .find_one(doc! {"_id": event_id, "channel_id": binding_id})
@@ -785,7 +844,7 @@ pub(crate) async fn hosted_mode(
     row.get("channel_guest_admission")
         .map(|mode| bson::from_bson(mode.clone()).map_err(|_| unavailable()))
         .transpose()
-        .map(|mode| mode.unwrap_or(GuestMode::Legacy))
+        .map(|mode| mode.unwrap_or(HostedAdmission::Legacy))
 }
 
 pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {

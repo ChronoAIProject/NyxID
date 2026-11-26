@@ -155,17 +155,11 @@ async fn accept(
     } else {
         claim_message(state, row, activity).await?
     };
-    use crate::services::channel_guest_access::GuestMode;
-    let guest_mode = if let Some(claim) = &claim {
-        match checked.guest_mode(&state.db).await {
-            Ok(mode) => mode,
-            Err(error) => {
-                let _ = EventDedupStore::release(&state.db, claim).await;
-                return Err(error);
-            }
-        }
+    use crate::services::channel_guest_access::HostedAdmission;
+    let guest_admission = if claim.is_some() {
+        HostedAdmission::from_selection(checked.guest_mode(&state.db).await)
     } else {
-        GuestMode::Legacy
+        HostedAdmission::Legacy
     };
     let now = Utc::now();
     let event_key = dispatch_identity::native_event(&response_id);
@@ -329,11 +323,11 @@ async fn accept(
                     .session(&mut *session).await?;
                 if committed.matched_count!=1 {return Err(AppError::Conflict("Native admission changed".into()));}
             }
-            if guest_mode == crate::services::channel_guest_access::GuestMode::Legacy {
+            if guest_admission == HostedAdmission::Legacy {
                 db.collection::<NyxbotEvent>(EVENTS).insert_one(&event).session(&mut *session).await?;
             } else {
                 let mut stored_event = bson::to_document(&event).map_err(|_| AppError::OAuthAuthorityUnavailable)?;
-                stored_event.insert("channel_guest_admission", bson::to_bson(&guest_mode).map_err(|_| AppError::OAuthAuthorityUnavailable)?);
+                stored_event.insert("channel_guest_admission", bson::to_bson(&guest_admission).map_err(|_| AppError::OAuthAuthorityUnavailable)?);
                 db.collection::<bson::Document>(EVENTS).insert_one(stored_event).session(&mut *session).await?;
             }
             db.collection::<StoredResponse>(RESPONSES).insert_one(&inserted).session(&mut *session).await?;
@@ -449,10 +443,12 @@ async fn execute(
         row.gateway_source.as_ref(),
         Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
     ) {
-        use crate::services::channel_guest_access::{AnswerAudience, GuestMode, hosted_mode};
-        let mode = hosted_mode(&state.db, event_key, &row.id).await?;
-        sender.guest_mode = Some(mode);
-        if matches!(mode, GuestMode::AddOn { .. }) {
+        use crate::services::channel_guest_access::{
+            AnswerAudience, HostedAdmission, hosted_admission,
+        };
+        let admission = hosted_admission(&state.db, event_key, &row.id).await?;
+        sender.guest_mode = Some(admission);
+        if matches!(admission, HostedAdmission::AddOn { .. }) {
             let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
             let config = crate::services::whatsapp_native::load(&state.db, &bot)
                 .await?

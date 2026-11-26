@@ -4739,6 +4739,7 @@ mod tests {
             effective_attachment_filenames: Vec::new(),
             guest_transport_audience: None,
             guest_relay: None,
+            hosted_guest_selector_unavailable: false,
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -4779,6 +4780,7 @@ mod tests {
             effective_attachment_filenames: Vec::new(),
             guest_transport_audience: None,
             guest_relay: None,
+            hosted_guest_selector_unavailable: false,
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -4989,6 +4991,165 @@ mod tests {
             routing::guest_access_state(db, &current).await.unwrap(),
             "ordinary_dedicated_key_required"
         );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_selector_outage_dispatches_only_to_the_bound_hosted_route() {
+        use crate::services::{
+            channel_guest_access as guest,
+            channel_inbound_service::{InboundDeps, InboundSource, process_inbound_messages},
+            channel_retry_ingress::{self, IngressContext},
+            feature_flag_service::{self as flags, FlagTarget},
+            security_readiness_service::ready_test_replica,
+        };
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let mut fixture = setup_reply_token_fixture("hosted_relay_selector_outage")
+            .await
+            .unwrap();
+        let server = MockServer::start().await;
+        let _callback_origin =
+            crate::services::resource_adapter::register_test_origin(&server.uri());
+        fixture.state.config.base_url = server.uri();
+        let state = &fixture.state;
+        let db = &state.db;
+        let binding = Uuid::new_v4().to_string();
+        let endpoint = format!("/api/v1/nyxbot/relay/{binding}");
+        let callback_url = format!("{}{endpoint}", server.uri());
+        Mock::given(path(&endpoint))
+            .respond_with(ResponseTemplate::new(202))
+            .expect(2)
+            .mount(&server)
+            .await;
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &fixture.bot.user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(API_KEYS)
+            .update_one(
+                doc! {"_id":&fixture.api_key.id},
+                doc! {"$set":{"callback_url":&callback_url}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&fixture.conversation.id},
+                doc! {"$set":{"platform_conversation_id":"1234"}},
+            )
+            .await
+            .unwrap();
+        prepare_guest_relay_fixture(db, &mut fixture.bot, &fixture.conversation.id).await;
+        ready_test_replica(db).await;
+        let flag = flags::set_platform_override(
+            db,
+            guest::FLAG,
+            &FlagTarget::Global,
+            true,
+            &fixture.bot.user_id,
+        )
+        .await
+        .unwrap();
+        db.collection::<bson::Document>(crate::models::feature_flag_override::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&flag.id},
+                doc! {"$set":{"enabled":"unreadable"}},
+            )
+            .await
+            .unwrap();
+        let adapter = resolve_adapter("telegram", &state.token_exchange_cache).unwrap();
+        let inbound = adapter
+            .parse_inbound(
+                br#"{
+            "update_id":11,"message":{"message_id":21,"from":{"id":1234,"is_bot":false},
+            "chat":{"id":1234,"type":"private"},"text":"test"}
+        }"#,
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        let invoke = || {
+            process_inbound_messages(
+                InboundSource::Webhook,
+                InboundDeps::from(state),
+                &fixture.bot,
+                adapter.as_ref(),
+                std::slice::from_ref(&inbound),
+            )
+        };
+        assert!(invoke().await.is_err());
+        assert!(server.received_requests().await.unwrap().is_empty());
+        db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+            .insert_one(doc! {"_id":&binding,"route_id":&fixture.conversation.id,
+                "route_api_key_id":&fixture.api_key.id,"channel_bot_id":&fixture.bot.id,
+                "transport":"direct","status":"active",
+            })
+            .await
+            .unwrap();
+
+        assert!(invoke().await.unwrap());
+        let requests = server.received_requests().await.unwrap();
+        let received = &requests[0];
+        assert!(!received.headers.contains_key("x-nyxid-user-token"));
+        let callback = received.headers["x-nyxid-callback-token"].to_str().unwrap();
+        let claims =
+            jwt::validate_relay_callback_token(&state.jwt_keys, &state.config, callback).unwrap();
+        let source = channel_relay_service::get_message(db, &claims.message_id)
+            .await
+            .unwrap();
+        assert!(source.hosted_guest_selector_unavailable);
+        assert!(source.guest_relay.is_none());
+
+        flags::set_platform_override(
+            db,
+            guest::FLAG,
+            &FlagTarget::Global,
+            false,
+            &fixture.bot.user_id,
+        )
+        .await
+        .unwrap();
+        db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&source.id},
+                doc! {"$set":{"callback_status":"failed"}},
+            )
+            .await
+            .unwrap();
+        let live = channel_bot_service::get_bot(db, &fixture.bot.id)
+            .await
+            .unwrap();
+        let retry_context = IngressContext {
+            db,
+            config: &state.config,
+            jwt_keys: &state.jwt_keys,
+            encryption_keys: &state.encryption_keys,
+            rate_limiter: &state.per_channel_event_limiter,
+        };
+        channel_retry_ingress::deliver(
+            &retry_context,
+            &live,
+            adapter.as_ref(),
+            &inbound,
+            "unused-retry-id",
+        )
+        .await
+        .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(!requests[1].headers.contains_key("x-nyxid-user-token"));
+        let retried = jwt::validate_relay_callback_token(
+            &state.jwt_keys,
+            &state.config,
+            requests[1].headers["x-nyxid-callback-token"]
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retried.message_id, source.id);
         db.drop().await.unwrap();
     }
 
@@ -6277,6 +6438,7 @@ mod tests {
             effective_attachment_filenames: Vec::new(),
             guest_transport_audience: None,
             guest_relay: None,
+            hosted_guest_selector_unavailable: false,
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -6991,6 +7153,7 @@ mod tests {
             effective_attachment_filenames: Vec::new(),
             guest_transport_audience: None,
             guest_relay: None,
+            hosted_guest_selector_unavailable: false,
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
@@ -7292,6 +7455,7 @@ mod tests {
             effective_attachment_filenames: Vec::new(),
             guest_transport_audience: None,
             guest_relay: None,
+            hosted_guest_selector_unavailable: false,
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,

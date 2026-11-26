@@ -3026,7 +3026,7 @@ impl std::fmt::Display for InboundReply {
 struct Sender<'a> {
     truncated_original_bytes: Option<usize>,
     guest_facts: crate::services::channel_guest_access::transport::TransportFacts<'a>,
-    guest_mode: Option<crate::services::channel_guest_access::GuestMode>,
+    guest_mode: Option<crate::services::channel_guest_access::HostedAdmission>,
     native_discord_activity: Option<&'a Value>,
     /// Provider classification before any normalization used by legacy chat.
     /// Only the new execution-source proof uses this distinction.
@@ -3444,18 +3444,63 @@ async fn owner_thread(
     Ok((format!("nyxa-{}", Uuid::new_v4().simple()), false))
 }
 
-async fn capture_hosted_guest_mode(
+async fn capture_hosted_guest_admission(
     state: &AppState,
     row: &NyxbotChannel,
     event_id: &str,
     checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+    source_unavailable: bool,
 ) -> AppResult<()> {
-    use crate::services::channel_guest_access as guest;
-    let mode = match checked {
-        Some(checked) => checked.guest_mode(&state.db).await?,
-        None => guest::select_mode(&state.db, &row.channel_bot_id).await?,
+    use crate::services::channel_guest_access::{self as guest, HostedAdmission};
+    let admission = if source_unavailable {
+        HostedAdmission::Unavailable
+    } else {
+        HostedAdmission::from_selection(match checked {
+            Some(checked) => checked.guest_mode(&state.db).await,
+            None => guest::select_mode(&state.db, &row.channel_bot_id).await,
+        })
     };
-    guest::stamp_hosted_mode(&state.db, event_id, &row.id, mode).await
+    guest::stamp_hosted_admission(&state.db, event_id, &row.id, admission).await
+}
+
+async fn gateway_relay_guest_selector_unavailable(
+    db: &mongodb::Database,
+    row: &NyxbotChannel,
+    activity: &Value,
+) -> AppResult<bool> {
+    let (Some(route), Some(message)) = (row.route_id.as_deref(), activity["event_id"].as_str())
+    else {
+        return Ok(false);
+    };
+    let matched = db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .find_one(doc! {
+            "_id": message, "direction": "inbound", "channel_bot_id": &row.channel_bot_id,
+            "user_id": bot_owner(row), "conversation_id": route,
+            "agent_api_key_id": &row.route_api_key_id, "platform": &row.platform,
+            "hosted_guest_selector_unavailable": true,
+        })
+        .projection(doc! {"platform_conversation_id": 1, "sender_platform_id": 1, "thread_id": 1})
+        .await?;
+    let Some(matched) = matched else {
+        return Ok(false);
+    };
+    let source = &activity["source"];
+    if source["type"] != "nyxid_relay"
+        || source["route_id"] != route
+        || source["platform"].as_str().is_none_or(|platform| {
+            canonical_platform(platform) != canonical_platform(&row.platform)
+        })
+        || matched.get_str("platform_conversation_id").ok()
+            != activity["conversation"]["id"].as_str()
+        || matched.get_str("sender_platform_id").ok() != activity["actor"]["id"].as_str()
+        || matched.get_str("thread_id").ok() != activity["conversation"]["thread_id"].as_str()
+    {
+        return Err(AppError::Forbidden(
+            "Channel source authority changed".into(),
+        ));
+    }
+    Ok(true)
 }
 
 async fn hosted_guest_facts<'a>(
@@ -3614,9 +3659,12 @@ async fn start_chat_turn(
     };
     use crate::services::channel_guest_access::{self as guest_runtime, GuestAdmission, GuestMode};
     let channel_guest = if guest {
-        let mode = match sender.guest_mode {
-            Some(mode) => mode,
-            None => guest_runtime::hosted_mode(&state.db, event_key, &row.id).await?,
+        let admission = match sender.guest_mode {
+            Some(admission) => admission,
+            None => guest_runtime::hosted_admission(&state.db, event_key, &row.id).await?,
+        };
+        let Some(mode) = admission.guest_mode() else {
+            return Ok(Inbound::Silent("refused_guest_authority_unavailable"));
         };
         let facts = if matches!(mode, GuestMode::AddOn { .. }) {
             hosted_guest_facts(state, row, chat, sender, event_key).await?
@@ -5524,7 +5572,9 @@ async fn custom_responses(
         }
         return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
     }
-    if let Err(error) = capture_hosted_guest_mode(&state, &destination, &event_key, None).await {
+    if let Err(error) =
+        capture_hosted_guest_admission(&state, &destination, &event_key, None, false).await
+    {
         discard_failed_provider_event(&state.db, &event_key).await;
         return provider_refusal::error(error);
     }
@@ -6047,13 +6097,27 @@ async fn responses_with_producers_impl(
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     }
-    if newly_admitted
-        && matches!(activity["actor"]["kind"].as_str(), Some("human" | "bot"))
-        && let Err(error) =
-            capture_hosted_guest_mode(&state, &row, &event_key, Some(&checked)).await
-    {
-        discard_failed_provider_event(&state.db, &event_key).await;
-        return provider_refusal::error(error);
+    if newly_admitted && matches!(activity["actor"]["kind"].as_str(), Some("human" | "bot")) {
+        let source_unavailable =
+            match gateway_relay_guest_selector_unavailable(&state.db, &row, activity).await {
+                Ok(unavailable) => unavailable,
+                Err(error) => {
+                    discard_failed_provider_event(&state.db, &event_key).await;
+                    return provider_refusal::error(error);
+                }
+            };
+        if let Err(error) = capture_hosted_guest_admission(
+            &state,
+            &row,
+            &event_key,
+            Some(&checked),
+            source_unavailable,
+        )
+        .await
+        {
+            discard_failed_provider_event(&state.db, &event_key).await;
+            return provider_refusal::error(error);
+        }
     }
     let prepared = if retry_prefix.is_some() {
         relay_responses::Prepared::default()
@@ -7310,6 +7374,7 @@ pub async fn relay_callback(
             .await;
         }
     };
+    let source_unavailable = sender.hosted_guest_selector_unavailable;
     let mut sender_id = sender.sender_platform_id;
     let mut display = sender.sender_display_name;
     // Dedup redeliveries of the same inbound message.
@@ -7462,8 +7527,14 @@ pub async fn relay_callback(
     // selection failure releases the unaccepted event for the existing retry.
     if sender_kind != crate::models::channel_thread::ThreadSenderKind::Unknown
         && payload["activity"]["reply_supported"] != false
-        && let Err(error) =
-            capture_hosted_guest_mode(&state, &row, &admitted.id, Some(&checked)).await
+        && let Err(error) = capture_hosted_guest_admission(
+            &state,
+            &row,
+            &admitted.id,
+            Some(&checked),
+            source_unavailable,
+        )
+        .await
     {
         discard_failed_provider_event(&state.db, &admitted.id).await;
         return provider_refusal::error(error);

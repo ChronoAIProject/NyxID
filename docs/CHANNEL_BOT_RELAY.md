@@ -1745,6 +1745,13 @@ a dedication that has yet to admit guest work.
 | Activated assignment removed, retired, transferred or suspended | Old broad credentials are blocked. To repurpose a previously activated key, rotate it and use the successor. Rotation revokes the predecessor and its children. |
 | Dedicated route waiting for a pending ordinary Aurinko callback | The original receipt resumes the ordinary callback. Pending and failed callbacks keep the route ordinary until they settle or their retained message metadata expires. |
 
+If the guest selector is temporarily unavailable, relay can send a signed
+callback to the original verified hosted route. The stored receipt carries
+the outage through retries, and the callback omits the owner bearer.
+Hosted admission applies the existing verified owner or member authority and
+refuses guest execution until it can classify a fresh source. Generic
+external destinations receive no callback while that selector read fails.
+
 An enrolled callback also carries `guest_access_token`. External runtimes
 use it as the Bearer credential for `POST /api/v1/channel-relay/guest-tools`.
 The `list` operation takes `{"operation":"list"}` and returns `tools`. The

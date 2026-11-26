@@ -161,7 +161,7 @@ pub async fn deliver(
             {
                 return Err(retry_later());
             }
-            if message.guest_relay.is_some() {
+            if message.guest_relay.is_some() || message.hosted_guest_selector_unavailable {
                 super::channel_admission_service::store_current_owner(db, message.clone())
                     .await?
                     .ok_or_else(retry_later)?;
@@ -200,6 +200,37 @@ pub async fn deliver(
     }
     guest_relay::revalidate_retry(db, bot, &route.conversation, &api_key.id, inbound, &stored)
         .await?;
+    if stored.guest_relay.is_none() {
+        if !stored.hosted_guest_selector_unavailable
+            && let Err(error) = guest::select_mode_for_bot(db, bot).await
+        {
+            if !guest_relay::is_hosted_route(db, &bot.id, &route.conversation.id, &api_key.id)
+                .await?
+                || stored.conversation_id != route.conversation.id
+                || stored.agent_api_key_id.as_deref() != Some(&api_key.id)
+            {
+                return Err(error);
+            }
+            let updated = messages
+                .update_one(
+                    doc! {"_id":&stored.id,"channel_bot_id":&bot.id,"user_id":&bot.user_id,
+                    "conversation_id":&route.conversation.id,"agent_api_key_id":&api_key.id,
+                    "guest_relay":null,"callback_status":{"$ne":"delivered"}},
+                    doc! {"$set":{"hosted_guest_selector_unavailable":true}},
+                )
+                .await?;
+            if updated.matched_count != 1 {
+                return Err(retry_later());
+            }
+            stored.hosted_guest_selector_unavailable = true;
+        }
+        if stored.hosted_guest_selector_unavailable
+            && (stored.conversation_id != route.conversation.id
+                || stored.agent_api_key_id.as_deref() != Some(&api_key.id))
+        {
+            return Err(retry_later());
+        }
+    }
     // Pending retries follow the current owner-approved route while keeping the
     // UUID stable. Old route-bound reply JWTs cease to match this message.
     if stored.conversation_id != route.conversation.id
@@ -241,6 +272,7 @@ pub async fn deliver(
     // agent-scoped delegation, never the mailbox credential.
     let owner = bot.user_id.parse().map_err(|_| retry_later())?;
     let access = if stored.guest_relay.is_some()
+        || stored.hosted_guest_selector_unavailable
         || channel_relay_service::is_linked_org_nyxbot_route(db, &bot.id, &api_key.id).await?
     {
         None
@@ -278,12 +310,15 @@ pub async fn deliver(
             .await?;
     }
     let delivery = channel_relay_service::forward_to_agent(
-        channel_relay_service::callback_request(
+        channel_relay_service::callback_request_for_source(
             db,
             &config,
             Some(&bot.id),
             &api_key.id,
             callback_url,
+            stored
+                .hosted_guest_selector_unavailable
+                .then_some(route.conversation.id.as_str()),
         )
         .await,
         &config,

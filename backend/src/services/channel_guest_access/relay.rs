@@ -46,8 +46,12 @@ pub(crate) async fn prepare(
     inbound: &InboundMessage,
     metadata: &mut ChannelMessage,
 ) -> AppResult<bool> {
-    let mode = super::select_mode_for_bot(db, bot).await?;
-    if mode == GuestMode::Legacy && !bot.diagnostics.guest_relay_work_present {
+    let mode = match super::select_mode_for_bot(db, bot).await {
+        Ok(mode) => Some(mode),
+        Err(_) if is_hosted_route(db, &bot.id, &route.id, &route.agent_api_key_id).await? => None,
+        Err(error) => return Err(error),
+    };
+    if mode == Some(GuestMode::Legacy) && !bot.diagnostics.guest_relay_work_present {
         return Ok(true);
     }
     let conversation_id = destination_for(metadata)?;
@@ -80,7 +84,7 @@ pub(crate) async fn prepare(
     if existing.is_some() {
         return Ok(false);
     }
-    if mode == GuestMode::Legacy {
+    if mode == Some(GuestMode::Legacy) {
         return Ok(true);
     }
     let mut facts = transport::inbound_facts(bot, inbound, metadata.thread_context.as_ref());
@@ -94,6 +98,11 @@ pub(crate) async fn prepare(
         None
     };
     metadata.guest_transport_audience = facts.sender_id.map(|_| facts.audience);
+    let Some(mode) = mode else {
+        metadata.id = stable_source;
+        metadata.hosted_guest_selector_unavailable = true;
+        return Ok(true);
+    };
     if is_hosted_route(db, &bot.id, &route.id, &route.agent_api_key_id).await? {
         return Ok(true);
     }
@@ -380,6 +389,31 @@ pub(crate) async fn bind_in_session(
     session: &mut mongodb::ClientSession,
     source: &ChannelMessage,
 ) -> AppResult<()> {
+    if source.hosted_guest_selector_unavailable {
+        let bot = source.channel_bot_id.as_deref().ok_or_else(refused)?;
+        let key = source.agent_api_key_id.as_deref().ok_or_else(refused)?;
+        let hosted = db
+            .collection::<Document>(HOSTED)
+            .update_one(
+                doc! {"channel_bot_id":bot,"route_id":&source.conversation_id,
+                "route_api_key_id":key,"status":"active"},
+                doc! {"$inc":{"guest_selector_outage_ingress_revision":1_i64}},
+            )
+            .session(&mut *session)
+            .await?;
+        let parent = db
+            .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":bot,"user_id":&source.user_id,"is_active":true},
+                doc! {"$set":{"diagnostics.guest_relay_work_present":true}},
+            )
+            .session(&mut *session)
+            .await?;
+        if hosted.matched_count != 1 || parent.matched_count != 1 {
+            return Err(refused());
+        }
+        return Ok(());
+    }
     let Some(turn) = source.guest_relay.as_ref() else {
         return Ok(());
     };
@@ -537,6 +571,14 @@ pub(crate) struct RetainedRelayKey {
     guest_relay_bot_revision: Option<i64>,
 }
 
+#[derive(serde::Deserialize)]
+struct RetainedRelayRoute {
+    #[serde(flatten)]
+    route: ChannelConversation,
+    #[serde(default)]
+    guest_relay_assignment_revision: i64,
+}
+
 impl RetainedRelayKey {
     pub(crate) async fn require_broad_access(&self, db: &Database) -> AppResult<()> {
         self.broad_route(db).await.map(drop)
@@ -545,13 +587,14 @@ impl RetainedRelayKey {
     async fn broad_route(
         &self,
         db: &Database,
-    ) -> AppResult<Option<(ChannelBot, ChannelConversation)>> {
+    ) -> AppResult<Option<(ChannelBot, RetainedRelayRoute)>> {
         let current = self.live_route(db).await?;
         if let Some((bot, route)) = &current {
             if super::select_mode_for_bot(db, bot).await? == GuestMode::Legacy
-                || (route.platform == "aurinko"
-                    && has_pending_legacy_callback(db, &bot.id, &route.user_id).await?)
-                || (self.guest_relay_bot_id.is_none() && !compatible_key(&self.key, &route.user_id))
+                || (route.route.platform == "aurinko"
+                    && has_pending_legacy_callback(db, &bot.id, &route.route.user_id).await?)
+                || (self.guest_relay_bot_id.is_none()
+                    && !compatible_key(&self.key, &route.route.user_id))
             {
                 return Ok(current);
             }
@@ -564,7 +607,7 @@ impl RetainedRelayKey {
     async fn live_route(
         &self,
         db: &Database,
-    ) -> AppResult<Option<(ChannelBot, ChannelConversation)>> {
+    ) -> AppResult<Option<(ChannelBot, RetainedRelayRoute)>> {
         let Some((bot_id, route_id)) = self
             .guest_relay_dedicated_bot_id
             .as_deref()
@@ -586,7 +629,7 @@ impl RetainedRelayKey {
         if !crate::services::platform_bot_authority::permits_personal_routes(db, bot_id).await? {
             return Ok(None);
         }
-        let route = db.collection::<ChannelConversation>(ROUTES).find_one(doc! {
+        let route = db.collection::<RetainedRelayRoute>(ROUTES).find_one(doc! {
             "_id": route_id, "channel_bot_id": bot_id, "user_id": &self.key.user_id,
             "agent_api_key_id": &self.key.id, "is_active":true, "retired_by_transfer":{"$ne":true},
         }).await?;
@@ -608,9 +651,7 @@ impl RetainedRelayKey {
             .epoch;
         Ok(Some(format!(
             "{}.{enrolled_epoch}.{enrolled_revision}.{rollout_epoch}.{}.{}",
-            route.id,
-            bot.guest_access_v1_revision,
-            route.updated_at.timestamp_millis(),
+            route.route.id, bot.guest_access_v1_revision, route.guest_relay_assignment_revision,
         )))
     }
 
