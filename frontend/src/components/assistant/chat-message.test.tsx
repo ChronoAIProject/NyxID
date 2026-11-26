@@ -1810,3 +1810,14 @@ it("does not expose arbitrary Lark failure text", () => {
   expect(screen.getByText(/The tool reported an error/)).toBeVisible();
   expect(screen.queryByText(/private field/)).toBeNull();
 });
+
+it.each([false, true])("shows recovery for an unconfirmed skill save (reviewed %s)", (reviewed) => {
+  render(<ChatMessageBubble message={{ ...BASE, toolCalls: [{
+    id: "skill", name: "nyxid__draft_agent_skill", status: "error", startedAt: 1,
+    failure: { kind: "tool_error", reason: "publication_ambiguous", status: 500 },
+    decision: reviewed ? { kind: "acknowledgement", id: "card", state: "failed" } : undefined,
+  }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /Turn details:/ }));
+  expect(screen.getByText("Skill save unconfirmed")).toBeVisible();
+  expect(screen.getByText(/Check Ornn or use Check again/)).toBeVisible();
+});

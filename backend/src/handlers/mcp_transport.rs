@@ -5123,7 +5123,22 @@ fn native_team_tool_result(
                 "isError": is_error,
             })));
     }
-    // Only a trusted native remember diagnostic may enrich persisted activity.
+    if name == "nyxid__draft_agent_skill" && is_error && value["error"] == "conflict" {
+        use crate::services::assistant_agent_learning_review::PublicationFailureCode;
+        let details = &value["details"];
+        let code = match details["reason"].as_str() {
+            Some("publication_ambiguous") => Some(PublicationFailureCode::PublishUncertain),
+            Some(reason) => PublicationFailureCode::parse(reason),
+            None => None,
+        };
+        let status = details["upstream_status"]
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok());
+        if let Some(failure) = code.and_then(|code| code.save_failure(status)) {
+            response.extensions_mut().insert(failure.activity());
+        }
+    }
+    // Only a trusted native remember diagnostic may enrich persisted memory activity.
     // Never interpret arbitrary downstream result text as safe UI metadata.
     if name == "nyxid__remember"
         && is_error

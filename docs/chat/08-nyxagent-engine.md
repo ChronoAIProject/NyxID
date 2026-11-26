@@ -681,7 +681,12 @@ reduced-scope acceptance on the complete review card. Successful automatic
 publication returns the outcome for narration in the same turn; reviewed
 publication queues one durable completion event. Package failures retain their
 safe rules and queue one repair event to the original drafting conversation,
-even when Full access produced no review card.
+even when Full access produced no review card. An unconfirmed skill save
+carries `publication_ambiguous` in the drafting tool's error details and in
+the failed activity's `failure.reason`. On a reviewed draft, history resolves
+the reason from the proposal linked to that card. NyxBot reports the incomplete
+setup and the offered recovery step. It must neither infer a cause nor issue
+another draft to retry an unconfirmed write.
 
 Only keys identified by their actual credential row get this authority; a platform
 label alone grants nothing. Their MCP listing/search includes all services visible

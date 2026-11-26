@@ -101,6 +101,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 `AppError` enum (`errors/mod.rs`, `thiserror`); handlers return `AppResult<T> = Result<T, AppError>`. Variants map to HTTP status codes and numeric error codes; `backend/src/errors/mod.rs` is the authoritative list. Internal/database errors never leak details to clients.
 
 **Reserved numeric code blocks** (single source of truth -- do not duplicate these tables elsewhere):
+- 1004 `SkillPublication` retains the HTTP 409 `conflict` response and adds safe skill-save diagnostics and recovery in `details`.
 - 1011-1019 SSH node-key/auth-mode: 1011 `SshNodeKeyMissing`, 1012 `SshHostKeyMismatch`, 1013 `SshNodeExecChannelClosed`, 1014 `SshPrincipalAmbiguous`, 1015 `SshAuthModeUnsupportedForOperation`
 - 2003 `MfaStepUpRequired` (HTTP 403, `mfa_step_up_required`): verify the current session before approving sign-ins on other devices; never signs out the approver.
 - 8000-8005 node/proxy: 8000 `NodeNotFound`, 8001 `NodeOffline`, 8002 `NodeProxyTimeout`, 8003 `NodeRegistrationFailed`, 8004 `NodeCredentialMissing`, 8005 `WsProxyDownstream`

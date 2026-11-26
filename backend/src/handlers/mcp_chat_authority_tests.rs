@@ -9166,3 +9166,161 @@ async fn agent_operation_effect_read_only_snapshot_never_grows() {
     assert_eq!(filtered["services"][0]["inputs"][&ids[0]], limits);
     f.state.db.drop().await.unwrap();
 }
+
+async fn unconfirmed_skill_save(mode: crate::models::assistant_settings::AccessMode) {
+    use crate::models::assistant_settings::AccessMode;
+    use crate::services::{
+        assistant_activity_decision, assistant_nyxagent, assistant_settings_service,
+        assistant_skill_authoring::tests::{fixture, input, setup_ornn},
+    };
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let f = fixture("mcp_unconfirmed_skill_save").await;
+    assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        assistant_settings_service::Update {
+            access_mode: Some(mode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"valid":true}})))
+        .mount(&server)
+        .await;
+    const PRIVATE: &str = "private-storage-host/bucket/operation";
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skills"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"detail":PRIVATE})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/skill-search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[],"totalPages":0}})),
+        )
+        .mount(&server)
+        .await;
+    let auth = authenticate(&f).await;
+    let draft = || {
+        call(
+            &f,
+            &auth,
+            "nyxid__draft_agent_skill",
+            input(&f.chat.agent_id),
+        )
+    };
+    let result_value = result(draft().await, true).await;
+    let reviewed = mode != AccessMode::Autopilot;
+    let card = if reviewed {
+        assert_eq!(result_value["error"], "acknowledgement_required");
+        Some(result_value["acknowledgement_id"].as_str().unwrap())
+    } else {
+        None
+    };
+    let decide = |id: &str| {
+        crate::handlers::assistant_nyxagent::decide_acknowledgement(
+            axum::extract::State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            axum::extract::Path((f.row.id.clone(), id.to_owned())),
+            Json(serde_json::from_value(json!({"decision":"allow"})).unwrap()),
+        )
+    };
+    let failure = if let Some(id) = card {
+        let error = decide(id).await.err().unwrap();
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        serde_json::to_value(error.response_body()).unwrap()
+    } else {
+        result_value.clone()
+    };
+    assert_eq!(
+        failure["details"]["reason"], "publication_ambiguous",
+        "{failure}"
+    );
+    assert_eq!(failure["details"]["recovery"], "check");
+    assert_eq!(failure["details"]["upstream_status"], 500);
+    assert!(!failure.to_string().contains(PRIVATE));
+    assert!(
+        failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not confirmed")
+    );
+    let mut activities = assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap()
+        .activities;
+    assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        activities.iter_mut().collect(),
+    )
+    .await
+    .unwrap();
+    let activity = activities.last().unwrap();
+    let diagnostic = activity.failure.as_ref().unwrap();
+    assert_eq!(diagnostic.reason.as_deref(), Some("publication_ambiguous"));
+    assert_eq!(diagnostic.status, Some(500));
+    assert!(!serde_json::to_string(activity).unwrap().contains(PRIVATE));
+    if let Some(id) = card {
+        assert_eq!(activity.decision.as_ref().unwrap().state, "failed");
+        let error = decide(id).await.err().unwrap();
+        assert_eq!(error.response_body().details.unwrap()["recovery"], "check");
+    } else {
+        assert_eq!(activity.status, "error");
+        assert!(activity.decision.is_none());
+        assert!(
+            failure["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("setup is incomplete")
+        );
+        assert!(
+            failure["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("guess a cause")
+        );
+        let proposal = f
+            .state
+            .db
+            .collection::<crate::models::assistant_agent_learning::AssistantAgentLearningProposal>(
+                crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME,
+            )
+            .find_one(doc! {"agent_id":&f.chat.agent_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(proposal.failure_code.as_deref(), Some("publish_uncertain"));
+        assert!(proposal.publication.unwrap().uncertain_dispatch);
+    }
+    server.verify().await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn unconfirmed_skill_save_full_access() {
+    Box::pin(unconfirmed_skill_save(
+        crate::models::assistant_settings::AccessMode::Autopilot,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn unconfirmed_skill_save_review_card() {
+    Box::pin(unconfirmed_skill_save(
+        crate::models::assistant_settings::AccessMode::Nyxmode,
+    ))
+    .await;
+}

@@ -1458,7 +1458,7 @@ async fn defer_publication_error<T>(
     .await?;
     match code {
         Code::VersionConflict => Err(AppError::Conflict("version_conflict".into())),
-        Code::PublishUncertain => Err(publication::ambiguous()),
+        Code::PublishUncertain => Err(publication::ambiguous(error.status().or(fallback_status))),
         _ => Err(error.into_app_error()),
     }
 }
@@ -2819,7 +2819,10 @@ async fn execute(
                     },
                 )
                 .await?;
-                return Err(AppError::Conflict(code.as_str().into()));
+                return Err(match code.save_failure(status) {
+                    Some(failure) => failure.into(),
+                    None => AppError::Conflict(code.as_str().into()),
+                });
             }
             publication::PublishOutcome::VersionConflict { status } => {
                 match publication::reconcile(reader, actor, p, body.base_skill.as_ref()).await {
@@ -2853,7 +2856,7 @@ async fn execute(
                     },
                 )
                 .await?;
-                return Err(publication::ambiguous());
+                return Err(publication::ambiguous(status));
             }
         }
     };

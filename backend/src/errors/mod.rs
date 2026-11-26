@@ -3,6 +3,7 @@ pub mod memory_write;
 pub mod refresh;
 mod refusal_throttle;
 pub mod skill_draft;
+pub mod skill_publication;
 pub mod skill_read;
 pub mod voice_start;
 use axum::http::StatusCode;
@@ -154,6 +155,9 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error(transparent)]
+    SkillPublication(#[from] skill_publication::SkillPublicationFailure),
 
     #[error("Conflict: trigger_overlap_skip")]
     TriggerOverlapSkip { blocking_run_id: String },
@@ -942,6 +946,7 @@ impl AppError {
             Self::CrashReportConsentRequired => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
             Self::Conflict(_)
+            | Self::SkillPublication(_)
             | Self::TriggerOverlapSkip { .. }
             | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing | Self::DiagnosticNotReady => {
@@ -1188,7 +1193,7 @@ impl AppError {
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
             Self::NotFound(_) => 1003,
-            Self::Conflict(_) | Self::TriggerOverlapSkip { .. } => 1004,
+            Self::Conflict(_) | Self::SkillPublication(_) | Self::TriggerOverlapSkip { .. } => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::ApprovalUnsupported => 12502,
@@ -1484,7 +1489,9 @@ impl AppError {
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
-            Self::Conflict(_) | Self::TriggerOverlapSkip { .. } => "conflict",
+            Self::Conflict(_) | Self::SkillPublication(_) | Self::TriggerOverlapSkip { .. } => {
+                "conflict"
+            }
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
@@ -1806,6 +1813,7 @@ impl AppError {
                 request_id,
                 approve_url,
             )),
+            AppError::SkillPublication(failure) => Some(serde_json::json!(failure)),
             AppError::MemoryWrite(reason) => {
                 Some(serde_json::json!({"reason": reason, "category": reason.category()}))
             }

@@ -567,6 +567,19 @@ fn error_result_inner(
                 value,
             };
         }
+        AppError::SkillPublication(failure) => {
+            let instructions = if failure.recovery == "check" {
+                "Report that setup is incomplete and the save was not confirmed. Give the recovery step. Do not draft again or guess a cause."
+            } else {
+                "Report that setup is incomplete and the skill was not saved. Give the reported reason and recovery step. Do not guess a cause."
+            };
+            return ToolResult {
+                permission_request: None,
+                is_error: true,
+                value: json!({"error": body.error, "error_code": body.error_code,
+                    "message": body.message, "details": body.details, "instructions": instructions}),
+            };
+        }
         AppError::SkillDraftValidation(_) | AppError::MemoryWrite(_) | AppError::SkillRead(_) => {
             return ToolResult {
                 permission_request: None,
