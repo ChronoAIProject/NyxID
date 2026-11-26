@@ -3,8 +3,9 @@
 - Date: 2026-11-25
 - Reviewer: Opus (independent review; no implementation changes)
 - Branch: `specialist-nyxbot-task-handoff` (uncommitted worktree changes on top of `575c5f596`, including untracked files)
-- **Latest verdict (final, 2026-11-25 15:14Z): APPROVED.** It applies to the implementation snapshot `7f838c6dd0859f59d1c847e675ac7f55e0b2d9f54ad5fb70e68a515997b0d5b0` (parent procedure, 49 files). My independent digest of the same tree is `93145854b3662f30fe9f51d7ab3b3b14d748f62009497bcd474823464dcddb94`. Residual limits are listed in the second pass, and evidence is in [Final verdict](#final-verdict-2026-11-25).
-- **Pass history:** first pass, CHANGES REQUESTED (B1–B6, M1–M5). Second pass, CHANGES REQUESTED (R1, R2, plus Rust evidence). Third pass, code findings cleared and approval held for Rust results. Final, APPROVED.
+- **Latest verdict (integration delta, 2026-11-26): APPROVED.** This covers merge commit `241da803e` (PR #2983, feature `508195a20` merged with `origin/dev` `fbd9b70b8`). No integration defects found. The approval assumes the PR's backend CI (compile, tests, CodeQL) passes, because no Rust build has run on the merged tree. See [Integration delta review](#integration-delta-review-2026-11-26).
+- **Previous verdict (final, 2026-11-25 15:14Z): APPROVED.** It applies to the implementation snapshot `7f838c6dd0859f59d1c847e675ac7f55e0b2d9f54ad5fb70e68a515997b0d5b0` (parent procedure, 49 files). My independent digest of the same tree is `93145854b3662f30fe9f51d7ab3b3b14d748f62009497bcd474823464dcddb94`. Residual limits are listed in the second pass, and evidence is in [Final verdict](#final-verdict-2026-11-25).
+- **Pass history:** first pass, CHANGES REQUESTED (B1–B6, M1–M5). Second pass, CHANGES REQUESTED (R1, R2, plus Rust evidence). Third pass, code findings cleared and approval held for Rust results. Final, APPROVED. Integration delta, APPROVED.
 - The first-pass text below describes the original snapshot. Its findings are superseded by the later sections.
 
 ## Scope and method
@@ -317,3 +318,83 @@ The filtered Rust handoff and CORS tests must pass on the final tree (digest `7f
   - mobile and CLI show the artifact as raw text;
   - neither the live app nor the backend was driven end-to-end.
 - This approval covers code review only. It does not authorize merging, deploying, or changing rules or protections. Any source change after this snapshot needs a new review of that delta.
+
+---
+
+## Integration delta review: 2026-11-26
+
+- **Verdict: APPROVED.** This approves the integration of the feature into current `dev`. I found no defects in the conflict resolution, in the auto-merges, or in how upstream changes interact with eligibility, model selection, admission or completion.
+- **Condition:** the PR's backend CI must pass (compile, Rust tests including the two filtered handoff and CORS tests, CodeQL). The parent ran `cargo fmt` only, so no Rust build has run on this merged tree. Per instructions, I started no cargo or build process.
+- **Reviewed:** merge commit `241da803e727ad26dc3c6444aad0282b78be1741`, with parents feature `508195a20` and `origin/dev` `fbd9b70b8`. The working tree was clean. I did not edit any source.
+
+### Method
+
+1. **The feature commit is the approved code.** For the 49 implementation files, I hashed each file's content in `508195a20` with the second- and third-pass procedure (record files excluded) and got `93145854b3662f30fe9f51d7ab3b3b14d748f62009497bcd474823464dcddb94`. That is identical to the approved snapshot.
+2. **Feature delta versus PR delta.** For every file, I compared the `-U0` delta from `575c5f596` to `508195a20` with the delta from `origin/dev` to `241da803e`. 43 of the 49 deltas are identical. The six that differ are:
+   - the two backend files;
+   - `chat-message.tsx`;
+   - the three legacy i18n monoliths, which dev deleted and replaced with nine split catalogs.
+3. **Upstream changes on our dependencies.** I read every upstream change from `575c5f596` to `origin/dev` that touches a dependency of the feature:
+   - models;
+   - the turns handler, `TurnStart`, `turn_notes` and the restart enrollment path;
+   - the transport, the NyxAgent hook, `api-client`, the text-block remark pipeline and the chat page;
+   - channel setup, channel hooks and the hosted-link hook;
+   - connect-link content, the NyxBot roster and the auth store.
+
+### Conflicts and non-identical deltas
+
+- **`chat-message.tsx` (the real conflict): correct.**
+  - dev's `contentOverride ?? <TextBlock …>` fallback is kept, and the TextBlock keeps every handoff gate unchanged: `eligible`, `role === "assistant"`, `status === "complete"`, `origin === "user"` and `!via`.
+  - `contentOverride` has a single producer, the voice message group renderer (`assistant-chat-page.tsx:1323`). Voice-grouped replies therefore render inert. That matches the backend, which never advertises the capability on voice turns (`voice_request_id`).
+- **Backend: formatting only.**
+  - `cargo fmt` reflowed the header-capability check (`handlers/assistant_nyxagent.rs`) and the `turn.note` predicate (`services/assistant_nyxagent.rs`). The tokens are identical.
+  - `ConversationResponse` is still built only through `From<AssistantConversation>`, which sets `handoff_eligible`.
+- **i18n: correct.**
+  - All nine feature keys landed in the split catalogs (`app/assistant`, `app/shared`, `app/unattributed`), with en, zh-CN and zh-TW values byte-identical to the approved monolith delta.
+  - The monoliths are absent on both `dev` and HEAD.
+  - *Optional nit:* two superseded strings are not referenced by any code and could be dropped later: "NyxBot will continue this task in a new chat…" and "NyxBot accepted this task…".
+
+### Upstream interactions checked
+
+**Backend admission and capability**
+- `start.note = HANDOFF_UI_NOTE` is still set only for first-party humans that send the header.
+- `TurnStart::from` still sets `note: None`.
+- No new upstream writer overwrites the note on browser turns. `platform_personal_turn_service` and `collaboration_group_service` set notes only on their own channel or group starts.
+- `turn_notes` still adds `specialist_handoff_capability` and strips the raw marker. No other code renders `turn.note`.
+- The new restart enrollment clones `start` into `admitted` (`handlers/assistant_nyxagent.rs:2698`), so restarted turns keep the note. If a restart path ever dropped it, the result would fail closed: no capability, so no card.
+
+**Eligibility**
+- Upstream added five `AssistantConversation` fields: `meta_grant`, `org_use_revision`, `reply_channel_meta_grant`, `stopped_window` and `thread_secret_fence`.
+- It added five `ActiveTurn` fields, all for restart, reattach or settlement: `execution_attempt`, `group_reply_in_settlement`, `restart_admission`, `restart_eligibility` and `restart_offer`.
+- None of these introduces a new thread kind that `private_handoff_thread` would have to exclude.
+- The org specialist maintainer and user lists (#2977, #2980) apply only to org specialists. Those threads carry `agent_owner_id`, so they are already ineligible.
+- dev has no Health or isolated specialist kind. `AgentKind` is still `Nyxbot | Specialist`.
+
+**Model (B2)**
+- `begin_turn` still resolves `start.model.unwrap_or(agent.model)` (`services/assistant_nyxagent.rs:2674`).
+- The handler's orchestrator-default branch still requires `agent_id` to be absent.
+- At HEAD, the transport still omits `model` when an agent is passed without a model, and still sends the capability header.
+- `nyxBotOf` still returns the roster entry with `kind === "nyxbot"`.
+
+**Transport, R1 and drafts**
+- HEAD keeps the `isNyxAgentConversationId(id)` gate in `list()`, the `clientDraftKey` isolation and adoption unchanged.
+- Upstream's `forgetAgent` now aborts live turns, but only for indexed threads of the forgotten agent. A pending NyxBot handoff is never indexed under that agent, so it is unaffected.
+
+**Rendering**
+- dev added `remarkAutolinkPunctuation` before `remarkSafeModelContent`. It rewrites only `link` nodes, so fenced code and the `dataHandoffFirst` marker are untouched.
+
+**Chat page**
+- dev added a `restricted` state for `can_use === false` and for history 403/404. It renders a minimal shell with no message list, so no handoff provider is mounted.
+- Navigating away clears the selection, so adoption navigation (`selection.current === source`) cannot pull the user back.
+
+**Completion and setup**
+- dev added `MetaCustomerSetup` to the `ChannelBotSetup` completion view. It has no links and does not navigate, and the hosted dialog's Escape and outside-click guards still cover it.
+- The hosted-link `refresh` type change is compatible with our callers.
+- dev's connect-link content also suppresses callbacks when embedded, which matches our contract.
+- The `authorityGuard` hooks merged cleanly: `use-channel-bots` and `use-api-keys` received only unrelated upstream edits.
+
+### Evidence and residuals
+
+- **Parent-reported:** 483/483 focused Vitest across 17 files, 4/4 Playwright specialist-handoff scenarios, a production build, and full frontend lint, typography and i18n (0 errors, 33 existing warnings). `cargo fmt` changed only the two expressions above. I did not re-run these.
+- **Unchanged residuals:** the residual limits from the second pass still apply.
+- **One integration-specific residual:** a voice reply that is *not* grouped would still pass through the gated TextBlock if it carried `origin === "user"`. The backend never offers the capability on voice turns, so this is a defence-in-depth gap only, not a defect.

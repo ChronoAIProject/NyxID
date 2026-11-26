@@ -32,6 +32,17 @@ See [the independent review](specialist-platform-actions-opus-review.md).
 - Native mobile and CLI may show a historical browser artifact as inert fenced text.
 - Canonical advanced management links stay in the app using their existing pages; only supported setup journeys use dialogs and the shared completion callback.
 
+## Integration with dev: 2026-11-26
+
+- Merged `dev` at `fbd9b70b8` into the feature branch in `241da803e`. Preserved the upstream voice `contentOverride` fallback together with all handoff eligibility gates.
+- Used the repository's `adopt:i18n` migration to move the nine feature strings from the deleted monoliths into the split catalogs, preserving every locale value. Ran Rust formatting on the capability header and note predicates.
+- Local validation after integration: 483 focused Vitest tests across 17 files, four Playwright handoff/setup scenarios, production frontend build, full lint/typography/i18n (33 existing warnings, no errors) all passed.
+- CI identified older channel-bot page assertions that expected a two-argument API call. Updated them to require the new `authorityGuard` option while retaining exact payload assertions; all 54 page tests now pass.
+- Rebuilt the committed CLI wizard bundle with `npm run build:wizard`, as required when its shared API-client source changes. The generated manifest stayed identical; the bundle and source hash were updated.
+- Opus approved the integration delta; the report records the condition that backend validation must pass on the merged tree. Final Rust filters and GitHub CI are being run before merging.
+
+The SHA-256 and file list above describe the original approved feature snapshot. The integration delta is tracked separately by its Git commits and the dated review section.
+
 ## Snapshot files
 
 - backend/src/handlers/assistant_nyxagent.rs
