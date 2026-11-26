@@ -27,6 +27,8 @@ export const cmaAgentSchema = z.object({
   owner_title: z.string().nullish(),
   status: z.string().max(80),
   callback_url: z.unknown().optional(),
+  bootstrap: z.unknown().optional(),
+  first_message: z.unknown().optional(),
 });
 export type CmaAgent = z.infer<typeof cmaAgentSchema>;
 

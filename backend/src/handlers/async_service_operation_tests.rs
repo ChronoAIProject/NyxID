@@ -5184,6 +5184,102 @@ async fn cma_origin_exact_candidates_and_connection_discovery_ignore_terminal_hi
 }
 
 #[tokio::test]
+async fn cma_origin_discovery_routes_exact_personal_proxy_connection() {
+    use crate::models::user_service::COLLECTION_NAME as CONNECTIONS;
+    use tower::ServiceExt;
+
+    let a = cma_existing_agent_fixture().await;
+    let watch = cma_origin_watch(&a).await;
+    let db = &a.f.state.db;
+    crate::test_utils::set_test_approval_preference(db, &a.f.owner, false).await;
+    let token = crate::crypto::jwt::generate_access_token(
+        &a.f.state.jwt_keys,
+        &a.f.state.config,
+        &uuid::Uuid::parse_str(&a.f.owner).unwrap(),
+        "proxy",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    let (_, router) = crate::routes::build_router_with_state(a.f.state.clone());
+    let router = router.with_state(a.f.state.clone());
+    let get = |uri: String| async {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice::<Value>(&body).unwrap())
+    };
+    let discovery = format!(
+        "/api/v1/assistant/nyxagent/cma-sessions?discover=true&conversation={}",
+        watch.conversation_id
+    );
+    let (status, page) = get(discovery.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let connection = &page["connections"][0];
+    assert_eq!(connection["id"], a.service);
+    let slug = connection["slug"].as_str().unwrap();
+    let uuid_route = format!("/api/v1/proxy/{}/api/v1/agents/agt_coffee", a.service);
+    let exact_route = format!(
+        "/api/v1/proxy/s/{slug}/api/v1/agents/agt_coffee?_nyxid_via={}",
+        a.service
+    );
+    let (status, body) = get(uuid_route).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error_code"], 1003);
+    let (status, body) = get(exact_route.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["id"], "agt_coffee");
+
+    let connections = db.collection::<bson::Document>(CONNECTIONS);
+    for enabled in [false, true] {
+        connections
+            .update_one(doc! {"_id":&a.service}, doc! {"$set":{"is_active":enabled}})
+            .await
+            .unwrap();
+        let (status, page) = get(discovery.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(
+            page["connections"].as_array().unwrap().len(),
+            usize::from(enabled)
+        );
+        let (status, body) = get(exact_route.clone()).await;
+        assert_eq!(
+            status,
+            if enabled {
+                StatusCode::OK
+            } else {
+                StatusCode::NOT_FOUND
+            },
+            "{body}"
+        );
+    }
+    connections
+        .delete_one(doc! {"_id":&a.service})
+        .await
+        .unwrap();
+    let (status, page) = get(discovery).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["connections"], json!([]));
+    let (status, body) = get(exact_route).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+}
+
+#[tokio::test]
 async fn execution_permission_watch_lifecycle_is_separate_and_keeps_original_task_and_actor() {
     for global in [false, true] {
         use crate::services::execution_permission_dispatch::phase_b_tests as permissions;

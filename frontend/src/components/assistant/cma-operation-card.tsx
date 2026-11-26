@@ -16,6 +16,9 @@ import {
   type CmaOperation,
 } from "@/schemas/cma-operation";
 import { useFeature } from "@/hooks/use-feature-flag";
+import { useCmaInitialTaskOutcome } from "@/hooks/use-cma-session";
+import { useAuthStore } from "@/stores/auth-store";
+import { cmaSessionKeySchema } from "@/schemas/cma-session";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { CmaAgentPanel } from "./cma-agent-panel";
 import { CmaCardDetails, CmaCardFrame } from "./cma-card-frame";
@@ -142,8 +145,10 @@ const phases: Record<string, string> = {
 
 export function CmaOperationCard({
   operation,
+  conversationId,
 }: {
   readonly operation: CmaOperation;
+  readonly conversationId?: string;
 }) {
   useUiTranslation();
   const [collapsed, setCollapsed] = useState(false);
@@ -192,7 +197,7 @@ export function CmaOperationCard({
         </>
       }
     >
-      <CmaOperationProgress operation={operation} />
+      <CmaOperationProgress operation={operation} conversationId={conversationId} />
       <div id={detailsId} hidden={collapsed} className="space-y-2">
         <CmaOperationDetails
           operation={operation}
@@ -210,12 +215,57 @@ const LONG_REQUEST_MS = 10 * 60_000;
 export function CmaOperationProgress({
   operation,
   animate = true,
+  conversationId,
 }: {
   readonly operation: CmaOperation;
   readonly animate?: boolean;
+  readonly conversationId?: string;
+}) {
+  const ownerId = useAuthStore((state) => state.user?.id);
+  const { service_id, agent_id, operation_id, kind, status } = operation;
+  if (
+    ownerId && conversationId && service_id && agent_id && operation_id &&
+    kind === "cma_provisioning" && status === "succeeded" &&
+    presentation(operation).label === "Ready" &&
+    cmaSessionKeySchema.safeParse(`${service_id}:${agent_id}`).success
+  ) {
+    return <CmaInitialTaskProgress
+      operation={operation}
+      animate={animate}
+      ownerId={ownerId}
+      conversationId={conversationId}
+      receipt={{ connectionId: service_id, agentId: agent_id, operationId: operation_id }}
+    />;
+  }
+  return <CmaRecordedProgress operation={operation} animate={animate} />;
+}
+
+function CmaInitialTaskProgress({
+  operation, animate, ownerId, conversationId, receipt,
+}: {
+  readonly operation: CmaOperation;
+  readonly animate: boolean;
+  readonly ownerId: string;
+  readonly conversationId: string;
+  readonly receipt: { connectionId: string; agentId: string; operationId: string };
+}) {
+  const outcome = useCmaInitialTaskOutcome(ownerId, conversationId, operation.id, receipt);
+  return <CmaRecordedProgress operation={operation} animate={animate} outcome={outcome} />;
+}
+
+function CmaRecordedProgress({
+  operation, animate, outcome,
+}: {
+  readonly operation: CmaOperation;
+  readonly animate: boolean;
+  readonly outcome?: "completed" | "failed" | null;
 }) {
   useUiTranslation();
-  const observed = presentation(operation);
+  const observed = outcome === "completed"
+    ? { label: "Completed", tone: "success" }
+    : outcome === "failed"
+      ? { label: "Failed", tone: "error" }
+      : presentation(operation);
   const pending = isCmaOperationPending(operation);
   const [now, setNow] = useState(Date.now);
   const running =
@@ -413,10 +463,12 @@ export function CmaSessionRequests({
   operations,
   scrollBody,
   visible,
+  conversationId,
 }: {
   readonly operations: readonly CmaOperation[];
   readonly scrollBody: RefObject<HTMLDivElement | null>;
   readonly visible: boolean;
+  readonly conversationId?: string;
 }) {
   useUiTranslation();
   const [limit, setLimit] = useState(3);
@@ -445,7 +497,7 @@ export function CmaSessionRequests({
                   : translateUi("Time unavailable")}
               </time>
             </p>
-            <CmaOperationProgress operation={operation} animate={false} />
+            <CmaOperationProgress operation={operation} animate={false} conversationId={conversationId} />
             <dl className="space-y-2 pt-1">
               <CmaOperationMetadata operation={operation} />
             </dl>

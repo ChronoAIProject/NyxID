@@ -234,6 +234,16 @@ required routes is unsupported. Detail and event-head reads verify remote
 identity. Requests use the existing authenticated REST proxy, current credential
 resolution, access checks, and metering.
 
+Agent list, detail, event-head and stream reads use
+`/api/v1/proxy/s/{connection_slug}/{path}?_nyxid_via={connection_id}` with any
+CMA query parameters alongside the selector. The slug and connection UUID come
+from current source discovery or the exact authorized receipt for a pin or
+historical request. The proxy resolves the selected active connection and
+strips `_nyxid_via` before forwarding. A withdrawn connection drops out of
+receipt discovery. If the same connection is re-enabled and still matches the
+recorded authority, discovery can select it again. A replacement UUID cannot
+inherit observation from a matching CMA Agent ID.
+
 Configure the CMA service's base URL to the CMA API origin when its OpenAPI
 paths include `/api/v1` and `/api/v2`. NyxID appends the advertised path to the
 configured base URL. A base URL ending in `/api/v1` would duplicate that prefix
@@ -278,6 +288,22 @@ Pinned subscriptions continue across routes.
 Discovery requests also have a 30-second deadline. Route discovery is cached for
 five minutes per account and connection.
 
+The card for a successful provisioning receipt can also show its initial task
+outcome. When the request status is rendered, the browser checks the exact
+connection and Agent against the current owner and source conversation, then
+reads that Agent directly. This read is independent of active inventory. The
+public Agent detail binds `bootstrap.operation_id` to the stored lifecycle
+operation ID and reports `first_message.purpose` and `first_message.state`. Only
+`purpose: task` with state `completed` or `failed` yields a terminal task status.
+Setup, missing or mismatched lineage, and nonterminal first-message states keep
+the recorded receipt status. The card re-reads this durable provider evidence
+after refresh and polls every 15 seconds while rendered. A withdrawn receipt or
+nonretryable denial removes the observed outcome and the card shows its recorded
+status. Provisioning watches and async delivery retain their recorded state.
+The field contract comes from CMA's public Agent detail and first-message model.
+[CMA `agent_openapi_shapes.rs`](https://github.com/ChronoAIProject/cma/blob/7fc711bd427338d85ad1bc645522808af26a66de/api/crates/layer1-public/src/rest/agent_openapi_shapes.rs)
+[CMA `first_message.rs`](https://github.com/ChronoAIProject/cma/blob/7fc711bd427338d85ad1bc645522808af26a66de/api/crates/layer2-core/src/sandbox/first_message.rs)
+
 Cards provide status and action summaries; desktop control and CMA approval
 actions remain separate capabilities.
 
@@ -305,7 +331,9 @@ actions remain separate capabilities.
 - `frontend/e2e/cma-session.spec.ts` exercises the real UI against HTTP fixtures,
   including the shared machine/CMA column, mobile keyboard/layout, disclosure
   controls, cross-page pins, slow pin refresh without stream restart, and
-  clickable/keyboard-reachable recovery at short viewport heights. Multi-connection
+  clickable/keyboard-reachable recovery at short viewport heights. A historical
+  receipt fixture covers terminal recovery after reload and a withdrawn connection.
+  Multi-connection
   API regressions distinguish denial from transient route/list failures and
   receipt withdrawal. These fixtures establish no live CMA connection.
 - `frontend/e2e/login-redirect.spec.ts` checks app approval and password-MFA to

@@ -8,6 +8,7 @@ import {
   listPinnedCmaSessions,
   isCmaRetryableError,
   readCmaAgent,
+  readCmaInitialTaskOutcome,
   resolveCmaRoutes,
   watchCmaSession,
 } from "@/lib/assistant/cma-session-api";
@@ -15,6 +16,57 @@ import type {
   CmaSessionReference,
   CmaSessionState,
 } from "@/schemas/cma-session";
+
+function fetchCmaRoutes(
+  client: ReturnType<typeof useQueryClient>,
+  ownerId: string,
+  connectionId: string,
+  bounded: AbortSignal,
+) {
+  return client.fetchQuery({
+    queryKey: ["cma-session", ownerId, connectionId, "routes"],
+    queryFn: ({ signal }) =>
+      resolveCmaRoutes(ownerId, connectionId, AbortSignal.any([signal, bounded])),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+}
+
+export function useCmaInitialTaskOutcome(
+  ownerId: string,
+  conversationId: string,
+  receiptId: string,
+  receipt: { connectionId: string; agentId: string; operationId: string },
+) {
+  const client = useQueryClient();
+  const query = useQuery({
+    queryKey: [
+      "cma-session", ownerId, "initial-task", conversationId, receiptId,
+      receipt.connectionId, receipt.agentId, receipt.operationId,
+    ],
+    queryFn: async ({ signal, queryKey }) => {
+      try {
+        return await readCmaInitialTaskOutcome(
+          ownerId,
+          conversationId,
+          receipt,
+          AbortSignal.any([signal, AbortSignal.timeout(30_000)]),
+          (id, bounded) => fetchCmaRoutes(client, ownerId, id, bounded),
+        );
+      } catch (error) {
+        if (!signal.aborted && !isCmaRetryableError(error))
+          client.setQueryData(queryKey, null);
+        throw error;
+      }
+    },
+    staleTime: 0,
+    refetchInterval: 15_000,
+    retry: false,
+  });
+  if (!query.isFetchedAfterMount || (query.isError && !isCmaRetryableError(query.error)))
+    return null;
+  return query.data;
+}
 
 export function useActiveCmaSessions(
   ownerId: string,
@@ -43,17 +95,7 @@ export function useActiveCmaSessions(
     [pinSelection],
   );
   const getRoutes = (connectionId: string, bounded: AbortSignal) =>
-    client.fetchQuery({
-      queryKey: ["cma-session", ownerId, connectionId, "routes"],
-      queryFn: ({ signal }) =>
-        resolveCmaRoutes(
-          ownerId,
-          connectionId,
-          AbortSignal.any([signal, bounded]),
-        ),
-      staleTime: 5 * 60_000,
-      retry: false,
-    });
+    fetchCmaRoutes(client, ownerId, connectionId, bounded);
   const origins = useQuery({
     queryKey: sourceKey,
     queryFn: async ({ signal }) => {
@@ -181,6 +223,7 @@ export function useActiveCmaSessions(
         ownerId,
         session.connection.id,
         session.agentId,
+        session.connection.slug,
         "active",
       ],
       queryFn: async ({
@@ -255,7 +298,7 @@ export function useCmaSessionStream(
   ownerId: string,
   session: CmaSessionReference,
 ) {
-  const key = `${ownerId}:${session.connection.id}:${session.agentId}`;
+  const key = `${ownerId}:${session.connection.id}:${session.connection.slug}:${session.agentId}`;
   const [retry, reconnect] = useReducer((value: number) => value + 1, 0);
   const [snapshot, setSnapshot] = useState<{
     key: string;

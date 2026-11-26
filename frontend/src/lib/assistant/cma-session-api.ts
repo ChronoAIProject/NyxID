@@ -52,8 +52,11 @@ function request(
   return apiFetch(endpoint, {
     errorFormat: "cma",
     signal,
-    authorityGuard: () => guard(ownerId, revision),
-    preserveSessionOn401: /^\/proxy\/[0-9a-f-]{36}\//i.test(endpoint),
+    authorityGuard: () => {
+      signal.throwIfAborted();
+      guard(ownerId, revision);
+    },
+    preserveSessionOn401: endpoint.startsWith("/proxy/s/"),
     headers: { Accept: stream ? "text/event-stream" : "application/json" },
   });
 }
@@ -86,6 +89,7 @@ async function json(
   try {
     for (;;) {
       const { done, value } = await reader.read();
+      signal.throwIfAborted();
       guard(ownerId, revision);
       if (done) break;
       size += value.length;
@@ -105,17 +109,22 @@ async function json(
 }
 
 export function cmaProxyPath(
-  connectionId: string,
+  connection: Pick<CmaConnection, "id" | "slug">,
   route: string,
   agentId?: string,
+  query = new URLSearchParams(),
 ): string {
-  z.uuid().parse(connectionId);
+  const id = z.uuid().parse(connection.id);
+  if (connection.slug.length > 80 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(connection.slug))
+    throw new Error("Invalid CMA connection slug.");
   if (!/^\/[A-Za-z0-9_{}/-]+$/.test(route) || route.includes("//"))
     throw new Error("Invalid CMA API route.");
   const path = route.replace(/\{[A-Za-z0-9_]+\}/g, () =>
     cmaAgentIdSchema.parse(agentId),
   );
-  return `/proxy/${connectionId}${path}`;
+  const params = new URLSearchParams(query);
+  params.set("_nyxid_via", id);
+  return `/proxy/s/${connection.slug}${path}?${params}`;
 }
 
 export async function listCmaConnections(
@@ -183,7 +192,7 @@ export async function resolveCmaRoutes(
 
 export async function listCmaAgents(
   ownerId: string,
-  connectionId: string,
+  connection: CmaConnection,
   routes: CmaRoutes,
   signal: AbortSignal,
   cursor?: string,
@@ -195,7 +204,7 @@ export async function listCmaAgents(
   return cmaAgentPageSchema.parse(
     await json(
       ownerId,
-      `${cmaProxyPath(connectionId, routes.agents)}?${query}`,
+      cmaProxyPath(connection, routes.agents, undefined, query),
       signal,
     ),
   );
@@ -209,11 +218,7 @@ export async function readCmaAgent(
   const agent = cmaAgentSchema.parse(
     await json(
       ownerId,
-      cmaProxyPath(
-        session.connection.id,
-        session.routes.agent,
-        session.agentId,
-      ),
+      cmaProxyPath(session.connection, session.routes.agent, session.agentId),
       signal,
     ),
   );
@@ -323,11 +328,7 @@ export async function watchCmaSession(
           readCmaAgent(ownerId, session, attempt.signal),
           json(
             ownerId,
-            cmaProxyPath(
-              session.connection.id,
-              session.routes.head,
-              session.agentId,
-            ),
+            cmaProxyPath(session.connection, session.routes.head, session.agentId),
             attempt.signal,
           ),
         ]);
@@ -355,7 +356,7 @@ export async function watchCmaSession(
       });
       const response = await request(
         ownerId,
-        `${cmaProxyPath(session.connection.id, session.routes.events, session.agentId)}?${query}`,
+        cmaProxyPath(session.connection, session.routes.events, session.agentId, query),
         attempt.signal,
         true,
       );
@@ -507,6 +508,59 @@ export interface CmaDiscoveryProgress {
 
 type RouteResolver = (id: string, signal: AbortSignal) => Promise<CmaRoutes>;
 
+function connectionFromOrigin(origin: CmaSessionOrigin): CmaConnection | null {
+  if (!origin.connection_slug) return null;
+  return {
+    id: origin.service_id,
+    name: origin.connection_name ?? "CMA",
+    slug: origin.connection_slug,
+    connected: true,
+    requires_connection: true,
+  };
+}
+
+const initialTaskEvidence = z.object({
+  bootstrap: z.object({ operation_id: z.string() }),
+  first_message: z.object({
+    purpose: z.literal("task"),
+    state: z.enum(["completed", "failed"]),
+  }),
+});
+
+/** A historical receipt authorizes no reads on its own. */
+export async function readCmaInitialTaskOutcome(
+  ownerId: string,
+  conversation: string,
+  receipt: { connectionId: string; agentId: string; operationId: string },
+  signal: AbortSignal,
+  getRoutes?: RouteResolver,
+) {
+  const { connectionId, agentId, operationId } = receipt;
+  const origins = await listCmaSessionOrigins(ownerId, signal, conversation, [], [
+    `${connectionId}:${agentId}`,
+  ]);
+  const origin = origins.find(
+    (row) =>
+      row.conversation_id === conversation &&
+      row.service_id === connectionId &&
+      row.agent_id === agentId,
+  );
+  const connection = origin && connectionFromOrigin(origin);
+  if (!connection) return null;
+
+  const routes = await (getRoutes?.(connection.id, signal) ??
+    resolveCmaRoutes(ownerId, connection.id, signal));
+  const agent = await readCmaAgent(
+    ownerId,
+    { connection, routes, agentId },
+    signal,
+  );
+  const evidence = initialTaskEvidence.safeParse(agent);
+  return evidence.success && evidence.data.bootstrap.operation_id === operationId
+    ? evidence.data.first_message.state
+    : null;
+}
+
 /** Receipt reads are exact and precede any pinned detail/stream request. */
 export async function listPinnedCmaSessions(
   ownerId: string,
@@ -519,16 +573,17 @@ export async function listPinnedCmaSessions(
   const revision = getAssistantIdentityRevision();
   const started = Date.now();
   const bounded = AbortSignal.any([signal, AbortSignal.timeout(25_000)]);
-  const origins = await listCmaSessionOrigins(
-    ownerId,
-    bounded,
-    undefined,
-    pins,
-    pins,
-  );
-  const connections = [...new Set(origins.map((origin) => origin.service_id))];
+  const origins = (
+    await listCmaSessionOrigins(ownerId, bounded, undefined, pins, pins)
+  )
+    .filter((origin) => pins.includes(`${origin.service_id}:${origin.agent_id}`))
+    .flatMap((origin) => {
+      const connection = connectionFromOrigin(origin);
+      return connection ? [{ origin, connection }] : [];
+    });
+  const connections = [...new Set(origins.map(({ connection }) => connection.id))];
   const sessions = new Map<string, CmaSessionReference>();
-  for (const origin of origins) {
+  for (const { origin, connection } of origins) {
     const prior = previous.find(
       (session) =>
         session.connection.id === origin.service_id &&
@@ -538,6 +593,7 @@ export async function listPinnedCmaSessions(
       sessions.set(`${origin.service_id}:${origin.agent_id}`, {
         ...prior,
         origin,
+        connection,
       });
   }
   // Allocate the bounded route budget across all pins, so a late healthy pin
@@ -548,10 +604,7 @@ export async function listPinnedCmaSessions(
       Math.max(1, Math.ceil(connections.length / 3)),
   );
   await visitConnections(connections, bounded, async (id) => {
-    const authorized = origins.filter(
-      (origin) =>
-        origin.service_id === id && pins.includes(`${id}:${origin.agent_id}`),
-    );
+    const authorized = origins.filter(({ connection }) => connection.id === id);
     try {
       const peer = AbortSignal.any([
         bounded,
@@ -559,16 +612,10 @@ export async function listPinnedCmaSessions(
       ]);
       const routes = await (getRoutes?.(id, peer) ??
         resolveCmaRoutes(ownerId, id, peer));
-      for (const origin of authorized)
+      for (const { origin, connection } of authorized)
         sessions.set(`${id}:${origin.agent_id}`, {
           origin,
-          connection: {
-            id,
-            name: origin.connection_name ?? "CMA",
-            slug: origin.connection_slug ?? "cma",
-            connected: true,
-            requires_connection: true,
-          },
+          connection,
           routes,
           agentId: origin.agent_id,
           title: "CMA session",
@@ -577,7 +624,7 @@ export async function listPinnedCmaSessions(
       guard(ownerId, revision);
       signal.throwIfAborted();
       if (!isCmaRetryableError(error))
-        for (const origin of authorized)
+        for (const { origin } of authorized)
           sessions.delete(`${id}:${origin.agent_id}`);
     }
   });
@@ -625,7 +672,12 @@ export async function discoverCmaSessions(
             `${origin.service_id}:${origin.agent_id}` === key &&
             origin.conversation_id === conversation,
         );
-        if (origin) sessions.set(key, { ...session, origin });
+        if (origin)
+          sessions.set(key, {
+            ...session,
+            origin,
+            connection: connectionFromOrigin(origin) ?? session.connection,
+          });
         else sessions.delete(key);
       }
     }
@@ -671,14 +723,18 @@ export async function discoverCmaSessions(
                   active.map((agent) => `${connection.id}:${agent.id}`),
                 );
                 for (const origin of origins) {
-                  if (origin.conversation_id !== conversation) continue;
+                  if (
+                    origin.conversation_id !== conversation ||
+                    origin.service_id !== connection.id
+                  )
+                    continue;
                   const agent = active.find(
                     (agent) => agent.id === origin.agent_id,
                   );
                   if (!agent) continue;
                   found.set(`${connection.id}:${agent.id}`, {
                     origin,
-                    connection,
+                    connection: connectionFromOrigin(origin) ?? connection,
                     routes,
                     agentId: agent.id,
                     title: (
@@ -771,7 +827,7 @@ async function activeCmaBatches(
     for (let page = 0; page < 100; page++) {
       const result = await listCmaAgents(
         ownerId,
-        connection.id,
+        connection,
         routes,
         signal,
         cursor,

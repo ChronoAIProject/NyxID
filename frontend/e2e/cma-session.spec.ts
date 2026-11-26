@@ -57,11 +57,18 @@ async function mockCma(
     pinDelayMs?: number;
     pinFailure?: number;
     deniedConnection?: boolean;
+    slug?: string;
   } = {},
 ) {
   let active = !options.idle;
   let completed = false;
   let callback: unknown = undefined;
+  let authorized = true;
+  let task: { operationId: string; purpose: string; state: string } | undefined;
+  const connection = {
+    ...cmaSession.connection,
+    slug: options.slug ?? cmaSession.connection.slug,
+  };
   let tails = 0;
   let heads = 0;
   const deniedId = "00000000-0000-4000-8000-000000000001";
@@ -70,15 +77,11 @@ async function mockCma(
   await page.route(
     "**/api/v1/assistant/nyxagent/cma-sessions?*",
     async (route) => {
-      if (
-        new URL(route.request().url()).searchParams.has("pins") &&
-        options.pinDelayMs
-      )
+      const query = new URL(route.request().url()).searchParams;
+      const discover = query.has("discover");
+      if (query.has("pins") && options.pinDelayMs)
         await new Promise((resolve) => setTimeout(resolve, options.pinDelayMs));
-      if (
-        new URL(route.request().url()).searchParams.has("pins") &&
-        options.pinFailure
-      )
+      if (query.has("pins") && options.pinFailure)
         return route.fulfill({
           status: options.pinFailure,
           json: {
@@ -101,20 +104,27 @@ async function mockCma(
                 specialist_id: source.specialist,
                 turn_id: "original-turn",
                 connection_name: cmaSession.connection.name,
-                connection_slug: cmaSession.connection.slug,
+                connection_slug: connection.slug,
                 cma_url:
                   options.receiptCallback === undefined
                     ? "https://cma.example/agents/agt_observed"
                     : options.receiptCallback,
               }))
+                .filter((receipt) => {
+                  const key = `${receipt.service_id}:${receipt.agent_id}`;
+                  return authorized && !discover &&
+                    (query.get("conversation") === receipt.conversation_id ||
+                      query.get("pins")?.split(",").includes(key)) &&
+                    (!query.has("agents") || query.get("agents")?.split(",").includes(key));
+                })
             : [],
           next_cursor: null,
-          connections: source
+          connections: source && authorized && discover
             ? [
                 ...(options.deniedConnection
-                  ? [{ ...cmaSession.connection, id: deniedId }]
+                  ? [{ ...connection, id: deniedId }]
                   : []),
-                cmaSession.connection,
+                connection,
               ]
             : [],
         },
@@ -144,7 +154,7 @@ async function mockCma(
         },
       });
     }
-    if (url.pathname.includes(deniedId))
+    if (url.pathname.includes(deniedId) || url.searchParams.get("_nyxid_via") === deniedId)
       return route.fulfill({
         status: 403,
         json: {
@@ -160,6 +170,16 @@ async function mockCma(
             Object.values(cmaSession.routes).map((path) => [path, { get: {} }]),
           ),
         },
+      });
+    }
+    if (
+      !authorized ||
+      !url.pathname.startsWith(`/api/v1/proxy/s/${connection.slug}/`) ||
+      url.searchParams.getAll("_nyxid_via").join(",") !== connection.id
+    ) {
+      return route.fulfill({
+        status: 404,
+        json: { error: "not_found", error_code: 1003, message: "Downstream service not found" },
       });
     }
     const second = url.pathname.includes("/agt_second/");
@@ -225,6 +245,10 @@ async function mockCma(
       title: cmaSession.title,
       status: active ? "working" : "ready",
       ...(callback === undefined ? {} : { callback_url: callback }),
+      ...(task ? {
+        bootstrap: { operation_id: task.operationId },
+        first_message: { purpose: task.purpose, state: task.state },
+      } : {}),
     };
     const otherAgent = {
       id: "agt_second",
@@ -244,6 +268,8 @@ async function mockCma(
   });
   return {
     requests,
+    setAuthorized: (value: boolean) => { authorized = value; },
+    setTask: (value: typeof task) => { task = value; },
     setCallback: (value: unknown) => {
       callback = value;
     },
@@ -501,6 +527,68 @@ for (const width of [1440, 390]) {
     await expect(receipt.getByRole("button", { name: /Pin CMA/ })).toHaveCount(0);
   });
 }
+
+test("recovers the exact initial task outcome after reload and respects connection withdrawal", async ({ page }) => {
+  const cma = await mockCma(page, { idle: true, slug: "my-cma-connection" });
+  const lifecycleId = "original-lifecycle-operation";
+  await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
+  await page.evaluate(({ connectionId, agentId, lifecycleId }) => {
+    const state = JSON.parse(sessionStorage.getItem("nyxagent-http-fixture-v4")!) as {
+      rows: [string, { history: { cma_operations: unknown[] } }][];
+    };
+    const conversation = new URL(location.href).searchParams.get("c");
+    state.rows.find(([id]) => id === conversation)![1].history.cma_operations = [
+      {
+        id: "initial-task-receipt", turn_id: "original-turn", service_id: connectionId,
+        agent_id: agentId, kind: "cma_provisioning", operation_id: lifecycleId,
+        idempotency_key: null, status: "succeeded", phase: "agent_startup",
+        state: "delivered", reason: "completed", monitor_name: "NyxBot",
+        created_at: "2026-11-17T07:15:09Z", checked_at: "2026-11-17T07:15:09Z",
+      },
+      {
+        id: "already-recorded-response", turn_id: "original-turn", service_id: connectionId,
+        agent_id: agentId, kind: "cma_response", operation_id: "resp_original",
+        idempotency_key: null, status: "completed", phase: null,
+        state: "delivered", reason: "completed", monitor_name: "NyxBot",
+        created_at: "2026-11-17T07:15:09Z", checked_at: "2026-11-17T07:15:09Z",
+      },
+    ];
+    sessionStorage.setItem("nyxagent-http-fixture-v4", JSON.stringify(state));
+  }, { connectionId: cmaSession.connection.id, agentId: cmaSession.agentId, lifecycleId });
+
+  const status = page.locator('[data-cma-operation="initial-task-receipt"]').getByRole("status");
+  const detailPath = `/api/v1/proxy/s/my-cma-connection/api/v1/agents/${cmaSession.agentId}`;
+  const reloadWithDetail = async () => {
+    const detail = page.waitForResponse((response) => new URL(response.url()).pathname === detailPath);
+    await page.reload();
+    const response = await detail;
+    expect(response.status()).toBe(200);
+    expect(new URL(response.url()).searchParams.get("_nyxid_via")).toBe(cmaSession.connection.id);
+  };
+
+  cma.setTask({ operationId: lifecycleId, purpose: "task", state: "completed" });
+  await reloadWithDetail();
+  await expect(status).toHaveText("Completed");
+  await reloadWithDetail();
+  await expect(status).toHaveText("Completed");
+
+  cma.setAuthorized(false);
+  cma.requests.length = 0;
+  const denial = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname.endsWith("/cma-sessions") && url.searchParams.has("agents");
+  });
+  await page.reload();
+  expect(await (await denial).json()).toMatchObject({ sessions: [] });
+  await expect(status).toHaveText("Ready");
+  await expect(page.locator('[data-cma-operation="already-recorded-response"]').getByRole("status")).toHaveText("Completed");
+  expect(cma.requests).toEqual([]);
+
+  cma.setAuthorized(true);
+  await reloadWithDetail();
+  await expect(status).toHaveText("Completed");
+  expect(cma.tailCount()).toBe(0);
+});
 
 for (const width of [1440, 390]) {
   test(`retains request status and one execution entry in the original live card (${width}px)`, async ({ page }) => {

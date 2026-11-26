@@ -71,9 +71,11 @@ export function CmaSessionCards() {
 export function CmaSessionObserver({
   children,
   operations = [],
+  conversationId,
 }: {
   readonly children: (cards: ReactNode) => ReactNode;
   readonly operations?: readonly CmaOperation[];
+  readonly conversationId?: string;
 }) {
   useUiTranslation();
   const ownerId = useAuthStore((state) => state.user?.id);
@@ -98,11 +100,12 @@ export function CmaSessionObserver({
             key={`${observation.session.connection.id}:${observation.session.agentId}`}
             ownerId={ownerId}
             observation={observation}
+            conversationId={conversationId}
             operations={operations.filter((operation) => matchingSession(operation, observation.session))}
           />
         ))}
         {receipts.slice(0, receiptLimit).map((operation) => (
-          <CmaOperationCard key={operation.id} operation={operation} />
+          <CmaOperationCard key={operation.id} operation={operation} conversationId={conversationId} />
         ))}
         {receipts.length > receiptLimit ? (
           <Button variant="ghost" size="sm" onClick={() => setReceiptLimit((value) => value + 3)}>{translateUi("Show older CMA submissions (")}{receipts.length - receiptLimit})
@@ -194,10 +197,12 @@ function CmaSessionCard({
   ownerId,
   observation,
   operations,
+  conversationId,
 }: {
   readonly operations: readonly CmaOperation[];
   readonly ownerId: string;
   readonly observation: ObservedCmaSession;
+  readonly conversationId?: string;
 }) {
   useUiTranslation();
   const { session, state, reconnect } = observation;
@@ -373,7 +378,7 @@ function CmaSessionCard({
             state={state}
             activeActionId={collapsed ? undefined : activeActionId}
           />
-          <CmaSessionRequests operations={operations} scrollBody={scrollBody} visible={!collapsed} />
+          <CmaSessionRequests operations={operations} scrollBody={scrollBody} visible={!collapsed} conversationId={conversationId} />
           <SessionDetails
             session={session}
             state={state}
