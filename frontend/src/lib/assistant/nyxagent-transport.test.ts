@@ -2085,6 +2085,66 @@ it("inherits a specialist's configured profile unless the owner explicitly selec
   expect(bodies[1]).toEqual({ agent_id: agent.id, model: "nyxagent/research", text: "Use this model" });
 });
 
+it("starts the owner's NyxBot on its configured model and advertises the browser artifact capability", async () => {
+  const transport = new NyxAgentTransport();
+  transport.setModel("nyxagent/stale-draft");
+  let body: unknown;
+  let headers: Headers | undefined;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+    if (endpoint.endsWith("/turns")) { body = JSON.parse(String(init.body)); headers = new Headers(init.headers); return stream(); }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [conversation()], next_cursor: null });
+    return json(history());
+  };
+  const agent = { id: "nyxbot-id", kind: "nyxbot" as const, name: "NyxBot", destroyed: false };
+  await transport.send(undefined, "Continue setup", vi.fn(), undefined, { agent });
+  expect(body).toEqual({ agent_id: agent.id, text: "Continue setup" });
+  expect(headers?.get("X-NyxID-Chat-Capabilities")).toBe("nyxbot-handoff-v1");
+});
+
+it("keeps a pending handoff out of the ordinary draft composer", async () => {
+  const transport = new NyxAgentTransport();
+  let release!: () => void;
+  globalThis.__nyxidAssistantHttpMock = async ({ endpoint }) => {
+    if (endpoint.endsWith("/turns")) { await new Promise<void>((resolve) => { release = resolve; }); return stream(); }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [conversation()], next_cursor: null });
+    return json(history());
+  };
+  const sending = transport.send(undefined, "Handoff task", vi.fn(), undefined, { agent: { id: "nyxbot", kind: "nyxbot", name: "NyxBot", destroyed: false }, clientDraftKey: "handoff:receipt" });
+  expect(transport.session(undefined).messages).toHaveLength(0);
+  expect(transport.isRunning(undefined)).toBe(false);
+  await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+  release();
+  await sending;
+});
+
+it("excludes an unadopted handoff from scoped and full conversation lists", async () => {
+  const transport = new NyxAgentTransport();
+  const agent = { id: "nyxbot-id", kind: "nyxbot" as const, name: "NyxBot", destroyed: false };
+  const saved = { ...conversation(), agent };
+  let release!: () => void;
+  globalThis.__nyxidAssistantHttpMock = async ({ endpoint }) => {
+    if (endpoint.endsWith("/turns")) {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return stream();
+    }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [saved], next_cursor: null });
+    return json({ ...history(), conversation: saved });
+  };
+  const sending = transport.send(undefined, "Handoff task", vi.fn(), undefined, {
+    agent,
+    clientDraftKey: "handoff:receipt",
+  });
+  await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+  try {
+    expect((await transport.list(agent.id)).map((row) => row.id)).toEqual([id]);
+    expect(transport.getConversations(agent.id).map((row) => row.id)).toEqual([id]);
+    expect((await transport.list()).map((row) => row.id)).toEqual([id]);
+  } finally {
+    release();
+    await sending;
+  }
+});
+
 it("persists decision continuation provenance through the request, optimistic turn and history without losing its turn count", async () => {
   const transport = new NyxAgentTransport();
   const card = "11111111-1111-4111-8111-111111111111";

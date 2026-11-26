@@ -120,6 +120,14 @@ notice).
 - Unchanged: secret exclusions, per-service proxy approval policies, node
   routing, billing to the acting person.
 
+In a direct browser chat, a specialist can offer a user-clicked
+**Continue with NyxBot** artifact for setup outside its authority, such as
+creating an Agent Key or channel bot. The card shows a bounded task summary;
+only the user's click starts a fresh personal NyxBot thread through ordinary
+user admission. Rendering the proposal does not contact NyxBot, request access,
+or grant permission. NyxBot uses its existing setup journeys and confirmations.
+See [the browser handoff contract](05-frontend-ui.md#specialist-setup-handoffs).
+
 ## 6. Thread authority and permission modes
 
 New and legacy NyxBot threads retain the full account authority needed by NyxBot; the owner-level permission mode and agent override govern confirmations. A legacy Ask-mode row

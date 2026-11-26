@@ -66,6 +66,81 @@ Direct surface. Typed query and turn ownership live in
 in `chat-message.tsx`, `chat-composer.tsx`, `assistant-sidebar.tsx`, and the
 card components.
 
+## Specialist setup handoffs
+
+A specialist in a direct user turn can offer a `nyxbot-handoff` fenced JSON
+artifact when account setup requires NyxBot, including creating an Agent Key,
+setting up a channel bot, or connecting a service. Version 1 contains exactly
+`version: 1`, `title` (1–120 characters), and `task` (1–4000 characters).
+The task must stand alone, include only relevant user-supplied context, and
+exclude credentials, private memory, and unrelated history.
+
+Only the first top-level artifact in an eligible, completed direct-user reply
+renders an active **Continue with NyxBot** card. The server marks private,
+personal specialist threads eligible; shared/organization specialists,
+guests, groups, channels, automations and other turn origins remain inert.
+The entire proposed task is visible and the CTA says it will be sent as the
+person's message. Known credential patterns (NyxID, bearer, Telegram, OpenAI,
+GitHub, Slack, JWT and PEM, among others) are refused. This screening does not
+replace the rule that secrets belong in setup forms.
+
+Rendering or restoring history starts no work. Clicking starts an ordinary
+user turn with the owner's live NyxBot agent ID and no model override, then
+opens the new conversation in the same app. The specialist's authority is not
+inherited. NyxBot's profile, access mode, live checks and approvals still apply.
+If navigation changes while admission is pending, adoption does not undo it.
+
+A bounded browser receipt stores only a payload hash and outcome, keyed by
+actor, source conversation and message. It survives reload, navigation and
+virtualized row remounts; returning to the source card opens the existing
+NyxBot thread. Unknown admitted outcomes remain non-replayable. Web Locks
+serialize duplicate clicks across tabs where available. Receipts are local to
+this browser (at most 200); they are not a server-wide or cross-device
+exactly-once guarantee.
+
+Handoff instructions are stable for the private specialist thread, so changing
+turn origins does not reset live model context. The current turn advertises
+presentation support through `X-NyxID-Chat-Capabilities: nyxbot-handoff-v1`;
+only that fact varies in turn context. Unsupported clients are not instructed
+to generate the card. Native mobile/CLI history may show a historical browser
+artifact as inert fenced text; active handoff rendering is a browser feature.
+
+## Platform setup and navigation over chat
+
+| Journey | In-app surface | Completion |
+| --- | --- | --- |
+| Service connector link | Existing connection dialog | Existing server watch resumes the chat |
+| Hosted channel-bot link | Existing token-bound bot setup in a dialog | Existing server watch resumes the chat |
+| Fresh direct channel setup | Existing bot setup dialog | Explicit finish verifies metadata and sends a continuation to the source chat |
+| Telegram request recovery | Existing bot setup dialog, retaining the exact request ID | Plain Back to chat; existing server watch or app webhook owns completion |
+| Agent Key creation | Existing key form and one-time result dialog | Explicit Back to chat verifies the resource ID and sends a continuation to the source chat |
+| Agent details / Grants | Existing sheet over the selected chat | Existing permission controls |
+| Automations, Machines, Saved logins and canonical Studio management links | Existing route within the same app | Existing page controls; Back returns to chat |
+
+The shared platform completion contract accepts only a resource kind and UUID.
+It reads the resource back through the authenticated API before sending a
+user continuation to the captured source conversation. The actor and identity
+revision are fenced across the read and send; changing the viewed thread does
+not retarget the result. Raw API keys, webhook secrets, credentials and arbitrary
+form values are never included. A rejected continuation preserves the one-time
+result for retry, without creating the resource again. Hosted connector/bot
+flows keep their server watches and do not add a second client continuation.
+Request recovery is not bound to the chat in which its link was opened, so it
+never synthesizes a continuation into that chat.
+
+Same-origin links are classified through an explicit allowlist. Modified clicks
+retain browser behavior. External, credentialed, fragmented and unsupported
+queries are excluded. Bot dialogs inherit app theme and accessibility settings;
+Escape/outside dismissal is blocked so a stray click cannot discard a one-time
+setup result. Embedded setup suppresses bot-management links and callback
+navigation. Standalone links keep their existing behavior. Telegram and other
+provider authorization steps retain their external flow.
+
+Advanced Studio links use their existing full app pages rather than newly
+invented modal forms. This change establishes the shared setup/completion path
+for the concrete supported journeys above; it does not add an executable
+artifact for every account-management operation.
+
 ## Conversation selection
 
 The route may select a durable conversation or the entry screen. The current

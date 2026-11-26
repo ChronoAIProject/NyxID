@@ -554,6 +554,58 @@ fn failure_diagnostics_normalize_unknown_upstream_codes() {
 }
 
 #[test]
+fn handoff_cards_are_offered_only_in_direct_specialist_user_turns() {
+    let mut row = stale_test_row(Utc::now());
+    row.role = AgentRole::Subagent;
+    row.channel = None;
+    row.group_id = None;
+    row.guest_turn = false;
+    row.active_turn.as_mut().unwrap().origin = TurnOrigin::User;
+    row.active_turn.as_mut().unwrap().report_to = None;
+    assert!(specialist_handoff_capability(&row).is_empty());
+    let without_capability = base_prompt(&row, None);
+    row.active_turn.as_mut().unwrap().note = Some(HANDOFF_UI_NOTE.into());
+    let stable = base_prompt(&row, None);
+    assert_eq!(without_capability, stable);
+    assert_eq!(specialist_handoff_capability(&row), HANDOFF_UI_NOTE);
+    assert!(stable.contains("language nyxbot-handoff"));
+
+    for origin in [
+        TurnOrigin::Orchestrator,
+        TurnOrigin::Event,
+        TurnOrigin::Channel,
+        TurnOrigin::Group,
+        TurnOrigin::Trigger,
+    ] {
+        row.active_turn.as_mut().unwrap().origin = origin;
+        assert_eq!(base_prompt(&row, None), stable);
+        assert!(specialist_handoff_capability(&row).is_empty());
+    }
+    row.active_turn.as_mut().unwrap().origin = TurnOrigin::User;
+    row.active_turn.as_mut().unwrap().report_to = Some("nyxa-parent".into());
+    assert!(specialist_handoff_capability(&row).is_empty());
+    row.active_turn.as_mut().unwrap().report_to = None;
+    row.guest_turn = true;
+    assert!(specialist_handoff_capability(&row).is_empty());
+    row.guest_turn = false;
+    row.group_id = Some("group".into());
+    assert!(specialist_handoff_capability(&row).is_empty());
+    row.group_id = None;
+    row.role = AgentRole::Orchestrator;
+    assert!(specialist_handoff_capability(&row).is_empty());
+    row.role = AgentRole::Subagent;
+    row.active_turn.as_mut().unwrap().voice_request_id = Some("voice".into());
+    assert!(specialist_handoff_capability(&row).is_empty());
+    assert_eq!(base_prompt(&row, None), stable);
+    row.active_turn.as_mut().unwrap().voice_request_id = None;
+    row.shared_agent_thread = true;
+    assert!(!handoff_thread_eligible(&row));
+    row.shared_agent_thread = false;
+    row.agent_owner_id = Some("organization".into());
+    assert!(!handoff_thread_eligible(&row));
+}
+
+#[test]
 fn web_research_guidance_reaches_both_roles_without_lifting_guest_limits() {
     let mut row = stale_test_row(Utc::now());
     for role in [AgentRole::Orchestrator, AgentRole::Subagent] {

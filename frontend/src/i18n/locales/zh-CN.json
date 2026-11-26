@@ -12145,5 +12145,14 @@
   "Lark attachment write: {{reason}}. Check the saved outcome before retrying.": "Lark 附件写入：{{reason}}。重试前请检查已记录的结果。",
   "This model request requires approval that this thread cannot present. Review Approval settings before retrying.": "此模型请求需要审批，但当前会话无法显示审批。请先检查审批设置，再重试。",
   "An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.": "审批策略拒绝了此次模型调用。请检查审批设置中模型服务的拒绝规则；如果是组织策略，请联系组织管理员。",
-  "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.": "组织要求对此模型服务进行审批。请组织管理员检查审批设置中的策略。"
+  "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.": "组织要求对此模型服务进行审批。请组织管理员检查审批设置中的策略。",
+  "Continue with NyxBot": "交由 NyxBot 继续",
+  "Open NyxBot chat": "打开 NyxBot 对话",
+  "NyxBot will continue this task in a new chat. You can review any required setup or approvals there.": "NyxBot 将在新对话中继续此任务。你可以在那里查看所需的设置或审批。",
+  "Could not start NyxBot. Try again.": "无法启动 NyxBot。请重试。",
+  "NyxBot accepted this task. Check your chats before trying again.": "NyxBot 已接受此任务。请先查看对话，再决定是否重试。",
+  "This task may already have started. Check your chats before trying again.": "此任务可能已经开始。请先查看对话，再决定是否重试。",
+  "NyxBot is unavailable. Refresh your chats and try again.": "NyxBot 暂时不可用。请刷新对话后重试。",
+  "Send this task as your message to NyxBot in a new chat. Review any required setup or approvals there.": "将此任务作为你的消息发送到新的 NyxBot 对话。你可以在那里查看所需的设置或审批。",
+  "Could not continue the chat. Try again.": "无法继续对话。请重试。"
 }

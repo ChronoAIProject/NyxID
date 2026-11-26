@@ -12145,5 +12145,14 @@
   "Lark attachment write: {{reason}}. Check the saved outcome before retrying.": "Lark 附件寫入：{{reason}}。重試前請檢查已記錄的結果。",
   "This model request requires approval that this thread cannot present. Review Approval settings before retrying.": "此模型請求需要審批，但目前對話無法顯示審批。請先檢查審批設定，再重試。",
   "An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.": "審批政策拒絕了此次模型呼叫。請檢查審批設定中模型服務的拒絕規則；如果是組織政策，請聯絡組織管理員。",
-  "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.": "組織要求對此模型服務進行審批。請組織管理員檢查審批設定中的政策。"
+  "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.": "組織要求對此模型服務進行審批。請組織管理員檢查審批設定中的政策。",
+  "Continue with NyxBot": "交由 NyxBot 繼續",
+  "Open NyxBot chat": "開啟 NyxBot 對話",
+  "NyxBot will continue this task in a new chat. You can review any required setup or approvals there.": "NyxBot 將在新對話中繼續此任務。你可以在那裡查看所需的設定或核准。",
+  "Could not start NyxBot. Try again.": "無法啟動 NyxBot。請重試。",
+  "NyxBot accepted this task. Check your chats before trying again.": "NyxBot 已接受此任務。請先查看對話，再決定是否重試。",
+  "This task may already have started. Check your chats before trying again.": "此任務可能已經開始。請先查看對話，再決定是否重試。",
+  "NyxBot is unavailable. Refresh your chats and try again.": "NyxBot 暫時無法使用。請重新整理對話後再試。",
+  "Send this task as your message to NyxBot in a new chat. Review any required setup or approvals there.": "將此任務作為你的訊息傳送至新的 NyxBot 對話。你可以在那裡查看所需的設定或核准。",
+  "Could not continue the chat. Try again.": "無法繼續對話。請重試。"
 }

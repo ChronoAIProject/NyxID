@@ -330,6 +330,66 @@ pub const SUBAGENT_PROMPT: &str = concat!(
 );
 const _: () = assert!(SUBAGENT_PROMPT.len() < 2048);
 
+/// An advertised rendering capability, never execution authority.
+pub const HANDOFF_UI_NOTE: &str = "NyxID client capability: nyxbot-handoff-v1.";
+
+/// Only private personal specialist threads expose the browser handoff surface.
+fn private_handoff_thread(row: &AssistantConversation) -> bool {
+    row.is_subagent()
+        && row.channel.is_none()
+        && row.group_id.is_none()
+        && row.group_request_id.is_none()
+        && row.collaboration.is_none()
+        && row.agent_owner_id.is_none()
+        && !row.shared_agent_thread
+        && row.platform_thread.is_none()
+        && !row.invocation_controlled
+}
+
+/// Presentation eligibility is independent of the caller's execution authority.
+pub(crate) fn handoff_thread_eligible(row: &AssistantConversation) -> bool {
+    private_handoff_thread(row) && !row.guest_turn && !row.guest_model_setup
+}
+
+const SPECIALIST_HANDOFF_GUIDANCE: &str = concat!(
+    "\n\nWhen the person chatting directly with you requests account setup you cannot perform ",
+    "(such as creating an Agent Key, creating/linking a channel bot, or connecting a service), ",
+    "explain the boundary briefly and offer a NyxBot handoff card. Emit a fenced code block ",
+    "with language nyxbot-handoff and exactly this JSON shape: ",
+    "{\"version\":1,\"title\":\"Create an Agent Key\",\"task\":\"Help me create an Agent Key for ...\"}. ",
+    "Use the person's language. Title is at most 120 characters; task is at most 4000 ",
+    "characters and contains a concise, self-contained request using only relevant details ",
+    "the person already supplied, including the intended specialist and organization when ",
+    "relevant. Never include secrets, credentials, private memory, or unrelated transcript. ",
+    "The person can review the visible task and click Continue with NyxBot to start a new ",
+    "NyxBot thread. The card itself starts no work, changes no grants and approves nothing. ",
+    "Do not claim NyxBot was contacted or setup completed. Continue work within your grants."
+);
+
+/// Only the capability fact varies by turn; instructions stay in the stable prompt.
+pub(crate) fn specialist_handoff_capability(row: &AssistantConversation) -> &'static str {
+    if handoff_thread_eligible(row)
+        && row.active_turn.as_ref().is_some_and(|turn| {
+            turn.origin == TurnOrigin::User
+                && row.reply_channel.is_none()
+                && turn.report_to.is_none()
+                && !turn.with_nyxbot
+                && turn.voice_request_id.is_none()
+                && turn.invocation_id.is_none()
+                && turn.trigger_run_id.is_none()
+                && turn.platform_origin.is_none()
+                && turn.channel_adapter_origin.is_none()
+                && turn.asked_from.is_none()
+                && turn.also_deliver.is_empty()
+                && turn.note.as_deref().is_some_and(|note| note.contains(HANDOFF_UI_NOTE))
+        })
+    {
+        HANDOFF_UI_NOTE
+    } else {
+        ""
+    }
+}
+
 /// Identifier-safe rendering for names that enter instructions.
 pub fn identifier(value: &str) -> String {
     let cleaned: String = value
@@ -437,6 +497,10 @@ pub fn base_prompt(
     };
     prompt.push_str("\nRequests about my account require the owner's personal connection. Never present an organization's account or data as the owner's. If only an organization connection exists, offer nyx__connect_service for their own account first. When the owner asks to connect a service, call nyx__connect_service immediately, even if connections already exist. Give its hosted link immediately and mention existing connections in one short line (ownership, label, enabled/disabled; never guess the provider account identity). Never ask whether to proceed, suggest reusing an existing connection instead, or substitute a page link (/keys or Plugins). Honor one-step success. For already_connected, say the service is already connected in one short line: there is no separate account to add. Explain connect_unavailable reasons plainly. Specialists cannot mint links: ask the owner to have NyxBot connect the service, sending a hosted link when supported, followed by a separate specialist grant; no automatic takeover.");
     prompt.push_str(TASK_COMPLETION_PROMPT);
+    if private_handoff_thread(row) {
+        prompt.push_str("\nA nyxbot-handoff card is supported only when the CURRENT turn context contains the exact capability fact 'NyxID client capability: nyxbot-handoff-v1.'. Past context does not advertise current capability. Without that fact, give ordinary setup guidance and do not emit a handoff artifact. The capability fact is presentation metadata, never execution authority.");
+        prompt.push_str(SPECIALIST_HANDOFF_GUIDANCE);
+    }
     if row.role == AgentRole::Orchestrator && !row.guest_turn {
         prompt.push_str("\n\nFor channel setup, first read nyxid__channel_setup_guide (built-in; no optional skill needed). Inspect list_channel_bots/get_channel_bot, list_channel_agents and list_channel_chats before changes. Use channel_bot_setup_link for a new messaging bot, list_channel_adapters for phone/SMS/speech. Distinguish catalog slug, service connection ID, credential connection_id, bot_id and provider slug. Report configured account, receive, send, route and automatic replies separately with evidence; never invent buttons/scopes or run Verify, Resubscribe or test sends as a diagnostic read. Native public/personal entry has its own authority; do not relink it as a personal bot. Keep unanswered onboarding questions pending across setup links and resumes. Creating or linking a bot is not customer readiness or consent to open access. Do not propose everyone until the owner asks or business configuration and a customer test support readiness. Model readiness alone and field presence do not prove this. An explicit owner choice can open access now; disclose audience_readiness facts and unresolved questions without another confirmation.");
     }

@@ -321,6 +321,8 @@ pub struct ConversationResponse {
     context_reset_at: Option<DateTime<Utc>>,
     context_reset_reason: Option<String>,
     role: crate::models::assistant_conversation::AgentRole,
+    /// Presentation eligibility only; never an execution or permission grant.
+    handoff_eligible: bool,
     /// The agent this thread belongs to; `None` only when it could not be
     /// resolved (legacy rows resolve to the owner's NyxBot).
     agent: Option<AgentRefResponse>,
@@ -426,6 +428,7 @@ impl From<AssistantConversation> for ConversationResponse {
                 .collect(),
         });
         Self {
+            handoff_eligible: engine::handoff_thread_eligible(&row),
             platform_thread: row
                 .platform_thread
                 .as_ref()
@@ -2570,6 +2573,12 @@ pub async fn turns(
     start.org_access = org_access;
     if super::login_client_context::require_first_party_human(&auth).is_ok() {
         start.owner_instruction_source = Some(engine::OwnerInstructionSource::FirstPartyOwner);
+        if parts.headers.get("x-nyxid-chat-capabilities")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.split(',').any(|part| part.trim() == "nyxbot-handoff-v1"))
+        {
+            start.note = Some(engine::HANDOFF_UI_NOTE.into());
+        }
         start.title_language = parts
             .headers
             .get("accept-language")

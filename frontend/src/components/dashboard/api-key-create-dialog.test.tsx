@@ -1,4 +1,5 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiKeyCreateDialog } from "./api-key-create-dialog";
@@ -83,6 +84,38 @@ function restrictedFinite() {
 }
 
 describe("new dashboard key intent", () => {
+  it("keeps one-time material in the form and reports only the resource ID after the user finishes", async () => {
+    const user = userEvent.setup();
+    const complete = vi.fn().mockRejectedValueOnce(new Error("A turn is already active.")).mockResolvedValue(undefined);
+    const close = vi.fn();
+    render(<ApiKeyCreateDialog externalOpen onExternalOpenChange={close} onComplete={complete} />);
+    await user.type(screen.getByLabelText("Name"), "CI");
+    await user.click(screen.getByRole("checkbox", { name: "read" }));
+    await user.click(screen.getByRole("button", { name: "Create Key" }));
+    expect(await screen.findByText("fixture")).toBeVisible();
+    expect(complete).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
+    expect(screen.getByText("fixture")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Back to chat" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("already active");
+    expect(screen.getByText("fixture")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Back to chat" }));
+    await waitFor(() => expect(close).toHaveBeenCalledWith(false));
+    expect(complete).toHaveBeenLastCalledWith("key");
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("discards a previous account's one-time result on identity transition", async () => {
+    const user = userEvent.setup();
+    render(<ApiKeyCreateDialog externalOpen />);
+    await user.type(screen.getByLabelText("Name"), "CI");
+    await user.click(screen.getByRole("checkbox", { name: "read" }));
+    await user.click(screen.getByRole("button", { name: "Create Key" }));
+    expect(await screen.findByText("fixture")).toBeVisible();
+    act(() => transitionAssistantIdentity(crypto.randomUUID()));
+    expect(screen.queryByText("fixture")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toHaveValue("");
+  });
   it("opens restricted and finite, resets on close, and resets after both owner transitions", async () => {
     const user = userEvent.setup();
     render(<ApiKeyCreateDialog />);

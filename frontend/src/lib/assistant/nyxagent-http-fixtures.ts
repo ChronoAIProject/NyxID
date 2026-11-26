@@ -336,6 +336,7 @@ export class NyxAgentHttpFixtures {
     const agent = this.agentOf(row);
     return {
       ...row.history.conversation,
+      handoff_eligible: agent.kind === "specialist" && !row.history.conversation.channel && !agent.destroyed_at,
       role: agent.kind === "specialist" ? "subagent" : "orchestrator",
       agent: {
         id: agent.id,

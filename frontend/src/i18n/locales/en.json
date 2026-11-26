@@ -12145,5 +12145,14 @@
   "Lark attachment write: {{reason}}. Check the saved outcome before retrying.": "Lark attachment write: {{reason}}. Check the saved outcome before retrying.",
   "This model request requires approval that this thread cannot present. Review Approval settings before retrying.": "This model request requires approval that this thread cannot present. Review Approval settings before retrying.",
   "An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.": "An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.",
-  "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.": "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings."
+  "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.": "The organization requires approval for this model service. Ask its administrator to review the policy in Approval settings.",
+  "Continue with NyxBot": "Continue with NyxBot",
+  "Open NyxBot chat": "Open NyxBot chat",
+  "NyxBot will continue this task in a new chat. You can review any required setup or approvals there.": "NyxBot will continue this task in a new chat. You can review any required setup or approvals there.",
+  "Could not start NyxBot. Try again.": "Could not start NyxBot. Try again.",
+  "NyxBot accepted this task. Check your chats before trying again.": "NyxBot accepted this task. Check your chats before trying again.",
+  "This task may already have started. Check your chats before trying again.": "This task may already have started. Check your chats before trying again.",
+  "NyxBot is unavailable. Refresh your chats and try again.": "NyxBot is unavailable. Refresh your chats and try again.",
+  "Send this task as your message to NyxBot in a new chat. Review any required setup or approvals there.": "Send this task as your message to NyxBot in a new chat. Review any required setup or approvals there.",
+  "Could not continue the chat. Try again.": "Could not continue the chat. Try again."
 }

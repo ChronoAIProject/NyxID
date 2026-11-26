@@ -112,7 +112,7 @@ export function useResubscribeChannelBot() {
 // Mutations
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function useCreateChannelBot() {
+export function useCreateChannelBot(authorityGuard?: () => void) {
   const link = useChannelConnectLinkContext();
   const queryClient = useQueryClient();
 
@@ -121,12 +121,10 @@ export function useCreateChannelBot() {
     mutationFn: async (
       data: CreateChannelBotRequest,
     ): Promise<CreateChannelBotResponse> => {
-      return link
-        ? api.post<CreateChannelBotResponse>(
-            "/channel-connect-links/complete",
-            { ...data, token: link.token },
-          )
-        : api.post<CreateChannelBotResponse>("/channel-bots", data);
+      authorityGuard?.();
+      const endpoint = link ? "/channel-connect-links/complete" : "/channel-bots";
+      const request = link ? { ...data, token: link.token } : data;
+      return authorityGuard ? api.post<CreateChannelBotResponse>(endpoint, request, { authorityGuard }) : api.post<CreateChannelBotResponse>(endpoint, request);
     },
     onSettled: () => {
       // Registration can save a bot before webhook setup fails.

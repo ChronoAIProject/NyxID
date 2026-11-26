@@ -2012,6 +2012,7 @@ fn private_cors(allowed_origins: std::collections::HashSet<axum::http::HeaderVal
             "X-API-Key".parse().unwrap(),
             "X-NyxID-Client".parse().unwrap(),
             "X-NyxID-Client-Version".parse().unwrap(),
+            "X-NyxID-Chat-Capabilities".parse().unwrap(),
             "X-NyxID-Analytics".parse().unwrap(),
             "X-NyxID-Analytics-Account".parse().unwrap(),
             "DNT".parse().unwrap(),
@@ -2338,7 +2339,7 @@ mod tests {
                         .header("Access-Control-Request-Method", "PUT")
                         .header(
                             "Access-Control-Request-Headers",
-                            "content-type,x-nyxid-analytics,x-nyxid-analytics-account,dnt",
+                            "content-type,x-nyxid-analytics,x-nyxid-analytics-account,dnt,x-nyxid-chat-capabilities",
                         )
                         .body(axum::body::Body::empty())
                         .unwrap(),
@@ -2362,6 +2363,7 @@ mod tests {
                 assert!(allowed.contains("x-nyxid-analytics"));
                 assert!(allowed.contains("x-nyxid-analytics-account"));
                 assert!(allowed.contains("dnt"));
+                assert!(allowed.contains("x-nyxid-chat-capabilities"));
             } else {
                 assert!(
                     !response
