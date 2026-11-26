@@ -1149,20 +1149,29 @@ pub(crate) fn resolve_personal_definitions<'a>(
     enabled_keys
 }
 
-/// Authoring requires both the org Admin's effective flag and live rollout readiness.
-pub(crate) async fn org_admin_authoring_available(
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AuthoringUnavailableReason {
+    FlagOff,
+    ReadinessMissing,
+}
+
+/// The caller has already established the org Admin's management permission.
+pub(crate) async fn org_admin_authoring_unavailable_reason(
     db: &mongodb::Database,
     actor: &str,
     org: &str,
     key: &str,
-) -> AppResult<bool> {
+) -> AppResult<Option<AuthoringUnavailableReason>> {
     let enabled = resolve_enabled_features(db, org, actor, OrgRole::Admin).await?;
     if !enabled.iter().any(|candidate| candidate == key) {
-        return Ok(false);
+        return Ok(Some(AuthoringUnavailableReason::FlagOff));
     }
     match super::security_readiness_service::require_serving(db, key).await {
-        Ok(()) => Ok(true),
-        Err(AppError::SecurityReadinessUnavailable) => Ok(false),
+        Ok(()) => Ok(None),
+        Err(AppError::SecurityReadinessUnavailable) => {
+            Ok(Some(AuthoringUnavailableReason::ReadinessMissing))
+        }
         Err(e) => Err(e),
     }
 }
