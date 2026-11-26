@@ -1440,6 +1440,27 @@ fn telegram_connect_transaction_uses_live_generation_after_real_aba_transfer() {
     crate::test_utils::run_native_journey_test("telegram_connect_transfer", || async {
         use crate::services::ownership_transfer_service as transfer;
         let f = fixture("telegram").await;
+        // Real transfer rebinds credentials. The lightweight bot_doc placeholder
+        // is deliberately empty; give this journey a valid scoped local token.
+        let token = crate::crypto::record_field::encrypt(
+            &f.state.encryption_keys,
+            crate::models::channel_bot::COLLECTION_NAME,
+            &f.bot.id,
+            OWNER,
+            "bot_token_encrypted",
+            b"local-transfer-token",
+        )
+        .await
+        .unwrap();
+        f.state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .update_one(doc!{"_id":&f.bot.id},doc!{"$set":{
+                "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token},
+                "secret_context_versions.bot_token_encrypted":3,
+            }}).await.unwrap();
+        TEST_BOT_USER_IDS
+            .lock()
+            .unwrap()
+            .insert(f.bot.id.clone(), "123".into());
         crate::services::role_service::seed_system_roles(&f.state.db)
             .await
             .unwrap();
@@ -1513,6 +1534,10 @@ fn telegram_connect_transaction_uses_live_generation_after_real_aba_transfer() {
             .unwrap();
         assert_eq!(bot.ownership_version, 2);
         assert_eq!(
+            bot.secret_context_versions.get("bot_token_encrypted"),
+            Some(&3)
+        );
+        assert_eq!(
             crate::handlers::channel_bots::health_loaded(&f.state, &bot, false, true)
                 .await
                 .unwrap()
@@ -1521,6 +1546,7 @@ fn telegram_connect_transaction_uses_live_generation_after_real_aba_transfer() {
             Some("active")
         );
         disconnect(&f.state, OWNER, &row.id).await.unwrap();
+        TEST_BOT_USER_IDS.lock().unwrap().remove(&f.bot.id);
         f.state.db.drop().await.unwrap();
     });
 }
