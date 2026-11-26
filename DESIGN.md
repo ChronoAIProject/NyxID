@@ -500,6 +500,45 @@ its controls, including wrapped compact headers. Defer rail position and size
 writes to an animation frame outside ResizeObserver delivery: moving the
 rail's top also changes the measured viewport height during header animation.
 
+### Pending decision stack
+
+NyxAgent private chats pin live human decisions above the composer, between its
+error notice and input. Multiple requests share one card with up to two neutral
+layers peeking above it (6px/12px offsets); use `bg-card`, `bg-muted`,
+`border-border`, `rounded-xl` and `shadow-sm`. Layers are decorative and never
+contain controls. The stack owns the frame; its cards omit transcript margins,
+width limits and duplicate outer frames. The user requested this layered pattern
+on 2026-11-26, with an Opus design consultation.
+
+The desktop header says “Needs your decision” or “N requests need your decision”
+(“N decisions” on mobile); a
+separate “1 out of N” pager has labelled Previous/Next buttons and stops at each
+end. A collapse button retains the header and count. Only the front card is
+accessible and interactive; preserve inactive review state with `hidden` and
+`inert`. New requests do not replace the front card. Settled or expired requests
+leave the stack and keep their history; markers provide Review navigation while
+a request is pinned. Do not add bulk approval or decision keyboard shortcuts.
+
+Keep pinned cards compact. Long requests show their title, effect, target and a
+bounded preview; skill drafts also show file/line counts and any scope omissions.
+Their footer offers Review and Deny (or the request's existing dismissal action).
+Allow is available only in full review. Short requests keep direct decision
+controls in the pinned footer. The footer stays outside the card's scroll area,
+whose height is capped at `min(30dvh,14rem)` on mobile and `min(36dvh,20rem)` on
+desktop. Keep the composer visible and reserve the measured dock height below
+the transcript.
+
+Full review uses a desktop dialog and full-height mobile sheet, with one scrolling
+body and an always-visible decision footer. Full skill files wrap without nested
+scrolling; edits open the existing Skills editor. Preserve scope and validity
+choices when review closes and reopens. Opening review focuses its heading;
+closing returns focus to Review, and changing the selected request closes review.
+Count changes use a
+small live announcement, not a live region around the review content. Arrivals
+never steal focus. Resolving the focused card moves focus to the next card's
+header, or the composer when empty, with a 750ms guard on newly promoted
+decision controls. Layer transitions obey both reduced-motion settings.
+
 ### Agent drawer search
 
 The agent details drawer has matching circular Search and Close header icon
@@ -883,6 +922,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-26 | Pending human decisions share a compact pinned card stack | User-requested layering keeps live decisions above the composer, separates the pending count from card position, and returns settled requests to history. Following Opus visual review, long requests open full review with one scrolling body and a fixed decision footer; short requests keep direct controls in a fixed card footer. One interactive copy, stable selection, preserved choices, inert inactive cards and guarded promotion protect exact approvals. |
 | 2026-11-05 | Account text and range rows use deliberate shared layouts | Stack account text labels above left-aligned borderless inputs, provide explicit password placeholders and an editable-name affordance, and truncate long read-only email values beside their verification context. RangeControl aligns each label and current value above the slider with one muted helper, in both shells and mobile widths. MFA switches reflect the server state through setup/disable confirmation, announce pending/errors, and prevent dismissal during requests. |
 | 2026-11-05 | Conversation previews require an intentional gesture | Passing pointers leave the rail quiet. Press and drag preview until release; keyboard focus retains its preview. Browser coverage includes virtualized-message jumps, isolated wheel scrolling and one roving tab stop. |
 | 2026-11-05 | Account Settings shares inset grouped editing in both shells | Profile, Security, Sessions, MCP, Display and Privacy use sibling groups and external help. The panel header shares its background; visited segmented tabs retain drafts and one dirty-only viewport bar reviews profile/password edits without exposing passwords. Studio reuses the same forms; immediate actions and URL/focus/dismiss behavior stay intact. Mobile uses the full-width dialog sheet with keyboard-aware actions. |

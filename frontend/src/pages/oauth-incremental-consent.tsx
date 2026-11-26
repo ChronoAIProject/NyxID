@@ -12,10 +12,17 @@ import { DetailRow } from "@/components/shared/detail-row";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { useUserServices } from "@/hooks/use-user-services";
+import { useOAuthConsentDisclosure } from "@/hooks/use-oauth-consent-disclosure";
 import { OAUTH_SCOPE_META } from "@/lib/constants";
 import type { UserServiceResponse } from "@/schemas/keys";
 import type { IncrementalConsentRequest } from "@/schemas/oauth-consent";
 import { useAuthStore } from "@/stores/auth-store";
+import { ConsentDuration, ConsentServiceSummary, ServiceConsentDetails, ConsentUnavailableService, type ConsentProvenance } from "./oauth-consent-disclosure";
+
+function organizationName(service: UserServiceResponse): string | null {
+  const source = service.credential_source;
+  return source.type === "org" ? source.org_name : null;
+}
 
 function ServiceIdentity({
   service,
@@ -23,7 +30,6 @@ function ServiceIdentity({
   readonly service: UserServiceResponse;
 }) {
   useUiTranslation();
-  const source = service.credential_source;
   return (
     <span className="block min-w-0">
       <span className="block break-words type-card-title text-foreground">
@@ -36,11 +42,6 @@ function ServiceIdentity({
       )}
       <span className="mt-1 block break-all type-secondary text-text-tertiary">
         {service.slug}
-      </span>
-      <span className="mt-1 block type-secondary text-muted-foreground">
-        {source.type === "org"
-          ? translateUi("Organization · {{value1}}", { value1: source.org_name })
-          : translateUi("Personal")}
       </span>
     </span>
   );
@@ -85,12 +86,37 @@ export function OAuthIncrementalConsentPage({
     ? []
     : requiredIds.filter((id) => !currentIds.includes(id));
   const additions = [...new Set([...requiredAdditions, ...optionalIds])];
+  const submittedAccess = {
+    allow_all_services: snapshot?.allow_all_services ?? false,
+    allowed_service_ids: [...new Set([...currentIds, ...additions])],
+  };
+  const { data: disclosure } = useOAuthConsentDisclosure(
+    available.map((service) => service.id),
+    Boolean(snapshot) && !isLoading && !isError,
+  );
+  const disclosures = new Map(disclosure?.services.map((item) => [item.service_id, item]));
+  const summaryInventory = new Map(available.map((service) => [service.id, {
+    id: service.id,
+    name: service.label || service.catalog_service_name || service.slug,
+    secondary: service.label || service.catalog_service_name ? service.slug : undefined,
+    orgName: organizationName(service),
+  }]));
+  const summaryId = "oauth-incremental-submitted-service-access";
+  const inventoryState = isError ? "failed" : isLoading ? "loading" : "ready";
+  const approvedScopes = snapshot?.scopes.split(/\s+/) ?? [];
+  const offline = approvedScopes.includes("offline_access");
+  const broker = approvedScopes.includes("urn:nyxid:scope:broker_binding");
   const currentScopes =
     snapshot?.current_scopes.split(/\s+/).filter(Boolean) ?? [];
   const addedScopes =
     snapshot?.scopes
       .split(/\s+/)
       .filter((scope) => scope && !currentScopes.includes(scope) && (scope !== "machine" || machineSelectionRequired)) ?? [];
+  function selectionProvenance(id: string): ConsentProvenance[] {
+    if (submittedAccess.allow_all_services || currentIds.includes(id)) return ["retained"];
+    return [requiredAdditions.includes(id) ? "required" : "selected"];
+  }
+
   const unavailable = [
     ...new Set([...requiredAdditions, ...optionalIds]),
   ].filter((id) => !available.some((service) => service.id === id));
@@ -124,10 +150,7 @@ export function OAuthIncrementalConsentPage({
     if (!service) {
       return (
         <div key={id} className="py-3.5 text-14 text-muted-foreground">
-          {isLoading || isError
-            ? translateUi("Previously authorized service details unavailable: ")
-            : translateUi("Previously authorized service unavailable: ")}
-          <span className="break-all font-mono">{id}</span>
+          <ConsentUnavailableService state={inventoryState} />
         </div>
       );
     }
@@ -139,12 +162,13 @@ export function OAuthIncrementalConsentPage({
         />
         <div className="min-w-0 flex-1">
           <ServiceIdentity service={service} />
+          <ServiceConsentDetails disclosure={disclosures.get(service.id)} orgName={organizationName(service)} />
         </div>
         <Badge
           variant={retained ? "secondary" : "accent"}
           className="shrink-0 text-12"
         >
-          {retained ? translateUi("Authorized") : translateUi("Required")}
+          {retained ? translateUi("Stays authorized") : translateUi("Required")}
         </Badge>
       </div>
     );
@@ -226,7 +250,10 @@ export function OAuthIncrementalConsentPage({
                             key={id}
                             className="flex items-start justify-between gap-3 border-b border-border/60 py-3.5"
                           >
-                            <ServiceIdentity service={service} />
+                            <div className="min-w-0">
+                              <ServiceIdentity service={service} />
+                              <ServiceConsentDetails disclosure={disclosures.get(service.id)} orgName={organizationName(service)} />
+                            </div>
                             <Badge
                               variant="accent"
                               className="shrink-0 text-12"
@@ -250,6 +277,7 @@ export function OAuthIncrementalConsentPage({
                               >
                                 <Checkbox
                                   id={`incremental-${service.id}`}
+                                  aria-describedby={`incremental-service-permissions-${service.id}`}
                                   checked={optionalIds.includes(service.id)}
                                   onCheckedChange={(checked) =>
                                     setOptionalIds((ids) =>
@@ -259,12 +287,19 @@ export function OAuthIncrementalConsentPage({
                                     )
                                   }
                                 />
-                                <Label
-                                  htmlFor={`incremental-${service.id}`}
-                                  className="min-w-0 cursor-pointer"
-                                >
-                                  <ServiceIdentity service={service} />
-                                </Label>
+                                <div className="min-w-0">
+                                  <Label
+                                    htmlFor={`incremental-${service.id}`}
+                                    className="min-w-0 cursor-pointer"
+                                  >
+                                    <ServiceIdentity service={service} />
+                                  </Label>
+                                  <ServiceConsentDetails
+                                    id={`incremental-service-permissions-${service.id}`}
+                                    disclosure={disclosures.get(service.id)}
+                                    orgName={organizationName(service)}
+                                  />
+                                </div>
                               </div>
                             ))}
                           </div>
@@ -279,11 +314,7 @@ export function OAuthIncrementalConsentPage({
                         <h2
                           id="incremental-permissions"
                           className="type-card-title text-foreground"
-                        >{translateUi("Allow ")}{addedScopes.length}{translateUi(" additional")}{" "}
-                          {addedScopes.length === 1
-                            ? translateUi("permission")
-                            : translateUi("permissions")}
-                        </h2>
+                        >{translateUi("Additional identity and app permissions")}</h2>
                         <div className="mt-4 divide-y divide-border/60 border-y border-border/60">
                           {addedScopes.map((scope) => (
                             <div key={scope} className="py-3.5 text-14">
@@ -311,7 +342,7 @@ export function OAuthIncrementalConsentPage({
                       <p className="mt-1.5 text-14 text-muted-foreground">
                         {snapshot.allow_all_services
                           ? translateUi("This application already has access to all available services. This access will be retained.")
-                          : translateUi("Your existing access will be retained. You can manage it separately in Authorized Applications.")}
+                          : translateUi("Your existing access will be retained.")}
                       </p>
                       {!snapshot.allow_all_services &&
                         currentIds.length > 0 && (
@@ -331,6 +362,7 @@ export function OAuthIncrementalConsentPage({
                     </section>
                   </>
                 )}
+                <ConsentDuration disclosure={disclosure} offline={offline} broker={broker} className="border-t border-border py-5" />
                 <section className="border-t border-border py-5">
                   <div className="flex items-start gap-3">
                     <AlertTriangle
@@ -340,7 +372,7 @@ export function OAuthIncrementalConsentPage({
                     <div>
                       <h2 className="type-body-strong text-foreground">{translateUi("Make sure you trust ")}{snapshot.client_name}
                       </h2>
-                      <p className="mt-2 text-14 text-muted-foreground">{translateUi("This app may receive the account information above and use the services you approve. You can revoke access later from Authorized Applications.")}</p>
+                      <p className="mt-2 text-14 text-muted-foreground">{translateUi("This app may receive the account information above and use the services you approve. Continue only if you trust it.")}</p>
                     </div>
                   </div>
                 </section>
@@ -379,7 +411,7 @@ export function OAuthIncrementalConsentPage({
                     />
                   </div>
                 </details>
-                {machineScope && <MachineGrantConsent consentRequest={request.token} onPrepared={setPreparedMachineRequest} onSelectionRequired={setMachineSelectionRequired} disabled={expired} allowedServiceIds={snapshot.allow_all_services ? undefined : [...new Set([...currentIds, ...additions])]} />}
+                {machineScope && <MachineGrantConsent consentRequest={request.token} onPrepared={setPreparedMachineRequest} onSelectionRequired={setMachineSelectionRequired} disabled={expired} allowedServiceIds={submittedAccess.allow_all_services ? undefined : submittedAccess.allowed_service_ids} />}
                 <form
                   method="POST"
                   action="/oauth/authorize/incremental/decision"
@@ -456,9 +488,9 @@ export function OAuthIncrementalConsentPage({
                   <input
                     type="hidden"
                     name="allow_all_services"
-                    value={snapshot.allow_all_services ? "true" : "false"}
+                    value={submittedAccess.allow_all_services ? "true" : "false"}
                   />
-                  {[...new Set([...currentIds, ...additions])].map((id) => (
+                  {submittedAccess.allowed_service_ids.map((id) => (
                     <input
                       key={id}
                       type="hidden"
@@ -474,10 +506,20 @@ export function OAuthIncrementalConsentPage({
                       value={resource}
                     />
                   ))}
+                  <ConsentServiceSummary
+                    id={summaryId}
+                    access={submittedAccess}
+                    services={summaryInventory}
+                    disclosures={disclosures}
+                    inventoryState={inventoryState}
+                    provenance={selectionProvenance}
+                    retainedAll={submittedAccess.allow_all_services}
+                  />
                   <Button
                     type="submit"
                     name="decision"
                     value="allow"
+                    aria-describedby={`${summaryId}-description`}
                     variant="primary"
                     disabled={blocked}
                     className="w-full"

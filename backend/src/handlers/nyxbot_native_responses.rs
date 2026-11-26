@@ -5,7 +5,9 @@ use crate::{
         COLLECTION_NAME as RESPONSES, GatewayResponse as StoredResponse,
     },
     services::{
+        channel_supplemental_delivery as supplemental_sources,
         coordination_service::{EventDedupClaimResult, EventDedupStore},
+        nyxbot_gateway_service::{gateway_call_at_base, side_message_available},
         nyxbot_gateway_source as source, nyxbot_response_recovery as recovery,
     },
 };
@@ -918,6 +920,7 @@ pub(super) async fn send_occurrence(
     conversation: &str,
     text: &str,
     occurrence: &str,
+    decision: &mut super::supplemental::Decision,
 ) -> AppResult<&'static str> {
     send_update_impl(
         state,
@@ -926,10 +929,76 @@ pub(super) async fn send_occurrence(
         conversation,
         text,
         Some(occurrence),
-        None,
+        Some(decision),
     )
     .await?
     .ok_or_else(|| AppError::NotFound("Native reply source unavailable".into()))
+}
+
+#[derive(Clone)]
+pub(super) enum SupplementalRoute {
+    Replies,
+    SideMessages { base: String, path: String },
+}
+
+impl SupplementalRoute {
+    pub(super) fn is_side_message(&self) -> bool {
+        matches!(self, Self::SideMessages { .. })
+    }
+
+    fn egress(&self) -> supplemental::Egress {
+        match self {
+            Self::Replies => supplemental::Egress::GatewayEvent,
+            Self::SideMessages { .. } => supplemental::Egress::GatewaySideMessage,
+        }
+    }
+}
+
+async fn supplemental_route(
+    state: &AppState,
+    bearer: &str,
+    reference: &str,
+) -> AppResult<SupplementalRoute> {
+    let path = format!("/events/{}/side-messages", urlencode(reference));
+    if let Ok(base) = gateway_base(state).await
+        && side_message_available(&base, &path, bearer).await?
+    {
+        return Ok(SupplementalRoute::SideMessages { base, path });
+    }
+    Ok(SupplementalRoute::Replies)
+}
+
+fn supplemental_part_key(
+    decision: &supplemental::Decision,
+    event: &NyxbotEvent,
+    origin: &ChannelOrigin,
+    occurrence: Option<&str>,
+    index: usize,
+) -> Option<String> {
+    use supplemental::Purpose;
+    use supplemental_sources::{saved_key, side_message_key};
+
+    if let Some(occurrence) = occurrence {
+        return Some(side_message_key(&("permission_result", occurrence), index));
+    }
+    match decision.purpose {
+        Purpose::TeamResult | Purpose::TeamAdditionalResult => decision
+            .turn
+            .as_deref()
+            .map(|turn| side_message_key(&("result", saved_key(turn, origin)), index)),
+        Purpose::CheckingNotice | Purpose::CapacityNotice => decision
+            .turn
+            .as_deref()
+            .or(event.turn_id.as_deref())
+            .map(|turn| {
+                side_message_key(&(decision.purpose, turn, saved_key(turn, origin)), index)
+            }),
+        Purpose::MachineDesktopNotice => decision
+            .machine_control
+            .as_ref()
+            .map(|request| side_message_key(&(decision.purpose, request), index)),
+        Purpose::PermissionResult => None,
+    }
 }
 
 async fn send_update_impl(
@@ -939,7 +1008,7 @@ async fn send_update_impl(
     conversation: &str,
     text: &str,
     occurrence: Option<&str>,
-    decision: Option<&mut super::supplemental::Decision>,
+    mut decision: Option<&mut super::supplemental::Decision>,
 ) -> AppResult<Option<&'static str>> {
     let unavailable = || AppError::NotFound("Native reply source unavailable".into());
     if !source::ready(row) {
@@ -966,12 +1035,9 @@ async fn send_update_impl(
         .and_then(crate::turn_trace::TurnContext::for_turn);
     let mut operation =
         crate::turn_trace::Operation::start(trace, crate::turn_trace::Stage::Channel);
-    let result: AppResult<Option<&'static str>> = crate::turn_trace::scope(operation.context(), async {
-        if event
-            .delivery
-            .as_ref()
-            .is_none_or(|d| d.origin != *origin || d.transport != "gateway")
-        {
+    let send = async {
+        let delivery = event.delivery.as_ref().ok_or_else(unavailable)?;
+        if delivery.origin != *origin || delivery.transport != "gateway" {
             return Err(unavailable());
         }
         let history = engine::get(
@@ -980,14 +1046,9 @@ async fn send_update_impl(
             conversation,
         )
         .await?;
-        if late_delivery::eligible(
-            state,
-            &event,
-            event.delivery.as_ref().ok_or_else(unavailable)?,
-            &history,
-        )
-        .await?
-        .is_none()
+        if late_delivery::eligible(state, &event, delivery, &history)
+            .await?
+            .is_none()
         {
             return Err(unavailable());
         }
@@ -995,7 +1056,14 @@ async fn send_update_impl(
             .event_context_ciphertext
             .as_ref()
             .ok_or_else(unavailable)?;
-        let context: Value = serde_json::from_slice(&crate::services::nyxbot_event_record::event_context(&state.encryption_keys, &event, ciphertext).await?)
+        let context: Value = serde_json::from_slice(
+            &crate::services::nyxbot_event_record::event_context(
+                &state.encryption_keys,
+                &event,
+                ciphertext,
+            )
+            .await?,
+        )
         .map_err(|_| unavailable())?;
         if !source::provider_context(row, &context) {
             return Err(unavailable());
@@ -1024,33 +1092,116 @@ async fn send_update_impl(
                 metadata: None,
             }]
         };
-        let saved_turn = decision
-            .as_ref()
+        let saved_key = decision
+            .as_deref()
             .filter(|decision| decision.saved_result)
-            .and_then(|decision| decision.turn.clone());
-        if let Some(decision) = decision
+            .and_then(|decision| decision.turn.as_deref())
+            .map(|turn| supplemental_sources::saved_key(turn, origin));
+        if let Some(decision) = decision.as_deref_mut()
             && decision.needs_post_turn_claim()
+            && !decision
+                .claim_result(state, &history.user_id, conversation, origin)
+                .await?
         {
-            if !decision.claim_result(state, &history.user_id, conversation, origin).await? {
-                return Ok(None);
-            }
-            decision.dispatch(super::supplemental::Egress::GatewayEvent);
+            return Ok(None);
         }
-        use crate::services::{channel_text_preparation as preparation,channel_text_delivery as journal};
-        let saved_plan = if let Some(turn) = saved_turn.as_deref() {
-            let key = crate::services::channel_supplemental_delivery::saved_key(turn,origin);
+        use crate::models::channel_text_delivery::TextPartState;
+        use crate::services::{
+            channel_text_delivery as journal, channel_text_preparation as preparation,
+        };
+        const SIDE_FINGERPRINT_PREFIX: &str = "gateway-side-message:";
+        let previous_plan = if let Some(key) = &saved_key {
+            journal::load(&state.db, key).await?
+        } else {
+            None
+        };
+        let side_plan = previous_plan
+            .as_ref()
+            .is_some_and(|plan| plan.fingerprint.starts_with(SIDE_FINGERPRINT_PREFIX));
+        let fingerprint = saved_key
+            .as_ref()
+            .map(|_| crate::services::channel_reply_plan::fingerprint(&reply_parts));
+        // The fingerprint pins the route across recovery. A concurrent worker
+        // selecting another route loses the existing plan comparison.
+        if let Some(plan) = &previous_plan
+            && side_plan
+            && plan.user_id == row.user_id
+            && plan.source_id == event.id
+            && plan
+                .channel_bot_id
+                .as_ref()
+                .is_none_or(|id| id == &row.channel_bot_id)
+            && plan.parts.len() == reply_parts.len()
+            && plan
+                .parts
+                .iter()
+                .all(|part| part.state == TextPartState::Sent)
+            && plan.fingerprint.strip_prefix(SIDE_FINGERPRINT_PREFIX) == fingerprint.as_deref()
+        {
+            if let Some(decision) = decision {
+                decision.dispatch(supplemental::Egress::GatewaySideMessage);
+            }
+            return Ok(Some("confirmed"));
+        }
+        let route = if let Some(decision) = decision.as_deref_mut() {
+            let route = if let Some(route) = &decision.native_route {
+                route.clone()
+            } else if previous_plan.is_some() && !side_plan {
+                SupplementalRoute::Replies
+            } else {
+                supplemental_route(state, &key, reference).await?
+            };
+            if route.is_side_message() {
+                if decision.purpose.result() && decision.turn.as_deref().is_none_or(str::is_empty) {
+                    decision.skip(supplemental::Reason::MissingResultIdentity);
+                    return Ok(None);
+                }
+            } else {
+                if decision.purpose.progress() {
+                    decision.skip(supplemental::Reason::NativeProgressUnsupported);
+                    return Ok(None);
+                }
+                if side_plan || decision.require_side_message {
+                    return Err(unavailable());
+                }
+            }
+            if occurrence.is_some() {
+                decision.native_route = Some(route.clone());
+            }
+            route
+        } else {
+            SupplementalRoute::Replies
+        };
+        let side_message = route.is_side_message();
+        let saved_plan = if let Some((key, fingerprint)) = saved_key.as_ref().zip(fingerprint) {
+            let fingerprint = if side_message {
+                format!("{SIDE_FINGERPRINT_PREFIX}{fingerprint}")
+            } else {
+                fingerprint
+            };
             let bot = crate::services::channel_bot_service::get_bot_for_user(
                 &state.db,
                 &row.channel_bot_id,
                 row.bot_owner_id.as_deref().unwrap_or(&row.user_id),
-            ).await?;
-            Some(journal::begin_parented(
-                &state.db, &key, &row.user_id, &event.id,
-                &crate::services::channel_reply_plan::fingerprint(&reply_parts),
-                reply_parts.len(), &bot,
-            ).await?)
-        } else {None};
+            )
+            .await?;
+            Some(
+                journal::begin_parented(
+                    &state.db,
+                    key,
+                    &row.user_id,
+                    &event.id,
+                    &fingerprint,
+                    reply_parts.len(),
+                    &bot,
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         let mut outcome = "reply_confirmed";
+        let replies_path = format!("/events/{}/replies", urlencode(reference));
         for (index, part) in reply_parts.into_iter().enumerate() {
             if crate::services::channel_guest_access::is_hosted_conversation(conversation)
                 && !late_delivery::stream_allowed(state, &event.id).await
@@ -1058,33 +1209,102 @@ async fn send_update_impl(
                 return Err(unavailable());
             }
             let mut part_trace = crate::turn_trace::Operation::part(
-                crate::turn_trace::TurnContext::current(), index,
+                crate::turn_trace::TurnContext::current(),
+                index,
             );
             let mut body = json!({"text":part.text.unwrap_or_default()});
             // A local followed reply chain is not necessarily a Discord thread.
             // CMA accepts native-thread mode only for the original thread channel.
-            if context["activity"]["conversation"]["thread_id"].is_string() {
+            if !side_message && context["activity"]["conversation"]["thread_id"].is_string() {
                 body["thread_reply"] = json!(true);
             }
-            let idempotency = occurrence.map(|id| format!("{id}:{index}"));
-            let path = format!("/events/{}/replies", urlencode(reference));
-            let send = crate::turn_trace::scope(part_trace.context(), gateway_call(
-                state,
-                reqwest::Method::POST,
-                &path,
-                &key,
-                Some(&body),
-                idempotency.as_deref(),
-            ));
-            let (result,attempt) = if let Some(plan) = &saved_plan {
-                match preparation::claim(&state.db,plan,index).await? {
+            let idempotency = if side_message {
+                Some(
+                    decision
+                        .as_deref()
+                        .and_then(|decision| {
+                            supplemental_part_key(decision, &event, origin, occurrence, index)
+                        })
+                        .ok_or_else(unavailable)?,
+                )
+            } else {
+                occurrence.map(|id| format!("{id}:{index}"))
+            };
+            if side_message {
+                #[cfg(test)]
+                crate::services::durable_wake_tests::after("native_side_message_before_authority")
+                    .await;
+                let (current, _) = late_delivery::eligible(state, &event, delivery, &history)
+                    .await?
+                    .ok_or_else(unavailable)?;
+                if !source::ready(&current)
+                    || current.binding_id != row.binding_id
+                    || current.agent_api_key_id != row.agent_api_key_id
+                    || !source::provider_context(&current, &context)
+                    || event.created_at + ChronoDuration::minutes(29) <= Utc::now()
+                {
+                    return Err(unavailable());
+                }
+                if saved_plan.is_some() {
+                    crate::services::channel_platform::revalidate_post_effect().await?;
+                }
+            }
+            let attempt = if let Some(plan) = &saved_plan {
+                match preparation::claim(&state.db, plan, index).await? {
                     journal::PartClaim::Sent(_) => continue,
-                    journal::PartClaim::Send(attempt) => {
-                        let result = preparation::with_part(&state.db,plan,index,&attempt,async {crate::services::channel_platform::revalidate_post_effect().await?;preparation::effect().await?;send.await}).await;
-                        (result,Some(attempt))
+                    journal::PartClaim::Send(attempt) => Some(attempt),
+                }
+            } else {
+                None
+            };
+            let send = async {
+                if let Some(decision) = decision.as_deref_mut() {
+                    decision.dispatch(route.egress());
+                }
+                match &route {
+                    SupplementalRoute::Replies => {
+                        gateway_call(
+                            state,
+                            reqwest::Method::POST,
+                            &replies_path,
+                            &key,
+                            Some(&body),
+                            idempotency.as_deref(),
+                        )
+                        .await
+                    }
+                    SupplementalRoute::SideMessages { base, path } => {
+                        gateway_call_at_base(
+                            base,
+                            reqwest::Method::POST,
+                            path,
+                            &key,
+                            Some(&body),
+                            idempotency.as_deref(),
+                        )
+                        .await
                     }
                 }
-            } else {(send.await,None)};
+            };
+            let send = crate::turn_trace::scope(part_trace.context(), send);
+            let result = if let (Some(plan), Some(attempt)) = (&saved_plan, &attempt) {
+                preparation::with_part(&state.db, plan, index, attempt, async {
+                    crate::services::channel_platform::revalidate_post_effect().await?;
+                    preparation::effect().await?;
+                    send.await
+                })
+                .await
+            } else {
+                send.await
+            };
+            if side_message
+                && let (Some(plan), Some(attempt), Err(_)) = (&saved_plan, &attempt, &result)
+                && preparation::release(&state.db, plan, index, attempt).await?
+            {
+                // The release only matches this attempt while it is Pending.
+                // A failed or ambiguous POST leaves the part Sending.
+                return result.map(|_| None);
+            }
             // Transport success alone is not a platform send receipt. Do not retry
             // an unknown outcome or report a rejected send as successful.
             outcome = match &result {
@@ -1097,6 +1317,7 @@ async fn send_update_impl(
                         _ => "reply_unknown",
                     }
                 }
+                Ok(result) if side_message && result.status == 409 => "reply_unknown",
                 Ok(result) if (500..600).contains(&result.status) => "reply_unknown",
                 Ok(_) => "reply_refused",
                 Err(_) => "reply_unknown",
@@ -1104,7 +1325,8 @@ async fn send_update_impl(
             part_trace.finish(
                 match outcome {
                     "reply_confirmed" => crate::turn_trace::Outcome::Confirmed,
-                    "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => crate::turn_trace::Outcome::Rejected,
+                    "reply_rejected" | "reply_unsupported" | "reply_rate_limited"
+                    | "reply_refused" => crate::turn_trace::Outcome::Rejected,
                     _ => crate::turn_trace::Outcome::Unknown,
                 },
                 None,
@@ -1113,14 +1335,28 @@ async fn send_update_impl(
             if outcome != "reply_confirmed" {
                 break;
             }
-            if let (Some(plan),Some(attempt)) = (&saved_plan,attempt) {
-                journal::finish(&state.db,plan,index,&attempt,crate::models::channel_text_delivery::TextPartState::Sent,None,None).await?;
+            if let (Some(plan), Some(attempt)) = (&saved_plan, attempt) {
+                journal::finish(
+                    &state.db,
+                    plan,
+                    index,
+                    &attempt,
+                    TextPartState::Sent,
+                    None,
+                    None,
+                )
+                .await?;
+                #[cfg(test)]
+                crate::services::durable_wake_tests::after("native_supplemental_part_confirmed")
+                    .await;
             }
         }
-        state.db.collection::<NyxbotChannel>(CHANNELS).update_one(
-            doc! {"_id":&row.id,"binding_id":&row.binding_id,"transport":"gateway","gateway_native_phase":"ready"},
-            doc! {"$set":{"gateway_native_delivery":outcome}},
-        ).await?;
+        if !side_message {
+            state.db.collection::<NyxbotChannel>(CHANNELS).update_one(
+                doc! {"_id":&row.id,"binding_id":&row.binding_id,"transport":"gateway","gateway_native_phase":"ready"},
+                doc! {"$set":{"gateway_native_delivery":outcome}},
+            ).await?;
+        }
         Ok(Some(match outcome {
             "reply_confirmed" => "confirmed",
             "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => {
@@ -1128,8 +1364,8 @@ async fn send_update_impl(
             }
             _ => "unknown",
         }))
-    })
-    .await;
+    };
+    let result = crate::turn_trace::scope(operation.context(), send).await;
     operation.finish(
         match &result {
             Ok(Some("confirmed")) => crate::turn_trace::Outcome::Confirmed,

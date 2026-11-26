@@ -190,6 +190,8 @@ pub(super) async fn deliver(state: &AppState, reply_id: &str) -> AppResult<bool>
                     claim: lease.clone(),
                 };
                 let guard = authority(state, &row, &target.origin);
+                let mut decision = supplemental::Decision::new(purpose);
+                decision.saved_result = true;
                 let result = Box::pin(crate::services::channel_platform::with_post_effect_guard(
                     guard,
                     with_parent(
@@ -200,7 +202,7 @@ pub(super) async fn deliver(state: &AppState, reply_id: &str) -> AppResult<bool>
                             &target.origin,
                             text,
                             images.as_ref(),
-                            purpose,
+                            decision,
                             Some(target.source),
                         ),
                     ),

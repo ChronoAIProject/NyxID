@@ -1290,18 +1290,43 @@ Missing or expired sources skip delivery to that destination. A missing
 permission source finishes refused. Image claims, multipart receipts, primary
 final replies and durable late replies use their existing delivery paths.
 
-Native-source progress is suppressed. Genuine independent native team results,
-followed results and permission occurrences retain their existing event replies
-and <29-minute original-event window. If the original primary final/failure is
-still pending, a confirmed independent result can suppress it; an unknown routed
-result may lose both and block later tool sends. This remaining native case
-needs a gateway non-answer send contract that changes neither tool marker nor
-unknown-tool barrier. NyxID does not defer these results for a day or retry
-uncertain sends. `nyxbot_channel_supplemental_delivery` records purpose, egress,
-outcome, closed skip reason, anchor class and turn/event/conversation IDs,
-including retained native `gateway_event` sends. No content or references enter
-the audit. Paired reference fields remain optional and ignored by older readers.
-No setting or reconnection is required.
+Native Discord and WhatsApp supplemental text uses the original event and its
+existing 29-minute window. Lark uses NyxID's relay path. Unknown native source
+types are ineligible. After local source and authority checks, NyxID queries
+`GET /v1/events/{event_ref}/side-messages` with the channel's agent bearer.
+Only HTTP 200 with `available: true` enables the side-message route for that
+event. A 404, false, transient error or two-second probe timeout retains event
+replies for independent team, additional-chat, followed-thread and permission
+results starting a delivery.
+Checking, capacity and machine-control notices skip with
+`native_progress_unsupported` when the capability is unavailable. HTTP 401,
+403 or 410 ends the attempt as an authority refusal.
+
+`POST /v1/events/{event_ref}/side-messages` sends only `{"text": ...}` and uses
+a deterministic `Idempotency-Key` derived from the local dispatch identity
+and part index. Team and additional-chat side messages use the settling turn
+and destination identity. A native result without a settling turn skips with
+`missing_result_identity` when the event advertises side messages. The same
+result uses the legacy event reply when capability discovery is unavailable.
+CMA retains the original destination and thread, rechecks
+authority and records an independent receipt. The event's answer token, reply
+marker and the routed unknown-tool barrier are untouched. Native WhatsApp parts
+send in order and stop at the first outcome other than confirmed. Rejected,
+unsupported and rate-limited receipts settle as rejected. Unknown receipts,
+conflicts, server errors, transport failures and unrecognized success bodies
+settle as unknown. A side-message attempt precludes an event-reply fallback,
+including when the POST returns 404. A saved text plan preserves its chosen
+route across recovery. A side-message plan requires a successful capability
+probe before a remaining part can send. A legacy plan resumes its unsent
+suffix through event replies. See the [permission receipt contract](EXECUTION_PERMISSIONS.md#verified-owner-channel-proposals-v4)
+for the permission occurrence fence.
+
+`nyxbot_channel_supplemental_delivery` records `gateway_side_message` for
+side sends and `gateway_event` for event replies. Side sends leave
+`gateway_native_delivery` health intact. Event replies can still suppress an
+automatic final or block later tool sends under the gateway's existing answer
+and unknown-tool rules. The capability requires no NyxID setting or owner
+reconnection. See the [CMA side-message contract](https://github.com/ChronoAIProject/cma/pull/3718).
 
 **Precise CMA follow-up request (no CMA code changed here):** pass the remaining
 absolute ingress turn deadline in the provider request, and expose a durable,

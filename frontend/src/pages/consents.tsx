@@ -57,7 +57,7 @@ function formatExternalSubject(
 
 function ServiceAccess({ consent }: { readonly consent: Consent }) {
   useUiTranslation();
-  const allowedServiceIds = consent.allowed_service_ids ?? [];
+  const allowedServiceIds = consent.allowed_service_ids;
   const allowedServices = consent.allowed_services ?? [];
 
   if (consent.legacy_unrestricted) {
@@ -75,30 +75,31 @@ function ServiceAccess({ consent }: { readonly consent: Consent }) {
     );
   }
 
-  if (allowedServiceIds.length === 0) {
+  if (allowedServices.length === 0) {
     return (
-      <Badge variant="secondary" className="text-12">{translateUi("No services")}</Badge>
+      <Badge variant="secondary" className="text-12">
+        {allowedServiceIds?.length === 0
+          ? translateUi("No services")
+          : translateUi("Service details unavailable")}
+      </Badge>
     );
   }
 
   return (
     <div className="flex flex-wrap gap-1">
-      {allowedServices.map((service) => (
-        <Badge
-          key={service.id}
-          variant={service.deleted ? "destructive" : "secondary"}
-          className="text-12"
-          title={
-            service.deleted
+      {allowedServices.map((service) => {
+        const label = [service.catalog_service_name, service.label]
+          .find((value) => value && value.trim() && value.trim() !== service.id && value.trim() !== "—");
+        return (
+          <Badge key={service.id} variant={service.deleted ? "destructive" : service.disabled ? "warning" : "secondary"} className="text-12">
+            {service.deleted
               ? translateUi("Deleted service")
-              : service.catalog_service_name ?? service.slug ?? service.id
-          }
-        >
-          {service.deleted
-            ? translateUi("{{value1}} (deleted)", { value1: service.id })
-            : service.catalog_service_name ?? service.label}
-        </Badge>
-      ))}
+              : service.disabled
+                ? label ? label + translateUi(" (disabled)") : translateUi("Service disabled")
+                : label || translateUi("Service details unavailable")}
+          </Badge>
+        );
+      })}
     </div>
   );
 }
@@ -203,8 +204,10 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
 
   return (
     <>
-      {/* Mobile card view */}
-      <div className="flex flex-col gap-3 md:hidden">
+      <div className={viewMode === "grid"
+        ? "grid gap-3 md:grid-cols-2 md:gap-4 lg:grid-cols-3"
+        : "flex flex-col gap-3 md:hidden"}
+      >
         {consents.map((consent) => (
           <div
             key={consent.id}
@@ -237,69 +240,19 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
             </div>
             <div className="mt-3 space-y-1">
               <p className="text-13 text-muted-foreground">
-                <span className="font-medium">{translateUi("Granted:")}</span>{" "}
+                <span className="font-medium">{translateUi("App consent granted")}</span>{" · "}
                 {formatDate(consent.granted_at)}
               </p>
               <p className="text-13 text-muted-foreground">
-                <span className="font-medium">{translateUi("Expires:")}</span>{" "}
-                {consent.expires_at
+                <span className="font-medium">{translateUi("App consent expiry")}</span>{" · "}
+                <span>{consent.expires_at
                   ? formatDate(consent.expires_at)
-                  : translateUi("Never")}
+                  : translateUi("Never")}</span>
               </p>
             </div>
           </div>
         ))}
       </div>
-
-      {/* Desktop grid view */}
-      {viewMode === "grid" && (
-        <div className="hidden md:grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {consents.map((consent) => (
-            <div
-              key={consent.id}
-              className="relative rounded-xl border border-border/50 bg-card p-4"
-            >
-              <div className="absolute right-3 top-3">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8"
-                  onClick={() => setRevokeClientId(consent.client_id)}
-                >
-                  <Trash2 className="h-4 w-4 text-destructive" />
-                </Button>
-              </div>
-              <p className="pr-10 type-card-title">
-                {consent.client_name}
-              </p>
-              <div className="mt-2 flex flex-wrap gap-1">
-                {consent.scopes.split(" ").map((scope) => (
-                  <Badge key={scope} variant="secondary" className="text-12">
-                    {scope}
-                  </Badge>
-                ))}
-              </div>
-              <div className="mt-3 space-y-1">
-                <p className="type-secondary-emphasis text-muted-foreground">{translateUi("Service access")}</p>
-                <ServiceAccess consent={consent} />
-                <Button variant="outline" size="sm" onClick={() => setMachineClientId(consent.client_id)}>{translateUi("Machine permissions")}</Button>
-              </div>
-              <div className="mt-3 space-y-1">
-                <p className="text-13 text-muted-foreground">
-                  <span className="font-medium">{translateUi("Granted:")}</span>{" "}
-                  {formatDate(consent.granted_at)}
-                </p>
-                <p className="text-13 text-muted-foreground">
-                  <span className="font-medium">{translateUi("Expires:")}</span>{" "}
-                  {consent.expires_at
-                    ? formatDate(consent.expires_at)
-                    : translateUi("Never")}
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* Desktop table view */}
       {viewMode === "table" && (
@@ -310,8 +263,8 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
                 <TableHead>{translateUi("Application")}</TableHead>
                 <TableHead>{translateUi("Scopes")}</TableHead>
                 <TableHead>{translateUi("Service access")}</TableHead>
-                <TableHead>{translateUi("Granted")}</TableHead>
-                <TableHead>{translateUi("Expires")}</TableHead>
+                <TableHead>{translateUi("App consent granted")}</TableHead>
+                <TableHead>{translateUi("App consent expiry")}</TableHead>
                 <TableHead className="w-[60px]">{translateUi("Actions")}</TableHead>
               </TableRow>
             </TableHeader>
@@ -366,7 +319,13 @@ function AuthorizedAppsTab({ viewMode }: { readonly viewMode: ViewMode }) {
       <Dialog open={machineClientId !== null} onOpenChange={(open) => { if (!open) setMachineClientId(null); }}>
         <DialogContent className="max-h-[90dvh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader><DialogTitle>{consents.find((consent) => consent.client_id === machineClientId)?.client_name}{translateUi(" · Machine permissions")}</DialogTitle><DialogDescription>{translateUi("Manage the Machine grant for this account and OAuth client.")}</DialogDescription></DialogHeader>
-          {machineClientId && <MachineGrantCard source={{ kind: "oauth", id: machineClientId }} allowedServiceIds={machineTarget?.allow_all_services ? undefined : machineTarget?.allowed_service_ids ?? []} />}
+          {machineClientId && (
+            <MachineGrantCard
+              source={{ kind: "oauth", id: machineClientId }}
+              allowedServiceIds={machineTarget?.allow_all_services ? undefined : machineTarget?.allowed_service_ids ?? []}
+              consentServices={machineTarget?.allowed_services ?? []}
+            />
+          )}
         </DialogContent>
       </Dialog>
       <Dialog

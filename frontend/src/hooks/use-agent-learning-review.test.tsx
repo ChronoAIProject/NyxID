@@ -3,6 +3,7 @@ import { renderHook } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { useAgentLearningReview } from "./use-agent-learning-review";
+import { useAuthStore } from "@/stores/auth-store";
 
 const { assistantJson } = vi.hoisted(() => ({ assistantJson: vi.fn() }));
 vi.mock("@/lib/assistant/assistant-http", () => ({ assistantJson }));
@@ -37,6 +38,20 @@ it("sends the revision and draft when editing a proposal", async () => {
     "/assistant/nyxagent/agents/agent/learning/proposals/proposal",
     { method: "PUT", body: { revision: 4, draft } },
   );
+});
+
+it("invalidates the authored card preview when the proposal is edited in the details sheet", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const key = ["authored-skill-review", useAuthStore.getState().user?.id, "proposal", "old-card"];
+  client.setQueryData(key, { state: "active", actions: ["publish"] });
+  const { result } = renderHook(() => useAgentLearningReview("agent", false), {
+    wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+  });
+  await result.current.edit.mutateAsync({ proposalId: "proposal", revision: 0, draft: {
+    schema_version: 1, kind: "new", name: "updated", description: "Updated", skill_md: "# Updated",
+    files: [], base_skill: null, rationale: "Reusable", safety_notes: "None",
+  } });
+  expect(client.getQueryState(key)?.isInvalidated).toBe(true);
 });
 
 it("sends the enabled consent body", async () => {

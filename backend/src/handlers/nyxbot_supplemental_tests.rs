@@ -149,6 +149,48 @@ async fn audit_decisions(f: &Fixture) -> Vec<bson::Document> {
         .await
         .unwrap()
 }
+
+#[tokio::test]
+async fn supplemental_native_side_messages_lark_keeps_local_relay() {
+    Box::pin(async {
+        let (f, platform) = image_fixture("lark", "gateway").await;
+        assert!(f.channel.gateway_source.is_none());
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"message_id":"sent"}})),
+            )
+            .expect(1)
+            .mount(&platform)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/events/cmaeg1.ev.original/side-messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"available":true})))
+            .expect(0)
+            .mount(&f.gateway)
+            .await;
+        let conversation = engine::get(
+            &f.state.db,
+            OWNER,
+            f.event.conversation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let origin = &f.event.delivery.as_ref().unwrap().origin;
+        deliver_to(&f.state, &conversation, origin, "Independent result", None).await;
+        platform.verify().await;
+        assert!(f.gateway.received_requests().await.unwrap().is_empty());
+        let audits = audit_decisions(&f).await;
+        assert_eq!(audits.len(), 1);
+        let data = audits[0].get_document("event_data").unwrap();
+        assert_eq!(data.get_str("egress"), Ok("local_relay"));
+        assert_eq!(data.get_str("outcome"), Ok("confirmed"));
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
 async fn notice(f: &Fixture, row: &AssistantConversation) {
     assert!(
         crate::handlers::assistant_nyxagent::send_checking_notice(

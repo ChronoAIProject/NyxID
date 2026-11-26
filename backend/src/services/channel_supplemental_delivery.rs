@@ -56,6 +56,7 @@ pub enum Reason {
     InvalidAnchor,
     StaleReferenceAnchor,
     NativeProgressUnsupported,
+    MissingResultIdentity,
     AuthorityRefused,
     SourceUnavailable,
     ReferenceUnavailable,
@@ -448,6 +449,14 @@ pub(crate) fn saved_destination_key(
 
 pub(crate) fn saved_key(turn: &str, origin: &ChannelOrigin) -> String {
     format!("saved-result:{turn}:{}", result_destination(origin))
+}
+
+/// Hash the local dispatch identity and part, keeping gateway headers printable
+/// and independent of the sealed event reference and text.
+pub(crate) fn side_message_key<T: Serialize>(identity: &T, part: usize) -> String {
+    let encoded = serde_json::to_vec(&(identity, part)).expect("dispatch identifiers serialize");
+    let digest = Sha256::digest(encoded);
+    format!("nyxbot-side-v1:{digest:x}")
 }
 
 tokio::task_local! {pub(crate) static SAVED_RELAY_KEY: String;}

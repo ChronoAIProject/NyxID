@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "nyxbot_native_side_message_tests.rs"]
+mod side_message_tests;
+
 fn enable_thread_follow<'a>(state: &'a AppState) -> futures::future::BoxFuture<'a, ()> {
     Box::pin(async move {
         let collection = state
@@ -1595,6 +1598,8 @@ async fn native_async_reply_thread_mode_and_delivery_receipts_iteration(native_t
             let (result, trace) =
                 crate::turn_trace::capture(crate::turn_trace::scope(other_turn, async {
                     if let Some(occurrence) = occurrence {
+                        let mut decision =
+                            supplemental::Decision::new(supplemental::Purpose::PermissionResult);
                         native_responses::send_occurrence(
                             &state,
                             &row,
@@ -1602,6 +1607,7 @@ async fn native_async_reply_thread_mode_and_delivery_receipts_iteration(native_t
                             stored.conversation_id.as_deref().unwrap(),
                             "Update",
                             occurrence,
+                            &mut decision,
                         )
                         .await
                     } else {
@@ -1650,23 +1656,29 @@ async fn native_async_reply_thread_mode_and_delivery_receipts_iteration(native_t
                 .unwrap();
             let gateway_span = trace
                 .iter()
-                .find(|record| record["stage"] == "gateway" && record["phase"] == "start")
+                .find(|record| {
+                    record["stage"] == "gateway"
+                        && record["phase"] == "start"
+                        && record["parent_span_id"] == part["span_id"]
+                })
                 .unwrap();
             assert_eq!(gateway_span["parent_span_id"], part["span_id"]);
             let requests = gateway.received_requests().await.unwrap();
             assert_eq!(
                 requests.len(),
-                1,
-                "no automatic retry of an uncertain receipt"
+                1 + usize::from(occurrence.is_some()),
+                "only supplemental sends discover capability"
             );
+            let request = requests.last().unwrap();
+            assert_eq!(request.method.as_str(), "POST");
             assert_eq!(
-                requests[0]
+                request
                     .headers
                     .get("idempotency-key")
                     .map(|value| value.to_str().unwrap()),
                 occurrence.map(|_| "permission-result-occurrence:0"),
             );
-            let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
             assert_eq!(
                 body.get("thread_reply"),
                 native_thread.then_some(&Value::Bool(true))
@@ -1678,7 +1690,7 @@ async fn native_async_reply_thread_mode_and_delivery_receipts_iteration(native_t
     let conversation = engine::get(&state.db, OWNER, stored.conversation_id.as_deref().unwrap())
         .await
         .unwrap();
-    assert_native_post_turn_claim(&state, &gateway, &conversation, origin, native_thread).await;
+    assert_native_post_turn_claim(&state, &gateway, &conversation, origin, true).await;
     upstream.abort();
 }
 
@@ -2033,7 +2045,12 @@ async fn supplemental_native_progress_leaves_primary_replay_intact() {
         for purpose in [supplemental::Purpose::CheckingNotice, supplemental::Purpose::CapacityNotice, supplemental::Purpose::MachineDesktopNotice] {
             deliver_to_for(&state, &conversation, origin, "progress", None, purpose).await;
         }
-        assert!(gateway.received_requests().await.unwrap().is_empty());
+        let requests = gateway.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|request| {
+            request.method.as_str() == "GET"
+                && request.url.path() == "/events/opaque-native-ref/side-messages"
+        }));
         let after = body_text(native_responses::snapshot(State(state.clone()), Path(id), bearer(&key)).await).await;
         assert_eq!(baseline, after);
         let event = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc!{"_id":&stored.event_key}).await.unwrap().unwrap();
@@ -2072,7 +2089,7 @@ async fn assert_native_post_turn_claim(
     gateway: &wiremock::MockServer,
     conversation: &crate::models::assistant_conversation::AssistantConversation,
     origin: &ChannelOrigin,
-    thread_reply: bool,
+    side_message: bool,
 ) {
     let mut row = conversation.clone();
     gateway_thread_tests::settled_result_turn(state, &mut row).await;
@@ -2126,16 +2143,30 @@ async fn assert_native_post_turn_claim(
         source,
         doc! {"$set":{"event_context_ciphertext":retained.get("event_context_ciphertext").unwrap().clone()}},
     ).await.unwrap();
-    wiremock::Mock::given(wiremock::matchers::path(
-        "/events/opaque-native-ref/replies",
-    ))
-    .respond_with(
-        wiremock::ResponseTemplate::new(200)
-            .set_body_json(json!({"delivery":{"outcome":"unknown"}})),
-    )
-    .expect(1)
-    .mount(gateway)
-    .await;
+    let side_path = "/events/opaque-native-ref/side-messages";
+    if side_message {
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(side_path))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(json!({"available":true})),
+            )
+            .expect(1)
+            .mount(gateway)
+            .await;
+    }
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path(if side_message {
+            side_path
+        } else {
+            "/events/opaque-native-ref/replies"
+        }))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(json!({"delivery":{"outcome":"unknown"}})),
+        )
+        .expect(1)
+        .mount(gateway)
+        .await;
     for _ in 0..2 {
         Box::pin(crate::handlers::assistant_team::after_turn(
             state,
@@ -2147,10 +2178,18 @@ async fn assert_native_post_turn_claim(
     }
     gateway.verify().await;
     let requests = gateway.received_requests().await.unwrap();
-    assert_eq!(requests.len(), 1);
-    let body: Value = requests[0].body_json().unwrap();
-    assert_eq!(body["text"], "Here is your answer");
-    assert_eq!(body["thread_reply"].as_bool(), thread_reply.then_some(true));
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].method.as_str(), "GET");
+    assert_eq!(
+        requests[0].url.path(),
+        "/events/opaque-native-ref/side-messages"
+    );
+    let body: Value = requests[1].body_json().unwrap();
+    assert_eq!(body, json!({"text":"Here is your answer"}));
+    assert_eq!(
+        requests[1].headers.contains_key("idempotency-key"),
+        side_message,
+    );
     for (outcome, reason) in [("unknown", None), ("skipped", Some("already_claimed"))] {
         assert_eq!(
             audits

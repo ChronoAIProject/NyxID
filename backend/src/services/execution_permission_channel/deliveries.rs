@@ -8,6 +8,7 @@ use crate::models::{
 use futures::TryStreamExt;
 
 pub(crate) const VERSION: i32 = 5;
+pub(crate) const SIDE_MESSAGE_VERSION: u32 = 6;
 pub(crate) const PREPARATION_SECS: i64 = 180;
 pub(crate) const SEND_SECS: i64 = 120;
 
@@ -90,14 +91,14 @@ fn changed() -> AppError {
 }
 
 pub(crate) async fn lease(db: &Database, id: &str) -> AppResult<Option<Delivery>> {
-    // Old workers explicitly select version 4. Promotion fences their snapshot
-    // before a new worker can commit a recoverable partial result.
+    // Version 4 uses the legacy dispatch protocol. Version 6 already has a
+    // confirmed side message and must stay outside older workers' selectors.
     Ok(db.collection::<Delivery>(DELIVERIES).find_one_and_update(doc!{
-        "_id":id,"version":{"$in":[4,VERSION]},"expires_at":{"$type":"date"},
+        "_id":id,"version":{"$in":[4,VERSION,SIDE_MESSAGE_VERSION]},"expires_at":{"$type":"date"},
         "$expr":{"$gt":["$expires_at","$$NOW"]},"$or":[
             {"state":"pending"},{"state":"preparing","$expr":elapsed("$lease_expires_at")}
         ]
-    },vec![doc!{"$set":{"version":VERSION,"state":"preparing","claim_id":uuid::Uuid::new_v4().to_string(),
+    },vec![doc!{"$set":{"version":{"$max":["$version",VERSION]},"state":"preparing","claim_id":uuid::Uuid::new_v4().to_string(),
         "lease_expires_at":deadline(PREPARATION_SECS)}}])
     .return_document(mongodb::options::ReturnDocument::After).await?)
 }
@@ -142,7 +143,7 @@ async fn receipt_authority(
 ) -> AppResult<SourceRows> {
     let t = &d.task;
     let source = t.channel_source.as_ref().ok_or_else(refused)?;
-    if !matches!(d.version, 4 | 5)
+    if !matches!(d.version, 4 | 5 | SIDE_MESSAGE_VERSION)
         || t.cancelled
         || t.hard_deadline <= Utc::now()
         || d.expires_at <= Utc::now()
@@ -184,7 +185,6 @@ async fn dispatch(db: &Database, d: &Delivery, part: Option<u32>) -> AppResult<b
         let mut filter=exact(d,if part.is_some(){bson::bson!({"$in":["preparing","dispatching"]})}else{bson::bson!("preparing")});
         filter.insert("$expr",live());
         if let Some(part)=part {
-            filter.insert("version",VERSION);
             filter.insert("preparation.next",*part);
         }
         Ok(db.collection::<Document>(DELIVERIES).update_one(filter,vec![doc!{"$set":{
@@ -204,21 +204,34 @@ pub(crate) async fn before_effect(db: &Database, d: &Delivery, part: u32) -> App
 
 pub(crate) async fn accepted(
     db: &Database,
-    d: &Delivery,
+    d: &mut Delivery,
     part: u32,
     total: u32,
     receipt: &crate::models::channel_turn_preparation::Receipt,
+    side_message: bool,
 ) -> AppResult<bool> {
     let mut filter = exact(d, "dispatching");
-    filter.insert("version", VERSION);
     filter.insert("preparation.next", part);
     filter.insert("preparation.total", total);
-    Ok(db.collection::<Document>(DELIVERIES).update_one(filter,vec![doc!{"$set":{
+    let mut changes = doc! {
         "state":if part+1==total {"confirmed"}else{"preparing"},
         "preparation.next":part+1,
         "preparation.receipts":{"$concatArrays":["$preparation.receipts",{"$literal":[bson::to_bson(receipt).map_err(encoding)?]}]},
         "lease_expires_at":if part+1==total {bson::bson!("$$REMOVE")}else{bson::bson!(deadline(PREPARATION_SECS))},
-    }}]).await?.matched_count==1)
+    };
+    if side_message {
+        changes.insert("version", SIDE_MESSAGE_VERSION);
+    }
+    let accepted = db
+        .collection::<Document>(DELIVERIES)
+        .update_one(filter, vec![doc! {"$set":changes}])
+        .await?
+        .matched_count
+        == 1;
+    if accepted && side_message {
+        d.version = SIDE_MESSAGE_VERSION;
+    }
+    Ok(accepted)
 }
 
 pub(crate) async fn finish_owned(db: &Database, d: &Delivery, state: &str) -> AppResult<bool> {
@@ -248,7 +261,7 @@ pub(crate) async fn finish(db: &Database, d: &Delivery, state: &str) -> AppResul
 
 pub(crate) fn due_pipeline() -> Vec<Document> {
     vec![
-        doc! {"$match":{"version":{"$in":[4,VERSION]},"$or":[
+        doc! {"$match":{"version":{"$in":[4,VERSION,SIDE_MESSAGE_VERSION]},"$or":[
             {"state":"pending"},
             {"state":"preparing","$expr":{"$or":[elapsed("$lease_expires_at"),elapsed("$expires_at")]}},
             {"state":"dispatching","$expr":elapsed("$lease_expires_at")}

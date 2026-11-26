@@ -240,6 +240,32 @@ token and invalidates the old one. A 120-second grace period handles network
 retries. Reuse of a revoked refresh token outside the grace period triggers
 revocation of the entire token family.
 
+### OAuth consent disclosure
+
+The consent screen presents identity and OAuth permissions, access duration
+and revocation, and service access separately. The final service summary uses
+the same service selection as the submitted decision. A live announcement
+reports the selection mode. It includes the count for a restricted selection.
+Service names and permission details appear in the summary before approval.
+All services lists the
+currently included connections and includes future connections. The summary
+shows retained access when existing authorization data is available.
+Ordinary approval preserves the stored grant and issues authority
+for the approved request. Incremental review lists newly requested permissions,
+including long-lived and durable broker access. Incremental approval carries
+forward the existing grant and adds the approved services.
+
+Service disclosures describe the connected credential and known catalog
+operations. They do not narrow full service access or replace credential,
+resource, or approval checks. Unavailable details fall back to full-access
+copy without blocking approval. Revoking app access in Authorized Applications
+requires the app to obtain consent again. The screen lists the configured
+standard and broker token lifetimes. The app's token flow determines which
+applies. Refresh rotation can keep the app connected.
+
+See [the disclosure API](API.md#post-apiv1user-servicesconsent-disclosure)
+for field and availability details.
+
 ---
 
 ## Resource Indicators

@@ -650,6 +650,26 @@ tool call when `activity_id` matches and otherwise as one grouped line per ident
 action; denials stay visible on the line. Pending cards, expired cards and authored-skill reviews
 keep their own transcript rows, and the full receipt text (including the bypassed
 automation, machine/saved-login or service-approval policy) is shown on hover.
+Live requests requiring the current person's decision appear once in a stacked
+card surface pinned above the composer: owner acknowledgements, proxy approvals
+and this conversation's shared-connection consents. The header counts pending
+decisions separately from the active card's position. Previous/next navigation
+keeps the active identity stable across polling and arrivals; inactive cards stay
+mounted but hidden and inert, preserving review inputs. Transcript markers link
+back to the stack instead of duplicating its interactive cards. The stack may
+collapse to its header and leaves the composer available. Short requests have
+direct actions in a fixed card footer. Long requests show a compact summary and
+Review/Deny controls; Allow appears only in full review, presented as a desktop
+dialog or full-height mobile sheet with one scrolling body and a fixed decision
+footer. Review choices survive closing and reopening. Promotion after removal guards decisions for 750 ms to
+prevent an old button's second click from deciding the next card.
+Allowed, used, denied, expired, bypassed and orchestrator-owned requests remain
+in history. Publication recovery belongs there too; it is not a new pending
+decision. Full access retains the organization-instruction and delegation floors.
+Settled proxy approvals return to their creation timestamp, so old denials do not
+follow later replies. Deep links reveal pending cards in the stack and settled
+cards through the existing transcript navigation. This changes presentation only;
+the existing handlers, exact bindings, expiry checks and continuations still apply.
 Automation-started messages expose `origin: "trigger"` and, while the run record
 is retained, `automation: {trigger_id, run_id, label}` from two owner-scoped,
 projected reads only when the page holds such a message. Full-access

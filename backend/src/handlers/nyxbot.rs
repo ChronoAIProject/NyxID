@@ -6956,19 +6956,24 @@ async fn custom_replay(state: &AppState, event_key: &str, response_id: &str) -> 
     )
 }
 
-pub async fn deliver_update_for(
+pub(crate) async fn deliver_machine_control_notice(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
     text: &str,
-    images: Option<&images::ImageSendPlan>,
-    purpose: supplemental::Purpose,
+    request_id: &str,
+    revision: i64,
 ) {
     // A channel thread answers its chat; the owner's own thread answers the
     // chat they last wrote from.
     let Some(origin) = row.channel.as_ref().or(row.reply_channel.as_ref()) else {
         return;
     };
-    deliver_to_for(state, row, origin, text, images, purpose).await;
+    let mut decision = supplemental::Decision::new(supplemental::Purpose::MachineDesktopNotice);
+    decision.machine_control = Some((request_id.to_owned(), revision));
+    let source = row.active_turn.as_ref().map(|turn| {
+        crate::services::channel_supplemental_delivery::ResultSource::capture(turn, origin)
+    });
+    let _ = deliver_from_source(state, row, origin, text, None, decision, source).await;
 }
 
 /// The chat a conversation may deliver to: its own channel thread's chat,
@@ -6984,6 +6989,7 @@ pub(crate) async fn delivery_target(
 }
 
 /// Deliver `text` from the conversation `row` to one chat. Best effort.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn deliver_to(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
@@ -7010,10 +7016,32 @@ pub async fn deliver_to_for(
     images: Option<&images::ImageSendPlan>,
     purpose: supplemental::Purpose,
 ) {
-    let source = row.active_turn.as_ref().map(|turn| {
+    deliver_to_for_turn(
+        state,
+        row,
+        origin,
+        text,
+        images,
+        purpose,
+        row.active_turn.as_ref(),
+    )
+    .await;
+}
+
+pub(super) async fn deliver_to_for_turn(
+    state: &AppState,
+    row: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &ChannelOrigin,
+    text: &str,
+    images: Option<&images::ImageSendPlan>,
+    purpose: supplemental::Purpose,
+    turn: Option<&crate::models::assistant_conversation::ActiveTurn>,
+) {
+    let source = turn.map(|turn| {
         crate::services::channel_supplemental_delivery::ResultSource::capture(turn, origin)
     });
-    let _ = deliver_from_source(state, row, origin, text, images, purpose, source).await;
+    let decision = supplemental::Decision::new(purpose);
+    let _ = deliver_from_source(state, row, origin, text, images, decision, source).await;
 }
 
 async fn deliver_from_source(
@@ -7022,13 +7050,13 @@ async fn deliver_from_source(
     origin: &ChannelOrigin,
     text: &str,
     images: Option<&images::ImageSendPlan>,
-    purpose: supplemental::Purpose,
+    mut decision: supplemental::Decision,
     source: Option<crate::services::channel_supplemental_delivery::ResultSource>,
 ) -> AppResult<()> {
     if crate::services::channel_guest_access::is_hosted_conversation(&row.id) {
         return Ok(());
     }
-    let mut decision = supplemental::Decision::new(purpose);
+    let purpose = decision.purpose;
     let turn_id = source.as_ref().map(|source| source.turn_id.clone());
     decision.turn.clone_from(&turn_id);
     decision.event = source
@@ -7036,7 +7064,6 @@ async fn deliver_from_source(
         .and_then(|binding| binding.event_id.clone())
         .or_else(|| origin.native_event_id.clone());
     decision.source = source;
-    decision.saved_result = row.active_turn.is_none() && turn_id.is_some();
     let trace = turn_id
         .as_deref()
         .and_then(crate::turn_trace::TurnContext::for_turn);

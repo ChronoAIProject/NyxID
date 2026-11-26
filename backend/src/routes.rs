@@ -1956,6 +1956,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/user-services",
             get(handlers::user_services_handler::list_user_services),
         )
+        .route(
+            "/user-services/consent-disclosure",
+            post(handlers::oauth_consent_disclosure::read),
+        )
         .route("/endpoints", get(handlers::user_endpoints::list_endpoints))
         .route(
             "/endpoints/{endpoint_id}/authorization",
