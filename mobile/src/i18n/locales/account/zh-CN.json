@@ -234,7 +234,7 @@
   "Setup key": "设置密钥",
   "Setup key copied. Add it to your authenticator.": "设置密钥已复制。将其添加到您的身份验证器中。",
   "Setup was cancelled. Try again.": "设置已取消，请重试。",
-  "Share app launch, first frame, input readiness, chat response times, frame rate, JavaScript responsiveness, and peak app memory use from this device. This setting is independent of account usage analytics and is off by default.": "分享此设备上的应用启动、首帧、输入框就绪和聊天响应时间，以及帧率、JavaScript 响应情况和应用内存峰值。这项设置独立于账户使用情况分析，默认关闭。",
+  "Share app launch, first frame, input readiness, chat response times, frame rate, and JavaScript responsiveness from this device. This setting is independent of account usage analytics and is off by default.": "分享此设备上的应用启动、首帧、输入框就绪和聊天响应时间，以及帧率和 JavaScript 响应情况。这项设置独立于账户使用情况分析，默认关闭。",
   "Share performance metrics": "分享性能指标",
   "Share performance metrics on this device": "在此设备上分享性能指标",
   "Shown to people you share agents and groups with.": "向与您共享智能体和群组的人显示。",

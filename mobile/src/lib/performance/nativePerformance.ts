@@ -15,8 +15,6 @@ export type FrameTiming = {
   over_budget_count: number;
   dropped_callback_count?: number;
   observed_fps?: number;
-  peak_rss_bytes?: number;
-  peak_rss_source?: "android_proc_status_vmhwm" | "ios_getrusage_maxrss";
 };
 export interface NativePerformance extends LaunchBridge {
   startFrames(token: string): Promise<boolean>;

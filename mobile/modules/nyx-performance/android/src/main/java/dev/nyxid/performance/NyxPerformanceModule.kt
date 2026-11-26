@@ -10,7 +10,7 @@ import expo.modules.kotlin.functions.Queues
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 
-/** No network or persistence. Observers and bounded procfs reads require a JS-authorized session. */
+/** Frame observers run only during a JS-authorized session. */
 class NyxPerformanceModule : Module() {
   private val main = Handler(Looper.getMainLooper())
   private val sessions = LinkedHashMap<String, FrameHistogram>()
@@ -65,16 +65,7 @@ class NyxPerformanceModule : Module() {
       }
     }.runOnQueue(Queues.MAIN)
     AsyncFunction("stopFrames") { token: String ->
-      var value = sessions.remove(token)?.result(now())?.plus("measurement_source" to "android_frame_metrics")
-      if (value != null) {
-        // Read only when an authorized frame window has a usable summary.
-        // VmHWM belongs to the process lifetime, including earlier allocations.
-        val peakRss = readPeakRssBytes()
-        if (peakRss != null) value = value + mapOf(
-          "peak_rss_bytes" to peakRss,
-          "peak_rss_source" to "android_proc_status_vmhwm"
-        )
-      }
+      val value = sessions.remove(token)?.result(now())?.plus("measurement_source" to "android_frame_metrics")
       if (sessions.isEmpty()) cancelAll()
       value
     }.runOnQueue(Queues.MAIN)

@@ -148,23 +148,27 @@ test("iOS cadence cannot claim callback drops and malformed summaries are refuse
   ])
     assert.equal(safeFrameTiming({ ...timing, ...invalid }), null);
 });
-test("forwards bounded FPS and a platform-matched process RSS peak independently", () => {
-  const sample: FrameTiming = {
-    ...timing,
-    observed_fps: 32.5,
-    peak_rss_bytes: 84_934_656,
-    peak_rss_source: "android_proc_status_vmhwm",
-  };
-  assert.deepEqual(safeFrameTiming(sample), sample);
-  const ios = { ...sample, measurement_source: "ios_display_link" } as const;
-  assert.equal(safeFrameTiming(ios)?.peak_rss_bytes, undefined);
-  assert.equal(
-    safeFrameTiming({ ...ios, peak_rss_source: "ios_getrusage_maxrss" })
-      ?.peak_rss_bytes,
-    sample.peak_rss_bytes,
-  );
+test("older native builds can return peak memory but only frame measurements are forwarded", () => {
+  const { dropped_callback_count, ...common } = timing;
+  const android = { ...common, observed_fps: 32.5, dropped_callback_count };
+  const ios = {
+    ...common,
+    measurement_source: "ios_display_link",
+    observed_fps: 60,
+  } as const;
+  for (const [expected, source] of [
+    [android, "android_proc_status_vmhwm"],
+    [ios, "ios_getrusage_maxrss"],
+  ] as const) {
+    const legacy = {
+      ...expected,
+      peak_rss_bytes: 84_934_656,
+      peak_rss_source: source,
+    };
+    assert.deepEqual(safeFrameTiming(legacy), expected);
+  }
   assert.deepEqual(
-    safeFrameTiming({ ...sample, observed_fps: Infinity, peak_rss_bytes: -1 }),
+    safeFrameTiming({ ...timing, observed_fps: Infinity }),
     timing,
   );
 });

@@ -1,10 +1,9 @@
 # Native performance measurements
 
 This local Expo module measures application launch milestones and chat frame
-timing, and reads the process peak resident memory from the OS when a sampled
-frame window ends. The JavaScript
-consent layer in `src/lib/performance` supplies a valid, sampled grant before
-calling `startFrames` and rechecks it before sending the result.
+timing. The JavaScript consent layer in `src/lib/performance` supplies a valid,
+sampled grant before calling `startFrames` and rechecks it before sending the
+result.
 
 One native frame observer serves up to two overlapping drag and streaming
 windows. JS ends each window within ten seconds. The native observer expires
@@ -21,10 +20,7 @@ Budgets follow dynamic refresh rates, with a ten percent tolerance before an
 observation counts as over budget. Analyze platforms and sources separately.
 
 The `observed_fps` field counts observed frame callbacks per second of elapsed
-window time. Compare windows of the same platform, source and gesture. The
-optional `peak_rss_bytes` field is the process lifetime high-water mark, read
-from `VmHWM` on Android or `getrusage(RUSAGE_SELF).ru_maxrss` on iOS.
-It can reflect work completed before the gesture. Missing readings are omitted.
+window time. Compare windows of the same platform, source and gesture.
 
 Both implementations use a fixed 1,002-bin histogram, one millisecond percentile
 precision and a maximum of 10,000 observations per window. Values over one second

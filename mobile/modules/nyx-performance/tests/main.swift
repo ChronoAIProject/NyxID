@@ -33,13 +33,7 @@ precondition(cadence.result(now: 1100)?["frame_count"] as? Int == 30)
 precondition(cadence.result(now: 1100)?["window_ms"] as? Double == 1000)
 precondition(cadence.result(now: 2100)?["observed_fps"] as? Double == 15)
 precondition(histogram.result(now: 400)?["observed_fps"] == nil)
-// Read the real host process high-water mark. No fixed or invented RSS value.
-let actualPeak = peakProcessResidentBytes()
-precondition(actualPeak != nil && actualPeak! > 0)
-let reportedPeak = cadence.result(now: 1100)?["peak_rss_bytes"] as? Int
-precondition(reportedPeak != nil && reportedPeak! >= actualPeak!)
-precondition(cadence.result(now: 1100)?["peak_rss_source"] as? String == "ios_getrusage_maxrss")
-print("PASS: Swift histogram covers dynamic budgets, bounds, actual callback cadence and process peak RSS")
+print("PASS: Swift histogram covers dynamic budgets, bounds and actual callback cadence")
 
 let launchBinding = String(repeating: "a", count: 64)
 let unauthorizedLaunch = LaunchTimingState(configured: launchBinding, saved: nil)

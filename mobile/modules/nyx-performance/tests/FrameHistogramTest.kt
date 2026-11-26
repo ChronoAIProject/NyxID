@@ -29,9 +29,5 @@ fun main() {
   repeat(30) { slow.add(2.0, 1000.0 / 60) }
   check(fast.result(1000.0)!!["observed_fps"] == 120.0)
   check(slow.result(1000.0)!!["observed_fps"] == 30.0)
-  check(parsePeakRssBytes("Name:\tqa\nVmHWM:\t 12345 kB\nVmRSS:\t 100 kB\n") == 12345L * 1024)
-  for (invalid in listOf("VmRSS: 123 kB", "VmHWM: 0 kB", "VmHWM: -1 kB", "VmHWM: 123 MB", "VmHWM: 999999999999999999999 kB")) {
-    check(parsePeakRssBytes(invalid) == null)
-  }
   println("PASS: Kotlin histogram honors dynamic budgets, invalid values, bounded counts and overflow percentiles")
 }

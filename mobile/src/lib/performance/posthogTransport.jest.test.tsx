@@ -103,8 +103,6 @@ test("consented measurements produce only direct single-event batches with the e
     interval_max_ms: 50.1,
     over_budget_count: 2,
     observed_fps: 58,
-    peak_rss_bytes: 210_000_000,
-    peak_rss_source: "ios_getrusage_maxrss",
   } as const;
   const chat = {
     outcome: "completed",

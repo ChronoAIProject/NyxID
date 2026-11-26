@@ -1,6 +1,6 @@
 # NyxID React Native 性能监控与排查手册
 
-适用范围为 NyxID 的原生 Android / iOS 应用。本分支区分冷启动和热启动，分别采集进入前台、首帧和关键输入可用的耗时，同时采集聊天响应、观测帧率、JS 长任务或事件循环延迟、进程内存峰值，并在构建时记录产物大小。下面的看板配置、告警阈值和教学数据分别用于配置与读图。
+适用范围为 NyxID 的原生 Android / iOS 应用。本分支区分冷启动和热启动，分别采集进入前台、首帧和关键输入可用的耗时，同时采集聊天响应、观测帧率、JS 长任务或事件循环延迟，并在构建时记录产物大小。正式版内存趋势直接看 Apple 和 Google 的商店报告。下面的看板配置、告警阈值和教学数据分别用于配置与读图。
 
 ## 1. 一个问题该去哪里看
 
@@ -12,7 +12,7 @@
 | 用户要多久才能打字、看到回复，哪个版本受影响 | RN 客户端在指定时刻计时，按本机许可直接发往 PostHog | PostHog 按版本、平台、场景看趋势和样本数 | 在真机复现，给网络、JS 和原生显示分别计时 |
 | 滚动或键盘动画哪一帧卡住 | Android 帧截止时间、iOS 动画停顿；开发包另提供 JS/UI FPS | 实验室看系统轨迹；需要线上场景趋势时把原生统计按一次交互汇总 | Android Perfetto FrameTimeline；iOS Instruments → Animation Hitches；针对 JS 更新用 React Profiler |
 | 安装或升级要多下载多少 | 产物字节数、按设备交付的包和商店估算 | CI 构建报告、Play Console、App Store Connect / App Thinning Size Report | 比较相同配置下的 Hermes 业务包、原生库、图片和字体 |
-| 长会话后是否越来越占内存或耗电 | Android 进程内存、iOS 内存占用、CPU/能源采样 | 真机 Profiler、Instruments；规模化后参考平台聚合趋势 | 固定场景反复进入退出，比较预热、峰值、退出稳定后的曲线 |
+| 新版本是否更吃内存，用户是否因为内存紧张被中断 | Apple 和 Google 汇总的正式版数据 | iOS 看 Xcode Organizer → Metrics，Android 看 Play Console → Android vitals | 用 Instruments 或 Android Studio Memory Profiler 重复长聊天、打开图片和退出页面，观察占用能否回落 |
 
 Android vitals 和 Apple 的平台报告各有分发、用户共享设置和聚合条件。侧载 QA APK 或 Ad Hoc IPA 的日常验证以真机本地数据为主。不同来源的分母和刷新频率应写在图表描述里。[Android vitals](https://developer.android.google.cn/topic/performance/vitals?hl=zh-cn) · [Apple MetricKit](https://developer.apple.com/documentation/metrickit)
 
@@ -43,7 +43,14 @@ Android vitals 和 Apple 的平台报告各有分发、用户共享设置和聚�
 
 每个版本分别记录 CI 生成的 APK/AAB/IPA 字节数、指定设备经过拆分和压缩后的下载量、设备安装后的占用。每版用同一架构、签名方式、构建配置比较。Android 可对相同设备规格使用 `bundletool get-size total`，iOS 查看 App Thinning Size Report。同为 ARM64 的 NyxID QA build 8 到 9 从 63,062,771 增至 63,071,651 字节，增长 8,880 字节，Hermes 业务包的增量也是 8,880 字节。这是历史 QA 产物的实测示例，不是本次性能采集接入的包体积验证。[Android bundletool](https://developer.android.google.cn/tools/bundletool?hl=zh-cn) · [Apple 包体积](https://developer.apple.com/documentation/xcode/reducing-your-app-s-size)
 
-稳定性与速度一同观察。Android 看用户感知 ANR（应用无响应）和崩溃，iOS 看 hangs 和崩溃。终止进程的会话可能来不及发最后一个业务事件。若看“无崩溃会话占比”，先确认数据源确实具备同口径的受影响会话数与会话总数。内存放在长聊天、图片和反复导航场景；耗电和发热放在连续语音等长时间工作场景。
+稳定性与速度一同观察。Android 看用户感知 ANR（应用无响应）和崩溃，iOS 看 hangs 和崩溃。终止进程的会话可能来不及发最后一个业务事件。若看“无崩溃会话占比”，先确认数据源确实具备同口径的受影响会话数与会话总数。耗电和发热放在连续语音等长时间工作场景。
+
+### 正式版与测试包的内存怎么查
+
+- **正式版。** iOS 在 Xcode Organizer 的 Metrics 里选 Memory，在同一设备类型上对比新旧版本。Android 在 Play Console 的 Android vitals 里按版本和设备内存档位看内存占用，再看每天遇到可感知低内存终止的用户占比。两个平台各用自己的口径对比版本。参与设备太少时，商店可能暂时没有数据。[Apple 线上指标](https://developer.apple.com/documentation/xcode/analyzing-the-performance-of-your-shipping-app) · [Android 内存占用](https://developer.android.com/google/play/vitals/memory-usage) · [Android 低内存终止率](https://developer.android.com/google/play/vitals/lmk)
+- **侧载 QA 包。** 使用可分析的构建，在真机上打开 Instruments → Allocations 或 Android Studio → Memory Profiler。从空闲开始录制，反复进入同一段长聊天、打开同一张图片再退出。记录每次峰值和退出后稳定的占用。若后者逐轮上升，再检查哪些对象仍被保留。[Apple 内存分析](https://developer.apple.com/documentation/xcode/gathering-information-about-memory-use) · [Android 内存分析工具](https://developer.android.com/studio/profile/memory-profiler)
+
+目前直接查看商店报告。以后需要在 PostHog 统一看发版数据时，可启用商店连接器，只同步所需的版本汇总表。同步行数计入数据仓库用量，商店样本不足时同步后也会缺数。[PostHog 的 Apple 连接器](https://posthog.com/docs/data-pipelines/sources/app-store-connect) · [PostHog 的 Google Play 连接器](https://posthog.com/docs/data-pipelines/sources/google-play-console)
 
 ## 3. NyxID 的 PostHog 看板怎么搭
 
@@ -75,7 +82,7 @@ Android vitals 和 Apple 的平台报告各有分发、用户共享设置和聚�
 
 按平台、阶段和 `target` 比较版本的 P50、P95 和样本数。进入前台、绘出首帧和输入可用各有自己的样本数。首次在设置里开启分享，只对后续符合条件的启动生效。
 
-**帧率与内存图**均读取 `mobile.perf_frames`。窗口的 `observed_fps` 为实际观测帧回调数除以经过的秒数。Android 窗口只在应用产生帧时收到回调，静止画面的低值也可能代表没有重绘需求。iOS 记录 CADisplayLink 回调频率。比较同平台、同场景和同构建类型，同时看慢帧占比。窗口结束时读取进程启动以来的常驻内存最高值 `peak_rss_bytes`，Android 取 `/proc/self/status` 的 VmHWM，iOS 取 getrusage 的 ru_maxrss。除以 1,048,576 得到 MiB。读不到的值保留为空；RSS 包含原生和 JS 等内存，排查泄漏需另看多次操作后的占用变化。
+**帧率图**读取 `mobile.perf_frames`。窗口的 `observed_fps` 为实际观测帧回调数除以经过的秒数。Android 窗口只在应用产生帧时收到回调，静止画面的低值也可能代表没有重绘需求。iOS 记录 CADisplayLink 回调频率。比较同平台、同场景和同构建类型，同时看慢帧占比。
 
 **包大小图**从标准 Android AAB 和 iOS IPA 发布脚本自动取数，只传构建元数据；独立于用户的本机开关，失败不阻断出包。QA 可在 mobile/ 中运行 `APP_ENV=dev node scripts/performance-artifact.js --kind apk --configuration debug --version 1.0.4 --build 112502 --file /path/to/build.apk`。同一种产物按构建号看变化，再用分发平台提供的拆包报告估算用户下载量。
 
@@ -126,7 +133,7 @@ adb -s "$device" shell dumpsys gfxinfo "$pkg" framestats > nyxid-frames.txt
 | 开发中有人反馈卡 | 记录页面、具体手势、消息长度、是否流式和可重复条件，用 Dev Menu 缩小范围 | 一条可复现步骤和对应轨迹时间区间 |
 | 每次构建 | 按平台和架构保存精确产物大小，与同配置上一构建比较 | 构建号、字节数、增量和主要变化文件 |
 | 发布候选包 | 固定真机比较稳定版与候选版，交替运行，分别测启动到可用、长聊滚动、键盘和聊天首文字 | 中位数/范围、各指标分母、最差轨迹、失败次数 |
-| 新版开始有用户 | 按平台和构建看 PostHog 趋势、样本覆盖和结果分布，同时看商店无响应和稳定性指标 | 受影响版本、平台、设备档位、渠道和影响范围 |
+| 新版开始有用户 | 按平台和构建看 PostHog 趋势、样本覆盖和结果分布，同时看商店内存占用、低内存终止和无响应指标 | 受影响版本、平台、设备档位、渠道和影响范围 |
 | 收到告警 | 先查埋点口径、分母、版本流量和设备构成是否改变，再找可复现的慢场景；修复后重做同机对照 | 指标前后值、相同口径的线上复核和残余问题 |
 
 告警从稳定版的自然波动推导。例如团队可试行“相对稳定版本上升至少 20%，且绝对增加至少 200 ms，达到团队约定的最低样本量并持续两个观察窗口”作为**启动 P95** 的候选规则。这是试运行参数；慢帧率有自己的分母和波动，崩溃/ANR 参考各平台口径。样本少的内测以真机逐次结果为主。

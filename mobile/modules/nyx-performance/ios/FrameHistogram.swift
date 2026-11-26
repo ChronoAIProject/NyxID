@@ -1,15 +1,4 @@
 import Foundation
-import Darwin
-
-/// Darwin documents ru_maxrss in bytes. This is the process lifetime high-water
-/// mark, not the resident size at this instant or a peak scoped to one window.
-func peakProcessResidentBytes() -> Int? {
-  var usage = rusage()
-  guard getrusage(RUSAGE_SELF, &usage) == 0,
-    usage.ru_maxrss > 0,
-    usage.ru_maxrss <= 9_007_199_254_740_991 else { return nil }
-  return Int(usage.ru_maxrss)
-}
 
 /// Fixed-memory, 1ms histogram. No per-frame array growth or content collection.
 final class FrameHistogram {
@@ -48,10 +37,6 @@ final class FrameHistogram {
       result["observed_fps"] = Double(callbackCount) * 1000 / (now - started)
       result["frame_count"] = callbackCount
       result["window_ms"] = now - started
-    }
-    if let peak = peakProcessResidentBytes() {
-      result["peak_rss_bytes"] = peak
-      result["peak_rss_source"] = "ios_getrusage_maxrss"
     }
     return result
   }
