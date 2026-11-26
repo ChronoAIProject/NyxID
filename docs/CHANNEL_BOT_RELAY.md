@@ -2859,6 +2859,12 @@ with no intake error. Flag-on with unavailable serving readiness is a real block
 of bot count: channels, releases and leases; two flag-resolution reads; and two
 fleet-readiness reads. Native-only lists skip relay flag/readiness reads.
 
+Adopting a native Discord binding sets the stored delivery status to
+`unconfirmed` and the error to `discord_native_intake_unconfirmed`, replacing
+any previous delivery error. After adoption, the delivery sweep writes this
+diagnostic only when the stored delivery error is null, absent or intake-only.
+It preserves any unrelated delivery failure recorded after adoption.
+
 The first authenticated native admission changes only the exact
 `unconfirmed` / `discord_native_intake_unconfirmed` pair to `unknown` with no
 error, in the admission transaction. It does not claim successful outbound
@@ -2880,8 +2886,35 @@ folds it into the existing bot fence write.
   disabled or disconnected, or its `connected` report has no live ingress lease.
 - `discord_native_intake_unconfirmed`: native intake owns the bot, but NyxID has
   no authenticated event for this hand-over. Check CMA intake; `selected` alone
-  cannot make the bot healthy. The channel aggregate reports `unconfirmed`,
-  rather than preserving an old `ok`.
+  cannot make the bot healthy.
+- `discord_native_connection_down`: the existing native delivery sweep's
+  bounded `GET /channels/{ref}` uses connection reports from a serving instance
+  reporting an acquired lease. Released, lost, contended and unknown leases
+  provide no current-holder evidence. A stale report counts as down even
+  with a future retry. A fresh report that shows a disconnected,
+  unauthenticated or unready session counts as down when `retry_at` is
+  explicitly null or at or before `observed_at`. A future retry in such a
+  fresh report leaves the stored observation unchanged. A ready, authenticated,
+  connected session needs no retry. Quiet channels retain their authenticated
+  inbound evidence regardless of message age.
+  The persisted observation is scoped to the current binding, remote channel
+  and Discord bot identity. Only newer conclusive observations replace it,
+  with a down report, including an explicit stale report, winning a tie against
+  ready evidence. Non-2xx,
+  absent or malformed connection data and non-owning instance observations leave
+  the existing observation intact. Proven recovery rearms the next down
+  transition, and a ready report without a current-binding inbound event still
+  shows `discord_native_intake_unconfirmed`. The existing failure notice goes
+  once per down transition to the bot owner or every organization admin, with
+  the `contact_admin` recommendation. Health and channel listings project the
+  persisted evidence without gateway requests, including while the connection
+  is down.
+
+Channel listings expose `discord_intake` independently of delivery status. A
+stored delivery failure unrelated to intake takes precedence in the delivery
+fields over every native intake code. Otherwise, native intake advice sets the
+delivery status to `failing` for a down connection or `unconfirmed` for a
+binding awaiting its first authenticated event.
 
 The existing 30-second release sweep repairs up to ten stale direct setup rows
 per pass, rotating by its last repair check. It cleans only failed attempt keys

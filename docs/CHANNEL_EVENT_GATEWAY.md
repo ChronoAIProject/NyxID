@@ -773,9 +773,13 @@ transaction clears only the exact stored intake-unconfirmed state; real delivery
 failures remain. Bot inbound diagnostics share the existing admission fence write. Health
 and the channel aggregate use this evidence separately from activation and
 historical relay delivery; no event means `discord_native_intake_unconfirmed`.
-Existing native bots are not automatically returned to relay. Positive connection
-confirmation and automatic rollback require a negotiated CMA health contract,
-a default-off rollout and all-replica readiness; CMA#1586 tracks that contract.
+The existing native delivery sweep also observes the gateway's
+`native_discord_activation.connection` status, including already flagged native
+bindings, and persists conclusive connection evidence scoped to the adopted
+binding and remote channel. See [Discord intake health](CHANNEL_BOT_RELAY.md#discord-intake-health-and-failed-hand-overs-2328-2323)
+for the authority, ordering, outage and recovery contract. Existing native bots
+are not automatically returned to relay. Automatic rollback requires a separate
+negotiated CMA contract, a default-off rollout and all-replica readiness.
 
 Failed setup is cleaned through the exact attempt fence, including errors before
 a reservation is returned. The bounded release sweep also repairs stale direct

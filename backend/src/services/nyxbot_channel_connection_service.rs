@@ -532,6 +532,7 @@ pub(crate) async fn connect(
         gateway_native_activation_operation: None,
         gateway_native_delivery: None,
         gateway_intake: None,
+        gateway_discord_connection: None,
         gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
