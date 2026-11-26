@@ -783,7 +783,15 @@ pub fn generate_relay_access_token(
     rbac: Option<&RbacClaimData>,
     agent_scope: &RelayAgentScope,
 ) -> Result<String, AppError> {
-    generate_relay_access_token_with_assignment(keys, config, user_id, scope, rbac, agent_scope, None)
+    generate_relay_access_token_with_assignment(
+        keys,
+        config,
+        user_id,
+        scope,
+        rbac,
+        agent_scope,
+        None,
+    )
 }
 
 pub(crate) fn generate_relay_access_token_with_assignment(

@@ -2519,7 +2519,10 @@ pub(crate) async fn set_guest_access_v1_in_session(
     };
     // Touch the bot for both cases so any prepared configuration activated
     // by this transaction serializes with transfer, deletion and dispatch.
-    let changed = bots.update_one(filter, doc! {"$set":set}).session(tx).await?;
+    let changed = bots
+        .update_one(filter, doc! {"$set":set})
+        .session(tx)
+        .await?;
     if changed.matched_count != 1 {
         return Err(conflict());
     }
@@ -3063,16 +3066,27 @@ pub(crate) async fn claim_owner_aurinko_lifecycle(
 pub(crate) async fn purge_guest_data(db: &mongodb::Database, bot_id: &str) -> AppResult<()> {
     let bots = db.collection::<bson::Document>(COLLECTION_NAME);
     let retiring = doc! {"_id":bot_id,"is_active":false,"channel_guest_data_present":true};
-    let Some(bot) = bots.find_one(retiring.clone()).projection(doc! {"platform":1}).await? else {
+    let Some(bot) = bots
+        .find_one(retiring.clone())
+        .projection(doc! {"platform":1})
+        .await?
+    else {
         return Ok(());
     };
     // Meta's provider-approved cleanup retains other grants on the same inbox.
-    if !bot.get_str("platform").is_ok_and(super::channel_adapters::meta::is_meta) {
+    if !bot
+        .get_str("platform")
+        .is_ok_and(super::channel_adapters::meta::is_meta)
+    {
         super::channel_guest_access::personal_records::purge_bot(db, bot_id).await?;
     }
     super::channel_guest_access::setup::purge_bot(db, bot_id).await?;
     super::channel_guest_access::purge_bot(db, bot_id).await?;
-    bots.update_one(retiring, doc! {"$set":{"channel_guest_retirement_complete":true}}).await?;
+    bots.update_one(
+        retiring,
+        doc! {"$set":{"channel_guest_retirement_complete":true}},
+    )
+    .await?;
     Ok(())
 }
 
@@ -3088,18 +3102,26 @@ pub(crate) async fn sweep_guest_retirement(db: &mongodb::Database) -> AppResult<
         .limit(32)
         .await?;
     while let Some(row) = rows.try_next().await? {
-        let bot_id = row.get_str("_id")
+        let bot_id = row
+            .get_str("_id")
             .map_err(|_| AppError::Internal("Invalid retiring channel bot".into()))?;
-        let cutoff = row.get_i64("channel_guest_purge_before_ownership")
+        let cutoff = row
+            .get_i64("channel_guest_purge_before_ownership")
             .map_err(|_| AppError::Internal("Invalid channel cleanup cutoff".into()))?;
-        if !super::channel_guest_access::personal_records::purge_before_ownership(&db, bot_id, cutoff).await? {
+        if !super::channel_guest_access::personal_records::purge_before_ownership(
+            &db, bot_id, cutoff,
+        )
+        .await?
+        {
             continue;
         }
-        super::channel_guest_access::purge_observations_before_ownership(&db, bot_id, cutoff).await?;
+        super::channel_guest_access::purge_observations_before_ownership(&db, bot_id, cutoff)
+            .await?;
         bots.update_one(
             doc! {"_id":bot_id,"channel_guest_purge_before_ownership":cutoff},
             doc! {"$unset":{"channel_guest_purge_before_ownership":""}},
-        ).await?;
+        )
+        .await?;
     }
     let mut rows = bots
         .find(doc! {
@@ -3111,7 +3133,9 @@ pub(crate) async fn sweep_guest_retirement(db: &mongodb::Database) -> AppResult<
         .limit(32)
         .await?;
     while let Some(row) = rows.try_next().await? {
-        let id = row.get_str("_id").map_err(|_| AppError::Internal("Invalid retiring channel bot".into()))?;
+        let id = row
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Invalid retiring channel bot".into()))?;
         purge_guest_data(&db, id).await?;
     }
     Ok(())

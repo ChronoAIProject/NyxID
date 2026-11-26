@@ -1813,7 +1813,8 @@ async fn server_run(cli: Cli) {
             let mut ticks = tokio::time::interval(std::time::Duration::from_secs(30));
             ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             while let Some(_work) = services::shutdown::process().tick(&mut ticks).await {
-                if let Err(error) = services::channel_bot_service::sweep_guest_retirement(&db).await {
+                if let Err(error) = services::channel_bot_service::sweep_guest_retirement(&db).await
+                {
                     tracing::warn!(
                         error_code = error.error_code(),
                         "Channel guest retirement reconciliation deferred"

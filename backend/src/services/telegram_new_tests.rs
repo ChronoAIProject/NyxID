@@ -445,10 +445,15 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
         provenance.retired,
         "provisioning permanently consumes the creation identity"
     );
-    state.db.collection::<ChannelBot>(BOTS)
-        .update_one(doc! {"_id":&result.id}, doc! {"$set":{
-            "guest_access_v1":false,"guest_access_v1_revision":2_i64,
-        }})
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! {"_id":&result.id},
+            doc! {"$set":{
+                "guest_access_v1":false,"guest_access_v1_revision":2_i64,
+            }},
+        )
         .await
         .unwrap();
     let repeated = service

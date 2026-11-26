@@ -3021,22 +3021,34 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
     .await?;
     crate::services::telegram_new_service::ensure_indexes(db).await?;
     let channel_bots = db.collection::<mongodb::bson::Document>("channel_bots");
-    channel_bots.create_index(
-        IndexModel::builder()
-            .keys(doc! {"channel_guest_purge_before_ownership":1,"_id":1})
-            .options(IndexOptions::builder().partial_filter_expression(
-                doc! {"channel_guest_purge_before_ownership":{"$gt":0_i64}},
-            ).build())
-            .build(),
-    ).await?;
-    channel_bots.create_index(
-        IndexModel::builder()
-            .keys(doc! {"is_active":1,"channel_guest_data_present":1})
-            .options(IndexOptions::builder().partial_filter_expression(
-                doc! {"is_active":false,"channel_guest_data_present":true},
-            ).build())
-            .build(),
-    ).await?;
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"channel_guest_purge_before_ownership":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(
+                            doc! {"channel_guest_purge_before_ownership":{"$gt":0_i64}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"is_active":1,"channel_guest_data_present":1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(
+                            doc! {"is_active":false,"channel_guest_data_present":true},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     crate::services::channel_adapters::aurinko::ensure_indexes(db).await?;
 
     channel_bots

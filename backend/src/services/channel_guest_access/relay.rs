@@ -620,7 +620,10 @@ impl RetainedRelayKey {
         claim: Option<&str>,
     ) -> AppResult<()> {
         if (self.guest_relay_dedicated_route_id.is_some() || self.guest_relay_bot_id.is_some())
-            && self.key.expires_at.is_some_and(|expiry| expiry <= chrono::Utc::now())
+            && self
+                .key
+                .expires_at
+                .is_some_and(|expiry| expiry <= chrono::Utc::now())
         {
             return Err(refused());
         }

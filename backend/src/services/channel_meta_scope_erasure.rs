@@ -370,13 +370,18 @@ async fn pass_authorized(
         .await?;
         return Ok(false);
     }
-    if stored.get_document("purge").is_ok_and(|progress| progress.get_i32("phase") == Ok(19))
-        && state.db.collection::<Document>(BOTS)
+    if stored
+        .get_document("purge")
+        .is_ok_and(|progress| progress.get_i32("phase") == Ok(19))
+        && state
+            .db
+            .collection::<Document>(BOTS)
             .find_one(doc! {"_id": bot, "channel_guest_data_present": true})
             .projection(doc! {"_id": 1})
             .await?
             .is_some()
-        && !crate::services::channel_guest_access::purge_meta_grant_batch(&state.db, bot, grant).await?
+        && !crate::services::channel_guest_access::purge_meta_grant_batch(&state.db, bot, grant)
+            .await?
     {
         return Ok(false);
     }
@@ -1967,11 +1972,13 @@ async fn finish(db: &Database, tx: &mut ClientSession, scope: &Document) -> AppR
             tx,
         )
         .await?;
-        if db.collection::<Document>(BOTS)
+        if db
+            .collection::<Document>(BOTS)
             .find_one(doc! {"_id":bot,"channel_guest_data_present":true})
             .projection(doc! {"_id":1})
             .session(&mut *tx)
-            .await?.is_some()
+            .await?
+            .is_some()
         {
             crate::services::channel_guest_access::setup::purge_bot_in_session(db, tx, bot).await?;
         }
@@ -2134,11 +2141,13 @@ async fn step(
         19 => {
             // Existing in-progress scopes can already be at phase 19.
             // Drain this grant's records before writing the completion proof.
-            if db.collection::<Document>(BOTS)
+            if db
+                .collection::<Document>(BOTS)
                 .find_one(doc! {"_id":bot,"channel_guest_data_present":true})
                 .projection(doc! {"_id":1})
                 .session(&mut *tx)
-                .await?.is_some()
+                .await?
+                .is_some()
             {
                 let records = erase_page(
                     db,

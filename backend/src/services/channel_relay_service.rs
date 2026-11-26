@@ -1183,12 +1183,19 @@ pub fn build_callback_payload(
             display_name: inbound.sender_display_name.clone(),
         },
         content: CallbackContent {
-            content_type: if guest.is_some() { "text".into() } else { inbound.content_type.clone() },
+            content_type: if guest.is_some() {
+                "text".into()
+            } else {
+                inbound.content_type.clone()
+            },
             text: inbound.text.clone(),
             attachments,
         },
         reply_to_message_id: None, // NyxID ID not available without a DB lookup
-        reply_to_platform_message_id: guest.is_none().then(|| inbound.reply_to_platform_message_id.clone()).flatten(),
+        reply_to_platform_message_id: guest
+            .is_none()
+            .then(|| inbound.reply_to_platform_message_id.clone())
+            .flatten(),
         thread_id: guest.is_none().then(|| inbound.thread_id.clone()).flatten(),
         timestamp: message.created_at.to_rfc3339(),
         raw_platform_data: guest.is_none().then(|| inbound.raw_data.clone()),

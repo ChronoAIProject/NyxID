@@ -25,7 +25,9 @@ pub(super) async fn require_legacy_guest_lane(db: &Database, binding: &Binding) 
     };
     let bot = crate::services::channel_bot_service::get_bot(db, parent).await?;
     if bot.user_id != binding.user_id || !bot.is_active {
-        return Err(AppError::Forbidden("Call adapter parent is unavailable".into()));
+        return Err(AppError::Forbidden(
+            "Call adapter parent is unavailable".into(),
+        ));
     }
     if select_mode_for_bot(db, &bot).await? == GuestMode::Legacy {
         return Ok(());

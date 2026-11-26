@@ -793,7 +793,6 @@ fn validate_message_bot_scope(
     Ok(())
 }
 
-
 fn reply_token_use(claims: &jwt::RelayReplyClaims) -> AppResult<ReplyTokenUse> {
     // Pad `exp_at` beyond the validator's clock-skew tolerance so the TTL
     // index never GCs a usage record while the same JWT would still pass
@@ -823,7 +822,6 @@ fn thread_reply_token_use(
     )
 }
 
-
 fn guest_reply_use_id(source_id: &str) -> String {
     format!("guest-relay:{source_id}")
 }
@@ -841,7 +839,11 @@ fn reply_dispatch_guard(
         return None;
     }
     let data = std::sync::Arc::new((
-        db.clone(), source.clone(), route.clone(), bot.clone(), key_id.to_owned(),
+        db.clone(),
+        source.clone(),
+        route.clone(),
+        bot.clone(),
+        key_id.to_owned(),
         claims.map(|validated| validated.0.clone()),
         tokio::sync::Mutex::new(false),
     ));
@@ -867,9 +869,11 @@ fn reply_dispatch_guard(
                     consumed_at: now,
                 }
             } else {
-                reply_token_use(claims.as_deref().ok_or_else(|| {
-                    AppError::Unauthorized("Reply token required".into())
-                })?)?
+                reply_token_use(
+                    claims
+                        .as_deref()
+                        .ok_or_else(|| AppError::Unauthorized("Reply token required".into()))?,
+                )?
             };
             channel_relay_service::consume_reply_token_use(db, &usage, &source.user_id).await?;
             *consumed = true;
@@ -922,14 +926,7 @@ async fn resolve_reply_token_context_classified(
     token: &str,
     body: &AsyncReplyRequest,
 ) -> Result<ReplyRequestContext, ReplyContextError> {
-    resolve_reply_token_message_context_classified(
-        state,
-        token,
-        &body.message_id,
-        true,
-        true,
-    )
-    .await
+    resolve_reply_token_message_context_classified(state, token, &body.message_id, true, true).await
 }
 
 async fn resolve_reply_token_message_context(
@@ -1009,7 +1006,10 @@ async fn resolve_reply_token_message_context_classified(
         )
         .await?;
         if !is_reply && original.guest_relay.is_some() {
-            return Err(AppError::Forbidden("Guest relay messages do not expose attachments".into()).into());
+            return Err(AppError::Forbidden(
+                "Guest relay messages do not expose attachments".into(),
+            )
+            .into());
         }
         let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
         if adapter.persists_reply_attempt() {
@@ -1108,7 +1108,8 @@ async fn resolve_api_key_reply_context_classified(
     }) {
         return Err(AppError::Forbidden(
             "A private guest reply requires its per-message reply token".into(),
-        ).into());
+        )
+        .into());
     }
     Ok(ReplyRequestContext {
         original,
@@ -1945,13 +1946,11 @@ async fn prepare_reply_outbound(
     };
     outbound.reply_to_platform_message_id = original.platform_message_id.clone();
     let interaction = guest_relay::open_reply_handle(&state.encryption_keys, original).await?;
-    let thread = interaction.as_deref().map(String::as_str)
+    let thread = interaction
+        .as_deref()
+        .map(String::as_str)
         .or_else(|| crate::services::channel_image_audience::message_thread(original));
-    adapter.reply_context(
-        thread,
-        original.created_at,
-        &mut outbound.metadata,
-    );
+    adapter.reply_context(thread, original.created_at, &mut outbound.metadata);
 
     if channel_reply_plan::uses_relay_renderer(adapter.platform_id(), outbound.metadata.as_ref())
         && (!outbound.attachments.is_empty()
@@ -4857,19 +4856,48 @@ mod tests {
         bot.guest_access_v1 = true;
         bot.guest_access_v1_revision = 1;
         db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-            .update_one(doc! {"_id":&bot.id}, doc! {"$set":{
-                "guest_access_v1":true,"guest_access_v1_revision":1_i64,
-            }}).await.unwrap();
-        let route = db.collection::<ChannelConversation>(CONVERSATIONS)
-            .find_one(doc! {"_id":route_id}).await.unwrap().unwrap();
+            .update_one(
+                doc! {"_id":&bot.id},
+                doc! {"$set":{
+                    "guest_access_v1":true,"guest_access_v1_revision":1_i64,
+                }},
+            )
+            .await
+            .unwrap();
+        let route = db
+            .collection::<ChannelConversation>(CONVERSATIONS)
+            .find_one(doc! {"_id":route_id})
+            .await
+            .unwrap()
+            .unwrap();
         channel_routing_service::update_conversation_with_guest_key(
-            db, route_id, &route.user_id, None, None, None, None, Some(true),
-        ).await.unwrap();
+            db,
+            route_id,
+            &route.user_id,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
         guest::set_pilot(
-            db, PilotSelection { fleet: true, bot_ids: None },
-            &AuditActor {user_id:bot.user_id.clone(),api_key_id:None,
-                api_key_name:None,ip_address:None,user_agent:None},
-        ).await.unwrap();
+            db,
+            PilotSelection {
+                fleet: true,
+                bot_ids: None,
+            },
+            &AuditActor {
+                user_id: bot.user_id.clone(),
+                api_key_id: None,
+                api_key_name: None,
+                ip_address: None,
+                user_agent: None,
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -4880,7 +4908,9 @@ mod tests {
             feature_flag_service::{self as flags, FlagTarget},
             security_readiness_service::ready_test_replica,
         };
-        let fixture = setup_reply_token_fixture("guest_relay_dedication").await.unwrap();
+        let fixture = setup_reply_token_fixture("guest_relay_dedication")
+            .await
+            .unwrap();
         let db = &fixture.state.db;
         let bot = &fixture.bot;
         let route = &fixture.conversation;
@@ -4888,35 +4918,77 @@ mod tests {
         sibling.id = Uuid::new_v4().to_string();
         sibling.platform_conversation_id = "unrelated-chat".into();
         db.collection::<ChannelConversation>(CONVERSATIONS)
-            .insert_one(&sibling).await.unwrap();
+            .insert_one(&sibling)
+            .await
+            .unwrap();
         db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-            .update_one(doc! {"_id":&bot.id}, doc! {"$set":{
-                "guest_access_v1":true,"guest_access_v1_revision":1_i64,
-            }}).await.unwrap();
+            .update_one(
+                doc! {"_id":&bot.id},
+                doc! {"$set":{
+                    "guest_access_v1":true,"guest_access_v1_revision":1_i64,
+                }},
+            )
+            .await
+            .unwrap();
         crate::test_utils::init_test_audit_chain_hmac_key();
-        guest::set_pilot(db, PilotSelection {fleet:true,bot_ids:None},
-            &crate::services::audit_service::AuditActor {user_id:bot.user_id.clone(),
-                api_key_id:None,api_key_name:None,ip_address:None,user_agent:None},
-        ).await.unwrap();
+        guest::set_pilot(
+            db,
+            PilotSelection {
+                fleet: true,
+                bot_ids: None,
+            },
+            &crate::services::audit_service::AuditActor {
+                user_id: bot.user_id.clone(),
+                api_key_id: None,
+                api_key_name: None,
+                ip_address: None,
+                user_agent: None,
+            },
+        )
+        .await
+        .unwrap();
         ready_test_replica(db).await;
         flags::set_platform_override(db, guest::FLAG, &FlagTarget::Global, true, &bot.user_id)
-            .await.unwrap();
+            .await
+            .unwrap();
         let mut tx = db.client().start_session().await.unwrap();
         tx.start_transaction().await.unwrap();
-        guest::update_activation_in_session(db, &mut tx, true).await.unwrap();
+        guest::update_activation_in_session(db, &mut tx, true)
+            .await
+            .unwrap();
         tx.commit_transaction().await.unwrap();
 
-        assert_eq!(routing::guest_access_state(db, route).await.unwrap(), "ordinary_dedicated_key_required");
-        let assign = |enabled| routing::update_conversation_with_guest_key(
-            db, &route.id, &route.user_id, None, None, None, None, Some(enabled),
+        assert_eq!(
+            routing::guest_access_state(db, route).await.unwrap(),
+            "ordinary_dedicated_key_required"
         );
+        let assign = |enabled| {
+            routing::update_conversation_with_guest_key(
+                db,
+                &route.id,
+                &route.user_id,
+                None,
+                None,
+                None,
+                None,
+                Some(enabled),
+            )
+        };
         assert!(matches!(assign(true).await, Err(AppError::Conflict(_))));
         db.collection::<ChannelConversation>(CONVERSATIONS)
-            .delete_one(doc! {"_id":&sibling.id}).await.unwrap();
+            .delete_one(doc! {"_id":&sibling.id})
+            .await
+            .unwrap();
         let current = assign(true).await.unwrap();
-        assert_eq!(routing::guest_access_state(db, &current).await.unwrap(), "guest_access");
+        assert_eq!(
+            routing::guest_access_state(db, &current).await.unwrap(),
+            "guest_access"
+        );
         let current = assign(false).await.unwrap();
-        assert_eq!(routing::guest_access_state(db, &current).await.unwrap(), "ordinary_dedicated_key_required");
+        assert_eq!(
+            routing::guest_access_state(db, &current).await.unwrap(),
+            "ordinary_dedicated_key_required"
+        );
         db.drop().await.unwrap();
     }
 
@@ -4960,7 +5032,8 @@ mod tests {
             .await
             .unwrap();
         let server = MockServer::start().await;
-        let _callback_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
+        let _callback_origin =
+            crate::services::resource_adapter::register_test_origin(&server.uri());
         Mock::given(path("/callback"))
             .respond_with(ResponseTemplate::new(202))
             .mount(&server)
@@ -5270,7 +5343,9 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
             assert_eq!(body["chat_id"], "1234");
         }
-        fixture.bot = channel_bot_service::get_bot(db, &fixture.bot.id).await.unwrap();
+        fixture.bot = channel_bot_service::get_bot(db, &fixture.bot.id)
+            .await
+            .unwrap();
         assert!(fixture.bot.diagnostics.guest_relay_work_present);
         assert!(send(fixture.bot.clone(), inbound.clone()).await);
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
@@ -5293,9 +5368,14 @@ mod tests {
         assert_eq!(requests.len(), 4);
         assert!(requests[3].headers.contains_key("x-nyxid-user-token"));
         let rollback_bearer = requests[3].headers["x-nyxid-user-token"].to_str().unwrap();
-        let rolled_back = jwt::verify_token(&state.jwt_keys, &state.config, rollback_bearer).unwrap();
+        let rolled_back =
+            jwt::verify_token(&state.jwt_keys, &state.config, rollback_bearer).unwrap();
         assert!(rolled_back.relay_guest_assignment.is_some());
-        assert!(crate::mw::auth::ensure_relay_agent_key_active(db, &rolled_back).await.is_ok());
+        assert!(
+            crate::mw::auth::ensure_relay_agent_key_active(db, &rolled_back)
+                .await
+                .is_ok()
+        );
         assert!(
             guest_tools(
                 State(state.clone()),
@@ -5414,22 +5494,56 @@ mod tests {
             .await
             .is_err()
         );
-        flags::set_platform_override(db, guest::FLAG, &FlagTarget::Global, false, &fixture.bot.user_id)
-            .await.unwrap();
+        flags::set_platform_override(
+            db,
+            guest::FLAG,
+            &FlagTarget::Global,
+            false,
+            &fixture.bot.user_id,
+        )
+        .await
+        .unwrap();
         assert!(
-            crate::mw::auth::ensure_relay_agent_key_active(db, &rolled_back).await.is_err(),
+            crate::mw::auth::ensure_relay_agent_key_active(db, &rolled_back)
+                .await
+                .is_err(),
             "a bearer from an earlier off interval must not revive"
         );
-        assert!(crate::services::key_service::validate_api_key(db, raw_key).await.is_ok());
+        assert!(
+            crate::services::key_service::validate_api_key(db, raw_key)
+                .await
+                .is_ok()
+        );
         crate::services::channel_routing_service::delete_conversation(
-            db, &fixture.conversation.id, &fixture.bot.user_id,
-        ).await.unwrap();
-        assert!(crate::services::key_service::validate_api_key(db, raw_key).await.is_err());
+            db,
+            &fixture.conversation.id,
+            &fixture.bot.user_id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::services::key_service::validate_api_key(db, raw_key)
+                .await
+                .is_err()
+        );
         let successor = crate::services::key_service::rotate_api_key(
-            db, &state.encryption_keys, &fixture.bot.user_id, &fixture.api_key.id,
-        ).await.unwrap();
-        assert!(crate::services::key_service::validate_api_key(db, &successor.full_key).await.is_ok());
-        assert!(crate::services::key_service::validate_api_key(db, raw_key).await.is_err());
+            db,
+            &state.encryption_keys,
+            &fixture.bot.user_id,
+            &fixture.api_key.id,
+        )
+        .await
+        .unwrap();
+        assert!(
+            crate::services::key_service::validate_api_key(db, &successor.full_key)
+                .await
+                .is_ok()
+        );
+        assert!(
+            crate::services::key_service::validate_api_key(db, raw_key)
+                .await
+                .is_err()
+        );
         db.drop().await.unwrap();
     }
 
@@ -5531,7 +5645,8 @@ mod tests {
             doc! {"$set":{"platform":platform,"platform_conversation_id":"*","default_agent":true}},
         ).await.unwrap();
         let server = MockServer::start().await;
-        let _callback_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
+        let _callback_origin =
+            crate::services::resource_adapter::register_test_origin(&server.uri());
         Mock::given(path("/callback"))
             .respond_with(ResponseTemplate::new(202))
             .expect(4)
@@ -5646,16 +5761,35 @@ mod tests {
         if platform == "discord" {
             assert!(a["thread_id"].is_null());
             assert!(a.get("raw_platform_data").is_none());
-            let mut source = channel_relay_service::get_message(db, a["message_id"].as_str().unwrap())
-                .await.unwrap();
-            assert!(source.thread_id.as_deref().unwrap().starts_with(guest_relay::REPLY_HANDLE_PREFIX));
+            let mut source =
+                channel_relay_service::get_message(db, a["message_id"].as_str().unwrap())
+                    .await
+                    .unwrap();
+            assert!(
+                source
+                    .thread_id
+                    .as_deref()
+                    .unwrap()
+                    .starts_with(guest_relay::REPLY_HANDLE_PREFIX)
+            );
             let sealed = bson::to_document(&source).unwrap();
-            guest_relay::verify_reply_handle_record(&state.encryption_keys, &sealed).await.unwrap();
+            guest_relay::verify_reply_handle_record(&state.encryption_keys, &sealed)
+                .await
+                .unwrap();
             let opened = guest_relay::open_reply_handle(&state.encryption_keys, &source)
-                .await.unwrap().unwrap();
-            assert_eq!(opened.as_str(), "interaction:999:fixture-only-discord-handle");
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                opened.as_str(),
+                "interaction:999:fixture-only-discord-handle"
+            );
             source.id = Uuid::new_v4().to_string();
-            assert!(guest_relay::open_reply_handle(&state.encryption_keys, &source).await.is_err());
+            assert!(
+                guest_relay::open_reply_handle(&state.encryption_keys, &source)
+                    .await
+                    .is_err()
+            );
         }
         let (status, created) =
             post(&a, call("create", json!({"title":"A's private record"}))).await;
@@ -6331,7 +6465,16 @@ mod tests {
         let db = fixture.state.db.clone();
 
         let token = valid_reply_token(&fixture);
-        insert_reply_token_use(&fixture, &jwt::validate_relay_reply_token(&fixture.state.jwt_keys, &fixture.state.config, &token).unwrap()).await;
+        insert_reply_token_use(
+            &fixture,
+            &jwt::validate_relay_reply_token(
+                &fixture.state.jwt_keys,
+                &fixture.state.config,
+                &token,
+            )
+            .unwrap(),
+        )
+        .await;
 
         let err = resolve_reply_token_context(
             &fixture.state,
@@ -6540,7 +6683,8 @@ mod tests {
                 doc! {"_id":&fixture.message.id},
                 doc! {"$set":{"platform_conversation_id":"1234"}},
             )
-            .await.unwrap();
+            .await
+            .unwrap();
         let server = MockServer::start().await;
         Mock::given(path("/botbot-token/sendMessage"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -6549,26 +6693,54 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let adapter = crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(
-            &server.uri(),
-        );
+        let adapter =
+            crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(
+                &server.uri(),
+            );
         let claims = valid_reply_claims(&fixture);
         let token = encode_reply_claims(state, &claims);
         let headers = bearer_headers(&token);
         let request = reply_request(&fixture.message.id);
-        let mut context = resolve_reply_token_context(state, &token, &request).await.unwrap();
+        let mut context = resolve_reply_token_context(state, &token, &request)
+            .await
+            .unwrap();
         context.validated_bot.as_mut().unwrap().bot_token_encrypted = vec![];
-        assert!(deliver_async_reply(state, &headers, context, request, &adapter).await.is_err());
-        assert!(!reply_token_has_been_consumed(state, &claims.jti).await.unwrap());
+        assert!(
+            deliver_async_reply(state, &headers, context, request, &adapter)
+                .await
+                .is_err()
+        );
+        assert!(
+            !reply_token_has_been_consumed(state, &claims.jti)
+                .await
+                .unwrap()
+        );
 
         let response = async_reply_with_test_adapter(
-            state, &headers, reply_request(&fixture.message.id), &adapter,
-        ).await.unwrap().0;
+            state,
+            &headers,
+            reply_request(&fixture.message.id),
+            &adapter,
+        )
+        .await
+        .unwrap()
+        .0;
         assert_eq!(response.platform_message_id.as_deref(), Some("78"));
-        assert!(reply_token_has_been_consumed(state, &claims.jti).await.unwrap());
-        assert!(async_reply_with_test_adapter(
-            state, &headers, reply_request(&fixture.message.id), &adapter,
-        ).await.is_err());
+        assert!(
+            reply_token_has_been_consumed(state, &claims.jti)
+                .await
+                .unwrap()
+        );
+        assert!(
+            async_reply_with_test_adapter(
+                state,
+                &headers,
+                reply_request(&fixture.message.id),
+                &adapter,
+            )
+            .await
+            .is_err()
+        );
         db.drop().await.unwrap();
     }
 

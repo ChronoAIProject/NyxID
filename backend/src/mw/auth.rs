@@ -2025,7 +2025,8 @@ pub async fn ensure_relay_agent_key_active(
             "Relay token's agent key is inactive or revoked".into(),
         ));
     }
-    key.require_relay_bearer(db, claims.relay_guest_assignment.as_deref()).await?;
+    key.require_relay_bearer(db, claims.relay_guest_assignment.as_deref())
+        .await?;
     Ok(key.key)
 }
 
