@@ -451,7 +451,12 @@ async fn machine_oauth_management_status_follows_signed_client_journey() {
         Some(control)
     );
 
-    for (token, usable) in [(base.access_token, false), (selected.access_token, true)] {
+    // The older consent revision fails authentication before management access
+    // is checked. The current OAuth token authenticates but lacks owner access.
+    for (token, usable, management_status) in [
+        (base.access_token, false, StatusCode::UNAUTHORIZED),
+        (selected.access_token, true, StatusCode::FORBIDDEN),
+    ] {
         assert_eq!(
             crate::handlers::mcp_transport::external_machine_oauth_source_for_test(
                 &f.state, &token
@@ -471,7 +476,7 @@ async fn machine_oauth_management_status_follows_signed_client_journey() {
             )
             .await
             .status(),
-            StatusCode::FORBIDDEN
+            management_status
         );
     }
 }
