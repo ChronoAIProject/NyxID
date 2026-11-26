@@ -378,7 +378,13 @@ function CmaSessionCard({
             state={state}
             activeActionId={collapsed ? undefined : activeActionId}
           />
-          <CmaSessionRequests operations={operations} scrollBody={scrollBody} visible={!collapsed} conversationId={conversationId} />
+          <CmaSessionRequests
+            operations={operations}
+            scrollBody={scrollBody}
+            visible={!collapsed}
+            conversationId={conversationId}
+            session={session}
+          />
           <SessionDetails
             session={session}
             state={state}

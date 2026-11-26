@@ -32,6 +32,24 @@ export const cmaAgentSchema = z.object({
 });
 export type CmaAgent = z.infer<typeof cmaAgentSchema>;
 
+export const cmaInitialTaskEvidenceSchema = z.object({
+  bootstrap: z.object({ operation_id: z.string().min(1).max(256) }).optional(),
+  first_message: z.object({
+    purpose: z.literal("task"),
+    state: z.enum([
+      "queued",
+      "dispatch_fenced",
+      "write_confirmed",
+      "execution_observed",
+      "completed",
+      "failed",
+      "recovery_required",
+    ]),
+  }),
+});
+export type CmaInitialTaskEvidence = z.infer<typeof cmaInitialTaskEvidenceSchema>;
+export type CmaInitialTaskOutcome = "pending" | "completed" | "failed" | "recovery_required";
+
 export const cmaAgentPageSchema = z.object({
   items: z.array(cmaAgentSchema).max(50),
   next: z.string().nullish(),
@@ -64,6 +82,7 @@ export const cmaOriginPageSchema = z.object({
 
 export const cmaSessionReferenceSchema = z.object({
   origin: cmaSessionOriginSchema.optional(),
+  initialTask: cmaInitialTaskEvidenceSchema.optional(),
   callbackUrl: z.string().nullable().optional(),
   connection: cmaConnectionSchema,
   agentId: cmaAgentIdSchema,

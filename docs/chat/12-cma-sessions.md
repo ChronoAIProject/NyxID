@@ -289,19 +289,24 @@ Discovery requests also have a 30-second deadline. Route discovery is cached for
 five minutes per account and connection.
 
 The card for a successful provisioning receipt can also show its initial task
-outcome. When the request status is rendered, the browser checks the exact
-connection and Agent against the current owner and source conversation, then
-reads that Agent directly. This read is independent of active inventory. The
-public Agent detail binds `bootstrap.operation_id` to the stored lifecycle
-operation ID and reports `first_message.purpose` and `first_message.state`. Only
-`purpose: task` with state `completed` or `failed` yields a terminal task status.
-Setup, missing or mismatched lineage, and nonterminal first-message states keep
-the recorded receipt status. The card re-reads this durable provider evidence
-after refresh and polls every 15 seconds while rendered. A withdrawn receipt or
-nonretryable denial removes the observed outcome and the card shows its recorded
-status. Provisioning watches and async delivery retain their recorded state.
-The field contract comes from CMA's public Agent detail and first-message model.
+outcome. The authenticated lifecycle receipt supplies the Agent ID. A mounted
+history card reauthorizes the exact owner, source conversation, connection and
+Agent, then reads that Agent directly. A live card for the same verified source
+uses its existing Agent detail read for the request row. CMA exposes
+`bootstrap.operation_id` only during early startup. When supplied, it must match
+the recorded lifecycle operation ID. For `first_message.purpose: task`, the
+first-message state determines pending, completed or failed status, and
+`recovery_required` shows **Needs attention**. Setup, missing task evidence and
+lineage mismatches retain the recorded receipt status.
+
+Pending initial tasks and retryable read failures poll every 15 seconds in a
+mounted history card. A terminal result, recovery requirement, missing task
+evidence or definitive denial stops that polling. A withdrawn receipt or
+definitive denial renders the recorded receipt status. Remounting, including
+after reload, checks current authorization and reads CMA's durable evidence
+again. Provisioning watches and async delivery retain their recorded state.
 [CMA `agent_openapi_shapes.rs`](https://github.com/ChronoAIProject/cma/blob/7fc711bd427338d85ad1bc645522808af26a66de/api/crates/layer1-public/src/rest/agent_openapi_shapes.rs)
+[CMA `lifecycle_bootstrap.rs`](https://github.com/ChronoAIProject/cma/blob/7fc711bd427338d85ad1bc645522808af26a66de/api/crates/layer2-core/src/sandbox/lifecycle_bootstrap.rs#L54-L66)
 [CMA `first_message.rs`](https://github.com/ChronoAIProject/cma/blob/7fc711bd427338d85ad1bc645522808af26a66de/api/crates/layer2-core/src/sandbox/first_message.rs)
 
 Cards provide status and action summaries; desktop control and CMA approval

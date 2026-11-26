@@ -2,7 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { useActiveCmaSessions, useCmaSessionStream } from "./use-cma-session";
+import { useActiveCmaSessions, useCmaInitialTaskOutcome, useCmaSessionStream } from "./use-cma-session";
 import { ApiError } from "@/lib/api-client";
 import { cmaSession } from "@/lib/assistant/cma-session.test-fixtures";
 import type { CmaSessionOrigin } from "@/schemas/cma-session";
@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   origins: vi.fn(),
   pins: vi.fn(),
   read: vi.fn(),
+  initialTask: vi.fn(),
   routes: vi.fn(),
   watch: vi.fn(),
   initial: vi.fn(),
@@ -23,6 +24,7 @@ vi.mock("@/lib/assistant/cma-session-api", () => ({
     (error instanceof ApiError &&
       (error.status === 429 || error.status >= 500)),
   readCmaAgent: api.read,
+  readCmaInitialTaskOutcome: api.initialTask,
   resolveCmaRoutes: api.routes,
   watchCmaSession: api.watch,
   initialCmaSession: api.initial,
@@ -59,7 +61,69 @@ beforeEach(() => {
   });
   api.watch.mockResolvedValue(undefined);
 });
-afterEach(() => client.clear());
+afterEach(() => {
+  client.clear();
+  vi.useRealTimers();
+});
+
+const initialTaskReceipt = {
+  connectionId: cmaSession.connection.id,
+  agentId: cmaSession.agentId,
+  operationId: "lifecycle-1",
+};
+
+it.each(["completed", "failed", "recovery_required", null, 404] as const)(
+  "stops history polling on definitive observation %s and reauthorizes on mount",
+  async (observation) => {
+    vi.useFakeTimers();
+    if (observation === 404)
+      api.initialTask.mockRejectedValueOnce(new ApiError(404, {
+        error: "not_found", message: "Agent unavailable", error_code: 1003,
+      }));
+    else api.initialTask.mockResolvedValueOnce(observation);
+
+    const useOutcome = () => useCmaInitialTaskOutcome("owner", "source", "receipt", initialTaskReceipt);
+    const first = renderHook(useOutcome, { wrapper });
+    await act(() => vi.advanceTimersByTimeAsync(45_000));
+    expect(first.result.current).toBe(observation === 404 ? null : observation);
+    expect(api.initialTask).toHaveBeenCalledTimes(1);
+    first.unmount();
+
+    let deny!: (outcome: null) => void;
+    api.initialTask.mockImplementationOnce(() => new Promise<null>((resolve) => { deny = resolve; }));
+    const remounted = renderHook(useOutcome, { wrapper });
+    expect(remounted.result.current).toBeNull();
+    expect(api.initialTask).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      deny(null);
+      await vi.advanceTimersByTimeAsync(45_000);
+    });
+    expect(remounted.result.current).toBeNull();
+    expect(api.initialTask).toHaveBeenCalledTimes(2);
+  },
+);
+
+it("polls pending work and transient errors until a task settles", async () => {
+  vi.useFakeTimers();
+  api.initialTask
+    .mockResolvedValueOnce("pending")
+    .mockRejectedValueOnce(new ApiError(503, {
+      error: "unavailable", message: "Try later", error_code: 1,
+    }))
+    .mockResolvedValueOnce("completed");
+  const { result } = renderHook(
+    () => useCmaInitialTaskOutcome("owner", "source", "receipt", initialTaskReceipt),
+    { wrapper },
+  );
+  await act(() => vi.advanceTimersByTimeAsync(100));
+  expect(result.current).toBe("pending");
+  await act(() => vi.advanceTimersByTimeAsync(15_100));
+  expect(api.initialTask).toHaveBeenCalledTimes(2);
+  expect(result.current).toBe("pending");
+  await act(() => vi.advanceTimersByTimeAsync(45_000));
+  expect(result.current).toBe("completed");
+  expect(api.initialTask).toHaveBeenCalledTimes(3);
+});
 
 it("shows only receipt-linked source work by default, pin follows routes, and unpin restores source visibility", async () => {
   const { result, rerender } = renderHook(

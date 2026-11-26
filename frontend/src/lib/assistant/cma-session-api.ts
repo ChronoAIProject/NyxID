@@ -19,7 +19,10 @@ import {
   cmaDiscoverySchema,
   cmaDurableEventSchema,
   cmaEventHeadSchema,
+  cmaInitialTaskEvidenceSchema,
   type CmaConnection,
+  type CmaInitialTaskEvidence,
+  type CmaInitialTaskOutcome,
   type CmaRoutes,
   type CmaSessionReference,
   type CmaSessionState,
@@ -519,13 +522,19 @@ function connectionFromOrigin(origin: CmaSessionOrigin): CmaConnection | null {
   };
 }
 
-const initialTaskEvidence = z.object({
-  bootstrap: z.object({ operation_id: z.string() }),
-  first_message: z.object({
-    purpose: z.literal("task"),
-    state: z.enum(["completed", "failed"]),
-  }),
-});
+export function cmaInitialTaskOutcome(
+  evidence: CmaInitialTaskEvidence | undefined,
+  operationId: string,
+): CmaInitialTaskOutcome | null {
+  if (!evidence || (
+    evidence.bootstrap && evidence.bootstrap.operation_id !== operationId
+  ))
+    return null;
+  const { state } = evidence.first_message;
+  if (state === "completed" || state === "failed" || state === "recovery_required")
+    return state;
+  return "pending";
+}
 
 /** A historical receipt authorizes no reads on its own. */
 export async function readCmaInitialTaskOutcome(
@@ -555,10 +564,12 @@ export async function readCmaInitialTaskOutcome(
     { connection, routes, agentId },
     signal,
   );
-  const evidence = initialTaskEvidence.safeParse(agent);
-  return evidence.success && evidence.data.bootstrap.operation_id === operationId
-    ? evidence.data.first_message.state
-    : null;
+  // The lifecycle receipt already binds this Agent. CMA omits bootstrap
+  // lineage after early startup, but a conflicting value must fail closed.
+  return cmaInitialTaskOutcome(
+    cmaInitialTaskEvidenceSchema.safeParse(agent).data,
+    operationId,
+  );
 }
 
 /** Receipt reads are exact and precede any pinned detail/stream request. */

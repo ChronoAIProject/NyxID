@@ -17,8 +17,13 @@ import {
 } from "@/schemas/cma-operation";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useCmaInitialTaskOutcome } from "@/hooks/use-cma-session";
+import { cmaInitialTaskOutcome } from "@/lib/assistant/cma-session-api";
 import { useAuthStore } from "@/stores/auth-store";
-import { cmaSessionKeySchema } from "@/schemas/cma-session";
+import {
+  cmaSessionKeySchema,
+  type CmaInitialTaskOutcome,
+  type CmaSessionReference,
+} from "@/schemas/cma-session";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { CmaAgentPanel } from "./cma-agent-panel";
 import { CmaCardDetails, CmaCardFrame } from "./cma-card-frame";
@@ -211,15 +216,24 @@ export function CmaOperationCard({
 
 const LONG_REQUEST_MS = 10 * 60_000;
 
+const initialTaskPresentation = {
+  pending: { label: "Awaiting status", tone: "active" },
+  completed: { label: "Completed", tone: "success" },
+  failed: { label: "Failed", tone: "error" },
+  recovery_required: { label: "Needs attention", tone: "warning" },
+} satisfies Record<CmaInitialTaskOutcome, { label: string; tone: string }>;
+
 /** Keep request status and notices when a live card replaces its receipt. */
 export function CmaOperationProgress({
   operation,
   animate = true,
   conversationId,
+  liveSession,
 }: {
   readonly operation: CmaOperation;
   readonly animate?: boolean;
   readonly conversationId?: string;
+  readonly liveSession?: CmaSessionReference;
 }) {
   const ownerId = useAuthStore((state) => state.user?.id);
   const { service_id, agent_id, operation_id, kind, status } = operation;
@@ -229,6 +243,16 @@ export function CmaOperationProgress({
     presentation(operation).label === "Ready" &&
     cmaSessionKeySchema.safeParse(`${service_id}:${agent_id}`).success
   ) {
+    if (
+      liveSession?.origin?.conversation_id === conversationId &&
+      liveSession.connection.id === service_id && liveSession.agentId === agent_id
+    ) {
+      return <CmaRecordedProgress
+        operation={operation}
+        animate={animate}
+        outcome={cmaInitialTaskOutcome(liveSession.initialTask, operation_id)}
+      />;
+    }
     return <CmaInitialTaskProgress
       operation={operation}
       animate={animate}
@@ -258,15 +282,12 @@ function CmaRecordedProgress({
 }: {
   readonly operation: CmaOperation;
   readonly animate: boolean;
-  readonly outcome?: "completed" | "failed" | null;
+  readonly outcome?: CmaInitialTaskOutcome | null;
 }) {
   useUiTranslation();
-  const observed = outcome === "completed"
-    ? { label: "Completed", tone: "success" }
-    : outcome === "failed"
-      ? { label: "Failed", tone: "error" }
-      : presentation(operation);
-  const pending = isCmaOperationPending(operation);
+  const observed = outcome ? initialTaskPresentation[outcome] : presentation(operation);
+  const receiptPending = isCmaOperationPending(operation);
+  const pending = receiptPending || outcome === "pending";
   const [now, setNow] = useState(Date.now);
   const running =
     pending &&
@@ -315,7 +336,7 @@ function CmaRecordedProgress({
               className={cn("h-2 w-2 fill-current", tones[tone])}
             />
           )}
-          {label}
+          {outcome === "recovery_required" ? translateUi("Needs attention") : label}
         </span>
         <span aria-hidden="true" className="text-text-tertiary">
           ·
@@ -333,7 +354,7 @@ function CmaRecordedProgress({
       {tone === "warning" && !pending && operation.reason !== "timeout" ? (
         <p className="text-13 text-muted-foreground">{translateUi("CMA’s final outcome could not be confirmed. Check the operation before submitting it again.")}</p>
       ) : null}
-      {operation.phase && phases[operation.phase] && pending ? (
+      {operation.phase && phases[operation.phase] && receiptPending ? (
         <p className="text-13 text-muted-foreground">
           {phases[operation.phase]}
         </p>
@@ -464,11 +485,13 @@ export function CmaSessionRequests({
   scrollBody,
   visible,
   conversationId,
+  session,
 }: {
   readonly operations: readonly CmaOperation[];
   readonly scrollBody: RefObject<HTMLDivElement | null>;
   readonly visible: boolean;
   readonly conversationId?: string;
+  readonly session: CmaSessionReference;
 }) {
   useUiTranslation();
   const [limit, setLimit] = useState(3);
@@ -497,7 +520,7 @@ export function CmaSessionRequests({
                   : translateUi("Time unavailable")}
               </time>
             </p>
-            <CmaOperationProgress operation={operation} animate={false} conversationId={conversationId} />
+            <CmaOperationProgress operation={operation} animate={false} conversationId={conversationId} liveSession={session} />
             <dl className="space-y-2 pt-1">
               <CmaOperationMetadata operation={operation} />
             </dl>

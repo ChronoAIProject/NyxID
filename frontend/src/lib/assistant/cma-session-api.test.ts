@@ -1199,7 +1199,6 @@ describe("initial task outcome from Agent detail", () => {
   const agent = {
     id: receipt.agentId,
     status: "ready",
-    bootstrap: { operation_id: receipt.operationId },
     first_message: { purpose: "task", state: "completed" },
   };
   const read = (signal = new AbortController().signal) =>
@@ -1208,13 +1207,15 @@ describe("initial task outcome from Agent detail", () => {
   it.each([
     [agent, "completed"],
     [{ ...agent, status: "working", first_message: { purpose: "task", state: "failed" } }, "failed"],
-    [{ ...agent, first_message: { purpose: "task", state: "write_confirmed" } }, null],
+    [{ ...agent, first_message: { purpose: "task", state: "write_confirmed" } }, "pending"],
+    [{ ...agent, first_message: { purpose: "task", state: "recovery_required" } }, "recovery_required"],
+    [{ ...agent, status: "starting", bootstrap: { operation_id: receipt.operationId }, first_message: { purpose: "task", state: "queued" } }, "pending"],
+    [{ ...agent, status: "starting", bootstrap: { operation_id: "different-lifecycle" }, first_message: { purpose: "task", state: "queued" } }, null],
     [{ ...agent, first_message: { purpose: "setup", state: "completed" } }, null],
     [{ ...agent, first_message: { state: "completed" } }, null],
     [{ ...agent, first_message: undefined }, null],
-    [{ ...agent, bootstrap: undefined }, null],
-    [{ ...agent, bootstrap: { operation_id: "different-lifecycle" } }, null],
-  ] as const)("uses only matching terminal task evidence from %j", async (detail, outcome) => {
+    [{ ...agent, bootstrap: null }, null],
+  ] as const)("uses only authorized initial task evidence from %j", async (detail, outcome) => {
     vi.stubGlobal("fetch", vi.fn(async (input: string) => {
       const url = new URL(input, "https://nyx.example");
       if (url.pathname.endsWith("/cma-sessions")) {

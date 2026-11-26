@@ -12,9 +12,10 @@ import {
   resolveCmaRoutes,
   watchCmaSession,
 } from "@/lib/assistant/cma-session-api";
-import type {
-  CmaSessionReference,
-  CmaSessionState,
+import {
+  cmaInitialTaskEvidenceSchema,
+  type CmaSessionReference,
+  type CmaSessionState,
 } from "@/schemas/cma-session";
 
 function fetchCmaRoutes(
@@ -44,7 +45,7 @@ export function useCmaInitialTaskOutcome(
       "cma-session", ownerId, "initial-task", conversationId, receiptId,
       receipt.connectionId, receipt.agentId, receipt.operationId,
     ],
-    queryFn: async ({ signal, queryKey }) => {
+    queryFn: async ({ signal }) => {
       try {
         return await readCmaInitialTaskOutcome(
           ownerId,
@@ -54,16 +55,23 @@ export function useCmaInitialTaskOutcome(
           (id, bounded) => fetchCmaRoutes(client, ownerId, id, bounded),
         );
       } catch (error) {
-        if (!signal.aborted && !isCmaRetryableError(error))
-          client.setQueryData(queryKey, null);
-        throw error;
+        if (signal.aborted || isCmaRetryableError(error)) throw error;
+        return null;
       }
     },
-    staleTime: 0,
-    refetchInterval: 15_000,
+    // Authorize each history mount. An old terminal result or refusal is
+    // scoped to its mounted query and never starts a new observation.
+    gcTime: 0,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    refetchInterval: ({ state }) =>
+      state.status === "error"
+        ? (isCmaRetryableError(state.error) ? 15_000 : false)
+        : (state.data === "pending" ? 15_000 : false),
     retry: false,
   });
-  if (!query.isFetchedAfterMount || (query.isError && !isCmaRetryableError(query.error)))
+  if (!query.isFetchedAfterMount || (query.isError && query.data !== "pending"))
     return null;
   return query.data;
 }
@@ -255,6 +263,7 @@ export function useActiveCmaSessions(
             connection,
             routes,
             agentId: agent.id,
+            initialTask: cmaInitialTaskEvidenceSchema.safeParse(agent).data,
             callbackUrl:
               agent.callback_url === undefined
                 ? undefined

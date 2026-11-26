@@ -64,7 +64,7 @@ async function mockCma(
   let completed = false;
   let callback: unknown = undefined;
   let authorized = true;
-  let task: { operationId: string; purpose: string; state: string } | undefined;
+  let firstMessage: { purpose: string; state: string } | undefined;
   const connection = {
     ...cmaSession.connection,
     slug: options.slug ?? cmaSession.connection.slug,
@@ -245,10 +245,7 @@ async function mockCma(
       title: cmaSession.title,
       status: active ? "working" : "ready",
       ...(callback === undefined ? {} : { callback_url: callback }),
-      ...(task ? {
-        bootstrap: { operation_id: task.operationId },
-        first_message: { purpose: task.purpose, state: task.state },
-      } : {}),
+      ...(firstMessage ? { first_message: firstMessage } : {}),
     };
     const otherAgent = {
       id: "agt_second",
@@ -269,7 +266,7 @@ async function mockCma(
   return {
     requests,
     setAuthorized: (value: boolean) => { authorized = value; },
-    setTask: (value: typeof task) => { task = value; },
+    setFirstMessage: (value: typeof firstMessage) => { firstMessage = value; },
     setCallback: (value: unknown) => {
       callback = value;
     },
@@ -528,7 +525,8 @@ for (const width of [1440, 390]) {
   });
 }
 
-test("recovers the exact initial task outcome after reload and respects connection withdrawal", async ({ page }) => {
+test("recovers the initial task outcome, stops settled polling, and reauthorizes after reload", async ({ page }) => {
+  await page.clock.install();
   const cma = await mockCma(page, { idle: true, slug: "my-cma-connection" });
   const lifecycleId = "original-lifecycle-operation";
   await openCmaAssistant(page, { faults: { nyxagentEnabled: true } });
@@ -566,9 +564,17 @@ test("recovers the exact initial task outcome after reload and respects connecti
     expect(new URL(response.url()).searchParams.get("_nyxid_via")).toBe(cmaSession.connection.id);
   };
 
-  cma.setTask({ operationId: lifecycleId, purpose: "task", state: "completed" });
+  const detailCount = () => cma.requests.filter((request) => request.startsWith(`${detailPath}?`)).length;
+  cma.setFirstMessage({ purpose: "task", state: "write_confirmed" });
   await reloadWithDetail();
+  await expect(status).toHaveText("Awaiting status");
+  cma.setFirstMessage({ purpose: "task", state: "completed" });
+  await page.clock.fastForward(16_000);
   await expect(status).toHaveText("Completed");
+  const settledReads = detailCount();
+  await page.clock.fastForward(46_000);
+  expect(detailCount()).toBe(settledReads);
+
   await reloadWithDetail();
   await expect(status).toHaveText("Completed");
 
@@ -582,12 +588,20 @@ test("recovers the exact initial task outcome after reload and respects connecti
   expect(await (await denial).json()).toMatchObject({ sessions: [] });
   await expect(status).toHaveText("Ready");
   await expect(page.locator('[data-cma-operation="already-recorded-response"]').getByRole("status")).toHaveText("Completed");
+  await page.clock.fastForward(46_000);
   expect(cma.requests).toEqual([]);
 
   cma.setAuthorized(true);
   await reloadWithDetail();
   await expect(status).toHaveText("Completed");
   expect(cma.tailCount()).toBe(0);
+
+  cma.setFirstMessage({ purpose: "task", state: "recovery_required" });
+  await reloadWithDetail();
+  await expect(status).toHaveText("Needs attention");
+  const recoveryReads = detailCount();
+  await page.clock.fastForward(46_000);
+  expect(detailCount()).toBe(recoveryReads);
 });
 
 for (const width of [1440, 390]) {
