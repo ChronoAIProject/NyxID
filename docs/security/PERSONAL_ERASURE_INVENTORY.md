@@ -71,6 +71,7 @@ db.channel_email_receipts.createIndex({"user_id": 1}, {name: "personal_erasure_o
 db.channel_email_sends.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_email_sends_user_id"});
 db.nyxbot_events.createIndex({"user_id": 1}, {name: "personal_erasure_owner_nyxbot_events_user_id"});
 db.refresh_tokens.createIndex({"user_id": 1}, {name: "personal_erasure_owner_refresh_tokens_user_id"});
+db.service_approval_configs.createIndex({"approver_user_ids": 1}, {name: "personal_erasure_owner_service_approval_configs_approver_user_ids"});
 db.service_change_events.createIndex({"actor.person_id": 1}, {name: "personal_erasure_owner_service_change_events_actor_person_id"});
 db.service_pool_health_observations.createIndex({"pool_id": 1}, {name: "personal_erasure_owner_service_pool_health_observations_pool_id"});
 db.trigger_deliveries.createIndex({"user_id": 1}, {name: "personal_erasure_owner_trigger_deliveries_user_id"});
@@ -555,7 +556,7 @@ backend/src/models/remote_machine_outbox.rs: COLLECTION_NAME=machine_effect_outb
 backend/src/models/saved_login.rs: COLLECTION_NAME=saved_logins | user_id
 backend/src/models/service_account.rs: COLLECTION_NAME=service_accounts | created_by, owner_user_id
 backend/src/models/service_account_key_read_grant.rs: COLLECTION_NAME=service_account_key_read_grants | owner_id
-backend/src/models/service_approval_config.rs: COLLECTION_NAME=service_approval_configs | user_id
+backend/src/models/service_approval_config.rs: COLLECTION_NAME=service_approval_configs | approver_user_ids, user_id
 backend/src/models/service_change_event.rs: COLLECTION_NAME=service_change_events, HEADS_COLLECTION_NAME=service_history_heads | owner_id
 backend/src/models/service_pool.rs: COLLECTION_NAME=service_pools | user_id
 backend/src/models/service_pool_member_health.rs: COLLECTION_NAME=service_pool_member_health, OBSERVATION_COLLECTION_NAME=service_pool_health_observations | owner_id

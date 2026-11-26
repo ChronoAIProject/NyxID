@@ -3,6 +3,18 @@
 Status: Implemented in stages; historical proposal and baseline below. Current code includes operation descriptors, scoped grants, exact authority validation and MCP preparation/approval gates. Consult `approval_service`, `execution_authority` and MCP preparation/redeem paths for the live contract.
 Author: design exploration, 2026-05-29
 
+## Organization service approvers
+
+An org-owned service policy inherits all live Admins entitled to the selected connection. A saved list restricts review to the people on it who still meet those conditions. A group request also requires the original participant. If pruning removes the last named Admin, required review returns `org_approval_no_admin`. Mobile and web apply the same eligibility checks to the inbox and to decisions.
+
+A Telegram decision requires a private callback from a uniquely linked, eligible NyxID person. Use web or mobile for shared chats or ambiguous account links. Only one Telegram message is updated after a decision. Other Admins may still see buttons. An eligible Admin tapping an old button receives the existing already-decided response.
+
+A reusable grant covers sibling connections of the same service when the deciding Admin can approve all of them. If their scope covers only some siblings, the grant covers the specific connection they approved. Historical requests retain their connection identity after disable or deletion. Group participants can see pending group cards. Only the eligible triggering person can decide them.
+
+Every list change expires earlier pending prompts. Narrowing also retires earlier reusable approvals for the policy, including operation-scoped grants. A widening preserves reusable approvals. Requests and grants carry the config UUID and revision so replacing a config cannot restore its authority. Exact-service retries keep their original effect identity and terminal receipt.
+
+During a rolling upgrade, old and new replicas can issue separate grant-mode prompts for the same call because their deduplication keys differ. A call that already read the previous config can reuse a grant while narrowing commits. Subsequent calls see the new cutoff.
+
 ## Current implementation status (2026-10-19)
 
 The original proposal is retained below as dated design history, including its old call-site table and decisions. It is not a description of current enforcement. MCP now has preparation and approval enforcement, and exact grants bind live execution authority. Current details are defined by `approval_service`, `execution_authority` and MCP preparation/redeem code. This status does not assert every original proposal item is shipped or enabled; feature gates and rollout requirements remain applicable.

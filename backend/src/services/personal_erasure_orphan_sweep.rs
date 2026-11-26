@@ -267,6 +267,18 @@ async fn apply_group_in_session(
             doc! {"$and": [filter, super::personal_attribution_service::pending_filter(spec, Some(&group.owner_id))]},
             super::personal_attribution_service::update(spec),
         ).session(&mut *tx).await?.modified_count > 0
+    } else if group.collection == crate::models::service_approval_config::COLLECTION_NAME
+        && group.field == "approver_user_ids"
+    {
+        db.collection::<Document>(group.collection)
+            .update_many(
+                doc! {"$and":[filter,{"approver_user_ids":&group.owner_id}]},
+                super::org_service_approvers::prune_update(&group.owner_id),
+            )
+            .session(&mut *tx)
+            .await?
+            .modified_count
+            > 0
     } else if group.collection == crate::models::assistant_agent::COLLECTION_NAME
         && matches!(group.field, "org_user_ids" | "org_maintainer_user_ids")
     {

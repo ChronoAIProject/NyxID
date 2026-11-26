@@ -56,6 +56,10 @@ async fn recorded_flags_enable_globally_for_users_and_orgs_under_overlap_but_ref
             vec![flags::ORG_AGENT_ACCESS_FLAG_KEY],
         ),
         (
+            crate::services::org_service_approvers::FLAG,
+            vec![crate::services::org_service_approvers::FLAG],
+        ),
+        (
             flags::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
             vec![flags::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY],
         ),
@@ -144,6 +148,10 @@ async fn recorded_flags_enable_globally_for_users_and_orgs_under_overlap_but_ref
 async fn recorded_clear_that_enables_preserves_cohort_prerequisites_and_disable_under_overlap() {
     use crate::services::execution_permission_enrollment as enrollment;
     for (flag, capability) in [
+        (
+            crate::services::org_service_approvers::FLAG,
+            crate::services::org_service_approvers::FLAG,
+        ),
         (enrollment::FLAG, enrollment::FLAG),
         (enrollment::FLAG, enrollment::READINESS),
         (enrollment::FLAG, "permissions:execution-dispatch-v1"),

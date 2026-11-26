@@ -218,6 +218,7 @@ pub mod org_invite_service;
 pub(crate) mod org_membership_authority;
 pub mod org_role_scope_service;
 pub mod org_service;
+pub(crate) mod org_service_approvers;
 pub mod org_slug;
 pub mod ownership_transfer_access;
 pub mod ownership_transfer_service;

@@ -12,6 +12,7 @@ fn now() -> DateTime<Utc> {
 pub(crate) fn fixture() -> ApprovalGrant {
     let validity = Validity::Persistent;
     ApprovalGrant {
+        org_policy: None,
         execution_review: None,
         execution_last_used_at: None,
         execution_use: None,

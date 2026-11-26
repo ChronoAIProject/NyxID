@@ -305,6 +305,10 @@ false, losing a heartbeat, or waiting for a lease does not downgrade enforcement
 maintenance drain and an explicit deployment/data recovery plan; the product
 does not automatically clear this marker or provide a live downgrade command.
 
+## Named approvers for organization services
+
+`approval:org-service-named-approvers-v1` defaults off. Deploy enforcement to every serving API and worker generation, verify support, then record activation before enabling authoring on a release that provides it. Disabling the flag closes authoring while saved lists, revisions and grant cutoffs continue to apply. Once an organization saves a restriction, roll back only to a release with these readers.
+
 ## Required approval and delivery
 
 A user with no explicit global preference defaults to **Writes only**: reads

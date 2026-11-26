@@ -5188,6 +5188,7 @@ async fn execute_resolved_proxy_inner<'a>(
             &approval_owner_user_id,
             service_owner_for_approval,
             service_id,
+            resolved_user_service_id.as_deref(),
             &operation,
             auth_user.approval_requester_type(),
             &approval_requester_id,
@@ -5308,6 +5309,7 @@ async fn execute_resolved_proxy_inner<'a>(
                 &operation,
                 pending.resolution.grant_scope.clone(),
             );
+            request_operation.org_policy = pending.resolution.policy_stamp();
             request_operation.assistant_group =
                 crate::services::org_group_service::approval_binding(
                     &state.db,
@@ -13416,6 +13418,7 @@ mod proxy_resolution_integration_tests {
     fn approval_config(owner_user_id: &str, service_id: &str) -> ServiceApprovalConfig {
         let now = Utc::now();
         ServiceApprovalConfig {
+            approvers: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: owner_user_id.to_string(),
             service_id: service_id.to_string(),

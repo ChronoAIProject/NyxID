@@ -11,6 +11,7 @@ pub(super) async fn require_approval(f: &Fixture, service: &str) {
         .db
         .collection::<ServiceApprovalConfig>(COLLECTION_NAME)
         .insert_one(ServiceApprovalConfig {
+            approvers: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: f.owner.clone(),
             service_id: service.into(),

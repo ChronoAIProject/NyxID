@@ -426,10 +426,19 @@ async fn mutate_in_session(
                     .session(&mut *session)
                     .await?
             };
-            if key == flags::ORG_AGENT_ACCESS_FLAG_KEY
-                && enabled.is_none()
+            if matches!(
+                key,
+                flags::ORG_AGENT_ACCESS_FLAG_KEY | super::org_service_approvers::FLAG
+            ) && enabled.is_none()
                 && before.as_ref().is_some_and(|row| !row.enabled)
-                && flags::org_access_clear_enables(db, session, *kind, target_id.as_deref()).await?
+                && flags::clear_enables_inherited_override(
+                    db,
+                    session,
+                    key,
+                    *kind,
+                    target_id.as_deref(),
+                )
+                .await?
             {
                 security_readiness_service::require_flag_enable(db, key).await?;
             }

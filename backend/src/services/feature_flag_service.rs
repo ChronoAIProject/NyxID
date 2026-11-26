@@ -270,6 +270,11 @@ const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+const NAMED_APPROVERS: FeatureFlagDef = FeatureFlagDef {
+    key: super::org_service_approvers::FLAG,
+    description: "Allow named approver configuration on organization services after fleet activation.",
+    default_enabled: false,
+};
 pub const GUEST_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:guest-operation-scopes";
 const GUEST_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: GUEST_OPERATION_SCOPES_FLAG_KEY,
@@ -565,6 +570,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     TURN_HANDOFF_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
+    NAMED_APPROVERS,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_PDF_VISION_FLAG,
     ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG,
@@ -646,6 +652,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     TURN_HANDOFF_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
+    NAMED_APPROVERS,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_PDF_VISION_FLAG,
     ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG,
@@ -1165,15 +1172,15 @@ pub async fn resolve_enabled_features(
 }
 
 /// A cleared deny must pass readiness if it restores an enabled parent.
-pub(super) async fn org_access_clear_enables(
+pub(super) async fn clear_enables_inherited_override(
     db: &mongodb::Database,
     session: &mut mongodb::ClientSession,
+    key: &str,
     kind: FlagTargetKind,
     target: Option<&str>,
 ) -> AppResult<bool> {
     use crate::models::org_membership::{COLLECTION_NAME as MEMBERS, OrgMembership};
     let rows = db.collection::<FeatureFlagOverride>(COLLECTION_NAME);
-    let key = ORG_AGENT_ACCESS_FLAG_KEY;
     let global = rows
         .find_one(
             doc! {"flag_key":key,"definition_id":null,"org_user_id":null,
@@ -3578,6 +3585,7 @@ mod tests {
                 "assistant:turn-handoff",
                 "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",
+                "approval:org-service-named-approvers-v1",
                 "assistant:channel-media",
                 "assistant:pdf-vision",
                 "assistant:channel-guest-media",

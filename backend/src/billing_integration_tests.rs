@@ -954,6 +954,7 @@ async fn run_billing_route_coverage_smoke() {
     }));
     db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
         .insert_one(ApprovalRequest {
+            org_policy: None,
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,

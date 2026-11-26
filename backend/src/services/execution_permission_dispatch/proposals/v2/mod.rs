@@ -370,6 +370,7 @@ pub(in crate::services::execution_permission_dispatch) async fn create(
         None
     };
     let request = ApprovalRequest {
+        org_policy: None,
         activity_outcome: None,
         activity_execution: None,
         execution_proposal: Some(ExecutionProposal {
