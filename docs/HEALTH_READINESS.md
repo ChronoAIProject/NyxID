@@ -103,6 +103,10 @@ image entrypoint for CSP/browser tests and does not launch this checker;
 `/frontend/ready` correctly reports `checker` there. Use
 `test-nginx-readiness.py` or the default production entrypoint for readiness.
 
+`Dockerfile.public-test` uses the default entrypoint with the same generated
+inventory and supervised checker as production, alongside its isolated backend
+fixture for public-page HTTP and browser tests.
+
 ## Routes, existing consumers and rollout
 
 Frontend `/health` preserves the backend/version proxy consumed by SPA release

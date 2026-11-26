@@ -9,6 +9,8 @@ RUN apk add --no-cache python3 \
     && chown 101:101 /etc/nginx/nyxid/generated
 COPY nginx.conf.template /etc/nginx/nyxid/default.conf.template
 COPY scripts/render-nginx.py /etc/nginx/nyxid/render-nginx.py
+COPY scripts/frontend-readiness.py /etc/nginx/nyxid/frontend-readiness.py
+RUN python3 /etc/nginx/nyxid/frontend-readiness.py --inventory
 COPY --chmod=755 scripts/nginx-policy-entrypoint.sh /docker-entrypoint.d/40-nyxid-policy.sh
 COPY nginx-default.conf /etc/nginx/conf.d/default.conf
 USER 101

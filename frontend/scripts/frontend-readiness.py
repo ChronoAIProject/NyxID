@@ -12,6 +12,7 @@ from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler
 import json
 import os
+import re
 from pathlib import Path, PurePosixPath
 from socketserver import UnixStreamServer
 import stat
@@ -48,10 +49,28 @@ def inventory(root):
     if not entry.is_file() or not 0 < entry.stat().st_size <= MAX_ENTRY_BYTES:
         raise ValueError("built entry HTML is required")
     parser.feed(entry.read_text())
+    metadata_path = root / "build-version.json"
+    metadata_required = not any(path.endswith(".css") for path in parser.paths)
+    if metadata_required:
+        # The public/app dispatcher loads its CSS with the selected entry. Use
+        # the producer's app-entry closure to require that CSS before readiness.
+        try:
+            metadata = json.loads(metadata_path.read_text())
+            assets = metadata.get("assets") if isinstance(metadata, dict) else None
+            if (not isinstance(assets, list) or not 1 <= len(assets) <= 256
+                    or not all(isinstance(asset, str) and
+                               re.fullmatch(r"assets/[a-zA-Z0-9_.-]+\.(js|css)", asset)
+                               for asset in assets)
+                    or not parser.paths.issubset(assets)):
+                raise ValueError("invalid app-entry build metadata")
+            parser.paths.update(assets)
+        except (OSError, ValueError) as error:
+            raise ValueError("built app-entry metadata is required") from error
     if not all(any(path.endswith(suffix) for path in parser.paths) for suffix in (".js", ".css")):
         raise ValueError("built entry JS and CSS are required")
     paths = sorted({"index.html", *(str(p.relative_to(root)) for p in root.rglob("*")
-                                    if p.suffix in (".html", ".js", ".css"))})
+                                    if p.suffix in (".html", ".js", ".css")),
+                    *(("build-version.json",) if metadata_required else ())})
     if (not parser.paths.issubset(paths) or len(paths) > MAX_FILES
             or not any(p.endswith(".js") for p in parser.paths)
             or not any(p.endswith(".css") for p in parser.paths)):

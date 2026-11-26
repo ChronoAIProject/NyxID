@@ -114,32 +114,35 @@ export function buildVersion(buildId: string, commit: string | null): Plugin {
         { tag: "meta", attrs: { name: "nyxid-assistant-build-id", content: assistant ?? "" } },
       ];
     },
-    generateBundle(_options, bundle) {
-      const assets = new Set<string>();
-      const visit = (fileName: string) => {
-        if (assets.has(fileName)) return;
-        const chunk = bundle[fileName];
-        if (!chunk || chunk.type !== "chunk") return;
-        assets.add(fileName);
-        const metadata = chunk as typeof chunk & {
-          viteMetadata?: { importedCss: Set<string> };
+    generateBundle: {
+      order: "post",
+      handler(_options, bundle) {
+        const assets = new Set<string>();
+        const visit = (fileName: string) => {
+          if (assets.has(fileName)) return;
+          const chunk = bundle[fileName];
+          if (!chunk || chunk.type !== "chunk") return;
+          assets.add(fileName);
+          const metadata = chunk as typeof chunk & {
+            viteMetadata?: { importedCss: Set<string> };
+          };
+          for (const css of metadata.viteMetadata?.importedCss ?? []) assets.add(css);
+          for (const imported of chunk.imports) visit(imported);
         };
-        for (const css of metadata.viteMetadata?.importedCss ?? []) assets.add(css);
-        for (const imported of chunk.imports) visit(imported);
-      };
-      for (const chunk of Object.values(bundle)) {
-        if (chunk.type === "chunk" && (
-          (chunk.isEntry && !chunk.isDynamicEntry) ||
-          chunk.facadeModuleId === path.join(root, "src/app-entry.tsx")
-        )) visit(chunk.fileName);
-      }
-      const version = parseBuildVersion({ buildId, commit, assistant, assets: [...assets].sort() });
-      if (!version) this.error("Frontend build metadata exceeds the browser update contract");
-      this.emitFile({
-        type: "asset",
-        fileName: "build-version.json",
-        source: JSON.stringify(version),
-      });
+        for (const chunk of Object.values(bundle)) {
+          if (chunk.type === "chunk" && (
+            (chunk.isEntry && !chunk.isDynamicEntry) ||
+            chunk.facadeModuleId === path.join(root, "src/app-entry.tsx")
+          )) visit(chunk.fileName);
+        }
+        const version = parseBuildVersion({ buildId, commit, assistant, assets: [...assets].sort() });
+        if (!version) this.error("Frontend build metadata exceeds the browser update contract");
+        this.emitFile({
+          type: "asset",
+          fileName: "build-version.json",
+          source: JSON.stringify(version),
+        });
+      },
     },
   };
 }
