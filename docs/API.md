@@ -8973,6 +8973,43 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
   http://localhost:3001/api/v1/approvals/service-configs/a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ```
 
+### Read or replace an organization service's approvers
+
+```http
+GET /api/v1/approvals/service-configs/{service_id}/approvers?org_id={org_uuid}
+PUT /api/v1/approvals/service-configs/{service_id}/approvers?org_id={org_uuid}
+```
+
+Both endpoints require a first-party human session or access token and an active Admin membership entitled to manage the organization's service config. A concrete connection must be in the caller's scope. A catalog ID addresses the config shared by its connections. An entitled Admin can govern the policy even when another person is the sole named approver.
+
+GET and successful PUT return the same object. For example, a config that inherits has the following response.
+
+```json
+{
+  "config_id": "381192a0-966c-4daf-bd2d-669cc144090c",
+  "revision": 0,
+  "approver_user_ids": null,
+  "authoring_available": true,
+  "eligible_candidates": [
+    {"user_id": "bc398c50-3b4e-4b5e-b141-973ef5bda829", "display_name": "Alex"}
+  ]
+}
+```
+
+Candidates are live Admins entitled to the config. For a shared catalog config this includes Admins scoped to any active sibling. Each decision still requires entitlement to the requested connection. A candidate's display name can be null. The saved list can contain a person who has since lost eligibility. A stored empty list means pruning removed every named approver and required review fails closed.
+
+PUT requires all three fields below. Send `null` to restore inheritance, or 1–128 distinct, currently eligible person UUIDs to select approvers. The calling Admin may select themselves.
+
+```json
+{
+  "config_id": "381192a0-966c-4daf-bd2d-669cc144090c",
+  "expected_revision": 0,
+  "approver_user_ids": ["bc398c50-3b4e-4b5e-b141-973ef5bda829"]
+}
+```
+
+GET returns 404 for a missing config. PUT returns 409 for a deleted, replaced or concurrently edited config. Read the current config and review the edit before resubmitting. Reordering the same valid set at the expected revision leaves the revision and audit count intact. PUT returns 403 when authoring is disabled or fleet support is unavailable. GET continues to return the saved policy with `authoring_available: false`.
+
 ### Delete Per-Service Approval Config
 
 ```

@@ -165,6 +165,21 @@ nyxid approval set-config <id> --require-approval true --approval-mode grant
 
 `set-config` takes a `UserService` ID (from [`nyxid service list`](/docs/cli/reference/service)) or a catalog ID; `--approval-mode` is `per_request` (every call) or `grant` (approval mints a reusable grant).
 
+### Organization service approvers
+
+Sign in as an Admin entitled to the service. Pass an organization UUID, slug or exact display name and an owned connection or catalog service ID.
+
+```bash
+nyxid approval approvers show --org acme --service "$SERVICE" --output json
+nyxid approval approvers set --org acme --service "$SERVICE" --set "$ALEX,$SAM"
+nyxid approval approvers set --org acme --service "$SERVICE" --remove "$SAM" --add "$RAVI"
+nyxid approval approvers set --org acme --service "$SERVICE" --inherit
+```
+
+`show` lists eligible person UUIDs, their display names and whether editing is available. `--inherit` includes future eligible Admins automatically. `--set` replaces the list. With `--add` or `--remove`, the CLI starts from the saved list, or from the current eligible candidates when inheriting. A change to that inherited set saves a named snapshot. An ineffective edit preserves inheritance. Named lists must contain 1–128 distinct eligible Admins.
+
+Each edit reads the config UUID and revision before submitting. If another Admin edits or replaces the config in between, the command reports 409. Run `show` and review the current policy before submitting a new edit. Both commands accept `--output json`. The JSON field `approver_user_ids` is null for inheritance and an empty array if automatic pruning removed every named approver.
+
 ## endpoint
 
 Manage the raw target URLs (`UserEndpoint`) behind your services. See [Endpoints, keys & services](/docs/shared/concepts/endpoints-keys-services).

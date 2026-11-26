@@ -224,6 +224,7 @@ feature flags requires deployment readiness:
 | Capability | Existing boundary retained |
 | --- | --- |
 | `channel:discord-gateway` | Relay socket ownership and gateway transport handoff; every transport writer must wait for relay shutdown before remote setup. The socket worker additionally requires live readiness at acquisition and renewal. |
+| `approval:org-service-named-approvers-v1` | Organization service approver authoring. Effective enables, clear-that-enables and every approver-list PUT require activation and support from every live generation. |
 | `assistant:org-agents` | Creation/configuration and use-oriented organization-agent discovery gate (`delegation_summaries`); direct use retains live membership/resource ACLs. |
 | `assistant:org-agent-access-lists-v1` | Organization specialist access-list authoring. Effective flag enables, clearing an override that enables authoring, and each policy PUT require durable activation and live fleet support. |
 | `assistant:operation-scopes` | Scope editing gate; stored scopes are enforced during authentication and execution with the flag off. |
@@ -307,7 +308,9 @@ does not automatically clear this marker or provide a live downgrade command.
 
 ## Named approvers for organization services
 
-`approval:org-service-named-approvers-v1` defaults off. Deploy enforcement to every serving API and worker generation, verify support, then record activation before enabling authoring on a release that provides it. Disabling the flag closes authoring while saved lists, revisions and grant cutoffs continue to apply. Once an organization saves a restriction, roll back only to a release with these readers.
+`approval:org-service-named-approvers-v1` defaults off. Deploy the enforcement readers to every serving API and worker generation. In `GET /api/v1/admin/security-readiness`, check that this capability has `activated: true` and `serving_ready: true`, then enable the flag for the intended cohort. The approvers GET reports the effective availability for the requesting Admin. Loss of live support closes PUT even for an already-enabled cohort.
+
+To stop edits, disable the flag. Saved lists, request revisions and reusable grant cutoffs remain enforced. After the first named list is saved, the oldest supported rollback target is a release containing the #2996 readers. Rolling back to that release removes the authoring endpoints.
 
 ## Required approval and delivery
 

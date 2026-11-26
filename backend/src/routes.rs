@@ -1828,6 +1828,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::approvals::delete_service_config),
         )
         .route(
+            "/service-configs/{service_id}/approvers",
+            get(handlers::approvals::get_org_approvers).put(handlers::approvals::put_org_approvers),
+        )
+        .route(
             "/service-configs/{service_id}/authorization",
             get(handlers::approvals::get_service_config_authorization),
         );

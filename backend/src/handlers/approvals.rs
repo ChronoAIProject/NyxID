@@ -15,7 +15,7 @@ use crate::models::service_approval_config::{ApprovalEffect, ApprovalMode, Appro
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
-use crate::services::{approval_service, audit_service};
+use crate::services::{approval_service, audit_service, org_service_approvers::authoring};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Response types ---
@@ -1746,6 +1746,54 @@ pub async fn list_service_configs(
         configs: items,
         dominant_org_policies,
     }))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct OrgApproversQuery {
+    pub(crate) org_id: uuid::Uuid,
+}
+
+async fn org_approvers(
+    state: &AppState,
+    auth: &AuthUser,
+    service_id: &str,
+    query: OrgApproversQuery,
+    replacement: Option<authoring::Replacement>,
+) -> AppResult<Json<authoring::Policy>> {
+    super::login_client_context::require_first_party_human(auth)?;
+    let org = query.org_id.to_string();
+    let actor = audit_service::AuditActor::from_auth_user(auth);
+    resolve_service_config_owner(state, &actor.user_id, Some(&org)).await?;
+    let target = resolve_approval_target(&state.db, &org, service_id).await?;
+    authoring::policy(
+        &state.db,
+        actor,
+        &org,
+        &target.effective_service_id,
+        target.user_service_id.as_deref(),
+        replacement,
+    )
+    .await
+    .map(Json)
+}
+
+pub(crate) async fn get_org_approvers(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(service): Path<String>,
+    Query(query): Query<OrgApproversQuery>,
+) -> AppResult<Json<authoring::Policy>> {
+    org_approvers(&state, &auth, &service, query, None).await
+}
+
+pub(crate) async fn put_org_approvers(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(service): Path<String>,
+    Query(query): Query<OrgApproversQuery>,
+    Json(body): Json<authoring::Replacement>,
+) -> AppResult<Json<authoring::Policy>> {
+    org_approvers(&state, &auth, &service, query, Some(body)).await
 }
 
 /// GET /api/v1/approvals/service-configs/{service_id}/authorization
