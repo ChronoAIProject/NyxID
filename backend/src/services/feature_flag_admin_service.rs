@@ -426,6 +426,13 @@ async fn mutate_in_session(
                     .session(&mut *session)
                     .await?
             };
+            if key == flags::ORG_AGENT_ACCESS_FLAG_KEY
+                && enabled.is_none()
+                && before.as_ref().is_some_and(|row| !row.enabled)
+                && flags::org_access_clear_enables(db, session, *kind, target_id.as_deref()).await?
+            {
+                security_readiness_service::require_flag_enable(db, key).await?;
+            }
             if key == enrollment::FLAG {
                 // A clear restores inheritance. Gate potential widening, while a
                 // disable stays available even if readiness or scope reads fail.

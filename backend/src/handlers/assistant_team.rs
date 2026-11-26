@@ -3790,21 +3790,61 @@ pub struct OrgAccessResponse {
     authoring_available: bool,
 }
 
+impl OrgAccessResponse {
+    fn from_agent(agent: AssistantAgent, authoring_available: bool) -> Self {
+        Self {
+            maintainers: agent.org_maintainer_user_ids,
+            users: agent.org_user_ids,
+            revision: agent.org_access_revision,
+            authoring_available,
+        }
+    }
+}
+
+async fn governed_policy(
+    state: &AppState,
+    auth: &AuthUser,
+    id: &str,
+) -> AppResult<(AssistantAgent, bool)> {
+    use crate::services::org_agent_service::{authoring, governed_agent};
+    super::login_client_context::require_first_party_human(auth)?;
+    let actor = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &actor).await?;
+    let agent = governed_agent(&state.db, &actor, id).await?;
+    let available = agent.destroyed_at.is_none()
+        && authoring::available(&state.db, &actor, &agent.user_id).await?;
+    Ok((agent, available))
+}
+
 pub async fn get_org_access(
     State(state): State<AppState>,
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<OrgAccessResponse>> {
-    super::login_client_context::require_first_party_human(&auth)?;
-    let actor = auth.user_id.to_string();
-    engine::require_enabled(&state.db, &actor).await?;
-    let agent = crate::services::org_agent_service::governed_agent(&state.db, &actor, &id).await?;
-    Ok(Json(OrgAccessResponse {
-        maintainers: agent.org_maintainer_user_ids,
-        users: agent.org_user_ids,
-        revision: agent.org_access_revision,
-        authoring_available: false,
-    }))
+    let (agent, available) = governed_policy(&state, &auth, &id).await?;
+    Ok(Json(OrgAccessResponse::from_agent(agent, available)))
+}
+
+pub async fn put_org_access(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    body: Result<
+        Json<crate::services::org_agent_service::authoring::Replacement>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> AppResult<Json<OrgAccessResponse>> {
+    use crate::services::{audit_service::AuditActor, org_agent_service::authoring};
+    let (agent, available) = governed_policy(&state, &auth, &id).await?;
+    if !available {
+        return Err(AppError::OrgAgentAccessAuthoringUnavailable);
+    }
+    let Json(policy) = body.map_err(|_| {
+        AppError::ValidationError("Expected maintainers, users and expected_revision".into())
+    })?;
+    let saved =
+        authoring::replace(&state.db, AuditActor::from_auth_user(&auth), agent, policy).await?;
+    Ok(Json(OrgAccessResponse::from_agent(saved, true)))
 }
 
 /// One agent with its memory, threads and pending requests.

@@ -52,6 +52,10 @@ async fn recorded_flags_enable_globally_for_users_and_orgs_under_overlap_but_ref
  {
     let families = [
         (
+            flags::ORG_AGENT_ACCESS_FLAG_KEY,
+            vec![flags::ORG_AGENT_ACCESS_FLAG_KEY],
+        ),
+        (
             flags::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
             vec![flags::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY],
         ),
@@ -139,53 +143,36 @@ async fn recorded_flags_enable_globally_for_users_and_orgs_under_overlap_but_ref
 #[tokio::test]
 async fn recorded_clear_that_enables_preserves_cohort_prerequisites_and_disable_under_overlap() {
     use crate::services::execution_permission_enrollment as enrollment;
-    for capability in [
-        enrollment::FLAG,
-        enrollment::READINESS,
-        "permissions:execution-dispatch-v1",
-        "permissions:execution-authoring-v1",
+    for (flag, capability) in [
+        (enrollment::FLAG, enrollment::FLAG),
+        (enrollment::FLAG, enrollment::READINESS),
+        (enrollment::FLAG, "permissions:execution-dispatch-v1"),
+        (enrollment::FLAG, "permissions:execution-authoring-v1"),
+        (
+            flags::ORG_AGENT_ACCESS_FLAG_KEY,
+            flags::ORG_AGENT_ACCESS_FLAG_KEY,
+        ),
     ] {
         let (db, actor, org, sibling) = fixture().await;
-        set(
-            &db,
-            &actor,
-            enrollment::FLAG,
-            FlagTargetKind::Global,
-            None,
-            Some(true),
-        )
-        .await
-        .unwrap();
+        set(&db, &actor, flag, FlagTargetKind::Global, None, Some(true))
+            .await
+            .unwrap();
         for (kind, id) in [
             (FlagTargetKind::User, actor.user_id.clone()),
             (FlagTargetKind::Org, org),
         ] {
-            set(
-                &db,
-                &actor,
-                enrollment::FLAG,
-                kind,
-                Some(id.clone()),
-                Some(false),
-            )
-            .await
-            .unwrap();
-            set(&db, &actor, enrollment::FLAG, kind, Some(id.clone()), None)
+            set(&db, &actor, flag, kind, Some(id.clone()), Some(false))
+                .await
+                .unwrap();
+            set(&db, &actor, flag, kind, Some(id.clone()), None)
                 .await
                 .unwrap();
             for failure in ["unsupported", "unrecorded"] {
-                let disabled = set(
-                    &db,
-                    &actor,
-                    enrollment::FLAG,
-                    kind,
-                    Some(id.clone()),
-                    Some(false),
-                )
-                .await
-                .unwrap()
-                .override_row
-                .unwrap();
+                let disabled = set(&db, &actor, flag, kind, Some(id.clone()), Some(false))
+                    .await
+                    .unwrap()
+                    .override_row
+                    .unwrap();
                 if failure == "unsupported" {
                     remove_test_replica_capability(&db, &sibling, capability).await;
                 } else {
@@ -200,7 +187,7 @@ async fn recorded_clear_that_enables_preserves_cohort_prerequisites_and_disable_
                 }
                 assert!(
                     matches!(
-                        set(&db, &actor, enrollment::FLAG, kind, Some(id.clone()), None).await,
+                        set(&db, &actor, flag, kind, Some(id.clone()), None).await,
                         Err(AppError::SecurityReadinessUnavailable)
                     ),
                     "{capability}/{failure}"

@@ -2919,7 +2919,8 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route(
             "/nyxagent/agents/{id}/org-access",
-            get(handlers::assistant_team::get_org_access),
+            get(handlers::assistant_team::get_org_access)
+                .put(handlers::assistant_team::put_org_access),
         )
         .route(
             "/nyxagent/skills/catalog",
