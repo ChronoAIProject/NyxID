@@ -344,10 +344,12 @@ New Slack assistant text plans use renderer v3. Outside code and masked link
 labels, CommonMark-escaped `*`, `_` and `~` runs use Slack inline code for
 their punctuation. Enclosed words retain their authored style. In affected
 messages, the parser preserves bare URL delimiters and star keycaps that would
-otherwise be consumed as CommonMark syntax. Slack receives the existing
-text-only message fields, including the plain-text fallback for literal
-backticks. Raw Slack edits and upload captions use their existing adapter
-formats. Telegram continues to use its native entities.
+otherwise be consumed as CommonMark syntax. Authored autolinks use Slack's
+explicit link syntax for supported destinations. If parsed display text
+contains a literal backtick, Slack receives the whole reply in its existing
+plain-text mode (`mrkdwn: false`), with labeled destinations included as visible
+URLs. Raw Slack edits and upload captions use their existing adapter formats.
+Telegram continues to use its native entities.
 
 The journal pins the renderer version with its fingerprint and notice inputs.
 An absent version means v1, retained only to finish recorded plans. New workers

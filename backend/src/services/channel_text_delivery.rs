@@ -486,7 +486,7 @@ mod tests {
         platform: &str,
     ) -> AppResult<(Vec<super::super::channel_platform::OutboundReply>, String)> {
         let text = if platform == "slack" {
-            "Plain Slack text. ".repeat(4_800)
+            format!(r"\*literal\* {}", "Slack text. ".repeat(7_100))
         } else {
             "A literal (value). https://example.test/a-b?x=1&y=2\n\n".repeat(250)
         };
@@ -614,6 +614,14 @@ mod tests {
                     .0
                 };
                 assert_eq!(row.renderer_version, version);
+                if platform == "slack" {
+                    let expected = if version == Some(current) {
+                        "`*`literal`*`"
+                    } else {
+                        "*literal*"
+                    };
+                    assert!(parts[0].text.as_deref().unwrap().starts_with(expected));
+                }
                 let PartClaim::Send(attempt) = claim(&db, &row, 0).await.unwrap() else {
                     panic!("pending");
                 };
@@ -640,6 +648,9 @@ mod tests {
                     super::super::channel_reply_plan::fingerprint(&resumed_parts),
                     fingerprint
                 );
+                if platform == "slack" {
+                    assert_eq!(resumed_parts[0].text, parts[0].text);
+                }
                 assert!(
                     matches!(claim(&db, &resumed, 0).await.unwrap(), PartClaim::Sent(part) if part.platform_message_id.as_deref() == Some("accepted-prefix"))
                 );

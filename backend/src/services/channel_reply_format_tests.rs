@@ -537,6 +537,64 @@ fn slack_literal_controls_keep_the_recorded_wire() {
 }
 
 #[test]
+fn slack_literal_url_protection_retains_commonmark_destinations_and_html() {
+    for (source, expected) in [
+        (
+            r"\*x\* https://example.com/my\_page\_name and https://example.com/a\*.",
+            "`*`x`*` https://example.com/my_page_name and https://example.com/a*.",
+        ),
+        (
+            r"Docs: https://example.com/a\_b\?x=1&y=2 \*note\*",
+            "Docs: https://example.com/a_b?x=1&amp;y=2 `*`note`*`",
+        ),
+        (
+            r#"\*x\* <a href="https://example.com/a">label</a>"#,
+            r#"`*`x`*` &lt;a href="https://example.com/a"&gt;label&lt;/a&gt;"#,
+        ),
+        (
+            "\\*x\\*\n\n<div>https://example.com/a</div>",
+            "`*`x`*`\n\n&lt;div&gt;https://example.com/a&lt;/div&gt;",
+        ),
+        (
+            r"\*x\* <https://example.com/a_b_?x=1&y=2> and <a@b.co>",
+            "`*`x`*` <https://example.com/a_b_?x=1&y=2|https://example.com/a_b_?x=1&amp;y=2> and <mailto:a@b.co|a@b.co>",
+        ),
+        (
+            r"\*x\* **<https://example.com/_b_>**",
+            "`*`x`*` <https://example.com/_b_|*https://example.com/_b_*>",
+        ),
+        (
+            r"\*x\* **<ftp://example.com/a>** and **[label](ftp://example.com/a)**",
+            "`*`x`*` *ftp://example.com/a* and *label (ftp://example.com/a)*",
+        ),
+        (
+            r"\*x\* **ftp://example.com/a**",
+            "`*`x`*` *ftp://example.com/a*",
+        ),
+    ] {
+        assert_eq!(wire(source, "slack"), expected, "{source}");
+    }
+}
+
+#[test]
+fn slack_dense_escaped_styles_use_the_wire_budget_before_splitting() {
+    let source = r"**Note:** the \*starred\* option is _optional_ here, see docs. ".repeat(900);
+    let limit = TextLimit::for_platform("slack");
+    let parts = assistant_parts(&source, "slack", "https://nyxid.test/thread");
+    assert_eq!(parts.len(), 2);
+    let lengths: Vec<_> = parts
+        .iter()
+        .map(|p| limit.measure(p.text.as_deref().unwrap()))
+        .collect();
+    assert!((39_900..=40_000).contains(&lengths[0]), "{lengths:?}");
+    assert!(lengths[1] <= limit.budget(), "{lengths:?}");
+    let output: String = parts.into_iter().filter_map(|part| part.text).collect();
+    assert_eq!(output.matches("`*`starred`*`").count(), 900);
+    assert_eq!(output.matches("*Note:*").count(), 900);
+    assert_eq!(output.matches("_optional_").count(), 900);
+}
+
+#[test]
 fn slack_literal_parts_fit_the_scalar_budget_and_keep_keycaps_whole() {
     let limit = TextLimit::for_platform("slack");
     let source = format!(

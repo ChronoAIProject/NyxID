@@ -375,7 +375,15 @@ fn assistant_parts_impl(
                 break (chunk, rendered, local);
             }
             // Account for syntax repeated around clipped formatting spans.
-            let next = (budget / 2).max(1);
+            let next = if slack_format {
+                // Estimate the display budget from the measured wire expansion.
+                // Halving wastes a part when only a few markers push it over.
+                (limit.measure(chunk) * limit.budget() / cost)
+                    .min(budget.saturating_sub(1))
+                    .max(1)
+            } else {
+                (budget / 2).max(1)
+            };
             if next == budget {
                 // Excessive nested styling can exceed the budget even for one
                 // scalar. Retain the link; long/nested targets were expanded.
@@ -590,6 +598,8 @@ fn render_markdown_impl(
             slack_literals && e["type"] == "url",
         )
     });
+    let style_edges = slack_literals.then(|| slack::style_edges(&spans));
+    let longest_ticks = text.split(|ch| ch != '`').map(str::len).max().unwrap_or(0);
     let markers = |e: &serde_json::Value| -> (String, String) {
         match e["type"].as_str().unwrap_or_default() {
             "bold" => {
@@ -603,11 +613,10 @@ fn render_markdown_impl(
             }
             "slack_literal" => ("`".into(), "`".into()),
             "code" | "pre" => {
-                let longest = text.split(|ch| ch != '`').map(str::len).max().unwrap_or(0);
                 let fence = "`".repeat(if e["type"] == "pre" {
-                    longest.max(2) + 1
+                    longest_ticks.max(2) + 1
                 } else {
-                    longest + 1
+                    longest_ticks + 1
                 });
                 if e["type"] == "pre" {
                     (format!("{fence}\n"), format!("\n{fence}"))
@@ -623,12 +632,30 @@ fn render_markdown_impl(
                     ("[".into(), format!("]({url})"))
                 }
             }
-            "url" if slack_literals && slack::url_touches_style(e, &spans) => {
-                ("<".into(), ">".into())
+            "url"
+                if style_edges.as_ref().is_some_and(|edges| {
+                    let start = e["offset"].as_u64().unwrap_or_default();
+                    let end = start + e["length"].as_u64().unwrap_or_default();
+                    edges.contains(&start) || edges.contains(&end)
+                }) && e["url"].as_str().is_some_and(|target| {
+                    e["length"].as_u64() == Some(target.encode_utf16().count() as u64)
+                        && supported_link_target(target)
+                }) =>
+            {
+                let target = e["url"].as_str().unwrap_or_default();
+                let open = if target.contains('|') {
+                    format!("<{}|", markdown_link_url(target))
+                } else {
+                    "<".into()
+                };
+                (open, ">".into())
             }
             _ => (String::new(), String::new()),
         }
     };
+    if platform == "slack" {
+        return slack::render_markers(text, &spans, markers);
+    }
     let mut result = String::new();
     let mut position = 0;
     for ch in text.chars() {
@@ -648,19 +675,10 @@ fn render_markdown_impl(
                 && e["offset"].as_u64().unwrap_or(0) <= position
                 && position < e["offset"].as_u64().unwrap_or(0) + e["length"].as_u64().unwrap_or(0)
         });
-        if platform == "slack" {
-            match ch {
-                '&' => result.push_str("&amp;"),
-                '<' => result.push_str("&lt;"),
-                '>' => result.push_str("&gt;"),
-                _ => result.push(ch),
-            }
-        } else {
-            if !in_code && "\\`*_{}[]()#+-.!|>~".contains(ch) {
-                result.push('\\');
-            }
-            result.push(ch);
+        if !in_code && "\\`*_{}[]()#+-.!|>~".contains(ch) {
+            result.push('\\');
         }
+        result.push(ch);
         position += ch.len_utf16() as u64;
     }
     for span in spans.iter().rev().filter(|e| {
@@ -680,21 +698,26 @@ fn markdown_link_url(url: &str) -> String {
 }
 
 fn telegram_text(source: &str) -> (String, Vec<serde_json::Value>) {
-    commonmark_text(source, false)
+    commonmark_text(source, None)
 }
 
-fn commonmark_text(source: &str, slack_literals: bool) -> (String, Vec<serde_json::Value>) {
+fn commonmark_text(
+    source: &str,
+    slack_bare_starts: Option<&[usize]>,
+) -> (String, Vec<serde_json::Value>) {
     use pulldown_cmark::{Event, LinkType, Options, Parser, Tag, TagEnd};
     let mut text = String::new();
     let mut entities = Vec::new();
     let mut stack: Vec<(TagEnd, usize, serde_json::Value)> = Vec::new();
     let mut lists: Vec<Option<u64>> = Vec::new();
+    let mut units = 0;
     for (event, range) in Parser::new_ext(
         source,
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
     )
     .into_offset_iter()
     {
+        let before = text.len();
         match event {
             Event::Start(tag) => {
                 let kind = match &tag {
@@ -705,16 +728,30 @@ fn commonmark_text(source: &str, slack_literals: bool) -> (String, Vec<serde_jso
                     Tag::Link {
                         link_type: LinkType::Autolink,
                         ..
-                    } if slack_literals => Some("url"),
+                    } if slack_bare_starts
+                        .is_some_and(|starts| starts.binary_search(&range.start).is_ok()) =>
+                    {
+                        Some("url")
+                    }
                     Tag::Link { .. } | Tag::Image { .. } => Some("text_link"),
                     _ => None,
                 };
                 if let Some(kind) = kind {
                     let mut entity = serde_json::json!({"type": kind});
-                    if let Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } = &tag {
-                        entity["url"] = dest_url.to_string().into();
+                    match &tag {
+                        Tag::Link {
+                            link_type: LinkType::Email,
+                            dest_url,
+                            ..
+                        } if slack_bare_starts.is_some() => {
+                            entity["url"] = format!("mailto:{dest_url}").into();
+                        }
+                        Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
+                            entity["url"] = dest_url.to_string().into();
+                        }
+                        _ => {}
                     }
-                    stack.push((tag.to_end(), text.encode_utf16().count(), entity));
+                    stack.push((tag.to_end(), units, entity));
                 }
                 if let Tag::List(start) = tag {
                     lists.push(start);
@@ -734,7 +771,7 @@ fn commonmark_text(source: &str, slack_literals: bool) -> (String, Vec<serde_jso
                 }
                 if stack.last().is_some_and(|(tag, _, _)| *tag == end) {
                     let (_, start, mut entity) = stack.pop().unwrap();
-                    let mut length = text.encode_utf16().count() - start;
+                    let mut length = units - start;
                     if length == 0 && entity["type"] == "text_link" {
                         let target = entity["url"].as_str().unwrap_or_default();
                         text.push_str(target);
@@ -765,23 +802,22 @@ fn commonmark_text(source: &str, slack_literals: bool) -> (String, Vec<serde_jso
                 }
             }
             Event::Text(value) => {
-                if slack_literals
+                if slack_bare_starts.is_some()
                     && let Some(length) = slack::escaped_delimiter(source, range.start, &value)
                     && !stack.iter().any(|(_, _, e)| {
                         matches!(e["type"].as_str(), Some("pre" | "text_link" | "url"))
                     })
                 {
                     entities.push(serde_json::json!({
-                        "type":"slack_literal", "offset":text.encode_utf16().count(), "length":length
+                        "type":"slack_literal", "offset":units, "length":length
                     }));
                 }
                 text.push_str(&value);
             }
             Event::Html(value) | Event::InlineHtml(value) => text.push_str(&value),
             Event::Code(value) => {
-                let offset = text.encode_utf16().count();
                 text.push_str(&value);
-                entities.push(serde_json::json!({"type":"code", "offset":offset,"length":value.encode_utf16().count()}));
+                entities.push(serde_json::json!({"type":"code", "offset":units,"length":value.encode_utf16().count()}));
             }
             Event::SoftBreak | Event::HardBreak => text.push('\n'),
             Event::Rule => text.push_str("───\n"),
@@ -793,6 +829,7 @@ fn commonmark_text(source: &str, slack_literals: bool) -> (String, Vec<serde_jso
             }
             Event::InlineMath(value) | Event::DisplayMath(value) => text.push_str(&value),
         }
+        units += text[before..].encode_utf16().count();
     }
     // Block separation is renderer-owned; the final paragraph adds no content.
     let trimmed = text.trim_end_matches('\n').len();
@@ -809,46 +846,40 @@ fn commonmark_text(source: &str, slack_literals: bool) -> (String, Vec<serde_jso
     entities.retain(|e| e["length"].as_u64().unwrap_or(0) > 0);
     // Telegram forbids code overlapping any other entity. Preserve code and
     // partition surrounding emphasis/links, rather than losing code styling.
-    let code: Vec<_> = entities
+    let mut code: Vec<_> = entities
         .iter()
         .filter(|e| matches!(e["type"].as_str(), Some("code" | "pre")))
-        .map(|e| (e["offset"].as_u64().unwrap(), e["length"].as_u64().unwrap()))
+        .map(|e| {
+            let start = e["offset"].as_u64().unwrap();
+            start..start + e["length"].as_u64().unwrap()
+        })
         .collect();
+    code.sort_unstable_by_key(|range| range.start);
+    let mut seen = std::collections::HashSet::new();
     let mut compatible = Vec::new();
     for entity in entities {
-        let mut spans = vec![(
-            entity["offset"].as_u64().unwrap(),
-            entity["length"].as_u64().unwrap(),
-        )];
-        if !matches!(entity["type"].as_str(), Some("code" | "pre")) {
-            for &(start, length) in &code {
-                spans = spans
-                    .into_iter()
-                    .flat_map(|(from, size)| {
-                        let to = from + size;
-                        if to <= start || from >= start + length {
-                            return vec![(from, size)];
-                        }
-                        let mut remaining = Vec::new();
-                        if from < start {
-                            remaining.push((from, start - from));
-                        }
-                        if to > start + length {
-                            remaining.push((start + length, to - start - length));
-                        }
-                        remaining
-                    })
-                    .collect();
-            }
-        }
-        for (offset, length) in spans {
-            let mut part = entity.clone();
-            part["offset"] = offset.into();
-            part["length"] = length.into();
-            if !compatible.contains(&part) {
+        let kind = entity["type"].as_str().unwrap_or_default();
+        let target = entity["url"].as_str();
+        let mut start = entity["offset"].as_u64().unwrap();
+        let end = start + entity["length"].as_u64().unwrap();
+        let mut push = |offset: u64, end: u64| {
+            if offset < end
+                && seen.insert((offset, end, kind.to_owned(), target.map(str::to_owned)))
+            {
+                let mut part = entity.clone();
+                part["offset"] = offset.into();
+                part["length"] = (end - offset).into();
                 compatible.push(part);
             }
+        };
+        if !matches!(kind, "code" | "pre" | "slack_literal") {
+            let first = code.partition_point(|span| span.end <= start);
+            for native in code[first..].iter().take_while(|span| span.start < end) {
+                push(start, native.start);
+                start = native.end;
+            }
         }
+        push(start, end);
     }
     (text, compatible)
 }

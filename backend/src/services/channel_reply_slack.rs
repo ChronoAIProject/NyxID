@@ -1,10 +1,12 @@
 //! Slack's text-only mrkdwn for NyxID-owned assistant plans.
-use super::{commonmark_text, render_markdown_impl};
+use super::{commonmark_text, render_markdown_impl, supported_link_target};
 use pulldown_cmark::{Event, Options, Parser, Tag};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 use std::ops::Range;
 
 const STYLE: [&str; 3] = ["bold", "italic", "strikethrough"];
+
 pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
     if !source
         .as_bytes()
@@ -25,6 +27,7 @@ pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
     let mut style_ends = Vec::new();
     let mut keycaps = Vec::new();
     let mut code_block = false;
+    let mut escape_slashes = Vec::new();
     let mut has_literal = false;
     for (event, range) in parser.into_offset_iter() {
         match event {
@@ -33,11 +36,17 @@ pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
                 excluded.push(range);
             }
             Event::End(pulldown_cmark::TagEnd::CodeBlock) => code_block = false,
-            Event::Start(Tag::Link { .. } | Tag::Image { .. }) | Event::Code(_) => {
+            Event::Start(Tag::Link { .. } | Tag::Image { .. })
+            | Event::Code(_)
+            | Event::Html(_)
+            | Event::InlineHtml(_) => {
                 excluded.push(range);
             }
             Event::Text(value) if !code_block => {
-                has_literal |= escaped_delimiter(source, range.start, &value).is_some();
+                if let Some(delimiter) = escaped_punctuation(source, range.start, &value) {
+                    escape_slashes.push(range.start - 1);
+                    has_literal |= matches!(delimiter, b'*' | b'_' | b'~');
+                }
             }
             Event::Start(Tag::Strong | Tag::Emphasis | Tag::Strikethrough) => {
                 let width = match event {
@@ -45,7 +54,7 @@ pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
                     Event::Start(Tag::Strikethrough) if source[range.clone()].ends_with("~~") => 2,
                     _ => 1,
                 };
-                style_ends.push((range.start, range.end - width));
+                style_ends.push((range.end - width, range.start));
                 // A keycap '*' can itself be mistaken for a CommonMark delimiter.
                 keycaps.extend(
                     [
@@ -66,6 +75,21 @@ pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
     if !has_literal {
         return None;
     }
+    style_ends.sort_unstable();
+    excluded.sort_unstable_by_key(|range| range.start);
+    let mut opaque: Vec<Range<usize>> = Vec::new();
+    for range in excluded {
+        if let Some(previous) = opaque.last_mut()
+            && range.start <= previous.end
+        {
+            previous.end = previous.end.max(range.end);
+        } else {
+            opaque.push(range);
+        }
+    }
+    escape_slashes.sort_unstable();
+    escape_slashes.dedup();
+
     let mut finder = linkify::LinkFinder::new();
     finder.kinds(&[linkify::LinkKind::Url]);
     let mut urls = Vec::new();
@@ -78,49 +102,79 @@ pub(super) fn parse(source: &str) -> Option<(String, Vec<Value>)> {
                 .iter()
                 .take_while(|&&b| b == b'*')
                 .count();
-        if let Some(close) = style_ends
+        let first_close = style_ends.partition_point(|&(close, _)| close < start);
+        if let Some(&(close, _)) = style_ends[first_close..]
             .iter()
-            .filter_map(|&(open, close)| {
-                (open < start && (start..end).contains(&close)).then_some(close)
-            })
-            .min()
+            .take_while(|&&(close, _)| close < end)
+            .find(|&&(_, open)| open < start)
         {
             end = close;
         }
-        if !excluded.iter().any(|r| r.start < end && start < r.end)
+        let first_opaque = opaque.partition_point(|range| range.end <= start);
+        if opaque
+            .get(first_opaque)
+            .is_none_or(|range| range.start >= end)
             && !source[start..end].contains(['<', '>'])
-            && url::Url::parse(&source[start..end]).is_ok()
+            && supported_link_target(&source[start..end])
         {
             urls.push(start..end);
         }
     }
-    let mut inserts = Vec::new();
+    let mut edits = Vec::new();
     for range in &urls {
-        inserts.push((range.start, '<'));
-        inserts.push((range.end, '>'));
+        edits.push((range.start, Some('<')));
+        edits.push((range.end, Some('>')));
+        // Autolinks retain backslashes verbatim. Consume only slashes whose
+        // following punctuation was escaped by the original CommonMark parse.
+        let first = escape_slashes.partition_point(|&at| at < range.start);
+        edits.extend(
+            escape_slashes[first..]
+                .iter()
+                .copied()
+                .take_while(|&at| at + 1 < range.end)
+                .map(|at| (at, None)),
+        );
     }
     keycaps.sort_unstable();
     keycaps.dedup();
     for at in keycaps {
-        if !urls.iter().any(|url| url.contains(&at)) {
-            inserts.push((at, '\\'));
+        let next_url = urls.partition_point(|url| url.end <= at);
+        if urls.get(next_url).is_none_or(|url| !url.contains(&at)) {
+            edits.push((at, Some('\\')));
         }
     }
-    inserts.sort_unstable();
-    let mut marked = String::with_capacity(source.len() + inserts.len());
+    edits.sort_unstable();
+    let mut marked = String::with_capacity(source.len() + edits.len());
+    let mut bare_starts = Vec::new();
     let mut next = 0;
-    for (at, ch) in inserts {
+    for (at, replacement) in edits {
         marked.push_str(&source[next..at]);
-        marked.push(ch);
         next = at;
+        if let Some(ch) = replacement {
+            if ch == '<' {
+                bare_starts.push(marked.len());
+            }
+            marked.push(ch);
+        } else {
+            next += 1;
+        }
     }
     marked.push_str(&source[next..]);
-    Some(commonmark_text(&marked, true))
+    Some(commonmark_text(&marked, Some(&bare_starts)))
 }
 
 pub(super) fn escaped_delimiter(source: &str, at: usize, value: &str) -> Option<usize> {
+    let first = escaped_punctuation(source, at, value)?;
+    match first {
+        b'*' => Some(1 + keycap_suffix(&value[1..]).chars().count()),
+        b'_' | b'~' => Some(1),
+        _ => None,
+    }
+}
+
+fn escaped_punctuation(source: &str, at: usize, value: &str) -> Option<u8> {
     let first = value.as_bytes().first().copied()?;
-    if !matches!(first, b'*' | b'_' | b'~')
+    if !first.is_ascii_punctuation()
         || source.as_bytes().get(at) != Some(&first)
         || source.as_bytes()[..at]
             .iter()
@@ -132,12 +186,7 @@ pub(super) fn escaped_delimiter(source: &str, at: usize, value: &str) -> Option<
     {
         return None;
     }
-    let suffix = if first == b'*' {
-        keycap_suffix(&value[1..])
-    } else {
-        ""
-    };
-    Some(1 + suffix.chars().count())
+    Some(first)
 }
 
 fn keycap_suffix(text: &str) -> &'static str {
@@ -169,19 +218,64 @@ fn span(kind: &str, range: Range<usize>) -> Value {
     json!({"type":kind, "offset":range.start, "length":range.len()})
 }
 
-pub(super) fn url_touches_style(url: &Value, entities: &[Value]) -> bool {
-    let range = entity_range(url);
-    entities.iter().any(|other| {
-        other["type"]
-            .as_str()
-            .is_some_and(|kind| STYLE.contains(&kind))
-            && {
-                let style = entity_range(other);
-                [style.start, style.end]
-                    .into_iter()
-                    .any(|edge| edge == range.start || edge == range.end)
-            }
-    })
+pub(super) fn style_edges(entities: &[Value]) -> HashSet<u64> {
+    entities
+        .iter()
+        .filter(|entity| {
+            entity["type"]
+                .as_str()
+                .is_some_and(|kind| STYLE.contains(&kind))
+        })
+        .flat_map(|entity| {
+            let range = entity_range(entity);
+            [range.start as u64, range.end as u64]
+        })
+        .collect()
+}
+
+pub(super) fn push_text_char(result: &mut String, ch: char) {
+    match ch {
+        '&' => result.push_str("&amp;"),
+        '<' => result.push_str("&lt;"),
+        '>' => result.push_str("&gt;"),
+        _ => result.push(ch),
+    }
+}
+
+pub(super) fn render_markers(
+    text: &str,
+    spans: &[Value],
+    markers: impl Fn(&Value) -> (String, String),
+) -> String {
+    let mut boundaries: Vec<_> = spans
+        .iter()
+        .enumerate()
+        .flat_map(|(index, span)| {
+            let range = entity_range(span);
+            let (open, close) = markers(span);
+            [
+                (range.start, true, index, open),
+                (range.end, false, usize::MAX - index, close),
+            ]
+        })
+        .filter(|(_, _, _, marker)| !marker.is_empty())
+        .collect();
+    // At a shared boundary, close inner spans before opening new spans.
+    boundaries.sort_unstable_by_key(|&(position, opening, order, _)| (position, opening, order));
+    let mut boundaries = boundaries.into_iter().peekable();
+    let mut result = String::with_capacity(text.len());
+    let mut position = 0;
+    for ch in text.chars() {
+        while let Some((_, _, _, marker)) = boundaries.next_if(|edge| edge.0 == position) {
+            result.push_str(&marker);
+        }
+        push_text_char(&mut result, ch);
+        position += ch.len_utf16();
+    }
+    for (_, _, _, marker) in boundaries {
+        result.push_str(&marker);
+    }
+    result
 }
 
 pub(super) fn render(text: &str, entities: &[Value]) -> String {
@@ -209,6 +303,11 @@ pub(super) fn render(text: &str, entities: &[Value]) -> String {
         }
     }
 
+    let utf16_bytes: Vec<_> = text
+        .char_indices()
+        .flat_map(|(byte, ch)| std::iter::repeat_n(byte, ch.len_utf16()))
+        .chain(std::iter::once(text.len()))
+        .collect();
     let mut rendered = Vec::new();
     for entity in entities {
         let kind = entity["type"].as_str().unwrap_or_default();
@@ -216,11 +315,16 @@ pub(super) fn render(text: &str, entities: &[Value]) -> String {
             continue;
         }
         let range = entity_range(entity);
-        if !STYLE.contains(&kind)
-            || !merged
-                .iter()
-                .any(|(code, literal)| *literal && range.start < code.end && code.start < range.end)
-        {
+        if !STYLE.contains(&kind) {
+            rendered.push(entity.clone());
+            continue;
+        }
+        let first = merged.partition_point(|(code, _)| code.end <= range.start);
+        let overlapping = merged[first..]
+            .iter()
+            .take_while(|(code, _)| code.start < range.end)
+            .filter(|(_, literal)| *literal);
+        if overlapping.clone().next().is_none() {
             rendered.push(entity.clone());
             continue;
         }
@@ -231,7 +335,7 @@ pub(super) fn render(text: &str, entities: &[Value]) -> String {
             if start >= end {
                 return;
             }
-            let local = &text[super::format::byte_range(text, &span(kind, start..end))];
+            let local = &text[utf16_bytes[start]..utf16_bytes[end]];
             let trimmed = local.trim();
             let leading = local[..local.len() - local.trim_start().len()]
                 .encode_utf16()
@@ -241,11 +345,9 @@ pub(super) fn render(text: &str, entities: &[Value]) -> String {
                 rendered.push(span(kind, from..from + trimmed.encode_utf16().count()));
             }
         };
-        for (code, literal) in &merged {
-            if *literal && start < code.end && code.start < range.end {
-                push_style(start, code.start);
-                start = code.end;
-            }
+        for (code, _) in overlapping {
+            push_style(start, code.start);
+            start = code.end;
         }
         push_style(start, range.end);
     }
