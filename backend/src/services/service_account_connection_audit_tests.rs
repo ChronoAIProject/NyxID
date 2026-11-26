@@ -1,3 +1,4 @@
+use crate::services::credential_record_service::fixtures;
 use crate::{
     AppState,
     handlers::{
@@ -257,8 +258,8 @@ async fn fixture(action: Action) -> Fixture {
         "provider_type":kind,"is_active":true,"created_by":&actor,
         "authorization_url":format!("{}/authorize",server.base),"token_url":format!("{}/token",server.base),
         "device_code_url":format!("{}/device",server.base),"device_token_url":format!("{}/token",server.base),
-        "client_id_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:state.encryption_keys.encrypt(b"fixture-client").await.unwrap()},
-        "client_secret_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:state.encryption_keys.encrypt(b"never-audit-client-secret").await.unwrap()},
+        "client_id_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:fixtures::provider(&provider, "client_id_encrypted", b"fixture-client").await},
+        "client_secret_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:fixtures::provider(&provider, "client_secret_encrypted", b"never-audit-client-secret").await},
         "supports_pkce":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).unwrap();
     db.collection::<ProviderConfig>("provider_configs")
         .insert_one(p)

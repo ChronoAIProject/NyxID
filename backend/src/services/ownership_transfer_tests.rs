@@ -1,4 +1,5 @@
 use super::ownership_transfer_service::*;
+use crate::services::credential_record_service::fixtures;
 use crate::{
     errors::AppError,
     models::{
@@ -474,8 +475,8 @@ async fn move_resource(
 
 async fn insert_bot(f: &Fixture) -> ChannelBot {
     let id = Uuid::new_v4().to_string();
-    let doc = doc! { "_id": id, "user_id": &f.owner, "platform": "telegram", "label": "Team bot",
-    "credential_source": "user", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: test_utils::test_encryption_keys().encrypt(b"transfer-token").await.unwrap() },
+    let doc = doc! { "_id": &id, "user_id": &f.owner, "platform": "telegram", "label": "Team bot",
+    "credential_source": "user", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: super::channel_bot_record::encrypt(&fixtures::staged_keys(), &id, &f.owner, "bot_token_encrypted", "transfer-token").await.unwrap() },
     "platform_bot_id": "remote-bot", "platform_bot_username": "team_bot", "webhook_registered": true,
     "webhook_secret_hash": "original-secret-hash", "status": "active", "is_active": true,
     "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now() };
@@ -487,7 +488,6 @@ async fn insert_bot(f: &Fixture) -> ChannelBot {
 }
 
 async fn insert_x_bot(f: &Fixture) -> (ChannelBot, UserApiKey) {
-    let state = test_utils::test_app_state(f.db.clone());
     let provider_id = Uuid::new_v4().to_string();
     let mut provider: ProviderConfig = bson::from_document(doc! {
         "_id": &provider_id,
@@ -505,20 +505,10 @@ async fn insert_x_bot(f: &Fixture) -> (ChannelBot, UserApiKey) {
         "updated_at": bson::DateTime::now(),
     })
     .unwrap();
-    provider.client_id_encrypted = Some(
-        state
-            .encryption_keys
-            .encrypt(b"platform-client")
-            .await
-            .unwrap(),
-    );
-    provider.client_secret_encrypted = Some(
-        state
-            .encryption_keys
-            .encrypt(b"platform-secret")
-            .await
-            .unwrap(),
-    );
+    provider.client_id_encrypted =
+        Some(fixtures::provider(&provider.id, "client_id_encrypted", b"platform-client").await);
+    provider.client_secret_encrypted =
+        Some(fixtures::provider(&provider.id, "client_secret_encrypted", b"platform-secret").await);
     f.db.collection(PROVIDERS)
         .insert_one(provider)
         .await
@@ -543,18 +533,22 @@ async fn insert_x_bot(f: &Fixture) -> (ChannelBot, UserApiKey) {
     })
     .unwrap();
     key.access_token_encrypted = Some(
-        state
-            .encryption_keys
-            .encrypt(b"live-x-access-token")
-            .await
-            .unwrap(),
+        fixtures::key(
+            &key.id,
+            &key.user_id,
+            "access_token_encrypted",
+            b"live-x-access-token",
+        )
+        .await,
     );
     key.refresh_token_encrypted = Some(
-        state
-            .encryption_keys
-            .encrypt(b"rotating-x-refresh-token")
-            .await
-            .unwrap(),
+        fixtures::key(
+            &key.id,
+            &key.user_id,
+            "refresh_token_encrypted",
+            b"rotating-x-refresh-token",
+        )
+        .await,
     );
     f.db.collection::<UserApiKey>(USER_API_KEYS)
         .insert_one(&key)
@@ -2872,7 +2866,7 @@ async fn unmarked_channel_transfer_fences_a_first_marker_even_when_the_transacti
     let bot = insert_bot(&f).await;
     let rows = f.db.collection::<Document>(BOTS);
     rows.update_one(doc! {"_id":&bot.id},doc! {"$set":{"bot_token_encrypted":bson::Binary {
-        subtype:bson::spec::BinarySubtype::Generic,bytes:keys.encrypt(b"first-marker-token").await.unwrap()}}}).await.unwrap();
+        subtype:bson::spec::BinarySubtype::Generic,bytes:fixtures::historical::first_marker_token()}}}).await.unwrap();
     let unmarked = rows.find_one(doc! {"_id":&bot.id}).await.unwrap().unwrap();
     crate::services::channel_registration::bind_fixture_fields(
         &f.db,
@@ -2963,7 +2957,18 @@ async fn channel_transfer_rebinds_all_fields_and_aborts_route_retirement_on_a_da
     for &field in super::channel_bot_record::FIELDS {
         set.insert(
             field,
-            bson::to_bson(&keys.encrypt(field.as_bytes()).await.unwrap()).unwrap(),
+            bson::to_bson(
+                &super::channel_bot_record::encrypt(
+                    &fixtures::staged_keys(),
+                    &bot.id,
+                    &bot.user_id,
+                    field,
+                    field,
+                )
+                .await
+                .unwrap(),
+            )
+            .unwrap(),
         );
     }
     rows.update_one(lookup.clone(), doc! {"$set":set})
@@ -3078,7 +3083,17 @@ async fn whatsapp_transfer_retains_the_enrollment_token_under_its_original_gener
     let keys = test_utils::test_encryption_keys();
     bot.platform = "whatsapp".into();
     bot.platform_bot_id = "333".into();
-    bot.app_secret_encrypted = Some(keys.encrypt(b"fixture-app-secret").await.unwrap());
+    bot.app_secret_encrypted = Some(
+        super::channel_bot_record::encrypt(
+            &fixtures::staged_keys(),
+            &bot.id,
+            &bot.user_id,
+            "app_secret_encrypted",
+            "fixture-app-secret",
+        )
+        .await
+        .unwrap(),
+    );
     let id = doc! {"_id":&bot.id};
     let parents = f.db.collection::<ChannelBot>(BOTS);
     parents.replace_one(id.clone(), &bot).await.unwrap();

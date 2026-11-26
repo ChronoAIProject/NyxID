@@ -178,6 +178,7 @@ pub(crate) async fn migrate_snapshot(
 mod tests {
     use super::*;
     use crate::models::downstream_service::test_helpers::dummy_service;
+    use crate::services::credential_record_service::fixtures;
 
     #[tokio::test]
     async fn catalog_master_readiness_preserves_staging_and_current_noop() {
@@ -286,7 +287,7 @@ mod tests {
         let keys = crate::test_utils::test_encryption_keys();
         let mut row = dummy_service();
         row.id = uuid::Uuid::new_v4().to_string();
-        row.credential_encrypted = keys.encrypt(b"").await.unwrap();
+        row.credential_encrypted = fixtures::historical::empty();
         let source = bson::to_document(&row).unwrap();
         db.collection::<Document>(COLLECTION_NAME)
             .insert_one(&source)

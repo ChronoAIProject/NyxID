@@ -327,6 +327,7 @@ fn connection_webhook_data(
 
 #[cfg(test)]
 mod tests {
+    use crate::services::credential_record_service::fixtures;
     use std::sync::Arc;
 
     use chrono::Utc;
@@ -527,11 +528,14 @@ mod tests {
         let encryption_keys = test_encryption_keys();
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
-        let client_id_encrypted = encryption_keys.encrypt(b"test-client-id").await.unwrap();
-        let client_secret_encrypted = encryption_keys
-            .encrypt(b"test-client-secret")
-            .await
-            .unwrap();
+        let client_id_encrypted =
+            fixtures::provider(&provider_id, "client_id_encrypted", b"test-client-id").await;
+        let client_secret_encrypted = fixtures::provider(
+            &provider_id,
+            "client_secret_encrypted",
+            b"test-client-secret",
+        )
+        .await;
         let provider = oauth_provider(
             &provider_id,
             token_url,
@@ -557,19 +561,32 @@ mod tests {
             .unwrap();
 
         let now = Utc::now();
+        let token_id = Uuid::new_v4().to_string();
         let token = UserProviderToken {
             secret_context_versions: Default::default(),
-            id: Uuid::new_v4().to_string(),
-            user_id,
+            id: token_id.clone(),
+            user_id: user_id.clone(),
             provider_config_id: provider_id,
             connection_id: None,
             credential_user_id: None,
             token_type: "oauth2".to_string(),
             access_token_encrypted: Some(
-                encryption_keys.encrypt(b"existing-access").await.unwrap(),
+                fixtures::token(
+                    &token_id,
+                    &user_id,
+                    "access_token_encrypted",
+                    b"existing-access",
+                )
+                .await,
             ),
             refresh_token_encrypted: Some(
-                encryption_keys.encrypt(b"existing-refresh").await.unwrap(),
+                fixtures::token(
+                    &token_id,
+                    &user_id,
+                    "refresh_token_encrypted",
+                    b"existing-refresh",
+                )
+                .await,
             ),
             token_scopes: Some("openid".to_string()),
             expires_at: Some(now - chrono::Duration::minutes(1)),
@@ -916,10 +933,15 @@ mod tests {
         });
 
         let keys = Arc::new(test_encryption_keys());
-        let encrypted_secret = keys
-            .encrypt(b"webhook-signing-secret")
-            .await
-            .expect("encrypt webhook secret");
+        let encrypted_secret = crate::services::oauth_client_webhook_record::encrypt(
+            &fixtures::staged_keys(),
+            &app_id,
+            &user_id,
+            crate::services::oauth_client_webhook_record::CONNECTION,
+            "webhook-signing-secret",
+        )
+        .await
+        .unwrap();
         db.collection::<OauthClient>(OAUTH_CLIENTS)
             .insert_one(webhook_client(
                 &app_id,

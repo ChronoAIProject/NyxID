@@ -3869,6 +3869,7 @@ mod tests {
     use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
     use crate::models::provider_config::ProviderConfig;
     use crate::models::user_provider_token::UserProviderToken;
+    use crate::services::credential_record_service::fixtures;
     use crate::services::oauth_flow;
     use chrono::Utc;
     use mongodb::bson::{self, Bson};
@@ -4593,8 +4594,11 @@ mod tests {
             .unwrap();
         let server = MockServer::start().await;
         provider.token_url = Some(format!("{}/v1/oauth/token", server.uri()));
-        provider.client_id_encrypted = Some(enc.encrypt(b"client-id").await.unwrap());
-        provider.client_secret_encrypted = Some(enc.encrypt(b"client-secret").await.unwrap());
+        provider.client_id_encrypted =
+            Some(fixtures::provider(&provider.id, "client_id_encrypted", b"client-id").await);
+        provider.client_secret_encrypted = Some(
+            fixtures::provider(&provider.id, "client_secret_encrypted", b"client-secret").await,
+        );
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .replace_one(doc! { "_id": &provider.id }, &provider)
             .await
@@ -4607,7 +4611,7 @@ mod tests {
         for (index, fixture) in fixtures.iter().enumerate() {
             for multi_connection in [false, true] {
                 server.reset().await;
-                let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+                let key = insert_pending_user_api_key(&db, &provider.id, None, None).await;
                 db.collection::<UserApiKey>(USER_API_KEYS).update_one(doc! { "_id": &key.id }, doc! {
                     "$set": { "refresh_token_encrypted": bson::Bson::Null, "token_scopes": bson::Bson::Null, "expires_at": bson::Bson::Null }
                 }).await.unwrap();
@@ -4790,8 +4794,11 @@ mod tests {
                 .await
                 .unwrap();
             provider.token_url = Some(format!("{}/token", server.uri()));
-            provider.client_id_encrypted = Some(enc.encrypt(b"client-id").await.unwrap());
-            provider.client_secret_encrypted = Some(enc.encrypt(b"client-secret").await.unwrap());
+            provider.client_id_encrypted =
+                Some(fixtures::provider(&provider.id, "client_id_encrypted", b"client-id").await);
+            provider.client_secret_encrypted = Some(
+                fixtures::provider(&provider.id, "client_secret_encrypted", b"client-secret").await,
+            );
             db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
                 .replace_one(doc! { "_id": &provider.id }, &provider)
                 .await
@@ -4801,7 +4808,6 @@ mod tests {
                 server.reset().await;
                 let key = insert_pending_user_api_key(
                     &db,
-                    &enc,
                     &provider.id,
                     byo.then_some("byo-client"),
                     byo.then_some("byo-secret"),
@@ -5029,9 +5035,10 @@ mod tests {
             let mut provider = make_test_provider(
                 &Uuid::new_v4().to_string(),
                 &format!("{}/token", server.uri()),
-                Some(enc.encrypt(b"client-id").await.unwrap()),
-                Some(enc.encrypt(b"client-secret").await.unwrap()),
-            );
+                Some(b"client-id"),
+                Some(b"client-secret"),
+            )
+            .await;
             provider.slug = slug.into();
             provider.authorization_nonce_required = true;
             if slug == "stripe" {
@@ -5066,7 +5073,7 @@ mod tests {
                 .expect(2)
                 .mount(&server)
                 .await;
-            let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+            let key = insert_pending_user_api_key(&db, &provider.id, None, None).await;
             db.collection::<UserApiKey>(USER_API_KEYS)
                 .update_one(
                     doc! { "_id": &key.id },
@@ -5111,7 +5118,6 @@ mod tests {
             assert_eq!(refreshed.credential_epoch, key.credential_epoch);
 
             let mut legacy = make_oauth_token(
-                &enc,
                 &Uuid::new_v4().to_string(),
                 &provider.id,
                 "old-access",
@@ -5119,8 +5125,15 @@ mod tests {
                 None,
             )
             .await;
-            legacy.refresh_token_encrypted =
-                Some(enc.encrypt(b"stored-refresh-token").await.unwrap());
+            legacy.refresh_token_encrypted = Some(
+                fixtures::token(
+                    &legacy.id,
+                    &legacy.user_id,
+                    "refresh_token_encrypted",
+                    b"stored-refresh-token",
+                )
+                .await,
+            );
             insert_test_token(&db, &legacy).await;
             assert_eq!(
                 oauth_flow::refresh_oauth_token(&db, &enc, &legacy)
@@ -5217,7 +5230,8 @@ mod tests {
                     "https://example.com/token",
                     None,
                     None,
-                );
+                )
+                .await;
                 provider.slug = if source == "named-lark" {
                     "lark"
                 } else {
@@ -5244,8 +5258,11 @@ mod tests {
                 format!("{}/token", server.uri())
             });
             provider.credential_mode = "admin".into();
-            provider.client_id_encrypted = Some(enc.encrypt(b"client-id").await.unwrap());
-            provider.client_secret_encrypted = Some(enc.encrypt(b"client-secret").await.unwrap());
+            provider.client_id_encrypted =
+                Some(fixtures::provider(&provider.id, "client_id_encrypted", b"client-id").await);
+            provider.client_secret_encrypted = Some(
+                fixtures::provider(&provider.id, "client_secret_encrypted", b"client-secret").await,
+            );
             let mut document = bson::to_document(&provider).unwrap();
             document.remove("token_request_encoding");
             db.collection::<bson::Document>(PROVIDER_CONFIGS)
@@ -5276,7 +5293,6 @@ mod tests {
                     .mount(&server)
                     .await;
                 let mut token = make_oauth_token(
-                    &enc,
                     &Uuid::new_v4().to_string(),
                     &provider.id,
                     "old-access",
@@ -5284,7 +5300,15 @@ mod tests {
                     None,
                 )
                 .await;
-                token.refresh_token_encrypted = Some(enc.encrypt(b"stored-refresh").await.unwrap());
+                token.refresh_token_encrypted = Some(
+                    fixtures::token(
+                        &token.id,
+                        &token.user_id,
+                        "refresh_token_encrypted",
+                        b"stored-refresh",
+                    )
+                    .await,
+                );
                 insert_test_token(&db, &token).await;
                 assert_eq!(
                     oauth_flow::refresh_oauth_token(&db, &enc, &token)
@@ -5356,7 +5380,7 @@ mod tests {
                 .ends_with("/api/v1/catalog-specs/notion/openapi.json")
         );
         let provider_id = catalog.provider_config_id.as_deref().unwrap();
-        let key = insert_pending_user_api_key(&db, &enc, provider_id, None, None).await;
+        let key = insert_pending_user_api_key(&db, provider_id, None, None).await;
         let endpoint = crate::test_utils::test_user_endpoint(
             &Uuid::new_v4().to_string(),
             &key.user_id,
@@ -5535,9 +5559,10 @@ mod tests {
         let mut provider = make_test_provider(
             &Uuid::new_v4().to_string(),
             "https://example.com/token",
-            Some(enc.encrypt(b"client-id").await.unwrap()),
-            Some(enc.encrypt(b"client-secret").await.unwrap()),
-        );
+            Some(b"client-id"),
+            Some(b"client-secret"),
+        )
+        .await;
         provider.authorization_nonce_required = true;
         provider.authorization_url = Some("https://example.com/authorize?audience=api".into());
         provider.default_scopes = Some(vec!["hubstaff:read".into()]);
@@ -5551,7 +5576,7 @@ mod tests {
             .insert_one(&provider)
             .await
             .unwrap();
-        let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+        let key = insert_pending_user_api_key(&db, &provider.id, None, None).await;
         let link = Uuid::new_v4().to_string();
         let mut nonces = std::collections::HashSet::new();
         for chat in [false, true, true] {
@@ -5645,9 +5670,10 @@ mod tests {
                 let mut provider = make_test_provider(
                     &Uuid::new_v4().to_string(),
                     "https://example.com/token",
-                    Some(enc.encrypt(b"client-id").await.unwrap()),
-                    Some(enc.encrypt(b"client-secret").await.unwrap()),
-                );
+                    Some(b"client-id"),
+                    Some(b"client-secret"),
+                )
+                .await;
                 provider.slug = slug.into();
                 provider.supports_pkce = slug != "stripe";
                 provider.supports_oauth_scopes = slug != "stripe";
@@ -5774,9 +5800,10 @@ mod tests {
             let mut provider = make_test_provider(
                 &Uuid::new_v4().to_string(),
                 "https://example.com/token",
-                Some(enc.encrypt(b"client-id").await.unwrap()),
-                Some(enc.encrypt(b"client-secret").await.unwrap()),
-            );
+                Some(b"client-id"),
+                Some(b"client-secret"),
+            )
+            .await;
             provider.authorization_url = Some(endpoint.into());
             provider.client_id_param_name = Some("nonce".into());
             db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -5823,9 +5850,10 @@ mod tests {
             let mut provider = make_test_provider(
                 &Uuid::new_v4().to_string(),
                 "https://example.com/token",
-                Some(enc.encrypt(b"client-id").await.unwrap()),
-                Some(enc.encrypt(b"client-secret").await.unwrap()),
-            );
+                Some(b"client-id"),
+                Some(b"client-secret"),
+            )
+            .await;
             provider.authorization_nonce_required = true;
             provider.authorization_url = Some(endpoint.into());
             provider.client_id_param_name = param.map(str::to_string);
@@ -5833,7 +5861,7 @@ mod tests {
                 .insert_one(&provider)
                 .await
                 .unwrap();
-            let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+            let key = insert_pending_user_api_key(&db, &provider.id, None, None).await;
             let before = db
                 .collection::<bson::Document>(USER_API_KEYS)
                 .find_one(doc! { "_id": &key.id })
@@ -5889,9 +5917,10 @@ mod tests {
             let mut provider = make_test_provider(
                 &Uuid::new_v4().to_string(),
                 &format!("{}/token", server.uri()),
-                Some(enc.encrypt(b"client-id").await.unwrap()),
-                Some(enc.encrypt(b"client-secret").await.unwrap()),
-            );
+                Some(b"client-id"),
+                Some(b"client-secret"),
+            )
+            .await;
             provider.authorization_nonce_required = !legacy;
             db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
                 .insert_one(&provider)
@@ -5998,12 +6027,20 @@ mod tests {
         }
     }
 
-    fn make_test_provider(
+    async fn make_test_provider(
         id: &str,
         token_url: &str,
-        client_id_encrypted: Option<Vec<u8>>,
-        client_secret_encrypted: Option<Vec<u8>>,
+        client_id: Option<&[u8]>,
+        client_secret: Option<&[u8]>,
     ) -> ProviderConfig {
+        let client_id_encrypted = match client_id {
+            Some(value) => Some(fixtures::provider(id, "client_id_encrypted", value).await),
+            None => None,
+        };
+        let client_secret_encrypted = match client_secret {
+            Some(value) => Some(fixtures::provider(id, "client_secret_encrypted", value).await),
+            None => None,
+        };
         ProviderConfig {
             secret_context_versions: Default::default(),
             id: id.to_string(),
@@ -6047,24 +6084,44 @@ mod tests {
 
     async fn insert_pending_user_api_key(
         db: &mongodb::Database,
-        encryption_keys: &crate::crypto::aes::EncryptionKeys,
         provider_config_id: &str,
         user_oauth_client_id: Option<&str>,
         user_oauth_client_secret: Option<&str>,
     ) -> UserApiKey {
         let connection_id = Uuid::new_v4().to_string();
         let key_id = Uuid::new_v4().to_string();
-        let refresh_enc = encryption_keys
-            .encrypt(b"stored-refresh-token")
-            .await
-            .unwrap();
-        let access_enc = encryption_keys.encrypt(b"stale-access").await.unwrap();
+        let owner = Uuid::new_v4().to_string();
+        let refresh_enc = fixtures::key(
+            &key_id,
+            &owner,
+            "refresh_token_encrypted",
+            b"stored-refresh-token",
+        )
+        .await;
+        let access_enc =
+            fixtures::key(&key_id, &owner, "access_token_encrypted", b"stale-access").await;
         let user_client_id_enc = match user_oauth_client_id {
-            Some(cid) => Some(encryption_keys.encrypt(cid.as_bytes()).await.unwrap()),
+            Some(cid) => Some(
+                fixtures::key(
+                    &key_id,
+                    &owner,
+                    "user_oauth_client_id_encrypted",
+                    cid.as_bytes(),
+                )
+                .await,
+            ),
             None => None,
         };
         let user_client_secret_enc = match user_oauth_client_secret {
-            Some(s) => Some(encryption_keys.encrypt(s.as_bytes()).await.unwrap()),
+            Some(s) => Some(
+                fixtures::key(
+                    &key_id,
+                    &owner,
+                    "user_oauth_client_secret_encrypted",
+                    s.as_bytes(),
+                )
+                .await,
+            ),
             None => None,
         };
         let now = Utc::now();
@@ -6073,7 +6130,7 @@ mod tests {
             oauth_app_observation: None,
             credential_source: None,
             id: key_id,
-            user_id: Uuid::new_v4().to_string(),
+            user_id: owner,
             label: "test-key".to_string(),
             credential_type: "oauth2".to_string(),
             credential_encrypted: None,
@@ -6131,18 +6188,13 @@ mod tests {
             }))
             .await;
         let provider_id = Uuid::new_v4().to_string();
-        let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
-            .insert_one(make_test_provider(
-                &provider_id,
-                &token_url,
-                Some(client_id),
-                None,
-            ))
+            .insert_one(
+                make_test_provider(&provider_id, &token_url, Some(b"client-id"), None).await,
+            )
             .await
             .unwrap();
-        let key =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let key = insert_pending_user_api_key(&db, &provider_id, None, None).await;
         let first_runtime = refresh_runtime("pod-a");
         let contender_observed = Arc::new(Notify::new());
         let second_runtime =
@@ -6214,26 +6266,27 @@ mod tests {
         )
         .await;
         let provider_id = Uuid::new_v4().to_string();
-        let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
-            .insert_one(make_test_provider(
-                &provider_id,
-                &token_url,
-                Some(client_id),
-                None,
-            ))
+            .insert_one(
+                make_test_provider(&provider_id, &token_url, Some(b"client-id"), None).await,
+            )
             .await
             .unwrap();
-        let stale =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
-        let replacement_access = encryption_keys
-            .encrypt(b"replacement-access")
-            .await
-            .unwrap();
-        let replacement_refresh = encryption_keys
-            .encrypt(b"replacement-refresh")
-            .await
-            .unwrap();
+        let stale = insert_pending_user_api_key(&db, &provider_id, None, None).await;
+        let replacement_access = fixtures::key(
+            &stale.id,
+            &stale.user_id,
+            "access_token_encrypted",
+            b"replacement-access",
+        )
+        .await;
+        let replacement_refresh = fixtures::key(
+            &stale.id,
+            &stale.user_id,
+            "refresh_token_encrypted",
+            b"replacement-refresh",
+        )
+        .await;
         db.collection::<UserApiKey>(USER_API_KEYS)
             .update_one(
                 doc! { "_id": &stale.id },
@@ -6308,8 +6361,8 @@ mod tests {
         let revocation_server =
             tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let provider_id = Uuid::new_v4().to_string();
-        let client = keys.encrypt(b"client-id").await.unwrap();
-        let mut provider = make_test_provider(&provider_id, &token_url, Some(client), None);
+        let mut provider =
+            make_test_provider(&provider_id, &token_url, Some(b"client-id"), None).await;
         provider.revocation = Some(
             serde_json::from_value(serde_json::json!({
                 "style":"rfc7009", "url":&revocation_url, "auth":"none",
@@ -6321,7 +6374,7 @@ mod tests {
             .insert_one(provider)
             .await
             .unwrap();
-        let stale = insert_pending_user_api_key(&db, &keys, &provider_id, None, None).await;
+        let stale = insert_pending_user_api_key(&db, &provider_id, None, None).await;
         let refresh = super::refresh_user_api_key_under_lease(&db, &keys, &stale, None);
         let replace = async {
             entered.notified().await;
@@ -6509,18 +6562,13 @@ mod tests {
         )
         .await;
         let provider_id = Uuid::new_v4().to_string();
-        let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
-            .insert_one(make_test_provider(
-                &provider_id,
-                &token_url,
-                Some(client_id),
-                None,
-            ))
+            .insert_one(
+                make_test_provider(&provider_id, &token_url, Some(b"client-id"), None).await,
+            )
             .await
             .unwrap();
-        let stale =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let stale = insert_pending_user_api_key(&db, &provider_id, None, None).await;
         db.collection::<UserApiKey>(USER_API_KEYS)
             .update_one(
                 doc! { "_id": &stale.id },
@@ -6564,17 +6612,13 @@ mod tests {
         // legacy provider-level BYO credential row -> resolve_oauth_credentials
         // must prefer the BYO client, and initiation must pin it onto the key.
         let provider_id = Uuid::new_v4().to_string();
-        let plat_cid = encryption_keys
-            .encrypt(b"platform-client-id")
-            .await
-            .unwrap();
-        let plat_sec = encryption_keys.encrypt(b"platform-secret").await.unwrap();
         let mut provider = make_test_provider(
             &provider_id,
             "https://example.com/token",
-            Some(plat_cid),
-            Some(plat_sec),
-        );
+            Some(b"platform-client-id"),
+            Some(b"platform-secret"),
+        )
+        .await;
         provider.credential_mode = "both".to_string();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
@@ -6582,24 +6626,33 @@ mod tests {
             .unwrap();
 
         // The connection placeholder carries NO embedded creds yet.
-        let key =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let key = insert_pending_user_api_key(&db, &provider_id, None, None).await;
         let user_id = key.user_id.clone();
         let connection_id = key.connection_id.clone().unwrap();
 
         // Legacy user-level BYO credential for (user, provider).
-        let byo_cid = encryption_keys
-            .encrypt(b"user-byo-client-id")
-            .await
-            .unwrap();
-        let byo_sec = encryption_keys.encrypt(b"user-byo-secret").await.unwrap();
+        let creds_id = Uuid::new_v4().to_string();
+        let byo_cid = fixtures::user_client(
+            &creds_id,
+            &user_id,
+            "client_id_encrypted",
+            b"user-byo-client-id",
+        )
+        .await;
+        let byo_sec = fixtures::user_client(
+            &creds_id,
+            &user_id,
+            "client_secret_encrypted",
+            b"user-byo-secret",
+        )
+        .await;
         db.collection::<crate::models::user_provider_credentials::UserProviderCredentials>(
             crate::models::user_provider_credentials::COLLECTION_NAME,
         )
         .insert_one(
             &crate::models::user_provider_credentials::UserProviderCredentials {
                 secret_context_versions: Default::default(),
-                id: Uuid::new_v4().to_string(),
+                id: creds_id,
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
                 client_id_encrypted: Some(byo_cid),
@@ -6676,17 +6729,13 @@ mod tests {
         let encryption_keys = test_encryption_keys();
 
         let provider_id = Uuid::new_v4().to_string();
-        let plat_cid = encryption_keys
-            .encrypt(b"platform-client-id")
-            .await
-            .unwrap();
-        let plat_sec = encryption_keys.encrypt(b"platform-secret").await.unwrap();
         let mut provider = make_test_provider(
             &provider_id,
             "https://example.com/token",
-            Some(plat_cid),
-            Some(plat_sec),
-        );
+            Some(b"platform-client-id"),
+            Some(b"platform-secret"),
+        )
+        .await;
         provider.credential_mode = "both".to_string();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
@@ -6694,8 +6743,7 @@ mod tests {
             .unwrap();
 
         // Managed connection: no embedded BYO, pinned source = "platform".
-        let key =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let key = insert_pending_user_api_key(&db, &provider_id, None, None).await;
         db.collection::<UserApiKey>(USER_API_KEYS)
             .update_one(
                 doc! { "_id": &key.id },
@@ -6707,18 +6755,28 @@ mod tests {
 
         // The user ALSO has a legacy provider-level BYO row — "both" precedence
         // would pick this if the pin were not honored.
-        let byo_cid = encryption_keys
-            .encrypt(b"legacy-byo-client-id")
-            .await
-            .unwrap();
-        let byo_sec = encryption_keys.encrypt(b"legacy-byo-secret").await.unwrap();
+        let creds_id = Uuid::new_v4().to_string();
+        let byo_cid = fixtures::user_client(
+            &creds_id,
+            &key.user_id,
+            "client_id_encrypted",
+            b"legacy-byo-client-id",
+        )
+        .await;
+        let byo_sec = fixtures::user_client(
+            &creds_id,
+            &key.user_id,
+            "client_secret_encrypted",
+            b"legacy-byo-secret",
+        )
+        .await;
         db.collection::<crate::models::user_provider_credentials::UserProviderCredentials>(
             crate::models::user_provider_credentials::COLLECTION_NAME,
         )
         .insert_one(
             &crate::models::user_provider_credentials::UserProviderCredentials {
                 secret_context_versions: Default::default(),
-                id: Uuid::new_v4().to_string(),
+                id: creds_id,
                 user_id: key.user_id.clone(),
                 provider_config_id: provider_id.clone(),
                 client_id_encrypted: Some(byo_cid),
@@ -6790,17 +6848,13 @@ mod tests {
         // Provider now has a platform app (ops provisioned it after the user
         // connected with their own).
         let provider_id = Uuid::new_v4().to_string();
-        let plat_cid = encryption_keys
-            .encrypt(b"platform-client-id")
-            .await
-            .unwrap();
-        let plat_sec = encryption_keys.encrypt(b"platform-secret").await.unwrap();
         let mut provider = make_test_provider(
             &provider_id,
             "https://example.com/token",
-            Some(plat_cid),
-            Some(plat_sec),
-        );
+            Some(b"platform-client-id"),
+            Some(b"platform-secret"),
+        )
+        .await;
         provider.credential_mode = "both".to_string();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
@@ -6810,7 +6864,6 @@ mod tests {
         // Existing BYO connection: embedded own-app creds + source pinned "byo".
         let key = insert_pending_user_api_key(
             &db,
-            &encryption_keys,
             &provider_id,
             Some("my-own-client-id"),
             Some("my-own-secret"),
@@ -6870,9 +6923,10 @@ mod tests {
         let mut provider = make_test_provider(
             &Uuid::new_v4().to_string(),
             "https://oauth2.googleapis.com/token",
-            Some(enc.encrypt(b"shared-client").await.unwrap()),
-            Some(enc.encrypt(b"shared-secret").await.unwrap()),
-        );
+            Some(b"shared-client"),
+            Some(b"shared-secret"),
+        )
+        .await;
         provider.slug = "google".into();
         provider.default_scopes = Some(vec!["openid".into(), "email".into(), "profile".into()]);
         provider.extra_auth_params = Some(HashMap::from([
@@ -6893,7 +6947,7 @@ mod tests {
             "api-google-slides",
         ] {
             let product = GoogleProduct::from_slug(slug).unwrap();
-            let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+            let key = insert_pending_user_api_key(&db, &provider.id, None, None).await;
             let conn = key.connection_id.as_deref();
             let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
             catalog.id = Uuid::new_v4().to_string();
@@ -7078,9 +7132,10 @@ mod tests {
         let mut provider = make_test_provider(
             &Uuid::new_v4().to_string(),
             &format!("{}/token", server.uri()),
-            Some(enc.encrypt(b"shared-client").await.unwrap()),
-            Some(enc.encrypt(b"shared-secret").await.unwrap()),
-        );
+            Some(b"shared-client"),
+            Some(b"shared-secret"),
+        )
+        .await;
         provider.slug = "google".into();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
@@ -7088,7 +7143,7 @@ mod tests {
             .unwrap();
 
         for slug in ["api-google-workspace", "api-google-gmail"] {
-            let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+            let key = insert_pending_user_api_key(&db, &provider.id, None, None).await;
             let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
             catalog.id = Uuid::new_v4().to_string();
             catalog.slug = slug.into();
@@ -7207,15 +7262,16 @@ mod tests {
         let mut provider = make_test_provider(
             &Uuid::new_v4().to_string(),
             &token_url,
-            Some(enc.encrypt(b"shared-google-client").await.unwrap()),
-            Some(enc.encrypt(b"old-secret").await.unwrap()),
-        );
+            Some(b"shared-google-client"),
+            Some(b"old-secret"),
+        )
+        .await;
         provider.slug = "google".into();
         let providers = db.collection::<ProviderConfig>(PROVIDER_CONFIGS);
         providers.insert_one(&provider).await.unwrap();
         let mut keys = Vec::new();
         for _ in 0..2 {
-            keys.push(insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await);
+            keys.push(insert_pending_user_api_key(&db, &provider.id, None, None).await);
         }
         providers
             .update_one(
@@ -7223,7 +7279,7 @@ mod tests {
                 doc! { "$set": {
                     "client_secret_encrypted": bson::Binary {
                         subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: enc.encrypt(b"rotated-secret").await.unwrap(),
+                        bytes: fixtures::provider(&provider.id, "client_secret_encrypted", b"rotated-secret").await,
                     },
                 }},
             )
@@ -7269,14 +7325,13 @@ mod tests {
         // GitHub-slug provider, platform creds present, no BYO -> the platform
         // scope allowlist applies. `delete_repo` is off the list.
         let provider_id = Uuid::new_v4().to_string();
-        let plat_cid = encryption_keys.encrypt(b"gh-client-id").await.unwrap();
-        let plat_sec = encryption_keys.encrypt(b"gh-secret").await.unwrap();
         let mut provider = make_test_provider(
             &provider_id,
             "https://github.com/login/oauth/access_token",
-            Some(plat_cid),
-            Some(plat_sec),
-        );
+            Some(b"gh-client-id"),
+            Some(b"gh-secret"),
+        )
+        .await;
         provider.slug = "github".to_string();
         provider.default_scopes = Some(vec!["read:user".into(), "user:email".into()]);
         provider.credential_mode = "both".to_string();
@@ -7285,8 +7340,7 @@ mod tests {
             .insert_one(&provider)
             .await
             .unwrap();
-        let key =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let key = insert_pending_user_api_key(&db, &provider_id, None, None).await;
         let connection_id = key.connection_id.clone().unwrap();
 
         // A non-allowlisted scope is rejected before any redirect is built.
@@ -7379,15 +7433,14 @@ mod tests {
         // Provider-owned creds (codex/OpenAI scenario): provider has
         // client_id_encrypted, the UserApiKey does NOT carry BYO creds.
         let provider_id = Uuid::new_v4().to_string();
-        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
-        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        let provider =
+            make_test_provider(&provider_id, &token_url, Some(b"admin-client-id"), None).await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
             .unwrap();
 
-        let key =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let key = insert_pending_user_api_key(&db, &provider_id, None, None).await;
 
         let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
@@ -7444,7 +7497,7 @@ mod tests {
         // Lark scenario: provider has NO admin client_id; the UserApiKey
         // carries the user-provided OAuth client_id/secret.
         let provider_id = Uuid::new_v4().to_string();
-        let provider = make_test_provider(&provider_id, &token_url, None, None);
+        let provider = make_test_provider(&provider_id, &token_url, None, None).await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
@@ -7452,7 +7505,6 @@ mod tests {
 
         let key = insert_pending_user_api_key(
             &db,
-            &encryption_keys,
             &provider_id,
             Some("byo-client-id"),
             Some("byo-client-secret"),
@@ -7503,15 +7555,14 @@ mod tests {
         .await;
 
         let provider_id = Uuid::new_v4().to_string();
-        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
-        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        let provider =
+            make_test_provider(&provider_id, &token_url, Some(b"admin-client-id"), None).await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
             .unwrap();
 
-        let key =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let key = insert_pending_user_api_key(&db, &provider_id, None, None).await;
 
         let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
@@ -7561,18 +7612,13 @@ mod tests {
         ] {
             let (token_url, _server) = spawn_token_server(body, status).await;
             let provider_id = Uuid::new_v4().to_string();
-            let provider = make_test_provider(
-                &provider_id,
-                &token_url,
-                Some(encryption_keys.encrypt(b"fixture-client").await.unwrap()),
-                None,
-            );
+            let provider =
+                make_test_provider(&provider_id, &token_url, Some(b"fixture-client"), None).await;
             db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
                 .insert_one(provider)
                 .await
                 .unwrap();
-            let key =
-                insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+            let key = insert_pending_user_api_key(&db, &provider_id, None, None).await;
             let capture = tempfile::NamedTempFile::new().unwrap();
             let writer = capture.reopen().unwrap();
             let subscriber = tracing_subscriber::fmt()
@@ -7635,15 +7681,14 @@ mod tests {
         .await;
 
         let provider_id = Uuid::new_v4().to_string();
-        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
-        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        let provider =
+            make_test_provider(&provider_id, &token_url, Some(b"admin-client-id"), None).await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
             .unwrap();
 
-        let key =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let key = insert_pending_user_api_key(&db, &provider_id, None, None).await;
 
         let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
@@ -7689,27 +7734,22 @@ mod tests {
         .await;
 
         let provider_id = Uuid::new_v4().to_string();
-        let admin_cid_enc = encryption_keys.encrypt(b"lark-client-id").await.unwrap();
-        let admin_sec_enc = encryption_keys
-            .encrypt(b"lark-client-secret")
-            .await
-            .unwrap();
         // slug = "lark" triggers `uses_json_oauth_token_exchange`, exercising
         // the JSON-body code path that legacy `refresh_oauth_token` lacks.
         let mut provider = make_test_provider(
             &provider_id,
             &token_url,
-            Some(admin_cid_enc),
-            Some(admin_sec_enc),
-        );
+            Some(b"lark-client-id"),
+            Some(b"lark-client-secret"),
+        )
+        .await;
         provider.slug = "lark".to_string();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
             .unwrap();
 
-        let key =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let key = insert_pending_user_api_key(&db, &provider_id, None, None).await;
 
         let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
@@ -7759,15 +7799,14 @@ mod tests {
         .await;
 
         let provider_id = Uuid::new_v4().to_string();
-        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
-        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        let provider =
+            make_test_provider(&provider_id, &token_url, Some(b"admin-client-id"), None).await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
             .unwrap();
 
-        let key =
-            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let key = insert_pending_user_api_key(&db, &provider_id, None, None).await;
         let original_rt_encrypted = key.refresh_token_encrypted.clone().unwrap();
 
         let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
@@ -7789,11 +7828,19 @@ mod tests {
 
         // Refresh token preserved (provider didn't issue a new one).
         let restored_rt = refreshed.refresh_token_encrypted.clone().unwrap();
-        let stored_plain = encryption_keys
-            .decrypt(&original_rt_encrypted)
+        let stored_plain = crate::services::credential_record_service::CredentialRecord::key(&key)
+            .decrypt(
+                &encryption_keys,
+                "refresh_token_encrypted",
+                &original_rt_encrypted,
+            )
             .await
             .unwrap();
-        let restored_plain = encryption_keys.decrypt(&restored_rt).await.unwrap();
+        let restored_plain =
+            crate::services::credential_record_service::CredentialRecord::key(&refreshed)
+                .decrypt(&encryption_keys, "refresh_token_encrypted", &restored_rt)
+                .await
+                .unwrap();
         assert_eq!(
             stored_plain, restored_plain,
             "refresh_token must be preserved when provider omits it from the response"
@@ -7808,29 +7855,33 @@ mod tests {
         };
         let encryption_keys = test_encryption_keys();
         let provider_id = Uuid::new_v4().to_string();
-        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
         let provider = make_test_provider(
             &provider_id,
             "http://127.0.0.1:0/token",
-            Some(admin_cid_enc),
+            Some(b"admin-client-id"),
             None,
-        );
+        )
+        .await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
             .unwrap();
 
         let now = Utc::now();
+        let key_id = Uuid::new_v4().to_string();
+        let owner = Uuid::new_v4().to_string();
         let key = UserApiKey {
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
-            id: Uuid::new_v4().to_string(),
-            user_id: Uuid::new_v4().to_string(),
+            id: key_id.clone(),
+            user_id: owner.clone(),
             label: "no-refresh-token".to_string(),
             credential_type: "oauth2".to_string(),
             credential_encrypted: None,
-            access_token_encrypted: Some(encryption_keys.encrypt(b"a").await.unwrap()),
+            access_token_encrypted: Some(
+                fixtures::key(&key_id, &owner, "access_token_encrypted", b"a").await,
+            ),
             refresh_token_encrypted: None, // ← missing on purpose
             token_scopes: None,
             expires_at: None,
@@ -7947,17 +7998,18 @@ mod tests {
 
     /// Helper: build an api_key-type token with encrypted key, ready for DB insert.
     async fn make_api_key_token(
-        enc: &crate::crypto::aes::EncryptionKeys,
         user_id: &str,
         provider_id: &str,
         api_key_value: &str,
         status: &str,
     ) -> UserProviderToken {
         let now = Utc::now();
-        let encrypted = enc.encrypt(api_key_value.as_bytes()).await.unwrap();
+        let id = Uuid::new_v4().to_string();
+        let encrypted =
+            fixtures::token(&id, user_id, "api_key_encrypted", api_key_value.as_bytes()).await;
         UserProviderToken {
             secret_context_versions: Default::default(),
-            id: Uuid::new_v4().to_string(),
+            id,
             user_id: user_id.to_string(),
             provider_config_id: provider_id.to_string(),
             connection_id: None,
@@ -7983,7 +8035,6 @@ mod tests {
 
     /// Helper: build an oauth2-type token with encrypted access token.
     async fn make_oauth_token(
-        enc: &crate::crypto::aes::EncryptionKeys,
         user_id: &str,
         provider_id: &str,
         access_token: &str,
@@ -7991,10 +8042,17 @@ mod tests {
         expires_at: Option<chrono::DateTime<Utc>>,
     ) -> UserProviderToken {
         let now = Utc::now();
-        let access_enc = enc.encrypt(access_token.as_bytes()).await.unwrap();
+        let id = Uuid::new_v4().to_string();
+        let access_enc = fixtures::token(
+            &id,
+            user_id,
+            "access_token_encrypted",
+            access_token.as_bytes(),
+        )
+        .await;
         UserProviderToken {
             secret_context_versions: Default::default(),
-            id: Uuid::new_v4().to_string(),
+            id,
             user_id: user_id.to_string(),
             provider_config_id: provider_id.to_string(),
             connection_id: None,
@@ -8034,20 +8092,20 @@ mod tests {
             }))
             .await;
         let provider_id = Uuid::new_v4().to_string();
-        let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
-        let client_secret = encryption_keys.encrypt(b"client-secret").await.unwrap();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
-            .insert_one(make_test_provider(
-                &provider_id,
-                &token_url,
-                Some(client_id),
-                Some(client_secret),
-            ))
+            .insert_one(
+                make_test_provider(
+                    &provider_id,
+                    &token_url,
+                    Some(b"client-id"),
+                    Some(b"client-secret"),
+                )
+                .await,
+            )
             .await
             .unwrap();
         let user_id = Uuid::new_v4().to_string();
         let mut token = make_oauth_token(
-            &encryption_keys,
             &user_id,
             &provider_id,
             "stale-legacy-access",
@@ -8056,10 +8114,13 @@ mod tests {
         )
         .await;
         token.refresh_token_encrypted = Some(
-            encryption_keys
-                .encrypt(b"legacy-refresh-token")
-                .await
-                .unwrap(),
+            fixtures::token(
+                &token.id,
+                &token.user_id,
+                "refresh_token_encrypted",
+                b"legacy-refresh-token",
+            )
+            .await,
         );
         insert_test_token(&db, &token).await;
         let first_runtime = refresh_runtime("pod-a");
@@ -8122,20 +8183,20 @@ mod tests {
         )
         .await;
         let provider_id = Uuid::new_v4().to_string();
-        let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
-        let client_secret = encryption_keys.encrypt(b"client-secret").await.unwrap();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
-            .insert_one(make_test_provider(
-                &provider_id,
-                &token_url,
-                Some(client_id),
-                Some(client_secret),
-            ))
+            .insert_one(
+                make_test_provider(
+                    &provider_id,
+                    &token_url,
+                    Some(b"client-id"),
+                    Some(b"client-secret"),
+                )
+                .await,
+            )
             .await
             .unwrap();
         let user_id = Uuid::new_v4().to_string();
         let mut stale = make_oauth_token(
-            &encryption_keys,
             &user_id,
             &provider_id,
             "stale-access",
@@ -8143,17 +8204,30 @@ mod tests {
             Some(Utc::now() - Duration::minutes(1)),
         )
         .await;
-        stale.refresh_token_encrypted =
-            Some(encryption_keys.encrypt(b"stale-refresh").await.unwrap());
+        stale.refresh_token_encrypted = Some(
+            fixtures::token(
+                &stale.id,
+                &stale.user_id,
+                "refresh_token_encrypted",
+                b"stale-refresh",
+            )
+            .await,
+        );
         insert_test_token(&db, &stale).await;
-        let replacement_access = encryption_keys
-            .encrypt(b"replacement-access")
-            .await
-            .unwrap();
-        let replacement_refresh = encryption_keys
-            .encrypt(b"replacement-refresh")
-            .await
-            .unwrap();
+        let replacement_access = fixtures::token(
+            &stale.id,
+            &stale.user_id,
+            "access_token_encrypted",
+            b"replacement-access",
+        )
+        .await;
+        let replacement_refresh = fixtures::token(
+            &stale.id,
+            &stale.user_id,
+            "refresh_token_encrypted",
+            b"replacement-refresh",
+        )
+        .await;
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .update_one(
                 doc! { "_id": &stale.id },
@@ -8213,8 +8287,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
 
-        let token =
-            make_api_key_token(&enc, &user_id, &provider_id, "sk-secret-123", "active").await;
+        let token = make_api_key_token(&user_id, &provider_id, "sk-secret-123", "active").await;
         insert_test_token(&db, &token).await;
 
         let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None)
@@ -8244,7 +8317,6 @@ mod tests {
         // Token that expires far in the future (no refresh needed)
         let far_future = Utc::now() + Duration::hours(24);
         let token = make_oauth_token(
-            &enc,
             &user_id,
             &provider_id,
             "access-token-xyz",
@@ -8276,7 +8348,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
 
-        let token = make_api_key_token(&enc, &user_id, &provider_id, "key-abc", "active").await;
+        let token = make_api_key_token(&user_id, &provider_id, "key-abc", "active").await;
         let token_id = token.id.clone();
         assert!(token.last_used_at.is_none());
         insert_test_token(&db, &token).await;
@@ -8309,8 +8381,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
 
-        let token =
-            make_api_key_token(&enc, &user_id, &provider_id, "key-expired", "expired").await;
+        let token = make_api_key_token(&user_id, &provider_id, "key-expired", "expired").await;
         insert_test_token(&db, &token).await;
 
         let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None)
@@ -8332,8 +8403,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
 
-        let token =
-            make_api_key_token(&enc, &user_id, &provider_id, "key-revoked", "revoked").await;
+        let token = make_api_key_token(&user_id, &provider_id, "key-revoked", "revoked").await;
         insert_test_token(&db, &token).await;
 
         let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None).await;
@@ -8419,7 +8489,6 @@ mod tests {
             eprintln!("skipping: no MongoDB");
             return;
         };
-        let enc = test_encryption_keys();
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
 
@@ -8434,7 +8503,7 @@ mod tests {
             .unwrap();
 
         // Insert an active token
-        let token = make_api_key_token(&enc, &user_id, &provider_id, "key-123", "active").await;
+        let token = make_api_key_token(&user_id, &provider_id, "key-123", "active").await;
         insert_test_token(&db, &token).await;
 
         let result = super::list_user_tokens(&db, &user_id).await.unwrap();
@@ -8452,17 +8521,15 @@ mod tests {
             eprintln!("skipping: no MongoDB");
             return;
         };
-        let enc = test_encryption_keys();
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
 
-        let active_token =
-            make_api_key_token(&enc, &user_id, &provider_id, "active-key", "active").await;
+        let active_token = make_api_key_token(&user_id, &provider_id, "active-key", "active").await;
         insert_test_token(&db, &active_token).await;
 
         let provider_id_2 = Uuid::new_v4().to_string();
         let revoked_token =
-            make_api_key_token(&enc, &user_id, &provider_id_2, "revoked-key", "revoked").await;
+            make_api_key_token(&user_id, &provider_id_2, "revoked-key", "revoked").await;
         insert_test_token(&db, &revoked_token).await;
 
         let result = super::list_user_tokens(&db, &user_id).await.unwrap();
@@ -8476,12 +8543,11 @@ mod tests {
             eprintln!("skipping: no MongoDB");
             return;
         };
-        let enc = test_encryption_keys();
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
 
         // Insert token but NO provider config
-        let token = make_api_key_token(&enc, &user_id, &provider_id, "orphan-key", "active").await;
+        let token = make_api_key_token(&user_id, &provider_id, "orphan-key", "active").await;
         insert_test_token(&db, &token).await;
 
         let result = super::list_user_tokens(&db, &user_id).await.unwrap();
@@ -8497,7 +8563,6 @@ mod tests {
             eprintln!("skipping: no MongoDB");
             return;
         };
-        let enc = test_encryption_keys();
         let user_id = Uuid::new_v4().to_string();
 
         // Create two providers
@@ -8522,8 +8587,8 @@ mod tests {
             .await
             .unwrap();
 
-        let t1 = make_api_key_token(&enc, &user_id, &pid1, "k1", "active").await;
-        let t2 = make_api_key_token(&enc, &user_id, &pid2, "k2", "active").await;
+        let t1 = make_api_key_token(&user_id, &pid1, "k1", "active").await;
+        let t2 = make_api_key_token(&user_id, &pid2, "k2", "active").await;
         insert_test_token(&db, &t1).await;
         insert_test_token(&db, &t2).await;
 
@@ -8542,12 +8607,10 @@ mod tests {
             eprintln!("skipping: no MongoDB");
             return;
         };
-        let enc = test_encryption_keys();
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
 
-        let token =
-            make_api_key_token(&enc, &user_id, &provider_id, "key-to-revoke", "active").await;
+        let token = make_api_key_token(&user_id, &provider_id, "key-to-revoke", "active").await;
         let token_id = token.id.clone();
         insert_test_token(&db, &token).await;
 
@@ -8579,10 +8642,9 @@ mod tests {
             eprintln!("skipping: no MongoDB");
             return;
         };
-        let enc = test_encryption_keys();
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
-        let token = make_api_key_token(&enc, &user_id, &provider_id, "key", "active").await;
+        let token = make_api_key_token(&user_id, &provider_id, "key", "active").await;
         let token_id = token.id.clone();
         insert_test_token(&db, &token).await;
 
@@ -8606,17 +8668,16 @@ mod tests {
             eprintln!("skipping: no MongoDB");
             return;
         };
-        let enc = test_encryption_keys();
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
-        let observed = make_api_key_token(&enc, &user_id, &provider_id, "old", "active").await;
+        let observed = make_api_key_token(&user_id, &provider_id, "old", "active").await;
         let observed_id = observed.id.clone();
         insert_test_token(&db, &observed).await;
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .delete_one(doc! { "_id": &observed_id })
             .await
             .unwrap();
-        let replacement = make_api_key_token(&enc, &user_id, &provider_id, "fresh", "active").await;
+        let replacement = make_api_key_token(&user_id, &provider_id, "fresh", "active").await;
         let replacement_id = replacement.id.clone();
         insert_test_token(&db, &replacement).await;
 
@@ -8861,10 +8922,8 @@ mod tests {
     /// Insert a UserApiKey with arbitrary `expires_at`, `connection_id`,
     /// and `credential_type` so the sweep query can be exercised against
     /// matching and non-matching rows.
-    #[allow(clippy::too_many_arguments)]
     async fn insert_oauth_key_with(
         db: &mongodb::Database,
-        encryption_keys: &crate::crypto::aes::EncryptionKeys,
         provider_config_id: &str,
         credential_type: &str,
         status: &str,
@@ -8873,8 +8932,18 @@ mod tests {
         with_refresh_token: bool,
     ) -> UserApiKey {
         let now = Utc::now();
+        let key_id = Uuid::new_v4().to_string();
+        let owner = Uuid::new_v4().to_string();
         let refresh_enc = if with_refresh_token {
-            Some(encryption_keys.encrypt(b"stored-refresh").await.unwrap())
+            Some(
+                fixtures::key(
+                    &key_id,
+                    &owner,
+                    "refresh_token_encrypted",
+                    b"stored-refresh",
+                )
+                .await,
+            )
         } else {
             None
         };
@@ -8882,12 +8951,14 @@ mod tests {
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
-            id: Uuid::new_v4().to_string(),
-            user_id: Uuid::new_v4().to_string(),
+            id: key_id.clone(),
+            user_id: owner.clone(),
             label: "sweep-key".to_string(),
             credential_type: credential_type.to_string(),
             credential_encrypted: None,
-            access_token_encrypted: Some(encryption_keys.encrypt(b"stale").await.unwrap()),
+            access_token_encrypted: Some(
+                fixtures::key(&key_id, &owner, "access_token_encrypted", b"stale").await,
+            ),
             refresh_token_encrypted: refresh_enc,
             token_scopes: None,
             expires_at,
@@ -8930,8 +9001,8 @@ mod tests {
         .await;
 
         let provider_id = Uuid::new_v4().to_string();
-        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
-        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        let provider =
+            make_test_provider(&provider_id, &token_url, Some(b"admin-client-id"), None).await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
@@ -8941,7 +9012,6 @@ mod tests {
         // Matches: expires in 5 min, well inside a 15-min window.
         let expiring = insert_oauth_key_with(
             &db,
-            &encryption_keys,
             &provider_id,
             "oauth2",
             "active",
@@ -8953,7 +9023,6 @@ mod tests {
         // Skipped: expires in 2 hours, outside the window.
         let far_future = insert_oauth_key_with(
             &db,
-            &encryption_keys,
             &provider_id,
             "oauth2",
             "active",
@@ -8965,7 +9034,6 @@ mod tests {
         // Skipped: legacy row with no connection_id (lazy path handles it).
         let legacy = insert_oauth_key_with(
             &db,
-            &encryption_keys,
             &provider_id,
             "oauth2",
             "active",
@@ -8977,7 +9045,6 @@ mod tests {
         // Skipped: non-oauth2 credential.
         let api_key_row = insert_oauth_key_with(
             &db,
-            &encryption_keys,
             &provider_id,
             "api_key",
             "active",
@@ -9052,8 +9119,8 @@ mod tests {
         .await;
 
         let provider_id = Uuid::new_v4().to_string();
-        let admin_cid_enc = encryption_keys.encrypt(b"admin-client-id").await.unwrap();
-        let provider = make_test_provider(&provider_id, &token_url, Some(admin_cid_enc), None);
+        let provider =
+            make_test_provider(&provider_id, &token_url, Some(b"admin-client-id"), None).await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
@@ -9062,7 +9129,6 @@ mod tests {
         let now = Utc::now();
         let key_a = insert_oauth_key_with(
             &db,
-            &encryption_keys,
             &provider_id,
             "oauth2",
             "active",
@@ -9073,7 +9139,6 @@ mod tests {
         .await;
         let key_b = insert_oauth_key_with(
             &db,
-            &encryption_keys,
             &provider_id,
             "oauth2",
             "active",

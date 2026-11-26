@@ -1186,6 +1186,7 @@ mod tests {
     use crate::crypto::jwt::JwtKeys;
     use crate::models::oauth_broker_binding::BINDING_ID_PREFIX;
     use crate::models::oauth_client::OauthClient;
+    use crate::services::credential_record_service::fixtures;
     use crate::test_utils::{
         cached_test_jwt_keys, connect_test_database, test_app_config, test_encryption_keys,
     };
@@ -1431,12 +1432,19 @@ mod tests {
         cnf: Option<Cnf>,
     ) -> OauthBrokerBinding {
         let binding_hash = hash_binding_id(seed.raw_binding_id);
-        let refresh_token_encrypted = encryption_keys
-            .encrypt_with_aad(seed.refresh_token.as_bytes(), binding_hash.as_bytes())
-            .await
-            .expect("encrypt refresh token");
+        let refresh_token_encrypted = crate::services::oauth_broker_record_service::encrypt(
+            encryption_keys,
+            &binding_hash,
+            seed.user_id,
+            seed.client_id,
+            seed.refresh_token.as_bytes(),
+        )
+        .await
+        .unwrap();
         let binding = OauthBrokerBinding {
-            secret_context_versions: Default::default(),
+            secret_context_versions: crate::services::oauth_broker_record_service::versions(
+                encryption_keys,
+            ),
             id: binding_hash,
             client_id: seed.client_id.to_string(),
             user_id: seed.user_id.to_string(),
@@ -1478,16 +1486,20 @@ mod tests {
 
     async fn insert_oauth_client_with_cae(
         db: &mongodb::Database,
-        encryption_keys: &EncryptionKeys,
         client_id: &str,
         webhook_url: &str,
         raw_secret: &str,
     ) {
         let now = Utc::now();
-        let encrypted_secret = encryption_keys
-            .encrypt(raw_secret.as_bytes())
-            .await
-            .expect("encrypt CAE secret");
+        let encrypted_secret = crate::services::oauth_client_webhook_record::encrypt(
+            &fixtures::staged_keys(),
+            client_id,
+            "test",
+            crate::services::oauth_client_webhook_record::REVOCATION,
+            raw_secret,
+        )
+        .await
+        .unwrap();
         let client = OauthClient {
             id: client_id.to_string(),
             client_name: "CAE Test Client".to_string(),
@@ -2610,8 +2622,7 @@ mod tests {
         let raw_binding_id = generate_binding_id();
         let binding_hash = hash_binding_id(&raw_binding_id);
 
-        insert_oauth_client_with_cae(&db, &encryption_keys, client_id, &webhook_url, raw_secret)
-            .await;
+        insert_oauth_client_with_cae(&db, client_id, &webhook_url, raw_secret).await;
         insert_refresh_token(&db, "jti-cae", client_id, "user-cae", false).await;
         insert_binding(
             &db,
@@ -2890,7 +2901,7 @@ mod tests {
         let Some(db) = connect_test_database("broker_aad_swap").await else {
             return;
         };
-        let encryption_keys = std::sync::Arc::new(test_encryption_keys());
+        let encryption_keys = std::sync::Arc::new(fixtures::staged_keys());
         let config = test_app_config();
         let jwt_keys = unused_jwt_keys();
         let user_id = Uuid::new_v4().to_string();
@@ -3535,10 +3546,15 @@ mod tests {
         let (new_refresh_jwt, new_refresh) =
             insert_refresh_token_jwt(&db, &jwt_keys, &config, "client-x", &user_id).await;
         mark_refresh_replaced(&db, &old_refresh.id, &new_refresh.id).await;
-        let new_blob = encryption_keys
-            .encrypt_with_aad(new_refresh_jwt.as_bytes(), binding_hash.as_bytes())
-            .await
-            .expect("encrypt replacement refresh token");
+        let new_blob = crate::services::oauth_broker_record_service::encrypt(
+            &encryption_keys,
+            &binding_hash,
+            &user_id,
+            "client-x",
+            new_refresh_jwt.as_bytes(),
+        )
+        .await
+        .unwrap();
         db.collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
             .update_one(
                 doc! { "_id": &binding_hash },
@@ -3547,6 +3563,7 @@ mod tests {
                         subtype: BinarySubtype::Generic,
                         bytes: new_blob,
                     },
+                    "secret_context_versions": crate::services::oauth_broker_record_service::version_update(&encryption_keys).unwrap(),
                     "refresh_token_jti": &new_refresh.jti,
                     "rotation_version": 1_i64,
                     "last_used_at": bson::DateTime::from_chrono(Utc::now()),
