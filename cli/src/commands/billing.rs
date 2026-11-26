@@ -1007,14 +1007,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topup_reports_server_purchase_minimum() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/billing/topup"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": "bad_request",
+                "error_code": 1000,
+                "message": "Minimum credit purchase is 10 credits"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let err = run(BillingCommands::Topup {
+            amount_credits: 9,
+            idempotency_key: Some("below-minimum".to_string()),
+            owner_id: None,
+            open: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Minimum credit purchase is 10 credits")
+        );
+        let server_error = err.downcast_ref::<crate::api::ApiError>().unwrap();
+        assert_eq!(server_error.status().as_u16(), 400);
+        assert_eq!(server_error.response().unwrap().error_code, 1000);
+        assert_eq!(server_error.response().unwrap().error, "bad_request");
+    }
+
+    #[tokio::test]
     async fn verify_topup_flow_polls_until_exact_paid_balance_is_reconciled() {
         let base_url =
-            spawn_verify_topup_server(vec![10, 11], topup_json(1, "verify-key-123")).await;
+            spawn_verify_topup_server(vec![10, 30], topup_json(20, "verify-key-123")).await;
 
         let mut api = ApiClient::new(&base_url, "test-token".to_string()).expect("api client");
         let result = verify_topup_flow(
             &mut api,
-            1,
+            20,
             Some("verify-key-123".to_string()),
             None,
             false,
@@ -1026,20 +1058,20 @@ mod tests {
 
         assert!(result.verified);
         assert_eq!(result.starting_balance_credits, 10);
-        assert_eq!(result.final_balance_credits, 11);
-        assert_eq!(result.expected_balance_credits, 11);
+        assert_eq!(result.final_balance_credits, 30);
+        assert_eq!(result.expected_balance_credits, 30);
         assert_eq!(result.topup.payment_provider.as_deref(), Some("stripe"));
     }
 
     #[tokio::test]
     async fn verify_topup_flow_rejects_double_credit_reconciliation() {
         let base_url =
-            spawn_verify_topup_server(vec![10, 12], topup_json(1, "verify-key-456")).await;
+            spawn_verify_topup_server(vec![10, 50], topup_json(20, "verify-key-456")).await;
 
         let mut api = ApiClient::new(&base_url, "test-token".to_string()).expect("api client");
         let error = verify_topup_flow(
             &mut api,
-            1,
+            20,
             Some("verify-key-456".to_string()),
             None,
             false,
@@ -1049,7 +1081,7 @@ mod tests {
         .await
         .expect_err("double-credit reconciliation must fail");
 
-        assert!(error.to_string().contains("expected=11"));
+        assert!(error.to_string().contains("expected=30"));
     }
 
     fn wallet_json(created: bool) -> serde_json::Value {

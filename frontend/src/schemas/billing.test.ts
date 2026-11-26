@@ -5,6 +5,9 @@ import {
   billingReadOnlyBlockSchema,
   billingWalletResponseSchema,
   topUpBillingRequestSchema,
+  topUpAmountSchema,
+  DEFAULT_TOP_UP_CREDITS,
+  TOP_UP_PRESETS_USD,
   topUpBillingResponseSchema,
   billingUsageResponseSchema,
   billingUsageRowSchema,
@@ -13,6 +16,20 @@ import {
 } from "./billing";
 
 describe("billing schemas", () => {
+  it("uses Finance's USD budgets for the USD 1 whole-credit wallet", () => {
+    expect(DEFAULT_TOP_UP_CREDITS).toBe(20);
+    expect(TOP_UP_PRESETS_USD).toEqual([20, 50, 100, 500]);
+    for (const amount of [10, 11, 20, 50, 100, 500, 10_000_000]) {
+      expect(topUpAmountSchema.safeParse(amount).success, String(amount)).toBe(true);
+    }
+    for (const amount of [-1, 0, 9, 10.5, 10_000_001, Number.MAX_SAFE_INTEGER, Infinity, NaN]) {
+      expect(topUpAmountSchema.safeParse(amount).success, String(amount)).toBe(false);
+    }
+    // Existing hosted checkouts below the new minimum can still be replayed.
+    expect(topUpBillingRequestSchema.safeParse({
+      amount_credits: 9, idempotency_key: "legacy-purchase",
+    }).success).toBe(true);
+  });
   it("preserves the actual optional Machine gateway attribution without creating a second charge", () => {
     const row = billingUsageRowSchema.parse({
       metric: "requests",

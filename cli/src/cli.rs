@@ -2255,8 +2255,8 @@ pub enum BillingCommands {
     },
     /// Create a hosted wallet top-up checkout
     Topup {
-        /// Credits to add
-        #[arg(long)]
+        /// Whole credits to add (USD 1 each; 10–10,000,000 for new purchases)
+        #[arg(long, allow_negative_numbers = true)]
         amount_credits: i64,
         /// Retry-safe idempotency key
         #[arg(long)]
@@ -2272,8 +2272,8 @@ pub enum BillingCommands {
     },
     /// Verify the deployed Lago + Stripe wallet top-up flow
     VerifyTopupFlow {
-        /// Credits to add in the verification top-up
-        #[arg(long, default_value_t = 1)]
+        /// Whole credits to add in the verification top-up (USD 1 each)
+        #[arg(long, default_value_t = 20, allow_negative_numbers = true)]
         amount_credits: i64,
         /// Fresh retry-safe idempotency key; omit to generate one
         #[arg(long)]
@@ -3341,6 +3341,25 @@ pub enum NodeDaemonCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn billing_topup_parses_signed_boundaries_and_verifier_defaults_to_twenty() {
+        for amount in ["-1", "0", "9", "10", "11", "20", "50", "100", "500", "10000000", "10000001", "9223372036854775807"] {
+            let cli = Cli::try_parse_from(["nyxid", "billing", "topup", "--amount-credits", amount]).unwrap();
+            let Commands::Billing { command: BillingCommands::Topup { amount_credits, .. } } = cli.command else { panic!("topup command"); };
+            assert_eq!(amount_credits, amount.parse::<i64>().unwrap());
+        }
+        assert!(Cli::try_parse_from(["nyxid", "billing", "topup", "--amount-credits", "9223372036854775808"]).is_err());
+        for args in [
+            vec!["nyxid", "billing", "verify-topup-flow"],
+            vec!["nyxid", "billing", "verify-topup-flow", "--amount-credits", "-1"],
+        ] {
+            let expected = if args.len() == 3 { 20 } else { -1 };
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Commands::Billing { command: BillingCommands::VerifyTopupFlow { amount_credits, .. } } = cli.command else { panic!("verifier command"); };
+            assert_eq!(amount_credits, expected);
+        }
+    }
 
     #[test]
     fn docker_machine_start_and_restart_parse_explicit_separation_only_for_machine() {

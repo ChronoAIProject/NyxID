@@ -53,6 +53,58 @@ async fn request(
 }
 
 #[tokio::test]
+async fn topup_http_limits_match_for_personal_and_org_wallets_before_provisioning() {
+    let db = crate::test_utils::connect_transaction_test_database("topup_d7_http_limits").await;
+    let admin = insert_owner(&db).await;
+    let org = organization(&db, &admin).await;
+    let lago = Arc::new(FakeLago::default());
+    let state = billing_route_state(db.clone(), lago.clone(), 0);
+    let app = app(&state);
+    let token = route_access_token(&state, &admin);
+
+    for owner in [None, Some(org.as_str())] {
+        for amount in [json!(-1), json!(0), json!(9), json!(10_000_001), json!(i64::MAX)] {
+            let (status, body) = request(
+                &app, &token, Method::POST, "/api/v1/billing/topup",
+                json!({"owner_id": owner, "amount_credits": amount, "idempotency_key": "d7-rejected"}),
+            ).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{amount}: {body}");
+            assert_eq!(body["error"], "bad_request");
+            if amount == json!(9) {
+                assert_eq!(body["message"], "Minimum credit purchase is 10 credits");
+            }
+        }
+    }
+    assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 0);
+    assert!(lago.topup_wallets.lock().unwrap().is_empty());
+    for collection in [BILLING_WALLET, "billing_topup_sessions"] {
+        assert_eq!(db.collection::<bson::Document>(collection).count_documents(doc! {}).await.unwrap(), 0);
+    }
+
+    // JSON numbers outside i64 or fractional credits fail extraction, before writes.
+    for amount in [json!(9_223_372_036_854_775_808_u64), json!(10.5)] {
+        let response = app.clone().oneshot(route_request(
+            Method::POST, "/api/v1/billing/topup", &token,
+            Body::from(json!({"amount_credits": amount, "idempotency_key": "d7-overflow"}).to_string()),
+        )).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+    for owner in [None, Some(org.as_str())] {
+        for amount in [10, 11, 20, 50, 100, 500, 10_000_000] {
+            let (status, body) = request(
+                &app, &token, Method::POST, "/api/v1/billing/topup",
+                json!({"owner_id": owner, "amount_credits": amount, "idempotency_key": format!("d7-{amount}")}),
+            ).await;
+            assert_eq!(status, StatusCode::OK, "{amount}: {body}");
+            assert_eq!(body["amount_credits"], amount);
+            assert_eq!(body["owner_id"], owner.unwrap_or(&admin));
+        }
+    }
+    assert_eq!(lago.topup_wallets.lock().unwrap().len(), 14);
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn org_wallet_read_is_non_provisioning_and_admin_setup_checkout_history_are_scoped() {
     let db = crate::test_utils::connect_transaction_test_database("org_wallet_web_admin").await;
     let admin = insert_owner(&db).await;

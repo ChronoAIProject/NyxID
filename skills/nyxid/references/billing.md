@@ -140,7 +140,7 @@ or upstream behavior. Verify those independently before enabling access.
 ```sh
 nyxid billing wallet --owner-id "$OWNER_UUID" --output json
 nyxid billing wallet --provision --owner-id "$OWNER_UUID"
-nyxid billing topup --amount-credits 5 --open
+nyxid billing topup --amount-credits 20 --open
 nyxid admin credits grant issue --user "$PILOT_UUID_OR_EMAIL" --amount 5 --service telnyx-platform --reason "Attended Telnyx pilot" --output json > grant.json
 nyxid admin credits grant list --user "$PILOT_UUID_OR_EMAIL" --output json
 nyxid admin credits grant revoke "$GRANT_UUID"

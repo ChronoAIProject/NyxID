@@ -2216,6 +2216,53 @@ async fn explicit_and_environment_human_credentials_override_saved_agent_profile
 }
 
 #[tokio::test]
+async fn topup_signed_amounts_reach_server_and_preserve_the_raw_error() {
+    for amount in ["-1", "0", "9", "10000001", "9223372036854775807"] {
+        let server = MockServer::start().await;
+        let raw = "{\"error\":\"bad_request\",\"error_code\":1000,\"message\":\"Server purchase amount refusal\"}";
+        Mock::given(method("POST"))
+            .and(path("/api/v1/billing/topup"))
+            .and(wiremock::matchers::body_partial_json(json!({
+                "amount_credits": amount.parse::<i64>().unwrap(),
+                "idempotency_key": "d7-raw-error"
+            })))
+            .respond_with(ResponseTemplate::new(400).set_body_raw(raw, "application/json"))
+            .expect(1).mount(&server).await;
+        let out = run(&server, &[
+            "billing", "topup", "--amount-credits", amount,
+            "--idempotency-key", "d7-raw-error", "--output", "json",
+        ]).await;
+        assert_eq!(out.status.code(), Some(1), "{amount}: {}", output_text(&out));
+        assert!(out.stdout.is_empty());
+        assert!(output_text(&out).contains(raw), "{amount}: {}", output_text(&out));
+        assert!(!output_text(&out).contains(SENTINEL));
+    }
+}
+
+#[tokio::test]
+async fn topup_cli_preserves_whole_quantities_and_existing_below_minimum_checkout() {
+    for (amount, reused) in [(9, true), (10, false), (11, false), (20, false), (50, false), (100, false), (500, false), (10_000_000, false)] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/billing/topup"))
+            .and(wiremock::matchers::body_partial_json(json!({"amount_credits": amount})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "owner_id": ID, "amount_credits": amount, "idempotency_key": "d7-parity",
+                "checkout_url": "https://checkout.stripe.test/fixture", "payment_provider": "stripe",
+                "lago_wallet_transaction_id": "fixture", "lago_invoice_id": null,
+                "status": "checkout_created", "reused": reused
+            }))).expect(1).mount(&server).await;
+        let out = run(&server, &[
+            "billing", "topup", "--amount-credits", &amount.to_string(),
+            "--idempotency-key", "d7-parity", "--output", "json",
+        ]).await;
+        assert!(out.status.success(), "{}", output_text(&out));
+        assert_eq!(json(&out)["amount_credits"], amount);
+        assert_eq!(json(&out)["reused"], reused);
+    }
+}
+
+#[tokio::test]
 async fn verify_topup_flow_refreshes_during_polling_without_repeating_checkout() {
     let server = MockServer::start().await;
     let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2228,7 +2275,7 @@ async fn verify_topup_flow_refreshes_during_polling_without_repeating_checkout()
             let mut wallet: Value =
                 serde_json::from_str(include_str!("fixtures/billing/wallet.json")).unwrap();
             if request.headers["authorization"] == "Bearer fresh-session-fixture" {
-                wallet["balance_credits"] = json!(1);
+                wallet["balance_credits"] = json!(20);
             }
             ResponseTemplate::new(200).set_body_json(wallet)
         })
@@ -2236,8 +2283,9 @@ async fn verify_topup_flow_refreshes_during_polling_without_repeating_checkout()
         .mount(&server)
         .await;
     Mock::given(method("POST")).and(path("/api/v1/billing/topup"))
+        .and(wiremock::matchers::body_partial_json(json!({"amount_credits":20})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "owner_id":ID,"amount_credits":1,"idempotency_key":"fixture",
+            "owner_id":ID,"amount_credits":20,"idempotency_key":"fixture",
             "checkout_url":"https://checkout.stripe.test/fixture","payment_provider":"stripe",
             "lago_wallet_transaction_id":"fixture","lago_invoice_id":null,"status":"checkout_created","reused":false
         }))).expect(1).mount(&server).await;
@@ -2255,7 +2303,7 @@ async fn verify_topup_flow_refreshes_during_polling_without_repeating_checkout()
             "billing",
             "verify-topup-flow",
             "--amount-credits",
-            "1",
+            "20",
             "--timeout-secs",
             "5",
             "--poll-interval-secs",
@@ -2697,6 +2745,8 @@ async fn partial_service_creation_preserves_id_and_rerun_updates_without_recreat
 
 #[tokio::test]
 async fn idempotent_wallet_and_checkout_posts_refresh_and_replay_the_same_body_once() {
+    // Explicit one-credit responses represent existing legacy checkouts.
+    // New verification purchases use the signed USD 20 default.
     for args in [
         vec!["billing", "wallet", "--provision"],
         vec!["billing", "wallet", "--owner-id", ID],
@@ -2710,6 +2760,7 @@ async fn idempotent_wallet_and_checkout_posts_refresh_and_replay_the_same_body_o
             "provided-key",
         ],
         vec!["billing", "verify-topup-flow", "--amount-credits", "1"],
+        vec!["billing", "verify-topup-flow"],
         vec![
             "billing",
             "verify-topup-flow",
@@ -2719,6 +2770,8 @@ async fn idempotent_wallet_and_checkout_posts_refresh_and_replay_the_same_body_o
             "provided-key",
         ],
     ] {
+        let amount = args.iter().position(|arg| *arg == "--amount-credits")
+            .map(|index| args[index + 1].parse::<usize>().unwrap()).unwrap_or(20);
         let server = MockServer::start().await;
         let wallet: Value =
             serde_json::from_str(include_str!("fixtures/billing/wallet.json")).unwrap();
@@ -2735,7 +2788,7 @@ async fn idempotent_wallet_and_checkout_posts_refresh_and_replay_the_same_body_o
                 .respond_with(move |_: &Request| {
                     let balance = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     let mut wallet = wallet.clone();
-                    wallet["balance_credits"] = json!(balance);
+                    wallet["balance_credits"] = json!(balance * amount);
                     ResponseTemplate::new(200).set_body_json(wallet)
                 })
                 .expect(2)
@@ -2761,7 +2814,7 @@ async fn idempotent_wallet_and_checkout_posts_refresh_and_replay_the_same_body_o
                     wallet.clone()
                 } else {
                     json!({
-                        "owner_id":ID, "amount_credits":1, "idempotency_key":body["idempotency_key"],
+                        "owner_id":ID, "amount_credits":body["amount_credits"], "idempotency_key":body["idempotency_key"],
                         "checkout_url":"https://checkout.stripe.test/fixture", "payment_provider":"stripe",
                         "lago_wallet_transaction_id":"fixture", "lago_invoice_id":null,
                         "status":"checkout_created", "reused":true
@@ -2795,6 +2848,7 @@ async fn idempotent_wallet_and_checkout_posts_refresh_and_replay_the_same_body_o
         );
         if args[1] != "wallet" {
             let body: Value = serde_json::from_slice(&posts[0].body).unwrap();
+            assert_eq!(body["amount_credits"], amount);
             let key = body["idempotency_key"].as_str().unwrap();
             assert!(!key.is_empty());
             if args.contains(&"provided-key") {
