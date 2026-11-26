@@ -5649,6 +5649,19 @@ val response = client.newCall(request).execute()
 
 List all OAuth consents the current user has granted to third-party applications.
 
+The `granted_at` and `expires_at` fields describe base OAuth consent. Explicit
+service allowlists resolve display metadata in one database snapshot. A
+first-party human session can see personally owned services and services
+covered by the person's current organization proxy scope. The read checks
+active organizations, memberships and service-level admin restrictions.
+The list uses the owner-bound endpoint label or the authorized service's slug.
+It displays `—` as the string label when neither name is usable. Catalog
+names require a matching owner-bound endpoint. An eligible disabled
+service with a surviving endpoint has the additive `disabled: true` field.
+Missing, deleted, and inaccessible entries keep their `id` and use
+`deleted: true` with a label numbered in list order (`#1`, `#2`, and so on).
+Use the `deleted` and `disabled` flags to render localized display labels.
+
 **Auth:** Required
 
 **Response (200):**
@@ -5674,6 +5687,47 @@ List all OAuth consents the current user has granted to third-party applications
 curl http://localhost:3001/api/v1/users/me/consents \
   -H "Authorization: Bearer <access_token>"
 ```
+
+---
+
+#### GET /api/v1/users/me/consents/{client_id}/machine-grant
+
+Requires a human owner session. The response includes the latest owned Machine
+grant (active first, then retained revoked history) or `null`, the independent
+`source_valid` and `grant_valid` booleans and their nullable validity reasons,
+and `source_and_grant_valid` (the logical AND of the independent checks).
+
+When the owner has saved consent or grant history for the client, the response
+also includes `oauth_machine_status`. The server reads the displayed grant
+and source in one database snapshot. It reports the first applicable owner,
+client, or consent blocker, then evaluates the grant if the source passes.
+
+| Check | `oauth_machine_status` values in evaluation order |
+| --- | --- |
+| Owner | `owner_unavailable` |
+| Client | `client_missing`, `client_disabled`, `client_machine_scope_missing`, `client_proxy_scope_missing` |
+| Consent | `consent_missing`, `consent_expired`, `consent_revision_missing`, `consent_machine_scope_missing`, `consent_proxy_scope_missing` |
+| Grant | `grant_missing`, `grant_revoked`, `grant_expired`, `grant_stale`, `valid` |
+
+A stale grant has a security epoch or consent binding that differs from the
+live source. Proxy capability here means `proxy` or `proxy:*`. The status
+describes saved permissions. Execution also checks live token authority and
+Machine readiness. See [optional Machine permission on consent](security/OAUTH_AUTHORITY_ROLLOUT.md#optional-machine-permission-on-consent)
+for first approval and renewal.
+
+When the response contains an OAuth Machine grant, `oauth_machine_services`
+is a display map keyed by the assigned service IDs. Labels use the resource
+owner's endpoint or the authorized service's slug in the same snapshot. The
+lookup applies the current consent ceiling and the person's direct ownership
+or proxy access through an active organization and membership, including the
+membership's effective service scope and service-level admin restrictions.
+Removed services and services outside that access use the same placeholder
+with `deleted: true` and a null `label`. This covers explicit deletion markers
+and older inactive rows whose owner-bound endpoint is gone. An accessible
+disabled service with a surviving owner-bound endpoint has `deleted: false`
+and the additive `disabled: true` field. The `label` is null when neither
+name is usable. The map is empty when the source or the
+assigned service list is unavailable.
 
 ---
 

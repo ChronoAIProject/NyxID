@@ -1,12 +1,16 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 use super::audit_service::required::{self, TextField};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
+use crate::models::downstream_service::COLLECTION_NAME as CATALOG;
+use crate::models::oauth_client::COLLECTION_NAME as CLIENTS;
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
 
 pub(crate) const REVOCATION_FENCES: &str = "consent_revocation_fences";
@@ -922,6 +926,7 @@ pub struct ConsentRevocationResult {
 }
 
 /// List all consents for a user.
+#[cfg(test)]
 pub async fn list_user_consents(db: &mongodb::Database, user_id: &str) -> AppResult<Vec<Consent>> {
     let consents: Vec<Consent> = db
         .collection::<Consent>(CONSENTS)
@@ -931,6 +936,136 @@ pub async fn list_user_consents(db: &mongodb::Database, user_id: &str) -> AppRes
         .await?;
 
     Ok(consents)
+}
+
+pub struct ConsentServiceDisplay {
+    pub slug: Option<String>,
+    pub label: String,
+    pub catalog_service_name: Option<String>,
+    pub disabled: bool,
+}
+
+pub struct ConsentListDisplay {
+    pub consents: Vec<Consent>,
+    pub client_names: BTreeMap<String, String>,
+    pub services: BTreeMap<String, ConsentServiceDisplay>,
+}
+
+/// Resolve the authorized consent inventory and all display names together.
+pub async fn list_user_consent_displays(
+    db: &mongodb::Database,
+    user: &str,
+    allow_org_access: bool,
+) -> AppResult<ConsentListDisplay> {
+    #[derive(Deserialize)]
+    struct ClientName {
+        #[serde(rename = "_id")]
+        id: String,
+        client_name: String,
+    }
+    #[derive(Deserialize)]
+    struct CatalogName {
+        #[serde(rename = "_id")]
+        id: String,
+        name: String,
+    }
+
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .await?;
+    let mut cursor = db
+        .collection::<Consent>(CONSENTS)
+        .find(doc! {"user_id": user})
+        .session(&mut session)
+        .await?;
+    let consents: Vec<Consent> = cursor.stream(&mut session).try_collect().await?;
+    let mut client_names = BTreeMap::new();
+    let client_ids: Vec<_> = consents
+        .iter()
+        .map(|c| c.client_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !client_ids.is_empty() {
+        let mut cursor = db
+            .collection::<ClientName>(CLIENTS)
+            .find(doc! {"_id": {"$in": client_ids}})
+            .projection(doc! {"_id": 1, "client_name": 1})
+            .session(&mut session)
+            .await?;
+        client_names = cursor
+            .stream(&mut session)
+            .map_ok(|row| (row.id, row.client_name))
+            .try_collect()
+            .await?;
+    }
+
+    let service_ids: Vec<_> = consents
+        .iter()
+        .flat_map(|consent| consent.allowed_service_ids.iter().flatten())
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let services = super::service_display::load_in_session(
+        db,
+        user,
+        &service_ids,
+        allow_org_access,
+        &mut session,
+    )
+    .await?;
+    let catalog_ids: Vec<_> = services
+        .values()
+        .filter_map(|row| row.catalog_service_id.as_deref())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut catalog_names = BTreeMap::new();
+    if !catalog_ids.is_empty() {
+        let mut cursor = db
+            .collection::<CatalogName>(CATALOG)
+            .find(doc! {"_id": {"$in": catalog_ids}})
+            .projection(doc! {"_id": 1, "name": 1})
+            .session(&mut session)
+            .await?;
+        catalog_names = cursor
+            .stream(&mut session)
+            .map_ok(|row| (row.id, row.name))
+            .try_collect()
+            .await?;
+    }
+    session.abort_transaction().await?;
+    let services = services
+        .into_iter()
+        .map(|(id, row)| {
+            let catalog_service_name = row
+                .catalog_service_id
+                .as_ref()
+                .and_then(|id| catalog_names.get(id))
+                .cloned();
+            let label = row
+                .label
+                .or_else(|| row.slug.clone())
+                .unwrap_or_else(|| "—".to_owned());
+            (
+                id,
+                ConsentServiceDisplay {
+                    slug: row.slug,
+                    label,
+                    catalog_service_name,
+                    disabled: row.disabled,
+                },
+            )
+        })
+        .collect();
+    Ok(ConsentListDisplay {
+        consents,
+        client_names,
+        services,
+    })
 }
 
 /// List all consents for a client.

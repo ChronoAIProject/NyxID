@@ -283,6 +283,7 @@ pub mod service_account_key_read_service;
 pub mod service_account_service;
 pub(crate) mod service_dispatch_guard;
 pub(crate) mod service_dispatch_registry;
+mod service_display;
 pub mod service_endpoint_service;
 pub mod service_pool_health_service;
 pub mod service_pool_service;
