@@ -1,3 +1,4 @@
+use crate::crypto::record_field::oracle::OracleOuter;
 use bson::{Document, doc};
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
@@ -177,13 +178,6 @@ fn conflict() -> AppError {
     AppError::Conflict("saved login changed; fetch the current profile before retrying".into())
 }
 
-pub(crate) fn aad(profile: &OracleLoginProfile) -> String {
-    format!(
-        "oracle-login-profile:{}:{}:{}:{}:v{}",
-        profile.pool_id, profile.id, profile.generation, profile.revision, profile.format_version
-    )
-}
-
 fn validate_envelope(version: u32, bytes: &[u8]) -> AppResult<()> {
     if version != LOGIN_SNAPSHOT_FORMAT_VERSION {
         return Err(AppError::ValidationError(
@@ -311,8 +305,8 @@ pub(crate) async fn save_in_session(
         updated_at: now,
         expires_at: now + Duration::days(RETENTION_DAYS),
     };
-    profile.encrypted_envelope = keys
-        .encrypt_with_aad(&input.sealed_envelope, aad(&profile).as_bytes())
+    profile.encrypted_envelope = OracleOuter::profile(&profile)
+        .seal(keys, &input.sealed_envelope)
         .await?;
     check_pool_in_session(db, mongo_session, pool).await?;
     // Preserve concurrent binding changes. The ID fence prevents a deleted profile
@@ -873,8 +867,8 @@ pub(crate) async fn refresh_in_session(
     profile.envelope_size = input.sealed_envelope.len() as u64;
     profile.updated_at = now;
     profile.expires_at = now + Duration::days(RETENTION_DAYS);
-    profile.encrypted_envelope = keys
-        .encrypt_with_aad(&input.sealed_envelope, aad(&profile).as_bytes())
+    profile.encrypted_envelope = OracleOuter::profile(&profile)
+        .seal(keys, &input.sealed_envelope)
         .await?;
     check_pool_in_session(db, mongo_session, pool).await?;
     let mut update = document(&profile)?;

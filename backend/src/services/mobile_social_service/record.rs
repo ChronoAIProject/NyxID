@@ -1,5 +1,6 @@
 //! Mobile sign-in delivery storage. Only redemption claims a delivery or installs its session.
 use super::{MobileSocialDelivery, PendingDelivery, invalid_code, valid_challenge};
+use crate::crypto::record_field::historical::HistoricalAad;
 use crate::{
     crypto::{aes::EncryptionKeys, record_field::RecordContext},
     errors::{AppError, AppResult},
@@ -30,17 +31,16 @@ impl<'a> Binding<'a> {
         RecordContext::new(COLLECTION, self.id, self.user, &self.path)
     }
 
-    fn legacy_aad(&self) -> String {
+    fn legacy_aad(&self) -> HistoricalAad<'_> {
         let [_, hash, challenge] = self.path;
-        format!("mobile-social-delivery-v1:{hash}:{challenge}:{}", self.user)
+        HistoricalAad::mobile_delivery(hash, challenge, self.user)
     }
 
     pub(super) async fn seal(&self, keys: &EncryptionKeys, payload: &[u8]) -> AppResult<Binary> {
         let bytes = if keys.contextual_record_writes() {
             keys.encrypt_record(payload, &self.context()?).await?
         } else {
-            keys.encrypt_with_aad(payload, self.legacy_aad().as_bytes())
-                .await?
+            self.legacy_aad().seal(keys, payload).await?
         };
         Ok(Binary {
             subtype: BinarySubtype::Generic,
@@ -59,8 +59,7 @@ impl<'a> Binding<'a> {
                     .await
             }
             None if keys.allow_legacy_record_reads() => {
-                keys.decrypt_with_aad(&row.ciphertext.bytes, self.legacy_aad().as_bytes())
-                    .await
+                self.legacy_aad().open(keys, &row.ciphertext.bytes).await
             }
             _ => Err(invalid_code()),
         }
