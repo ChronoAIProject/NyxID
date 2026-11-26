@@ -1471,6 +1471,39 @@ it("shows pending proxy approvals raised by the chat key as cards at the tail", 
   );
 });
 
+it.each(["approved", "rejected", "expired"] as const)("returns a %s proxy approval to its original place before later turns", async (status) => {
+  const page = history();
+  page.messages.push(
+    { ...page.messages[0]!, id: "u2", seq: 3, turn_id: "turn-2", created_at: "2026-09-17T00:01:00Z" },
+    { ...page.messages[1]!, id: "a2", seq: 4, turn_id: "turn-2", created_at: "2026-09-17T00:01:02Z" },
+  );
+  const approval = {
+    id: "old-request", status: "pending" as const, service_slug: "google-sheets", service_name: "Google Sheets",
+    summary: "POST /v4/spreadsheets", approval_mode: "per_request" as const, agent_key_prefix: "",
+    created_at: reset, expires_at: "2026-09-17T00:05:00Z",
+  };
+  page.approval_history = [approval];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)?.id).toBe("nyxagent-approval:old-request");
+
+  // History can return pending and settled rows in either order. An older
+  // pending request must still be last, even when settled rows follow it.
+  page.approval_history = [
+    { ...approval, id: "waiting-request", created_at: start },
+    { ...approval, status },
+  ];
+  await transport.history(id);
+  expect(transport.session(id).messages.map((message) => message.id)).toEqual([
+    "u", "nyxagent-approval:old-request", "a", "u2", "a2", "nyxagent-approval:waiting-request",
+  ]);
+  await transport.history(id);
+  expect(transport.session(id).messages.map((message) => message.id)).toEqual([
+    "u", "nyxagent-approval:old-request", "a", "u2", "a2", "nyxagent-approval:waiting-request",
+  ]);
+});
+
 it("optimistically renames during a turn and rolls back on failure without losing activity", async () => {
   let finish!: (response: Response) => void;
   const activeRow = {

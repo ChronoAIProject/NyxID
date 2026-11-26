@@ -859,17 +859,25 @@ export class NyxAgentTransport {
         return { ...message, decisions };
       });
     }
-    // Proxy approvals block the running tool call until decided; show them
-    // at the tail while the turn waits.
+    // Only pending proxy approvals belong at the tail while a tool waits.
+    // Settled requests keep their creation position when newer turns arrive.
+    const pendingApprovals: ChatMessage[] = [];
     for (const approval of history?.approvals ?? []) {
-      messages.push({
+      const receipt: ChatMessage = {
         id: `nyxagent-approval:${approval.id}`,
         role: "system",
         content: approval.summary,
         timestamp: Date.parse(approval.created_at),
         status: "complete",
-      });
+      };
+      if (!approval.status || approval.status === "pending") {
+        pendingApprovals.push(receipt);
+      } else {
+        const position = messages.findIndex((message) => message.timestamp > receipt.timestamp);
+        messages.splice(position < 0 ? messages.length : position, 0, receipt);
+      }
     }
+    messages.push(...pendingApprovals);
     // Rows rebuilt above with identical fields keep their previous object.
     const previousViews = this.views.get(id ?? "draft");
     const views = new Map<string, ChatMessage>();
