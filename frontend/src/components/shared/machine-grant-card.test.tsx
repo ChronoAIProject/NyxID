@@ -620,6 +620,39 @@ describe("Machine grant owner management", () => {
     expect(ceiling).not.toHaveTextContent("Catalog fallback");
     serviceIds.forEach((id) => expect(ceiling).not.toHaveTextContent(id));
   });
+  it("uses current OAuth service visibility over saved consent labels", () => {
+    const read = {
+      grant: { ...grant(), assignments: { machine: {
+        capabilities: { shell: true },
+        mode: "shared_legacy",
+        revision: 1,
+        file_roots: ["/workspace"],
+        service_ids: ["org-service", "private-service"],
+      } } },
+      source_and_grant_valid: true,
+      oauth_machine_status: "valid",
+    };
+    const source = { kind: "oauth", id: "client" } as const;
+    const consentServices = [
+      { id: "org-service", label: "#1", catalog_service_name: null, slug: null, deleted: true },
+      { id: "private-service", label: "Prior label", catalog_service_name: null, slug: "private", deleted: false },
+    ];
+    mocks.data = { ...read, oauth_machine_services: {
+      "org-service": { label: "Shared team service", deleted: false },
+      "private-service": { label: null, deleted: true },
+    } };
+    const view = render(<MachineGrantCard source={source} consentServices={consentServices} />);
+    const ceiling = screen.getByText(/Gateway service ceiling/);
+    expect(ceiling).toHaveTextContent("Shared team service, Deleted service");
+    expect(ceiling).not.toHaveTextContent(/Prior label|org-service|private-service/);
+    mocks.data = {
+      ...read, oauth_machine_status: "client_disabled",
+      source_and_grant_valid: false, oauth_machine_services: {},
+    };
+    view.rerender(<MachineGrantCard source={source} consentServices={consentServices} />);
+    expect(ceiling).toHaveTextContent("Service details unavailable, Service details unavailable");
+    expect(ceiling).not.toHaveTextContent(/Prior label|org-service|private-service/);
+  });
   it("does not offer editing without current parent Key CAS", () => {
     mocks.data = {
       grant: null,

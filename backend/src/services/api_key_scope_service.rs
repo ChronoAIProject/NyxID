@@ -13,7 +13,7 @@ use crate::models::node_service_binding::{
     COLLECTION_NAME as NODE_SERVICE_BINDINGS, NodeServiceBinding,
 };
 use crate::models::org_membership::{
-    COLLECTION_NAME as ORG_MEMBERSHIPS, MemberScopeSource, OrgMembership, OrgRole,
+    COLLECTION_NAME as ORG_MEMBERSHIPS, MemberScopeSource, OrgMembership,
 };
 use crate::models::org_role_scope::{COLLECTION_NAME as ORG_ROLE_SCOPES, OrgRoleScope};
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
@@ -278,6 +278,25 @@ async fn resolve_owner_access_with_session(
     target_owner_id: &str,
     session: &mut ClientSession,
 ) -> AppResult<OwnerAccess> {
+    resolve_owner_access_in_session(db, actor_user_id, target_owner_id, false, session).await
+}
+
+pub(super) async fn resolve_active_owner_access_with_session(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    target_owner_id: &str,
+    session: &mut ClientSession,
+) -> AppResult<OwnerAccess> {
+    resolve_owner_access_in_session(db, actor_user_id, target_owner_id, true, session).await
+}
+
+async fn resolve_owner_access_in_session(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    target_owner_id: &str,
+    require_active_org: bool,
+    session: &mut ClientSession,
+) -> AppResult<OwnerAccess> {
     if actor_user_id == target_owner_id {
         return Ok(OwnerAccess::Direct);
     }
@@ -287,7 +306,9 @@ async fn resolve_owner_access_with_session(
         .find_one(doc! { "_id": target_owner_id })
         .session(&mut *session)
         .await?;
-    let Some(owner) = owner.filter(|owner| owner.user_type.is_org()) else {
+    let Some(owner) =
+        owner.filter(|owner| owner.user_type.is_org() && (!require_active_org || owner.is_active))
+    else {
         return Ok(OwnerAccess::Forbidden);
     };
 
@@ -316,22 +337,13 @@ async fn resolve_owner_access_with_session(
             .and_then(|scope| scope.allowed_service_ids),
     };
 
-    Ok(match membership.role {
-        OrgRole::Admin => OwnerAccess::AsOrgAdmin {
-            org_user_id: owner.id,
-            membership_id: membership.id,
-            allowed_service_ids: effective_scope,
-        },
-        OrgRole::Member | OrgRole::Viewer => OwnerAccess::AsOrgMember {
-            org_user_id: owner.id,
-            membership_id: membership.id,
-            role: membership.role,
-            allowed_service_ids: effective_scope,
-        },
-    })
+    Ok(org_service::access_for_membership(
+        membership,
+        effective_scope,
+    ))
 }
 
-fn actor_can_scope_service(access: &OwnerAccess, service_id: &str) -> bool {
+pub(super) fn actor_can_scope_service(access: &OwnerAccess, service_id: &str) -> bool {
     let role_allows = match access {
         OwnerAccess::Direct | OwnerAccess::AsOrgAdmin { .. } => true,
         OwnerAccess::AsOrgMember { role, .. } => role.can_proxy(),

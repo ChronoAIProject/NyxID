@@ -1844,6 +1844,7 @@ struct LiveSourceStatus {
     client_epoch: Option<i64>,
     consent: Option<ProtectedConsentRef>,
     oauth_consent_exists: Option<bool>,
+    oauth_service_ceiling: Option<Vec<String>>,
 }
 impl LiveSourceStatus {
     fn invalid(reason: ValidityReason) -> Self {
@@ -1854,6 +1855,7 @@ impl LiveSourceStatus {
             client_epoch: None,
             consent: None,
             oauth_consent_exists: None,
+            oauth_service_ceiling: None,
         }
     }
 
@@ -1886,6 +1888,7 @@ async fn source_status_in_session(
         client_epoch: None,
         consent: None,
         oauth_consent_exists: None,
+        oauth_service_ceiling: None,
     };
     if !owner.is_active {
         result.status = invalid_status(ValidityReason::Disabled);
@@ -1980,6 +1983,9 @@ async fn source_status_in_session(
                 result.oauth_failure(ValidityReason::Ineligible, ConsentMachineScopeMissing);
             } else if !crate::mw::auth::scope_allows_rest_proxy(&live_consent.scopes) {
                 result.oauth_failure(ValidityReason::Ineligible, ConsentProxyScopeMissing);
+            } else if !live_consent.allow_all_services {
+                result.oauth_service_ceiling =
+                    Some(live_consent.allowed_service_ids.unwrap_or_default());
             }
         }
     }
@@ -1990,8 +1996,14 @@ async fn oauth_grant_services_in_session(
     db: &Database,
     user: &str,
     grant: &MachineExternalGrant,
+    oauth_service_ceiling: Option<&[String]>,
     session: &mut ClientSession,
 ) -> AppResult<BTreeMap<String, OAuthMachineServiceDisplay>> {
+    use super::api_key_scope_service::{
+        actor_can_scope_service, resolve_active_owner_access_with_session,
+    };
+    use std::collections::btree_map::Entry;
+
     let mut displays: BTreeMap<_, _> = grant
         .policy
         .assignments
@@ -2008,57 +2020,95 @@ async fn oauth_grant_services_in_session(
             )
         })
         .collect();
-    if displays.is_empty() {
-        return Ok(displays);
-    }
-
     #[derive(Deserialize)]
     struct ServiceEndpoint {
         #[serde(rename = "_id")]
         id: String,
+        user_id: String,
         endpoint_id: String,
+        #[serde(default)]
+        admin_only: bool,
     }
     #[derive(Deserialize)]
     struct EndpointLabel {
         #[serde(rename = "_id")]
         id: String,
+        user_id: String,
         label: Option<String>,
     }
-    let ids: Vec<_> = displays.keys().map(String::as_str).collect();
+    let ceiling =
+        oauth_service_ceiling.map(|ids| ids.iter().map(String::as_str).collect::<BTreeSet<_>>());
+    let ids: Vec<_> = displays
+        .keys()
+        .map(String::as_str)
+        .filter(|id| ceiling.as_ref().is_none_or(|ceiling| ceiling.contains(id)))
+        .collect();
+    if ids.is_empty() {
+        return Ok(displays);
+    }
     let mut cursor = db
         .collection::<ServiceEndpoint>(SERVICES)
-        .find(doc! {"_id": {"$in": ids}, "user_id": user, "deleted_at": null})
-        .projection(doc! {"_id": 1, "endpoint_id": 1})
+        .find(doc! {"_id": {"$in": ids}, "is_active": true, "deleted_at": null})
+        .projection(doc! {"_id": 1, "user_id": 1, "endpoint_id": 1, "admin_only": 1})
         .session(&mut *session)
         .await?;
     let services: Vec<ServiceEndpoint> = cursor.stream(&mut *session).try_collect().await?;
-    if services.is_empty() {
+    let mut owner_access = BTreeMap::new();
+    let mut authorized = Vec::new();
+    for service in &services {
+        let access = match owner_access.entry(service.user_id.as_str()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(
+                resolve_active_owner_access_with_session(db, user, &service.user_id, session)
+                    .await?,
+            ),
+        };
+        // The gateway also applies the org service's admin-only restriction.
+        if actor_can_scope_service(access, &service.id)
+            && (!service.admin_only || access.can_write())
+        {
+            authorized.push(service);
+        }
+    }
+    if authorized.is_empty() {
         return Ok(displays);
     }
-    let endpoint_ids: Vec<_> = services
-        .iter()
-        .map(|service| service.endpoint_id.as_str())
-        .collect::<BTreeSet<_>>()
+    let mut endpoints_by_owner = BTreeMap::<_, BTreeSet<_>>::new();
+    for service in &authorized {
+        endpoints_by_owner
+            .entry(service.user_id.as_str())
+            .or_default()
+            .insert(service.endpoint_id.as_str());
+    }
+    let endpoint_filters: Vec<_> = endpoints_by_owner
         .into_iter()
+        .map(|(owner, ids)| {
+            doc! {"user_id": owner, "_id": {"$in": ids.into_iter().collect::<Vec<_>>()}}
+        })
         .collect();
     let mut cursor = db
         .collection::<EndpointLabel>(ENDPOINTS)
-        .find(doc! {"_id": {"$in": endpoint_ids}, "user_id": user, "deleted_at": null})
-        .projection(doc! {"_id": 1, "label": 1})
+        .find(doc! {"$or": endpoint_filters, "deleted_at": null})
+        .projection(doc! {"_id": 1, "user_id": 1, "label": 1})
         .session(&mut *session)
         .await?;
     let labels: Vec<EndpointLabel> = cursor.stream(&mut *session).try_collect().await?;
     let labels: BTreeMap<_, _> = labels
-        .into_iter()
-        .filter_map(|row| row.label.map(|label| (row.id, label)))
+        .iter()
+        .filter_map(|row| {
+            row.label
+                .as_ref()
+                .map(|label| ((row.user_id.as_str(), row.id.as_str()), label))
+        })
         .collect();
-    for service in services {
+    for service in authorized {
         let label = labels
-            .get(&service.endpoint_id)
+            .get(&(service.user_id.as_str(), service.endpoint_id.as_str()))
+            .copied()
             .filter(|label| !label.trim().is_empty() && label.trim() != service.id)
             .cloned();
         displays.insert(
-            service.id,
+            service.id.clone(),
             OAuthMachineServiceDisplay {
                 label,
                 deleted: false,
@@ -2090,7 +2140,7 @@ pub async fn read_oauth_grant(
         oauth_client_id: client.to_owned(),
         consent: None,
     };
-    let live = source_status_in_session(db, user, &source, &mut session).await?;
+    let mut live = source_status_in_session(db, user, &source, &mut session).await?;
     // The path accepts arbitrary client IDs. Return detailed client state only
     // when this owner has a consent or retained grant for that client.
     let can_disclose = if row.is_some() {
@@ -2106,6 +2156,7 @@ pub async fn read_oauth_grant(
             .is_some()
     };
     let status = live.oauth_failure;
+    let service_ceiling = live.oauth_service_ceiling.take();
     let validity = snapshot_validity(
         &source,
         grant_status(row.as_ref(), row.as_ref()),
@@ -2125,8 +2176,9 @@ pub async fn read_oauth_grant(
         }
     };
     let services = match row.as_ref() {
-        Some(row) if status != OwnerUnavailable => {
-            oauth_grant_services_in_session(db, user, row, &mut session).await?
+        Some(row) if validity.source.valid => {
+            oauth_grant_services_in_session(db, user, row, service_ceiling.as_deref(), &mut session)
+                .await?
         }
         _ => BTreeMap::new(),
     };

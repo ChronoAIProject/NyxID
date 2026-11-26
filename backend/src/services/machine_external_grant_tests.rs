@@ -1522,6 +1522,164 @@ async fn oauth_machine_service_labels_are_current_and_owner_scoped_for_all_servi
 }
 
 #[tokio::test]
+async fn oauth_machine_service_labels_respect_live_org_access_in_one_snapshot() {
+    use crate::{
+        models::{
+            org_membership::{
+                COLLECTION_NAME as MEMBERSHIPS, MemberScopeSource, OrgMembership, OrgRole,
+            },
+            org_role_scope::{COLLECTION_NAME as ROLE_SCOPES, OrgRoleScope},
+            user_endpoint::UserEndpoint,
+        },
+        test_utils::{test_membership, test_user_endpoint},
+    };
+    let f = fixture("oauth_machine_org_service_labels").await;
+    let client = oauth_client(&f).await;
+    let (consent, mut grant, _) = approve_oauth(&f, &client).await;
+    let org = Uuid::new_v4().to_string();
+    let revoked_org = Uuid::new_v4().to_string();
+    let nonmember_org = Uuid::new_v4().to_string();
+    let inactive_org = Uuid::new_v4().to_string();
+    let mut inactive_owner = test_user(&inactive_org, UserType::Org);
+    inactive_owner.is_active = false;
+    f.db.collection::<User>(USERS)
+        .insert_many([
+            test_user(&org, UserType::Org),
+            test_user(&revoked_org, UserType::Org),
+            test_user(&nonmember_org, UserType::Org),
+            inactive_owner,
+        ])
+        .await
+        .unwrap();
+    let mut inherited = test_membership(&org, &f.user, OrgRole::Member, None);
+    inherited.scope_source = MemberScopeSource::Inherit;
+    let mut revoked = test_membership(&revoked_org, &f.user, OrgRole::Member, None);
+    revoked.revoked_at = Some(Utc::now());
+    f.db.collection::<OrgMembership>(MEMBERSHIPS)
+        .insert_many([
+            inherited,
+            revoked,
+            test_membership(&inactive_org, &f.user, OrgRole::Member, None),
+        ])
+        .await
+        .unwrap();
+
+    let mut rows = Vec::new();
+    let mut endpoints = Vec::new();
+    let mut assigned_ids = Vec::new();
+    let mut membership_scope = Vec::new();
+    for (slug, owner, label, included, admin_only) in [
+        ("allowed", &org, "Shared team service", true, false),
+        ("narrowed", &org, "Out-of-scope service", false, false),
+        ("admin-only", &org, "Admin-only service", true, true),
+        (
+            "revoked",
+            &revoked_org,
+            "Revoked membership service",
+            false,
+            false,
+        ),
+        (
+            "nonmember",
+            &nonmember_org,
+            "Nonmember service",
+            false,
+            false,
+        ),
+        (
+            "inactive-org",
+            &inactive_org,
+            "Inactive organization service",
+            false,
+            false,
+        ),
+    ] {
+        let service = Uuid::new_v4().to_string();
+        let endpoint = Uuid::new_v4().to_string();
+        let mut row = test_user_service(&service, owner, slug, &endpoint, None, None);
+        row.admin_only = admin_only;
+        rows.push(row);
+        endpoints.push(test_user_endpoint(
+            &endpoint,
+            owner,
+            label,
+            "https://fixture.example",
+            None,
+            None,
+        ));
+        if included {
+            membership_scope.push(service.clone());
+        }
+        assigned_ids.push(service);
+    }
+    f.db.collection::<OrgRoleScope>(ROLE_SCOPES)
+        .insert_one(OrgRoleScope {
+            id: Uuid::new_v4().to_string(),
+            org_user_id: org,
+            role: OrgRole::Member,
+            allowed_service_ids: Some(membership_scope),
+            updated_at: Utc::now(),
+            updated_by: f.user.clone(),
+        })
+        .await
+        .unwrap();
+    f.db.collection::<UserService>(SERVICES)
+        .insert_many(rows)
+        .await
+        .unwrap();
+    f.db.collection::<UserEndpoint>(ENDPOINTS)
+        .insert_many(endpoints)
+        .await
+        .unwrap();
+    let consents = f.db.collection::<Consent>(CONSENTS);
+    consents
+        .update_one(
+            doc! {"_id": &consent.id},
+            doc! {"$set": {
+                "allow_all_services": true, "allowed_service_ids": [],
+            }},
+        )
+        .await
+        .unwrap();
+    grant.restrictions.get_mut(&f.node.id).unwrap().service_ids = assigned_ids.clone();
+    f.db.collection::<MachineExternalGrant>(GRANTS)
+        .replace_one(doc! {"_id": &grant.id}, &grant)
+        .await
+        .unwrap();
+
+    let read = read_oauth_grant(&f.db, &f.user, &client).await.unwrap();
+    assert_eq!(read.status, Some(OAuthMachineStatus::Valid));
+    let allowed = &assigned_ids[0];
+    assert_eq!(
+        read.services[allowed].label.as_deref(),
+        Some("Shared team service")
+    );
+    assert!(!read.services[allowed].deleted);
+    for denied in &assigned_ids[1..] {
+        assert!(read.services[denied].label.is_none());
+        assert!(read.services[denied].deleted);
+    }
+
+    consents
+        .update_one(
+            doc! {"_id": &consent.id},
+            doc! {"$set": {
+                "allow_all_services": false, "allowed_service_ids": [],
+            }},
+        )
+        .await
+        .unwrap();
+    let narrowed = read_oauth_grant(&f.db, &f.user, &client).await.unwrap();
+    assert!(
+        narrowed
+            .services
+            .values()
+            .all(|service| service.deleted && service.label.is_none())
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn independent_validity_owner_epoch_remains_changed_after_disable_and_reenable() {
     let f = fixture("external_grant_owner_epoch_validity").await;
     let grant = f.approve().await;

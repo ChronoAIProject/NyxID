@@ -147,8 +147,8 @@ pub struct GrantReadResponse {
     pub source_and_grant_valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_machine_status: Option<OAuthMachineStatus>,
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub oauth_machine_services: BTreeMap<String, OAuthMachineServiceDisplay>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_machine_services: Option<BTreeMap<String, OAuthMachineServiceDisplay>>,
 }
 
 impl GrantReadResponse {
@@ -165,7 +165,7 @@ impl GrantReadResponse {
             grant_validity_reason: validity.grant.reason,
             source_and_grant_valid: validity.combined,
             oauth_machine_status,
-            oauth_machine_services: BTreeMap::new(),
+            oauth_machine_services: None,
         }
     }
 }
@@ -309,8 +309,9 @@ pub async fn get_oauth(
 ) -> AppResult<Json<GrantReadResponse>> {
     let user = owner(&auth)?;
     let read = grants::read_oauth_grant(&state.db, &user, &client).await?;
+    let services = read.grant.is_some().then_some(read.services);
     let mut response = GrantReadResponse::new(read.grant, read.validity, read.status);
-    response.oauth_machine_services = read.services;
+    response.oauth_machine_services = services;
     Ok(Json(response))
 }
 pub async fn put_oauth(
