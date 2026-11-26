@@ -10,6 +10,7 @@ import {
   Outlet,
   useLoaderData,
   useLocation,
+  useMatches,
   useRouter,
 } from "@tanstack/react-router";
 import {
@@ -121,6 +122,10 @@ function Content() {
 }
 function PublicLayout() {
   const location = useLocation();
+  const renderedPath = useMatches({ select: matches => {
+    const payload = matches[matches.length - 1]?.loaderData as PublicPayload | undefined;
+    return payload?.meta.path;
+  } });
   const router = useRouter();
   const [navigationRevision, setNavigationRevision] = useState(0);
   const lastSuccessfulHref = useRef(location.href);
@@ -139,10 +144,10 @@ function PublicLayout() {
   );
   return (
     <PublicSearchContext.Provider value={true}>
-      {docPaths.has(location.pathname) ? (
+      {docPaths.has(renderedPath ?? location.pathname) ? (
         <Outlet />
       ) : (
-        <WebsitePage navigationRevision={navigationRevision}>
+        <WebsitePage navigationRevision={navigationRevision} renderedPath={renderedPath}>
           <Outlet />
         </WebsitePage>
       )}

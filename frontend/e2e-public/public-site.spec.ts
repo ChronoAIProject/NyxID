@@ -3,6 +3,7 @@ const publication = JSON.parse(
   fs.readFileSync("dist/public-release.json", "utf8"),
 );
 import { test, expect } from "@playwright/test";
+const testOrigin = process.env.PUBLIC_TEST_ORIGIN || "http://127.0.0.1:4188";
 test("initial body remains readable with JavaScript disabled", async ({
   browser,
 }) => {
@@ -15,7 +16,7 @@ test("initial body remains readable with JavaScript disabled", async ({
     "/zh/solutions/help-desk",
     "/docs/ai/guides/agent-isolation",
   ]) {
-    await page.goto(`http://127.0.0.1:4188${path}`);
+    await page.goto(`${testOrigin}${path}`);
     await expect(page.locator("h1")).toBeVisible();
     await expect(page.locator("main")).not.toBeEmpty();
   }
@@ -35,12 +36,12 @@ test("hydrates, keeps shell during a delayed route chunk and supports history an
       () => matchMedia("(prefers-reduced-motion: reduce)").matches,
     ),
   ).toBe(true);
-  await expect(page.locator("nav")).toBeVisible();
+  await expect(page.locator("#nav")).toBeVisible();
   await page.waitForFunction(() =>
-    document.querySelector('nav a[href^="/security"]'),
+    document.querySelector('#nav .public-more a[href^="/security"]'),
   );
   await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
-  await expect(page.locator('nav a[href^="/register"]')).toHaveAttribute(
+  await expect(page.locator('#nav a[href^="/register"]')).toHaveAttribute(
     "href",
     /code=INV/,
   );
@@ -55,16 +56,17 @@ test("hydrates, keeps shell during a delayed route chunk and supports history an
     await held;
     await route.continue();
   });
-  await page.locator('nav a[href^="/security"]').click({ noWaitAfter: true });
+  await page.locator("#nav .public-more summary").click();
+  await page.locator('#nav .public-more a[href^="/security"]').click({ noWaitAfter: true });
   await page.waitForTimeout(250);
   await expect(page.locator("#nav")).toBeVisible();
   await expect(page.locator("#foot")).toBeAttached();
   expect(await nav!.evaluate((el) => el.isConnected)).toBe(true);
   release();
   await expect(page).toHaveURL(/\/security\?/);
-  await expect(page.locator("h1")).toContainText("passwords");
+  await expect(page.locator("h1")).toContainText("credentials");
   expect(delayed).toBe(true);
-  await page.getByRole("link", { name: "中文", exact: true }).click();
+  await page.locator("#foot").getByRole("link", { name: "中文", exact: true }).click();
   await expect(page).toHaveURL(/\/zh\/security\?/);
   await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
   expect(new URL(page.url()).searchParams.get("return_to")).toBe("/keys");
@@ -97,6 +99,9 @@ test("contact preselection and configured solution gate survive hydration", asyn
       publication.configuration.solutions["help-desk"],
     );
   } else {
+    await expect(page.locator(".st-availability")).toContainText("Not available yet");
+    await expect(page.getByRole("link", { name: "Talk it through", exact: true })).toBeVisible();
+    await page.getByText("Setup availability", { exact: true }).click();
     await expect(
       page.getByRole("button", { name: "Use this solution", exact: true }),
     ).toBeDisabled();
@@ -203,20 +208,20 @@ test("retains authenticated home redirects and Docs controls", async ({
     {
       name: "fixture-auth",
       value: "1",
-      url: "http://127.0.0.1:4188",
+      url: testOrigin,
       httpOnly: true,
     },
   ]);
   for (const path of ["/", "/zh"]) {
     await page.goto(path);
-    await expect(page).toHaveURL(/\/dashboard$/);
+    await expect(page).toHaveURL(/\/assistant$/);
   }
   await page.goto("/docs/ai/guides/agent-isolation");
   await expect(
     page.getByRole("link", { name: "Dashboard", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("button", { name: /Switch to (light|dark) mode/ }),
+    page.getByRole("button", { name: /Switch to (day|night) mode/ }),
   ).toBeVisible();
   await expect(page.locator('aside a[href^="#"]')).not.toHaveCount(0);
 });
@@ -250,7 +255,7 @@ test("F01 contact remains inert without entry JavaScript and never submits perso
         submissions.push(request.url());
     });
     try {
-      await target.goto("http://127.0.0.1:4188/contact", {
+      await target.goto(`${testOrigin}/contact`, {
         waitUntil: "commit",
       });
       await expect(target.locator("#cForm fieldset")).toHaveAttribute(
@@ -291,7 +296,7 @@ test("F01 contact remains inert without entry JavaScript and never submits perso
   const leaked: string[] = [];
   page.on("request", (request) => {
     if (
-      request.url().startsWith("http://127.0.0.1:4188") &&
+      request.url().startsWith(testOrigin) &&
       (request.url().includes("PERSONAL_SENTINEL") ||
         request.postData()?.includes("PERSONAL_SENTINEL"))
     )
@@ -315,57 +320,32 @@ test("F02 and F04 preserve ordered query strings, document identity and mobile m
   await page.evaluate(() => {
     (window as unknown as { identity: string }).identity = "same-document";
   });
+  const menu = page.locator("#nav .public-more");
   for (const selector of [
-    'nav a[data-nav="security"]',
-    'nav a[data-nav="solutions"]',
-    'nav a[data-lang="zh"]',
+    '#nav .public-more a[href^="/security"]',
+    '#nav .public-more a[href^="/solutions"]',
+    '#nav .public-more a[lang="zh-CN"]',
   ]) {
-    await page.locator("#burger").click();
-    await expect(page.locator("#burger")).toHaveAttribute(
-      "aria-expanded",
-      "true",
-    );
+    await menu.locator("summary").click();
+    await expect(menu).toHaveAttribute("open", "");
     const link = page.locator(selector);
-    expect(
-      Array.from(
-        new URL((await link.getAttribute("href"))!, page.url()).searchParams,
-      ),
-    ).toEqual(entries);
+    expect(Array.from(new URL((await link.getAttribute("href"))!, page.url()).searchParams)).toEqual(entries);
     await link.click();
-    await expect(page.locator("#burger")).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
+    await expect(menu).not.toHaveAttribute("open", "");
     expect(Array.from(new URL(page.url()).searchParams)).toEqual(entries);
-    expect(
-      await page.evaluate(
-        () => (window as unknown as { identity: string }).identity,
-      ),
-    ).toBe("same-document");
+    expect(await page.evaluate(() => (window as unknown as { identity: string }).identity)).toBe("same-document");
   }
   for (const direction of ["goBack", "goForward"] as const) {
-    await page.locator("#burger").click();
+    await menu.locator("summary").click();
     await page[direction]();
-    await expect(page.locator("#burger")).toHaveAttribute(
-      "aria-expanded",
-      "false",
-    );
+    await expect(menu).not.toHaveAttribute("open", "");
     expect(Array.from(new URL(page.url()).searchParams)).toEqual(entries);
   }
-  await page.locator("#burger").click();
-  await page
-    .locator('nav a[data-nav="security"]')
-    .click({ modifiers: ["Control"] });
-  await expect(page.locator("#burger")).toHaveAttribute(
-    "aria-expanded",
-    "true",
-  );
-  const login = page.locator('nav a[href^="/login"]').first();
-  expect(
-    Array.from(
-      new URL((await login.getAttribute("href"))!, page.url()).searchParams,
-    ),
-  ).toEqual(entries);
+  await menu.locator("summary").click();
+  await menu.locator('a[href*="/security"]').click({ modifiers: ["Control"] });
+  await expect(menu).toHaveAttribute("open", "");
+  const login = menu.locator('a[href^="/login"]');
+  expect(Array.from(new URL((await login.getAttribute("href"))!, page.url()).searchParams)).toEqual(entries);
 });
 
 test("F03 retries a failed Docs fetch and recovers a failed route import by explicit reload", async ({
@@ -417,7 +397,7 @@ test("F03 retries a failed Docs fetch and recovers a failed route import by expl
   await page.getByRole("button", { name: "Retry", exact: true }).click();
   await reloaded;
   await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
-  await expect(page.locator("h1")).toContainText("passwords");
+  await expect(page.locator("h1")).toContainText("credentials");
   expect(
     await page.evaluate(
       () => (window as unknown as { retryDocument?: string }).retryDocument,
@@ -433,7 +413,7 @@ test("published visibility matches the release and makes no feature POST request
   page.on("request", (request) => {
     if (
       request.method() === "POST" &&
-      new URL(request.url()).origin === "http://127.0.0.1:4188"
+      new URL(request.url()).origin === testOrigin
     )
       writes.push(request.url());
   });
@@ -495,7 +475,7 @@ test("Blog menu visibility applies to mobile and desktop without changing direct
         "v1",
       );
       await expect(page.locator("h1")).toBeVisible();
-      if (width === 700) await page.locator("#burger").click();
+      await page.locator("#nav .public-more summary").click();
       await expect(page.locator('nav [data-nav="blog"]')).toHaveCount(
         publication.visibility.blogMenu ? 1 : 0,
       );

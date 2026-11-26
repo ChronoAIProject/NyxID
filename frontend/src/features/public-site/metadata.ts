@@ -53,7 +53,7 @@ export function metadataHead(meta: PublicMetadata, origin = PUBLIC_ORIGIN) {
 <meta data-public-head name="twitter:title" content="${e(title)}">
 <meta data-public-head name="twitter:description" content="${e(meta.description)}">
 <meta data-public-head name="twitter:image" content="${PUBLIC_ORIGIN}/nyxid-coloured-logo.svg">
-<script data-public-head type="application/ld+json">${JSON.stringify({ "@context": "https://schema.org", "@type": "WebPage", name: meta.title, description: meta.description, url: canonical, inLanguage: meta.locale === "zh" ? "zh-CN" : "en" }).replace(/</g, "\u003c")}</script>`;
+<script data-public-head type="application/ld+json">${JSON.stringify({ "@context": "https://schema.org", "@type": "WebPage", name: meta.title, description: meta.description, url: canonical, inLanguage: meta.locale === "zh" ? "zh-CN" : "en" }).replace(/</g, "\\u003c")}</script>`;
 }
 export function applyMetadata(meta: PublicMetadata) {
   document.head

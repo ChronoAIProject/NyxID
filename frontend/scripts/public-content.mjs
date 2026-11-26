@@ -1,4 +1,9 @@
 import { Window } from "happy-dom";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import { toMarkdown } from "mdast-util-to-markdown";
+import { gfmTableToMarkdown } from "mdast-util-gfm-table";
+const markdownParser = unified().use(remarkParse);
 export function semanticMarkdown(html, meta, revision, origin) {
   const window = new Window();
   const doc = window.document;
@@ -49,20 +54,21 @@ export function semanticMarkdown(html, meta, revision, origin) {
       return `${fence} ${value} ${fence}`;
     }
     if (tag === "table") {
-      const rows = Array.from(node.querySelectorAll("tr"), (row) =>
-        Array.from(row.children, (cell) =>
-          text(cell).trim().replace(/\|/g, "\\|").replace(/\n+/g, "<br>"),
-        ).join(" | "),
-      );
-      const columns = node.querySelector("tr")?.children.length ?? 0;
-      return (
-        `\n\n| ${rows[0]} |\n| ${Array(columns).fill("---").join(" | ")} |\n` +
-        rows
-          .slice(1)
-          .map((row) => `| ${row} |`)
-          .join("\n") +
-        "\n\n"
-      );
+      // Serialize cells as Markdown nodes so pipes, backslashes and code spans
+      // retain their meaning without an incomplete second escaping pass.
+      const rows = Array.from(node.querySelectorAll("tr"), row => ({
+        type: "tableRow",
+        children: Array.from(row.children, cell => ({
+          type: "tableCell",
+          children: markdownParser.parse(text(cell).trim()).children.flatMap((block, index) => [
+            ...(index ? [{ type: "html", value: "<br>" }] : []),
+            ...(block.type === "paragraph" ? block.children : [{ type: "text", value: cell.textContent.trim() }]),
+          ]),
+        })),
+      }));
+      return `\n\n${toMarkdown({ type: "table", children: rows }, {
+        extensions: [gfmTableToMarkdown({ tablePipeAlign: false })],
+      })}\n`;
     }
     if (tag === "a") {
       const href = node.getAttribute("href");

@@ -54,11 +54,8 @@ it("F02 keeps ordered string query values with the real public Router", async ()
     await act(async () => {
       fireEvent.click(link);
     });
-    if (path.startsWith("/zh")) {
-      // Switching locale uses a real document URL. JSDOM does not follow ordinary anchors.
-      await act(async () => router.navigate({ to: new URL(link.href).pathname as never, search: router.state.location.search as never }));
-    }
     await waitFor(() => expect(router.state.location.pathname).toBe(path));
+    await waitFor(() => expect(router.state.status).toBe("idle"));
     if (path === "/security")
       await screen.findByRole("heading", { level: 1, name: /Keep credentials out of the agent/ });
     expect(

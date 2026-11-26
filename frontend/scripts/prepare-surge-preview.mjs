@@ -48,7 +48,25 @@ for (const page of release.pages) {
 }
 
 // Directory hosting may append a slash. Normalize it before the public router hydrates.
-const previewScript = `(()=>{const live=${JSON.stringify(liveOrigin)};const app=${JSON.stringify(appPatterns)}.map(p=>new RegExp(p));const isApp=p=>app.some(pattern=>pattern.test(p));const route=location.pathname.replace(/\\/+$/,"")||"/";if(isApp(route)){location.replace(live+route+location.search+location.hash);return}if(route!==location.pathname)history.replaceState(history.state,"",route+location.search+location.hash);document.addEventListener("click",e=>{const a=e.target?.closest?.("a[href]");if(!a)return;const url=new URL(a.href,location.href);if(url.origin===location.origin&&isApp(url.pathname)){e.preventDefault();location.assign(live+url.pathname+url.search+url.hash)}},true)})();`;
+const previewConfig = encodeURIComponent(JSON.stringify({ live: liveOrigin, app: appPatterns }));
+// Keep configuration as inert HTML data; the JavaScript file is always static.
+const previewScript = String.raw`(() => {
+  const { live, app } = JSON.parse(decodeURIComponent(document.documentElement.dataset.staticPreview));
+  const patterns = app.map(pattern => new RegExp(pattern));
+  const isApp = path => patterns.some(pattern => pattern.test(path));
+  const route = location.pathname.replace(/\/+$/, "") || "/";
+  if (isApp(route)) { location.replace(live + route + location.search + location.hash); return; }
+  if (route !== location.pathname) history.replaceState(history.state, "", route + location.search + location.hash);
+  document.addEventListener("click", event => {
+    const anchor = event.target?.closest?.("a[href]");
+    if (!anchor) return;
+    const url = new URL(anchor.href, location.href);
+    if (url.origin === location.origin && isApp(url.pathname)) {
+      event.preventDefault();
+      location.assign(live + url.pathname + url.search + url.hash);
+    }
+  }, true);
+})();`;
 await fs.writeFile(path.join(output, "static-preview.js"), previewScript);
 
 const fallback = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Page not found · NyxID</title><meta name="robots" content="noindex,nofollow"><script src="/static-preview.js"></script><style>body{margin:0;background:#F3F3F0;color:#17171A;font:18px/1.5 system-ui,sans-serif}main{max-width:600px;margin:16vh auto;padding:24px}img{height:28px}h1{font-size:44px;font-weight:500;letter-spacing:-.04em}a{color:inherit;text-underline-offset:4px}</style></head><body><main><a href="/"><img src="/nyxid-coloured-logo-dark.svg" alt="NyxID"></a><h1>Page not found.</h1><p><a href="/">Back to NyxID</a></p></main></body></html>`;
@@ -63,7 +81,8 @@ async function inject(directory) {
     if (entry.isDirectory()) await inject(target);
     else if (entry.name.endsWith(".html")) {
       const html = await fs.readFile(target, "utf8");
-      if (!html.includes('src="/static-preview.js"')) await fs.writeFile(target, html.replace("</head>", '<script src="/static-preview.js"></script></head>'));
+      const configured = html.replace(/<html\b/i, `<html data-static-preview="${previewConfig}"`);
+      await fs.writeFile(target, configured.includes('src="/static-preview.js"') ? configured : configured.replace("</head>", '<script src="/static-preview.js"></script></head>'));
     }
   }
 }

@@ -238,7 +238,11 @@ function jsx(el) {
     attrs.push("onError={s.imageFallback}");
   }
   if (tag === "button" && !el.hasAttribute("data-lang") && !el.hasAttribute("type")) attrs.push('type="button"');
-  if (el.hasAttribute("data-lang")) attrs.push(`href={s.localeHref(${q(el.dataset.lang)})}`);
+  if (el.hasAttribute("data-lang")) {
+    if (el.dataset.lang === "zh") attrs.push('href={s.localeHref("zh")}');
+    else if (el.dataset.lang === "en") attrs.push('href={s.localeHref("en")}');
+    else throw new Error("Unexpected baseline language target");
+  }
   if (cls === "nb-app")
     attrs.push("onMouseEnter={s.stopDemo} onFocusCapture={s.stopDemo}");
   if (id === "burger")

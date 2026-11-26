@@ -100,7 +100,7 @@ export function verifyMarkdownContract(path, markdown, origin = getPublicOrigin(
         ])
       assert.ok(markdown.includes(title), `${path}: missing audience ${title}`);
   if (path === "/") {
-    assert.ok(code.some(value => value.includes("claude mcp add --transport http --scope user") && value.includes("https://nyx-api.chrono-ai.fun/mcp")), "Home: retain the visible MCP setup example");
+    assert.ok(code.some(value => value.trim().split(/\s+/).at(-1) === "https://nyx-api.chrono-ai.fun/mcp" && value.includes("claude mcp add --transport http --scope user")), "Home: retain the visible MCP setup example");
     for (const body of [
       "The pile on your counter, sorted before you wake.",
       "Your agent works in the apps and chats you connect.",

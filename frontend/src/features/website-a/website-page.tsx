@@ -33,9 +33,11 @@ const NyxHomePage = lazy(() => import("./nyx-home/nyx-home-page"));
 function Website({
   children,
   navigationRevision,
+  renderedPath,
 }: {
   children?: ReactNode;
   navigationRevision?: number;
+  renderedPath?: string;
 }) {
   const { mode } = useVisualMotion();
   const publicRef = useRef<HTMLDivElement>(null);
@@ -49,6 +51,9 @@ function Website({
     window.dispatchEvent(new Event("nyxid:public-url-context"));
   }, [location.pathname, location.searchStr, location.hash]);
   const { locale: language, route } = parsePublicPath(location.pathname);
+  // Keep the current page's frame while the next route's loader is pending.
+  // Navigation links still follow the requested URL and its locale.
+  const rendered = parsePublicPath(renderedPath ?? location.pathname);
   const [menu, setMenu] = useState({ revision: navigationRevision, open: false });
   const menuOpen = menu.revision === navigationRevision && menu.open;
   const [filters, setFilters] = useState<Record<string, string>>({
@@ -164,7 +169,7 @@ function Website({
   };
   // The English home page brings its own menu and footer, so it skips this frame.
   // The public site passes it in as children (its router loads it); the app renders it here.
-  if (language === "en" && route === "/") {
+  if (rendered.locale === "en" && rendered.route === "/") {
     return (
       <WebsiteContext.Provider value={state}>
         <Suspense fallback={null}>{children ?? <NyxHomePage />}</Suspense>
@@ -208,13 +213,15 @@ function Website({
 export function WebsitePage({
   children,
   navigationRevision,
+  renderedPath,
 }: {
   children?: ReactNode;
   navigationRevision?: number;
+  renderedPath?: string;
 }) {
   return (
     <VisualMotionProvider>
-      <Website navigationRevision={navigationRevision}>{children}</Website>
+      <Website navigationRevision={navigationRevision} renderedPath={renderedPath}>{children}</Website>
     </VisualMotionProvider>
   );
 }

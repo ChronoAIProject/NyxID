@@ -70,7 +70,10 @@ export function PublicHeader({ home = false, route = "", language = "en", siteHr
             onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) e.currentTarget.open = false; }}
             onKeyDown={(e) => { if (e.key === "Escape") { e.currentTarget.open = false; e.currentTarget.querySelector("summary")?.focus(); } }}>
             <summary className="list-none">{zh ? "了解更多" : "Show more"}<ChevronDown size={14} aria-hidden="true" /></summary>
-            <nav className="public-more-menu" aria-label={zh ? "探索 NyxID" : "Explore NyxID"} onClick={(e) => { if ((e.target as Element).closest("a")) e.currentTarget.closest("details")?.removeAttribute("open"); }}>
+            <nav className="public-more-menu" aria-label={zh ? "探索 NyxID" : "Explore NyxID"} onClick={(e) => {
+              if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+              if ((e.target as Element).closest("a")) e.currentTarget.closest("details")?.removeAttribute("open");
+            }}>
               {primaryPages.map(([path, title, titleZh]) => <SiteLink className="public-more-primary" key={path} href={site(path)} aria-current={route === path ? "page" : route.startsWith(`${path}/`) ? "location" : undefined}><b>{zh ? titleZh : title}</b><ArrowUpRight size={17} aria-hidden="true" /></SiteLink>)}
               {home && <SiteLink className="public-more-home-nyxbot" href={site("/nyxbot")}><span><b>NyxBot</b><small>{zh ? "查看应用与专属助手。" : "See the app and specialists."}</small></span><ArrowUpRight size={17} aria-hidden="true" /></SiteLink>}
               {morePages.map(([path, title, titleZh, detail, detailZh]) => (
@@ -82,7 +85,7 @@ export function PublicHeader({ home = false, route = "", language = "en", siteHr
               <div className="public-more-bottom">
                 <a href={auth("login")}>{zh ? "登录" : "Log in"}</a>
                 <SiteLink href={site("/contact")}>{zh ? "联系" : "Contact"}</SiteLink>
-                {localeHref && <a href={localeHref(zh ? "en" : "zh")} lang={zh ? "en" : "zh-CN"}>{zh ? "EN" : "中文"}</a>}
+                {localeHref && <SiteLink href={localeHref(zh ? "en" : "zh")} lang={zh ? "en" : "zh-CN"}>{zh ? "EN" : "中文"}</SiteLink>}
               </div>
             </nav>
           </details>
@@ -121,7 +124,7 @@ export function PublicFooter({ language = "en", siteHref, localeHref, showStatus
             <a href={site("/terms")}>{zh ? "服务条款" : "Terms"}</a>
             <a href={site("/privacy")}>{zh ? "隐私政策" : "Privacy"}</a>
             {STATUS_ENABLED && showStatus && websiteRelease.footerStatus && <a data-website-feature="footer-status" href={websiteRelease.footerStatus} target="_blank" rel="noopener noreferrer">{zh ? "服务状态" : "Status"}</a>}
-            {localeHref && <a href={localeHref(zh ? "en" : "zh")} lang={zh ? "en" : "zh-CN"}>{zh ? "English" : "中文"}</a>}
+            {localeHref && <SiteLink href={localeHref(zh ? "en" : "zh")} lang={zh ? "en" : "zh-CN"}>{zh ? "English" : "中文"}</SiteLink>}
           </nav>
         </div>
       </div>

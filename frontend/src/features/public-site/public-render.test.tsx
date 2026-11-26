@@ -5,6 +5,16 @@ import { renderPage } from "../../../scripts/public-render";
 import { metadataHead, PUBLIC_ORIGIN } from "./metadata";
 import { publicationPath } from "./publication";
 describe("window-free public renderer", () => {
+  it("keeps closing script text inside inert JSON-LD data", async () => {
+    const { meta } = await renderPage("/security", async () => "");
+    const payload = '</script><SCRIPT>alert("example")</SCRIPT>';
+    const head = metadataHead({ ...meta, title: payload, description: payload });
+    const data = head.match(/<script data-public-head type="application\/ld\+json">([\s\S]*?)<\/script>/i)?.[1];
+    expect(data).toBeDefined();
+    expect(data).not.toContain("<");
+    expect(JSON.parse(data!).name).toBe(payload);
+    expect(head.match(/<script(?:\s|>)/gi)).toHaveLength(1);
+  });
   it.each(["/", "/security", "/solutions/help-desk"])(
     "renders %s in two locales with real body and reciprocal head",
     async (route) => {
@@ -27,7 +37,7 @@ describe("window-free public renderer", () => {
         expect(html).not.toContain("<!--$!-->");
         expect(meta.locale).toBe(locale);
         expect(meta.description.length).toBeGreaterThan(20);
-        expect(html).not.toMatch(/<script(?:\s|>)/);
+        expect(html).not.toMatch(/<script(?:\s|>)/i);
         const head = metadataHead(meta);
         expect(head).toContain(`href="${PUBLIC_ORIGIN}${path}"`);
         expect(head).toContain('hreflang="zh-Hans"');

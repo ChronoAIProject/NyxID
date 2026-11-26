@@ -1,4 +1,7 @@
 import { expect, it } from "vitest";
+import { unified } from "unified";
+import remarkParse from "remark-parse";
+import remarkGfm from "remark-gfm";
 // @ts-expect-error Build-only module.
 import { semanticMarkdown } from "../scripts/public-content.mjs";
 it("retains table columns, code whitespace, links, images and ordered list meaning", () => {
@@ -16,4 +19,16 @@ it("retains table columns, code whitespace, links, images and ordered list meani
   expect(md).toContain("![Credential boundary]");
   expect(md).toContain("[reference](<https://nyx.chrono-ai.fun/docs>)");
   expect(md).not.toContain("private panel");
+});
+
+it("round-trips backslashes and pipes in table text and inline code", () => {
+  const md = semanticMarkdown(
+    String.raw`<main><h1>Table escapes</h1><table><tr><th>Plain</th><th>Code</th></tr><tr><td>C:\tools|work</td><td><code>a\b|c</code></td></tr></table></main>`,
+    { path: "/docs/example", locale: "en", title: "Table escapes" }, "revision", "https://nyx.chrono-ai.fun",
+  );
+  const tree = unified().use(remarkParse).use(remarkGfm).parse(md);
+  const table = tree.children.find(node => node.type === "table");
+  if (table?.type !== "table") throw new Error("Missing semantic table");
+  expect(table.children[1]!.children.map(cell => cell.children.map(node => "value" in node ? node.value : "").join("")))
+    .toEqual([String.raw`C:\tools|work`, String.raw`a\b|c`]);
 });
