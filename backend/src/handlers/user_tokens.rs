@@ -1284,17 +1284,12 @@ pub async fn preview_connector_continuation(
     }))
 }
 
-#[derive(Serialize)]
-pub struct ConnectorContinuationResult {
-    return_url: String,
-}
-
 pub async fn confirm_connector_continuation(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(id): Path<String>,
-    Json(body): Json<ConnectorConfirmation>,
-) -> AppResult<Json<ConnectorContinuationResult>> {
+    Form(body): Form<ConnectorConfirmation>,
+) -> AppResult<axum::response::Response> {
     super::login_client_context::require_first_party_human(&auth_user)?;
     if !body.confirm {
         return Err(AppError::ValidationError(
@@ -1334,9 +1329,14 @@ pub async fn confirm_connector_continuation(
                 .join("/providers/callback?status=error")
                 .expect("local URL")
         });
-    Ok(Json(ConnectorContinuationResult {
-        return_url: return_url.to_string(),
-    }))
+    // End the form submission before a custom-scheme or cross-origin
+    // navigation. The interstitial rechecks the destination at the sink.
+    Ok(super::oauth_consent_response::redirect_interstitial(
+        return_url.as_str(),
+        "Returning to the application",
+        "Redirecting to the application…",
+        0,
+    ))
 }
 
 async fn fail_callback_placeholders(
@@ -4422,25 +4422,31 @@ mod tests {
             State(state.clone()),
             other_user,
             Path(id.to_string()),
-            Json(ConnectorConfirmation { confirm: true }),
+            Form(ConnectorConfirmation { confirm: true }),
         )
         .await;
         assert!(matches!(denied, Err(AppError::NotFound(_))));
 
         // The provider is intentionally absent. The original mobile client
         // must get the fixed exchange error when the initiator confirms.
-        let Json(completed) = confirm_connector_continuation(
+        let completed = confirm_connector_continuation(
             State(state),
             crate::test_utils::test_auth_user(&user_id),
             Path(id.to_string()),
-            Json(ConnectorConfirmation { confirm: true }),
+            Form(ConnectorConfirmation { confirm: true }),
         )
         .await
         .unwrap();
-        assert_eq!(
-            completed.return_url,
-            "nyxid://services/oauth-return?status=error&code=exchange_failed"
+        assert_eq!(completed.status(), axum::http::StatusCode::OK);
+        assert_eq!(completed.headers()[header::CACHE_CONTROL], "no-store");
+        let html = axum::body::to_bytes(completed.into_body(), 16_384)
+            .await
+            .unwrap();
+        let html = std::str::from_utf8(&html).unwrap();
+        assert!(
+            html.contains("nyxid://services/oauth-return?status=error&amp;code=exchange_failed")
         );
+        assert!(!html.contains("test-provider-code"));
     }
 
     #[tokio::test]
