@@ -404,7 +404,7 @@ export class NyxAgentTransport {
     } while (cursor);
     if (mutationRevision !== this.mutationRevision) return this.getConversations(agentId);
     for (const [id, turn] of this.live) {
-      if (id !== "draft" && (!agentId || turn.conversation.agent?.id === agentId)) {
+      if (isNyxAgentConversationId(id) && (!agentId || turn.conversation.agent?.id === agentId)) {
         const current = rows.get(id);
         if (current) {
           turn.conversation = { ...turn.conversation, title: current.title, title_source: current.title_source };
@@ -912,16 +912,18 @@ export class NyxAgentTransport {
       readonly adoptExisting?: boolean;
       readonly retryOf?: string;
       readonly acknowledgementId?: string;
+      /** Isolate a handoff's optimistic state from the composer's draft. */
+      readonly clientDraftKey?: `handoff:${string}`;
     } = {},
   ) {
     const generation = this.identity();
-    if (this.isRunning(id)) throw new Error("A turn is already active.");
+    if (!id && options.clientDraftKey ? this.live.has(options.clientDraftKey) : this.isRunning(id)) throw new Error("A turn is already active.");
     if ((!text.trim() && !options.attachmentIds?.length && !options.attachments?.length && !options.retryOf) || [...text].length > 32768) {
       throw new Error("Message must contain 1 to 32768 characters.");
     }
     const controller = new AbortController();
     this.requests.add(controller);
-    let key = id ?? "draft";
+    let key = id ?? options.clientDraftKey ?? "draft";
     const now = new Date().toISOString();
     const model = (!id ? options.model : undefined) ?? this.getModel(id);
     const userMessageId = crypto.randomUUID();
@@ -1023,7 +1025,7 @@ export class NyxAgentTransport {
             ...(options.acknowledgementId ? { acknowledgement_id: options.acknowledgementId } : {}),
             ...(options.attachmentIds?.length ? { attachment_ids: options.attachmentIds } : {}),
           },
-          headers: { Accept: "text/event-stream", "Accept-Language": assistantTitleLanguage() },
+          headers: { Accept: "text/event-stream", "Accept-Language": assistantTitleLanguage(), "X-NyxID-Chat-Capabilities": "nyxbot-handoff-v1" },
           signal: controller.signal,
           creditsDenial: {
             key: `assistant:nyxagent:${key}:${userMessageId}`,

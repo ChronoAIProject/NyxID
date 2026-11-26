@@ -17,6 +17,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   memo,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -38,6 +39,7 @@ import {
   X,
 } from "lucide-react";
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
+import { NyxBotHandoffContext } from "@/lib/assistant/nyxbot-handoff-context";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { ArtifactDelivery } from "@/components/assistant/blocks/artifact-delivery";
@@ -737,6 +739,7 @@ export function ChatMessageBubble({
 }) {
   useUiTranslation();
   const streaming = message.status === "streaming";
+  const handoffController = useContext(NyxBotHandoffContext);
   const capacityNote = streaming && message.systemNote === "capacity_wait";
   const [retrying, setRetrying] = useState(false);
   const [retryConfirmed, setRetryConfirmed] = useState(false);
@@ -869,7 +872,7 @@ export function ChatMessageBubble({
         ) : null}
         {capacityNote ? (
           <p role="note" className="text-14 text-foreground">{CAPACITY_ACKNOWLEDGEMENT}</p>
-        ) : content ? (contentOverride ?? <TextBlock text={content} streaming={streaming} />) : null}
+        ) : content ? (contentOverride ?? <TextBlock text={content} streaming={streaming} handoffMessageId={message.id} allowHandoff={handoffController?.eligible === true && message.role === "assistant" && message.status === "complete" && message.origin === "user" && !message.via} />) : null}
         {message.status === "error" && errorMessage ? (
           <div role={billing ? "alert" : undefined} className={cn("mt-2", STATUS_CARD_MAX_W, BANNER_FRAME, BANNER_DESTRUCTIVE)}>
             <div className={BANNER_ROW}>

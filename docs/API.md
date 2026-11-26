@@ -9377,6 +9377,14 @@ again. With the authoring flag off or fleet readiness blocked, PUT returns
 HTTP 403 `org_agent_access_authoring_unavailable`. The Admin can still read
 the saved lists. See [organization specialist agents](ORG_AGENTS.md).
 
+## Assistant setup handoff presentation
+
+The assistant conversation DTO and client-capability header are defined in the
+[engine API contract](chat/08-nyxagent-engine.md#browser-routes) and
+[session context contract](chat/08-nyxagent-engine.md#session-instructions-and-per-turn-context).
+The [browser handoff and setup contract](chat/05-frontend-ui.md#specialist-setup-handoffs)
+defines the user action and completion flow.
+
 ## Owner NyxBot invocations
 
 These endpoints let a first-party owner account session or access token drive

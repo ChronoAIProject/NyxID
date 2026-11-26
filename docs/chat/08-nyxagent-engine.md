@@ -1056,9 +1056,15 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 | `GET /models` | no body | `[{id,label,available,description?,input_modalities?}]` |
 
 Conversation DTO: `id,title,model,access_mode,created_at,last_message_at,message_count,
-pending_acknowledgements,active_turn,context_reset_at,role,agent,pending_events,channel`.
+pending_acknowledgements,active_turn,context_reset_at,role,agent,pending_events,channel,handoff_eligible`.
 `access_mode` is always `full`; `agent` is `{id,kind,name,destroyed}` (a destroyed
 agent's threads are read-only).
+`handoff_eligible` is a server-derived presentation flag for private personal
+specialist threads. Channel, personal or collaboration group, shared,
+organization-agent, native platform-thread, guest, guest-model-setup and
+invocation-controlled threads are ineligible. The flag
+grants no execution authority. The browser's per-message activation and artifact
+format are defined in [Specialist setup handoffs](05-frontend-ui.md#specialist-setup-handoffs).
 `active_turn` is null or `{turn_id,started_at,activities,response_id,steering_allowed,stop_requested}`.
 Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities,attachments`,
 The optional `steering` field is `{client_request_id,outcome,code}`.
@@ -1707,6 +1713,7 @@ separate stable session instructions from volatile turn facts:
 | Contributor | Placement |
 | --- | --- |
 | NyxBot/system, specialist and scheduling prompts | Stable instructions |
+| Specialist setup-handoff guidance, gated by thread-stable privacy properties | Stable instructions |
 | Agent handle, role description, display name and persona | Stable instructions |
 | Pinned skill metadata | Stable instructions
 | Agent memory notes | Per-turn input (each turn's first request and fresh-session recovery); omitted for guests |
@@ -1720,9 +1727,21 @@ separate stable session instructions from volatile turn facts:
 | Group participation and speaker context | Input context |
 | Published voice results since the previous user message | Input context; omitted for guests |
 | `turn.note`, sender identity, chat-app/asked-from/reply-channel location | Input context |
+| Current setup-handoff client capability | Input context |
 | Current upload listing, expired uploads and image fallback notices | Input context |
 | Event-turn payload and automatic continuation request | Input, as before |
 | Bounded prior-history recap | Initial instructions after a reset only |
+
+First-party human clients advertise setup-card support on `POST /turns` through
+`X-NyxID-Chat-Capabilities: nyxbot-handoff-v1`; private CORS allows this header.
+The handler records the capability in the admitted turn. An eligible direct
+user turn supplies the exact fact `NyxID client capability: nyxbot-handoff-v1.`
+in its context only when it has no voice, invocation, trigger, delegation,
+platform/adapter origin, asked-from chat, reply channel or additional delivery
+target. The raw note marker is stripped from other turn notes. The stable guidance requires
+that current fact before offering an artifact; switching origin or client
+capability does not change the stable instruction fingerprint. Clients that do
+not advertise support receive ordinary setup guidance.
 
 `nyxagent_instruction_binding` is an additive, serde-defaulted, server-only
 conversation field. It binds a keyed fingerprint, marker and audience to the

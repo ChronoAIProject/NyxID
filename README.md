@@ -92,6 +92,8 @@ without rerunning the Sandbox. See [generated files and rollout](docs/chat/10-up
 
 ## What NyxID Does
 
+- **Continue specialist setup with NyxBot** — [setup handoffs](docs/chat/05-frontend-ui.md#specialist-setup-handoffs) and [in-app setup](docs/chat/05-frontend-ui.md#platform-setup-and-navigation-over-chat) keep supported account setup journeys connected to chat.
+
 - **Track delegated automation work** — optional coordinator completion keeps scheduled and webhook assistant runs waiting for specialist assignments and group handoffs, resumes the coordinator with results, and shows a completion deadline and Cancel action in run history. Enrollment is disabled by default and requires fleet readiness. See [NyxBot schedules](docs/NYXBOT_SCHEDULES.md).
 
 - **Allocate repeatable credits** — admin Credits supports exact one-time or recurring allocations, optional shared-total service ceilings, and reclaim of each allocation's unspent remainder. Existing free-unit allowances stay separate. New policy authoring is off until all billing writers are upgraded; see [credit allocation accounting and rollout](docs/BILLING_EXACT_ACCOUNTING.md#allocation-local-service-ceilings-and-reclaim).
