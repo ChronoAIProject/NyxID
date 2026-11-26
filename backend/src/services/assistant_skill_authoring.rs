@@ -474,6 +474,16 @@ pub async fn create(
     let binding = match binding {
         Ok(binding) => binding,
         Err(failure) => {
+            if body.base_skill.is_some()
+                && failure.code == Some(review::PublicationFailureCode::OrnnUnavailable)
+                && let Some(diagnostic) =
+                    crate::errors::skill_publication::SkillPublicationFailure::registry_unavailable(
+                        "source_skill_unavailable",
+                        failure.upstream_status,
+                    )
+            {
+                return Err(diagnostic.into());
+            }
             // Keep the reserved proposal retryable: another caller may be
             // preparing the same generation, or this worker may be retried.
             if body.base_skill.is_some()
@@ -495,7 +505,10 @@ pub async fn create(
         }
     };
     if automatic {
-        return publish_automatically(state, chat, &agent, id, &binding, reader).await;
+        return publish_automatically_from_origin(
+            state, chat, &agent, id, &binding, reader, None, true,
+        )
+        .await;
     }
     let card = claims::finalize(state, &reservation, &binding, chat.approval_options()).await?;
     // A recovered draft can retain a different review conversation. Link this
@@ -810,6 +823,7 @@ async fn submit_owner_draft(
             &binding,
             reader,
             Some(&app_origin),
+            false,
         )
         .await;
     }
@@ -852,7 +866,7 @@ pub async fn publish_automatically(
     binding: &Value,
     reader: &impl super::agent_skill_service::OrnnReader,
 ) -> AppResult<Value> {
-    publish_automatically_from_origin(state, chat, agent, id, binding, reader, None).await
+    publish_automatically_from_origin(state, chat, agent, id, binding, reader, None, false).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -884,6 +898,7 @@ pub async fn renew_automatically(
         binding,
         reader,
         Some(&origin),
+        false,
     )
     .await
 }
@@ -897,6 +912,7 @@ async fn publish_automatically_from_origin(
     binding: &Value,
     reader: &impl super::agent_skill_service::OrnnReader,
     origin: Option<&acks::RequestOrigin>,
+    draft_tool: bool,
 ) -> AppResult<Value> {
     let proposal = state
         .db
@@ -943,7 +959,14 @@ async fn publish_automatically_from_origin(
         binding,
         &super::agent_skill_service::OwnerPublicationReader(reader),
     ))
-    .await?;
+    .await
+    .map_err(|error| {
+        if draft_tool {
+            error
+        } else {
+            error.with_legacy_skill_registry_error()
+        }
+    })?;
     let url = format!(
         "{}/assistant?agent={}&proposal={}",
         state.config.frontend_url.trim_end_matches('/'),

@@ -409,6 +409,19 @@ durable proposal keeps `publish_uncertain`. Check Ornn directly if there is
 no review card. Recognized Ornn refusals carry the specific reason and either
 `check_access` or `revise_draft`.
 
+In the native drafting tool, a 5xx from the initial source metadata or latest
+version lookup for an improvement returns `source_skill_unavailable`. A 5xx
+during mandatory validation before the write returns `ornn_unavailable`. Both
+carry the HTTP status and `retry_later`, since NyxID has not saved a new version.
+The optional preflight remains best effort. A 5xx from the initial verification
+metadata lookup after Ornn accepts the write returns `verify_failed` and
+`check`. NyxID has not attached the version. The owner can inspect the existing
+version in Ornn, and NyxID reconciles the operation without resending the write.
+The later package preview reads still report a generic unavailable error. The
+drafting agent reports setup as incomplete for the typed failures, and web turn
+details display the fixed reason and recovery step without provider messages or
+draft contents.
+
 For a create with a missing response, **Check again** searches the approving
 person's private skills. When keyword search has no exact name or spans several
 pages, NyxID also reads the canonical skill name at the reviewed version. It
