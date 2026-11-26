@@ -9,6 +9,8 @@ use super::*;
 pub(super) enum Answer {
     NotRequested,
     NotFound,
+    TerminalRefusalNotFound,
+    CreateFencedAbsent,
     MatchingRecord,
     DifferentVersion,
     AuthRefused,

@@ -93,6 +93,7 @@ export const channelBotHealthSchema = z.object({
     outcome: z.enum(["not_sent", "rejected", "unknown"]),
     http_status: z.number().int().nullable(),
     field: z.string().nullable(),
+    problem_code: z.enum(["invalid_request", "provider_rejected", "not_authenticated", "forbidden", "channel_not_found", "conflict", "rate_limited", "provider_unavailable", "provider_busy", "draining", "internal"]).nullish(),
   }).optional(),
   nyxbot_last_error: z.string().nullable().optional(),
   nyxbot_restore_state: z.string().optional(),

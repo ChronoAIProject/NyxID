@@ -172,6 +172,138 @@ async fn release_crash_boundaries_reservation_dispatch_post_attachment_and_activ
     }
 }
 
+#[test]
+fn terminal_provider_absence_preserves_original_owner_issuer_and_legacy_evidence_fences() {
+    crate::test_utils::run_native_journey_test("provider_absence_scope", || async {
+        for mode in [
+            "original",
+            "historical",
+            "issuer_overlap",
+            "inactive_owner",
+            "binding_changed",
+        ] {
+            let (mut state, row, _, server, upstream) = fixture("provider_absence_scope").await;
+            let _upstream = tokio_util::task::AbortOnDropHandle::new(upstream);
+            let reserved = reserve(&state, &row).await;
+            assert!(
+                release::record_provider_refusal(&state.db, &row, &reserved.id)
+                    .await
+                    .is_ok()
+            );
+            assert!(!current(&state, &reserved.id).await.create_provider_refused);
+            release::dispatch(&state.db, &reserved).await.unwrap();
+            let mut foreign = row.clone();
+            foreign.user_id = Uuid::new_v4().to_string();
+            assert!(
+                release::record_provider_refusal(&state.db, &foreign, &reserved.id)
+                    .await
+                    .is_ok()
+            );
+            assert!(!current(&state, &reserved.id).await.create_provider_refused);
+            if mode != "historical" {
+                release::record_provider_refusal(&state.db, &row, &reserved.id)
+                    .await
+                    .unwrap();
+            }
+            release::retire_attempt(&state, &reserved.id, ReleaseReason::SetupFailed)
+                .await
+                .unwrap();
+            // Older workers/rows have no additive evidence flag. A row's error
+            // code alone must never make an uncertain CREATE conclusive.
+            if mode == "historical" {
+                state.db.collection::<Document>(RELEASES).update_one(doc!{"_id":&reserved.id},
+                    doc!{"$unset":{"create_provider_refused":""},"$set":{"last_error":"gateway_provider_not_registered"}}).await.unwrap();
+            }
+            if mode == "issuer_overlap" {
+                state.config.domain_aliases.base_urls = vec![state.config.jwt_issuer.clone()];
+                state.config.jwt_issuer = "https://new.example".into();
+            }
+            if mode == "inactive_owner" {
+                state
+                    .db
+                    .collection::<Document>(USERS)
+                    .update_one(doc! {"_id":OWNER}, doc! {"$set":{"is_active":false}})
+                    .await
+                    .unwrap();
+            }
+            if mode == "binding_changed" {
+                state
+                    .db
+                    .collection::<Document>(RELEASES)
+                    .update_one(
+                        doc! {"_id":&reserved.id},
+                        doc! {"$set":{"binding_id":"bnd_other"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            Mock::given(method("GET"))
+                .and(path(format!("/channel-records/{}", reserved.id)))
+                .respond_with(
+                    ResponseTemplate::new(404)
+                        .set_body_json(json!({"status":404,"code":"channel_not_found"})),
+                )
+                .expect(if mode == "inactive_owner" { 0 } else { 1 })
+                .mount(&server)
+                .await;
+            if mode == "original" {
+                Mock::given(method("GET"))
+                    .and(path("/channel-records/cancel-create-capability"))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(json!({"contract_version":1})),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                Mock::given(method("POST")).and(path(format!("/channel-records/{}/cancel-create",reserved.id)))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({"contract_version":1,"status":"creation_fenced_absent",
+                        "record_id":reserved.record_id,"owner":{"issuer":reserved.creator_issuer,"kind":"human","subject":OWNER},
+                        "provider":{"slug":"nyxbot","binding_id":reserved.binding_id}}))).expect(1).mount(&server).await;
+            }
+            assert_eq!(
+                execute(&state, &reserved.id).await,
+                mode == "original",
+                "{mode}"
+            );
+            let stored = current(&state, &reserved.id).await;
+            assert_eq!(
+                stored.state == ReleaseState::Settled,
+                mode == "original",
+                "{mode}"
+            );
+            assert_eq!(
+                stored.resolution.as_deref(),
+                if mode == "original" {
+                    Some("missing")
+                } else {
+                    None
+                },
+                "{mode}"
+            );
+            for request in server.received_requests().await.unwrap() {
+                assert!(
+                    request.method == "GET" || (mode == "original" && request.method == "POST")
+                );
+                let bearer = request
+                    .headers
+                    .get("authorization")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix("Bearer ")
+                    .unwrap();
+                let claims =
+                    crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, bearer)
+                        .unwrap();
+                assert_eq!(claims.sub, OWNER);
+                assert_eq!(claims.iss, state.config.jwt_issuer);
+            }
+            server.verify().await;
+            state.db.drop().await.unwrap();
+        }
+    });
+}
+
 #[tokio::test]
 async fn release_uncertain_create_404_escalates_then_late_record_is_attributable() {
     let (state, row, _, server, upstream) = fixture("release_uncertain").await;

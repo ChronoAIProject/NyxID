@@ -1945,14 +1945,38 @@ these nested constraints in addition to the management request schema, uses the
 registered gateway client's real introspection path, pairs the owner and executes
 a personal specialist turn for both `telegram-new` and `telegram`.
 
-HTTP 400 alone does not prove that a channel was never saved. CMA saves an
-owner-reserved record and mutation intent before provider binding. In particular,
-`invalid_request` with exact detail `nyxbot` means the NyxBot provider was not
-registered; `provider_rejected` / `invalid_binding` can also arrive after that
-reservation. These and unknown 400s retain the existing release obligation for
-record-ID reconciliation and the admin release review API. Only known pre-effect
-validation/authentication refusals settle as `not_created`. Local authority and
-keys are retired independently of remote cleanup availability.
+HTTP 400 alone does not prove that a channel was never saved. An
+`invalid_request` with trimmed exact detail `nyxbot`, `unknown provider: nyxbot`
+or the supported legacy message `provider is not registered` identifies the
+missing provider; arbitrary provider prose and validation pointers do not.
+CMA `976b30f30d6a` checks the provider allowlist before reserving a fresh record.
+CMA `70761e9b` reserves the record and mutation intent before this check;
+existing reservations can also survive a retry on a newer gateway.
+`provider_rejected` (including the upstream `invalid_binding` refusal) and
+unknown 400s retain release custody. Known pre-effect validation/authentication
+refusals settle as `not_created`. Local authority and keys retire independently
+of remote cleanup availability.
+
+For an exact terminal CREATE missing-provider response, NyxID records
+`create_provider_refused` on the original provisional obligation. Losing its
+setup fence writes no evidence and preserves the actual refusal. A
+creator-authenticated GET of the exact canonical record ID returning CMA's
+`status:404` / `code:channel_not_found` is only a candidate for absence proof:
+CMA's lookup derives the record URL from its current origin and checks the saved
+sealed channel pointer; origin/sealing changes can conceal a retained record.
+The release worker requires `GET /channel-records/cancel-create-capability`
+with `contract_version:1`, followed by the exact record's `POST .../cancel-create`
+and a `creation_fenced_absent` receipt matching the captured record, human owner,
+issuer, provider and binding. This record-store protocol checks retained records
+independently of the current CMA origin, refuses pending creates, and fences late
+writers under CMA's verified writer floor. Read-only release inspection never
+performs that POST. A present record follows ordinary identity/version-fenced
+cleanup or review. Malformed receipts, missing/unsupported capability, read or
+transport failures, historical row errors and uncertain POSTs cannot use this
+terminal-refusal exception. Older CMA builds, including `976b30f30d6a`, lack the
+cancellation protocol: even a genuinely absent record retains its obligation for
+the existing review/recovery process. This does not block repaired owner retries.
+No optional replay advertisement is required or treated as absence evidence.
 
 The shared `nyxbot_channel_connection_service` owns connection preflight,
 transactional bot-generation capture, credential allocation and setup diagnostics.
@@ -1962,8 +1986,10 @@ no credential context marker. Direct Meta connections use the same orchestration
 with their live default-route proof, repair fences and committed guest policy.
 
 Failed Telegram connection health surfaces a bounded last-attempt code and
-allowlisted operation, HTTP status and validation pointer, never remote detail
-prose, submitted values, URLs or credentials. A configuration refusal records
+allowlisted operation, HTTP status, management problem code and validation
+pointer, never remote detail prose, submitted values, URLs or credentials.
+`outcome:rejected` describes the observed HTTP call, not proof that CMA saved no
+record; release custody is independent. A configuration refusal records
 `configuration` / `not_sent` without allocating route or agent credentials.
 Health does not probe whether an administrator has since fixed the dependency;
 reconnect performs the next attempt. Active, pending and disconnected current
@@ -1980,14 +2006,25 @@ only with its exact still-active route owned by the current bot owner and bot ID
 without `retired_by_transfer`; transfer retires all prior routes. This preserves
 valid active connections created after transfer by older binaries while hiding
 pre-transfer failures and routes, including a transfer away and back. Health
-eligibility does not grant execution authority. The optional `recommendation_cause`
-is emitted only when gateway setup advice actually wins the recommendation;
+eligibility does not grant execution authority. The page-scoped history read and
+initial sort use `nyxbot_health_latest`. Transferred unversioned
+candidates alone enter the route lookup branch; versioned rows and other
+platforms do not. Route checks precede legacy selection so a newer retired
+route cannot hide an eligible older binding. Each branch emits at most one row
+per requested bot before their final merge; lookup work depends only on the
+eligible legacy history, not all history in a mixed page. The optional
+`recommendation_cause` is emitted only when gateway setup advice actually wins the recommendation;
 clients use it for localization and retain server text for older responses.
 
-The Unicode-byte mismatch and missing-provider failure have each been reproduced
-against CMA `70761e9b` in local review. Neither establishes which condition caused
-the November 23 staging attempts without their gateway trace or configuration
-snapshot. No production delivery assertion follows from the local fixtures.
+The November 23 staging incident is attributed to the missing `nyxbot` provider
+in [cma-infra#140](https://github.com/ChronoAIProject/cma-infra/issues/140).
+[cma-infra#142](https://github.com/ChronoAIProject/cma-infra/pull/142) supplies the
+provider configuration; the incident's owner follow-up confirms a staging link
+to the default NyxBot, owner pairing and Telegram reply. It does not establish a
+staging personal-specialist turn. The Unicode byte-limit failure is independently
+reproduced against CMA `70761e9b` in local review; it is not the attributed
+staging cause. Local fixtures verify request, authority and cleanup contracts
+without asserting production delivery.
 
 An exact known missing-provider refusal applies a 60-second backoff from the
 attempt's start time, scoped to the current owner and generation. It allocates

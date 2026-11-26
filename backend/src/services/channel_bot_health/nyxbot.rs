@@ -15,6 +15,7 @@ pub struct SetupDiagnostic {
     pub outcome: &'static str,
     pub http_status: Option<u16>,
     pub field: Option<&'static str>,
+    pub problem_code: Option<&'static str>,
 }
 
 impl SetupDiagnostic {
@@ -64,6 +65,9 @@ impl SetupDiagnostic {
                 "unknown"
             },
             http_status: response.and_then(|r| Self::status(r.status)),
+            problem_code: response
+                .and_then(|r| r.body["code"].as_str())
+                .and_then(crate::services::nyxbot_gateway_service::setup_problem_code),
             // CMA's Invalid(ValidationError) serializes "{pointer}: {message}".
             // Only that exact pointer position, under invalid_request/400, counts.
             field: response
@@ -88,6 +92,10 @@ impl SetupDiagnostic {
                 .and_then(|s| u16::try_from(s).ok())
                 .and_then(Self::status),
             field: doc.get_str("field").ok().and_then(Self::field),
+            problem_code: doc
+                .get_str("problem_code")
+                .ok()
+                .and_then(crate::services::nyxbot_gateway_service::setup_problem_code),
         })
     }
 }
@@ -153,6 +161,19 @@ pub(crate) struct NyxbotHealthRow {
     #[serde(default)]
     pub(crate) gateway_not_received:
         Option<crate::services::channel_bot_health::MissingGatewayEvent>,
+}
+
+fn select_latest(owners: &bson::Document, limit: usize) -> Vec<bson::Document> {
+    vec![
+        doc! {"$group": {"_id": "$channel_bot_id", "row": {"$first": "$$ROOT"},
+        "gateway_not_received": {"$max": "$gateway_not_received"},
+        "live": {"$max":{"$cond":[{"$and":[
+            {"$ne":[{"$type":{"$getField":{"field":"$channel_bot_id","input":{"$literal":&owners}}}},"missing"]},
+            {"$in":["$status",["pending","active"]]}
+        ]},{"created_at":"$created_at","id":"$_id","row":"$$ROOT"},null]}}}},
+        doc! {"$replaceWith": {"$mergeObjects": [{"$ifNull":["$live.row","$row"]}, {"gateway_not_received": "$gateway_not_received"}]}},
+        doc! {"$limit": limit as i64},
+    ]
 }
 
 pub(crate) async fn latest_nyxbot_rows(
@@ -225,28 +246,34 @@ pub(crate) async fn latest_nyxbot_rows(
         .iter()
         .any(|bot| owners.contains_key(&bot.id) && bot.ownership_version > 0)
     {
-        pipeline.extend([
-            // Transferred legacy bindings have no generation. A still-live route
-            // proves they were created after transfer; transfer retires every old
-            // route even when the bot later returns to the same owner.
+        // Keep the route join out of normal/versioned histories, including mixed
+        // admin pages. Each branch emits at most one row per requested bot. The
+        // legacy branch must validate routes before choosing a row: a newer
+        // retired legacy route must not hide an older eligible live binding.
+        let mut current = vec![doc! {"$match":{"legacy_needs_route":{"$ne":true}}}];
+        current.extend(select_latest(&owners, bot_ids.len()));
+        let mut legacy = vec![
+            doc! {"$match":{"legacy_needs_route":true}},
             doc! {"$lookup":{"from":crate::models::channel_conversation::COLLECTION_NAME,
-                "localField":"legacy_route_id","foreignField":"_id","as":"legacy_route",
-                "pipeline":[{"$match":{"is_active":true,"retired_by_transfer":{"$ne":true}}},
-                    {"$project":{"_id":1,"user_id":1,"channel_bot_id":1}}]}},
-            doc! {"$match":{"$expr":{"$or":[{"$ne":["$legacy_needs_route",true]},
-                {"$and":[{"$eq":[{"$arrayElemAt":["$legacy_route.user_id",0]},{"$ifNull":["$bot_owner_id",{"$ifNull":["$org_specialist.org_id","$user_id"]}]}]},
-                    {"$eq":[{"$arrayElemAt":["$legacy_route.channel_bot_id",0]},"$channel_bot_id"]}]}
+            "localField":"legacy_route_id","foreignField":"_id","as":"legacy_route",
+            "pipeline":[{"$match":{"is_active":true,"retired_by_transfer":{"$ne":true}}},
+                {"$project":{"_id":1,"user_id":1,"channel_bot_id":1}}]}},
+            doc! {"$match":{"$expr":{"$and":[
+                {"$eq":[{"$arrayElemAt":["$legacy_route.user_id",0]},{"$ifNull":["$bot_owner_id",{"$ifNull":["$org_specialist.org_id","$user_id"]}]}]},
+                {"$eq":[{"$arrayElemAt":["$legacy_route.channel_bot_id",0]},"$channel_bot_id"]}
             ]}}},
+        ];
+        legacy.extend(select_latest(&owners, bot_ids.len()));
+        pipeline.extend([
+            doc! {"$facet":{"current":current,"legacy":legacy}},
+            doc! {"$project":{"rows":{"$concatArrays":["$current","$legacy"]}}},
+            doc! {"$unwind":"$rows"},
+            doc! {"$replaceWith":"$rows"},
+            doc! {"$sort":{"channel_bot_id":1,"created_at":-1,"_id":-1}},
         ]);
     }
+    pipeline.extend(select_latest(&owners, bot_ids.len()));
     pipeline.extend([
-            doc! {"$group": {"_id": "$channel_bot_id", "row": {"$first": "$$ROOT"},
-                "gateway_not_received": {"$max": "$gateway_not_received"},
-                "live": {"$max":{"$cond":[{"$and":[
-                    {"$ne":[{"$type":{"$getField":{"field":"$channel_bot_id","input":{"$literal":&owners}}}},"missing"]},
-                    {"$in":["$status",["pending","active"]]}
-                ]},{"created_at":"$created_at","id":"$_id","row":"$$ROOT"},null]}}}},
-            doc! {"$replaceWith": {"$mergeObjects": [{"$ifNull":["$live.row","$row"]}, {"gateway_not_received": "$gateway_not_received"}]}},
             doc! {"$project": {
                 "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1, "binding_id": 1, "platform": 1, "transport": 1,
                 "status": 1, "last_error": 1, "setup_diagnostic": 1, "org_specialist": 1,

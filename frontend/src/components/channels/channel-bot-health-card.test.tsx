@@ -413,7 +413,7 @@ it.each([
 it.each(["telegram", "telegram-new"])("shows the last gateway refusal without changing verification truth for %s", async (platform) => {
   mockGet.mockResolvedValue(health({ platform, can_write: false, status: "active", webhook_registered: true,
     nyxbot_status: "failed", nyxbot_last_error: "gateway_rejected_request", recommendation_cause: "gateway_rejected_request",
-    nyxbot_setup_diagnostic: {operation:"create",outcome:"rejected",http_status:400,field:"/name"},
+    nyxbot_setup_diagnostic: {operation:"create",outcome:"rejected",http_status:400,field:"/name",problem_code:"invalid_request"},
     recommended_action:"contact_admin",recommended_action_text:"gateway_rejected_request: Last connection attempt: rejected." }));
   renderCard();
   expect(await screen.findByText(/Last connection attempt: The gateway rejected the connection request/)).toBeVisible();
@@ -423,9 +423,9 @@ it.each(["telegram", "telegram-new"])("shows the last gateway refusal without ch
 });
 
 it.each([
-  ["en", "Last connection attempt: The gateway did not recognize"],
-  ["zh-CN", "上次连接尝试：网关无法识别"],
-  ["zh-TW", "上次連線嘗試：閘道無法識別"],
+  ["en", "Last connection attempt: The gateway has not registered"],
+  ["zh-CN", "上次连接尝试：网关尚未将"],
+  ["zh-TW", "上次連線嘗試：閘道尚未將"],
 ])("localizes missing-provider recovery in %s", async (language, text) => {
   mockGet.mockResolvedValue(health({platform:"telegram",nyxbot_status:"failed",nyxbot_last_error:"gateway_provider_not_registered",recommendation_cause:"gateway_provider_not_registered",
     recommended_action:"contact_admin",recommended_action_text:"gateway_provider_not_registered: Last connection attempt: missing."}));

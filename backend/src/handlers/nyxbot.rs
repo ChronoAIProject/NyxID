@@ -476,6 +476,15 @@ async fn record_gateway_rejection(
     record_setup_diagnostic(state, row, Some(release_id), operation, Some(response))
         .await
         .map_err(|_| "storage_unavailable")?;
+    if operation == "create"
+        && canonical_platform(&row.platform) == "telegram"
+        && response.status == 400
+        && unknown_nyxbot_provider(&response.body)
+    {
+        releases::record_provider_refusal(&state.db, row, release_id)
+            .await
+            .map_err(|_| "storage_unavailable")?;
+    }
     if row.gateway_source.is_none() {
         return Ok(());
     }

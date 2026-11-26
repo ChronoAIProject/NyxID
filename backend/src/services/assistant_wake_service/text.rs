@@ -75,7 +75,7 @@ pub fn failure_reason(code: &str, transport: &str) -> String {
 pub fn gateway_error_guidance(code: &str) -> &'static str {
     match code {
         "gateway_provider_not_registered" => {
-            "The gateway did not recognize the NyxBot provider. Ask an administrator to register the nyxbot provider, then reconnect after the 60-second retry delay."
+            "The gateway has not registered NyxBot as a provider yet (operator step). Ask an administrator to register the nyxbot provider, then reconnect after the 60-second retry delay."
         }
         "gateway_configuration_required" => {
             "Ask an administrator to check the active cmaeg service and its URL."

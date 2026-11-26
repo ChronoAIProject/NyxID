@@ -403,7 +403,7 @@ async fn telegram_health_query_keeps_indexed_sort_and_bounded_projection() {
         handler,
     )
     .await;
-    crate::services::nyxbot_gateway_release_service::ensure_indexes(&db)
+    crate::services::assistant_nyxagent::ensure_indexes(&db)
         .await
         .unwrap();
     let mut bot: ChannelBot = bson::from_document(doc! {
@@ -486,9 +486,9 @@ async fn telegram_health_query_keeps_indexed_sort_and_bounded_projection() {
     // The real maximum admin page: one bounded owner map and one indexed scan,
     // not an OR arm per bot. Include history and foreign rows under each bot.
     let mut page: Vec<_> = (0..500)
-        .map(|_| {
+        .map(|i| {
             let mut b = bot.clone();
-            b.platform = "telegram".into();
+            b.platform = ["telegram", "discord", "whatsapp", "lark"][i % 4].into();
             b.id = Uuid::new_v4().to_string();
             b
         })
@@ -545,6 +545,70 @@ async fn telegram_health_query_keeps_indexed_sort_and_bounded_projection() {
     assert!(encoded.contains("nyxbot_health_latest"));
     assert!(!encoded.contains("COLLSCAN"), "{encoded}");
     assert!(!encoded.contains("\"stage\":\"SORT\""), "{encoded}");
+
+    // A realistic mixed page contains one genuinely legacy transferred binding,
+    // a newer retired legacy route, and otherwise entirely versioned history.
+    let legacy_bot = &page[0];
+    let good_route = Uuid::new_v4().to_string();
+    let retired_route = Uuid::new_v4().to_string();
+    let good_row = Uuid::new_v4().to_string();
+    db.collection::<Document>(crate::models::channel_conversation::COLLECTION_NAME).insert_many([
+        doc!{"_id":&good_route,"user_id":&legacy_bot.user_id,"channel_bot_id":&legacy_bot.id,"is_active":true},
+        doc!{"_id":&retired_route,"user_id":&legacy_bot.user_id,"channel_bot_id":&legacy_bot.id,"is_active":false,"retired_by_transfer":true},
+    ]).await.unwrap();
+    rows.insert_many([
+        doc!{"_id":&good_row,"user_id":&legacy_bot.user_id,"channel_bot_id":&legacy_bot.id,"route_id":good_route,
+            "platform":"telegram","transport":"gateway","status":"active","created_at":bson::DateTime::from_millis(21)},
+        doc!{"_id":Uuid::new_v4().to_string(),"user_id":&legacy_bot.user_id,"channel_bot_id":&legacy_bot.id,"route_id":retired_route,
+            "platform":"telegram","transport":"gateway","status":"active","created_at":bson::DateTime::from_millis(22)},
+    ]).await.unwrap();
+    let started = std::time::Instant::now();
+    let loaded = latest_nyxbot_rows(&db, &page).await.unwrap();
+    assert_eq!(loaded.len(), 500);
+    assert_eq!(loaded[&legacy_bot.id].id, good_row);
+    eprintln!(
+        "500 mixed bots / 10,002 rows with two transferred legacy candidates: {:?}",
+        started.elapsed()
+    );
+    let recorded = commands.lock().unwrap().last().unwrap().clone();
+    let explain=db.run_command(doc!{"explain":{"aggregate":CHANNELS,"pipeline":recorded.get_array("pipeline").unwrap(),"cursor":{}},"verbosity":"executionStats"}).await.unwrap();
+    let encoded = serde_json::to_string(&explain).unwrap();
+    assert!(encoded.contains("nyxbot_health_latest"));
+    assert!(!encoded.contains("COLLSCAN"), "{encoded}");
+    assert!(!encoded.contains("\"stage\":\"SORT\""), "{encoded}");
+    let facet = explain
+        .get_array("stages")
+        .unwrap()
+        .iter()
+        .find_map(|stage| stage.as_document()?.get_document("$facet").ok())
+        .unwrap();
+    let legacy = facet.get_array("legacy").unwrap();
+    let lookup = legacy
+        .iter()
+        .find_map(|stage| {
+            let stage = stage.as_document()?;
+            stage.contains_key("$lookup").then_some(stage)
+        })
+        .unwrap();
+    assert_eq!(lookup.get_i64("nReturned").unwrap(), 2, "{lookup:?}");
+    assert_eq!(lookup.get_i64("collectionScans").unwrap(), 0, "{lookup:?}");
+    assert!(
+        lookup
+            .get_array("indexesUsed")
+            .unwrap()
+            .contains(&bson::Bson::String("_id_".into()))
+    );
+    assert!(
+        lookup.get_i64("totalKeysExamined").unwrap() <= 2,
+        "{lookup:?}"
+    );
+    assert!(
+        facet
+            .get_array("current")
+            .unwrap()
+            .iter()
+            .all(|stage| !stage.as_document().unwrap().contains_key("$lookup"))
+    );
 
     db.drop().await.unwrap();
 }

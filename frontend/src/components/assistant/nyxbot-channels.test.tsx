@@ -271,7 +271,7 @@ it.each([
   ],
   [
     "gateway_provider_not_registered",
-    "The gateway did not recognize the NyxBot provider. Ask an administrator to register the nyxbot provider, then reconnect after the 60-second retry delay.",
+    "The gateway has not registered NyxBot as a provider yet (operator step). Ask an administrator to register the nyxbot provider, then reconnect after the 60-second retry delay.",
   ],
   [
     "gateway_rejected_request",

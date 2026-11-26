@@ -251,6 +251,7 @@ async fn new_release(
         state: ReleaseState::Provisional,
         reason: ReleaseReason::Setup,
         dispatch_started_at: None,
+        create_provider_refused: false,
         provisional_expires_at: Some(now + Duration::minutes(SETUP_MINUTES)),
         due_at: None,
         next_attempt_at: None,
@@ -338,6 +339,29 @@ pub(crate) async fn dispatch(db: &Database, release: &Release) -> AppResult<()> 
     {
         return Err(conflict());
     }
+    Ok(())
+}
+
+/// Only the caller holding the actual terminal CREATE response records this.
+/// Historical row error codes cannot establish the remote outcome.
+pub(crate) async fn record_provider_refusal(
+    db: &Database,
+    row: &NyxbotChannel,
+    release_id: &str,
+) -> AppResult<()> {
+    db.collection::<Document>(RELEASES)
+        .update_one(
+            doc! {
+                "_id":release_id,"record_id":release_id,"channel_id":&row.id,
+                "owner_user_id":&row.user_id,"platform":"telegram","state":"provisional",
+                "gateway_channel_id":bson::Bson::Null,"dispatch_started_at":{"$type":"date"},
+                "$expr":{"$gt":["$provisional_expires_at","$$NOW"]},
+            },
+            doc! {"$set":{"create_provider_refused":true}},
+        )
+        .await?;
+    // Losing the setup fence records no evidence. Keep the actual terminal
+    // refusal truthful; the retired/expired obligation remains conservative.
     Ok(())
 }
 
@@ -1865,7 +1889,28 @@ async fn observe_inner(
         result => result?,
     };
     match response.status {
-        404 => Ok(Observation::Missing),
+        404 => {
+            // This is only a candidate for durable absence proof. CMA's record
+            // lookup can hide a retained record after origin/sealing changes.
+            // The worker must negotiate and validate a cancellation receipt;
+            // read-only inspection never issues the cancellation POST.
+            if release.create_provider_refused
+                && release.platform == "telegram"
+                && release.gateway_channel_id.is_none()
+                && state.config.jwt_issuer == release.creator_issuer
+                && release.record_id.as_deref().is_some_and(|record| {
+                    Uuid::parse_str(record).is_ok_and(|id| {
+                        id.to_string() == record
+                            && release.binding_id == format!("bnd_{}", id.simple())
+                    })
+                })
+                && response.body["status"] == 404
+                && response.body["code"] == "channel_not_found"
+            {
+                *answer = Answer::TerminalRefusalNotFound;
+            }
+            Ok(Observation::Missing)
+        }
         200 => {
             let mut retained = release.clone();
             // An older replica may have authored the retirement. Recover only
@@ -1887,6 +1932,65 @@ async fn observe_inner(
         401 | 403 => Err(AppError::Forbidden("gateway_authority_refused".into())),
         _ => Err(AppError::OAuthAuthorityUnavailable),
     }
+}
+
+/// CMA's record-store fence checks the UUID/owner independently of the current
+/// CMA origin and refuses retained records or pending CREATE. Legacy gateways
+/// without this explicit contract leave the obligation unresolved.
+async fn fence_refused_create(
+    state: &AppState,
+    release: &Release,
+    answer: &mut Answer,
+) -> AppResult<bool> {
+    let bearer = gateway::creator_bearer(state, &release.owner_user_id)?;
+    let capability = gateway::gateway_call_at_base(
+        &release.gateway_base_url,
+        reqwest::Method::GET,
+        "/channel-records/cancel-create-capability",
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    *answer = Answer::from_response(&capability);
+    let capability = capability?;
+    if capability.status != 200 || capability.body["contract_version"].as_u64() != Some(1) {
+        return Ok(false);
+    }
+    admit(&state.db, release).await?;
+    if !destination(state, release).await? {
+        return Ok(false);
+    }
+    let record = release.record_id.as_deref().ok_or_else(conflict)?;
+    let receipt = gateway::gateway_call_at_base(
+        &release.gateway_base_url,
+        reqwest::Method::POST,
+        &format!("/channel-records/{}/cancel-create", encoded(record)),
+        &bearer,
+        None,
+        None,
+    )
+    .await;
+    *answer = Answer::from_response(&receipt);
+    let receipt = receipt?;
+    let body = &receipt.body;
+    let valid = receipt.status == 200
+        && body["contract_version"].as_u64() == Some(1)
+        && body["status"] == "creation_fenced_absent"
+        && body["record_id"] == record
+        && body["owner"]["issuer"] == release.creator_issuer
+        && body["owner"]["kind"] == "human"
+        && body["owner"]["subject"] == release.owner_user_id
+        && body["provider"]["slug"] == "nyxbot"
+        && body["provider"]["binding_id"] == release.binding_id;
+    if valid {
+        *answer = Answer::CreateFencedAbsent;
+    } else if receipt.status == 200 {
+        *answer = Answer::InvalidResponse;
+    } else if receipt.status == 409 {
+        *answer = Answer::RequestRefused;
+    }
+    Ok(valid)
 }
 
 pub(crate) async fn execute(state: &AppState, release: Release) -> AppResult<bool> {
@@ -1976,14 +2080,19 @@ async fn execute_claimed(
         Observation::Missing => {
             // A known remote identity can be conclusively absent. An uncertain
             // dispatch's 404 is only an observation and never proves no create.
-            if release.gateway_channel_id.is_some() {
+            let fenced_absent = if matches!(answer, Answer::TerminalRefusalNotFound) {
+                fence_refused_create(state, &release, last_answer).await?
+            } else {
+                false
+            };
+            if release.gateway_channel_id.is_some() || fenced_absent {
                 return transition(
                     &state.db,
                     &release,
                     ReleaseState::Settled,
                     "missing",
                     None,
-                    answer,
+                    *last_answer,
                 )
                 .await;
             }
@@ -2004,7 +2113,7 @@ async fn execute_claimed(
                     "create_not_observed"
                 },
                 None,
-                answer,
+                *last_answer,
             )
             .await?;
             Ok(false)

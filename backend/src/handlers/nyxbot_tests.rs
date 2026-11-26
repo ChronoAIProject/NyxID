@@ -6940,6 +6940,22 @@ async fn gateway_connect_reports_unregistered_nyxbot_to_owner_and_audit() {
         .unwrap();
     assert_eq!(data["error_code"], "gateway_provider_not_registered");
     assert!(!data.to_string().contains("nyxbot"));
+    let observed = state
+        .db
+        .collection::<AuditLog>(AUDIT)
+        .find_one(doc! {
+            "user_id":OWNER,"event_type":"nyxbot_gateway_setup_observed"
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .event_data
+        .unwrap();
+    assert_eq!(observed["diagnostic"]["problem_code"], "invalid_request");
+    assert_eq!(observed["diagnostic"]["operation"], "create");
+    assert_eq!(observed["diagnostic"]["http_status"], 400);
+    assert!(observed["diagnostic"].get("detail").is_none());
+
     assert!(
         envelope["message"]
             .as_str()

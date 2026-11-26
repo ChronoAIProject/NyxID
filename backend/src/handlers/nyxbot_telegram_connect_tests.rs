@@ -17,6 +17,8 @@ pub(super) struct CreatorAuth {
     pub(super) refusal: Arc<Mutex<Option<CreateRefusal>>>,
     deny_delete: Arc<AtomicBool>,
     delete_refusal: Arc<Mutex<Option<(u16, Value)>>>,
+    record_absence: Arc<Mutex<Option<(u16, Value)>>>,
+    create_cancellation: Arc<Mutex<Option<(u16, Value)>>>,
 }
 
 pub(super) async fn authorize(
@@ -25,7 +27,11 @@ pub(super) async fn authorize(
     next: axum::middleware::Next,
 ) -> Response {
     let method = request.method().as_str().to_owned();
+    let request_path = request.uri().path().to_owned();
+    let cancellation = request_path == "/channel-records/cancel-create-capability"
+        || request_path.ends_with("/cancel-create");
     let permission = match method.as_str() {
+        _ if cancellation => "cma-eg:channels:delete",
         "POST" => "cma-eg:channels:create",
         "PUT" => "cma-eg:channels:update",
         "DELETE" => "cma-eg:channels:delete",
@@ -61,6 +67,24 @@ pub(super) async fn authorize(
     if !allowed {
         return StatusCode::FORBIDDEN.into_response();
     }
+    if cancellation && let Some((status, receipt)) = auth.create_cancellation.lock().await.clone() {
+        if method == "GET" {
+            return Json(json!({"contract_version":1})).into_response();
+        }
+        let record = request_path
+            .strip_prefix("/channel-records/")
+            .unwrap()
+            .strip_suffix("/cancel-create")
+            .unwrap();
+        let receipt = if receipt.is_null() {
+            json!({"contract_version":1,"status":"creation_fenced_absent",
+            "record_id":record,"owner":{"issuer":auth.state.config.jwt_issuer,"kind":"human","subject":OWNER},
+            "provider":{"slug":"nyxbot","binding_id":format!("bnd_{}",record.replace('-',""))}})
+        } else {
+            receipt
+        };
+        return (StatusCode::from_u16(status).unwrap(), Json(receipt)).into_response();
+    }
     if method == "DELETE"
         && let Some((status, body)) = auth.delete_refusal.lock().await.clone()
     {
@@ -69,7 +93,15 @@ pub(super) async fn authorize(
     if method == "DELETE" && auth.deny_delete.load(std::sync::atomic::Ordering::SeqCst) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    next.run(request).await
+    let record_lookup = method == "GET" && request.uri().path().starts_with("/channel-records/");
+    let response = next.run(request).await;
+    if record_lookup
+        && response.status() == StatusCode::NOT_FOUND
+        && let Some((status, body)) = auth.record_absence.lock().await.clone()
+    {
+        return (StatusCode::from_u16(status).unwrap(), Json(body)).into_response();
+    }
+    response
 }
 
 /// Independent validator for the exercised Telegram request contract at CMA
@@ -182,6 +214,8 @@ async fn fixture(platform: &str) -> Fixture {
         refusal: Default::default(),
         deny_delete: Default::default(),
         delete_refusal: Default::default(),
+        record_absence: Default::default(),
+        create_cancellation: Default::default(),
     };
     let (gateway_calls, gateway) = mock_gateway_with_creator_auth(
         &mut state,
@@ -626,6 +660,7 @@ fn telegram_gateway_400_contract_classification_and_redaction() {
             Some(&response),
         )
         .unwrap();
+        assert_eq!(diagnostic.problem_code, response.body["code"].as_str());
         assert_eq!(diagnostic.field, field);
         assert_eq!(diagnostic.http_status, Some(400));
         let encoded = serde_json::to_string(&diagnostic).unwrap();
@@ -638,6 +673,38 @@ fn telegram_gateway_400_contract_classification_and_redaction() {
             matches!(present_gateway_error(AppError::ValidationError(expected.into())),AppError::ValidationError(message) if message.starts_with(&format!("{expected}:")))
         );
     }
+    for (status, code) in [
+        (401, "not_authenticated"),
+        (403, "forbidden"),
+        (429, "provider_busy"),
+        (503, "provider_unavailable"),
+        (500, "internal"),
+    ] {
+        let response = GatewayResponse {
+            status,
+            body: json!({"code":code,"detail":"PRIVATE"}),
+        };
+        let diagnostic = crate::services::channel_bot_health::nyxbot::SetupDiagnostic::new(
+            "create",
+            Some(&response),
+        )
+        .unwrap();
+        assert_eq!(diagnostic.problem_code, Some(code));
+        assert!(diagnostic.field.is_none());
+    }
+    let private = GatewayResponse {
+        status: 400,
+        body: json!({"code":"private_identifier", "detail":"/name: PRIVATE"}),
+    };
+    let diagnostic =
+        crate::services::channel_bot_health::nyxbot::SetupDiagnostic::new("create", Some(&private))
+            .unwrap();
+    assert!(diagnostic.problem_code.is_none());
+    assert!(diagnostic.field.is_none());
+    let old = crate::services::channel_bot_health::nyxbot::SetupDiagnostic::from_document(
+        &doc!{"operation":"create","outcome":"rejected","http_status":400,"problem_code":"invalid_binding","field":"PRIVATE"}).unwrap();
+    assert!(old.problem_code.is_none());
+    assert!(old.field.is_none());
     assert!(
         crate::services::channel_bot_health::nyxbot::SetupDiagnostic::new("PRIVATE", None)
             .is_none()
@@ -769,6 +836,167 @@ fn telegram_real_connect_configuration_refusal_records_attempt_without_keys() {
 }
 
 #[test]
+fn telegram_terminal_provider_refusal_settles_only_authoritative_original_record_absence() {
+    crate::test_utils::run_native_journey_test("telegram_provider_absence", || async {
+        for (create_problem, absence_status, absence, cancellation, settled) in [
+            (
+                json!({"code":"invalid_request","detail":" nyxbot\n"}),
+                404,
+                json!({"status":404,"code":"channel_not_found","detail":"The channel does not exist."}),
+                Some((200, Value::Null)),
+                true,
+            ),
+            (
+                json!({"code":"invalid_request","detail":"nyxbot"}),
+                404,
+                Value::Null,
+                None,
+                false,
+            ),
+            (
+                json!({"code":"invalid_request","detail":"nyxbot"}),
+                404,
+                json!({"code":"channel_not_found","status":400}),
+                None,
+                false,
+            ),
+            (
+                json!({"code":"invalid_request","detail":"nyxbot"}),
+                503,
+                json!({"status":404,"code":"channel_not_found"}),
+                None,
+                false,
+            ),
+            (
+                json!({"code":"invalid_request","detail":"unknown provider prose"}),
+                404,
+                json!({"status":404,"code":"channel_not_found"}),
+                None,
+                false,
+            ),
+            (
+                json!({"code":"provider_rejected","detail":"The provider refused the binding profile or target. Check the channel configuration before retrying."}),
+                404,
+                json!({"status":404,"code":"channel_not_found"}),
+                None,
+                false,
+            ),
+            // A legacy gateway cannot prove absence after origin/key drift.
+            (
+                json!({"code":"invalid_request","detail":"nyxbot"}),
+                404,
+                json!({"status":404,"code":"channel_not_found"}),
+                None,
+                false,
+            ),
+            // The durable record-store fence sees a retained record even when
+            // the origin-dependent GET returns the ordinary missing problem.
+            (
+                json!({"code":"invalid_request","detail":"nyxbot"}),
+                404,
+                json!({"status":404,"code":"channel_not_found"}),
+                Some((
+                    409,
+                    json!({"status":409,"code":"conflict","detail":"record_present"}),
+                )),
+                false,
+            ),
+            (
+                json!({"code":"invalid_request","detail":"nyxbot"}),
+                404,
+                json!({"status":404,"code":"channel_not_found"}),
+                Some((
+                    200,
+                    json!({"contract_version":1,"status":"creation_fenced_absent","record_id":"other"}),
+                )),
+                false,
+            ),
+        ] {
+            let f = fixture("telegram-new").await;
+            let provider_refused = unknown_nyxbot_provider(&create_problem);
+            let proof_candidate = provider_refused
+                && absence_status == 404
+                && absence["status"] == 404
+                && absence["code"] == "channel_not_found";
+            let cancel_sent = proof_candidate && cancellation.is_some();
+            *f.auth.create_cancellation.lock().await = cancellation;
+            *f.auth.refusal.lock().await = Some((400, create_problem, None));
+            *f.auth.record_absence.lock().await = Some((absence_status, absence));
+            let error = connect(&f.state, OWNER, None, &f.bot.id, &f.specialist)
+                .await
+                .err()
+                .unwrap();
+            assert!(matches!(error, AppError::ValidationError(_)));
+            let row = list(&f.state, OWNER).await.unwrap().remove(0);
+            assert_eq!(row.status, "failed");
+            let stored = f
+                .state
+                .db
+                .collection::<crate::models::nyxbot_gateway_release::NyxbotGatewayRelease>(
+                    crate::models::nyxbot_gateway_release::COLLECTION_NAME,
+                )
+                .find_one(doc! {"channel_id":&row.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.create_provider_refused, provider_refused);
+            assert_eq!(stored.owner_user_id, OWNER);
+            assert_eq!(
+                stored.state,
+                if settled {
+                    crate::models::nyxbot_gateway_release::ReleaseState::Settled
+                } else {
+                    crate::models::nyxbot_gateway_release::ReleaseState::Due
+                }
+            );
+            assert_eq!(
+                stored.resolution.as_deref(),
+                if settled { Some("missing") } else { None }
+            );
+            assert!(
+                f.gateway_calls
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|(method, id, _)| method == "GET"
+                        && Some(id.as_str()) == stored.record_id.as_deref())
+            );
+            let calls = f.auth.calls.lock().await;
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|(method, active, allowed)| method == "POST" && *active && *allowed)
+                    .count(),
+                1 + usize::from(cancel_sent)
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|(method, active, allowed)| method == "GET" && *active && *allowed)
+                    .count(),
+                1 + usize::from(proof_candidate)
+            );
+            assert!(!calls.iter().any(|(method, _, _)| method == "DELETE"));
+            drop(calls);
+            for key in [&stored.agent_api_key_id, &stored.route_api_key_id] {
+                let key = f
+                    .state
+                    .db
+                    .collection::<crate::models::api_key::ApiKey>(
+                        crate::models::api_key::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {"_id":key})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(!key.is_active);
+            }
+            f.state.db.drop().await.unwrap();
+        }
+    });
+}
+
+#[test]
 fn telegram_real_connect_post_reservation_400_retains_and_reconciles_custody() {
     crate::test_utils::run_native_journey_test("telegram_400_custody", || async {
         for (problem, delete_problem, reason) in [
@@ -868,7 +1096,7 @@ fn telegram_real_connect_post_reservation_400_retains_and_reconciles_custody() {
             let health = serde_json::to_value(health).unwrap();
             assert_eq!(
                 health["nyxbot_setup_diagnostic"],
-                json!({"operation":"create","outcome":"rejected","http_status":400,"field":null})
+                json!({"operation":"create","outcome":"rejected","http_status":400,"field":null,"problem_code":problem["code"]})
             );
             let evidence =
                 crate::services::channel_bot_health::setup_evidence(&f.state.db, &f.bot, false)
@@ -890,6 +1118,15 @@ fn telegram_real_connect_post_reservation_400_retains_and_reconciles_custody() {
                 .await
                 .unwrap();
             assert_eq!(audit.len(), 1);
+            let diagnostic = audit[0]
+                .get_document("event_data")
+                .unwrap()
+                .get_document("diagnostic")
+                .unwrap();
+            assert_eq!(
+                diagnostic.get_str("problem_code").unwrap(),
+                problem["code"].as_str().unwrap()
+            );
             assert!(!serde_json::to_string(&audit).unwrap().contains("PRIVATE"));
             let before = f
                 .gateway_calls
@@ -1314,7 +1551,7 @@ fn telegram_connect_transport_failure_keeps_http_status_unknown() {
         let diagnostic = serde_json::to_value(health.nyxbot_setup_diagnostic).unwrap();
         assert_eq!(
             diagnostic,
-            json!({"operation":"create","outcome":"unknown","http_status":null,"field":null})
+            json!({"operation":"create","outcome":"unknown","http_status":null,"field":null,"problem_code":null})
         );
         f.state.db.drop().await.unwrap();
     });

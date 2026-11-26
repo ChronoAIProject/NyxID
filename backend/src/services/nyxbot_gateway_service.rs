@@ -1113,7 +1113,26 @@ mod reply_contract_tests {
 pub(crate) fn unknown_nyxbot_provider(body: &Value) -> bool {
     body["code"] == "invalid_request"
         && matches!(
-            body["detail"].as_str(),
+            body["detail"].as_str().map(str::trim),
             Some("nyxbot" | "unknown provider: nyxbot" | "provider is not registered")
         )
+}
+
+/// Public management problem codes only; never retain arbitrary upstream code
+/// strings (which may contain identifiers) in setup diagnostics or their audit.
+pub(crate) fn setup_problem_code(value: &str) -> Option<&'static str> {
+    match value {
+        "invalid_request" => Some("invalid_request"),
+        "provider_rejected" => Some("provider_rejected"),
+        "not_authenticated" => Some("not_authenticated"),
+        "forbidden" => Some("forbidden"),
+        "channel_not_found" => Some("channel_not_found"),
+        "conflict" => Some("conflict"),
+        "rate_limited" => Some("rate_limited"),
+        "provider_unavailable" => Some("provider_unavailable"),
+        "internal" => Some("internal"),
+        "provider_busy" => Some("provider_busy"),
+        "draining" => Some("draining"),
+        _ => None,
+    }
 }
