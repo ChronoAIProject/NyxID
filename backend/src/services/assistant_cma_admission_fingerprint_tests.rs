@@ -118,7 +118,7 @@ impl Fixture {
             route,
             None,
             body,
-            &[("Idempotency-Key".into(), key.into())],
+            &[("Idempotency-Key".into(), key.into()), ("Content-Type".into(), "application/json".into())],
             false,
         )
         .await
@@ -128,6 +128,7 @@ impl Fixture {
         reqwest::Client::new()
             .post(format!("{}{route}", self.server.uri()))
             .header("Idempotency-Key", key)
+            .header("Content-Type","application/json")
             .body(body.to_vec())
             .build()
             .unwrap()

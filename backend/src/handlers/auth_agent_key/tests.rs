@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::credential_record_fixtures::KeySecret;
 use crate::models::{
     api_key::{ApiKey, COLLECTION_NAME as API_KEYS},
     user::{COLLECTION_NAME as USERS, User, UserType},
@@ -490,28 +491,28 @@ async fn enrolled_credential_executes_only_allowed_proxy_with_live_parent_bindin
     assert_eq!(denied.json::<Value>().await.unwrap()["error_code"], 9000);
 
     let external_id = Uuid::new_v4().to_string();
-    let encrypted = server
-        .state
-        .encryption_keys
-        .encrypt(b"bound-provider-secret")
-        .await
-        .unwrap();
-    let external: UserApiKey = mongodb::bson::from_document(doc! {
+    let mut external: UserApiKey = mongodb::bson::from_document(doc! {
         "_id": &external_id, "user_id": &actor, "label": "Bound provider",
         "credential_type": "bearer", "status": "active",
-        "credential_encrypted": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: encrypted },
         "created_at": mongodb::bson::DateTime::now(), "updated_at": mongodb::bson::DateTime::now(),
-    }).unwrap();
+    })
+    .unwrap();
     let mut default_external = external.clone();
     default_external.id = Uuid::new_v4().to_string();
-    default_external.credential_encrypted = Some(
-        server
-            .state
-            .encryption_keys
-            .encrypt(b"default-provider-secret")
-            .await
-            .unwrap(),
-    );
+    KeySecret::Credential
+        .set(
+            &server.state.encryption_keys,
+            &mut external,
+            b"bound-provider-secret",
+        )
+        .await;
+    KeySecret::Credential
+        .set(
+            &server.state.encryption_keys,
+            &mut default_external,
+            b"default-provider-secret",
+        )
+        .await;
     let default_id = default_external.id.clone();
     db.collection::<UserApiKey>(EXTERNAL_KEYS)
         .insert_many([external, default_external])
