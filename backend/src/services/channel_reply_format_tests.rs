@@ -681,6 +681,61 @@ fn slack_bare_urls_keep_commonmark_character_references() {
 }
 
 #[test]
+fn slack_bare_url_escape_triggers_rich_text() {
+    let part = assistant_parts(r"**https://example.test/x\_name**", "slack", "").remove(0);
+    assert_eq!(part.text.as_deref(), Some("https://example.test/x_name"));
+    assert_eq!(
+        &part.metadata.unwrap()["blocks"][0]["elements"][0]["elements"],
+        &serde_json::json!([{
+            "type":"link", "text":"https://example.test/x_name",
+            "url":"https://example.test/x_name", "style":{"bold":true}
+        }])
+    );
+}
+
+#[test]
+fn slack_bare_url_character_references_preserve_decoded_whitespace_boundaries() {
+    for (reference, whitespace) in [("&#32;", " "), ("&ensp;", "\u{2002}")] {
+        let input = format!(r"\*escaped\* https://example.test/A{reference}B");
+        let part = assistant_parts(&input, "slack", "").remove(0);
+        let suffix = format!("{whitespace}B");
+        assert_eq!(
+            part.text.unwrap(),
+            format!("*escaped* https://example.test/A{suffix}")
+        );
+        assert_eq!(
+            part.metadata.unwrap()["blocks"][0]["elements"][0]["elements"],
+            serde_json::json!([
+                {"type":"text","text":"*escaped* "},
+                {"type":"link","url":"https://example.test/A","text":"https://example.test/A"},
+                {"type":"text","text":suffix}
+            ])
+        );
+    }
+}
+
+#[test]
+fn slack_wholly_code_link_labels_hide_their_destinations_before_expansion() {
+    let oversized = format!("https://example.test/{}", "a".repeat(21_000));
+    for target in [
+        "javascript:foo",
+        "https://example.test/hidden",
+        oversized.as_str(),
+    ] {
+        let source = format!(r"\*escaped\* [`code`]({target})");
+        let part = assistant_parts(&source, "slack", "").remove(0);
+        assert_eq!(part.text.as_deref(), Some("*escaped* code"), "{target:.40}");
+        assert_eq!(
+            part.metadata.unwrap()["blocks"][0]["elements"][0]["elements"],
+            serde_json::json!([
+                {"type":"text", "text":"*escaped* "},
+                {"type":"text", "text":"code", "style":{"code":true}}
+            ])
+        );
+    }
+}
+
+#[test]
 fn slack_bare_url_terminators_keep_only_literal_backslashes() {
     for (source, expected) in [
         (r"https://e.com/a\. next", "https://e.com/a. next"),

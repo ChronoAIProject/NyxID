@@ -7,6 +7,16 @@ use std::ops::Range;
 
 const STYLE: [&str; 3] = ["bold", "italic", "strikethrough"];
 
+pub(super) struct BareUrl {
+    pub start: usize,
+    pub normalized: Option<NormalizedUrl>,
+}
+
+pub(super) struct NormalizedUrl {
+    pub display: String,
+    pub literals: Vec<Range<usize>>,
+}
+
 pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
     if !source
         .as_bytes()
@@ -154,8 +164,8 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
         let slashes = &escape_slashes[first..first + count];
         edits.extend(slashes.iter().copied().map(|at| (at, None)));
         decoded_urls.push(
-            (!references.is_empty())
-                .then(|| decode_bare_url(source, range.clone(), references, slashes)),
+            (!references.is_empty() || !slashes.is_empty())
+                .then(|| normalize_bare_url(source, range.clone(), references, slashes)),
         );
     }
     let mut decoded_urls = decoded_urls.into_iter();
@@ -181,7 +191,10 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
                 if preceding_backslashes(source, at) % 2 != 0 {
                     marked.push('\\');
                 }
-                bare_urls.push((marked.len(), decoded_urls.next().unwrap()));
+                bare_urls.push(BareUrl {
+                    start: marked.len(),
+                    normalized: decoded_urls.next().unwrap(),
+                });
             }
             marked.push(ch);
         } else {
@@ -192,29 +205,40 @@ pub(super) fn parse(source: &str, rich: bool) -> Option<(String, Vec<Value>)> {
     Some(commonmark_text(&marked, Some(&bare_urls), rich))
 }
 
-fn decode_bare_url(
+fn normalize_bare_url(
     source: &str,
     url: Range<usize>,
     references: &[(Range<usize>, CowStr<'_>)],
     slashes: &[usize],
-) -> String {
+) -> NormalizedUrl {
     // Reuse the original CommonMark text events. Inserting their values into
     // the markup would let decoded angle brackets or whitespace change syntax.
     let mut replacements: Vec<_> = references
         .iter()
-        .map(|(range, value)| (range.clone(), value.as_ref()))
-        .chain(slashes.iter().map(|&at| (at..at + 1, "")))
+        .map(|(range, value)| (range.clone(), Some(value.as_ref())))
+        .chain(slashes.iter().map(|&at| (at..at + 1, None)))
         .collect();
     replacements.sort_unstable_by_key(|(range, _)| range.start);
-    let mut decoded = String::with_capacity(url.len());
+    let mut display = String::with_capacity(url.len());
+    let mut literals = Vec::new();
+    let mut units = 0;
     let mut next = url.start;
     for (range, replacement) in replacements {
-        decoded.push_str(&source[next..range.start]);
-        decoded.push_str(replacement);
+        let prefix = &source[next..range.start];
+        display.push_str(prefix);
+        units += prefix.encode_utf16().count();
+        if let Some(replacement) = replacement {
+            display.push_str(replacement);
+            units += replacement.encode_utf16().count();
+        } else if let Some(length) =
+            escaped_delimiter(source, range.end, &source[range.end..url.end])
+        {
+            literals.push(units..units + length);
+        }
         next = range.end;
     }
-    decoded.push_str(&source[next..url.end]);
-    decoded
+    display.push_str(&source[next..url.end]);
+    NormalizedUrl { display, literals }
 }
 
 pub(super) fn escaped_delimiter(source: &str, at: usize, value: &str) -> Option<usize> {

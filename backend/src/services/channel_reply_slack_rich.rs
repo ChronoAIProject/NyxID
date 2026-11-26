@@ -62,12 +62,7 @@ enum Span<'a> {
     Link(Option<&'a str>),
 }
 
-pub(super) fn render(text: &str, entities: &[Value]) -> Rendered {
-    let bytes: Vec<_> = text
-        .char_indices()
-        .flat_map(|(byte, ch)| std::iter::repeat_n(byte, ch.len_utf16()))
-        .chain(std::iter::once(text.len()))
-        .collect();
+fn code_spans(entities: &[Value]) -> Vec<std::ops::Range<usize>> {
     let mut code: Vec<_> = entities
         .iter()
         .filter(|e| matches!(e["type"].as_str(), Some("code" | "pre")))
@@ -90,7 +85,36 @@ pub(super) fn render(text: &str, entities: &[Value]) -> Rendered {
             merged.push(span);
         }
     }
+    merged
+}
 
+fn last_label_end(code: &[std::ops::Range<usize>], end: usize) -> usize {
+    let tail = code.partition_point(|span| span.start < end);
+    code[..tail]
+        .last()
+        .filter(|span| span.end >= end)
+        .map_or(end, |span| span.start)
+}
+
+pub(super) fn omit_wholly_code_links(entities: &mut Vec<Value>) {
+    let code = code_spans(entities);
+    entities.retain(|entity| {
+        if entity["type"] != "text_link" {
+            return true;
+        }
+        let start = entity["offset"].as_u64().unwrap_or_default() as usize;
+        let end = start + entity["length"].as_u64().unwrap_or_default() as usize;
+        last_label_end(&code, end) > start
+    });
+}
+
+pub(super) fn render(text: &str, entities: &[Value]) -> Rendered {
+    let bytes: Vec<_> = text
+        .char_indices()
+        .flat_map(|(byte, ch)| std::iter::repeat_n(byte, ch.len_utf16()))
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let code = code_spans(entities);
     let mut spans = Vec::new();
     let mut boundaries = Vec::new();
     let mut suffixes: BTreeMap<usize, Vec<(&str, bool)>> = BTreeMap::new();
@@ -111,11 +135,7 @@ pub(super) fn render(text: &str, entities: &[Value]) -> Rendered {
                 };
                 let clickable = supported_target(target);
                 let label = &text[bytes[start]..bytes[end]];
-                let tail = merged.partition_point(|span| span.start < end);
-                let last_label_end = merged[..tail]
-                    .last()
-                    .filter(|span| span.end >= end)
-                    .map_or(end, |span| span.start);
+                let last_label_end = last_label_end(&code, end);
                 // The shared renderer leaves wholly code labels unlinked.
                 if last_label_end <= start {
                     continue;
