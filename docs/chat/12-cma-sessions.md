@@ -234,6 +234,16 @@ required routes is unsupported. Detail and event-head reads verify remote
 identity. Requests use the existing authenticated REST proxy, current credential
 resolution, access checks, and metering.
 
+Agent list, detail, event-head and stream reads use
+`/api/v1/proxy/s/{connection_slug}/{path}?_nyxid_via={connection_id}` with any
+CMA query parameters alongside the selector. The slug and connection UUID come
+from current source discovery or the exact authorized receipt for a pin or
+historical request. The proxy resolves the selected active connection and
+strips `_nyxid_via` before forwarding. A withdrawn connection drops out of
+receipt discovery. If the same connection is re-enabled and still matches the
+recorded authority, discovery can select it again. A replacement UUID cannot
+inherit observation from a matching CMA Agent ID.
+
 Configure the CMA service's base URL to the CMA API origin when its OpenAPI
 paths include `/api/v1` and `/api/v2`. NyxID appends the advertised path to the
 configured base URL. A base URL ending in `/api/v1` would duplicate that prefix
@@ -278,6 +288,29 @@ Pinned subscriptions continue across routes.
 Discovery requests also have a 30-second deadline. Route discovery is cached for
 five minutes per account and connection.
 
+The card for a successful provisioning receipt can also show its initial task
+outcome. The authenticated lifecycle receipt supplies the Agent ID. A mounted
+history card reauthorizes the exact owner, source conversation, connection and
+Agent, then reads that Agent directly. A live card for the same verified source
+uses its existing Agent detail read for the request row. CMA exposes
+`bootstrap.operation_id` only during early startup. When supplied, it must match
+the recorded lifecycle operation ID. For `first_message.purpose: task`, the
+first-message state determines pending, completed or failed status.
+`recovery_required` and unfinished tasks on a `failed`, `stopped` or `deleted`
+Agent show **Needs attention**. A durable completed or failed task result takes
+precedence over the Agent status. Setup, missing task evidence and lineage
+mismatches retain the recorded receipt status.
+
+Pending initial tasks and retryable read failures poll every 15 seconds in a
+mounted history card. A terminal result, **Needs attention**, missing task
+evidence or definitive denial stops that polling. A withdrawn receipt or
+definitive denial renders the recorded receipt status. Remounting, including
+after reload, checks current authorization and reads CMA's durable evidence
+again. Provisioning watches and async delivery retain their recorded state.
+[CMA `agent_openapi_shapes.rs`](https://github.com/ChronoAIProject/cma/blob/7fc711bd427338d85ad1bc645522808af26a66de/api/crates/layer1-public/src/rest/agent_openapi_shapes.rs)
+[CMA `lifecycle_bootstrap.rs`](https://github.com/ChronoAIProject/cma/blob/7fc711bd427338d85ad1bc645522808af26a66de/api/crates/layer2-core/src/sandbox/lifecycle_bootstrap.rs#L54-L66)
+[CMA `first_message.rs`](https://github.com/ChronoAIProject/cma/blob/7fc711bd427338d85ad1bc645522808af26a66de/api/crates/layer2-core/src/sandbox/first_message.rs)
+
 Cards provide status and action summaries; desktop control and CMA approval
 actions remain separate capabilities.
 
@@ -305,7 +338,9 @@ actions remain separate capabilities.
 - `frontend/e2e/cma-session.spec.ts` exercises the real UI against HTTP fixtures,
   including the shared machine/CMA column, mobile keyboard/layout, disclosure
   controls, cross-page pins, slow pin refresh without stream restart, and
-  clickable/keyboard-reachable recovery at short viewport heights. Multi-connection
+  clickable/keyboard-reachable recovery at short viewport heights. A historical
+  receipt fixture covers terminal recovery after reload and a withdrawn connection.
+  Multi-connection
   API regressions distinguish denial from transient route/list failures and
   receipt withdrawal. These fixtures establish no live CMA connection.
 - `frontend/e2e/login-redirect.spec.ts` checks app approval and password-MFA to

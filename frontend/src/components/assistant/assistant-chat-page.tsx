@@ -1151,6 +1151,7 @@ function NyxAgentThreadPage() {
         />
       ) : undefined}
       cmaOperations={chat.session.cmaOperations}
+      cmaConversationId={chat.session.conversationId}
       asidePercent={machinePercent}
       onAsidePercentChange={setMachinePercent}
       title={showHome ? translateUi("Home") : chat.session.title}
