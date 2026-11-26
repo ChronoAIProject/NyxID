@@ -4960,6 +4960,7 @@ mod tests {
             .await
             .unwrap();
         let server = MockServer::start().await;
+        let _callback_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
         Mock::given(path("/callback"))
             .respond_with(ResponseTemplate::new(202))
             .mount(&server)
@@ -5530,6 +5531,7 @@ mod tests {
             doc! {"$set":{"platform":platform,"platform_conversation_id":"*","default_agent":true}},
         ).await.unwrap();
         let server = MockServer::start().await;
+        let _callback_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
         Mock::given(path("/callback"))
             .respond_with(ResponseTemplate::new(202))
             .expect(4)

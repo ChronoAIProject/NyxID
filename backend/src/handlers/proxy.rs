@@ -579,7 +579,9 @@ pub(super) async fn channel_guest_skill_download(
         .uri(format!("/api/v1/proxy/{service_id}{path}"))
         .body(Body::empty())
         .map_err(|_| AppError::BadRequest("Invalid pinned package path".into()))?;
-    let capability = skills::issue(state, &permit, &service)?;
+    // Server-side preloads can carry only the conversation's version floor.
+    // Bind the capability to the key version verified during reauthentication.
+    let capability = skills::issue(state, &permit, &service, live.key_version)?;
     let owner = permit.owner.clone();
     let billing_owner = permit
         .chat

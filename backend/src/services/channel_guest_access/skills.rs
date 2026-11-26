@@ -752,6 +752,7 @@ pub(crate) fn issue(
     state: &crate::AppState,
     permit: &Permit,
     catalog: &crate::models::downstream_service::DownstreamService,
+    authenticated_key_version: i64,
 ) -> AppResult<zeroize::Zeroizing<String>> {
     use jsonwebtoken::{Algorithm, Header, encode};
     let now = chrono::Utc::now().timestamp();
@@ -772,7 +773,7 @@ pub(crate) fn issue(
         audience: permit.turn.audience,
         activation_epoch: permit.turn.activation_epoch,
         bot_revision: permit.turn.bot_revision,
-        key_version: permit.chat.key_version,
+        key_version: authenticated_key_version,
         selection_revision: permit.selection_revision,
         skills_revision: permit.skills_revision,
         root: permit.root_id.clone(),

@@ -751,6 +751,22 @@ async fn channel_guest_aurinko_retries_settle_only_proven_obsolete_receipts() {
         ))
         .await
         .unwrap();
+    db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &fixture.bot.id},
+            doc! {"$set":{"guest_access_v1":true,"guest_access_v1_revision":1_i64}},
+        )
+        .await.unwrap();
+    crate::services::channel_routing_service::update_conversation_with_guest_key(
+        db, &fixture.route.id, &fixture.bot.user_id, None, None, None, None, Some(true),
+    ).await.unwrap();
+    guest::set_pilot(
+        db, guest::PilotSelection { fleet: false, bot_ids: Some(vec![fixture.bot.id.clone()]) },
+        &crate::services::audit_service::AuditActor {
+            user_id: fixture.bot.user_id.clone(), api_key_id: None,
+            api_key_name: None, ip_address: None, user_agent: None,
+        },
+    ).await.unwrap();
     ready_test_replica(db).await;
     let flag = flags::set_platform_override(
         db,
