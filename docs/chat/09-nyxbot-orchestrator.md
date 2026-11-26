@@ -121,6 +121,9 @@ notice).
 - Unchanged: secret exclusions, per-service proxy approval policies, node
   routing, billing to the acting person.
 
+For setup outside a specialist's authority, the browser supports an explicit
+[user-started setup handoff](05-frontend-ui.md#specialist-setup-handoffs).
+
 ## 6. Thread authority and permission modes
 
 New and legacy NyxBot threads retain the full account authority needed by NyxBot; the owner-level permission mode and agent override govern confirmations. A legacy Ask-mode row
@@ -819,17 +822,19 @@ Failed local supplemental text keeps its receipts and audit. The live-turn
 notice claim selects one attempt across replicas. An already claimed local
 notice completing just after the final cannot suppress or duplicate it.
 
-Native progress is not sent. Genuine independent native team/followed/permission
-results retain today's event reply behavior. While the same event's primary
-answer is pending, those sends can still suppress that answer on confirmation
-or leave both uncertain under the gateway's routed unknown-tool barrier. This
-needs the gateway's non-answer-send contract. Metadata-only
-`nyxbot_channel_supplemental_delivery` audits include those `gateway_event`
-results as well as local sends/skips, their closed purpose/outcome/reason and
-anchor (`event_source`, `chat_pointer`, `chat_reference_event`, `thread_binding`,
-`none`), plus turn/event/conversation IDs. No text, inbound references, tokens
-or binding digests are recorded. No owner action is needed; drain old replicas
-to apply the result window and claims everywhere.
+Native Discord and WhatsApp progress and independent results use side messages when the original
+event advertises support. When the capability is unavailable, independent
+results use event replies and progress skips with
+`native_progress_unsupported`. The original event window, post-turn claims
+and permission receipt fences apply to both routes. See the [gateway delivery
+contract](../CHANNEL_EVENT_GATEWAY.md#nyxbot-provider-late-replies-and-cma-contract-boundary).
+
+Metadata-only `nyxbot_channel_supplemental_delivery` audits record native side
+messages, gateway event replies, local sends and skips. They include the
+closed purpose, egress, outcome, reason and anchor class (`event_source`,
+`chat_pointer`, `chat_reference_event`, `thread_binding`, `none`), plus
+turn/event/conversation IDs. They omit text, inbound references, tokens and
+binding digests.
 
 Tool images precede text on every channel reply path. The settled message is the
 source of image metadata; stale conversation snapshots do not decide the list.
@@ -2170,6 +2175,31 @@ with the flag off; observed support from all executing workers and recorded
 activation then permit enabling for an admin, without roster/drain declarations. Disable and retire before binary downgrade.
 
 ### Guest settings and binding recovery
+
+Current organization admins can read retained guest conversations for a
+specialist's current organization channel bindings in first-party NyxID
+clients. This permission follows live organization membership, including for
+admins outside the specialist's use or maintenance lists. It applies to guest
+DMs and guest exchanges in shared chats on the current binding, including
+exchanges retained from earlier guest-policy revisions and while guest execution
+is suspended. The read requires the channel and specialist to retain the same
+organization binding. A pending or failed channel with current binding
+authority remains readable. Disconnecting the channel, deactivating its bot,
+or retiring the binding for lost organization access removes the view.
+Source chats use NyxID's opaque chat identifiers.
+
+The read-only transcript contains guest input, retained final reply text, and
+bounded outcome codes. A retained reply is an execution record. Delivery status
+appears separately when a typed delivery outcome is available. Member exchanges,
+working context, tool inputs and results, credentials, attachments, and action
+cards are outside the transcript projection. History pages record a
+metadata-only audit entry for the administrator, organization, and conversation.
+Personal erasure removes verified account-linked transcript content and retains
+the sender revocation tombstone described above. Historically anonymous guest
+turns remain under their original channel or provider-grant retention and
+erasure scope. A later member verification does not assign those turns to the
+member's account. Channel, organization, and provider-grant erasure remove the
+associated guest history from the view according to their existing scopes.
 
 Every listed binding has a **Who can talk to this bot** section on web and mobile:
 Allow guests; a localized explanation of guest identity and org payment; named

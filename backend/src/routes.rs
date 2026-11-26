@@ -1951,6 +1951,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/user-services",
             get(handlers::user_services_handler::list_user_services),
         )
+        .route(
+            "/user-services/consent-disclosure",
+            post(handlers::oauth_consent_disclosure::read),
+        )
         .route("/endpoints", get(handlers::user_endpoints::list_endpoints))
         .route(
             "/endpoints/{endpoint_id}/authorization",
@@ -2863,6 +2867,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/nyxagent/conversations",
             get(handlers::assistant_nyxagent::list),
+        )
+        .route(
+            "/nyxagent/agents/{id}/guest-conversations",
+            get(handlers::org_specialist_channels::guest_conversations),
+        )
+        .route(
+            "/nyxagent/guest-conversations/{id}",
+            get(handlers::org_specialist_channels::guest_history),
         )
         .route(
             "/nyxagent/conversations/{id}",

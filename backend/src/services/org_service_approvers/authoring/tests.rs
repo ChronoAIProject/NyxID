@@ -123,6 +123,8 @@ async fn authoring_governance_candidates_and_readiness_follow_live_authority() {
     assert_eq!(initial["config_id"], s.config);
     assert_eq!(initial["revision"], 0);
     assert_eq!(initial["authoring_available"], false);
+    assert_eq!(initial["authoring_unavailable_reason"], "flag_off");
+    assert_eq!(initial["unavailable"], json!([]));
     let ids: std::collections::BTreeSet<_> = initial["eligible_candidates"]
         .as_array()
         .unwrap()
@@ -178,13 +180,19 @@ async fn authoring_governance_candidates_and_readiness_follow_live_authority() {
             .db
             .collection::<Document>(crate::models::security_capability_activation::COLLECTION_NAME);
     let activation = activations.find_one_and_delete(doc! {"record_kind":crate::models::security_capability_activation::RECORD_KIND,"capability":FLAG}).await.unwrap().unwrap();
-    assert_eq!(get().await.unwrap()["authoring_available"], false);
+    let view = get().await.unwrap();
+    assert_eq!(view["authoring_available"], false);
+    assert_eq!(view["authoring_unavailable_reason"], "readiness_missing");
     assert!(matches!(put().await, Err(AppError::Forbidden(_))));
     activations.insert_one(activation).await.unwrap();
-    assert_eq!(get().await.unwrap()["authoring_available"], true);
+    let view = get().await.unwrap();
+    assert_eq!(view["authoring_available"], true);
+    assert_eq!(view.get("authoring_unavailable_reason"), Some(&Value::Null));
     let peer = readiness::overlapping_test_replica(&s.f.state.db).await;
     readiness::remove_test_replica_capability(&s.f.state.db, &peer, FLAG).await;
-    assert_eq!(get().await.unwrap()["authoring_available"], false);
+    let view = get().await.unwrap();
+    assert_eq!(view["authoring_available"], false);
+    assert_eq!(view["authoring_unavailable_reason"], "readiness_missing");
     assert!(matches!(put().await, Err(AppError::Forbidden(_))));
     s.available(false).await.unwrap();
     assert!(matches!(
@@ -408,4 +416,106 @@ fn replacement_requires_explicit_list_and_rejects_unknown_keys() {
     ] {
         assert!(serde_json::from_value::<Replacement>(body).is_err());
     }
+}
+
+#[tokio::test]
+async fn unavailable_approvers_explain_saved_ids_with_org_scoped_names() {
+    use org_membership::OrgRole;
+    let s = Settings::new("approver_unavailable_evidence").await;
+    let db = &s.f.state.db;
+    let users = db.collection::<Document>(user::COLLECTION_NAME);
+    let memberships =
+        db.collection::<org_membership::OrgMembership>(org_membership::COLLECTION_NAME);
+    let configs = db.collection::<Document>(CONFIGS);
+    let mut expected = serde_json::Map::new();
+    let mut saved = vec![s.f.admin.clone()];
+    for (name, role, active, revoked, reason) in [
+        ("Former Admin", OrgRole::Admin, true, true, "not_member"),
+        ("Current Member", OrgRole::Member, true, false, "not_admin"),
+        ("Disabled Admin", OrgRole::Admin, false, false, "inactive"),
+        ("Scoped Admin", OrgRole::Admin, true, false, "out_of_scope"),
+    ] {
+        let id = Uuid::new_v4().to_string();
+        let mut person = test_user(&id, user::UserType::Person);
+        person.display_name = Some(name.into());
+        person.is_active = active;
+        db.collection::<user::User>(user::COLLECTION_NAME)
+            .insert_one(person)
+            .await
+            .unwrap();
+        let mut membership = test_membership(&s.f.org, &id, role, Some(vec![]));
+        membership.revoked_at = revoked.then(chrono::Utc::now);
+        memberships.insert_one(membership).await.unwrap();
+        expected.insert(id.clone(), json!([name, reason]));
+        saved.push(id);
+    }
+    // Even a named member of a different org has no display-name evidence here.
+    memberships
+        .insert_one(test_membership(
+            "other-org",
+            &s.f.outsider,
+            OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    users
+        .update_one(
+            doc! {"_id":&s.f.outsider},
+            doc! {"$set":{"display_name":"Other org only"}},
+        )
+        .await
+        .unwrap();
+    saved.push(s.f.outsider.clone());
+    expected.insert(s.f.outsider.clone(), json!([null, "not_member"]));
+
+    let missing_person = Uuid::new_v4().to_string();
+    memberships
+        .insert_one(test_membership(
+            &s.f.org,
+            &missing_person,
+            OrgRole::Admin,
+            None,
+        ))
+        .await
+        .unwrap();
+    expected.insert(missing_person.clone(), json!([null, "unknown"]));
+    saved.push(missing_person);
+    configs
+        .update_one(
+            doc! {"_id":&s.config},
+            doc! {"$set":{"approver_user_ids":&saved}},
+        )
+        .await
+        .unwrap();
+    let get = || s.get(test_auth_user(&s.f.admin), &s.catalog);
+    let result = get().await.unwrap();
+    let rows = result["unavailable"].as_array().unwrap();
+    assert_eq!(rows.len(), expected.len());
+    for row in rows {
+        assert_eq!(
+            expected.remove(row["user_id"].as_str().unwrap()),
+            Some(json!([row["display_name"], row["reason"]]))
+        );
+    }
+    assert!(expected.is_empty());
+    assert!(
+        s.get(test_auth_user(&s.f.outsider), &s.catalog)
+            .await
+            .is_err()
+    );
+
+    // Cap metadata even if an older or malformed stored document exceeds the write bound.
+    let oversized: Vec<_> = (0..130).map(|_| Uuid::new_v4().to_string()).collect();
+    configs
+        .update_one(
+            doc! {"_id":&s.config},
+            doc! {"$set":{"approver_user_ids":&oversized}},
+        )
+        .await
+        .unwrap();
+    let result = get().await.unwrap();
+    assert_eq!(result["unavailable"].as_array().unwrap().len(), 128);
+    assert_eq!(result["approver_user_ids"].as_array().unwrap().len(), 130);
+    db.drop().await.unwrap();
 }

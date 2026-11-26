@@ -99,6 +99,8 @@ export const nyxAgentChannelOriginSchema = z.object({
 });
 export type NyxAgentChannelOrigin = z.infer<typeof nyxAgentChannelOriginSchema>;
 export const nyxAgentConversationSchema = z.object({
+  /** Server-authored privacy boundary for the specialist handoff UI. */
+  handoff_eligible: z.boolean().optional(),
   id: conversationId,
   title: z.string(),
   platform_thread: platformThreadSchema.nullish(),
@@ -829,6 +831,7 @@ export const nyxAgentChannelConnectSchema = z.object({
 export type NyxAgentChannelConnect = z.infer<typeof nyxAgentChannelConnectSchema>;
 /** A chat a channel bot is in: a private chat, group, channel or topic. */
 export const nyxAgentChannelChatSchema = z.object({
+  guest_conversation_id: z.string().optional(),
   can_manage: z.boolean().optional(),
   guest_readiness: guestReadinessSchema.nullish(),
   parent_chat_id: z.string().nullable().optional(),

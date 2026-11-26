@@ -71,6 +71,7 @@ export interface ConsentAllowedService {
   readonly label: string;
   readonly catalog_service_name: string | null;
   readonly deleted: boolean;
+  readonly disabled?: boolean;
 }
 
 export interface ConsentListResponse {

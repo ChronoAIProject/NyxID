@@ -1471,6 +1471,39 @@ it("shows pending proxy approvals raised by the chat key as cards at the tail", 
   );
 });
 
+it.each(["approved", "rejected", "expired"] as const)("returns a %s proxy approval to its original place before later turns", async (status) => {
+  const page = history();
+  page.messages.push(
+    { ...page.messages[0]!, id: "u2", seq: 3, turn_id: "turn-2", created_at: "2026-09-17T00:01:00Z" },
+    { ...page.messages[1]!, id: "a2", seq: 4, turn_id: "turn-2", created_at: "2026-09-17T00:01:02Z" },
+  );
+  const approval = {
+    id: "old-request", status: "pending" as const, service_slug: "google-sheets", service_name: "Google Sheets",
+    summary: "POST /v4/spreadsheets", approval_mode: "per_request" as const, agent_key_prefix: "",
+    created_at: reset, expires_at: "2026-09-17T00:05:00Z",
+  };
+  page.approval_history = [approval];
+  globalThis.__nyxidAssistantHttpMock = () => json(page);
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  expect(transport.session(id).messages.at(-1)?.id).toBe("nyxagent-approval:old-request");
+
+  // History can return pending and settled rows in either order. An older
+  // pending request must still be last, even when settled rows follow it.
+  page.approval_history = [
+    { ...approval, id: "waiting-request", created_at: start },
+    { ...approval, status },
+  ];
+  await transport.history(id);
+  expect(transport.session(id).messages.map((message) => message.id)).toEqual([
+    "u", "nyxagent-approval:old-request", "a", "u2", "a2", "nyxagent-approval:waiting-request",
+  ]);
+  await transport.history(id);
+  expect(transport.session(id).messages.map((message) => message.id)).toEqual([
+    "u", "nyxagent-approval:old-request", "a", "u2", "a2", "nyxagent-approval:waiting-request",
+  ]);
+});
+
 it("optimistically renames during a turn and rolls back on failure without losing activity", async () => {
   let finish!: (response: Response) => void;
   const activeRow = {
@@ -2169,6 +2202,66 @@ it("inherits a specialist's configured profile unless the owner explicitly selec
   expect(bodies[0]).toEqual({ agent_id: agent.id, text: "Use your default" });
   await transport.send(undefined, "Use this model", vi.fn(), undefined, { agent, model: "nyxagent/research" });
   expect(bodies[1]).toEqual({ agent_id: agent.id, model: "nyxagent/research", text: "Use this model" });
+});
+
+it("starts the owner's NyxBot on its configured model and advertises the browser artifact capability", async () => {
+  const transport = new NyxAgentTransport();
+  transport.setModel("nyxagent/stale-draft");
+  let body: unknown;
+  let headers: Headers | undefined;
+  globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+    if (endpoint.endsWith("/turns")) { body = JSON.parse(String(init.body)); headers = new Headers(init.headers); return stream(); }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [conversation()], next_cursor: null });
+    return json(history());
+  };
+  const agent = { id: "nyxbot-id", kind: "nyxbot" as const, name: "NyxBot", destroyed: false };
+  await transport.send(undefined, "Continue setup", vi.fn(), undefined, { agent });
+  expect(body).toEqual({ agent_id: agent.id, text: "Continue setup" });
+  expect(headers?.get("X-NyxID-Chat-Capabilities")).toBe("nyxbot-handoff-v1");
+});
+
+it("keeps a pending handoff out of the ordinary draft composer", async () => {
+  const transport = new NyxAgentTransport();
+  let release!: () => void;
+  globalThis.__nyxidAssistantHttpMock = async ({ endpoint }) => {
+    if (endpoint.endsWith("/turns")) { await new Promise<void>((resolve) => { release = resolve; }); return stream(); }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [conversation()], next_cursor: null });
+    return json(history());
+  };
+  const sending = transport.send(undefined, "Handoff task", vi.fn(), undefined, { agent: { id: "nyxbot", kind: "nyxbot", name: "NyxBot", destroyed: false }, clientDraftKey: "handoff:receipt" });
+  expect(transport.session(undefined).messages).toHaveLength(0);
+  expect(transport.isRunning(undefined)).toBe(false);
+  await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+  release();
+  await sending;
+});
+
+it("excludes an unadopted handoff from scoped and full conversation lists", async () => {
+  const transport = new NyxAgentTransport();
+  const agent = { id: "nyxbot-id", kind: "nyxbot" as const, name: "NyxBot", destroyed: false };
+  const saved = { ...conversation(), agent };
+  let release!: () => void;
+  globalThis.__nyxidAssistantHttpMock = async ({ endpoint }) => {
+    if (endpoint.endsWith("/turns")) {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return stream();
+    }
+    if (endpoint.includes("/conversations?")) return json({ conversations: [saved], next_cursor: null });
+    return json({ ...history(), conversation: saved });
+  };
+  const sending = transport.send(undefined, "Handoff task", vi.fn(), undefined, {
+    agent,
+    clientDraftKey: "handoff:receipt",
+  });
+  await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+  try {
+    expect((await transport.list(agent.id)).map((row) => row.id)).toEqual([id]);
+    expect(transport.getConversations(agent.id).map((row) => row.id)).toEqual([id]);
+    expect((await transport.list()).map((row) => row.id)).toEqual([id]);
+  } finally {
+    release();
+    await sending;
+  }
 });
 
 it("persists decision continuation provenance through the request, optimistic turn and history without losing its turn count", async () => {

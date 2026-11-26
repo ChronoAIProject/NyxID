@@ -585,13 +585,14 @@ async fn deliver_settled_channel_result(
     if reply.status != "completed" {
         // They were told an answer would come: say it did not.
         for origin in &reply.post_turn_deliver_also {
-            super::nyxbot::deliver_to_for(
+            super::nyxbot::deliver_to_for_turn(
                 state,
                 row,
                 origin,
                 "I couldn't finish answering that question. Please ask again.",
                 None,
                 Purpose::TeamAdditionalResult,
+                Some(turn),
             )
             .await;
         }
@@ -609,17 +610,27 @@ async fn deliver_settled_channel_result(
     // their bound chats (or the configured home chat).
     if let engine::PrimaryDestination::ChatUpdate { origins } = primary {
         for origin in origins {
-            super::nyxbot::deliver_to(state, row, &origin, &reply.text, Some(&plan)).await;
+            super::nyxbot::deliver_to_for_turn(
+                state,
+                row,
+                &origin,
+                &reply.text,
+                Some(&plan),
+                Purpose::TeamResult,
+                Some(turn),
+            )
+            .await;
         }
     }
     for origin in &reply.post_turn_deliver_also {
-        super::nyxbot::deliver_to_for(
+        super::nyxbot::deliver_to_for_turn(
             state,
             row,
             origin,
             &reply.text,
             Some(&plan),
             Purpose::TeamAdditionalResult,
+            Some(turn),
         )
         .await;
     }

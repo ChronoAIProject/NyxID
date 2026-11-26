@@ -1290,18 +1290,43 @@ Missing or expired sources skip delivery to that destination. A missing
 permission source finishes refused. Image claims, multipart receipts, primary
 final replies and durable late replies use their existing delivery paths.
 
-Native-source progress is suppressed. Genuine independent native team results,
-followed results and permission occurrences retain their existing event replies
-and <29-minute original-event window. If the original primary final/failure is
-still pending, a confirmed independent result can suppress it; an unknown routed
-result may lose both and block later tool sends. This remaining native case
-needs a gateway non-answer send contract that changes neither tool marker nor
-unknown-tool barrier. NyxID does not defer these results for a day or retry
-uncertain sends. `nyxbot_channel_supplemental_delivery` records purpose, egress,
-outcome, closed skip reason, anchor class and turn/event/conversation IDs,
-including retained native `gateway_event` sends. No content or references enter
-the audit. Paired reference fields remain optional and ignored by older readers.
-No setting or reconnection is required.
+Native Discord and WhatsApp supplemental text uses the original event and its
+existing 29-minute window. Lark uses NyxID's relay path. Unknown native source
+types are ineligible. After local source and authority checks, NyxID queries
+`GET /v1/events/{event_ref}/side-messages` with the channel's agent bearer.
+Only HTTP 200 with `available: true` enables the side-message route for that
+event. A 404, false, transient error or two-second probe timeout retains event
+replies for independent team, additional-chat, followed-thread and permission
+results starting a delivery.
+Checking, capacity and machine-control notices skip with
+`native_progress_unsupported` when the capability is unavailable. HTTP 401,
+403 or 410 ends the attempt as an authority refusal.
+
+`POST /v1/events/{event_ref}/side-messages` sends only `{"text": ...}` and uses
+a deterministic `Idempotency-Key` derived from the local dispatch identity
+and part index. Team and additional-chat side messages use the settling turn
+and destination identity. A native result without a settling turn skips with
+`missing_result_identity` when the event advertises side messages. The same
+result uses the legacy event reply when capability discovery is unavailable.
+CMA retains the original destination and thread, rechecks
+authority and records an independent receipt. The event's answer token, reply
+marker and the routed unknown-tool barrier are untouched. Native WhatsApp parts
+send in order and stop at the first outcome other than confirmed. Rejected,
+unsupported and rate-limited receipts settle as rejected. Unknown receipts,
+conflicts, server errors, transport failures and unrecognized success bodies
+settle as unknown. A side-message attempt precludes an event-reply fallback,
+including when the POST returns 404. A saved text plan preserves its chosen
+route across recovery. A side-message plan requires a successful capability
+probe before a remaining part can send. A legacy plan resumes its unsent
+suffix through event replies. See the [permission receipt contract](EXECUTION_PERMISSIONS.md#verified-owner-channel-proposals-v4)
+for the permission occurrence fence.
+
+`nyxbot_channel_supplemental_delivery` records `gateway_side_message` for
+side sends and `gateway_event` for event replies. Side sends leave
+`gateway_native_delivery` health intact. Event replies can still suppress an
+automatic final or block later tool sends under the gateway's existing answer
+and unknown-tool rules. The capability requires no NyxID setting or owner
+reconnection. See the [CMA side-message contract](https://github.com/ChronoAIProject/cma/pull/3718).
 
 **Precise CMA follow-up request (no CMA code changed here):** pass the remaining
 absolute ingress turn deadline in the provider request, and expose a durable,
@@ -1934,3 +1959,132 @@ channel summaries explain the local `gateway_native_draining` fence; web hides
 native activation retry only for `gateway_native_draining`, alongside the existing
 intake evidence; the previous `relay_draining` text and retry action are unchanged. None of these
 observations relaxes exclusive ingress or the persisted 90-second drain.
+
+### Telegram connection request diagnostics (#1974)
+
+CMA `70761e9b` bounds both the channel `name` and `profile.metadata.name` to
+80 **UTF-8 bytes**. NyxID retains its 60-character display cap and truncates
+both request names at a UTF-8 boundary before create and full attachment update.
+Telegram relay issuers must be HTTPS origins. The local connect regression checks
+these nested constraints in addition to the management request schema, uses the
+registered gateway client's real introspection path, pairs the owner and executes
+a personal specialist turn for both `telegram-new` and `telegram`.
+
+HTTP 400 alone does not prove that a channel was never saved. An
+`invalid_request` with trimmed exact detail `nyxbot`, `unknown provider: nyxbot`
+or the supported legacy message `provider is not registered` identifies the
+missing provider; arbitrary provider prose and validation pointers do not.
+CMA `976b30f30d6a` checks the provider allowlist before reserving a fresh record.
+CMA `70761e9b` reserves the record and mutation intent before this check;
+existing reservations can also survive a retry on a newer gateway.
+`provider_rejected` (including the upstream `invalid_binding` refusal) and
+unknown 400s retain release custody. Known pre-effect validation/authentication
+refusals settle as `not_created`. Local authority and keys retire independently
+of remote cleanup availability.
+
+For an exact terminal CREATE missing-provider response, NyxID records
+`create_provider_refused` on the original provisional obligation. Losing its
+setup fence writes no evidence and preserves the actual refusal. A
+creator-authenticated GET of the exact canonical record ID returning CMA's
+`status:404` / `code:channel_not_found` is only a candidate for absence proof:
+CMA's lookup derives the record URL from its current origin and checks the saved
+sealed channel pointer; origin/sealing changes can conceal a retained record.
+The release worker requires `GET /channel-records/cancel-create-capability`
+with `contract_version:1`, followed by the exact record's `POST .../cancel-create`
+and a `creation_fenced_absent` receipt matching the captured record, human owner,
+issuer, provider and binding. This record-store protocol checks retained records
+independently of the current CMA origin, refuses pending creates, and fences late
+writers under CMA's verified writer floor. Read-only release inspection never
+performs that POST. A present record follows ordinary identity/version-fenced
+cleanup or review. Malformed receipts, missing/unsupported capability, read or
+transport failures, historical row errors and uncertain POSTs cannot use this
+terminal-refusal exception. Older CMA builds, including `976b30f30d6a`, lack the
+cancellation protocol: even a genuinely absent record retains its obligation for
+the existing review/recovery process. This does not block repaired owner retries.
+No optional replay advertisement is required or treated as absence evidence.
+
+The shared `nyxbot_channel_connection_service` owns connection preflight,
+transactional bot-generation capture, credential allocation and setup diagnostics.
+Gateway agent credentials use `nyxbot_channel_key` sealing for the exact channel,
+linking owner and key ID. A refused preflight allocates no credentials and writes
+no credential context marker. Direct Meta connections use the same orchestration
+with their live default-route proof, repair fences and committed guest policy.
+
+Failed Telegram connection health surfaces a bounded last-attempt code and
+allowlisted operation, HTTP status, management problem code and validation
+pointer, never remote detail prose, submitted values, URLs or credentials.
+`outcome:rejected` describes the observed HTTP call, not proof that CMA saved no
+record; release custody is independent. A configuration refusal records
+`configuration` / `not_sent` without allocating route or agent credentials.
+Health does not probe whether an administrator has since fixed the dependency;
+reconnect performs the next attempt. Active, pending and disconnected current
+bindings suppress stale failed setup advice. Bot credential faults retain their
+higher priority, while historical outbound errors do not mask the current setup
+failure. Telegram projections bind to the bot's current owner and ownership
+generation, including org-owned bots. A row's bot owner is `bot_owner_id`,
+falling back to `org_specialist.org_id` on older org-specialist rows and then
+`user_id` on personal rows; any explicit specialist org must also match. Versioned rows
+must match the live bot generation recorded under its transactional write fence.
+Unversioned rows for bots that have never transferred retain legacy behavior.
+For a bot with a positive ownership generation, an unversioned row is eligible
+only with its exact still-active route owned by the current bot owner and bot ID,
+without `retired_by_transfer`; transfer retires all prior routes. This preserves
+valid active connections created after transfer by older binaries while hiding
+pre-transfer failures and routes, including a transfer away and back. Health
+eligibility does not grant execution authority. The page-scoped history read and
+initial sort use `nyxbot_health_latest`. Transferred unversioned
+candidates alone enter the route lookup branch; versioned rows and other
+platforms do not. Route checks precede legacy selection so a newer retired
+route cannot hide an eligible older binding. Each branch emits at most one row
+per requested bot before their final merge; lookup work depends only on the
+eligible legacy history, not all history in a mixed page. The optional
+`recommendation_cause` is emitted only when gateway setup advice actually wins the recommendation;
+clients use it for localization and retain server text for older responses.
+
+The November 23 staging incident is attributed to the missing `nyxbot` provider
+in [cma-infra#140](https://github.com/ChronoAIProject/cma-infra/issues/140).
+[cma-infra#142](https://github.com/ChronoAIProject/cma-infra/pull/142) supplies the
+provider configuration; the incident's owner follow-up confirms a staging link
+to the default NyxBot, owner pairing and Telegram reply. It does not establish a
+staging personal-specialist turn. The Unicode byte-limit failure is independently
+reproduced against CMA `70761e9b` in local review; it is not the attributed
+staging cause. Local fixtures verify request, authority and cleanup contracts
+without asserting production delivery.
+
+An exact known missing-provider refusal applies a 60-second backoff from the
+attempt's start time, scoped to the current owner and generation. It allocates
+no further keys or remote reservations during that interval. Once the interval
+passes, the owner can reconnect normally after configuration is corrected; no
+admin reset or replay advertisement is required. A generic historical 400,
+including an old Unicode name refusal, does not impose this delay or block a
+repaired connection. Release custody is independent of that new admission.
+
+CMA `70761e9b` can retain a CREATE mutation intent after its missing-provider
+refusal. DELETE can then return a conflict even with the observed record version;
+without a held intent, unbind can itself return `invalid_request` / `nyxbot`.
+These known cases park the exact obligation for operator review as
+`gateway_provider_setup_required` (or `gateway_setup_custody_required` when the
+provider cause is not proven). They do not run an endless automatic DELETE loop,
+change the captured deletion version, cancel upstream intent, or make the owner
+resolve old custody before reconnecting. Configure the provider on every gateway
+replica and inspect the retained record through the existing release review API.
+For a matching record that has become deletable, `retry_original` requeues only
+the captured authority. If CMA still holds CREATE, that action remains in review;
+NyxID has no supported cancellation protocol at this pinned CMA version. A CMA
+operator must resolve that intent through a supported upstream recovery path or
+upgrade. After actual removal, the existing missing-record resolution applies.
+NyxID never clears the intent or claims release on the operator's behalf.
+
+Older replicas incorrectly marked all create 400s `not_created`. Historical
+cleanup is inspected on demand through the existing paginated release review
+API (`states=settled` or the captured obligation ID). If the exact original record
+is still present and matches, a platform administrator may explicitly use
+`retry_original` with that inspection and revision, even on a legacy Telegram
+`not_created` setup release. The same live authority checks, audit and original
+version rules apply. Missing, changed or malformed observations cannot use this
+exception. It adds no global history scan or automatic historical mutation.
+A held CREATE still returns to custody review; this action never cancels it.
+Upgrade all NyxID connection writers to obtain the new refusal classification
+and backoff across the fleet; older writers can still create and falsely settle
+additional reservations. A historical error grants no execution authority and
+never prevents a repaired owner connection.

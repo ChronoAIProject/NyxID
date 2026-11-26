@@ -2441,6 +2441,14 @@ the hosted page offers recovery for saved bots and authorized OAuth connections.
 
 ### Bot-link implementation and compatibility
 
+Inside browser assistant chat, same-origin `/connect/bot/nyx_bcl_*` links open
+the reusable hosted connection content in a dialog over the transcript. The
+dialog retains token-bound setup, progress polling, one-time result display,
+and recovery. On completion it returns to chat without following the frontend
+callback or opening bot management. Server completion and app notifications
+follow the tracked bot-link lifecycle. Standalone links render the full hosted
+page with callback navigation.
+
 Bot links have their own collection and terminal state transitions. The existing service-link model, handlers, hosted page, and callback fields remain unchanged. The shared app lookup validates bot callbacks through the same OAuth redirect policy used by service links.
 
 | Responsibility | Implementation |

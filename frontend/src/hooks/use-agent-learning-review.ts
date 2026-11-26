@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import { useAuthStore } from "@/stores/auth-store";
+import { nyxBotQueryKeys } from "./use-nyxbot-agents";
 import {
   learningApprovalSchema,
   learningProposalsSchema,
@@ -27,7 +28,11 @@ export function useAgentLearningReview(id: string, enabled = true) {
   const client = useQueryClient();
   const status = useQuery({ queryKey: ["agent-learning-status", owner, id], queryFn: async () => learningStatusSchema.parse(await assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning`)), enabled: Boolean(owner && enabled), retry: false });
   const query = useQuery({ queryKey: ["agent-learning-proposals", owner, id], queryFn: async () => learningProposalsSchema.parse(await assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/proposals`)), enabled: Boolean(owner && enabled), retry: false });
-  const invalidate = () => client.invalidateQueries({ queryKey: ["agent-learning-proposals", owner, id] });
+  const invalidate = () => Promise.all([
+    client.invalidateQueries({ queryKey: ["agent-learning-proposals", owner, id] }),
+    client.invalidateQueries({ queryKey: ["authored-skill-review", owner] }),
+    client.invalidateQueries({ queryKey: [...nyxBotQueryKeys.root(owner), "history"] }),
+  ]);
   const run = useMutation({ mutationFn: () => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/run`, { method: "POST", body: {} }), onSuccess: invalidate });
   // The server fences a reject on the reviewed revision (and defaults the reason).
   const reject = useMutation({ mutationFn: ({ proposalId, revision }: { proposalId: string; revision: number }) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/proposals/${encodeURIComponent(proposalId)}/reject`, { method: "POST", body: { revision } }), onSuccess: invalidate });
@@ -37,7 +42,7 @@ export function useAgentLearningReview(id: string, enabled = true) {
   const edit = useMutation({ mutationFn: ({ proposalId, revision, draft }: { proposalId: string; revision: number; draft: LearningDraftBody }) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/proposals/${encodeURIComponent(proposalId)}`, { method: "PUT", body: { revision, draft } }), onSuccess: invalidate });
   // Checks a draft against the proposal's validator without saving it.
   const validate = useMutation({ mutationFn: async ({ proposalId, draft }: { proposalId: string; draft: LearningDraftBody }) => skillDraftValidationSchema.parse(await assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/proposals/${encodeURIComponent(proposalId)}/validate`, { method: "POST", body: { draft } })) });
-  const configure = useMutation({ mutationFn: (body: { enabled: boolean; threshold: number }) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning`, { method: "PUT", body }), onSuccess: () => { void status.refetch(); invalidate(); } });
+  const configure = useMutation({ mutationFn: (body: { enabled: boolean; threshold: number }) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning`, { method: "PUT", body }), onSuccess: () => { void status.refetch(); void invalidate(); } });
   const consent = useMutation({ mutationFn: (enabled: boolean) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/consent`, { method: "PUT", body: { enabled, threshold: 1 } }), onSuccess: () => void status.refetch() });
   return { ...query, status, run, reject, approve, reprepare, edit, validate, configure, consent };
 }

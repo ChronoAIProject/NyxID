@@ -290,7 +290,7 @@ function ConversationRow({
           </span>
         ) : showDraft ? <span className="mt-0.5 block">{draftLine}</span> : null}
       </button>
-      <DropdownMenu open={menuOpen} onOpenChange={(open) => {
+      {!conversation.read_only ? <DropdownMenu open={menuOpen} onOpenChange={(open) => {
         if (open) {
           rowList.current = optionsTrigger.current?.closest("nav") ?? null;
           pinAction.current = false;
@@ -367,7 +367,7 @@ function ConversationRow({
           >
             <Trash2 aria-hidden="true" />{translateUi("Delete")}</DropdownMenuItem>
         </DropdownMenuContent>
-      </DropdownMenu>
+      </DropdownMenu> : null}
     </div>
   );
 }
@@ -388,6 +388,9 @@ export interface SidebarAgents {
   /** The selected agent's threads, newest first. */
   readonly threads: readonly Conversation[];
   readonly threadsLoading?: boolean;
+  readonly onMoreGuestThreads?: () => void;
+  readonly loadingGuestThreads?: boolean;
+  readonly guestThreadsError?: boolean;
   readonly onSelectAgent: (agentId: string) => void;
   readonly onNewThread: (agentId: string) => void;
   /** Open an agent's details sheet; the row's hover menu offers it. */
@@ -573,8 +576,9 @@ function AgentRow({
   const highlighted = selected && (!threadsColumn || separateThreads);
   const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
   const pinnedIds = usePinnedConversationIds();
+  const canReadGuestHistory = agent.owner_kind === "org" && agent.can_govern === true;
   const threads = expanded
-    ? splitChannelThreads(model.threads)
+    ? splitChannelThreads(agent.can_use === false ? model.threads.filter((thread) => thread.read_only) : model.threads)
     : { own: [], bots: [] };
   const ordered = pinnedConversationsFirst(threads.own, pinnedIds);
   const [showAllThreads, setShowAllThreads] = useState(false);
@@ -651,7 +655,7 @@ function AgentRow({
           <button
             type="button"
             onClick={() => {
-              if (agent.can_use === false) {
+              if (agent.can_use === false && !canReadGuestHistory) {
                 model.onAgentDetails?.(agent.id);
               } else if (model.onBackToWorkspace) {
                 model.onSelectAgent(agent.id);
@@ -767,7 +771,7 @@ function AgentRow({
           </DropdownMenu>
         ) : null}
       </div>
-      {expanded && agent.can_use !== false ? (
+      {expanded && (agent.can_use !== false || canReadGuestHistory) ? (
         // The guide line runs down from the avatar's centre.
         <div
           role="group"
@@ -801,6 +805,12 @@ function AgentRow({
               unreadThreadIds={model.unreadThreadIds}
             />
           ))}
+          {model.onMoreGuestThreads ? (
+            <button type="button" disabled={model.loadingGuestThreads} onClick={model.onMoreGuestThreads}
+              className="w-full rounded-lg px-3 py-2 text-left type-secondary text-text-tertiary hover:bg-overlay">
+              {translateUi("Load more guest conversations")}
+            </button>
+          ) : null}
           {canChat ? (
             <button
               type="button"
@@ -1660,7 +1670,10 @@ function RailAgent({
   const selected = agent.id === model.selectedAgentId;
   if (agent.can_use === false) return (
     <button type="button" className={RAIL_BUTTON} aria-label={agentAccessibleName(agent)}
-      onClick={() => model.onAgentDetails?.(agent.id)}><AgentAvatar agent={agent} /></button>
+      onClick={() => {
+        if (agent.owner_kind === "org" && agent.can_govern) model.onSelectAgent(agent.id);
+        else model.onAgentDetails?.(agent.id);
+      }}><AgentAvatar agent={agent} /></button>
   );
   return (
     // Its chats open on click, never on a passing pointer; "All chats"

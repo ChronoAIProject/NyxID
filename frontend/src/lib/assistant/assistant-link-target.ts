@@ -1,9 +1,15 @@
 import { ACCOUNT_PANEL_KEYS, parseAccountPanelSearch, type AccountPanel, type AccountPanelParams } from "./account-panel-search";
 import { parseRawChannelBotReturnTo } from "@/schemas/channel-bot-setup";
 import { isHostedConnectLink } from "@/lib/assistant/hosted-connect-link";
+import { isNyxAgentConversationId } from "./conversation-ids";
+import { AGENT_DETAILS_TABS } from "./search";
 
 export type AssistantModalLinkTarget =
   | { readonly kind: "account-panel"; readonly href: string; readonly panel: AccountPanel; readonly params: AccountPanelParams }
+  | { readonly kind: "agent-key"; readonly href: string }
+  | { readonly kind: "channel-connect"; readonly href: string; readonly token: string }
+  | { readonly kind: "conversation"; readonly href: string; readonly conversationId: string }
+  | { readonly kind: "workspace"; readonly href: string }
   | {
       readonly kind: "connect";
       readonly href: string;
@@ -14,6 +20,7 @@ export type AssistantModalLinkTarget =
       readonly href: string;
       readonly platform: string;
       readonly search: string;
+      readonly requestId?: string;
     };
 
 const CHANNEL_BOT_SETUP_PATH = /^\/channel-bots\/connect\/([^/]+)$/;
@@ -60,7 +67,52 @@ export function assistantModalLinkTarget(
     };
   }
 
+  if (url.pathname === "/channel-bots" && url.searchParams.get("connect") === "telegram-new") {
+    const keys = [...url.searchParams.keys()];
+    if (new Set(keys).size !== keys.length || keys.some((key) => !["connect", "request_id", "label", "target_org_id"].includes(key))) return null;
+    const requestId = url.searchParams.get("request_id") ?? undefined;
+    if (requestId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) return null;
+    return { kind: "channel-bot", href: url.href, platform: "telegram-new", search: safeChannelSetupSearch(url), requestId };
+  }
+
+  const workspaceKeys = url.pathname === "/assistant/automations" ? ["setup", "agent"]
+    : url.pathname === "/assistant/machines" ? ["tab"] : undefined;
+  if (workspaceKeys && [...url.searchParams.keys()].every((key) => workspaceKeys.includes(key)) &&
+      new Set(url.searchParams.keys()).size === url.searchParams.size &&
+      [...url.searchParams.values()].every((value) => /^[A-Za-z0-9_-]{1,256}$/.test(value))) {
+    return { kind: "workspace", href: url.href };
+  }
+
+  // Advanced management screens already own their forms and authorization.
+  // Keep their canonical entry points in the app without inventing dialogs.
+  if (!url.search && (["/assistant/plugins", "/assistant/approvals", "/channel-bots", "/nodes", "/approvals/settings", "/approvals/history", "/approvals/grants", "/orgs", "/triggers", "/developer/apps", "/settings/devices/onboard", "/ai-setup"].includes(url.pathname) || /^\/orgs\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(url.pathname))) {
+    return { kind: "workspace", href: url.href };
+  }
+  if (url.pathname === "/keys" && url.searchParams.size === 1 && ["services", "pools", "nyxid"].includes(url.searchParams.get("tab") ?? "")) {
+    return { kind: "workspace", href: url.href };
+  }
+
+  // Hosted channel setup has its own token and lifecycle; preserve it intact.
+  const channelConnect = /^\/connect\/bot\/(nyx_bcl_[A-Za-z0-9_-]{1,152})$/.exec(url.pathname);
+  if (channelConnect && !url.search) {
+    return { kind: "channel-connect", href: url.href, token: channelConnect[1]! };
+  }
+  if (url.pathname === "/keys" && url.searchParams.get("tab") === "nyxid" &&
+      url.searchParams.get("action") === "create-key" &&
+      url.searchParams.size === 2) {
+    return { kind: "agent-key", href: url.href };
+  }
+
   if (url.pathname === "/assistant") {
+    if (url.searchParams.size === 2 && url.searchParams.has("agent") && url.searchParams.has("details") &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(url.searchParams.get("agent") ?? "") &&
+        AGENT_DETAILS_TABS.some((tab) => tab === url.searchParams.get("details"))) {
+      return { kind: "workspace", href: url.href };
+    }
+    const conversationId = url.searchParams.get("c");
+    if (url.searchParams.size === 1 && conversationId && isNyxAgentConversationId(conversationId)) {
+      return { kind: "conversation", href: url.href, conversationId };
+    }
     if (Array.from(url.searchParams.keys()).some((key) => !ACCOUNT_PANEL_KEYS.some((allowed) => allowed === key))) return null;
     const raw: Record<string, unknown> = Object.fromEntries(url.searchParams);
     if (url.searchParams.has("panelServices")) {

@@ -6,7 +6,8 @@ use crate::{
     models::machine_external_grant::{ExternalGrantBinding, MachineExternalGrant},
     mw::auth::AuthUser,
     services::machine_external_grant_service::{
-        self as grants, GrantSelection, SourceReference, ValidityReason,
+        self as grants, GrantSelection, GrantValidity, OAuthMachineServiceDisplay,
+        OAuthMachineStatus, SourceReference, ValidityReason,
     },
 };
 use axum::{
@@ -144,6 +145,29 @@ pub struct GrantReadResponse {
     pub grant_valid: bool,
     pub grant_validity_reason: Option<ValidityReason>,
     pub source_and_grant_valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_machine_status: Option<OAuthMachineStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_machine_services: Option<BTreeMap<String, OAuthMachineServiceDisplay>>,
+}
+
+impl GrantReadResponse {
+    fn new(
+        row: Option<MachineExternalGrant>,
+        validity: GrantValidity,
+        oauth_machine_status: Option<OAuthMachineStatus>,
+    ) -> Self {
+        Self {
+            grant: row.map(Into::into),
+            source_valid: validity.source.valid,
+            source_validity_reason: validity.source.reason,
+            grant_valid: validity.grant.valid,
+            grant_validity_reason: validity.grant.reason,
+            source_and_grant_valid: validity.combined,
+            oauth_machine_status,
+            oauth_machine_services: None,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -201,22 +225,6 @@ fn audit(state: &AppState, user: &str, row: &MachineExternalGrant, action: &str)
     );
 }
 
-async fn read_response(
-    state: &AppState,
-    user: &str,
-    source: SourceReference,
-    row: Option<MachineExternalGrant>,
-) -> AppResult<GrantReadResponse> {
-    let validity = grants::evaluate_validity(&state.db, user, &source, row.as_ref()).await?;
-    Ok(GrantReadResponse {
-        grant: row.map(Into::into),
-        source_valid: validity.source.valid,
-        source_validity_reason: validity.source.reason,
-        grant_valid: validity.grant.valid,
-        grant_validity_reason: validity.grant.reason,
-        source_and_grant_valid: validity.combined,
-    })
-}
 pub async fn get_key(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -224,15 +232,14 @@ pub async fn get_key(
 ) -> AppResult<Json<GrantReadResponse>> {
     let user = owner(&auth)?;
     let row = grants::get_latest_for_key(&state.db, &user, &key).await?;
-    Ok(Json(
-        read_response(
-            &state,
-            &user,
-            SourceReference::ApiKey { api_key_id: key },
-            row,
-        )
-        .await?,
-    ))
+    let validity = grants::evaluate_validity(
+        &state.db,
+        &user,
+        &SourceReference::ApiKey { api_key_id: key },
+        row.as_ref(),
+    )
+    .await?;
+    Ok(Json(GrantReadResponse::new(row, validity, None)))
 }
 pub async fn put_key(
     State(state): State<AppState>,
@@ -301,30 +308,11 @@ pub async fn get_oauth(
     Path(client): Path<String>,
 ) -> AppResult<Json<GrantReadResponse>> {
     let user = owner(&auth)?;
-    let row = grants::get_latest_for_oauth(&state.db, &user, &client).await?;
-    let consent = row.as_ref().and_then(|grant| match &grant.binding {
-        ExternalGrantBinding::OAuth {
-            consent_id,
-            consent_revision,
-            ..
-        } => Some(crate::models::consent::ProtectedConsentRef {
-            consent_id: consent_id.clone(),
-            consent_revision: consent_revision.clone(),
-        }),
-        ExternalGrantBinding::ApiKey { .. } => None,
-    });
-    Ok(Json(
-        read_response(
-            &state,
-            &user,
-            SourceReference::OAuth {
-                oauth_client_id: client,
-                consent,
-            },
-            row,
-        )
-        .await?,
-    ))
+    let read = grants::read_oauth_grant(&state.db, &user, &client).await?;
+    let services = read.grant.is_some().then_some(read.services);
+    let mut response = GrantReadResponse::new(read.grant, read.validity, read.status);
+    response.oauth_machine_services = services;
+    Ok(Json(response))
 }
 pub async fn put_oauth(
     State(state): State<AppState>,

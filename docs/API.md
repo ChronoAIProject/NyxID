@@ -3867,6 +3867,30 @@ List user's service bindings.
 
 The integration contract guarantees `services[].id`, `services[].slug`, and `services[].is_active` across compatible `/api/v1` releases. Other fields are documented for current clients but may evolve additively; clients should ignore unknown fields.
 
+#### POST /api/v1/user-services/consent-disclosure
+
+Read consent display metadata for up to 100 exact user-service UUIDs in
+`{"service_ids":["…"]}`. An empty list returns only configured token lifetimes.
+Only first-party human sessions and access tokens qualify. Unknown, disabled,
+and non-executable services are omitted under the active user-service listing's
+visibility policy. The response is private and non-cacheable.
+
+`access_token_ttl_secs`, `broker_access_token_ttl_secs`, and
+`refresh_token_ttl_secs` report the NyxID OAuth lifetimes. Each `services` entry contains `service_id`,
+`credential_source` (personal or organization), and `credential_kind`. Only a
+linked OAuth credential's recorded scope string can populate `upstream_scopes`.
+Known entries include the curated label, description and sensitivity. Other
+entries retain the raw scope with `known: false` and unknown sensitivity. A
+null list means the permissions could not be determined or do not apply.
+
+`known_operations` counts active published catalog rows under `read`, `write`,
+`delete`, and `unclassified`. It is null when no published inventory is known
+or the connection has an owner-mounted OpenAPI spec.
+Explicit endpoint risk supplies read and write, and a classified write using
+HTTP DELETE counts as delete. The counts carry `limiting: false`. Capability
+values report positive catalog evidence or null for unknown. These fields are
+descriptive and approval never depends on the projection.
+
 #### PUT /api/v1/user-services/{id}
 
 Update auth config or node routing.
@@ -5649,6 +5673,19 @@ val response = client.newCall(request).execute()
 
 List all OAuth consents the current user has granted to third-party applications.
 
+The `granted_at` and `expires_at` fields describe base OAuth consent. Explicit
+service allowlists resolve display metadata in one database snapshot. A
+first-party human session can see personally owned services and services
+covered by the person's current organization proxy scope. The read checks
+active organizations, memberships and service-level admin restrictions.
+The list uses the owner-bound endpoint label or the authorized service's slug.
+It displays `—` as the string label when neither name is usable. Catalog
+names require a matching owner-bound endpoint. An eligible disabled
+service with a surviving endpoint has the additive `disabled: true` field.
+Missing, deleted, and inaccessible entries keep their `id` and use
+`deleted: true` with a label numbered in list order (`#1`, `#2`, and so on).
+Use the `deleted` and `disabled` flags to render localized display labels.
+
 **Auth:** Required
 
 **Response (200):**
@@ -5674,6 +5711,47 @@ List all OAuth consents the current user has granted to third-party applications
 curl http://localhost:3001/api/v1/users/me/consents \
   -H "Authorization: Bearer <access_token>"
 ```
+
+---
+
+#### GET /api/v1/users/me/consents/{client_id}/machine-grant
+
+Requires a human owner session. The response includes the latest owned Machine
+grant (active first, then retained revoked history) or `null`, the independent
+`source_valid` and `grant_valid` booleans and their nullable validity reasons,
+and `source_and_grant_valid` (the logical AND of the independent checks).
+
+When the owner has saved consent or grant history for the client, the response
+also includes `oauth_machine_status`. The server reads the displayed grant
+and source in one database snapshot. It reports the first applicable owner,
+client, or consent blocker, then evaluates the grant if the source passes.
+
+| Check | `oauth_machine_status` values in evaluation order |
+| --- | --- |
+| Owner | `owner_unavailable` |
+| Client | `client_missing`, `client_disabled`, `client_machine_scope_missing`, `client_proxy_scope_missing` |
+| Consent | `consent_missing`, `consent_expired`, `consent_revision_missing`, `consent_machine_scope_missing`, `consent_proxy_scope_missing` |
+| Grant | `grant_missing`, `grant_revoked`, `grant_expired`, `grant_stale`, `valid` |
+
+A stale grant has a security epoch or consent binding that differs from the
+live source. Proxy capability here means `proxy` or `proxy:*`. The status
+describes saved permissions. Execution also checks live token authority and
+Machine readiness. See [optional Machine permission on consent](security/OAUTH_AUTHORITY_ROLLOUT.md#optional-machine-permission-on-consent)
+for first approval and renewal.
+
+When the response contains an OAuth Machine grant, `oauth_machine_services`
+is a display map keyed by the assigned service IDs. Labels use the resource
+owner's endpoint or the authorized service's slug in the same snapshot. The
+lookup applies the current consent ceiling and the person's direct ownership
+or proxy access through an active organization and membership, including the
+membership's effective service scope and service-level admin restrictions.
+Removed services and services outside that access use the same placeholder
+with `deleted: true` and a null `label`. This covers explicit deletion markers
+and older inactive rows whose owner-bound endpoint is gone. An accessible
+disabled service with a surviving owner-bound endpoint has `deleted: false`
+and the additive `disabled: true` field. The `label` is null when neither
+name is usable. The map is empty when the source or the
+assigned service list is unavailable.
 
 ---
 
@@ -8990,6 +9068,8 @@ GET and successful PUT return the same object. For example, a config that inheri
   "revision": 0,
   "approver_user_ids": null,
   "authoring_available": true,
+  "authoring_unavailable_reason": null,
+  "unavailable": [],
   "eligible_candidates": [
     {"user_id": "bc398c50-3b4e-4b5e-b141-973ef5bda829", "display_name": "Alex"}
   ]
@@ -8997,6 +9077,10 @@ GET and successful PUT return the same object. For example, a config that inheri
 ```
 
 Candidates are live Admins entitled to the config. For a shared catalog config this includes Admins scoped to any active sibling. Each decision still requires entitlement to the requested connection. A candidate's display name can be null. The saved list can contain a person who has since lost eligibility. A stored empty list means pruning removed every named approver and required review fails closed.
+
+The additive `unavailable` array describes up to 128 saved IDs absent from `eligible_candidates`. Each entry contains `user_id`, nullable `display_name` and `reason`. Only a current or revoked membership in this organization permits a display-name lookup. A revoked or absent membership yields `not_member`. A membership with no matching person yields `unknown`. Among current members, an inactive or deleting account yields `inactive`, a Member or Viewer yields `not_admin`, and an otherwise eligible Admin outside the service scope yields `out_of_scope`.
+
+For an authorized reader, `authoring_unavailable_reason` is `flag_off` when the effective flag is off, `readiness_missing` when activation or live server support is missing, and `null` when editing is available. A caller without management permission receives HTTP 403 and no policy or person data.
 
 PUT requires all three fields below. Send `null` to restore inheritance, or 1–128 distinct, currently eligible person UUIDs to select approvers. The calling Admin may select themselves.
 
@@ -9371,6 +9455,14 @@ again. With the authoring flag off or fleet readiness blocked, PUT returns
 HTTP 403 `org_agent_access_authoring_unavailable`. The Admin can still read
 the saved lists. See [organization specialist agents](ORG_AGENTS.md).
 
+## Assistant setup handoff presentation
+
+The assistant conversation DTO and client-capability header are defined in the
+[engine API contract](chat/08-nyxagent-engine.md#browser-routes) and
+[session context contract](chat/08-nyxagent-engine.md#session-instructions-and-per-turn-context).
+The [browser handoff and setup contract](chat/05-frontend-ui.md#specialist-setup-handoffs)
+defines the user action and completion flow.
+
 ## Owner NyxBot invocations
 
 These endpoints let a first-party owner account session or access token drive
@@ -9678,6 +9770,26 @@ Eligible owner NyxAgent chat keys also receive `nyx__artifact_delivery`, accepti
 an empty object. The server freezes its original-reply target and preflights
 recoverability before auditing or requesting an owner confirmation. Disabled or
 ineligible callers retain the ordinary unknown-tool response.
+
+## Organization guest conversation reads
+
+The following first-party reads use the [organization guest transcript policy](chat/09-nyxbot-orchestrator.md#guest-settings-and-binding-recovery).
+
+| Route | Response |
+|---|---|
+| `GET /api/v1/assistant/nyxagent/agents/{id}/guest-conversations` | `conversations` and optional `next_cursor`. Rows have read-only `org-guest-` IDs and channel source metadata. `limit` and `cursor` page in descending activity time and ID order. |
+| `GET /api/v1/assistant/nyxagent/guest-conversations/{id}` | `conversation`, `messages`, and optional `before_seq`. The page presents messages in ascending sequence order. Pass `before_seq` and `limit` for older messages. |
+| `GET /api/v1/assistant/nyxagent/channels/{id}/chats` | Eligible admin chat rows include `guest_conversation_id`, a read-only link to the most recent retained guest conversation for that source. |
+
+Guest conversation IDs address the dedicated history read. Ineligible agent
+or conversation IDs return 404. Page limits range from 1 to 100.
+
+With `nyxid nyxbot conversations --agent <id>`, an eligible admin's results
+include guest rows in the same recency order and within the requested limit.
+Pass the returned `next_cursor` to the same agent query. The CLI accepts regular
+conversation cursors for ordinary history discovery and uses a guest ID with
+`nyxid nyxbot history <id>` to read the guest transcript. A server without
+guest discovery continues to serve ordinary conversations.
 
 ## Assistant skill review and image input
 

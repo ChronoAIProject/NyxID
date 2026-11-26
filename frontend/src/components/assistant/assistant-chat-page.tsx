@@ -7,7 +7,10 @@ import { translateErrorMessage } from "@/lib/error-messages";
 import { NyxAgentRequestLinks } from "./nyxagent-request-links";
 import { CmaSessionIndicator } from "./cma-session-card";
 import { useConnectionDown } from "@/hooks/use-connection-down";
-import { SharedConsentCards } from "./shared-agent-controls";
+import { SharedConsentDecision } from "./shared-consent-decision";
+import { DecisionStack } from "./decision-stack";
+import { useChatDecisions } from "@/hooks/use-chat-decisions";
+import { decisionMessageId, type PendingChatDecision } from "@/lib/assistant/pending-decisions";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import type { PreparedMicrophone } from "@/lib/microphone-capture";
 import { navigateWithBuildUpdate } from "@/lib/build-update-navigation";
@@ -33,6 +36,8 @@ import { AgentDetailsSheet } from "./nyxbot-agent-details";
 import { NewAgentDialog } from "./nyxbot-agent-forms";
 import { NewGroupDialog } from "./nyxbot-group-forms";
 import { NyxAgentGroupPage } from "./nyxbot-group-view";
+import { OrgGuestConversationPage } from "./org-guest-conversation-page";
+import { orgGuestConversationId } from "@/schemas/org-guest-conversation";
 import { VoiceCaptionText } from "./voice-captions";
 import {
   mergeVoiceCaptions,
@@ -57,6 +62,10 @@ import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import type { NyxAgentConversationAgent } from "@/schemas/assistant-nyxagent";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
 import { AssistantLinkModalHost } from "@/components/assistant/assistant-link-modals";
+import { NyxBotHandoffContext } from "@/lib/assistant/nyxbot-handoff-context";
+import { startNyxBotHandoff } from "@/lib/assistant/nyxbot-handoff";
+import { completePlatformSetup } from "@/lib/assistant/platform-setup";
+import { getAssistantIdentityRevision } from "@/lib/assistant/identity";
 import {
   lazy,
   Suspense,
@@ -610,6 +619,9 @@ export function NyxAgentAssistantChatPage() {
   if (search.g) {
     return <NyxAgentGroupPage key={search.g} groupId={search.g} mock={Boolean(search.mock)} />;
   }
+  if (!search.draft && search.c && orgGuestConversationId.test(search.c)) {
+    return <OrgGuestConversationPage key={search.c} id={search.c} />;
+  }
   return <NyxAgentThreadPage />;
 }
 
@@ -697,6 +709,7 @@ function NyxAgentThreadPage() {
   });
   const selectedId = search.draft ? undefined : search.c;
   const errorScope = `${user?.id}:${selectedId ?? `draft:${search.agent ?? "nyxbot"}`}`;
+  const setupIdentityRevision = getAssistantIdentityRevision();
   const [requestError, setRequestError] = useState<{ scope: string; message: string }>();
   const pendingSend = useRef<{ scope: string } | undefined>(undefined);
   // No thread, draft or agent in the URL: the NyxBot home.
@@ -1026,6 +1039,23 @@ function NyxAgentThreadPage() {
     nyxBotSettings.data?.access_mode,
     agentOverride,
   );
+  const canMaintainAgent = selectedAgent?.owner_kind !== "org" || selectedAgent.can_maintain !== false;
+  const decisionScope = `${user?.id}:${selectedId ?? "draft"}`;
+  const [decisionReveal, setDecisionReveal] = useState({ scope: "", id: "", card: "", revision: 0 });
+  const { decisions, consentError } = useChatDecisions({
+    acknowledgements: chat.acknowledgements.filter((row) => canMaintainAgent || row.kind === "action"),
+    approvals: chat.approvals,
+    accessMode,
+    sharedAgentId: selectedAgent?.share_role ? selectedAgent.id : undefined,
+    conversationId: selectedId,
+    disabled: showHome || destroyed || !selectedId,
+  });
+  const pendingMessageIds = new Map(decisions.flatMap((decision) => {
+    const id = decisionMessageId(decision);
+    return id ? [[id, decision] as const] : [];
+  }));
+  const linkedDecision = decisions.find((decision) => decision.request.id === search.card)?.id;
+  const revealedDecision = decisionReveal.scope === decisionScope && decisionReveal.card === (search.card ?? "") ? decisionReveal.id : undefined;
   const currentVoice =
     voiceView &&
     voiceView.threadId === selectedId &&
@@ -1069,6 +1099,7 @@ function NyxAgentThreadPage() {
       : undefined;
   const dockedError =
     chat.error ??
+    consentError?.message ??
     chat.interruption ??
     (requestError?.scope === errorScope ? requestError.message : undefined) ??
     turnError;
@@ -1083,6 +1114,41 @@ function NyxAgentThreadPage() {
   const displayTitle = conversation?.channel?.thread_id
     ? conversationDisplayTitle({ ...conversation, title: chat.session.title })
     : chat.session.title;
+
+  function renderDecision(decision: PendingChatDecision, pinned = false) {
+    if (decision.kind === "consent") return <SharedConsentDecision agentId={selectedAgent!.id} request={decision.request} />;
+    if (decision.kind === "approval") {
+      const approval = decision.request;
+      return <ApprovalCard
+        block={{
+          type: "approval_card", block_id: `nyxagent-approval:${approval.id}`,
+          approval_request_id: approval.id, execution_proposal: approval.execution_proposal,
+          body: `${approval.service_name}: ${approval.summary}`, service_slug: approval.service_slug,
+          agent_key_prefix: approval.agent_key_prefix, approval_mode: approval.approval_mode,
+          grant_duration_sec: null, expires_at: approval.expires_at,
+          decision: approval.status === "approved" ? "approved" : approval.status === "rejected" ? "denied" : approval.status === "expired" ? "expired" : null,
+          decision_channel: null,
+        }}
+        reviewPath={approval.review_path}
+        onRequestAgain={!chat.isStreaming && !destroyed ? () => requestConfirmationAgain(approval.id, "proxy approval") : undefined}
+        onDecide={(approved) => chat.decideApproval(approval.id, approved)}
+        onExecutionChange={() => void chat.refreshHistory()}
+      />;
+    }
+    const acknowledgement = decision.request;
+    if (!canMaintainAgent && acknowledgement.kind !== "action") return null;
+    return <ReviewCardTarget selected={search.card === acknowledgement.id}>
+      <NyxAgentAcknowledgementCard
+        acknowledgement={acknowledgement} accessMode={accessMode}
+        deciding={Boolean(chat.decidingAcknowledgement)}
+        onRequestAgain={!chat.isStreaming && !destroyed ? () => requestConfirmationAgain(acknowledgement.id, "confirmation") : undefined}
+        onDecision={async (choice, acceptReducedScope) => {
+          await chat.decideAcknowledgement({ id: acknowledgement.id, choice, acceptReducedScope });
+          if (!pinned) setFocusRequest((value) => value + 1);
+        }}
+      />
+    </ReviewCardTarget>;
+  }
   const threadPanels = !showHome ? (
     <ThreadPanels>
       <ThreadHeader
@@ -1175,6 +1241,34 @@ function NyxAgentThreadPage() {
       }
     >
       <ReviewCardNavigation selectionKey={`${user?.id}:${selectedId ?? "draft"}:${search.card ?? ""}`}>
+      <NyxBotHandoffContext value={{
+        ownerUserId: user?.id,
+        sourceConversationId: selectedId,
+        eligible: Boolean(selectedId && nyxAgentTransport.getConversation(selectedId)?.handoff_eligible === true && threadAgent?.kind === "specialist" && !threadAgent.destroyed && nyxBotOf(agents.data?.agents)),
+        continue: async (handoff, onAdopt, receiptKey) => {
+          const source = selectedId;
+          const target = nyxBotOf(agents.data?.agents);
+          if (!target) throw new Error(translateUi("NyxBot is unavailable. Refresh your chats and try again."));
+          await startNyxBotHandoff(handoff, source, (id) => {
+            onAdopt(id);
+            if (selection.current === source) void navigate({
+              to: "/assistant",
+              search: { c: id, ...(search.mock ? { mock: 1 as const } : {}) },
+            });
+          }, receiptKey, { id: target.id, kind: "nyxbot", name: target.name, destroyed: target.status === "destroyed" });
+        },
+        open: (id) => navigateTo({ c: id }),
+        complete: user && selectedId ? (result) => completePlatformSetup(result, {
+          ownerUserId: user.id, identityRevision: setupIdentityRevision, conversationId: selectedId,
+        }) : undefined,
+        navigate: (href) => {
+          const target = new URL(href, window.location.origin);
+          if (target.origin !== window.location.origin) return;
+          if (target.pathname === "/assistant" && target.searchParams.has("details") && selectedId) target.searchParams.set("c", selectedId);
+          if (search.mock) target.searchParams.set("mock", "1");
+          void navigate({ href: `${target.pathname}${target.search}` });
+        },
+      }}>
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {threadPanels}
         <AgentDetailsSheet
@@ -1345,59 +1439,22 @@ function NyxAgentThreadPage() {
                     />
                   );
                 }
+                const pending = pendingMessageIds.get(message.id);
+                if (pending) return <p className="ml-[30px] flex min-w-0 items-baseline gap-x-2 type-secondary text-muted-foreground">
+                  <span className="min-w-0 truncate" title={message.content}>{translateUi("Waiting for your decision")} · {message.content}</span>
+                  <button type="button" className="shrink-0 type-action-link underline" aria-label={translateUi("Review decision: {{summary}}", { summary: message.content })} onClick={() => setDecisionReveal((previous) => ({ scope: decisionScope, id: pending.id, card: search.card ?? "", revision: previous.revision + 1 }))}>{translateUi("Review")}</button>
+                </p>;
                 const approval = chat.approvals.find(
                   (row) => message.id === `nyxagent-approval:${row.id}`,
                 );
                 if (approval) {
-                  return (
-                    <ApprovalCard
-                      block={{
-                        type: "approval_card",
-                        block_id: message.id,
-                        approval_request_id: approval.id,
-                        execution_proposal: approval.execution_proposal,
-                        body: `${approval.service_name}: ${approval.summary}`,
-                        service_slug: approval.service_slug,
-                        agent_key_prefix: approval.agent_key_prefix,
-                        approval_mode: approval.approval_mode,
-                        grant_duration_sec: null,
-                        expires_at: approval.expires_at,
-                        decision: approval.status === "approved" ? "approved" : approval.status === "rejected" ? "denied" : approval.status === "expired" ? "expired" : null,
-                        decision_channel: null,
-                      }}
-                      reviewPath={approval.review_path}
-                      onRequestAgain={!chat.isStreaming && !destroyed ? () => requestConfirmationAgain(approval.id, "proxy approval") : undefined}
-                      onDecide={(approved) =>
-                        chat.decideApproval(approval.id, approved)
-                      }
-                    />
-                  );
+                  return renderDecision({ id: `approval:${approval.id}`, kind: "approval", request: approval });
                 }
                 const acknowledgement = chat.acknowledgements.find(
                   (row) => message.id === `nyxagent-acknowledgement:${row.id}`,
                 );
                 if (!acknowledgement) return undefined;
-                if (selectedAgent?.owner_kind === "org" && selectedAgent.can_maintain === false && acknowledgement.kind !== "action") return null;
-                return (
-                  <ReviewCardTarget
-                    selected={search.card === acknowledgement.id}
-                  >
-                    <NyxAgentAcknowledgementCard
-                      acknowledgement={acknowledgement}
-                      accessMode={accessMode}
-                      deciding={Boolean(chat.decidingAcknowledgement)}
-                      onRequestAgain={!chat.isStreaming && !destroyed ? () => requestConfirmationAgain(acknowledgement.id, "confirmation") : undefined}
-                      onDecision={async (choice, acceptReducedScope) => {
-                        await chat.decideAcknowledgement({
-                          id: acknowledgement.id,
-                          choice,
-                          acceptReducedScope,
-                        });
-                        setFocusRequest((value) => value + 1);
-                      }}
-                    />
-                  </ReviewCardTarget>
-                );
+                return renderDecision({ id: `acknowledgement:${acknowledgement.id}`, kind: "acknowledgement", request: acknowledgement });
               }}
               // Everything renderMessage reads besides the message itself.
               projectionVersion={[
@@ -1406,6 +1463,7 @@ function NyxAgentThreadPage() {
                 `deciding:${chat.decidingAcknowledgement ?? ""}`,
                 `channel:${channelPlatform ?? ""}`,
                 `mode:${accessMode}`,
+                ...decisions.map((decision) => `pinned:${decision.id}`),
                 `voice:${voiceDeliveryRevision(liveCaptions, currentVoice?.activity.playbackMs ?? 0)}`,
                 ...chat.acknowledgements.map(
                   (row) => `${row.id}:${row.status}`,
@@ -1416,7 +1474,7 @@ function NyxAgentThreadPage() {
               // A linked review card may sit outside the mounted window.
               // A settled decision is folded into its reply's turn summary.
               focusMessageId={
-                search.card
+                search.card && !linkedDecision
                   ? (chat.session.messages.find((message) =>
                       message.decisions?.some((row) => row.id === search.card),
                     )?.id ?? `nyxagent-acknowledgement:${search.card}`)
@@ -1442,14 +1500,23 @@ function NyxAgentThreadPage() {
               onClose={() => setVoiceSettingsOpen(false)} />
           </DialogContent>
         </Dialog>}
-        <div ref={composerRef} data-composer-dock="" data-tour="composer" className="absolute inset-x-0 bottom-0 z-10">
+        <div ref={composerRef} data-composer-dock="" data-tour="composer" className="absolute inset-x-0 bottom-0 z-10 flex max-h-[75%] flex-col">
           {/* Failures sit with the composer, where the next attempt starts. */}
           <AssistantErrorNotice
             docked
             onRetry={selectedId && chat.error ? () => void chat.refreshHistory() : undefined}
             message={connectionDown && dockedError?.startsWith("Connection interrupted") ? undefined : dockedError}
           />
-          {selectedAgent?.share_role && selectedId ? <div className="mx-auto max-h-64 max-w-3xl overflow-y-auto px-4"><SharedConsentCards agentId={selectedAgent.id} conversationId={selectedId} /></div> : null}
+          <CardLanguageContext.Provider value={cardLanguage}>
+          <AssistantLinkModalHost>
+            <DecisionStack key={decisionScope}
+              items={decisions.map((decision) => ({ id: decision.id, content: renderDecision(decision, true) }))}
+              selectedId={revealedDecision ?? linkedDecision}
+              revealKey={revealedDecision ? `${revealedDecision}:${decisionReveal.revision}` : linkedDecision}
+              onEmptyFocus={() => setFocusRequest((value) => value + 1)}
+            />
+          </AssistantLinkModalHost>
+          </CardLanguageContext.Provider>
           <NyxAgentComposer
             agentId={headerAgent?.id}
             onVoiceSettings={voiceEnabled && !destroyed && !channelPlatform ? () => setVoiceSettingsOpen(true) : undefined}
@@ -1547,6 +1614,7 @@ function NyxAgentThreadPage() {
           />
         </div>
       </div>
+      </NyxBotHandoffContext>
       </ReviewCardNavigation>
     </AssistantShell>
   );

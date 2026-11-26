@@ -650,6 +650,26 @@ tool call when `activity_id` matches and otherwise as one grouped line per ident
 action; denials stay visible on the line. Pending cards, expired cards and authored-skill reviews
 keep their own transcript rows, and the full receipt text (including the bypassed
 automation, machine/saved-login or service-approval policy) is shown on hover.
+Live requests requiring the current person's decision appear once in a stacked
+card surface pinned above the composer: owner acknowledgements, proxy approvals
+and this conversation's shared-connection consents. The header counts pending
+decisions separately from the active card's position. Previous/next navigation
+keeps the active identity stable across polling and arrivals; inactive cards stay
+mounted but hidden and inert, preserving review inputs. Transcript markers link
+back to the stack instead of duplicating its interactive cards. The stack may
+collapse to its header and leaves the composer available. Short requests have
+direct actions in a fixed card footer. Long requests show a compact summary and
+Review/Deny controls; Allow appears only in full review, presented as a desktop
+dialog or full-height mobile sheet with one scrolling body and a fixed decision
+footer. Review choices survive closing and reopening. Promotion after removal guards decisions for 750 ms to
+prevent an old button's second click from deciding the next card.
+Allowed, used, denied, expired, bypassed and orchestrator-owned requests remain
+in history. Publication recovery belongs there too; it is not a new pending
+decision. Full access retains the organization-instruction and delegation floors.
+Settled proxy approvals return to their creation timestamp, so old denials do not
+follow later replies. Deep links reveal pending cards in the stack and settled
+cards through the existing transcript navigation. This changes presentation only;
+the existing handlers, exact bindings, expiry checks and continuations still apply.
 Automation-started messages expose `origin: "trigger"` and, while the run record
 is retained, `automation: {trigger_id, run_id, label}` from two owner-scoped,
 projected reads only when the page holds such a message. Full-access
@@ -1056,9 +1076,15 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 | `GET /models` | no body | `[{id,label,available,description?,input_modalities?}]` |
 
 Conversation DTO: `id,title,model,access_mode,created_at,last_message_at,message_count,
-pending_acknowledgements,active_turn,context_reset_at,role,agent,pending_events,channel`.
+pending_acknowledgements,active_turn,context_reset_at,role,agent,pending_events,channel,handoff_eligible`.
 `access_mode` is always `full`; `agent` is `{id,kind,name,destroyed}` (a destroyed
 agent's threads are read-only).
+`handoff_eligible` is a server-derived presentation flag for private personal
+specialist threads. Channel, personal or collaboration group, shared,
+organization-agent, native platform-thread, guest, guest-model-setup and
+invocation-controlled threads are ineligible. The flag
+grants no execution authority. The browser's per-message activation and artifact
+format are defined in [Specialist setup handoffs](05-frontend-ui.md#specialist-setup-handoffs).
 `active_turn` is null or `{turn_id,started_at,activities,response_id,steering_allowed,stop_requested}`.
 Message DTO: `id,seq,turn_id,role,text,status,error_code,created_at,activities,attachments`,
 The optional `steering` field is `{client_request_id,outcome,code}`.
@@ -1707,6 +1733,7 @@ separate stable session instructions from volatile turn facts:
 | Contributor | Placement |
 | --- | --- |
 | NyxBot/system, specialist and scheduling prompts | Stable instructions |
+| Specialist setup-handoff guidance, gated by thread-stable privacy properties | Stable instructions |
 | Agent handle, role description, display name and persona | Stable instructions |
 | Pinned skill metadata | Stable instructions
 | Agent memory notes | Per-turn input (each turn's first request and fresh-session recovery); omitted for guests |
@@ -1720,9 +1747,21 @@ separate stable session instructions from volatile turn facts:
 | Group participation and speaker context | Input context |
 | Published voice results since the previous user message | Input context; omitted for guests |
 | `turn.note`, sender identity, chat-app/asked-from/reply-channel location | Input context |
+| Current setup-handoff client capability | Input context |
 | Current upload listing, expired uploads and image fallback notices | Input context |
 | Event-turn payload and automatic continuation request | Input, as before |
 | Bounded prior-history recap | Initial instructions after a reset only |
+
+First-party human clients advertise setup-card support on `POST /turns` through
+`X-NyxID-Chat-Capabilities: nyxbot-handoff-v1`; private CORS allows this header.
+The handler records the capability in the admitted turn. An eligible direct
+user turn supplies the exact fact `NyxID client capability: nyxbot-handoff-v1.`
+in its context only when it has no voice, invocation, trigger, delegation,
+platform/adapter origin, asked-from chat, reply channel or additional delivery
+target. The raw note marker is stripped from other turn notes. The stable guidance requires
+that current fact before offering an artifact; switching origin or client
+capability does not change the stable instruction fingerprint. Clients that do
+not advertise support receive ordinary setup guidance.
 
 `nyxagent_instruction_binding` is an additive, serde-defaulted, server-only
 conversation field. It binds a keyed fingerprint, marker and audience to the
