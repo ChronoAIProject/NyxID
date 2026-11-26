@@ -2316,16 +2316,18 @@ async fn v2_direct_after_turn_keeps_delivery_and_queued_pool_duties() {
     )
     .await
     .unwrap();
-    state.db.collection::<Document>(CONVERSATIONS).update_one(doc! {"_id": &child.id}, doc! {"$set": {"deliver_also": [{"nyxbot_channel_id": "missing-channel", "partition": "chat", "platform": "telegram"}]}}).await.unwrap();
+    let turn_id = &child.active_turn.as_ref().unwrap().turn_id;
+    assert!(engine::also_deliver(
+        &state.db, OWNER, &child.id, turn_id,
+        &bson::from_document(doc! {"nyxbot_channel_id": "missing-channel", "partition": "chat", "platform": "telegram"}).unwrap(),
+    ).await.unwrap());
     save_reply(&state, &child, "Research finished", None).await;
     crate::handlers::assistant_team::after_turn(&state, &child, "Research finished", None).await;
-    assert!(
-        engine::get(&state.db, OWNER, &child.id)
-            .await
-            .unwrap()
-            .deliver_also
-            .is_empty()
-    );
+    let saved = engine::post_turn_reply(&state.db, OWNER, &child.id, turn_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.post_turn_deliver_also.len(), 1);
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         loop {
             if state

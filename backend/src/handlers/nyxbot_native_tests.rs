@@ -1675,6 +1675,10 @@ async fn native_async_reply_thread_mode_and_delivery_receipts_iteration(native_t
             assert_eq!(saved.gateway_native_delivery.as_deref(), Some(expected));
         }
     }
+    let conversation = engine::get(&state.db, OWNER, stored.conversation_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert_native_post_turn_claim(&state, &gateway, &conversation, origin, native_thread).await;
     upstream.abort();
 }
 
@@ -2043,9 +2047,12 @@ async fn supplemental_native_progress_leaves_primary_replay_intact() {
         deliver_to(&state,&conversation,origin,"independent result",None).await;
         let turn = Uuid::new_v4().to_string();
         for _ in 0..2 {
+            let mut decision = supplemental::Decision::new(supplemental::Purpose::TeamResult);
+            decision.saved_result = true;
+            decision.turn = Some(turn.clone());
             assert_eq!(native_responses::send_supplemental(
-                &state, &channel, origin, &conversation.id, "saved native result", Some(&turn),
-            ).await.unwrap(), "confirmed");
+                &state, &channel, origin, &conversation.id, "saved native result", &mut decision,
+            ).await.unwrap(), Some("confirmed"));
         }
         let saved_key = crate::services::channel_supplemental_delivery::saved_key(&turn, origin);
         let plan = crate::services::channel_text_delivery::load(&state.db, &saved_key).await.unwrap().unwrap();
@@ -2055,8 +2062,109 @@ async fn supplemental_native_progress_leaves_primary_replay_intact() {
         gateway.verify().await;
         let audit=state.db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME).find_one(doc!{"event_type":"nyxbot_channel_supplemental_delivery","event_data.purpose":"team_result"}).await.unwrap().unwrap();
         assert_eq!(audit.get_document("event_data").unwrap().get_str("egress"),Ok("gateway_event"));
+        assert_native_post_turn_claim(&state, &gateway, &conversation, origin, false).await;
         state.db.drop().await.unwrap();
     }).await;
+}
+
+async fn assert_native_post_turn_claim(
+    state: &AppState,
+    gateway: &wiremock::MockServer,
+    conversation: &crate::models::assistant_conversation::AssistantConversation,
+    origin: &ChannelOrigin,
+    thread_reply: bool,
+) {
+    let mut row = conversation.clone();
+    gateway_thread_tests::settled_result_turn(state, &mut row).await;
+    row.channel = Some(origin.clone());
+    let turn_id = &row.active_turn.as_ref().unwrap().turn_id;
+    gateway.reset().await;
+    let audits = state
+        .db
+        .collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+    let events = state.db.collection::<bson::Document>(EVENTS);
+    let source = doc! {"_id":origin.native_event_id.as_deref().unwrap()};
+    let retained = events
+        .find_one_and_update(
+            source.clone(),
+            doc! {"$unset":{"event_context_ciphertext":""}},
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    Box::pin(crate::handlers::assistant_team::after_turn(
+        state, &row, "Unused", None,
+    ))
+    .await;
+    assert!(gateway.received_requests().await.unwrap().is_empty());
+    assert_eq!(
+        audits
+            .count_documents(doc! {
+                "event_type":"nyxbot_channel_supplemental_delivery",
+                "event_data.turn_id":turn_id,
+                "event_data.outcome":"skipped",
+                "event_data.reason":"authority_refused",
+                "event_data.egress":"skipped",
+            })
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .count_documents(doc! {
+                "user_id":&row.user_id,"conversation_id":&row.id,"turn_id":turn_id,
+                "role":"assistant","supplemental_result_claims":{"$exists":true},
+            })
+            .await
+            .unwrap(),
+        0
+    );
+    events.update_one(
+        source,
+        doc! {"$set":{"event_context_ciphertext":retained.get("event_context_ciphertext").unwrap().clone()}},
+    ).await.unwrap();
+    wiremock::Mock::given(wiremock::matchers::path(
+        "/events/opaque-native-ref/replies",
+    ))
+    .respond_with(
+        wiremock::ResponseTemplate::new(200)
+            .set_body_json(json!({"delivery":{"outcome":"unknown"}})),
+    )
+    .expect(1)
+    .mount(gateway)
+    .await;
+    for _ in 0..2 {
+        Box::pin(crate::handlers::assistant_team::after_turn(
+            state,
+            &row,
+            "Uncommitted native answer",
+            None,
+        ))
+        .await;
+    }
+    gateway.verify().await;
+    let requests = gateway.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    let body: Value = requests[0].body_json().unwrap();
+    assert_eq!(body["text"], "Here is your answer");
+    assert_eq!(body["thread_reply"].as_bool(), thread_reply.then_some(true));
+    for (outcome, reason) in [("unknown", None), ("skipped", Some("already_claimed"))] {
+        assert_eq!(
+            audits
+                .count_documents(doc! {
+                    "event_type":"nyxbot_channel_supplemental_delivery",
+                    "event_data.turn_id":turn_id,
+                    "event_data.outcome":outcome,
+                    "event_data.reason":reason,
+                })
+                .await
+                .unwrap(),
+            1
+        );
+    }
 }
 
 /// A Discord deletion uses the original partition even though Discord omits the deleting actor.

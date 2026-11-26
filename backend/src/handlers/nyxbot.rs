@@ -6612,19 +6612,6 @@ async fn custom_replay(state: &AppState, event_key: &str, response_id: &str) -> 
     )
 }
 
-/// Deliver a supplemental reply to the conversation's chat. Relay-source
-/// gateway results use a validated retained inbound within 24 hours; progress
-/// retains its reference window. Native sources retain their original event reply.
-/// Best effort: the result stays in the conversation history either way.
-pub async fn deliver_update(
-    state: &AppState,
-    row: &crate::models::assistant_conversation::AssistantConversation,
-    text: &str,
-    images: Option<&images::ImageSendPlan>,
-) {
-    deliver_update_for(state, row, text, images, supplemental::Purpose::TeamResult).await;
-}
-
 pub async fn deliver_update_for(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
@@ -6869,11 +6856,19 @@ async fn deliver_from_source(
                 if bound_anchor.is_none() {
                     decision.anchor = supplemental::Anchor::ChatPointer;
                 }
-                if decision.saved_result {
+                let claim = decision.needs_post_turn_claim();
+                if decision.saved_result || claim {
                     supplemental::prepare_local_result(
                         state, &channel, &thread, message_id, &reply,
                     )
                     .await?;
+                }
+                if claim
+                    && !decision
+                        .claim_result(state, &row.user_id, &row.id, origin)
+                        .await?
+                {
+                    return Ok(());
                 }
                 decision.dispatch(supplemental::Egress::LocalRelay);
                 supplemental::send_local(state, &channel, message_id, origin, &reply, &decision)

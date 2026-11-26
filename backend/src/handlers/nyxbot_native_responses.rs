@@ -814,7 +814,7 @@ pub(super) fn send_update<'a>(
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
     Box::pin(async move {
         match send_update_impl(state, row, origin, conversation, text, None, None).await? {
-            "confirmed" => Ok(()),
+            Some("confirmed") => Ok(()),
             _ => Err(AppError::NotFound("Native reply source unavailable".into())),
         }
     })
@@ -826,8 +826,8 @@ pub(super) async fn send_supplemental(
     origin: &ChannelOrigin,
     conversation: &str,
     text: &str,
-    saved_turn: Option<&str>,
-) -> AppResult<&'static str> {
+    decision: &mut super::supplemental::Decision,
+) -> AppResult<Option<&'static str>> {
     Box::pin(send_update_impl(
         state,
         row,
@@ -835,7 +835,7 @@ pub(super) async fn send_supplemental(
         conversation,
         text,
         None,
-        saved_turn,
+        Some(decision),
     ))
     .await
 }
@@ -858,7 +858,8 @@ pub(super) async fn send_occurrence(
         Some(occurrence),
         None,
     )
-    .await
+    .await?
+    .ok_or_else(|| AppError::NotFound("Native reply source unavailable".into()))
 }
 
 async fn send_update_impl(
@@ -868,8 +869,8 @@ async fn send_update_impl(
     conversation: &str,
     text: &str,
     occurrence: Option<&str>,
-    saved_turn: Option<&str>,
-) -> AppResult<&'static str> {
+    decision: Option<&mut super::supplemental::Decision>,
+) -> AppResult<Option<&'static str>> {
     let unavailable = || AppError::NotFound("Native reply source unavailable".into());
     if !source::ready(row) {
         return Err(unavailable());
@@ -895,7 +896,7 @@ async fn send_update_impl(
         .and_then(crate::turn_trace::TurnContext::for_turn);
     let mut operation =
         crate::turn_trace::Operation::start(trace, crate::turn_trace::Stage::Channel);
-    let result: AppResult<&'static str> = crate::turn_trace::scope(operation.context(), async {
+    let result: AppResult<Option<&'static str>> = crate::turn_trace::scope(operation.context(), async {
         if event
             .delivery
             .as_ref()
@@ -953,8 +954,20 @@ async fn send_update_impl(
                 metadata: None,
             }]
         };
+        let saved_turn = decision
+            .as_ref()
+            .filter(|decision| decision.saved_result)
+            .and_then(|decision| decision.turn.clone());
+        if let Some(decision) = decision
+            && decision.needs_post_turn_claim()
+        {
+            if !decision.claim_result(state, &history.user_id, conversation, origin).await? {
+                return Ok(None);
+            }
+            decision.dispatch(super::supplemental::Egress::GatewayEvent);
+        }
         use crate::services::{channel_text_preparation as preparation,channel_text_delivery as journal};
-        let saved_plan = if let Some(turn) = saved_turn {
+        let saved_plan = if let Some(turn) = saved_turn.as_deref() {
             let key = crate::services::channel_supplemental_delivery::saved_key(turn,origin);
             let bot = crate::services::channel_bot_service::get_bot_for_user(
                 &state.db,
@@ -1033,19 +1046,20 @@ async fn send_update_impl(
             doc! {"_id":&row.id,"binding_id":&row.binding_id,"transport":"gateway","gateway_native_phase":"ready"},
             doc! {"$set":{"gateway_native_delivery":outcome}},
         ).await?;
-        Ok(match outcome {
+        Ok(Some(match outcome {
             "reply_confirmed" => "confirmed",
             "reply_rejected" | "reply_unsupported" | "reply_rate_limited" | "reply_refused" => {
                 "rejected"
             }
             _ => "unknown",
-        })
+        }))
     })
     .await;
     operation.finish(
         match &result {
-            Ok("confirmed") => crate::turn_trace::Outcome::Confirmed,
-            Ok("rejected") => crate::turn_trace::Outcome::Rejected,
+            Ok(Some("confirmed")) => crate::turn_trace::Outcome::Confirmed,
+            Ok(Some("rejected")) => crate::turn_trace::Outcome::Rejected,
+            Ok(None) => crate::turn_trace::Outcome::Silent,
             _ => crate::turn_trace::Outcome::Unknown,
         },
         None,

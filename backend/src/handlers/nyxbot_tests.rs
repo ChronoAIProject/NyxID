@@ -4424,29 +4424,6 @@ async fn the_same_question_is_not_worked_on_twice() {
         1
     );
     assert_eq!(calls.lock().await.len(), 1, "no second turn for either");
-    // Settlement hands the waiting chats over once.
-    state
-        .db
-        .collection::<bson::Document>(CONVERSATIONS)
-        .update_one(
-            doc! {"_id": &home},
-            doc! {"$set": {"deliver_also": [bson::to_bson(&asked_from).unwrap()]}},
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        engine::take_deliveries(&state.db, OWNER, &home)
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
-    assert!(
-        engine::take_deliveries(&state.db, OWNER, &home)
-            .await
-            .unwrap()
-            .is_empty()
-    );
     server.abort();
 }
 

@@ -801,20 +801,20 @@ authority checks, including agent-key presence, remain. Checking/capacity/machin
 progress keeps the original 29-minute reference gates and skip reasons;
 permission occurrences retain their own event/target gates.
 
-Widened results claim their exact settled assistant message per stable
-destination before text dispatch (#2462). Primary and additional delivery to
-the same chat share one claim. Repeated hooks audit `already_claimed` and do not
-send; a claim database error follows `source_unavailable` without sending.
-Confirmed, rejected, unknown and interrupted attempts are never retried. There
-is no preparation lease: a crash after the claim can lose the text. The optional
-serde-defaulted claim list is internal, absent from API/log/audit, and purged with
-the message. New replicas share it; old replicas ignore it and keep the 29-minute
-behavior until drained (also on rollback). There is no readiness gate or
-retroactive protection for pre-upgrade sends. Other transports and primary
-answer claims do not use this marker. Direct and relay-era
-`direct_reply` paths are unchanged. Failed local supplemental text keeps its
-receipts and audit without adding a primary-answer failure event to the web
-transcript. The existing live-turn notice claim selects
+Post-turn team and additional-chat text claims the exact settled assistant
+reply per stable destination after delivery preparation. Direct relay,
+relay-era, native gateway and followed-thread sends participate. Primary team
+updates and additional delivery to the same chat share one claim. Repeated hooks
+audit `already_claimed`. A claim database error audits `source_unavailable` and
+prevents text dispatch. Confirmed, rejected, unknown and interrupted attempts
+keep the claim. A crash after the claim can lose the text. The optional claim
+list is internal and purged with the reply. Drain older replicas for full
+coverage, including on rollback. Saved handoff delivery and primary channel
+answers use their own durable delivery paths. A repeated hook audits
+`already_claimed` for each saved destination after the handoff delivery has
+finished, while a pending handoff remains eligible for its existing recovery.
+Failed local supplemental text
+keeps its receipts and audit. The existing live-turn notice claim selects
 one attempt across replicas; an already claimed local notice completing just
 after the final cannot suppress or duplicate it.
 
@@ -834,9 +834,8 @@ Tool images precede text on every channel reply path. The settled message is the
 source of image metadata; stale conversation snapshots do not decide the list.
 Per-destination MongoDB image claims are taken inside the existing text claim for
 direct/late replies, gateway streams and automation results. Event-turn sends
-retain their image claims and image-before-text preparation. Widened relay-source
-results then acquire the supplemental text claim described above; other event-turn
-text retains its prior best-effort behavior. A crash after images and before text
+retain their image claims and image-before-text preparation, then acquire the
+supplemental text claim described above. A crash after images and before text
 can leave images without text. Claimed text is not replayed. An attachment claimed by a new writer
 but not yet uploaded has a MongoDB-time preparation lease and is recovered
 independently under current authority; confirmed or uncertain uploads are never
@@ -1310,7 +1309,12 @@ short excerpt. When a message arrives while its thread is busy:
   owner asked on Telegram and again on Lark), another original-source record
   joins the exact running answer. Each source retains its own destination and
   irreversible delivery claim; the bound is `MAX_ALSO_DELIVER + 1` (five
-  destinations including the first);
+  destinations including the first). Settlement stores additional destinations
+  privately on the exact assistant reply, including chats added while the turn
+  ran. The hook reads that reply's result and destinations, even when a newer
+  turn has settled. Failed turns send the additional chats a short failure
+  notice. Replies without saved destinations have an empty list. The legacy
+  conversation slot is reserved for draining older replicas;
 - if the same question is already queued, it is not queued again, and a repeat
   from another eligible chat adds its independently anchored source to that
   question within the same destination bound. Guest busy/refusal behavior
