@@ -971,10 +971,11 @@ mod tests {
         let db =
             crate::test_utils::connect_transaction_test_database("email_verification_expiry").await;
         role_service::seed_system_roles(&db).await.unwrap();
+        let password = Zeroizing::new(generate_random_token());
         let reg = register_user(
             &db,
             "verify-expiry@example.test",
-            "password123",
+            &password,
             None,
             None,
             false,
