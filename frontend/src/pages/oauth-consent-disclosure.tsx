@@ -21,6 +21,7 @@ interface ServiceAccess {
 export type ConsentProvenance =
   | "required"
   | "preselected"
+  | "preselected_locked"
   | "selected"
   | "already"
   | "retained";
@@ -36,6 +37,8 @@ export function ConsentSelectionLabel({
       return translateUi("Required by app");
     case "preselected":
       return translateUi("Preselected by app");
+    case "preselected_locked":
+      return translateUi("Preselected by app (locked)");
     case "selected":
       return translateUi("Selected by you");
     case "already":
@@ -196,22 +199,29 @@ export function ConsentServiceSummary({
   const retainedNames = retained?.map(
     (serviceId) => services.get(serviceId)?.name ?? unavailable,
   );
+  const describesRetained = retainedAll || Boolean(retainedNames?.length);
   return (
-    <div
+    <section
       id={id}
-      aria-live="polite"
-      aria-atomic="true"
+      aria-labelledby={`${id}-heading`}
       className="space-y-2 text-14 text-foreground"
     >
-      <p className="type-card-title">
+      <h2 id={`${id}-heading`} className="type-card-title">
         {translateUi("Selected service access")}
-      </p>
-      <p>
+      </h2>
+      <p id={`${id}-description`} aria-live="polite" aria-atomic="true">
         {access.allow_all_services
           ? translateUi("All current and future services are included.")
           : access.allowed_service_ids.length === 0
             ? translateUi("No services are included in this request.")
-            : translateUi("Full access to the services listed below.")}
+            : access.allowed_service_ids.length === 1
+              ? translateUi("Full access to one selected service.")
+              : translateUi("Full access to {{count}} selected services.", {
+                  count: access.allowed_service_ids.length,
+                })}
+        {describesRetained && (
+          <> {translateUi("Earlier authorization stays in effect.")}</>
+        )}
       </p>
       {(access.allow_all_services || access.allowed_service_ids.length > 0) && (
         <p>
@@ -277,7 +287,7 @@ export function ConsentServiceSummary({
           </p>
         )
       )}
-    </div>
+    </section>
   );
 }
 

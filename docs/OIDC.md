@@ -244,7 +244,10 @@ revocation of the entire token family.
 
 The consent screen presents identity and OAuth permissions, access duration
 and revocation, and service access separately. The final service summary uses
-the same service selection as the submitted decision. All services lists the
+the same service selection as the submitted decision. A live announcement
+reports the selection mode. It includes the count for a restricted selection.
+Service names and permission details appear in the summary before approval.
+All services lists the
 currently included connections and includes future connections. The summary
 shows retained access when existing authorization data is available.
 Ordinary approval preserves the stored grant and issues authority

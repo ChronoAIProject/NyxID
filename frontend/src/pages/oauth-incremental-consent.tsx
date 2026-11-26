@@ -519,7 +519,7 @@ export function OAuthIncrementalConsentPage({
                     type="submit"
                     name="decision"
                     value="allow"
-                    aria-describedby={summaryId}
+                    aria-describedby={`${summaryId}-description`}
                     variant="primary"
                     disabled={blocked}
                     className="w-full"

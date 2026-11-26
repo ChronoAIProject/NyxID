@@ -44,7 +44,7 @@ The flow:
 
 Redirect URI types supported: standard HTTPS URLs, loopback redirects (`http://127.0.0.1:*`, `http://localhost:*`), and private-use URI schemes (e.g. `cursor://`, `vscode://`).
 
-See [OAuth consent disclosure](https://github.com/ChronoAIProject/NyxID/blob/dev/docs/OIDC.md#oauth-consent-disclosure) for the service review, token lifetime and revocation details shown before approval.
+See [OAuth consent disclosure](https://github.com/ChronoAIProject/NyxID/blob/main/docs/OIDC.md#oauth-consent-disclosure) for the service review, token lifetime and revocation details shown before approval.
 
 ## Reviewing a broker binding's service access
 

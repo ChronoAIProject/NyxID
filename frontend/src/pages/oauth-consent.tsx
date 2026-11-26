@@ -543,7 +543,7 @@ function StandardConsentPage({
     if (requiredServiceIds.includes(id) || resourceSelectedServiceIds.includes(id)) {
       labels.push("required");
     } else if (preselectServiceIds.includes(id) && (!agentAccess || !submittedAccess.allow_all_services)) {
-      labels.push("preselected");
+      labels.push(agentAccess ? "preselected" : "preselected_locked");
     } else if (!submittedAccess.allow_all_services && approvedIds.has(id) && labels.length === 0) {
       labels.push("selected");
     }
@@ -1065,7 +1065,7 @@ function StandardConsentPage({
             variant="primary"
             name="decision"
             value="allow"
-            aria-describedby={summaryId}
+            aria-describedby={`${summaryId}-description`}
             disabled={Boolean(preview) || (machineScope && machineSelectionRequired && !preparedMachineRequest)}
             className={cn("w-full", agentAccess && "lg:w-auto lg:min-w-44")}
           >

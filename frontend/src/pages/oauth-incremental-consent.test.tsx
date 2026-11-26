@@ -120,9 +120,13 @@ describe("incremental consent", () => {
     await user.click(optional);
     const allow = screen.getByRole("button", { name: "Allow 3 services" });
     const form = allow.closest("form")!;
-    const summary = document.getElementById(allow.getAttribute("aria-describedby")!)!;
+    const summary = screen.getByRole("region", { name: "Selected service access" });
     expect(allow).toBeEnabled();
-    expect(summary).toHaveAttribute("aria-live", "polite");
+    const announcement = document.getElementById(allow.getAttribute("aria-describedby")!)!;
+    expect(announcement).toHaveAttribute("aria-live", "polite");
+    expect(summary).not.toHaveAttribute("aria-live");
+    expect(allow).toHaveAccessibleDescription("Full access to 5 selected services.");
+    expect(announcement).not.toHaveTextContent("optional-e");
     expect(summary).toHaveTextContent("optional-e");
     expect(summary).toHaveTextContent("Stays authorized");
     expect(new FormData(form).getAll("allowed_service_ids")).toEqual([
@@ -131,6 +135,7 @@ describe("incremental consent", () => {
     expect(screen.getByRole("region", { name: "Additional services" })).not.toContainElement(summary);
     await user.click(optional);
     expect(allow).toHaveAccessibleName("Allow 2 services");
+    expect(allow).toHaveAccessibleDescription("Full access to 4 selected services.");
     expect(summary).not.toHaveTextContent("optional-e");
     expect(new FormData(form).getAll("allowed_service_ids")).toEqual([
       "old-a", "old-b", "new-c", "new-d",
