@@ -367,7 +367,10 @@ pub async fn accept_provider_request(
                 if !ids.is_empty() {
                     if *erase {db.collection::<OAuthSession>(SESSIONS).delete_many(doc! {"_id":{"$in":ids}}).session(&mut *tx).await?;}
                     else {db.collection::<OAuthSession>(SESSIONS).update_many(doc! {"_id":{"$in":ids},"status":{"$in":["pending","exchanging","assets","installing"]}},
-                        doc! {"$set":{"status":"revoked"},"$unset":{"assets_encrypted":""}}).session(&mut *tx).await?;}
+                        doc! {"$set":{"status":"revoked"},"$unset":{
+                            "assets_encrypted":"",
+                            "assets_context_version":"",
+                        }}).session(&mut *tx).await?;}
                 }
                 let mut cursor = db.collection::<bson::Document>(BOTS).find(doc! {
                     "platform":platform,"meta_binding.app_id":app,"meta_binding.grant_subject_id":subject,
@@ -581,7 +584,10 @@ async fn capture_sessions(
                 let exact=doc! {"_id":row.get("_id").cloned(),"grant_identity":capture.get_str("identity").map_err(|_|invalid())?,"created_at":row.get("created_at").cloned()};
                 if job.get_bool("erase")==Ok(true) {db.collection::<bson::Document>(SESSIONS).delete_one(exact).session(&mut *tx).await?;}
                 else if matches!(row.get_str("status"),Ok("pending"|"exchanging"|"assets"|"installing")) {
-                    db.collection::<bson::Document>(SESSIONS).update_one(exact,doc! {"$set":{"status":"revoked"},"$unset":{"assets_encrypted":""}}).session(&mut *tx).await?;
+                    db.collection::<bson::Document>(SESSIONS).update_one(exact,doc! {"$set":{"status":"revoked"},"$unset":{
+                            "assets_encrypted":"",
+                            "assets_context_version":"",
+                        }}).session(&mut *tx).await?;
                 }
             }
             let mut fields=doc! {"scope_capture.sessions_done":rows.len()<SCOPE_BATCH as usize};

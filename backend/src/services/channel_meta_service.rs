@@ -18,6 +18,8 @@ use crate::{
     },
 };
 
+pub(super) mod asset_record;
+
 pub struct MetaService<'a> {
     pub db: &'a mongodb::Database,
     pub keys: &'a crate::crypto::aes::EncryptionKeys,
@@ -415,6 +417,8 @@ impl MetaService<'_> {
             connect_link_id: None,
             grant_subject_id: None,
             selected_asset_id: None,
+            grant_identity: None,
+            assets_context_version: None,
             assets_encrypted: None,
             created_at: Utc::now(),
             expires_at: Utc::now() + Duration::minutes(15),
@@ -521,11 +525,7 @@ impl MetaService<'_> {
             true,
         )
         .await?;
-        let bytes = self
-            .keys
-            .decrypt(session.assets_encrypted.as_deref().ok_or_else(conflict)?)
-            .await?;
-        serde_json::from_slice(&bytes).map_err(|_| conflict())
+        asset_record::open(self.keys, session, subject).await
     }
     pub async fn progress(&self, actor: &str, id: &str) -> AppResult<Progress> {
         let session = self.session(actor, id).await?;
@@ -630,14 +630,13 @@ impl MetaService<'_> {
                         .await?;
                 } else {
                     let subject = assets[0].grant_subject_id.clone();
-                    let bytes =
-                        Zeroizing::new(serde_json::to_vec(&assets).map_err(|_| conflict())?);
-                    let encrypted = self.keys.encrypt(&bytes).await?;
-                    let args = (self.db.clone(), session.clone(), subject, encrypted);
+                    let update =
+                        asset_record::publication(self.keys, &session, &subject, &assets).await?;
+                    let args = (self.db.clone(), session.clone(), subject, update);
                     let stored = super::transaction_service::run_db_only(
                         self.db,
                         &args,
-                        |tx, (db, s, subject, encrypted)| {
+                        |tx, (db, s, subject, update)| {
                             Box::pin(async move {
                                 fence_grant_in_session(
                                     db,
@@ -654,10 +653,7 @@ impl MetaService<'_> {
                                         doc! {"_id":&s.id,
                                         "status":"exchanging",
                                         "expires_at":{"$gt":bson::DateTime::now()}},
-                                        doc! {"$set":{"status":"assets",
-                                        "grant_subject_id":subject,
-                                        "grant_identity":provider::grant_identity(&s.platform,&s.app_id,subject)?,
-                                        "assets_encrypted":binary(encrypted.clone())}},
+                                        update.clone(),
                                     )
                                     .session(&mut *tx)
                                     .await?;
@@ -675,7 +671,10 @@ impl MetaService<'_> {
                             .collection::<OAuthSession>(SESSIONS)
                             .update_one(
                                 doc! {"_id":&session.id,"status":"exchanging"},
-                                doc! {"$set":{"status":"revoked"},"$unset":{"assets_encrypted":""}},
+                                doc! {"$set":{"status":"revoked"},"$unset":{
+                                    "assets_encrypted":"",
+                                    "assets_context_version":"",
+                                }},
                             )
                             .await?;
                         return Err(error);
@@ -1174,7 +1173,10 @@ impl MetaService<'_> {
                 let done = db.collection::<OAuthSession>(SESSIONS).update_one(
                     doc! {"_id": &s.id, "status": "installing"},
                     doc! {"$set": {"status": "completed", "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::hours(2))},
-                        "$unset": {"assets_encrypted": ""}},
+                        "$unset": {
+                            "assets_encrypted": "",
+                            "assets_context_version": "",
+                        }},
                 ).session(&mut *tx).await?;
                 if done.matched_count != 1 { return Err(conflict()); }
                 Ok(())

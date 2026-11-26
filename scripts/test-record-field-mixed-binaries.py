@@ -58,6 +58,8 @@ def main():
                         help="exchange Discord receipts and reply handles through claimed sends")
     parser.add_argument("--mobile-social", action="store_true",
                         help="exchange PKCE mobile sign-in deliveries through one-time redemption")
+    parser.add_argument("--meta-consent", action="store_true",
+                        help="exchange Messenger and Instagram OAuth assets through selection")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -95,7 +97,7 @@ def main():
                 if "1 passed;" not in result.stdout:
                     raise RuntimeError(f"test did not run: {test}")
 
-        if args.auth_device or args.node_device or args.native_handle or args.mobile_social:
+        if args.auth_device or args.node_device or args.native_handle or args.mobile_social or args.meta_consent:
             base_reject = "legacy-claim-error" if args.node_device else "reject"
             migration = ("services::device_code_service::mixed_delivery::migrate_signed_deliveries_from_the_base_writer"
                          if args.node_device else
@@ -104,6 +106,8 @@ def main():
                 migration = "services::platform_native_reply_service::tests::mixed::rewrap_captured_reply_handle"
             if args.mobile_social:
                 migration = "services::mobile_social_service::mixed::rewrap_preserves_bson_and_http_response"
+            if args.meta_consent:
+                migration = "services::channel_meta_service::tests::mixed_assets::rewrap_preserves_exchange_bytes"
             for writer, reader in [("base", "candidate"), ("candidate", "base")]:
                 run(writer, "write", "compatible")
                 run(reader, "read", "compatible")

@@ -237,7 +237,7 @@ GCP automatically selects the correct version for decrypt.
 
 ### Cross-Key Rotation
 
-Prepare independent HMAC keys before changing AES/JWT sources. Stage readers with both old and new KMS keys across the fleet before switching the primary, or drain writers while preparing them. After activation, retain the old key in the provider's `_PREVIOUS` setting. Follow [the explicit migration/readiness procedure](SECURITY.md#encrypted-record-migration), which covers durable progress, exact-source CAS and unresolved fields. Pending adapters block complete readiness.
+Prepare independent HMAC keys before changing AES/JWT sources. Stage readers with both old and new KMS keys across the fleet before switching the primary, or drain writers while preparing them. After activation, retain the old key in the provider's `_PREVIOUS` setting. Follow [the explicit migration/readiness procedure](SECURITY.md#encrypted-record-migration), which covers durable progress, exact-source CAS and unresolved fields.
 
 ### Local Key Rotation
 

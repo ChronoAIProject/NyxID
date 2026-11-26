@@ -69,9 +69,7 @@ enum Adapter {
     AgentLogin,
     NodeDevice,
     AuthDevice,
-    // These are implementation blockers until their service-owned decoders and
-    // actual writers are converted. They may not be waived by operator input.
-    Pending,
+    MetaConsentAssets,
 }
 
 struct Entry {
@@ -380,7 +378,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "channel_meta_oauth_sessions",
-        adapter: Adapter::Pending,
+        adapter: Adapter::MetaConsentAssets,
         fields: &["assets_encrypted"],
     },
 ];
@@ -546,12 +544,6 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
         return Ok(None);
     };
     let mut blockers = vec!["backup_and_rollback_reader_evidence_required"];
-    if REGISTRY
-        .iter()
-        .any(|entry| matches!(entry.adapter, Adapter::Pending))
-    {
-        blockers.push("implementation_registry_incomplete");
-    }
     if verify_generation(keys, &row).await.is_err() {
         blockers.push("registry_or_primary_provider_changed");
     }
@@ -584,6 +576,7 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
         Some(
             previous_labels::EVENT_REPLY_DIGEST
             | previous_labels::EVENT_WRITERS_DIGEST
+            | previous_labels::META_CONSENT_BASE_DIGEST
             | previous_labels::MOBILE_SOCIAL_BASE_DIGEST
             | previous_labels::NATIVE_REPLY_BASE_DIGEST
             | previous_labels::NODE_DEVICE_BASE_DIGEST
@@ -871,9 +864,9 @@ async fn verify(
         Adapter::AgentLogin => {
             super::agent_login_record_service::verify_current_snapshot(keys, row).await
         }
-        Adapter::Pending => Err(AppError::Conflict(
-            "Encrypted field adapter implementation is pending".into(),
-        )),
+        Adapter::MetaConsentAssets => {
+            Box::pin(super::channel_meta_service::asset_record::verify(keys, row)).await
+        }
     }
 }
 
@@ -1059,9 +1052,12 @@ async fn migrate(
         Adapter::AgentLogin => {
             super::agent_login_record_service::migrate_snapshot(db, keys, row).await
         }
-        Adapter::Pending => Err(AppError::Conflict(
-            "Encrypted field adapter implementation is pending".into(),
-        )),
+        Adapter::MetaConsentAssets => {
+            Box::pin(super::channel_meta_service::asset_record::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
     }
 }
 
@@ -1173,6 +1169,9 @@ pub async fn list_findings(db: &Database, after: Option<&str>) -> AppResult<Find
             }
             Some(super::platform_native_reply_service::record::RECEIPT_MISSING) => {
                 super::platform_native_reply_service::record::RECEIPT_MISSING
+            }
+            Some(super::channel_meta_service::asset_record::AMBIGUOUS) => {
+                super::channel_meta_service::asset_record::AMBIGUOUS
             }
             Some("adapter_not_implemented") => "adapter_not_implemented",
             Some("authentication_binding_or_lifecycle_unresolved") => {
@@ -1309,7 +1308,7 @@ pub async fn lookup_finding(
             });
         result.disposition = if verify(entry, &db, keys, row).await.is_ok() {
             "authenticated_current_new_pass_required"
-        } else if rewrap && !matches!(entry.adapter, Adapter::Pending) {
+        } else if rewrap {
             match prepare_signing(entry, &db, keys, row).await {
                 Ok(true) => {
                     // Keep the matching producer in the next page while its internal cursor advances.
@@ -1341,8 +1340,6 @@ pub async fn lookup_finding(
                     Err(_) => "storage_or_lifecycle_repair_required",
                 },
             }
-        } else if matches!(entry.adapter, Adapter::Pending) {
-            "adapter_implementation_required"
         } else {
             "storage_or_lifecycle_repair_required"
         };
@@ -1486,7 +1483,6 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
         // error, never an exemption based solely on its byte length.
         let exempt = no_material
             && match entry.adapter {
-                Adapter::Pending => true,
                 Adapter::Capability => {
                     row.get("capability_encrypted")
                         .is_none_or(|v| v == &Bson::Null)
@@ -1506,7 +1502,7 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
         } else {
             match verify(entry, &db, keys, row).await {
                 Ok(()) => Ok(false),
-                Err(_) if mode == Mode::Migrate && !matches!(entry.adapter, Adapter::Pending) => {
+                Err(_) if mode == Mode::Migrate => {
                     match prepare_signing(entry, &db, keys, row).await {
                         Ok(true) => {
                             preparing = true;
@@ -1582,13 +1578,16 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
                     Some(super::platform_native_reply_service::record::RECEIPT_MISSING)
                 }
             }
+            Err(AppError::Conflict(reason))
+                if matches!(entry.adapter, Adapter::MetaConsentAssets)
+                    && reason == super::channel_meta_service::asset_record::AMBIGUOUS =>
+            {
+                unresolved += 1;
+                Some(super::channel_meta_service::asset_record::AMBIGUOUS)
+            }
             Err(_) => {
                 unresolved += 1;
-                Some(if matches!(entry.adapter, Adapter::Pending) {
-                    "adapter_not_implemented"
-                } else {
-                    "authentication_binding_or_lifecycle_unresolved"
-                })
+                Some("authentication_binding_or_lifecycle_unresolved")
             }
         };
         // Checkpoint and finding commit together; an expired worker cannot

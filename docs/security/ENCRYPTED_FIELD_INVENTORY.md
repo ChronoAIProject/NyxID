@@ -5,10 +5,6 @@ This inventory mirrors the collection, field and adapter entries in the
 **Implemented** means the registry dispatches to a service-owned verifier and
 migration adapter. It describes the source implementation; it does not establish
 that a deployment has completed migration or is ready to retire a key.
-**Pending** means the family lacks a complete registry verifier and migration
-adapter. Some Pending families already have contextual writers and readers.
-Pending adapters block complete migration readiness, including when their
-collections are empty.
 
 A canonical context binds the collection, record ID, canonical owner and exact
 field identity without ambiguous concatenation.
@@ -20,8 +16,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 50 entries for 48 collections, with 49 implemented adapters
-and 1 Pending entry. Each row lists the exact BSON paths for one adapter.
+The registry has 50 entries for 48 collections, with 50 implemented adapters
+and 0 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -75,7 +71,7 @@ A collection may use separate adapters for different fields.
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | [Reattach window storage](../../backend/src/services/assistant_reattach_window_record.rs) | Implemented |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | [Approval proposal storage](../../backend/src/services/execution_permission_dispatch/proposals/record.rs) | Implemented |
-| `channel_meta_oauth_sessions` | `assets_encrypted` | — | Pending |
+| `channel_meta_oauth_sessions` | `assets_encrypted` | [Meta OAuth consent assets](../../backend/src/services/channel_meta_service/asset_record.rs) | Implemented |
 
 OAuth client webhook signing keys use the registration ID, the persisted creator
 and a separate field path for each webhook. System, dynamic and ownerless
@@ -177,6 +173,13 @@ ownership generation. Callback transitions preserve it. Relay-phase settings
 replacement clears it. Enrollment requires a matching live bot. Migration can
 authenticate retained settings under the original owner after a transfer.
 [WhatsApp enrollment and storage](../../backend/src/services/whatsapp_native/token_record.rs)
+
+Meta consent assets bind the session, owner, actor, platform, app, grant subject
+and attempt to the encrypted field. The adapter checks the selected Page or inbox
+against the retained list, preserves its exact JSON and compares the full source
+row before rewrap. Legacy validation checks the common subject and eligible
+asset shape. Their envelope cannot distinguish two otherwise identical grants
+from the same subject. A conflicting list produces a metadata-only finding.
 
 ## Source and storage boundaries
 
@@ -299,8 +302,7 @@ The current status response exposes phase, current collection, scanned rows,
 `rewrite_operations_observed`, unresolved findings, per-field outcomes and
 blockers. Rewrite observations are not an exact total: a crash between a
 successful source update and its progress record can omit that rewrite on replay.
-`implementation_registry_incomplete` remains a blocker while any Pending
-adapter exists. Backup/rollback-reader evidence, enabled legacy readers,
+Backup/rollback-reader evidence, enabled legacy readers,
 provider/registry changes, unfinished walks and unresolved findings also block
 readiness. Completing a walk does not authorize key retirement. The complete
 per-family format/key inventory and retirement report remain follow-up work.
@@ -311,8 +313,7 @@ rollback binary. Short-lived families may use drain reporting only after all
 writers/readers are converted, every writer's maximum lifetime is proved, and
 contextual writes have been enabled for at least that lifetime. Drain checks
 must include expired rows and rows awaiting purge; an expiry timestamp does not
-remove a retained old-key dependency. The pending families do not currently
-provide that completed drain-reporting contract.
+remove a retained old-key dependency.
 
 AWS and GCP KMS may decrypt several internal key versions behind one configured
 logical key ID. Successful authentication with the current logical ID does not
@@ -355,11 +356,7 @@ migration or retirement has completed.
 ## Remaining work
 
 [Encryption migration and retirement work (#1934)](https://github.com/ChronoAIProject/NyxID/issues/1934)
-includes completing the Pending families in the registry table above. Each needs
-complete writer/reader coverage, context and lifecycle validation, owner rebind
-where applicable, exact-source
-migration or a proved drain contract, and swap/concurrency/round-trip regression
-evidence. The same follow-up must deliver per-family readiness and
+covers per-family readiness and
 key-retirement reporting, including drain status and retained old-key, legacy
 reader, rollback and backup dependencies.
 

@@ -1,15 +1,6 @@
 use super::*;
 use std::collections::HashSet;
 
-fn pending_sources() -> Vec<(&'static str, Document)> {
-    use crate::models::*;
-    let bytes = Bson::Binary(bson::Binary {
-        subtype: bson::spec::BinarySubtype::Generic,
-        bytes: vec![0xa5],
-    });
-    vec![(channel_meta::SESSIONS, doc! {"assets_encrypted": &bytes})]
-}
-
 #[test]
 fn previous_labels_match_the_ordered_base_registry() {
     use sha2::{Digest, Sha256};
@@ -42,18 +33,12 @@ fn registered_paths_match_stored_material_and_the_documented_inventory() {
         .filter(|line| line.starts_with("| `"))
         .collect();
     assert_eq!(rows.len(), REGISTRY.len());
-    let pending = REGISTRY
-        .iter()
-        .filter(|e| matches!(e.adapter, Adapter::Pending))
-        .count();
     let collections: HashSet<_> = REGISTRY.iter().map(|e| e.collection).collect();
     assert!(inventory.contains(&format!(
-        "{} entries for {} collections, with {} implemented adapters\nand {} Pending {}.",
+        "{} entries for {} collections, with {} implemented adapters\nand 0 Pending entries.",
         REGISTRY.len(),
         collections.len(),
-        REGISTRY.len() - pending,
-        pending,
-        if pending == 1 { "entry" } else { "entries" }
+        REGISTRY.len()
     )));
     let mut unique = HashSet::new();
     for (entry, line) in REGISTRY.iter().zip(rows) {
@@ -61,14 +46,7 @@ fn registered_paths_match_stored_material_and_the_documented_inventory() {
         assert_eq!(cells[0].trim_matches('`'), entry.collection);
         let fields: Vec<_> = cells[1].split(", ").map(|f| f.trim_matches('`')).collect();
         assert_eq!(fields, entry.fields);
-        assert_eq!(
-            cells[3],
-            if matches!(entry.adapter, Adapter::Pending) {
-                "Pending"
-            } else {
-                "Implemented"
-            }
-        );
+        assert_eq!(cells[3], "Implemented");
         for field in entry.fields {
             assert!(
                 unique.insert((entry.collection, *field)),
@@ -88,53 +66,7 @@ fn registered_paths_match_stored_material_and_the_documented_inventory() {
     assert!(!unique.contains(&("nyxbot_events", "event_ref_ciphertext")));
     assert!(!unique.contains(&("auth_device_codes_v2", "delivery_credential_encrypted")));
 
-    fn assert_binary_paths(
-        collection: &str,
-        doc: &Document,
-        prefix: &str,
-        fields: &HashSet<(&str, &str)>,
-    ) {
-        for (key, value) in doc {
-            let path = format!("{prefix}{key}");
-            match value {
-                Bson::Document(child) => {
-                    assert_binary_paths(collection, child, &format!("{path}."), fields)
-                }
-                Bson::Binary(_) => assert!(
-                    fields.contains(&(collection, path.as_str())),
-                    "{collection}.{path}"
-                ),
-                _ => {}
-            }
-        }
-    }
-    for (collection, source) in pending_sources() {
-        let entry = REGISTRY
-            .iter()
-            .find(|entry| entry.collection == collection)
-            .unwrap();
-        assert!(matches!(entry.adapter, Adapter::Pending));
-        assert!(has_material(entry, &source));
-        assert_binary_paths(collection, &source, "", &unique);
-        for field in entry.fields {
-            assert_eq!(
-                field_has_material(&source, field),
-                matches!(path(&source, field), Some(Bson::Binary(_)))
-            );
-            assert!(!field_has_material(&doc! {}, field));
-            let mut null = Bson::Null;
-            for component in field.split('.').rev() {
-                null = doc! {component: null}.into();
-            }
-            assert!(!field_has_material(null.as_document().unwrap(), field));
-            if let Some((_, leaf)) = field.rsplit_once('.') {
-                assert!(!field_has_material(
-                    &doc! {leaf: 1, "sibling": {leaf: 1}},
-                    field
-                ));
-            }
-        }
-    }
+    assert_eq!((REGISTRY.len(), collections.len()), (50, 48));
 }
 
 #[tokio::test]
@@ -149,7 +81,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let live = registry_digest();
     assert_eq!(
         live,
-        "72d9fc2dca536136c4a9a4ae34ee542299ec7c517cae2fa5f039912f2a95169d"
+        "c526844b3d17aa7a1211f84b3e167ffa92c1e7fae23853506517fc966a0a8dae"
     );
     // Checkpoints read from earlier draft registries. Keep these input bytes
     // independent of the production lookup so a mistyped digest fails here.
@@ -176,7 +108,9 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let node_device_base = "90d8a86835621035aac28bbb0e064ef45c90b76e3572949f4c41917c5ed9323a";
     let native_reply_base = "c9160176c797bce8a685fbe1525b33093a611b56b2d9f0568523c478b3f57e50";
     let mobile_social_base = "72058b48a651932bcd6db8e41c61501152380812f83bdcbdd31d1273a982126b";
+    let meta_consent_base = "72d9fc2dca536136c4a9a4ae34ee542299ec7c517cae2fa5f039912f2a95169d";
     for digest in [
+        Some(meta_consent_base),
         Some(mobile_social_base),
         Some(native_reply_base),
         Some(node_device_base),
@@ -237,6 +171,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
             v == live
                 || v == device_base
                 || v == node_device_base
+                || v == meta_consent_base
                 || v == mobile_social_base
                 || v == native_reply_base
                 || v == event_writers_checkpoint
@@ -260,6 +195,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                     && field.authenticated_current == 11),
             digest == Some(live.as_str())
                 || digest == Some(node_device_base)
+                || digest == Some(meta_consent_base)
                 || digest == Some(mobile_social_base)
                 || digest == Some(native_reply_base)
                 || digest == Some(event_writers_checkpoint)
@@ -367,63 +303,6 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
         .await
         .unwrap();
     advance(&db, &keys, &next).await.unwrap();
-    db.drop().await.unwrap();
-}
-
-#[tokio::test]
-async fn pending_sources_are_reported_and_preserved_by_both_walk_modes() {
-    crate::test_utils::init_test_audit_chain_hmac_key();
-    let db = crate::test_utils::connect_test_database("registry_pending_walk")
-        .await
-        .unwrap();
-    let keys = crate::test_utils::test_encryption_keys();
-    let mut sources = pending_sources();
-    for (index, (collection, source)) in sources.iter_mut().enumerate() {
-        let mut row = doc! {"_id": index.to_string()};
-        row.extend(std::mem::take(source));
-        *source = row;
-        db.collection::<Document>(collection)
-            .insert_one(&*source)
-            .await
-            .unwrap();
-    }
-    for mode in [Mode::Verify, Mode::Migrate] {
-        let generation = start(&db, &keys, mode, None).await.unwrap();
-        let report = finish(&db, &keys, &generation).await;
-        assert_eq!(report.unresolved, sources.len() as i64);
-        assert_eq!(report.rewritten, 0);
-        for (collection, source) in &sources {
-            let stored = db
-                .collection::<Document>(collection)
-                .find_one(doc! {"_id":source.get_str("_id").unwrap()})
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                bson::to_vec(source).unwrap(),
-                bson::to_vec(&stored).unwrap()
-            );
-            let entry = REGISTRY
-                .iter()
-                .find(|e| e.collection == *collection)
-                .unwrap();
-            for field in entry
-                .fields
-                .iter()
-                .filter(|field| field_has_material(source, field))
-            {
-                assert!(
-                    report
-                        .field_outcomes
-                        .iter()
-                        .any(|f| f.collection == *collection
-                            && f.field == *field
-                            && f.verification_blocked > 0
-                            && f.authenticated_current == 0)
-                );
-            }
-        }
-    }
     db.drop().await.unwrap();
 }
 

@@ -976,7 +976,10 @@ async fn insert_registered_bot_inner(
             if let Some(meta) = &meta_session {
                 let done = db.collection::<bson::Document>(crate::models::channel_meta::SESSIONS).update_one(
                     doc! {"_id":&meta.id,"actor_id":&meta.actor_id,"owner_id":&bot.user_id,"status":"installing","selected_asset_id":&bot.platform_bot_id,"bot_id":&bot.id,"expires_at":{"$gt":bson::DateTime::now()}},
-                    doc! {"$set":{"status":"completed","expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(2))},"$unset":{"assets_encrypted":""}},
+                    doc! {"$set":{"status":"completed","expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(2))},"$unset":{
+                            "assets_encrypted":"",
+                            "assets_context_version":"",
+                        }},
                 ).session(&mut *session).await?;
                 if done.matched_count != 1 { return Err(AppError::Conflict("Meta connection claim changed".into())); }
                 if let Some(link_id)=&meta.connect_link_id {
