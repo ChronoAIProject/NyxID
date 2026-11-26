@@ -159,7 +159,7 @@ function MachineGrantCardContent({
       : consentServices?.find((service) => service.id === id);
     if (display?.deleted) return translateUi("Deleted service");
     const trimmed = display?.label?.trim();
-    const label = trimmed === id ? undefined : trimmed;
+    const label = trimmed === id || trimmed === "—" ? undefined : trimmed;
     if (display?.disabled) {
       return label ? label + translateUi(" (disabled)") : translateUi("Service disabled");
     }

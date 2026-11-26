@@ -111,12 +111,15 @@ pub(super) async fn load_in_session(
         }
         let label = endpoint
             .and_then(|row| row.label.as_ref())
-            .filter(|label| !label.trim().is_empty() && label.trim() != service.id)
+            .filter(|label| {
+                let label = label.trim();
+                !label.is_empty() && label != "—" && !label.eq_ignore_ascii_case(&service.id)
+            })
             .cloned();
 
-        let slug = endpoint
-            .map(|_| service.slug)
-            .filter(|slug| !slug.trim().is_empty() && slug.trim() != service.id);
+        let slug = service.slug.trim();
+        let slug = (!slug.is_empty() && slug != "—" && !slug.eq_ignore_ascii_case(&service.id))
+            .then(|| slug.to_owned());
         displays.insert(
             service.id,
             ServiceDisplay {

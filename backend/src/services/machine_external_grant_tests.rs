@@ -1408,6 +1408,7 @@ async fn oauth_machine_service_labels_are_current_and_owner_scoped_for_all_servi
     let deleted = Uuid::new_v4().to_string();
     let legacy_tombstone = Uuid::new_v4().to_string();
     let unavailable = Uuid::new_v4().to_string();
+    let unnamed = Uuid::new_v4().to_string();
     let foreign = Uuid::new_v4().to_string();
     let endpoints =
         f.db.collection::<crate::models::user_endpoint::UserEndpoint>(ENDPOINTS);
@@ -1460,6 +1461,7 @@ async fn oauth_machine_service_labels_are_current_and_owner_scoped_for_all_servi
                 None,
                 None,
             ),
+            test_user_service(&unnamed, &f.user, &unnamed, &foreign_endpoint, None, None),
             test_user_service(
                 &foreign,
                 &outsider,
@@ -1484,6 +1486,7 @@ async fn oauth_machine_service_labels_are_current_and_owner_scoped_for_all_servi
         deleted.clone(),
         legacy_tombstone.clone(),
         unavailable.clone(),
+        unnamed.clone(),
         foreign.clone(),
     ];
     f.db.collection::<MachineExternalGrant>(GRANTS)
@@ -1510,9 +1513,42 @@ async fn oauth_machine_service_labels_are_current_and_owner_scoped_for_all_servi
     assert_eq!(wire[foreign.as_str()], wire[deleted.as_str()]);
     assert_eq!(
         wire[unavailable.as_str()],
+        serde_json::json!({"label": "unavailable", "deleted": false})
+    );
+    assert_eq!(
+        wire[unnamed.as_str()],
         serde_json::json!({"label": null, "deleted": false})
     );
     assert!(!wire.to_string().contains("Private endpoint name"));
+    f.db.collection::<Consent>(CONSENTS)
+        .update_one(doc! {"_id": &consent.id}, doc! {"$set": {
+            "allow_all_services": false, "allowed_service_ids": vec![unavailable.as_str(), unnamed.as_str()],
+        }})
+        .await.unwrap();
+    let list = crate::handlers::consent::list_my_consents(
+        axum::extract::State(crate::test_utils::test_app_state(f.db.clone())),
+        crate::test_utils::test_auth_user(&f.user),
+    )
+    .await
+    .unwrap()
+    .0;
+    let items = &list.consents[0].allowed_services;
+    assert_eq!(items[0].label, "unavailable");
+    assert_eq!(items[0].slug.as_deref(), Some("unavailable"));
+    assert_eq!(items[1].label, "—");
+    assert!(items[1].slug.is_none());
+    assert!(
+        items
+            .iter()
+            .all(|row| row.catalog_service_name.is_none() && !row.deleted)
+    );
+    f.db.collection::<Consent>(CONSENTS)
+        .update_one(
+            doc! {"_id": &consent.id},
+            doc! {"$set": {"allow_all_services": true}},
+        )
+        .await
+        .unwrap();
     endpoints
         .update_one(
             doc! {"_id": &owned_endpoint},

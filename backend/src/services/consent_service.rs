@@ -1049,7 +1049,7 @@ pub async fn list_user_consent_displays(
             let label = row
                 .label
                 .or_else(|| row.slug.clone())
-                .unwrap_or_else(|| "Service details unavailable".to_owned());
+                .unwrap_or_else(|| "—".to_owned());
             (
                 id,
                 ConsentServiceDisplay {

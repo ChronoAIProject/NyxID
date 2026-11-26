@@ -2033,7 +2033,7 @@ async fn oauth_grant_services_in_session(
         displays.insert(
             id,
             OAuthMachineServiceDisplay {
-                label: display.label,
+                label: display.label.or(display.slug),
                 deleted: false,
                 disabled: display.disabled.then_some(true),
             },

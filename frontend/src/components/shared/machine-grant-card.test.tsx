@@ -617,9 +617,11 @@ describe("Machine grant owner management", () => {
     view.rerender(<MachineGrantCard source={source} consentServices={[
       { id: "active-id", label: "Saved endpoint name", catalog_service_name: "Catalog fallback", slug: "service", deleted: false },
       { id: "deleted-id", label: "deleted-id", catalog_service_name: null, slug: null, deleted: true },
+      { id: "unavailable-id", label: "—", catalog_service_name: null, slug: null, deleted: false },
     ]} />);
     expect(ceiling).toHaveTextContent("Saved endpoint name, Deleted service, Service details unavailable");
     expect(ceiling).not.toHaveTextContent("Catalog fallback");
+    expect(ceiling).not.toHaveTextContent("—");
     serviceIds.forEach((id) => expect(ceiling).not.toHaveTextContent(id));
   });
   it("uses current OAuth service visibility over saved consent labels", () => {

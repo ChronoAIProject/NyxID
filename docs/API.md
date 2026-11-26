@@ -5654,7 +5654,9 @@ service allowlists resolve display metadata in one database snapshot. A
 first-party human session can see personally owned services and services
 covered by the person's current organization proxy scope. The read checks
 active organizations, memberships and service-level admin restrictions.
-Labels come from the service's owner-bound endpoint. An eligible disabled
+The list uses the owner-bound endpoint label or the authorized service's slug.
+It displays `—` as the string label when neither name is usable. Catalog
+names require a matching owner-bound endpoint. An eligible disabled
 service with a surviving endpoint has the additive `disabled: true` field.
 Missing, deleted, and inaccessible entries keep their `id` and use
 `deleted: true` with a label numbered in list order (`#1`, `#2`, and so on).
@@ -5714,8 +5716,8 @@ Machine readiness. See [optional Machine permission on consent](security/OAUTH_A
 for first approval and renewal.
 
 When the response contains an OAuth Machine grant, `oauth_machine_services`
-is a display map keyed by the assigned service IDs. Labels come from the
-current service and its resource owner's endpoint in the same snapshot. The
+is a display map keyed by the assigned service IDs. Labels use the resource
+owner's endpoint or the authorized service's slug in the same snapshot. The
 lookup applies the current consent ceiling and the person's direct ownership
 or proxy access through an active organization and membership, including the
 membership's effective service scope and service-level admin restrictions.
@@ -5723,8 +5725,8 @@ Removed services and services outside that access use the same placeholder
 with `deleted: true` and a null `label`. This covers explicit deletion markers
 and older inactive rows whose owner-bound endpoint is gone. An accessible
 disabled service with a surviving owner-bound endpoint has `deleted: false`
-and the additive `disabled: true` field. The `label` is null whenever the
-endpoint label is unavailable. The map is empty when the source or the
+and the additive `disabled: true` field. The `label` is null when neither
+name is usable. The map is empty when the source or the
 assigned service list is unavailable.
 
 ---
