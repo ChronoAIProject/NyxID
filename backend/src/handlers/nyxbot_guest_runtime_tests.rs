@@ -272,7 +272,10 @@ async fn nyxbot_guest_skill_reads_follow_the_live_chat_specialist() {
         guest::AnswerAudience::Shared,
     );
     let visible = skills::visible_agent(db, &chat).await.unwrap();
-    assert_eq!(visible.skills, [override_pin.clone()]);
+    assert_eq!(
+        visible.skills.as_slice(),
+        std::slice::from_ref(&override_pin)
+    );
     let path = format!("/api/v1/skills/{skill_id}/versions/1.0.0/download");
     let permit = skills::authorize(db, &chat, &skill_id, &path)
         .await

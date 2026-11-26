@@ -41,6 +41,10 @@ pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             "reason":{"$in":["credential_installed","protocol_no_issuance"]},
             "capability_encrypted":{"$exists":false},"completion_basis":{"$exists":false}},
         ),
+        (
+            m::channel_guest_setup::GuestSetup::COLLECTION_NAME,
+            doc! {"owner_id":owner},
+        ),
         (m::channel_message::COLLECTION_NAME, doc! {"user_id":owner}),
         (
             m::channel_reply_delivery::COLLECTION_NAME,

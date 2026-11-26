@@ -431,6 +431,7 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "channel_email_receipts" => Some(("channels", "channel_email_receipts")),
         "channel_email_sends" => Some(("channels", "channel_email_sends")),
         "channel_email_subscriptions" => Some(("channels", "channel_email_subscriptions")),
+        "channel_guest_setup" => Some(("channels", "channel_guest_setup")),
         "channel_messages" => Some(("channels", "channel_messages")),
         "channel_reply_deliveries" => Some(("channels", "channel_reply_deliveries")),
         "channel_text_deliveries" => Some(("channels", "channel_text_deliveries")),
@@ -874,6 +875,13 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
         "channel_email_receipts" => &["user_id", "created_at"],
         "channel_email_sends" => &["user_id", "status", "created_at", "updated_at"],
         "channel_email_subscriptions" => &["user_id", "created_at"],
+        "channel_guest_setup" => &[
+            "owner_id",
+            "revision",
+            "pending_activation",
+            "policy_revision",
+            "updated_at",
+        ],
         "channel_messages" => &[
             "user_id",
             "conversation_id",
