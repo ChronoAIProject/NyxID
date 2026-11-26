@@ -262,6 +262,11 @@ saved approvals remain errors. Later re-consent can add Machine permission using
 that same approval/revision contract; it never widens an older token. Declining
 Machine access on a new session does not revoke another session's existing grant.
 
+In Authorized Apps, the grant and expiry dates describe base OAuth consent.
+Machine permissions opens the [owner Machine grant read](../API.md#get-apiv1usersmeconsentsclient_idmachine-grant)
+for the selected app. Its effective status comes from the saved client, consent,
+and grant. Initial approval and renewal start in the client’s signed OAuth flow.
+
 ### Browser delivery and native handoff
 
 Both SPA decision forms (including their Machine selection) send the hidden

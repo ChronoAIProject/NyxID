@@ -230,7 +230,7 @@ async fn resolve_allowed_services(
             resolved.push(ConsentAllowedServiceItem {
                 id: service_id.clone(),
                 slug: None,
-                label: service_id.clone(),
+                label: "Deleted service".to_owned(),
                 catalog_service_name: None,
                 deleted: true,
             });
@@ -427,7 +427,9 @@ mod tests {
         assert_eq!(items[1].id, missing_service_id);
         assert!(items[1].slug.is_none());
         assert!(items[1].deleted);
+        assert_eq!(items[1].label, "Deleted service");
         assert_eq!(items[2].id, foreign_service_id);
+        assert_eq!(items[2].label, items[1].label);
         assert!(items[2].slug.is_none());
         assert!(items[2].deleted);
     }

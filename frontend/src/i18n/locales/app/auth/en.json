@@ -39,6 +39,8 @@
   "An unexpected error occurred during authorization.": "An unexpected error occurred during authorization.",
   "An unexpected error occurred. Please try again.": "An unexpected error occurred. Please try again.",
   "Anyone with this code can redeem the selected access once, within five minutes. Restricted Agent Key access is recommended.": "Anyone with this code can redeem the selected access once, within five minutes. Restricted Agent Key access is recommended.",
+  "App consent expiry": "App consent expiry",
+  "App consent granted": "App consent granted",
   "App details": "App details",
   "Application access via NyxID": "Application access via NyxID",
   "Approval steps": "Approval steps",

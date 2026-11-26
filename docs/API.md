@@ -5649,6 +5649,11 @@ val response = client.newCall(request).execute()
 
 List all OAuth consents the current user has granted to third-party applications.
 
+The `granted_at` and `expires_at` fields describe base OAuth consent. An
+unresolvable entry in `allowed_services` has `deleted: true` and a generic
+`label`. A missing service and a service outside the owner's inventory use the
+same placeholder. Use the `deleted` flag to render a localized display label.
+
 **Auth:** Required
 
 **Response (200):**
@@ -5674,6 +5679,33 @@ List all OAuth consents the current user has granted to third-party applications
 curl http://localhost:3001/api/v1/users/me/consents \
   -H "Authorization: Bearer <access_token>"
 ```
+
+---
+
+#### GET /api/v1/users/me/consents/{client_id}/machine-grant
+
+Requires a human owner session. The response includes the latest owned Machine
+grant (active first, then retained revoked history) or `null`, the independent
+`source_valid` and `grant_valid` booleans and their nullable validity reasons,
+and `source_and_grant_valid` (the logical AND of the independent checks).
+
+When the owner has saved consent or grant history for the client, the response
+also includes `oauth_machine_status`. The server reads the displayed grant
+and source in one database snapshot. It reports the first applicable owner,
+client, or consent blocker, then evaluates the grant if the source passes.
+
+| Check | `oauth_machine_status` values in evaluation order |
+| --- | --- |
+| Owner | `owner_unavailable` |
+| Client | `client_missing`, `client_disabled`, `client_machine_scope_missing`, `client_proxy_scope_missing` |
+| Consent | `consent_missing`, `consent_expired`, `consent_revision_missing`, `consent_machine_scope_missing`, `consent_proxy_scope_missing` |
+| Grant | `grant_missing`, `grant_revoked`, `grant_expired`, `grant_stale`, `valid` |
+
+A stale grant has a security epoch or consent binding that differs from the
+live source. Proxy capability here means `proxy` or `proxy:*`. The status
+describes saved permissions. Execution also checks live token authority and
+Machine readiness. See [optional Machine permission on consent](security/OAUTH_AUTHORITY_ROLLOUT.md#optional-machine-permission-on-consent)
+for first approval and renewal.
 
 ---
 

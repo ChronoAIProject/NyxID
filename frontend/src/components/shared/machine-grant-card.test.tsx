@@ -556,12 +556,32 @@ describe("Machine grant owner management", () => {
       source_and_grant_valid: false,
     };
     render(<MachineGrantCard source={{ kind: "oauth", id: "client" }} />);
-    expect(
-      screen.getByRole("button", { name: "Approve Machine permissions" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByText(/Reconnect from this application/),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve Machine permissions" })).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("No Machine grant");
+    expect(screen.getByText(/Reconnect from the app, choose the Machines/)).toBeInTheDocument();
+    expect(screen.queryByText("Source + grant:")).toBeNull();
+  });
+  it("explains the effective OAuth blocker and keeps the old API reason generic", () => {
+    const legacy = {
+      grant: null,
+      source_valid: false,
+      source_validity_reason: "ineligible",
+      grant_valid: false,
+      grant_validity_reason: "missing",
+      source_and_grant_valid: false,
+    };
+    mocks.data = legacy;
+    const source = { kind: "oauth", id: "client" } as const;
+    const view = render(<MachineGrantCard source={source} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Machine access could not be confirmed");
+    mocks.data = { ...legacy, oauth_machine_status: "client_proxy_scope_missing" };
+    view.rerender(<MachineGrantCard source={source} />);
+    expect(screen.getByRole("status")).toHaveTextContent("App lacks proxy capability");
+    expect(screen.getByText(/Ask the app provider to enable proxy access/)).toBeInTheDocument();
+    mocks.data = { ...legacy, oauth_machine_status: "consent_machine_scope_missing" };
+    view.rerender(<MachineGrantCard source={source} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Machine access omitted from consent");
+    expect(screen.queryByText("No Machine grant")).toBeNull();
   });
   it("does not offer editing without current parent Key CAS", () => {
     mocks.data = {

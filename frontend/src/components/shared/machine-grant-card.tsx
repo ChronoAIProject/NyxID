@@ -15,11 +15,13 @@ import type {
   MachineGrantSource,
 } from "@/schemas/machine-grants";
 import type { ApiKey } from "@/types/api";
+import type { ConsentAllowedService } from "@/types/rbac";
 import { ApiError } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import { SHARED_LEGACY_WARNING } from "@/schemas/machines";
 import { formatDate } from "@/lib/utils";
 import { MachineGrantEditor } from "./machine-grant-editor";
+import { OAuthMachineStatusSummary } from "./oauth-machine-status";
 import { ErrorBanner } from "./error-banner";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -71,6 +73,7 @@ interface MachineGrantCardProps {
   readonly stateVersion?: number;
   readonly allowedNodeIds?: readonly string[];
   readonly allowedServiceIds?: readonly string[];
+  readonly consentServices?: readonly ConsentAllowedService[];
 }
 export function MachineGrantCard(props: MachineGrantCardProps) {
   useUiTranslation();
@@ -122,6 +125,7 @@ function MachineGrantCardContent({
   stateVersion,
   allowedNodeIds,
   allowedServiceIds,
+  consentServices,
   keyQuery,
 }: MachineGrantCardProps & { readonly keyQuery?: SourceKeyQuery }) {
   useUiTranslation();
@@ -163,6 +167,7 @@ function MachineGrantCardContent({
     !query.isFetching &&
     active &&
     query.data?.source_and_grant_valid === true &&
+    (source.kind === "api_key" || query.data.oauth_machine_status === undefined || query.data.oauth_machine_status === "valid") &&
     (!independentValidity || (sourceValid === true && grantValid === true));
   const revokeReviewCurrent =
     revokeReview !== null &&
@@ -337,46 +342,52 @@ function MachineGrantCardContent({
           )}
           {!query.error && query.data && (
             <>
-              <div className="flex flex-wrap gap-2">
-                <Badge variant={combinedLiveValid ? "success" : "warning"}>{translateUi("Source + grant:")}{" "}
-                  {query.isFetching
-                    ? translateUi("checking")
-                    : combinedLiveValid
-                      ? translateUi("valid")
-                      : translateUi("not currently valid")}
-                </Badge>
-                {independentValidity && (
-                  <>
-                    <Badge variant={sourceValid ? "success" : "warning"}>{translateUi("Source:")}{" "}
+              {source.kind === "oauth" ? (
+                <OAuthMachineStatusSummary read={query.data} active={active} checking={query.isFetching} />
+              ) : (
+                <>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge variant={combinedLiveValid ? "success" : "warning"}>{translateUi("Source + grant:")}{" "}
                       {query.isFetching
-                        ? translateUi("Checking")
-                        : liveLabel(
-                            sourceValid,
-                            query.data.source_validity_reason,
-                          )}
+                        ? translateUi("checking")
+                        : combinedLiveValid
+                          ? translateUi("valid")
+                          : translateUi("not currently valid")}
                     </Badge>
-                    <Badge variant={grantValid ? "success" : "warning"}>{translateUi("Grant validity:")}{" "}
-                      {query.isFetching
-                        ? translateUi("Checking")
-                        : liveLabel(grantValid, grantReason)}
+                    {independentValidity && (
+                      <>
+                        <Badge variant={sourceValid ? "success" : "warning"}>{translateUi("Source:")}{" "}
+                          {query.isFetching
+                            ? translateUi("Checking")
+                            : liveLabel(
+                                sourceValid,
+                                query.data.source_validity_reason,
+                              )}
+                        </Badge>
+                        <Badge variant={grantValid ? "success" : "warning"}>{translateUi("Grant validity:")}{" "}
+                          {query.isFetching
+                            ? translateUi("Checking")
+                            : liveLabel(grantValid, grantReason)}
+                        </Badge>
+                      </>
+                    )}
+                    <Badge variant={active ? "secondary" : "warning"}>{translateUi("Grant:")}{" "}
+                      {!grant
+                        ? translateUi("none")
+                        : active
+                          ? translateUi("active")
+                          : grant.status === "revoked"
+                            ? translateUi("revoked")
+                            : translateUi("expired")}
                     </Badge>
-                  </>
-                )}
-                <Badge variant={active ? "secondary" : "warning"}>{translateUi("Grant:")}{" "}
-                  {!grant
-                    ? translateUi("none")
-                    : active
-                      ? translateUi("active")
-                      : grant.status === "revoked"
-                        ? translateUi("revoked")
-                        : translateUi("expired")}
-                </Badge>
-              </div>
-              <p className="text-13 text-muted-foreground">
-                {independentValidity
-                  ? translateUi("Source authentication and Machine grant validity are live checks over their authoritative records. Unknown or stale results do not establish execution authority, Machine readiness, or the client’s local token state.")
-                  : translateUi("The server reports one combined source and grant check; it does not report source validity separately. This result is separate from Machine resource readiness and from the client’s local token or transport state.")}
-              </p>
+                  </div>
+                  <p className="text-13 text-muted-foreground">
+                    {independentValidity
+                      ? translateUi("Source authentication and Machine grant validity are live checks over their authoritative records. Unknown or stale results do not establish execution authority, Machine readiness, or the client’s local token state.")
+                      : translateUi("The server reports one combined source and grant check; it does not report source validity separately. This result is separate from Machine resource readiness and from the client’s local token or transport state.")}
+                  </p>
+                </>
+              )}
               {source.kind === "api_key" ? (
                 <div className="space-y-2 rounded-lg border border-border/50 bg-muted/30 p-3 text-14">
                   <p className="font-medium">{translateUi("Current parent Key review")}</p>
@@ -429,7 +440,7 @@ function MachineGrantCardContent({
                       </dd>
                     </div>
                     <div>
-                      <dt className="text-muted-foreground">{translateUi("Expires")}</dt>
+                      <dt className="text-muted-foreground">{source.kind === "oauth" ? translateUi("Machine grant expiry") : translateUi("Expires")}</dt>
                       <dd>{formatDate(grant.expires_at)}</dd>
                     </div>
                     <div>
@@ -478,7 +489,12 @@ function MachineGrantCardContent({
                             {assignment.file_roots.join(", ") || translateUi("None")}
                           </p>
                           <p className="break-all">{translateUi("Gateway service ceiling:")}{" "}
-                            {assignment.service_ids.join(", ") || translateUi("None")}
+                            {assignment.service_ids.map((id) => {
+                              if (!consentServices) return id;
+                              const service = consentServices.find((entry) => entry.id === id);
+                              if (service?.deleted) return translateUi("Deleted service");
+                              return service?.catalog_service_name || service?.label || translateUi("Service details unavailable");
+                            }).join(", ") || translateUi("None")}
                           </p>
                         </article>
                       ),
@@ -489,31 +505,30 @@ function MachineGrantCardContent({
                   ) : null}
                 </>
               )}
-              {(query.data.source_valid === false ||
+              {source.kind === "api_key" && (query.data.source_valid === false ||
                 (active && query.data.grant_valid === false)) && (
                 <p className="text-14 text-warning">{translateUi("Current source or grant checks prevent editing. Reload and review the original authentication source before approving new Machine permissions.")}</p>
               )}
               {!sourceVersionAvailable && (
                 <p role="alert" className="text-14 text-warning">{translateUi("This server did not expose the parent Key revision required for safe approval. Reload after server integration; approvals are unavailable.")}</p>
               )}
-              {source.kind === "oauth" && !active && (
-                <p className="text-14 text-muted-foreground">{translateUi("Reconnect from this application and explicitly approve Machine access to create a new grant. Existing consent cannot silently restore revoked or expired Machine permissions.")}</p>
-              )}
               <div className="flex flex-wrap gap-2">
-                <Button
-                  disabled={
-                    !canEdit || Boolean(machineId && !currentAssignment)
-                  }
-                  onClick={() => setEditing((value) => !value)}
-                >
-                  {editing
-                    ? translateUi("Close editor")
-                    : active
-                      ? machineId
-                        ? translateUi("Edit current source grant")
-                        : translateUi("Edit Machine permissions")
-                      : translateUi("Approve Machine permissions")}
-                </Button>
+                {(source.kind === "api_key" || (active && (combinedLiveValid || editing || query.isFetching || needsReview))) && (
+                  <Button
+                    disabled={
+                      !canEdit || Boolean(machineId && !currentAssignment)
+                    }
+                    onClick={() => setEditing((value) => !value)}
+                  >
+                    {editing
+                      ? translateUi("Close editor")
+                      : active
+                        ? machineId
+                          ? translateUi("Edit current source grant")
+                          : translateUi("Edit Machine permissions")
+                        : translateUi("Approve Machine permissions")}
+                  </Button>
+                )}
                 {canManageCurrent ? (
                   <Button
                     variant="outline"
@@ -560,6 +575,7 @@ function MachineGrantCardContent({
             submitting={save.isPending}
             allowedNodeIds={effectiveNodeIds}
             allowedServiceIds={effectiveServiceIds}
+            hideUnavailableServiceIds={consentServices !== undefined}
           />
         )}
         <Dialog

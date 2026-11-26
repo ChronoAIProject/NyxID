@@ -127,6 +127,27 @@ pub enum ValidityReason {
     Ineligible,
 }
 
+/// Effective owner-facing OAuth Machine status. This describes saved authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthMachineStatus {
+    OwnerUnavailable,
+    ClientMissing,
+    ClientDisabled,
+    ClientMachineScopeMissing,
+    ClientProxyScopeMissing,
+    ConsentMissing,
+    ConsentExpired,
+    ConsentRevisionMissing,
+    ConsentMachineScopeMissing,
+    ConsentProxyScopeMissing,
+    GrantMissing,
+    GrantStale,
+    GrantRevoked,
+    GrantExpired,
+    Valid,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidityStatus {
     pub valid: bool,
@@ -1667,18 +1688,6 @@ pub async fn get_latest_for_key(
         .sort(doc! {"status":1,"created_at":-1,"_id":-1})
         .await?)
 }
-pub async fn get_latest_for_oauth(
-    db: &Database,
-    user: &str,
-    client: &str,
-) -> AppResult<Option<MachineExternalGrant>> {
-    Ok(db
-        .collection(COLLECTION_NAME)
-        .find_one(doc! {"user_id":user,"binding.kind":"oauth","binding.oauth_client_id":client})
-        .sort(doc! {"status":1,"created_at":-1,"_id":-1})
-        .await?)
-}
-
 fn decode_machine_grant_cursor(cursor: &str) -> AppResult<(DateTime<Utc>, String)> {
     if cursor.len() > 80 {
         return Err(AppError::BadRequest("machine_grant_cursor_invalid".into()));
@@ -1816,18 +1825,27 @@ fn grant_status(
 /// authentication material; they only relate the live source to a grant.
 struct LiveSourceStatus {
     status: ValidityStatus,
+    oauth_failure: Option<OAuthMachineStatus>,
     user_epoch: Option<i64>,
     client_epoch: Option<i64>,
     consent: Option<ProtectedConsentRef>,
+    oauth_consent_exists: Option<bool>,
 }
 impl LiveSourceStatus {
     fn invalid(reason: ValidityReason) -> Self {
         Self {
             status: invalid_status(reason),
+            oauth_failure: None,
             user_epoch: None,
             client_epoch: None,
             consent: None,
+            oauth_consent_exists: None,
         }
+    }
+
+    fn oauth_failure(&mut self, reason: ValidityReason, detail: OAuthMachineStatus) {
+        self.status = invalid_status(reason);
+        self.oauth_failure = Some(detail);
     }
 }
 
@@ -1849,9 +1867,11 @@ async fn source_status_in_session(
         bson::from_document(owner_row.clone()).map_err(|_| AppError::MachineAuthorityStale)?;
     let mut result = LiveSourceStatus {
         status: valid_status(),
+        oauth_failure: None,
         user_epoch: Some(source_epoch(&owner_row)?),
         client_epoch: None,
         consent: None,
+        oauth_consent_exists: None,
     };
     if !owner.is_active {
         result.status = invalid_status(ValidityReason::Disabled);
@@ -1890,26 +1910,29 @@ async fn source_status_in_session(
         SourceReference::OAuth {
             oauth_client_id, ..
         } => {
+            use OAuthMachineStatus::*;
             let client_row = db
                 .collection::<Document>(CLIENTS)
                 .find_one(doc! {"_id": oauth_client_id})
                 .session(&mut *session)
                 .await?;
             let Some(client_row) = client_row else {
-                result.status = invalid_status(ValidityReason::Missing);
+                result.oauth_failure(ValidityReason::Missing, ClientMissing);
                 return Ok(result);
             };
             result.client_epoch = Some(source_epoch(&client_row)?);
             let client: OauthClient =
                 bson::from_document(client_row).map_err(|_| AppError::MachineAuthorityStale)?;
             if !client.is_active {
-                result.status = invalid_status(ValidityReason::Disabled);
+                result.oauth_failure(ValidityReason::Disabled, ClientDisabled);
                 return Ok(result);
             }
-            if !has_scope(&client.allowed_scopes, "machine")
-                || !crate::mw::auth::scope_allows_rest_proxy(&client.allowed_scopes)
-            {
-                result.status = invalid_status(ValidityReason::Ineligible);
+            if !has_scope(&client.allowed_scopes, "machine") {
+                result.oauth_failure(ValidityReason::Ineligible, ClientMachineScopeMissing);
+                return Ok(result);
+            }
+            if !crate::mw::auth::scope_allows_rest_proxy(&client.allowed_scopes) {
+                result.oauth_failure(ValidityReason::Ineligible, ClientProxyScopeMissing);
                 return Ok(result);
             }
             // Current source authentication is independent of the old grant's
@@ -1919,8 +1942,9 @@ async fn source_status_in_session(
                 .find_one(doc! {"user_id": user, "client_id": oauth_client_id})
                 .session(&mut *session)
                 .await?;
+            result.oauth_consent_exists = Some(live_consent.is_some());
             let Some(live_consent) = live_consent else {
-                result.status = invalid_status(ValidityReason::Missing);
+                result.oauth_failure(ValidityReason::Missing, ConsentMissing);
                 return Ok(result);
             };
             result.consent = live_consent
@@ -1935,16 +1959,81 @@ async fn source_status_in_session(
                 .expires_at
                 .is_some_and(|expires_at| expires_at <= Utc::now())
             {
-                result.status = invalid_status(ValidityReason::Expired);
-            } else if result.consent.is_none()
-                || !has_scope(&live_consent.scopes, "machine")
-                || !crate::mw::auth::scope_allows_rest_proxy(&live_consent.scopes)
-            {
-                result.status = invalid_status(ValidityReason::Ineligible);
+                result.oauth_failure(ValidityReason::Expired, ConsentExpired);
+            } else if result.consent.is_none() {
+                result.oauth_failure(ValidityReason::Ineligible, ConsentRevisionMissing);
+            } else if !has_scope(&live_consent.scopes, "machine") {
+                result.oauth_failure(ValidityReason::Ineligible, ConsentMachineScopeMissing);
+            } else if !crate::mw::auth::scope_allows_rest_proxy(&live_consent.scopes) {
+                result.oauth_failure(ValidityReason::Ineligible, ConsentProxyScopeMissing);
             }
         }
     }
     Ok(result)
+}
+
+/// Read the displayed OAuth grant and its source together. No authority is
+/// inferred from an OAuth token, and this read never changes saved permissions.
+pub async fn read_oauth_grant(
+    db: &Database,
+    user: &str,
+    client: &str,
+) -> AppResult<(
+    Option<MachineExternalGrant>,
+    GrantValidity,
+    Option<OAuthMachineStatus>,
+)> {
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .await?;
+    let row = db
+        .collection::<MachineExternalGrant>(COLLECTION_NAME)
+        .find_one(doc! {"user_id":user,"binding.kind":"oauth","binding.oauth_client_id":client})
+        .sort(doc! {"status":1,"created_at":-1,"_id":-1})
+        .session(&mut session)
+        .await?;
+    let source = SourceReference::OAuth {
+        oauth_client_id: client.to_owned(),
+        consent: None,
+    };
+    let live = source_status_in_session(db, user, &source, &mut session).await?;
+    // The path accepts arbitrary client IDs. Return detailed client state only
+    // when this owner has a consent or retained grant for that client.
+    let can_disclose = if row.is_some() {
+        true
+    } else if let Some(exists) = live.oauth_consent_exists {
+        exists
+    } else {
+        db.collection::<Document>(CONSENTS)
+            .find_one(doc! {"user_id":user,"client_id":client})
+            .projection(doc! {"_id":1})
+            .session(&mut session)
+            .await?
+            .is_some()
+    };
+    let status = live.oauth_failure;
+    let validity = snapshot_validity(
+        &source,
+        grant_status(row.as_ref(), row.as_ref()),
+        row.as_ref(),
+        live,
+    );
+    session.abort_transaction().await?;
+    use OAuthMachineStatus::*;
+    let status = if !validity.source.valid {
+        status.unwrap_or(OwnerUnavailable)
+    } else {
+        match validity.grant.reason {
+            None => Valid,
+            Some(ValidityReason::Missing) => GrantMissing,
+            Some(ValidityReason::Expired) => GrantExpired,
+            Some(ValidityReason::Revoked) => GrantRevoked,
+            Some(_) => GrantStale,
+        }
+    };
+    Ok((row, validity, can_disclose.then_some(status)))
 }
 
 fn source_binding_matches(
@@ -2015,22 +2104,29 @@ pub async fn evaluate_validity(
     } else {
         None
     };
-    let mut grant_status = grant_status(grant, current.as_ref());
+    let grant_status = grant_status(grant, current.as_ref());
     let live = source_status_in_session(db, user, source, &mut session).await?;
-    if grant_status.valid
-        && current
-            .as_ref()
-            .is_some_and(|row| !source_binding_matches(row, source, &live))
+    let validity = snapshot_validity(source, grant_status, current.as_ref(), live);
+    session.abort_transaction().await?;
+    Ok(validity)
+}
+
+fn snapshot_validity(
+    source: &SourceReference,
+    mut grant_status: ValidityStatus,
+    current: Option<&MachineExternalGrant>,
+    live: LiveSourceStatus,
+) -> GrantValidity {
+    if grant_status.valid && current.is_some_and(|row| !source_binding_matches(row, source, &live))
     {
         grant_status = invalid_status(ValidityReason::Changed);
     }
-    session.abort_transaction().await?;
     let combined = live.status.valid && grant_status.valid;
-    Ok(GrantValidity {
+    GrantValidity {
         source: live.status,
         grant: grant_status,
         combined,
-    })
+    }
 }
 
 pub async fn evaluate_validity_for_grant(

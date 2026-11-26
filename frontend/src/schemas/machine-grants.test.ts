@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { machineGrantListSchema, machineGrantReadSchema, machineGrantSchema, machineGrantSelectionSchema, readMachineConsentScope } from "./machine-grants";
 
+it("tolerates an older response and distinguishes a future OAuth status", () => {
+  const legacy = { grant: null, source_and_grant_valid: false };
+  expect(machineGrantReadSchema.parse(legacy).oauth_machine_status).toBeUndefined();
+  expect(machineGrantReadSchema.parse({ ...legacy, oauth_machine_status: "future_status" }).oauth_machine_status).toBe("unknown");
+});
+
 const nodeId = "b7b0c3da-5d64-4b90-bbae-9bd7aa42104c";
 const serviceId = "4b49d5a5-b8d2-4bfc-8290-19baf7a5ce7c";
 const assignment = () => ({ capabilities: { shell: true, files: true, browser: false, computer: false, developer_browser: false }, file_roots: ["/workspace"], service_ids: [] as string[] });

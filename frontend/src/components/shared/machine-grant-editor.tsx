@@ -15,7 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 
-export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submitting = false, submitLabel = "Save Machine permissions", disabled = false, optional = false, allowedNodeIds, allowedServiceIds }: {
+export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submitting = false, submitLabel = "Save Machine permissions", disabled = false, optional = false, allowedNodeIds, allowedServiceIds, hideUnavailableServiceIds = false }: {
   readonly initial?: MachineGrantSelection;
   readonly onSubmit: (value: MachineGrantSelection) => Promise<void>;
   readonly onSelectionChange?: (hasSelection: boolean) => void;
@@ -25,6 +25,7 @@ export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submi
   readonly optional?: boolean;
   readonly allowedNodeIds?: readonly string[];
   readonly allowedServiceIds?: readonly string[];
+  readonly hideUnavailableServiceIds?: boolean;
 }) {
   useUiTranslation();
   const id = useId();
@@ -84,7 +85,7 @@ export function MachineGrantEditor({ initial, onSubmit, onSelectionChange, submi
               {services.isLoading && <p role="status">{translateUi("Loading services…")}</p>}
               {services.error && <ErrorBanner message={translateUi("Service choices are unavailable. Existing selections are retained; retry before adding services.")} onRetry={() => void services.refetch()} />}
               {availableServices.map((service) => <div key={service.id} className="flex items-center gap-2"><Checkbox id={`${id}-${node.id}-svc-${service.id}`} disabled={!assignment.capabilities.shell} checked={assignment.service_ids.includes(service.id)} onCheckedChange={(checked) => update(node.id, { ...assignment, service_ids: checked ? [...assignment.service_ids, service.id] : assignment.service_ids.filter((value) => value !== service.id) })} /><Label htmlFor={`${id}-${node.id}-svc-${service.id}`}>{service.label || service.catalog_service_name || service.slug}</Label></div>)}
-              {assignment.service_ids.filter((serviceId) => !availableServices.some((service) => service.id === serviceId)).map((serviceId) => <div key={serviceId} className="flex items-center justify-between gap-2 text-13"><span>{translateUi("Unavailable service: ")}{serviceId}</span><Button type="button" variant="ghost" onClick={() => update(node.id, { ...assignment, service_ids: assignment.service_ids.filter((value) => value !== serviceId) })}>{translateUi("Remove")}</Button></div>)}
+              {assignment.service_ids.filter((serviceId) => !availableServices.some((service) => service.id === serviceId)).map((serviceId) => <div key={serviceId} className="flex items-center justify-between gap-2 text-13"><span>{hideUnavailableServiceIds ? translateUi("Service details unavailable") : <>{translateUi("Unavailable service: ")}{serviceId}</>}</span><Button type="button" variant="ghost" onClick={() => update(node.id, { ...assignment, service_ids: assignment.service_ids.filter((value) => value !== serviceId) })}>{translateUi("Remove")}</Button></div>)}
             </details>
           </>}
         </fieldset>;

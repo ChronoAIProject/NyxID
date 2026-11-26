@@ -1278,6 +1278,10 @@ async fn independent_validity_oauth_client_and_consent_are_live_not_label_snapsh
     let disabled = evaluate_validity_for_grant(&f.db, &grant).await.unwrap();
     assert_eq!(disabled.source.reason, Some(ValidityReason::Disabled));
     assert!(disabled.grant.valid && !disabled.combined);
+    assert_eq!(
+        read_oauth_grant(&f.db, &f.user, &client).await.unwrap().2,
+        Some(OAuthMachineStatus::ClientDisabled)
+    );
     f.db.collection::<OauthClient>(CLIENTS)
         .update_one(doc! {"_id": &client}, doc! {"$set": {"is_active": true}})
         .await
@@ -1294,6 +1298,87 @@ async fn independent_validity_oauth_client_and_consent_are_live_not_label_snapsh
     let expired = evaluate_validity_for_grant(&f.db, &grant).await.unwrap();
     assert_eq!(expired.source.reason, Some(ValidityReason::Expired));
     assert!(expired.grant.valid && !expired.combined);
+    assert_eq!(
+        read_oauth_grant(&f.db, &f.user, &client).await.unwrap().2,
+        Some(OAuthMachineStatus::ConsentExpired)
+    );
+    f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn oauth_machine_status_distinguishes_source_capability_and_grant_lifecycle() {
+    use OAuthMachineStatus::*;
+    let f = fixture("external_grant_oauth_management_status").await;
+    let client = oauth_client(&f).await;
+    let (consent, grant, _) = approve_oauth(&f, &client).await;
+    let status = async || read_oauth_grant(&f.db, &f.user, &client).await.unwrap().2;
+    let clients = f.db.collection::<OauthClient>(CLIENTS);
+    let original_client = clients
+        .find_one(doc! {"_id": &client})
+        .await
+        .unwrap()
+        .unwrap();
+    let consents = f.db.collection::<Consent>(CONSENTS);
+    let grants = f.db.collection::<MachineExternalGrant>(GRANTS);
+    assert_eq!(status().await, Some(Valid));
+
+    clients
+        .update_one(
+            doc! {"_id": &client},
+            doc! {"$set": {"allowed_scopes": "openid machine llm:proxy"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(status().await, Some(ClientProxyScopeMissing));
+    clients
+        .update_one(
+            doc! {"_id": &client},
+            doc! {"$set": {"allowed_scopes": &original_client.allowed_scopes}},
+        )
+        .await
+        .unwrap();
+    consents
+        .update_one(
+            doc! {"_id": &consent.id},
+            doc! {"$set": {"scopes": "openid machine llm:proxy"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(status().await, Some(ConsentProxyScopeMissing));
+    consents
+        .update_one(
+            doc! {"_id": &consent.id},
+            doc! {"$set": {"scopes": &consent.scopes, "revision": Uuid::new_v4().to_string()}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(status().await, Some(GrantStale));
+    consents
+        .replace_one(doc! {"_id": &consent.id}, &consent)
+        .await
+        .unwrap();
+
+    grants.update_one(doc! {"_id": &grant.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))}}).await.unwrap();
+    assert_eq!(status().await, Some(GrantExpired));
+    grants
+        .update_one(
+            doc! {"_id": &grant.id},
+            doc! {"$set": {"status": "revoked"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(status().await, Some(GrantRevoked));
+    consents
+        .delete_one(doc! {"_id": &consent.id})
+        .await
+        .unwrap();
+    assert_eq!(status().await, Some(ConsentMissing));
+    clients.delete_one(doc! {"_id": &client}).await.unwrap();
+    assert_eq!(status().await, Some(ClientMissing));
+    clients.insert_one(original_client).await.unwrap();
+    consents.insert_one(consent).await.unwrap();
+    grants.delete_one(doc! {"_id": &grant.id}).await.unwrap();
+    assert_eq!(status().await, Some(GrantMissing));
     f.db.drop().await.unwrap();
 }
 
@@ -1378,9 +1463,10 @@ async fn current_source_reads_prefer_active_grant_over_equal_timestamp_history()
         key_grant.id,
     );
     assert_eq!(
-        get_latest_for_oauth(&f.db, &f.user, &client)
+        read_oauth_grant(&f.db, &f.user, &client)
             .await
             .unwrap()
+            .0
             .unwrap()
             .id,
         oauth_grant.id,
@@ -1392,9 +1478,10 @@ async fn current_source_reads_prefer_active_grant_over_equal_timestamp_history()
             .is_none()
     );
     assert!(
-        get_latest_for_oauth(&f.db, &f.user, &f.key.id)
+        read_oauth_grant(&f.db, &f.user, &f.key.id)
             .await
             .unwrap()
+            .0
             .is_none()
     );
     let stranger = Uuid::new_v4().to_string();
@@ -1405,9 +1492,10 @@ async fn current_source_reads_prefer_active_grant_over_equal_timestamp_history()
             .is_none()
     );
     assert!(
-        get_latest_for_oauth(&f.db, &stranger, &client)
+        read_oauth_grant(&f.db, &stranger, &client)
             .await
             .unwrap()
+            .0
             .is_none()
     );
     f.db.drop().await.unwrap();
@@ -1427,6 +1515,7 @@ async fn grant_read_handlers_are_owner_only_and_return_safe_independent_states()
         .unwrap()
         .0;
     let json = serde_json::to_value(response).unwrap();
+    assert!(json.get("oauth_machine_status").is_none());
     assert_eq!(json["grant"]["id"], grant.id);
     assert_eq!(json["source_valid"], true);
     assert_eq!(json["grant_valid"], true);

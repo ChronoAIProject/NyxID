@@ -39,6 +39,8 @@
   "An unexpected error occurred during authorization.": "授權時發生未預期的錯誤。",
   "An unexpected error occurred. Please try again.": "發生意外錯誤。請再試一次。",
   "Anyone with this code can redeem the selected access once, within five minutes. Restricted Agent Key access is recommended.": "持有此登入碼的任何人都能在五分鐘內兌換一次所選的存取權限。建議使用受限的代理程式金鑰存取權限。",
+  "App consent expiry": "應用程式授權到期時間",
+  "App consent granted": "應用程式授權時間",
   "App details": "應用程式詳細資料",
   "Application access via NyxID": "透過 NyxID 存取應用程式",
   "Approval steps": "核准步驟",

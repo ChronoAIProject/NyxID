@@ -69,8 +69,29 @@ export const machineGrantValidityReasonSchema = z.enum([
   "ineligible",
 ]);
 export type MachineGrantValidityReason = z.infer<typeof machineGrantValidityReasonSchema>;
+const oauthMachineStatusSchema = z.enum([
+  "owner_unavailable",
+  "client_missing",
+  "client_disabled",
+  "client_machine_scope_missing",
+  "client_proxy_scope_missing",
+  "consent_missing",
+  "consent_expired",
+  "consent_revision_missing",
+  "consent_machine_scope_missing",
+  "consent_proxy_scope_missing",
+  "grant_missing",
+  "grant_stale",
+  "grant_revoked",
+  "grant_expired",
+  "valid",
+  "unknown",
+]);
+export type OAuthMachineStatus = z.infer<typeof oauthMachineStatusSchema>;
+
 export const machineGrantReadSchema = z.object({
   grant: machineGrantSchema.nullable(),
+  oauth_machine_status: oauthMachineStatusSchema.catch("unknown").optional(),
   // The independent fields are additive. Their absence remains unknown on
   // older servers; the combined field is not an independent validity result.
   source_valid: z.boolean().optional(),
@@ -88,6 +109,7 @@ export const machineGrantReadSchema = z.object({
     context.addIssue({ code: "custom", message: "Machine validity checks are incomplete or inconsistent" });
   }
 });
+export type MachineGrantRead = z.infer<typeof machineGrantReadSchema>;
 export type MachineGrantSource = { kind: "api_key" | "oauth"; id: string };
 
 // Display only. The server verifies the signed request at prepare and decision.
