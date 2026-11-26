@@ -577,8 +577,9 @@ async fn key_authority_request_command_counts() {
         );
         let expected = match case {
             Case::Child => 7,
-            // The successor insert passes the personal erasure fence (#2859).
-            Case::Rotate => 29,
+            // The successor insert passes the personal erasure fence (#2859)
+            // and looks up personal approval-rule memberships once.
+            Case::Rotate => 30,
             Case::Delete => 23,
             Case::Operations => 17,
             // Provisioned key inserts pass the personal erasure fence (#2859).
@@ -590,6 +591,18 @@ async fn key_authority_request_command_counts() {
             Case::Revoke => 13,
         };
         assert_eq!(commands.len(), expected, "{case:?}: command budget");
+        if matches!(case, Case::Rotate) {
+            assert_eq!(
+                commands
+                    .iter()
+                    .filter(|(command, collection)| {
+                        command == "find" && collection == "service_approval_configs"
+                    })
+                    .count(),
+                1,
+                "rotation membership lookup"
+            );
+        }
         if matches!(case, Case::Rotate | Case::Delete | Case::Revoke) {
             let window_lookups = commands
                 .iter()

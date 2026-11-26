@@ -4419,6 +4419,7 @@ async fn authorize_mcp_operation(
             auth.auth_method == AuthMethod::Session,
             target.is_auto_connected,
             auth.chat.as_ref(),
+            auth.api_key_id.as_deref(),
         )
     })
     .await
@@ -4509,6 +4510,8 @@ async fn wait_for_mcp_approval(
         operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.fresh_decision = pending.resolution.fresh_decision;
+    request_operation.caller_api_key_id = auth.api_key_id.clone();
     request_operation.assistant_group = crate::services::org_group_service::approval_binding(
         &state.db,
         auth.assistant_group_id.as_deref(),
@@ -4574,6 +4577,19 @@ async fn wait_for_mcp_approval(
                 approval_service::wait_failure_result(error, &req_id, &state.config.frontend_url);
             outcome.to_string()
         })?;
+    approval_service::recheck_after_decision(
+        &state.db,
+        &auth.effective_approval_owner_user_id(),
+        &target.service_owner_user_id,
+        &target.service_id,
+        operation,
+        target.is_auto_connected,
+        auth.api_key_id.as_deref(),
+        &approval_request.approval_mode,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+
     if let Some(chat) = auth.chat.as_ref() {
         crate::services::assistant_activity_decision::approval(
             &state.db,
@@ -9095,6 +9111,8 @@ mod tests {
 
         let now = chrono::Utc::now();
         let config = ServiceApprovalConfig {
+            disabled: false,
+            grant_expiry_days: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: org_id.clone(),
             service_id: catalog_service_id.clone(),
@@ -9317,6 +9335,8 @@ mod tests {
             .expect("insert allowlisted cancellation endpoint");
         db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                disabled: false,
+                grant_expiry_days: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: actor_id.clone(),
                 service_id: service.id.clone(),

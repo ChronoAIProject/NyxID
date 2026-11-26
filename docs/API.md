@@ -8943,9 +8943,28 @@ Creates or updates a per-service approval override. When set, this value takes p
 }
 ```
 
-| Field               | Type    | Required | Description                              |
-|---------------------|---------|----------|------------------------------------------|
-| `approval_required` | boolean | Yes      | Whether approval is required for this service |
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `approval_required` | boolean, optional | Legacy fallback for a policy with no rules/default. |
+| `approval_mode` | `per_request` or `grant` | Default approval mode; omitted preserves it. |
+| `rules` | ordered array | Whole ordered list of `effect`, `methods`, `resource_pattern`, `verbs`, `mode` and optional `api_key_ids` (maximum 20 IDs per rule, 50 rules). Empty key IDs mean all callers; scoped rules match only the calling NyxID key. |
+| `default_effect` | `auto_allow`, `require_approval`, `deny` or null | Unmatched fallback. Omitted preserves. Null restores the legacy/no-opinion behavior only together with `expected_revision`; without it (older clients), null leaves the stored fallback unchanged and a default-only body still creates a policy. |
+| `grant_expiry_days` | integer 1–365 or null | New remembered approvals use these days. Omitted preserves; null uses the account default. Existing grants retain identity and expiry. |
+| `disabled` | boolean, personal only | Suspend the override without rewriting rules; normal global/account fallback applies. |
+| `expected_revision` | string | Reviewed revision returned by the server; empty means no policy existed. Stale edits return 409, including edits after deletion. Without it, a save keeps the original contract: always written and audited, last write wins, the newer fields are left untouched, and a non-grant policy revokes active service grants and pending grant-mode requests. The same applies to DELETE: without `expected_revision` it revokes every grant for the service (including execution permissions) and expires pending grant-mode requests. |
+
+Rules and days validate and commit together with reconciliation and the audit.
+With `expected_revision`, an identical save is a no-op, only changed rules are
+revalidated, and a stored policy whose connection is gone can still be edited.
+Its reconciliation revokes only ordinary remembered approvals and expires only
+pending requests the new policy no longer requires; explicit execution
+permissions remain, and every use still evaluates the live policy. Key-only rule
+changes keep unrelated grants. New fields require fleet readiness; clients must
+first read `GET /api/v1/approvals/capabilities`. Old replicas return 404 and cannot
+be used to author these fields. List/config responses include `revision`,
+`disabled`, ordered `rules`, nullable `default_effect` and `grant_expiry_days`.
+DELETE accepts `?expected_revision=...` and applies the same stale-edit check;
+with it, removal also keeps explicit execution permissions.
 
 **Response (200):**
 

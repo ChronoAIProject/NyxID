@@ -105,8 +105,24 @@ pub struct ExactServiceApprovalBinding {
     pub redemption: Option<ExactServiceApprovalRedemption>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct GrantExpiryDefault {
+    pub days: u32,
+    pub policy_override: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRequest {
+    /// An explicit key-specific Ask must remain available even in Full access.
+    #[serde(default)]
+    pub fresh_decision: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caller_api_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_protocol: Option<String>,
+    /// Remembered-approval default captured when this request was issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_expiry_days_snapshot: Option<GrantExpiryDefault>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -272,6 +288,10 @@ mod tests {
 
     fn make_approval_request() -> ApprovalRequest {
         ApprovalRequest {
+            fresh_decision: false,
+            caller_api_key_id: None,
+            approval_protocol: None,
+            grant_expiry_days_snapshot: None,
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,

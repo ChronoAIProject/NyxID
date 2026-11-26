@@ -454,6 +454,10 @@ pub(super) async fn create(
     )
     .await?;
     let request = ApprovalRequest {
+        fresh_decision: false,
+        caller_api_key_id: None,
+        approval_protocol: None,
+        grant_expiry_days_snapshot: None,
         activity_outcome: None,
         activity_execution: None,
         execution_proposal: Some(version.envelope(p)),

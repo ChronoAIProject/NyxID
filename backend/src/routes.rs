@@ -1794,6 +1794,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Approval management (human-only; status polling is in api_v1_delegated)
     let approval_routes = Router::new()
         .route(
+            "/capabilities",
+            get(handlers::approvals::authoring_capabilities),
+        )
+        .route(
             "/requests",
             get(handlers::approvals::list_requests).post(handlers::approvals::create_request),
         )

@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
 };
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -21,6 +22,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 #[derive(Debug, Serialize)]
 pub struct ApprovalRequestItem {
+    pub grant_expiry_days: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_proposal:
         Option<crate::services::execution_permission_dispatch::proposals::ProposalView>,
@@ -257,6 +259,10 @@ fn to_approval_request_item(
     };
     let resolved_org_name = if from_org_policy { org_name } else { None };
     ApprovalRequestItem {
+        grant_expiry_days: request
+            .grant_expiry_days_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.days),
         execution_proposal: crate::services::execution_permission_dispatch::proposals::view(
             &request,
         ),
@@ -1328,6 +1334,8 @@ pub async fn get_grant_authorization(
 
 #[derive(Debug, Serialize)]
 pub struct ServiceApprovalConfigItem {
+    pub revision: String,
+    pub disabled: bool,
     /// The storage key used by proxy resolution. For catalog-backed user
     /// services this is `catalog_service_id`; for custom user services this
     /// is the `UserService.id` itself.
@@ -1337,6 +1345,10 @@ pub struct ServiceApprovalConfigItem {
     pub approval_mode: ApprovalMode,
     pub rules: Vec<ApprovalRule>,
     pub default_effect: Option<ApprovalEffect>,
+    /// Days an approval remembered under this policy lasts; absent means the
+    /// owner's account-wide setting applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grant_expiry_days: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
     /// The `UserService.id` that this policy applies to, when the config can
@@ -1408,7 +1420,20 @@ pub struct SetServiceApprovalConfigRequest {
     pub approval_required: Option<bool>,
     pub approval_mode: Option<ApprovalMode>,
     pub rules: Option<Vec<ApprovalRule>>,
-    pub default_effect: Option<ApprovalEffect>,
+    #[serde(default, deserialize_with = "nullable_patch")]
+    pub default_effect: Option<Option<ApprovalEffect>>,
+    #[serde(default, deserialize_with = "nullable_patch")]
+    pub grant_expiry_days: Option<Option<u32>>,
+    pub disabled: Option<bool>,
+    pub expected_revision: Option<String>,
+}
+
+fn nullable_patch<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1418,6 +1443,7 @@ pub struct ServiceApprovalConfigQuery {
     /// org. Used by the per-service approval CRUD endpoints so an org
     /// admin can set/list/delete policies on org-shared services.
     pub org_id: Option<String>,
+    pub expected_revision: Option<String>,
 }
 
 /// Resolve the effective `user_id` *and* the caller's `OwnerAccess` for
@@ -1738,12 +1764,15 @@ pub async fn list_service_configs(
             None => (None, None),
         };
         items.push(ServiceApprovalConfigItem {
+            revision: approval_service::config_revision(&c).unwrap_or_default(),
+            disabled: c.disabled,
             service_id: c.service_id,
             service_name: c.service_name,
             approval_required: c.approval_required,
             approval_mode: c.approval_mode,
             rules: c.rules,
             default_effect: c.default_effect,
+            grant_expiry_days: c.grant_expiry_days,
             created_at: c.created_at.to_rfc3339(),
             updated_at: c.updated_at.to_rfc3339(),
             user_service_id,
@@ -1789,6 +1818,9 @@ pub async fn list_service_configs(
                 )
                 .await?;
             for c in org_configs {
+                if c.disabled {
+                    continue;
+                }
                 let in_scope = match &effective_scope {
                     None => true,
                     Some(allowed) => {
@@ -1867,12 +1899,15 @@ pub async fn get_service_config_authorization(
     )
     .await?;
     let item = ServiceApprovalConfigItem {
+        revision: approval_service::config_revision(&config).unwrap_or_default(),
+        disabled: config.disabled,
         service_id: config.service_id,
         service_name: config.service_name,
         approval_required: config.approval_required,
         approval_mode: config.approval_mode,
         rules: config.rules,
         default_effect: config.default_effect,
+        grant_expiry_days: config.grant_expiry_days,
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
         user_service_id: matching.as_ref().map(|service| service.id.clone()),
@@ -1910,22 +1945,65 @@ pub async fn set_service_config(
     let (user_id, access) =
         resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
 
+    let owner_is_org = state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .find_one(doc! {"_id":&user_id})
+        .await?
+        .is_some_and(|owner| owner.user_type.is_org());
+    if owner_is_org
+        && (body.disabled.is_some()
+            || body
+                .rules
+                .as_ref()
+                .is_some_and(|rules| rules.iter().any(|rule| !rule.api_key_ids.is_empty())))
+    {
+        return Err(AppError::ValidationError(
+            "Personal scoped rules and disabling do not apply to organization policies".into(),
+        ));
+    }
+    // Revision-aware editors clear the fallback with an explicit null. Older
+    // clients never had that meaning: their null leaves it unchanged.
+    let default_effect = match body.default_effect.clone() {
+        Some(None) if body.expected_revision.is_none() => None,
+        patch => patch,
+    };
     if body.approval_required.is_none()
         && body.approval_mode.is_none()
         && body.rules.is_none()
-        && body.default_effect.is_none()
+        && default_effect.is_none()
+        && body.grant_expiry_days.is_none()
+        && body.disabled.is_none()
     {
         return Err(AppError::ValidationError(
             "At least one approval config field must be provided".to_string(),
         ));
     }
-
-    if let Some(ref rules) = body.rules {
+    // Callers without a reviewed revision keep the original request contract:
+    // every rule is validated before the target is resolved, and a missing
+    // connection is not found. Only revision-aware editors may edit a stored
+    // policy whose connection is gone, revalidating just the rules they changed.
+    let legacy = body.expected_revision.is_none();
+    if legacy && let Some(ref rules) = body.rules {
         crate::services::approval_policy::validate_rules(rules)
             .map_err(AppError::ValidationError)?;
     }
 
-    let target = resolve_approval_target(&state.db, &user_id, &service_id).await?;
+    let target = match resolve_approval_target(&state.db, &user_id, &service_id).await {
+        Ok(target) => target,
+        Err(AppError::NotFound(_)) if !legacy && query.org_id.is_none() => {
+            let cfg = approval_service::get_config(&state.db, &user_id, &service_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound("Approval configuration not found".into()))?;
+            ApprovalTarget {
+                effective_service_id: cfg.service_id,
+                display_name: cfg.service_name,
+                user_service_id: None,
+                user_service_slug: None,
+            }
+        }
+        Err(error) => return Err(error),
+    };
 
     // Reject a scoped admin targeting a specific UserService outside
     // their `allowed_service_ids`, even when a sibling for the same
@@ -1945,7 +2023,37 @@ pub async fn set_service_config(
     ensure_service_config_in_scope(&state.db, &access, &user_id, &target.effective_service_id)
         .await?;
 
-    let config = approval_service::set_config(
+    let existing =
+        approval_service::get_config(&state.db, &user_id, &target.effective_service_id).await?;
+    if let Some(rules) = &body.rules {
+        if !legacy && existing.as_ref().is_none_or(|cfg| cfg.rules != *rules) {
+            if rules.len() > crate::services::approval_policy::MAX_APPROVAL_RULES {
+                return Err(AppError::ValidationError("Too many approval rules".into()));
+            }
+            let changed: Vec<_> = rules
+                .iter()
+                .filter(|rule| {
+                    existing
+                        .as_ref()
+                        .is_none_or(|cfg| !cfg.rules.contains(rule))
+                })
+                .cloned()
+                .collect();
+            crate::services::approval_policy::validate_rules(&changed)
+                .map_err(AppError::ValidationError)?;
+        }
+        if query.org_id.is_some() && rules.iter().any(|rule| !rule.api_key_ids.is_empty()) {
+            return Err(AppError::ValidationError(
+                "Organization approval policies cannot be limited to API keys".into(),
+            ));
+        }
+    }
+    if body.disabled.is_some() && query.org_id.is_some() {
+        return Err(AppError::ValidationError(
+            "Organization policy disable is not supported".into(),
+        ));
+    }
+    let config = approval_service::set_config_with_options(
         &state.db,
         &user_id,
         &target.effective_service_id,
@@ -1953,10 +2061,19 @@ pub async fn set_service_config(
         body.approval_required,
         body.approval_mode.as_ref(),
         body.rules.as_deref(),
-        body.default_effect.as_ref(),
+        // A supplied effect is granular input, so a default-only create stays valid.
+        default_effect.clone().flatten().as_ref(),
         approval_service::ConfigAudit {
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             user_service_id: target.user_service_id.clone(),
+        },
+        approval_service::ConfigWriteOptions {
+            grant_expiry_days: body.grant_expiry_days,
+            default_effect,
+            disabled: body.disabled,
+            expected_revision: body.expected_revision,
+            #[cfg(test)]
+            collision_hook: None,
         },
     )
     .await?;
@@ -1982,12 +2099,15 @@ pub async fn set_service_config(
     .await;
 
     Ok(Json(ServiceApprovalConfigItem {
+        revision: approval_service::config_revision(&config).unwrap_or_default(),
+        disabled: config.disabled,
         service_id: config.service_id,
         service_name: config.service_name,
         approval_required: config.approval_required,
         approval_mode: config.approval_mode,
         rules: config.rules,
         default_effect: config.default_effect,
+        grant_expiry_days: config.grant_expiry_days,
         created_at: config.created_at.to_rfc3339(),
         updated_at: config.updated_at.to_rfc3339(),
         user_service_id: target.user_service_id,
@@ -2025,7 +2145,7 @@ pub async fn delete_service_config(
     // Per-service scope check, same as set_service_config.
     ensure_service_config_in_scope(&state.db, &access, &user_id, &effective_service_id).await?;
 
-    approval_service::delete_service_approval_config(
+    approval_service::delete_config_with_revision(
         &state.db,
         &user_id,
         &effective_service_id,
@@ -2033,6 +2153,7 @@ pub async fn delete_service_config(
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             user_service_id,
         },
+        query.expected_revision.as_deref(),
     )
     .await?;
 
@@ -2073,6 +2194,10 @@ mod tests {
 
     fn sample_request(user_id: &str) -> ApprovalRequest {
         ApprovalRequest {
+            fresh_decision: false,
+            caller_api_key_id: None,
+            approval_protocol: None,
+            grant_expiry_days_snapshot: None,
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
@@ -2463,4 +2588,22 @@ mod tests {
         assert!(item.decided_at.unwrap().contains('T'));
         assert_eq!(item.decision_channel.as_deref(), Some("push"));
     }
+}
+
+#[derive(Serialize)]
+pub struct ApprovalAuthoringCapabilities {
+    personal_rules: bool,
+}
+pub async fn authoring_capabilities(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+) -> AppResult<Json<ApprovalAuthoringCapabilities>> {
+    let rules = crate::services::security_readiness_service::serving_report(
+        &state.db,
+        approval_service::RULES_READINESS,
+    )
+    .await?;
+    Ok(Json(ApprovalAuthoringCapabilities {
+        personal_rules: rules.serving_ready,
+    }))
 }

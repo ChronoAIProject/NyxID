@@ -458,6 +458,35 @@ binaries before downgrade. Cap-free spend and all legacy settings remain retaine
 old code may refuse above-cap admissions or changed digests. Never reset spend or
 silently regenerate legacy authority to make rollback permissive.
 
+## Personal approval rules
+
+`approvals:personal-rules-v1` advertises key-aware personal readers, exact policy
+editing, revision checks, disabling and atomic/clearable policy durations.
+The capability participates in the normal fleet observation and durable activation
+protocol described above.
+
+Before authoring new personal fields, upgrade every serving replica and worker and
+retire older generations. `GET /api/v1/approvals/capabilities` exposes
+`personal_rules`, which reflects the serving assessment.
+Until readiness is reported, NyxBot keeps basic protections, ordinary edits and
+removal available but disables key limits, disabling and per-policy days. An old
+server returns 404 for this endpoint and the UI treats those newer controls as
+unavailable; it must never send key-limited Allow, disable or per-policy-day
+payloads based on a version string or a cached assumption. Updated backend writers independently require the
+same fleet capability. Invalid data fails validation without policy/grant changes.
+
+This is a reader/writer rollout, not a data migration. Existing policies, grants,
+pending requests, history and connections remain stored and keep working.
+Legacy clients keep their semantics: `default_effect: null` without
+`expected_revision` leaves the fallback unchanged, a default-only create remains
+valid, and DELETE without `expected_revision` still revokes every grant for the
+service and expires pending grant-mode requests.
+Do not restart an older binary after authoring new policy fields: it cannot enforce
+those fields or carry personal rule membership through Agent Key rotation, even
+though updated replicas detect its missing capability. Disable
+new authoring and drain all readers before any coordinated rollback that removes
+or converts the new policy data. No rollout tool mutates policy or connections.
+
 ## Billing usage receipt continuity
 
 `billing:usage-receipts-v1` gates observational comparison only. The lease holder

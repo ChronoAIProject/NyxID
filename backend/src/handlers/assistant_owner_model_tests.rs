@@ -62,6 +62,7 @@ async fn owner_1995_metadata_preserves_explicit_and_explicit_deny_policy() {
             &service.id,
             &descriptor,
             auto_connected,
+            None,
         )
         .await
         .unwrap();
@@ -87,6 +88,7 @@ async fn owner_1995_metadata_preserves_explicit_and_explicit_deny_policy() {
             &service.id,
             &descriptor,
             auto_connected,
+            None,
         )
         .await
         .unwrap();

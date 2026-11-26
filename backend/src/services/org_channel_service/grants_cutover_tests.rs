@@ -1222,6 +1222,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
         let append_resource = "/v4/spreadsheets/event/values/Questions%21A%3AH:append";
         let rules = [
             ApprovalRule {
+                api_key_ids: vec![],
                 mandatory_review: false,
                 methods: vec!["GET".into()],
                 resource_pattern: "*".into(),
@@ -1230,6 +1231,7 @@ async fn applied_guest_grants_execute_workspace_sheets_read_and_append() {
                 mode: ApprovalMode::PerRequest,
             },
             ApprovalRule {
+                api_key_ids: vec![],
                 mandatory_review: false,
                 methods: vec!["POST".into()],
                 resource_pattern: append_resource.into(),
@@ -1620,6 +1622,7 @@ async fn separate_sheets_catalog_allows_one_guest_append_and_preserves_workspace
         Some(&ApprovalMode::PerRequest),
         Some(&[
             ApprovalRule {
+                api_key_ids: vec![],
                 mandatory_review: false,
                 methods: vec!["GET".into()],
                 resource_pattern: "*".into(),
@@ -1628,6 +1631,7 @@ async fn separate_sheets_catalog_allows_one_guest_append_and_preserves_workspace
                 mode: ApprovalMode::PerRequest,
             },
             ApprovalRule {
+                api_key_ids: vec![],
                 mandatory_review: false,
                 methods: vec!["PUT".into()],
                 resource_pattern: owner_resource.into(),
@@ -1745,6 +1749,7 @@ async fn separate_sheets_catalog_allows_one_guest_append_and_preserves_workspace
             Some(&ApprovalMode::PerRequest),
             Some(&[
                 ApprovalRule {
+                    api_key_ids: vec![],
                     mandatory_review: false,
                     methods: vec!["GET".into()],
                     resource_pattern: "*".into(),
@@ -1753,6 +1758,7 @@ async fn separate_sheets_catalog_allows_one_guest_append_and_preserves_workspace
                     mode: ApprovalMode::PerRequest,
                 },
                 ApprovalRule {
+                    api_key_ids: vec![],
                     mandatory_review: false,
                     methods: vec!["POST".into()],
                     resource_pattern: append.into(),
@@ -2011,6 +2017,7 @@ async fn workspace_booking_append_checks_the_connection_owners_policy_for_both_g
             Some(true),
             Some(&ApprovalMode::PerRequest),
             Some(&[ApprovalRule {
+                api_key_ids: vec![],
                 mandatory_review: false,
                 methods: vec!["POST".into()],
                 resource_pattern: resource.into(),
