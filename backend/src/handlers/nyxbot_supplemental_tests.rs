@@ -576,7 +576,8 @@ async fn stored_recovery(f: &mut Fixture) -> String {
         terminal: true,
         answer_delivery: None,
         revision: 1,
-        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        payload_context_version: None,
+        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
@@ -930,11 +931,11 @@ async fn supplemental_notice_preserves_recovered_failure_and_one_failure_deliver
         let id=stored_recovery(&mut f).await;
         let mut payload=crate::services::nyxbot_response_recovery::Payload::new(&id,"nyxbot-test",Default::default());
         payload.finish(None,true);
-        let cipher=payload.seal(&f.state.encryption_keys).await.unwrap();
+        let cipher=payload.seal_legacy(&f.state.encryption_keys).await.unwrap();
         f.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME).update_one(doc!{"response_id":&id},doc!{"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
         let (mut baseline_fixture,_,_)=Box::pin(notice_fixture()).await;
         let baseline_id=stored_recovery(&mut baseline_fixture).await;
-        let cipher=payload.seal(&baseline_fixture.state.encryption_keys).await.unwrap();
+        let cipher=payload.seal_legacy(&baseline_fixture.state.encryption_keys).await.unwrap();
         baseline_fixture.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME).update_one(doc!{"response_id":&baseline_id},doc!{"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
         let baseline=recovery_bytes(&baseline_fixture,&baseline_id).await;
         assert!(baseline.0.contains("failed"));

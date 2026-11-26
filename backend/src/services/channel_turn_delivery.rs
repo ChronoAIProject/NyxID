@@ -28,7 +28,10 @@ pub(crate) async fn bind_in_session(
         .find_one_and_update(
             doc! {"_id":event,"$or":[{"user_id":owner},{"delivery.origin.org_execution.actor_id":owner}],"status":{"$in":["running","resuming","queued"]},
             "turn_id":bson::Bson::Null,"media.interrupted":{"$ne":true},"delivery.version":1},
-            doc! {"$set":{"conversation_id":conversation,"resolved_conversation_id":conversation,"turn_id":turn},"$unset":{"guest_setup_payload":""}},
+            doc! {"$set":{"conversation_id":conversation,"resolved_conversation_id":conversation,"turn_id":turn},"$unset": {
+                "guest_setup_payload": "",
+                "guest_setup_context_version": "",
+            }},
         )
         .session(&mut *session)
         .await?
@@ -318,7 +321,9 @@ pub async fn silence(db: &Database, event: &str) -> AppResult<bool> {
             // capability. Never reopen the terminal delivery claim itself.
             vec![doc! {"$set": {"delivery.state": "silent", "status": "completed",
                 "event_context_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$event_context_ciphertext","$$REMOVE"]},
-                "delivery.target_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$delivery.target_ciphertext","$$REMOVE"]}
+                "event_context_version":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$event_context_version","$$REMOVE"]},
+                "delivery.target_ciphertext":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$delivery.target_ciphertext","$$REMOVE"]},
+                "delivery.target_context_version":{"$cond":[{"$eq":["$delivery.execution_source_bound",true]},"$delivery.target_context_version","$$REMOVE"]}
             }}],
         )
         .await?
@@ -425,6 +430,14 @@ pub(crate) async fn enqueue_in_session(
     // Transaction retries must revalidate the original unaccepted
     // origin. Never leak queued=true from an aborted attempt.
     let mut event = incoming.clone();
+    if let Some(member) = event
+        .reply_to
+        .first()
+        .and_then(|o| o.org_execution.as_deref())
+        .filter(|e| !e.guest)
+    {
+        event.org_use_revision = member.org_use_revision;
+    }
     let rows = db.collection::<AssistantConversation>(CONVERSATIONS);
     let mut row = rows
         .find_one(doc! {"_id": &conversation, "user_id": &owner})

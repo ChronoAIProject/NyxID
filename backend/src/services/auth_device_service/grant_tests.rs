@@ -18,9 +18,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-const KEY: &[u8] = b"device-grant-fixture-key";
+pub(super) const KEY: &[u8] = b"device-grant-fixture-key";
 
-async fn fixture(name: &str) -> (crate::AppState, String) {
+pub(super) async fn fixture(name: &str) -> (crate::AppState, String) {
     let db = connect_transaction_test_database(name).await;
     crate::db::ensure_indexes(&db).await.unwrap();
     let user = Uuid::new_v4().to_string();
@@ -30,7 +30,7 @@ async fn fixture(name: &str) -> (crate::AppState, String) {
         .unwrap();
     (test_app_state(db), user)
 }
-fn input(user: &str, code: &str) -> ApproveInput {
+pub(super) fn input(user: &str, code: &str) -> ApproveInput {
     ApproveInput {
         user_id: user.into(),
         user_code: code.into(),
@@ -38,7 +38,7 @@ fn input(user: &str, code: &str) -> ApproveInput {
         approver_user_agent: None,
     }
 }
-fn selection() -> Selection {
+pub(super) fn selection() -> Selection {
     serde_json::from_value(
         serde_json::json!({"kind":"new", "name":"Fixture restricted", "scopes":"proxy"}),
     )

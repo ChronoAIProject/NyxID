@@ -28,6 +28,8 @@ pub struct ReplyPayload {
     pub response_id: String,
     #[serde(with = "crate::models::bson_bytes::required")]
     pub ciphertext: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_version: Option<u8>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]

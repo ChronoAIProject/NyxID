@@ -1547,6 +1547,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         automation_thread: false,
         voice_parent_conversation_id: None,
         guest_model_setup: false,
+        org_use_revision: 0,
         shared_agent_thread: false,
         agent_owner_id: None,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),

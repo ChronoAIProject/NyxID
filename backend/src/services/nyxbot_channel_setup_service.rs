@@ -651,9 +651,7 @@ pub(crate) async fn release_org_channel(state: &AppState, row: &NyxbotChannel) -
 
 pub(crate) async fn disconnect(state: &AppState, owner: &str, id: &str) -> AppResult<Value> {
     let row = load_channel(state, owner, id).await?;
-    let ids =
-        releases::retire_connection(state, &row, ReleaseReason::Disconnect, "disconnected", None)
-            .await?;
+    let ids = releases::disconnect_as(state, &row, owner).await?;
     finish_disconnect(state, owner, &row, &ids).await
 }
 

@@ -16,6 +16,7 @@ use crate::services::assistant_links::AssistantPage;
 use crate::services::channel_inbound_diagnostics::{self as x_diagnostics, Outcome as XOutcome};
 use crate::services::nyxbot_channel_key as channel_key;
 use crate::services::nyxbot_dispatch_identity as dispatch_identity;
+use crate::services::nyxbot_event_record as event_record;
 use crate::services::nyxbot_gateway_release_service as releases;
 use crate::services::org_channel_service::OrgAccess;
 use axum::{
@@ -2631,21 +2632,20 @@ async fn channel_listing(state: &AppState, owner: &str, with_readiness: bool) ->
     }
     let mut readiness_by_agent = std::collections::HashMap::new();
     let on = thread_follow::enabled(state, owner).await?;
+    let manageable = crate::services::org_channel_service::management::manageable_agents(
+        &state.db, owner, &rows,
+    )
+    .await?;
     let mut channel_agents = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut value = serde_json::to_value(ChannelAgentResponse::from(row))
             .map_err(|error| AppError::Internal(error.to_string()))?;
-        if let Some(binding) = &row.org_specialist {
-            let access =
-                crate::services::org_agent_service::access(&state.db, owner, &binding.org_id)
-                    .await?;
-            if crate::services::org_agent_service::can_use(&access) {
-                let admin = matches!(
-                    access,
-                    crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
-                );
-                value["can_manage"] = json!(admin);
-            }
+        if row.org_specialist.is_some() {
+            value["can_manage"] = json!(
+                row.agent_id
+                    .as_ref()
+                    .is_some_and(|id| manageable.contains(id))
+            );
         }
         if let Some(intake) = intake.get(&row.channel_bot_id) {
             value["discord_intake"] = json!(intake);
@@ -4878,7 +4878,13 @@ async fn get_event_context_inner(
             let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
                 return problem(StatusCode::NOT_FOUND, "event_not_found");
             };
-            return match state.encryption_keys.decrypt(ciphertext).await {
+            return match crate::services::nyxbot_event_record::event_context(
+                &state.encryption_keys,
+                &event,
+                ciphertext,
+            )
+            .await
+            {
                 Ok(bytes) => {
                     let valid = serde_json::from_slice::<Value>(&bytes).is_ok_and(|context| {
                         context["channel_id"].as_str() == row.gateway_channel_id.as_deref()
@@ -4923,7 +4929,13 @@ async fn get_event_context_inner(
     let Some(ciphertext) = event.event_context_ciphertext.as_ref() else {
         return problem(StatusCode::NOT_FOUND, "event_not_found");
     };
-    match state.encryption_keys.decrypt(ciphertext).await {
+    match crate::services::nyxbot_event_record::event_context(
+        &state.encryption_keys,
+        &event,
+        ciphertext,
+    )
+    .await
+    {
         Ok(bytes) => Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "application/json")
@@ -5226,7 +5238,15 @@ async fn custom_responses(
         return problem(StatusCode::BAD_REQUEST, "invalid_request");
     }
     let ciphertext = match serde_json::to_vec(context) {
-        Ok(bytes) => match state.encryption_keys.encrypt(&bytes).await {
+        Ok(bytes) => match event_record::seal(
+            &state.encryption_keys,
+            &event_key,
+            &binding.user_id,
+            &[event_record::CONTEXT, &destination.id],
+            &Zeroizing::new(bytes),
+        )
+        .await
+        {
             Ok(ciphertext) => ciphertext,
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         },
@@ -5250,6 +5270,7 @@ async fn custom_responses(
         event_id: event_id.to_owned(),
         relay_message_id: None,
         custom_binding_id: Some(binding.id.clone()),
+        event_context_version: event_record::version(&state.encryption_keys),
         event_context_ciphertext: Some(ciphertext),
         status: "running".into(),
         conversation_id: request["conversation"].as_str().map(str::to_owned),
@@ -5363,7 +5384,10 @@ async fn custom_responses(
                 .collection::<NyxbotEvent>(EVENTS)
                 .update_one(
                     doc! {"_id": &event_key},
-                    doc! {"$set": {"status": "refused"}, "$unset": {"event_context_ciphertext": ""}},
+                    doc! {"$set": {"status": "refused"}, "$unset": {
+                        "event_context_ciphertext": "",
+                        "event_context_version": "",
+                    }},
                 )
                 .await;
             response_sse(
@@ -5379,7 +5403,10 @@ async fn custom_responses(
                 .collection::<NyxbotEvent>(EVENTS)
                 .update_one(
                     doc! {"_id": &event_key},
-                    doc! {"$set": {"status": "refused"}, "$unset": {"event_context_ciphertext": ""}},
+                    doc! {"$set": {"status": "refused"}, "$unset": {
+                        "event_context_ciphertext": "",
+                        "event_context_version": "",
+                    }},
                 )
                 .await;
             response_sse(
@@ -5595,7 +5622,15 @@ async fn responses_with_producers_impl(
         dispatch_identity::dispatch_key(&row.id, idempotency)
     };
     let ciphertext = match serde_json::to_vec(context) {
-        Ok(bytes) => match state.encryption_keys.encrypt(&bytes).await {
+        Ok(bytes) => match event_record::seal(
+            &state.encryption_keys,
+            &event_key,
+            &row.user_id,
+            &[event_record::CONTEXT, &row.id],
+            &Zeroizing::new(bytes),
+        )
+        .await
+        {
             Ok(ciphertext) => ciphertext,
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         },
@@ -5691,6 +5726,7 @@ async fn responses_with_producers_impl(
         relay_message_id: (activity["source"]["type"] == json!("nyxid_relay"))
             .then(|| event_id.clone()),
         custom_binding_id: None,
+        event_context_version: event_record::version(&state.encryption_keys),
         event_context_ciphertext: Some(ciphertext),
         status: "running".into(),
         conversation_id: None,
@@ -6019,7 +6055,10 @@ async fn dispatch_relay_response(
                 .update_one(
                     unaccepted_provider_event(&event_key),
                     doc! {"$set": {"status": status, "conversation_id": conversation},
-                    "$unset": {"event_context_ciphertext": ""}},
+                    "$unset": {
+                        "event_context_ciphertext": "",
+                        "event_context_version": "",
+                    }},
                 )
                 .await;
         }
@@ -6150,7 +6189,10 @@ async fn discard_failed_provider_event(db: &mongodb::Database, event: &str) {
     let _ = events
         .update_one(
             fail,
-            doc! {"$set": {"status": "failed"}, "$unset": {"event_context_ciphertext": ""}},
+            doc! {"$set": {"status": "failed"}, "$unset": {
+                "event_context_ciphertext": "",
+                "event_context_version": "",
+            }},
         )
         .await;
 }
@@ -7151,6 +7193,7 @@ pub async fn relay_callback(
         event_id: claims.message_id.clone(),
         relay_message_id: Some(claims.message_id.clone()),
         custom_binding_id: None,
+        event_context_version: None,
         event_context_ciphertext: None,
         status: "running".into(),
         conversation_id: None,
@@ -7925,6 +7968,7 @@ mod custom_event_contract_tests {
 
     fn binding() -> NyxbotEventBinding {
         NyxbotEventBinding {
+            org_use_revision: 0,
             id: "binding-a".into(),
             user_id: "owner".into(),
             agent_id: "agent".into(),

@@ -255,6 +255,44 @@ async fn org_specialist_provider_uses_confirmed_member_thread_dedup_and_live_aut
     org::links::confirm(&state.db, OWNER, &row, challenge["id"].as_str().unwrap())
         .await
         .unwrap();
+    // The same guest-enabled binding must distinguish a denied verified member from a guest.
+    let mut guest_enabled = row.clone();
+    guest_enabled
+        .org_specialist
+        .as_mut()
+        .unwrap()
+        .guests
+        .enabled = true;
+    let agents = state.db.collection::<bson::Document>("assistant_agents");
+    agents
+        .update_one(
+            doc! {"_id": &agent.id},
+            doc! {"$set": {"org_user_ids": [], "org_use_revision": 1_i64}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        org::sender(&state.db, &guest_enabled, "7", true, &agent.id)
+            .await
+            .is_err()
+    );
+    let (guest, _) = org::sender(
+        &state.db,
+        &guest_enabled,
+        "unverified-sender",
+        true,
+        &agent.id,
+    )
+    .await
+    .unwrap();
+    assert!(guest.guest && guest.actor_id == org_id);
+    agents
+        .update_one(
+            doc! {"_id": &agent.id},
+            doc! {"$set": {"org_user_ids": [OWNER]}},
+        )
+        .await
+        .unwrap();
     let body = event("Summarize today's request", "7", "org-first");
     let answer = body_text(respond(&state, &key, &body, "org-first").await).await;
     assert!(answer.contains("Here is your answer"), "{answer}");
@@ -298,6 +336,79 @@ async fn org_specialist_provider_uses_confirmed_member_thread_dedup_and_live_aut
     assert_eq!(calls.lock().await.len(), 1);
     server.abort();
     state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_channel_chat_override_requires_maintenance_on_both_specialists() {
+    let (state, _, server) = setup("org_channel_override_maintenance").await;
+    let (row, _, agent, _) = org_channel(&state, false).await;
+    let db = &state.db;
+    let mut other = agent.clone();
+    other.id = Uuid::new_v4().to_string();
+    other.name = "chat-override".into();
+    other.org_maintainer_user_ids = Some(Vec::new());
+    use crate::models::assistant_agent::{AssistantAgent, COLLECTION_NAME as AGENTS};
+    let agents = db.collection::<AssistantAgent>(AGENTS);
+    agents.insert_one(&other).await.unwrap();
+    let chat = chats::record_chat(
+        &state,
+        &row,
+        &chats::group_partition("test-group", None),
+        &chats::ChatFacts {
+            kind: "group",
+            chat_id: "test-group".into(),
+            thread_id: None,
+            owner: false,
+            title: None,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let update = chats::ChatSettings {
+        agent_id: Some(other.id.clone()),
+        ..Default::default()
+    };
+    assert!(
+        chats::update_chat(&state, OWNER, &chat.id, &update)
+            .await
+            .is_err()
+    );
+    agents
+        .update_one(
+            doc! {"_id":&other.id},
+            doc! {"$set":{"org_maintainer_user_ids":[OWNER]}},
+        )
+        .await
+        .unwrap();
+    chats::update_chat(&state, OWNER, &chat.id, &update)
+        .await
+        .unwrap();
+    agents
+        .update_one(
+            doc! {"_id":&other.id},
+            doc! {"$set":{"org_maintainer_user_ids":[]},"$inc":{"org_maintain_revision":1_i64}},
+        )
+        .await
+        .unwrap();
+    let restore = chats::ChatSettings {
+        agent_id: Some("default".into()),
+        ..Default::default()
+    };
+    assert!(
+        chats::update_chat(&state, OWNER, &chat.id, &restore)
+            .await
+            .is_err()
+    );
+    let saved = db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"_id":&chat.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.agent_id, Some(other.id));
+    server.abort();
+    db.drop().await.unwrap();
 }
 
 pub(super) async fn org_channel(

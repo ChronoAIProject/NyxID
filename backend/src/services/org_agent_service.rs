@@ -1,4 +1,6 @@
 //! Live organization-agent ACL. The agent owner and the execution actor differ.
+pub(crate) mod authoring;
+
 use futures::TryStreamExt;
 use mongodb::{Database, bson::doc};
 
@@ -19,6 +21,132 @@ pub fn can_use(access: &OwnerAccess) -> bool {
         OwnerAccess::AsOrgMember { role, .. } => role.can_proxy(),
         OwnerAccess::Forbidden => false,
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpecialistRights {
+    pub can_use: bool,
+    pub can_maintain: bool,
+    pub can_govern: bool,
+    maintain_revision: i64,
+}
+
+pub fn specialist_rights(
+    actor: &str,
+    agent: &AssistantAgent,
+    access: &OwnerAccess,
+) -> SpecialistRights {
+    if matches!(access, OwnerAccess::Direct) && actor == agent.user_id {
+        return SpecialistRights {
+            can_use: true,
+            can_maintain: true,
+            can_govern: false,
+            maintain_revision: 0,
+        };
+    }
+    let Some(role) = role(access) else {
+        return SpecialistRights::default();
+    };
+    member_rights(actor, agent, role)
+}
+
+pub fn member_rights(actor: &str, agent: &AssistantAgent, role: OrgRole) -> SpecialistRights {
+    let eligible = role.can_proxy() && !agent.is_nyxbot();
+    let includes = |list: &Option<Vec<String>>| {
+        list.as_ref()
+            .is_none_or(|ids| ids.iter().any(|id| id == actor))
+    };
+    SpecialistRights {
+        can_use: eligible && includes(&agent.org_user_ids),
+        can_maintain: eligible && includes(&agent.org_maintainer_user_ids),
+        maintain_revision: agent.org_maintain_revision,
+        can_govern: role == OrgRole::Admin && !agent.is_nyxbot(),
+    }
+}
+
+/// Resolve the same membership and role scope as a single owner lookup for a page of agents.
+pub(crate) async fn owners_for_page(
+    db: &Database,
+    actor: &str,
+    owners: std::collections::HashSet<&str>,
+) -> AppResult<std::collections::HashMap<String, (OwnerAccess, User)>> {
+    use crate::models::{
+        org_membership::{MemberScopeSource, OrgMembership},
+        org_role_scope::OrgRoleScope,
+    };
+    use std::collections::HashMap;
+    let ids: Vec<_> = owners.into_iter().filter(|id| *id != actor).collect();
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let mut users: HashMap<String, User> = db
+        .collection::<User>(USERS)
+        .find(doc! {"_id":{"$in":&ids},"user_type":"org","is_active":true})
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?
+        .into_iter()
+        .map(|u| (u.id.clone(), u))
+        .collect();
+    let memberships: Vec<OrgMembership> = db
+        .collection(crate::models::org_membership::COLLECTION_NAME)
+        .find(doc! {"org_user_id":{"$in":ids},"member_user_id":actor,"revoked_at":null})
+        .await?
+        .try_collect()
+        .await?;
+    let inherited: Vec<_> = memberships
+        .iter()
+        .filter(|m| m.scope_source == MemberScopeSource::Inherit)
+        .map(|m| &m.org_user_id)
+        .collect();
+    let scopes: HashMap<_, _> = if inherited.is_empty() {
+        HashMap::new()
+    } else {
+        db.collection::<OrgRoleScope>(crate::models::org_role_scope::COLLECTION_NAME)
+            .find(doc! {"org_user_id":{"$in":inherited}})
+            .await?
+            .try_collect::<Vec<_>>()
+            .await?
+            .into_iter()
+            .map(|s| ((s.org_user_id, s.role), s.allowed_service_ids))
+            .collect()
+    };
+    Ok(memberships
+        .into_iter()
+        .filter_map(|m| {
+            let owner = users.remove(&m.org_user_id)?;
+            let scope = match m.scope_source {
+                MemberScopeSource::Override => m.allowed_service_ids.clone(),
+                MemberScopeSource::Inherit => scopes
+                    .get(&(m.org_user_id.clone(), m.role))
+                    .cloned()
+                    .flatten(),
+            };
+            Some((
+                m.org_user_id.clone(),
+                (org_service::access_for_membership(m, scope), owner),
+            ))
+        })
+        .collect())
+}
+
+pub async fn governed_agent(db: &Database, actor: &str, id: &str) -> AppResult<AssistantAgent> {
+    let missing = || AppError::NotFound("Organization specialist not found".into());
+    let agent = db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":id,"kind":"specialist","user_id":{"$ne":actor}})
+        .await?
+        .ok_or_else(missing)?;
+    let acl = access(db, actor, &agent.user_id).await?;
+    if !acl.can_read() {
+        return Err(missing());
+    }
+    if !specialist_rights(actor, &agent, &acl).can_govern {
+        return Err(AppError::Forbidden(
+            "Organization administrator access is required".into(),
+        ));
+    }
+    Ok(agent)
 }
 
 pub fn can_maintain(access: &OwnerAccess) -> bool {
@@ -58,12 +186,302 @@ pub async fn require_maintain(db: &Database, actor: &str, agent: &AssistantAgent
     if actor == agent.user_id {
         return Ok(());
     }
-    if !can_maintain(&Box::pin(access(db, actor, &agent.user_id)).await?) || agent.is_nyxbot() {
+    let acl = Box::pin(access(db, actor, &agent.user_id)).await?;
+    if !can_maintain(&acl) || agent.is_nyxbot() {
         return Err(AppError::Forbidden(
             "Only organization Admins and Members may maintain this agent".into(),
         ));
     }
+    if !specialist_rights(actor, agent, &acl).can_maintain {
+        return Err(AppError::Forbidden(
+            "Organization specialist maintenance access is required".into(),
+        ));
+    }
     Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MemberFence {
+    ReadOnly,
+    Member,
+    MemberAndOrg,
+}
+
+pub(crate) async fn member_rights_in_session(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    actor: &str,
+    agent: &AssistantAgent,
+    fence: MemberFence,
+) -> AppResult<SpecialistRights> {
+    use super::org_channel_service::live_doc;
+    live_doc(
+        db,
+        tx,
+        USERS,
+        doc! {"_id":&agent.user_id,"user_type":"org","is_active":true},
+        fence == MemberFence::MemberAndOrg,
+    )
+    .await?;
+    live_doc(
+        db,
+        tx,
+        USERS,
+        doc! {"_id":actor,"user_type":{"$ne":"org"},"is_active":true},
+        fence != MemberFence::ReadOnly,
+    )
+    .await?;
+    let membership = live_doc(db,tx,crate::models::org_membership::COLLECTION_NAME,
+        doc! {"member_user_id":actor,"org_user_id":&agent.user_id,"revoked_at":null,"role":{"$in":["admin","member"]}},fence != MemberFence::ReadOnly).await?;
+    let membership: crate::models::org_membership::OrgMembership = bson::from_document(membership)
+        .map_err(|_| AppError::Forbidden("Membership unavailable".into()))?;
+    Ok(member_rights(actor, agent, membership.role))
+}
+
+/// Membership loss prunes explicit selections in the membership mutation's transaction.
+pub(crate) async fn prune_member(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    org: &str,
+    actor: &str,
+) -> AppResult<()> {
+    let mut filter = member_list_filter(actor);
+    filter.insert("user_id", org);
+    db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_many(filter, prune_member_update(actor))
+        .session(tx)
+        .await?;
+    Ok(())
+}
+
+pub(super) fn member_list_filter(actor: &str) -> bson::Document {
+    doc! {"kind":"specialist","$or":[{"org_maintainer_user_ids":actor},{"org_user_ids":actor}]}
+}
+
+pub(super) fn prune_member_update(actor: &str) -> Vec<bson::Document> {
+    let contains = |field: &str| bson::bson!({"$in":[{"$literal":actor},{"$ifNull":[format!("${field}"),[]]}]});
+    let prune = |field: &str| bson::bson!({"$cond":[contains(field),{"$filter":{"input":format!("${field}"),"cond":{"$ne":["$$this",{"$literal":actor}]}}},format!("${field}")]});
+    let advance = |revision: &str, field: &str| bson::bson!({"$add":[{"$ifNull":[format!("${revision}"),0]},{"$cond":[contains(field),1_i64,0_i64]}]});
+    vec![doc! {"$set":{
+        "org_access_revision":{"$add":[{"$ifNull":["$org_access_revision",0]},1_i64]},
+        "org_use_revision":advance("org_use_revision","org_user_ids"),
+        "org_maintain_revision":advance("org_maintain_revision","org_maintainer_user_ids"),
+        "org_user_ids":prune("org_user_ids"),"org_maintainer_user_ids":prune("org_maintainer_user_ids"),
+    }}]
+}
+
+fn live_specialist_filter(org: &str, agent_id: &str) -> bson::Document {
+    doc! {"_id":agent_id,"user_id":org,"kind":"specialist","destroyed_at":null}
+}
+
+pub(crate) async fn fence_member_use(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    actor: &str,
+    org: &str,
+    agent_id: &str,
+    fence_policy: bool,
+) -> AppResult<i64> {
+    let agents = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME);
+    let filter = live_specialist_filter(org, agent_id);
+    let agent = if fence_policy {
+        agents
+            .find_one_and_update(filter, doc! {"$inc":{"thread_fence":1_i64}})
+            .session(&mut *tx)
+            .await?
+    } else {
+        agents.find_one(filter).session(&mut *tx).await?
+    }
+    .ok_or_else(super::org_group_service::missing)?;
+    if !member_rights_in_session(db, tx, actor, &agent, MemberFence::Member)
+        .await?
+        .can_use
+    {
+        return Err(AppError::Forbidden(
+            "Specialist use access is required".into(),
+        ));
+    }
+    Ok(agent.org_use_revision)
+}
+
+pub(crate) fn ordinary_member_org(
+    row: &crate::models::assistant_conversation::AssistantConversation,
+) -> Option<&str> {
+    row.agent_owner_id.as_deref().filter(|org| {
+        *org != row.user_id
+            && !row.shared_agent_thread
+            && row.collaboration.is_none()
+            && !row.guest_turn
+    })
+}
+
+/// Settlement can race a narrowing. Queued results retain the revision for the
+/// consumer's fenced authorization, so independent writers can finish together.
+pub(crate) async fn settlement_use_is_live(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    actor: &str,
+    org: &str,
+    agent_id: &str,
+    revision: i64,
+) -> AppResult<bool> {
+    let Some(agent) = db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(live_specialist_filter(org, agent_id))
+        .session(&mut *tx)
+        .await?
+    else {
+        return Ok(false);
+    };
+    if agent.org_use_revision != revision {
+        return Ok(false);
+    }
+    match member_rights_in_session(db, tx, actor, &agent, MemberFence::ReadOnly).await {
+        Ok(rights) => Ok(rights.can_use),
+        Err(AppError::Forbidden(_) | AppError::NotFound(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) async fn use_revision_is_live(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    actor: &str,
+    org: &str,
+    agent: &str,
+    revision: i64,
+) -> AppResult<bool> {
+    match fence_member_use(db, tx, actor, org, agent, true).await {
+        Ok(current) => Ok(current == revision),
+        Err(AppError::Forbidden(_) | AppError::NotFound(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) async fn event_source_is_live(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    actor: &str,
+    event: &crate::models::assistant_conversation::AgentEvent,
+) -> AppResult<bool> {
+    if event.source_owner_id.is_none()
+        && !matches!(
+            event.kind.as_str(),
+            "subagent_settled" | "permission_requested"
+        )
+    {
+        return Ok(true);
+    }
+    let Some(id) = event.agent_id.as_deref() else {
+        // Unattributed legacy status notices carry no specialist assignment.
+        return Ok(event.source_owner_id.is_none() && event.delegated_result.is_none());
+    };
+    let legacy_owner;
+    let org = match event.source_owner_id.as_deref() {
+        Some(owner) if owner == actor => return Ok(true),
+        Some(owner) => owner,
+        None => {
+            // Legacy delegated results predate the persistent revision. Identify their owner once.
+            let Some(agent) = db
+                .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+                .find_one(doc! {"_id":id})
+                .session(&mut *tx)
+                .await?
+            else {
+                return Ok(false);
+            };
+            if agent.user_id == actor {
+                return Ok(true);
+            }
+            let owner_is_org = db
+                .collection::<bson::Document>(USERS)
+                .find_one(doc! {"_id":&agent.user_id,"user_type":"org"})
+                .projection(doc! {"_id":1})
+                .session(&mut *tx)
+                .await?
+                .is_some();
+            if !owner_is_org {
+                return Ok(true);
+            }
+            legacy_owner = agent.user_id;
+            &legacy_owner
+        }
+    };
+    use_revision_is_live(db, tx, actor, org, id, event.source_org_use_revision).await
+}
+
+pub(crate) fn fence_maintenance<'a>(
+    db: &'a Database,
+    tx: &'a mut mongodb::ClientSession,
+    actor: &'a str,
+    target: &'a AssistantAgent,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    Box::pin(fence_maintenance_inner(db, tx, actor, target))
+}
+
+async fn fence_maintenance_inner(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    actor: &str,
+    target: &AssistantAgent,
+) -> AppResult<()> {
+    if actor == target.user_id {
+        return Ok(());
+    }
+    let agent = db
+        .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {"_id":&target.id,"user_id":&target.user_id,"kind":"specialist"},
+            doc! {"$inc":{"thread_fence":1_i64}},
+        )
+        .session(&mut *tx)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Specialist not found".into()))?;
+    if agent.org_maintain_revision != target.org_maintain_revision
+        || !member_rights_in_session(db, tx, actor, &agent, MemberFence::MemberAndOrg)
+            .await?
+            .can_maintain
+    {
+        return Err(AppError::Forbidden(
+            "Specialist maintenance access changed".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Personal writes retain their existing single-document operation.
+pub(crate) async fn update_maintained(
+    db: &Database,
+    actor: &str,
+    target: &AssistantAgent,
+    filter: bson::Document,
+    update: bson::Document,
+) -> AppResult<Option<AssistantAgent>> {
+    use mongodb::options::ReturnDocument;
+    let collection =
+        db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME);
+    if actor == target.user_id {
+        return Ok(collection
+            .find_one_and_update(filter, update)
+            .return_document(ReturnDocument::After)
+            .await?);
+    }
+    let context = (db, actor, target, collection, filter, update);
+    super::transaction_service::run_db_only(
+        db,
+        &context,
+        |tx, (db, actor, target, coll, filter, update)| {
+            Box::pin(async move {
+                fence_maintenance(db, tx, actor, target).await?;
+                Ok(coll
+                    .find_one_and_update(filter.clone(), update.clone())
+                    .return_document(ReturnDocument::After)
+                    .session(tx)
+                    .await?)
+            })
+        },
+    )
+    .await
 }
 
 /// Explicit selector resolution: ID, slug, then an unambiguous visible name.
@@ -213,6 +631,8 @@ pub struct RequestAccess {
     actor: String,
     owner: String,
     acl: OwnerAccess,
+    specialist: Option<(String, SpecialistRights)>,
+    credential: Option<String>,
     shared: Option<super::shared_agent_service::RequestAccess>,
     channel: Option<super::org_channel_service::Access>,
 }
@@ -231,7 +651,7 @@ impl RequestAccess {
             OwnerAccess::Forbidden
         } else {
             let acl = access(db, &e.actor_id, &e.org_id).await?;
-            if !can_use(&acl) {
+            if !specialist_rights(&e.actor_id, channel.agent(), &acl).can_use {
                 return Err(super::org_channel_service::denied());
             }
             acl
@@ -239,6 +659,11 @@ impl RequestAccess {
         Ok(std::sync::Arc::new(Self {
             actor: e.actor_id.clone(),
             owner: e.org_id.clone(),
+            specialist: Some((
+                channel.agent().id.clone(),
+                specialist_rights(&e.actor_id, channel.agent(), &acl),
+            )),
+            credential: None,
             acl,
             shared: None,
             channel: Some(channel),
@@ -254,9 +679,38 @@ impl RequestAccess {
             actor: shared.actor().into(),
             owner: shared.owner().into(),
             acl: OwnerAccess::Forbidden,
+            specialist: None,
+            credential: None,
             shared: Some(shared),
             channel: None,
         }
+    }
+
+    pub(crate) fn for_thread(
+        self: &std::sync::Arc<Self>,
+        agent: &AssistantAgent,
+        row: &crate::models::assistant_conversation::AssistantConversation,
+    ) -> AppResult<std::sync::Arc<Self>> {
+        if self.shared.is_some() || self.channel.is_some() {
+            return Ok(self.clone());
+        }
+        self.check_conversation(row)?;
+        if agent.id.as_str() != row.agent_id.as_deref().unwrap_or_default()
+            || !self.permits_agent(&row.user_id, agent)
+            || agent.org_use_revision != row.org_use_revision
+        {
+            return Err(AppError::Forbidden("Specialist use access changed".into()));
+        }
+        let rights = specialist_rights(&row.user_id, agent, &self.acl);
+        Ok(std::sync::Arc::new(Self {
+            actor: self.actor.clone(),
+            owner: self.owner.clone(),
+            acl: self.acl.clone(),
+            specialist: Some((agent.id.clone(), rights)),
+            credential: Some(row.credential_api_key_id.clone()),
+            shared: None,
+            channel: None,
+        }))
     }
 
     pub(crate) fn owner(&self) -> &str {
@@ -280,7 +734,61 @@ impl RequestAccess {
     }
 
     pub(crate) fn can_maintain(&self) -> bool {
-        can_maintain(&self.acl)
+        self.specialist
+            .as_ref()
+            .is_some_and(|(_, rights)| rights.can_maintain)
+    }
+
+    pub(crate) fn maintain_revision(&self) -> i64 {
+        self.specialist
+            .as_ref()
+            .map_or(0, |(_, rights)| rights.maintain_revision)
+    }
+
+    pub(crate) async fn fence_thread(
+        self: &std::sync::Arc<Self>,
+        db: &Database,
+        row: &crate::models::assistant_conversation::AssistantConversation,
+        tx: &mut mongodb::ClientSession,
+    ) -> AppResult<std::sync::Arc<Self>> {
+        self.check_conversation(row)?;
+        if self.shared.is_some() || self.channel.is_some() {
+            return Ok(self.clone());
+        }
+        let agent = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+            .find_one_and_update(doc! {"_id":row.agent_id.as_deref(),"user_id":&self.owner,"kind":"specialist","destroyed_at":null},doc! {"$inc":{"thread_fence":1_i64}})
+            .session(&mut *tx).await?.ok_or_else(super::shared_agent_service::missing)?;
+        let rights =
+            member_rights_in_session(db, tx, &row.user_id, &agent, MemberFence::MemberAndOrg)
+                .await?;
+        if !rights.can_use || row.org_use_revision != agent.org_use_revision {
+            return Err(AppError::Forbidden("Specialist use access changed".into()));
+        }
+        Ok(std::sync::Arc::new(Self {
+            actor: self.actor.clone(),
+            owner: self.owner.clone(),
+            acl: self.acl.clone(),
+            specialist: Some((agent.id, rights)),
+            credential: Some(row.credential_api_key_id.clone()),
+            shared: None,
+            channel: None,
+        }))
+    }
+
+    pub(crate) fn permits_agent(&self, actor: &str, agent: &AssistantAgent) -> bool {
+        if !self.matches(actor, &agent.user_id) {
+            return false;
+        }
+        if let Some(channel) = self.channel() {
+            return channel.agent().id == agent.id;
+        }
+        if let Some(shared) = self.shared() {
+            return shared.agent().id == agent.id;
+        }
+        self.specialist
+            .as_ref()
+            .is_none_or(|(id, _)| id == &agent.id)
+            && specialist_rights(actor, agent, &self.acl).can_use
     }
 
     pub(crate) fn approval_admin_permits(&self, ids: &[String]) -> bool {
@@ -319,6 +827,13 @@ impl RequestAccess {
 
     pub async fn agent(&self, db: &Database, actor: &str, id: &str) -> AppResult<AssistantAgent> {
         self.check(actor, &self.owner)?;
+        if self
+            .specialist
+            .as_ref()
+            .is_some_and(|(expected, _)| expected != id)
+        {
+            return Err(super::shared_agent_service::missing());
+        }
         if let Some(channel) = &self.channel {
             if channel.agent().id != id {
                 return Err(super::org_channel_service::denied());
@@ -338,10 +853,15 @@ impl RequestAccess {
             }
             return Ok(shared.agent().clone());
         }
-        db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        let agent = db
+            .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
             .find_one(doc! {"_id": id, "user_id": &self.owner, "kind": "specialist"})
             .await?
-            .ok_or_else(|| AppError::NotFound("Agent not found".into()))
+            .ok_or_else(|| AppError::NotFound("Agent not found".into()))?;
+        if !self.permits_agent(actor, &agent) {
+            return Err(super::shared_agent_service::missing());
+        }
+        Ok(agent)
     }
 
     fn check(&self, actor: &str, owner: &str) -> AppResult<()> {
@@ -357,6 +877,17 @@ impl RequestAccess {
         &self,
         row: &crate::models::assistant_conversation::AssistantConversation,
     ) -> AppResult<()> {
+        if self
+            .specialist
+            .as_ref()
+            .is_some_and(|(id, _)| Some(id.as_str()) != row.agent_id.as_deref())
+            || self
+                .credential
+                .as_ref()
+                .is_some_and(|id| *id != row.credential_api_key_id)
+        {
+            return Err(super::shared_agent_service::missing());
+        }
         if let Some(channel) = &self.channel {
             return channel.check_conversation(row);
         }
@@ -391,6 +922,8 @@ pub(crate) fn test_request_access(actor: &str, owner: &str, acl: OwnerAccess) ->
         actor: actor.into(),
         owner: owner.into(),
         acl,
+        specialist: None,
+        credential: None,
         shared: None,
         channel: None,
     }
@@ -446,23 +979,46 @@ pub async fn resolve_credential_access(
     {
         return Ok(None);
     }
-    // Every org-channel key carries its specialist owner, including guests
-    // whose actor is that org. Ordinary unmarked keys keep their no-read path.
-    if key.assistant_agent_owner_id.is_some()
-        && let Some(row) = db.collection::<crate::models::assistant_conversation::AssistantConversation>("assistant_conversations")
-        .find_one(doc! {"user_id":&key.user_id,"credential_api_key_id":&key.id,
-            "$or":[{"channel.org_execution":{"$type":"object"}},{"reply_channel.org_execution":{"$type":"object"}}]}).await?
+    let Some(owner) = key.assistant_agent_owner_id.as_deref() else {
+        return Ok(None);
+    };
+    let row = db
+        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .find_one(doc! {"user_id":&key.user_id,"credential_api_key_id":&key.id})
+        .await?;
+    if let Some(row) = row
+        .as_ref()
+        .filter(|row| super::org_channel_service::origin(row).is_some())
     {
-        return super::org_channel_service::conversation_access(db, &row).await;
+        if super::org_channel_service::origin(row)
+            .and_then(|o| o.org_execution.as_ref())
+            .is_none_or(|e| e.org_id != owner)
+        {
+            return Err(super::org_channel_service::denied());
+        }
+        let access = super::org_channel_service::conversation_access(db, row).await?;
+        if access.as_ref().and_then(|a| a.channel()).is_some_and(|c| {
+            !c.execution().guest && c.agent().org_use_revision != row.org_use_revision
+        }) {
+            return Err(super::org_channel_service::denied());
+        }
+        return Ok(access);
     }
-    resolve_access(
-        db,
-        &key.user_id,
-        key.assistant_agent_owner_id.as_deref(),
-        None,
-        Some(&key.id),
-    )
-    .await
+    if key.user_id == owner {
+        return Ok(None);
+    }
+    let row = row
+        .filter(|r| r.agent_owner_id.as_deref() == Some(owner))
+        .ok_or_else(super::shared_agent_service::missing)?;
+    let agent = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id":row.agent_id.as_deref().ok_or_else(super::shared_agent_service::missing)?,"user_id":owner,"kind":"specialist"}).await?
+        .ok_or_else(super::shared_agent_service::missing)?;
+    if agent.org_use_revision != row.org_use_revision {
+        return Err(AppError::Forbidden("Specialist use access changed".into()));
+    }
+    resolve_access(db, &key.user_id, Some(owner), Some(&agent), Some(&key.id)).await
 }
 
 async fn resolve_access(
@@ -472,42 +1028,54 @@ async fn resolve_access(
     agent: Option<&AssistantAgent>,
     key: Option<&str>,
 ) -> AppResult<Option<std::sync::Arc<RequestAccess>>> {
-    let Some(owner) = owner.filter(|owner| *owner != actor) else {
+    let Some(owner) = owner.filter(|id| *id != actor) else {
         return Ok(None);
     };
     let user = db
         .collection::<User>(USERS)
-        .find_one(doc! {"_id": owner, "is_active": true})
+        .find_one(doc! {"_id":owner,"is_active":true})
         .await?
         .ok_or_else(super::shared_agent_service::missing)?;
     if !user.user_type.is_org() {
-        let loaded;
-        let agent = if let Some(agent) = agent {
-            agent
-        } else {
-            let key = key.ok_or_else(super::shared_agent_service::missing)?;
-            let row = db
-                .collection::<crate::models::assistant_conversation::AssistantConversation>(
-                    crate::models::assistant_conversation::COLLECTION_NAME,
-                )
-                .find_one(
-                    doc! {"user_id": actor, "agent_owner_id": owner, "credential_api_key_id": key},
-                )
-                .await?
-                .ok_or_else(super::shared_agent_service::missing)?;
-            loaded = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
-                .find_one(doc! {"_id": row.agent_id.ok_or_else(super::shared_agent_service::missing)?, "user_id": owner})
-                .await?.ok_or_else(super::shared_agent_service::missing)?;
-            &loaded
-        };
-        let shared = super::shared_agent_service::require(db, actor, agent).await?;
+        let shared = super::shared_agent_service::require(
+            db,
+            actor,
+            agent.ok_or_else(super::shared_agent_service::missing)?,
+        )
+        .await?;
         return Ok(Some(std::sync::Arc::new(RequestAccess::from_shared(
             shared,
         ))));
     }
-    resolve_org_access(db, actor, owner, user.is_active).await
+    let acl = org_service::resolve_owner_access(db, actor, owner).await?;
+    if !can_use(&acl) {
+        return Err(AppError::Forbidden(
+            "Organization agent access was revoked or is no longer permitted".into(),
+        ));
+    }
+    let specialist = if let Some(agent) = agent {
+        let rights = specialist_rights(actor, agent, &acl);
+        if !rights.can_use {
+            return Err(AppError::Forbidden(
+                "Specialist use access is required".into(),
+            ));
+        }
+        Some((agent.id.clone(), rights))
+    } else {
+        None
+    };
+    Ok(Some(std::sync::Arc::new(RequestAccess {
+        actor: actor.into(),
+        owner: owner.into(),
+        acl,
+        specialist,
+        credential: key.map(str::to_owned),
+        shared: None,
+        channel: None,
+    })))
 }
 
+#[cfg(test)]
 pub(crate) async fn resolve_org_access(
     db: &Database,
     actor: &str,
@@ -527,6 +1095,8 @@ pub(crate) async fn resolve_org_access(
         actor: actor.into(),
         owner: owner.into(),
         acl,
+        specialist: None,
+        credential: None,
         shared: None,
         channel: None,
     })))
@@ -768,7 +1338,8 @@ pub async fn tool_arguments(
                 .find_one(doc! {"user_id": &owner, "kind": "specialist", "destroyed_at": mongodb::bson::Bson::Null,
                     "$or": [{"_id": selector}, {"name": selector}]})
                 .await?.ok_or_else(|| AppError::NotFound("Organization agent not found".into()))?;
-            require_maintain(db, actor, &agent).await?;
+            // Resolving the immutable selector is not admission. Each operation checks
+            // its own use or maintenance right at its protected entry point.
             args[field] = agent.id.into();
         }
     }

@@ -720,6 +720,13 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if !super::assistant_invocation_service::fence_in_session(&db,session,&w.user_id,w.delivery.invocation_id.as_deref()).await? {return Ok(false);}
             meta_lineage::fence(&db,session,&w.meta_contexts,true).await?;
             if let Some(work) = w.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &w.user_id, &w.conversation_id, work, session).await?;}
+            if let Some(org) = super::org_agent_service::ordinary_member_org(&row)
+                && (row.credential_api_key_id != w.api_key_id ||
+                    !super::org_agent_service::use_revision_is_live(&db, session, &w.user_id, org, &w.agent_id, row.org_use_revision).await?)
+            {
+                db.collection::<bson::Document>(WATCHES).delete_one(lease_filter(&w)).session(&mut *session).await?;
+                return Ok(false);
+            }
             let approval_key = cma_approval_watch_key(&w.id);
             if row.pending_events.iter().filter(|event| {
                 event.kind != super::cma_operation::APPROVAL_EVENT_KIND
@@ -731,6 +738,9 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
                 doc!{"$pull":{"pending_events":{"kind":super::cma_operation::APPROVAL_EVENT_KIND,"question_key":approval_key}}})
                 .session(&mut *session).await?;
             let event = AgentEvent {
+                source_owner_id: None,
+                source_org_use_revision: 0,
+                org_use_revision: row.org_use_revision,
                 channel_message: None,
                 wake: None,
                 automation_work: w.delivery.automation_work.clone(),

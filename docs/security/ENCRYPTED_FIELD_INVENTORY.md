@@ -20,8 +20,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 50 entries for 48 collections, with 42 implemented adapters
-and 8 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 50 entries for 48 collections, with 47 implemented adapters
+and 3 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -46,16 +46,16 @@ A collection may use separate adapters for different fields.
 | `agent_key_login_requests` | `delivery_credential_encrypted` | [agent_login_record_service.rs](../../backend/src/services/agent_login_record_service.rs) | Implemented |
 | `assistant_agent_learning_proposals` | `scope_encrypted`, `body_encrypted`, `publication.interface_encrypted` | [assistant_learning_record_storage.rs](../../backend/src/services/assistant_learning_record_storage.rs) | Implemented |
 | `assistant_async_operations` | `result_encrypted` | [async_service_operation.rs](../../backend/src/services/async_service_operation.rs) | Implemented |
-| `auth_device_codes` | `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
-| `auth_device_codes_v2` | `agent_key_grant.delivery_credential_encrypted`, `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
-| `device_codes` | `delivery_api_key_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
+| `auth_device_codes` | `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | [Device delivery](../../backend/src/services/auth_device_service/record.rs) | Implemented |
+| `auth_device_codes_v2` | `agent_key_grant.delivery_credential_encrypted`, `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | [Device delivery](../../backend/src/services/auth_device_service/record.rs) | Implemented |
+| `device_codes` | `delivery_api_key_encrypted`, `delivery_refresh_token_encrypted` | [Node device delivery](../../backend/src/services/device_code_service/record.rs) | Implemented |
 | `channel_bots` | `registration_pin_encrypted`, `webhook_secret_encrypted`, `bot_token_encrypted`, `app_secret_encrypted`, `lark_verification_token_encrypted`, `lark_encrypt_key_encrypted` | [channel_bot_record.rs](../../backend/src/services/channel_bot_record.rs) | Implemented |
 | `channel_connect_links` | `receiver.secret_encrypted` | [channel_connect_link_service.rs](../../backend/src/services/channel_connect_link_service.rs) | Implemented |
 | `downstream_services` | `credential_encrypted` | [catalog_credential_record_service.rs](../../backend/src/services/catalog_credential_record_service.rs) | Implemented |
 | `downstream_services` | `ssh_config.ca_private_key_encrypted` | [ssh_ca_record_service.rs](../../backend/src/services/ssh_ca_record_service.rs) | Implemented |
 | `nyxbot_channels` | `agent_key_ciphertext` | [nyxbot_channel_key.rs](../../backend/src/services/nyxbot_channel_key.rs) | Implemented |
 | `nyxbot_threads` | `event_ref_ciphertext` | [Thread reference storage](../../backend/src/services/nyxbot_thread_reference.rs) | Implemented |
-| `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload` | — | Pending |
+| `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload`, `response_reply.ciphertext` | [Event storage](../../backend/src/services/nyxbot_event_record.rs) | Implemented |
 | `mobile_social_deliveries` | `ciphertext` | — | Pending |
 | `oauth_broker_bindings` | `refresh_token_encrypted` | [oauth_broker_record_service.rs](../../backend/src/services/oauth_broker_record_service.rs) | Implemented |
 | `oauth_clients` | `revocation_webhook_secret_encrypted`, `connection_webhook_secret_encrypted` | [OAuth client webhooks](../../backend/src/services/oauth_client_webhook_record.rs) | Implemented |
@@ -71,7 +71,7 @@ A collection may use separate adapters for different fields.
 | `assistant_cma_sandboxes` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
 | `assistant_cma_creations` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
 | `nyxbot_event_bindings` | `provider_key_ciphertext`, `producer_secret_ciphertext` | [storage.rs](../../backend/src/services/nyxbot_event_binding_service/storage.rs) | Implemented |
-| `nyxbot_gateway_responses` | `payload_ciphertext` | — | Pending |
+| `nyxbot_gateway_responses` | `payload_ciphertext` | [Gateway replay storage](../../backend/src/services/nyxbot_response_recovery/storage.rs) | Implemented |
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | [Reattach window storage](../../backend/src/services/assistant_reattach_window_record.rs) | Implemented |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | [Approval proposal storage](../../backend/src/services/execution_permission_dispatch/proposals/record.rs) | Implemented |
@@ -129,16 +129,31 @@ the reference deadline and relay message. A matching relay binding is recomputed
 with the new ciphertext in the same exact-source update.
 [Thread reference storage](../../backend/src/services/nyxbot_thread_reference.rs)
 
+NyxBot event writers bind the event ID, owner, channel and field purpose. The
+stored no-turn reply also binds its response ID. The adapter compares the exact
+event before updating ciphertext and version pairs. Delivery claims, guest
+leases, media retention and replay mappings keep their original values.
+[Event storage](../../backend/src/services/nyxbot_event_record.rs)
+
+Gateway response payloads bind the response row, owner, channel, binding and response ID.
+Migration checks the stored snapshot and frame order, fences the complete source, and
+rewraps the original bytes while preserving replay revision and expiry.
+[Gateway replay storage](../../backend/src/services/nyxbot_response_recovery/storage.rs)
+
+Device-code delivery binds the request in its actual collection to the approving person
+and session. The v2 Agent Key grant binds its parent and issued child. Migration matches
+the complete stored request before replacing the pair or the nested credential.
+[Device storage](../../backend/src/services/auth_device_service/record.rs)
+
+Node device-code approval binds each delivery field to the request, signer, approving
+person, personal or organization owner, issued key and node. A signed poll clears the
+pair and its marker in one claim. Retained expired pairs use the same migration.
+[Node device delivery](../../backend/src/services/device_code_service/record.rs)
+
 ### Production storage for Pending fields
 
 - Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
   [Mobile delivery](../../backend/src/services/mobile_social_service.rs)
-- V2 device approval stores the credential inside the Agent Key grant. A session
-  grant writes the access and refresh token fields at the top level.
-  [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
-- The NyxBot event holds its context, the late-delivery target and the queued guest setup payload.
-  Gateway responses store an encrypted replay payload.
-  [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
 secret. Each field binds to the binding ID, linking person, target agent and

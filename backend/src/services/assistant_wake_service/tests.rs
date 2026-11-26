@@ -947,6 +947,8 @@ async fn durable_wake_review_command_costs_for_group_publication_and_watch_admis
     eprintln!("group publication bind added commands: {:?}", take(&counts));
     group::with_member(
         group::Member {
+            org_revision: None,
+            durable: true,
             group_id: member.group_id.clone().unwrap(),
             agent_id: member.agent_id.clone().unwrap(),
             upper_seq: 1,

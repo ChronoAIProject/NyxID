@@ -159,14 +159,18 @@ async fn accept(
         event_id: event_id.into(),
         relay_message_id: None,
         custom_binding_id: None,
+        event_context_version: event_record::version(&state.encryption_keys),
         event_context_ciphertext: Some(
-            state
-                .encryption_keys
-                .encrypt(
-                    &serde_json::to_vec(context)
-                        .map_err(|_| AppError::OAuthAuthorityUnavailable)?,
-                )
-                .await?,
+            event_record::seal(
+                &state.encryption_keys,
+                &event_key,
+                &row.user_id,
+                &[event_record::CONTEXT, &row.id],
+                &Zeroizing::new(
+                    serde_json::to_vec(context).map_err(|_| AppError::OAuthAuthorityUnavailable)?,
+                ),
+            )
+            .await?,
         ),
         status: if notification {
             "silent"
@@ -192,15 +196,12 @@ async fn accept(
         resolved_thread_id: None,
         resolved_conversation_id: None,
     };
-    let identity = format!(
-        "nyxbot_{}",
-        &sha256_hex(format!("{}:{binding}:{partition}", row.id))[..32]
-    );
+    let identity = recovery::conversation_identity(&row.id, binding, partition);
     let mut payload = recovery::Payload::new(&response_id, &identity, metadata);
     if claim.is_none() {
         payload.finish(None, false);
     }
-    let stored = StoredResponse {
+    let mut stored = StoredResponse {
         id: Uuid::new_v4().to_string(),
         response_id,
         user_id: row.user_id.clone(),
@@ -213,10 +214,12 @@ async fn accept(
         terminal: claim.is_none(),
         answer_delivery: None,
         revision: 0,
-        payload_ciphertext: payload.seal(&state.encryption_keys).await?,
+        payload_context_version: None,
+        payload_ciphertext: Vec::new(),
         created_at: now,
         expires_at: event.expires_at,
     };
+    recovery::storage::install(&state.encryption_keys, &mut stored, &payload).await?;
     let db = state.db.clone();
     let inserted = stored.clone();
     let event = event.clone();
@@ -921,7 +924,7 @@ async fn send_update_impl(
             .event_context_ciphertext
             .as_ref()
             .ok_or_else(unavailable)?;
-        let context: Value = serde_json::from_slice(&state.encryption_keys.decrypt(ciphertext).await?)
+        let context: Value = serde_json::from_slice(&crate::services::nyxbot_event_record::event_context(&state.encryption_keys, &event, ciphertext).await?)
         .map_err(|_| unavailable())?;
         if !source::provider_context(row, &context) {
             return Err(unavailable());

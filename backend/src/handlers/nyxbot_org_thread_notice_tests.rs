@@ -682,6 +682,18 @@ async fn org_notice_2625_bot_or_route_closed_reads_complete_empty_and_record_hea
                     .modified_count,
                 1
             );
+            // Closed transport must complete the original cursors even when the retained reply cannot open.
+            let changed = f
+                .state
+                .db
+                .collection::<bson::Document>(EVENTS)
+                .update_one(
+                    doc! {"channel_id":&f.row.id,"event_id":&c.source},
+                    doc! {"$set":{"response_reply.context_version":99}},
+                )
+                .await
+                .unwrap();
+            assert_eq!(changed.modified_count, 1);
             let empty = match first_read {
                 "snapshot" => snapshot(&f, &c.id).await,
                 "events" => closed_history(read_events(&f, &c, None).await, text)

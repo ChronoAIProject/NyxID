@@ -1447,6 +1447,7 @@ pub(crate) async fn apply_in_session<'a>(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Specialist not found".into()))?;
+    super::org_agent_service::fence_maintenance(db, session, owner, &agent).await?;
     let edit = edit.into();
     let input = edit.input;
     let scope = Box::pin(compile(db, &agent, service, edit, session)).await?;

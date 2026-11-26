@@ -111,8 +111,15 @@ pub(crate) async fn delete_conversation(
         .session(&mut *tx)
         .await?;
     db.collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
-        .update_many(doc!{"guest_setup_conversation_id":conversation,"turn_id":null},
-            doc!{"$set":{"status":"refused","delivery.state":"refused"},"$unset":{"guest_setup_payload":""}}).session(tx).await?;
+        .update_many(
+            doc! {"guest_setup_conversation_id":conversation,"turn_id":null},
+            doc! {"$set":{"status":"refused","delivery.state":"refused"},"$unset": {
+                "guest_setup_payload": "",
+                "guest_setup_context_version": "",
+            }},
+        )
+        .session(tx)
+        .await?;
     Ok(())
 }
 

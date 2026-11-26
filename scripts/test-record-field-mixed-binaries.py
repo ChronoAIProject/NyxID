@@ -40,10 +40,20 @@ def main():
                         help="exercise the retained conversation window and the legacy subscriber boundary")
     parser.add_argument("--learning-writers", action="store_true",
                         help="exchange learning proposals with the reader-preparation binary")
+    parser.add_argument("--gateway-writers", action="store_true",
+                        help="exchange native and relay gateway payloads across writer activation")
+    parser.add_argument("--event-writers", action="store_true",
+                        help="exchange native event contexts and stored no-turn replies")
+    parser.add_argument("--event-replay-readers", action="store_true",
+                        help="exchange event replies and gateway replay, including stored generation labels")
     parser.add_argument("--approval-readers", action="store_true",
                         help="exchange four versions of pending, completed and cleared approvals")
     parser.add_argument("--approval-writers", action="store_true",
                         help="migrate and exchange retained approvals with the dual-reader base")
+    parser.add_argument("--auth-device", action="store_true",
+                        help="exchange both session protocols and their v2 Agent Key grant")
+    parser.add_argument("--node-device", action="store_true",
+                        help="exchange personal and organization node deliveries through signed polling")
     args = parser.parse_args()
     bins = {"base": args.base.resolve(), "candidate": args.candidate.resolve()}
     hashes = {}
@@ -80,6 +90,41 @@ def main():
                 result.check_returncode()
                 if "1 passed;" not in result.stdout:
                     raise RuntimeError(f"test did not run: {test}")
+
+        if args.auth_device or args.node_device:
+            base_reject = "legacy-claim-error" if args.node_device else "reject"
+            migration = ("services::device_code_service::mixed_delivery::migrate_signed_deliveries_from_the_base_writer"
+                         if args.node_device else
+                         "services::auth_device_service::mixed_delivery::migrate_retained_device_deliveries")
+            for writer, reader in [("base", "candidate"), ("candidate", "base")]:
+                run(writer, "write", "compatible")
+                run(reader, "read", "compatible")
+            run("base", "write", "base-on", writes=True)
+            run("candidate", "reject", "base-on", legacy=False)
+            run("candidate", "read", "base-on", writes=True)
+            run("base", "write", "retained")
+            run("candidate", "migrate", "retained", writes=True,
+                test=migration)
+            run("base", base_reject, "retained")
+            run("candidate", "read", "retained", legacy=False)
+            run("candidate", "write", "activated", writes=True)
+            run("base", base_reject, "activated")
+            run("candidate", "read", "activated", writes=True, legacy=False)
+            run("candidate", "write", "before-rollback", writes=True)
+            run("candidate", "read", "before-rollback", legacy=False)
+            run("candidate", "write", "rollback")
+            run("base", "read", "rollback")
+            if args.node_device:
+                run("candidate", "write", "old-claim", writes=True)
+                run("base", "legacy-claim-error-save", "old-claim")
+                run("candidate", "migrate-terminal", "old-claim", writes=True,
+                    test="services::device_code_service::mixed_delivery::legacy_terminal_marker_clears_without_reissuing")
+            registry = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
+            for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
+                run(writer, "registry-write", "generation", writes=True, test=registry)
+                run(writer, "registry-live", "generation", writes=True, test=registry)
+                run(reader, "registry-" + previous, "generation", writes=True, test=registry)
+            return
 
         if args.gateway_setup:
             for writer, reader in [("base", "candidate"), ("candidate", "base")]:
@@ -130,7 +175,31 @@ def main():
                 run(reader, "registry-" + previous, "generation", test=registry, writes=True)
             return
 
-        if args.approval_readers:
+        if args.event_writers or args.gateway_writers:
+            family = "gateway" if args.gateway_writers else "event"
+            for writer, reader in [("base", "candidate"), ("candidate", "base")]:
+                run(writer, "write", writer)
+                run(reader, f"{family}-read", writer)
+            run("base", "write", "retained", writes=True)
+            run("candidate", f"{family}-read", "retained", writes=True)
+            run("candidate", f"{family}-reject", "retained", legacy=False)
+            run("candidate", f"{family}-migrate", "retained", writes=True)
+            run("candidate", "write-active" if args.gateway_writers else "write", "active", writes=True)
+            for fixture in ["retained", "active"]:
+                for reader in ["base", "candidate"]:
+                    for writes in [False, True]:
+                        run(reader, f"{family}-read", fixture, writes=writes, legacy=False)
+            run("candidate", "write", "rollback")
+            run("base", f"{family}-read", "rollback")
+            run("candidate", f"{family}-reject", "rollback", legacy=False)
+            registry = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
+            for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
+                run(writer, "registry-write", "generation", writes=True, test=registry)
+                run(writer, "registry-live", "generation", writes=True, test=registry)
+                run(reader, "registry-" + previous, "generation", writes=True, test=registry)
+            return
+
+        if args.approval_readers or args.event_replay_readers:
             for writes in (False, True):
                 for writer, reader in [("base", "candidate"), ("candidate", "base")]:
                     run(writer, "write", "legacy", writes=writes)
@@ -140,6 +209,12 @@ def main():
             run("candidate", "read", "current", writes=True, legacy=False)
             run("candidate", "read", "current", legacy=False)
             run("base", "reject", "current")
+            if args.event_replay_readers:
+                registry = "services::encrypted_record_migration::mixed_webhooks::mixed_binary_webhook_signatures"
+                for writer, reader, previous in [("base", "candidate", "known"), ("candidate", "base", "unknown")]:
+                    run(writer, "registry-write", "generation", writes=True, test=registry)
+                    run(writer, "registry-live", "generation", writes=True, test=registry)
+                    run(reader, "registry-" + previous, "generation", writes=True, test=registry)
             return
 
         run("base", "write", "old")

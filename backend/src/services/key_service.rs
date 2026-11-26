@@ -1390,6 +1390,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                             grants,
                             scopes,
                             owner,
+                            _,
                         ) | super::assistant_agent_credential_service::KeyAuthority::Shared(grants, scopes, owner)
                         | super::assistant_agent_credential_service::KeyAuthority::OrgChannelGuest(grants, scopes, owner) => {
                             successor.assistant_agent_owner_id = Some(owner.clone());
@@ -1421,10 +1422,10 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                                 .as_ref()
                                 .and(conversation.group_id.clone())
                         });
-                    if successor.assistant_group_id.is_some()
+                    if super::org_agent_service::ordinary_member_org(&conversation).is_some() || successor.assistant_group_id.is_some()
                         || super::org_channel_service::origin(&conversation).is_some()
                     {
-                        // Group, collaboration and org-channel authentication bind
+                        // Organization specialist and group authentication bind
                         // the key to its thread. Move that binding with the encrypted successor,
                         // rather than waiting for the next turn to refresh it.
                         db.collection::<bson::Document>(

@@ -870,6 +870,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<Trigger>(TRIGGERS)
             .insert_one(Trigger {
+                assistant_target_owner: None,
                 secret_context_versions: Default::default(),
                 source: Default::default(),
                 setup_watch_id: None,

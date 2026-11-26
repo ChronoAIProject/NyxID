@@ -883,6 +883,11 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         with_nyxbot: false,
     };
     let agent = crate::models::assistant_agent::AssistantAgent {
+        org_maintainer_user_ids: None,
+        org_user_ids: None,
+        org_access_revision: 0,
+        org_use_revision: 0,
+        org_maintain_revision: 0,
         channel_checking_notice: false,
         id: "agent".into(),
         user_id: "owner".into(),
@@ -1015,6 +1020,43 @@ async fn org_review_fixture(
         .await
         .unwrap();
     (fixture, agent, proposal_id, member)
+}
+
+#[tokio::test]
+async fn pin_fences_claimed_revision_after_maintenance_is_restored() {
+    let (fixture, agent, _, member) = org_review_fixture("learning_pin_maintain_revision").await;
+    let db = &fixture.state.db;
+    let publication = LearningPublication {
+        approved_by: Some(member.clone()),
+        org_maintain_revision: agent.org_maintain_revision,
+        ..Default::default()
+    };
+    let agents = db.collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    agents
+        .update_one(
+            doc! {"_id":&agent.id},
+            doc! {"$inc":{"org_maintain_revision":1_i64},
+            "$set":{"org_maintainer_user_ids":[&member]}},
+        )
+        .await
+        .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(matches!(
+        fence_pin_authority(db, &mut session, &agent, &publication).await,
+        Err(AppError::Forbidden(_))
+    ));
+    session.abort_transaction().await.unwrap();
+    let fresh = team::maintained_agent(db, &member, &agent.id)
+        .await
+        .unwrap();
+    session.start_transaction().await.unwrap();
+    assert!(matches!(
+        fence_pin_authority(db, &mut session, &fresh, &publication).await,
+        Err(AppError::Conflict(_))
+    ));
+    session.abort_transaction().await.unwrap();
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -1691,6 +1733,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
         .db
         .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
         .insert_one(AssistantAgentLearningRun {
+            org_maintain_revision: 0,
             id: "run".into(),
             agent_id: agent.id.clone(),
             owner_id: fixture.owner.clone(),
@@ -1871,6 +1914,8 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
         )
         .insert_one(AssistantAcknowledgement {
             meta_contexts: Vec::new(),
+            org_maintenance_targets: Default::default(),
+            org_maintain_revision: 0,
             activity_execution: None,
             automation_work: None,
             execution_task: None,
@@ -2258,6 +2303,8 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
         )
         .insert_one(AssistantAcknowledgement {
             meta_contexts: Vec::new(),
+            org_maintenance_targets: Default::default(),
+            org_maintain_revision: 0,
             activity_execution: None,
             automation_work: None,
             execution_task: None,
@@ -3048,6 +3095,8 @@ async fn publication_events_are_bounded_deduplicated_and_identifier_safe() {
         .insert_one(doc! {
             "_id": "card", "conversation_id": &f.row.id, "user_id": &f.owner,
             "api_key_id": &f.chat.api_key_id, "kind": "action", "summary": "Review skill",
+            "tool_name": TOOL, "authored_skill": {"proposal_id": &row.id, "agent_id": &row.agent_id,
+            "revision": row.revision, "skills_revision": row.agent_skills_revision},
             "status": "allowed", "created_at": bson::DateTime::now(),
             "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::hours(1)),
         })

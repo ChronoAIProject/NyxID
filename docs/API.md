@@ -9307,6 +9307,33 @@ Human `POST/PUT /api/v1/services` use the same skill validation/history path; up
 The operation-contract route returns the authorized catalog service's bounded source OpenAPI document, preserving upstream server declarations. It does not rewrite proxy URLs or grant execution access; generated skills must use the consumer's authorized NyxID service connection. It reads a configured `openapi_spec_url` through NyxID's hardened, size-limited path, resolving known hosted overlay URLs locally. When the URL is absent or empty, it falls back to an embedded overlay registered for the service slug. The configured URL must be readable without downstream credentials; this route never injects a service-account or catalog credential. Authenticated custom documents need a separate, explicitly scoped contract-fetch capability. The route never resolves a user-managed `/keys` service, injects a credential, or returns the caller-wide `/mcp/config` catalog. The discovery response includes the catalog service `id`, `slug`, `name`, and current skill revision. Catalog and MCP responses retain name recommendations and expose optional refs/revision. Ref-only changes do not change the existing `catalog_digest`; `skills_manifest_digest` is a separate versioned digest. Instance names suppress inherited refs. See [Service account curation](SERVICE_ACCOUNTS.md#catalog-skill-curation) for exact payloads, grant limits, history pagination, recovery, runtime confinement, rollout ordering, and the boundary with Ornn package content CRU.
 
 
+## Organization specialist member access
+
+`GET /api/v1/assistant/nyxagent/agents/{id}/org-access` returns both lists,
+the edit revision and current authoring availability. GET and PUT require the
+NyxAgent engine and a first-party human session or access token for a live
+Admin of the owning organization, including an Admin outside both lists.
+
+```json
+{"maintainers":null,"users":[],"revision":3,"authoring_available":true}
+```
+
+`PUT` on the same resource replaces both lists and returns the GET shape.
+Supply these three fields and use the revision from GET.
+
+```json
+{"maintainers":[],"users":null,"expected_revision":3}
+```
+
+Each list independently accepts `null` for inheritance, `[]` for nobody, or
+up to 128 distinct eligible Admin or Member person UUIDs. A reordered
+equivalent set is a no-op. Unknown fields, omissions, invalid subjects and
+negative revisions return HTTP 400 `validation_error`. A stale revision returns
+HTTP 409 `conflict`. Read the current policy and review the draft before saving
+again. With the authoring flag off or fleet readiness blocked, PUT returns
+HTTP 403 `org_agent_access_authoring_unavailable`. The Admin can still read
+the saved lists. See [organization specialist agents](ORG_AGENTS.md).
+
 ## Owner NyxBot invocations
 
 These endpoints let a first-party owner account session or access token drive

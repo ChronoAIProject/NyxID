@@ -572,7 +572,7 @@ async fn schedule_records_the_owned_overlap_found_at_dispatch() {
         .start_transaction()
         .and_run2(async move |session| {
             crate::services::api_key_mutation_service::transaction_result(
-                schedules::admit_turn(&db, OWNER, &claim, "thread", "turn", session).await,
+                schedules::admit_turn(&db, OWNER, &claim, "thread", "turn", 0, session).await,
             )
         })
         .await
@@ -784,7 +784,28 @@ async fn schedule_specialist_authority_threads_and_guest_refusal() {
     let (state, _, server) = setup("schedule_authority").await;
     let agent = specialist(&state).await;
     let trigger = automation(&state, &agent.id, None).await;
+    let triggers = state
+        .db
+        .collection::<bson::Document>(crate::models::trigger::COLLECTION_NAME);
+    triggers
+        .update_one(
+            doc! {"_id":&trigger.id},
+            doc! {"$unset":{"assistant_target_owner":""}},
+        )
+        .await
+        .unwrap();
     let first = schedules::enqueue_now(&state.db, &trigger).await.unwrap();
+    assert_eq!(
+        triggers
+            .find_one(doc! {"_id":&trigger.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_document("assistant_target_owner")
+            .unwrap()
+            .get_str("owner_id"),
+        Ok(OWNER)
+    );
     let thread = Box::pin(schedules::run_thread(
         &state.db,
         &state.encryption_keys,
@@ -1324,7 +1345,8 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .start_transaction()
         .and_run2(async move |session| {
             crate::services::api_key_mutation_service::transaction_result(
-                schedules::admit_turn(&db, OWNER, &claim, &thread_id, &user_run.id, session).await,
+                schedules::admit_turn(&db, OWNER, &claim, &thread_id, &user_run.id, 0, session)
+                    .await,
             )
         })
         .await
@@ -1335,6 +1357,8 @@ async fn confirmation_waits_and_resumes(kind: &str) {
         .collection::<AssistantAcknowledgement>(ACKS)
         .insert_one(AssistantAcknowledgement {
             meta_contexts: Vec::new(),
+            org_maintenance_targets: Default::default(),
+            org_maintain_revision: 0,
             activity_execution: None,
             automation_work: None,
             execution_task: None,
@@ -2256,7 +2280,7 @@ async fn schedule_queue_one_busy_grace_and_edit_fence() {
         .start_transaction()
         .and_run2(async move |session| {
             crate::services::api_key_mutation_service::transaction_result(
-                schedules::admit_turn(&db, OWNER, &claim, "thread", "turn", session).await,
+                schedules::admit_turn(&db, OWNER, &claim, "thread", "turn", 0, session).await,
             )
         })
         .await;

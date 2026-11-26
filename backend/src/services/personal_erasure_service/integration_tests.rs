@@ -914,6 +914,23 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
             }
         }
     }
+    let agents = db.collection::<Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    for (id, fields) in [
+        ("acl-user", doc! {"org_user_ids":[&owner,&other]}),
+        (
+            "acl-maintainer",
+            doc! {"org_maintainer_user_ids":[&owner,&other]},
+        ),
+        (
+            "acl-both",
+            doc! {"org_user_ids":[&owner,&other],"org_maintainer_user_ids":[&owner,&other]},
+        ),
+    ] {
+        let mut agent =
+            doc! {"_id":id,"user_id":&org,"kind":"specialist","org_access_revision":7_i64};
+        agent.extend(fields);
+        agents.insert_one(agent).await.unwrap();
+    }
     // Force one lease expiry between pages to cover interruption/resumption.
     step(&state).await;
     db.collection::<Document>(JOBS)
@@ -930,6 +947,30 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         status(&db, &owner).await.unwrap().unwrap().status,
         ErasureStatus::Complete
     );
+    for (id, used, maintained) in [
+        ("acl-user", true, false),
+        ("acl-maintainer", false, true),
+        ("acl-both", true, true),
+    ] {
+        let agent = agents.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+        assert_eq!(agent.get_str("user_id"), Ok(org.as_str()));
+        assert_eq!(agent.get_i64("org_access_revision"), Ok(8));
+        for (field, revision, pruned) in [
+            ("org_user_ids", "org_use_revision", used),
+            (
+                "org_maintainer_user_ids",
+                "org_maintain_revision",
+                maintained,
+            ),
+        ] {
+            assert_eq!(agent.get_i64(revision), Ok(i64::from(pruned)));
+            if pruned {
+                assert_eq!(agent.get(field), Some(&bson::bson!([&other])));
+            } else {
+                assert!(!agent.contains_key(field));
+            }
+        }
+    }
     for (collection, id, before, target, disposition) in domain_rows {
         let row = db
             .collection::<Document>(collection)

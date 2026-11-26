@@ -55,6 +55,8 @@ enum Adapter {
     NativeWhatsapp,
     NyxbotChannelKey,
     ThreadReference,
+    NyxbotEvent,
+    GatewayResponse,
     EventBinding,
     GatewayTransport,
     CmaRequest,
@@ -63,6 +65,8 @@ enum Adapter {
     ApprovalProposal,
     Setup,
     AgentLogin,
+    NodeDevice,
+    AuthDevice,
     // These are implementation blockers until their service-owned decoders and
     // actual writers are converted. They may not be waived by operator input.
     Pending,
@@ -202,7 +206,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "auth_device_codes",
-        adapter: Adapter::Pending,
+        adapter: Adapter::AuthDevice,
         fields: &[
             "delivery_access_token_encrypted",
             "delivery_refresh_token_encrypted",
@@ -210,7 +214,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "auth_device_codes_v2",
-        adapter: Adapter::Pending,
+        adapter: Adapter::AuthDevice,
         fields: &[
             "agent_key_grant.delivery_credential_encrypted",
             "delivery_access_token_encrypted",
@@ -219,7 +223,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "device_codes",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NodeDevice,
         fields: &[
             "delivery_api_key_encrypted",
             "delivery_refresh_token_encrypted",
@@ -257,11 +261,12 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "nyxbot_events",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NyxbotEvent,
         fields: &[
             "delivery.target_ciphertext",
             "event_context_ciphertext",
             "guest_setup_payload",
+            "response_reply.ciphertext",
         ],
     },
     Entry {
@@ -344,7 +349,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "nyxbot_gateway_responses",
-        adapter: Adapter::Pending,
+        adapter: Adapter::GatewayResponse,
         fields: &["payload_ciphertext"],
     },
     Entry {
@@ -574,12 +579,22 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
+        Some(
+            previous_labels::EVENT_REPLY_DIGEST
+            | previous_labels::EVENT_WRITERS_DIGEST
+            | previous_labels::NODE_DEVICE_BASE_DIGEST
+            | previous_labels::DEVICE_BASE_DIGEST,
+        ) => project_labels(
+            &row,
+            previous_labels::event_reply_draft()
+                .chain(std::iter::once(previous_labels::META_ASSETS)),
+        )?,
+        Some(previous_labels::EVENT_REPLY_DRAFT_DIGEST) => {
+            project_labels(&row, previous_labels::event_reply_draft())?
+        }
         Some(digest) if previous_labels::META_DIGESTS.contains(&digest) => project_labels(
             &row,
-            previous_labels::reconciled().chain(std::iter::once((
-                "channel_meta_oauth_sessions",
-                &["assets_encrypted"][..],
-            ))),
+            previous_labels::reconciled().chain(std::iter::once(previous_labels::META_ASSETS)),
         )?,
         Some(
             previous_labels::THREAD_EVENT_DIGEST
@@ -795,6 +810,10 @@ async fn verify(
             super::platform_entry_gateway_service::verify_request(keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
+        Adapter::NyxbotEvent => Box::pin(super::nyxbot_event_record::verify(keys, row)).await,
+        Adapter::GatewayResponse => {
+            Box::pin(super::nyxbot_response_recovery::storage::verify(keys, row)).await
+        }
         Adapter::ThreadReference => {
             Box::pin(super::nyxbot_thread_reference::verify(keys, row)).await
         }
@@ -824,6 +843,17 @@ async fn verify(
         }
         Adapter::Setup => {
             super::platform_setup_record_service::verify_current_snapshot(keys, row).await
+        }
+        Adapter::AuthDevice => {
+            Box::pin(super::auth_device_service::record::verify(
+                keys,
+                entry.collection,
+                row,
+            ))
+            .await
+        }
+        Adapter::NodeDevice => {
+            Box::pin(super::device_code_service::record::verify(keys, row)).await
         }
         Adapter::AgentLogin => {
             super::agent_login_record_service::verify_current_snapshot(keys, row).await
@@ -948,6 +978,13 @@ async fn migrate(
             super::platform_entry_gateway_service::migrate_request(db, keys, row).await
         }
         Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
+        Adapter::NyxbotEvent => Box::pin(super::nyxbot_event_record::migrate(db, keys, row)).await,
+        Adapter::GatewayResponse => {
+            Box::pin(super::nyxbot_response_recovery::storage::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
         Adapter::ThreadReference => {
             Box::pin(super::nyxbot_thread_reference::migrate(db, keys, row)).await
         }
@@ -984,6 +1021,18 @@ async fn migrate(
         }
         Adapter::Setup => {
             super::platform_setup_record_service::migrate_snapshot(db, keys, row).await
+        }
+        Adapter::AuthDevice => {
+            Box::pin(super::auth_device_service::record::migrate(
+                db,
+                keys,
+                entry.collection,
+                row,
+            ))
+            .await
+        }
+        Adapter::NodeDevice => {
+            Box::pin(super::device_code_service::record::migrate(db, keys, row)).await
         }
         Adapter::AgentLogin => {
             super::agent_login_record_service::migrate_snapshot(db, keys, row).await
@@ -1094,6 +1143,12 @@ pub async fn list_findings(db: &Database, after: Option<&str>) -> AppResult<Find
             return Err(invalid());
         }
         let category = match row.get_str("category").ok() {
+            Some(super::auth_device_service::record::ISSUANCE_MISSING) => {
+                super::auth_device_service::record::ISSUANCE_MISSING
+            }
+            Some(super::device_code_service::record::ISSUANCE_MISSING) => {
+                super::device_code_service::record::ISSUANCE_MISSING
+            }
             Some("adapter_not_implemented") => "adapter_not_implemented",
             Some("authentication_binding_or_lifecycle_unresolved") => {
                 "authentication_binding_or_lifecycle_unresolved"
@@ -1470,6 +1525,20 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
                 None
             }
             Err(AppError::DatabaseError(error)) => return Err(AppError::DatabaseError(error)),
+            Err(AppError::Conflict(reason))
+                if matches!(entry.adapter, Adapter::AuthDevice)
+                    && reason == super::auth_device_service::record::ISSUANCE_MISSING =>
+            {
+                unresolved += 1;
+                Some(super::auth_device_service::record::ISSUANCE_MISSING)
+            }
+            Err(AppError::Conflict(reason))
+                if matches!(entry.adapter, Adapter::NodeDevice)
+                    && reason == super::device_code_service::record::ISSUANCE_MISSING =>
+            {
+                unresolved += 1;
+                Some(super::device_code_service::record::ISSUANCE_MISSING)
+            }
             Err(_) => {
                 unresolved += 1;
                 Some(if matches!(entry.adapter, Adapter::Pending) {

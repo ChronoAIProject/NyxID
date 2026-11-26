@@ -1350,24 +1350,23 @@ pub(crate) async fn list_chats(
     {
         return Err(AppError::NotFound(format!("Channel {id} not found")));
     }
-    let mut managed = Vec::new();
-    for row in channels {
-        if let Some(binding) = &row.org_specialist {
-            match crate::services::org_channel_service::require_admin(
-                &state.db,
-                owner,
-                &binding.org_id,
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(AppError::Forbidden(_)) if channel_id.is_none() => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        managed.push(row);
+    let manageable = crate::services::org_channel_service::management::manageable_agents(
+        &state.db, owner, &channels,
+    )
+    .await?;
+    let channels: Vec<_> = channels
+        .into_iter()
+        .filter(|row| {
+            row.org_specialist.is_none()
+                || row
+                    .agent_id
+                    .as_ref()
+                    .is_some_and(|id| manageable.contains(id))
+        })
+        .collect();
+    if channel_id.is_some() && channels.is_empty() {
+        return Err(crate::services::org_channel_service::denied());
     }
-    let channels = managed;
     let ids: Vec<&str> = channels.iter().map(|row| row.id.as_str()).collect();
     let chats: Vec<NyxbotThread> = state
         .db
@@ -3095,7 +3094,16 @@ pub async fn list_channel_chats(
         if !crate::services::org_agent_service::can_use(&access) && row.user_id != owner {
             return Err(crate::services::org_channel_service::denied());
         }
-        if matches!(access, crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } if role.can_proxy())
+        let manageable = crate::services::org_channel_service::management::manageable_agents(
+            &state.db,
+            &owner,
+            std::slice::from_ref(&row),
+        )
+        .await?;
+        if !row
+            .agent_id
+            .as_ref()
+            .is_some_and(|id| manageable.contains(id))
         {
             return Ok(Json(member_chat_settings(&state, &row).await?));
         }

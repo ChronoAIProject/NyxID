@@ -460,11 +460,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "assistant_agents",
-        owner: OwnerSelector::Fields(&["user_id"]),
+        owner: OwnerSelector::Fields(&["user_id", "org_user_ids", "org_maintainer_user_ids"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
         export_selector: ExportSelector::Person("user_id"),
-        why: "assistant_agents stores the person-owned assistant agents record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "Local cleanup deletes assistant_agents owned by the person and prunes the person's access-list entries from surviving specialists. Only the owner can export the agent.",
     },
     Entry {
         collection: "assistant_analytics_settings",
@@ -3326,7 +3326,6 @@ pub(crate) const EXPORT_JOIN_INDEX_GAPS: &[(&str, &str)] = &[
 /// complete account export. Each addition is owned by its writer module.
 #[cfg(test)]
 pub(crate) const EXPORT_SELECTOR_INDEX_GAPS: &[(&str, &str)] = &[
-    ("assistant_attachments", "user_id"),
     ("assistant_checkpoints", "user_id"),
     ("assistant_group_requests", "actor_user_id"),
     ("org_channel_messages", "author_user_id"),
@@ -3338,6 +3337,8 @@ pub(crate) const EXPORT_SELECTOR_INDEX_GAPS: &[(&str, &str)] = &[
 /// blanket "one index per field" loop: existing indexes are reused whenever
 /// their first key covers the predicate.
 pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
+    ("assistant_agents", "org_maintainer_user_ids"),
+    ("assistant_agents", "org_user_ids"),
     ("assistant_group_mention_notifications", "user_id"),
     ("assistant_group_messages", "author_user_id"),
     ("assistant_group_messages", "user_id"),
@@ -3347,7 +3348,6 @@ pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
     ("channel_email_batches", "user_id"),
     ("channel_email_receipts", "user_id"),
     ("channel_email_sends", "user_id"),
-    ("channel_reply_deliveries", "user_id"),
     ("nyxbot_events", "user_id"),
     ("refresh_tokens", "user_id"),
     ("service_change_events", "actor.person_id"),
@@ -3484,11 +3484,6 @@ const OWNER_INDEX_BOUNDED: &[(&str, &str, OwnerIndexBoundedReason)] = &[
         "assistant_skill_draft_attempts",
         "user_id",
         OwnerIndexBoundedReason::ShortTtl,
-    ),
-    (
-        "assistant_voice_announcements",
-        "user_id",
-        OwnerIndexBoundedReason::SmallOrResourceBounded,
     ),
     (
         "assistant_voice_windows",

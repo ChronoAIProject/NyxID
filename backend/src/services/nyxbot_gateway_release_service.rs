@@ -808,7 +808,24 @@ pub(crate) async fn retire_connection(
     status: &str,
     error: Option<&str>,
 ) -> AppResult<Vec<String>> {
-    retire_connection_checked(state, row, reason, status, error, None).await
+    retire_connection_checked(state, row, reason, status, error, None, None).await
+}
+
+pub(crate) async fn disconnect_as(
+    state: &AppState,
+    row: &NyxbotChannel,
+    actor: &str,
+) -> AppResult<Vec<String>> {
+    retire_connection_checked(
+        state,
+        row,
+        ReleaseReason::Disconnect,
+        "disconnected",
+        None,
+        Some(actor),
+        None,
+    )
+    .await
 }
 
 struct RepairGuard {
@@ -828,6 +845,7 @@ pub(crate) async fn retire_for_repair(
         ReleaseReason::Disconnect,
         "disconnected",
         None,
+        Some(actor),
         Some(RepairGuard {
             actor: actor.into(),
             meta_callback: meta_callback.map(str::to_owned),
@@ -842,8 +860,10 @@ async fn retire_connection_checked(
     reason: ReleaseReason,
     status: &str,
     error: Option<&str>,
+    manager: Option<&str>,
     repair: Option<RepairGuard>,
 ) -> AppResult<Vec<String>> {
+    let manager = manager.map(str::to_owned);
     let scoped_state = state.clone();
     let db = state.db.clone();
     let scoped_row = row.clone();
@@ -880,6 +900,12 @@ async fn retire_connection_checked(
                 }
             }
             if (reason==ReleaseReason::SetupFailed && current.status!="pending") || (reason==ReleaseReason::OrgAccessLost && !matches!(current.status.as_str(),"pending"|"active")) {return Ok((Vec::new(), false));}
+            if let Some(actor) = manager.as_deref() && let Some(binding) = current.org_specialist.as_ref() {
+                let target = db.collection::<crate::models::assistant_agent::AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&current.agent_id,"user_id":&binding.org_id}).session(&mut *session).await?.ok_or_else(conflict)?;
+                super::org_agent_service::fence_maintenance(&db,session,actor,&target).await?;
+                super::org_channel_service::live_doc(&db,session,"org_memberships",doc! {"org_user_id":&binding.org_id,"member_user_id":actor,"revoked_at":null,"role":"admin"},true).await?;
+            }
             let ids=retire_in_session(state,&current,reason,session).await?;
             if current.org_specialist.is_some() {super::org_channel_service::lifecycle::retire_in_session(&db,session,&current.id,None).await?;}
             db.collection::<Document>(CHANNELS).update_one(doc! {"_id":&current.id},doc! {"$inc":{"execution_policy_revision":1_i64,"notification_epoch":1_i64},"$set":{"status":&status,"last_error":&error,"gateway_no_progress":false,"updated_at":bson::DateTime::now()},

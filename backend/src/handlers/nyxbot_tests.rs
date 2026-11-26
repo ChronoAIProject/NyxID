@@ -1818,6 +1818,7 @@ fn admission(channel_id: &str, event_id: &str) -> NyxbotEvent {
         event_id: event_id.into(),
         relay_message_id: None,
         custom_binding_id: None,
+        event_context_version: None,
         event_context_ciphertext: None,
         status: "completed".into(),
         conversation_id: None,
@@ -1972,6 +1973,7 @@ async fn lost_chat_app_messages_are_reported_to_the_agent_once() {
         event_id: arrived.clone(),
         relay_message_id: None,
         custom_binding_id: None,
+        event_context_version: None,
         event_context_ciphertext: None,
         status: "completed".into(),
         conversation_id: None,
@@ -8000,3 +8002,26 @@ async fn durable_wake_review_deleted_chat_still_links_bot_and_settles_once() {
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+#[path = "nyxbot_mixed_replay_tests.rs"]
+mod mixed_replay_tests;
+
+async fn contextual_event_field(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    event: &NyxbotEvent,
+    path: &str,
+    legacy: &[u8],
+) -> bson::Binary {
+    let plaintext = keys.decrypt(legacy).await.unwrap();
+    let parts = [path, &event.channel_id];
+    let context =
+        crate::crypto::record_field::RecordContext::new(EVENTS, &event.id, &event.user_id, &parts)
+            .unwrap();
+    bson::Binary {
+        subtype: bson::spec::BinarySubtype::Generic,
+        bytes: keys.encrypt_record(&plaintext, &context).await.unwrap(),
+    }
+}
+
+#[path = "nyxbot_gateway_record_tests.rs"]
+mod gateway_record_tests;

@@ -121,6 +121,7 @@ async fn fixture(name: &str) -> Fixture {
         stream_deadline: now + ChronoDuration::seconds(570),
         checked_at: now,
         claim_id: None,
+        target_context_version: None,
         target_ciphertext: None,
         target_expires_at: None,
     });
@@ -390,6 +391,18 @@ async fn guest_access_and_reply_mode_are_live_at_late_delivery() {
 #[tokio::test]
 async fn original_reply_target_survives_event_expiry_and_newer_chat_activity() {
     let f = fixture("channel_late_original_target").await;
+    let source = contextual_event_field(
+        &f.state.encryption_keys,
+        &f.event,
+        "event_context_ciphertext",
+        f.event.event_context_ciphertext.as_deref().unwrap(),
+    )
+    .await;
+    patch(
+        &f,
+        doc! {"event_context_ciphertext":source,"event_context_version":3},
+    )
+    .await;
     delivery::detach(&f.state.db, &f.event.id).await.unwrap();
     late_delivery::sweep(&f.state).await.unwrap(); // mint before settlement
     let event = f
@@ -400,7 +413,8 @@ async fn original_reply_target_survives_event_expiry_and_newer_chat_activity() {
         .await
         .unwrap()
         .unwrap();
-    assert!(event.delivery.unwrap().target_ciphertext.is_some());
+    let delivery = event.delivery.as_ref().unwrap();
+    assert_eq!(delivery.target_context_version, Some(3));
     patch(
         &f,
         doc! {"created_at": bson::DateTime::from_chrono(Utc::now() - ChronoDuration::hours(1))},
@@ -1107,7 +1121,8 @@ async fn pending_recovery(
         terminal: false,
         answer_delivery: None,
         revision: 0,
-        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        payload_context_version: None,
+        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
@@ -1867,3 +1882,70 @@ mod response_read_delivery_tests;
 
 #[path = "nyxbot_channel_capacity_tests.rs"]
 mod channel_capacity_tests;
+
+#[tokio::test]
+async fn event_record_context_target_and_guest_setup_bind_source_owner_channel_and_purpose() {
+    use crate::services::nyxbot_event_record as record;
+    let f = fixture("event_record_swaps").await;
+    let keys = &f.state.encryption_keys;
+    let mut event = f.event.clone();
+    event.event_context_version = Some(3);
+    let mut delivery = event.delivery.clone().unwrap();
+    delivery.target_context_version = Some(3);
+    let legacy = keys.encrypt(b"fixture bytes").await.unwrap();
+    for path in [
+        "event_context_ciphertext",
+        "delivery.target_ciphertext",
+        "guest_setup_payload",
+    ] {
+        let sealed = contextual_event_field(keys, &event, path, &legacy).await;
+        for (identity, value) in [
+            ("_id", "swapped"),
+            ("user_id", "swapped"),
+            ("channel_id", "swapped"),
+            ("_id", event.id.as_str()),
+        ] {
+            let original = value == event.id;
+            let mut source = bson::to_document(&event).unwrap();
+            source.insert(identity, value);
+            source.insert("guest_setup_context_version", 3);
+            source.insert("guest_setup_payload", sealed.clone());
+            let row = bson::from_document(source.clone()).unwrap();
+            for (reader, result) in [
+                (
+                    "event_context_ciphertext",
+                    record::event_context(keys, &row, &sealed.bytes).await,
+                ),
+                (
+                    "delivery.target_ciphertext",
+                    record::delivery_target(keys, &row, &delivery, &sealed.bytes).await,
+                ),
+                (
+                    "guest_setup_payload",
+                    record::guest_setup(keys, &source).await,
+                ),
+            ] {
+                if original && path == reader {
+                    assert_eq!(result.unwrap().as_slice(), b"fixture bytes");
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "{reader} accepted {path} after {identity} substitution"
+                    );
+                }
+            }
+        }
+    }
+    let mut raw = bson::to_document(&event).unwrap();
+    raw.insert(
+        "guest_setup_payload",
+        bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: legacy,
+        },
+    );
+    for invalid in [bson::Bson::Int32(8), bson::Bson::String("3".into())] {
+        raw.insert("guest_setup_context_version", invalid);
+        assert!(record::guest_setup(keys, &raw).await.is_err());
+    }
+}
