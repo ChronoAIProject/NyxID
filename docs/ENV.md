@@ -136,6 +136,29 @@ its target permissions, API connectivity and CA in the deployment environment. S
 local-fixture limits and pending environment acceptance. No IAM/RBAC changes
 are supplied or authorized by this configuration support.
 
+### Remote Machine runtime, funding and bootstrap verification
+
+Missing or invalid required values do not stop the server; they keep managed
+Machine admission closed and appear as platform readiness blockers. The
+signed-ticket verification settings below are not part of that readiness report:
+an invalid or incomplete key makes bootstrap verification unavailable (an error is
+logged) without appearing as a readiness blocker.
+
+| Variable | Requirement | Default | Description |
+|---|---|---|---|
+| `NYXID_REMOTE_MACHINE_IMAGE_DIGEST` | Required | *(none)* | Runtime image pinned by digest, `<image>@sha256:<64 hex>`. Absent or invalid values report `runtime_image_reference_missing_or_invalid`. |
+| `NYXID_REMOTE_MACHINE_BOOTSTRAP_BASE_URL` | Defaulted | `BASE_URL` | HTTPS origin that managed Machines use to bootstrap; credentials, query and fragment are rejected (`bootstrap_origin_invalid`). |
+| `NYXID_REMOTE_MACHINE_FUNDING_WINDOW_SECONDS` | Defaulted | `120` | Funded runtime window length, clamped to 60–300 seconds; unparseable values use the default. |
+| `NYXID_REMOTE_MACHINE_FUNDING_RENEWAL_MARGIN_SECONDS` | Defaulted | `45` | Renewal margin before a window ends, clamped to 20 seconds through half the window; unparseable values use the default. |
+| `NYXID_REMOTE_MACHINE_STORAGE_CLASS` | Optional | Cluster default | Unset or blank omits the PVC `storageClassName`; a configured name must be a valid, existing StorageClass. |
+| `NYXID_REMOTE_MACHINE_RUNTIME_CLASS` | Optional | Node default | Unset or blank omits `runtimeClassName`. |
+| `NYXID_REMOTE_MACHINE_PROVIDER_PUBLIC_KEY_FILE`, `NYXID_REMOTE_MACHINE_PROVIDER_ISSUER` | Mode-specific | *(none)* | Signed workload-ticket verification, used only when `NYXID_REMOTE_MACHINE_KUBE_API` is unset. Set both or neither; one alone or an invalid key keeps admission closed. When `NYXID_REMOTE_MACHINE_KUBE_API` is set, bootstrap uses Kubernetes TokenReview and ignores both. |
+| `NYXID_REMOTE_MACHINE_CONTROLLER_NAMESPACE`, `NYXID_REMOTE_MACHINE_CONTROLLER_DEPLOYMENT`, `NYXID_REMOTE_MACHINE_CONTROLLER_IMAGE_DIGEST`, `NYXID_REMOTE_MACHINE_CONTROLLER_CONTAINER` | Optional | *(none)* | Sandbox controller health on the admin platform view only; the first three are needed together (`sha256:<64 lowercase hex>` digest), the container is optional. Not a lifecycle prerequisite. |
+| `NYXID_REMOTE_MACHINE_KUBELET_ENDPOINTS`, `NYXID_REMOTE_MACHINE_KUBELET_CA_FILE`, `NYXID_REMOTE_MACHINE_KUBELET_TOKEN_FILE`, `NYXID_REMOTE_MACHINE_KUBELET_AUDIENCE` | Optional | *(none)* | Direct kubelet Pod-storage collector. Unset or blank endpoints disable it; once endpoints (a JSON map of node name to HTTPS origin) are set, the other three are required. |
+
+See [Remote Machine deployment](../deploy/remote-machine/README.md) for the
+matching approved-runtime ConfigMap values.
+
 ## Cluster coordination
 
 NyxID uses MongoDB for shared ownership, leases, replay checks, rate windows,
@@ -787,7 +810,7 @@ Channel relay is a first-class metadata-only gateway under ADR-013. See [CHANNEL
 |----------|---------|-------------|
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND` | `1` | Shared per-conversation proactive send rate, checked before authentication; deliberately lower than replies because unsolicited messages are a spam surface |
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST` | `5` | Burst capacity for proactive sends, including retries/idempotent replays |
-| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/reply` and `/send` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64. |
+| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/send`, `/reply` and `/thread-reply` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64; `/reply` and `/thread-reply` accept at least 2 MiB. |
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |

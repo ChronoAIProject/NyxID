@@ -1,5 +1,7 @@
 # Long IM replies: investigation and delivery contract
 
+> **Status:** Historical — investigation record; the delivery contract shipped. Current spec: [Complete IM replies](../CHANNEL_COMPLETE_REPLIES.md).
+
 The reported Lark screenshot shows a URL continuing in the next message. That
 demonstrates an unsafe split, but does not itself prove that text was lost. The
 code contains both unnecessary splitting and separate lossy truncation paths.

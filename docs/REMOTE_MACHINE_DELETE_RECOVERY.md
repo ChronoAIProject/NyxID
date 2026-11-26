@@ -95,6 +95,12 @@ The deletion path requires these existing API capabilities for the actual authen
 | Original `nyxid-machine` namespace | core / pods | get, list |
 | Original `nyxid-machine` namespace | core / persistentvolumeclaims | get, list |
 
+The shipped manifests grant more than this deletion minimum for creation and
+observation: `manager-role.yaml` adds Sandbox `watch` and `update`,
+`sandboxes/status` get, Pod/PVC `watch`, and Event and ResourceQuota reads;
+`identity-review-role.yaml` adds cluster-scoped TokenReview create, Node and
+PersistentVolume get, and StorageClass get/list.
+
 Manager must be denied Pod/PVC DELETE, PV LIST, VolumeAttachment LIST and all-namespace Pod LIST. `healthcheck.sh` loads the same configured backend token-file credential (`NYXID_REMOTE_MACHINE_KUBE_API`, `NYXID_REMOTE_MACHINE_KUBE_TOKEN_FILE`, optional CA) into a disposable kubeconfig, verifies `auth whoami` against `NYXID_MACHINE_MANAGER_PRINCIPAL` (defaulting to the configured Manager service account), and performs these denials plus required namespace reads/Sandbox writes without impersonation. Metadata mode is intentionally outside this shell check and remains covered by backend readiness/API checks. Independent operator-context infrastructure reads remain separate. PV GET remains for independent known-PV investigation; VolumeAttachment GET has no caller and is omitted. Check the union of all RoleBindings/ClusterRoleBindings, not only these manifests. Controller, GC and storage identities must remain independent and retain their own required permissions.
 
 The existing Kubernetes roles and the separate `deploy/remote-machine/node-lease-role.yaml` remain within this boundary. The Lease role stays separate because the namespace-setting kustomization would rewrite `kube-node-lease`. Existing Node/Lease checks and optional Controller Deployment diagnostics are not new deletion-completion gates. Deployment acceptance must validate the actual implementation permissions. Do not withdraw them before old workers are drained.
@@ -103,7 +109,7 @@ The user identified the environment as GKE Standard; whether PD CSI is managed r
 
 ## Verification status
 
-The effective control-plane deletion contract is described above and in [`deploy/remote-machine/README.md`](../deploy/remote-machine/README.md). Incident-specific operations plans and local acceptance artifacts are maintained separately from the repository documentation.
+The effective control-plane deletion contract is described above and in [`deploy/remote-machine/README.md`](../deploy/remote-machine/README.md). Its design record is the historical [Sandbox-driven deletion plan](plans/2026-10-20-remote-machine-sandbox-deletion.md). Incident-specific operations plans and local acceptance artifacts are maintained separately from the repository documentation.
 
 Earlier implementation snapshots recorded six backend Cargo groups with 153 passing tests, including an additional now-obsolete external-fact group, plus a sandbox updater group with 55 passing tests, healthcheck contracts with 54 passing tests, offline kustomize and diff checks. Those six backend groups differed from the preceding A5 grouping of five backend groups and one updater group. Those results belong to the earlier external-fact contract and frozen source hashes. They remain historical evidence; they do not establish that the current control-plane revision passed its tests. Earlier diagnostic stack overrides and GCE-enabled snapshots are also historical only.
 

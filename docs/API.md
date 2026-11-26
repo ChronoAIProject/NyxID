@@ -180,7 +180,8 @@ CLI text errors preserve the existing `Error: ...` line and append the accepted 
 | 6003 | `social_auth_deactivated`  | 403         | Social login account is deactivated      |
 | 6004 | `external_token_invalid`   | 400         | External provider token verification failed (signature, expiry, audience, or claims) |
 | 6005 | `external_provider_not_configured` | 400  | Provider hint missing or provider not configured on the server |
-| 7000 | `approval_required`        | 403         | User approval required (proxy/LLM requests block until decision; this code is used for async status polling) |
+| 7000 | `approval_required`        | 403         | Approval is required and the request was not held: an eligible request sent `X-NyxID-Approval-Mode: async`, or an assistant call needs an execution-permission review. Carries `request_id`. NyxID sends or resumes the request after approval, so never re-send it. Ordinary proxy/LLM requests wait for the decision instead; see [Proxy](#proxy) |
+| 7001 | `approval_failed`          | 403         | Approval was rejected, expired or timed out, or the occurrence is already terminal; NyxID did not send the request on this call. Carries `request_id`, `approve_url` and `details` |
 | 12800 | `managed_execution_pending` | 409       | Provider outcome requires verification; inspect the execution UUID in the message and do not retry automatically |
 
 ---
@@ -4315,13 +4316,13 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Streaming:** If the client sends `Accept: text/event-stream` or the upstream responds with `Content-Type: text/event-stream`, NyxID forwards the SSE stream without buffering and strips `content-length`.
 
-**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approved requests proceed; rejection or timeout returns `403 Forbidden`. An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts auto-connected (auto-provisioned, credential-free) services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
+**Transaction Approval:** When the resolved approval policy requires approval and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing grant in grant mode. Otherwise it persists a pending request and **holds the HTTP connection open** until approval, rejection, or timeout. Notification delivery is attempted when configured; an unavailable provider or missing channel never authorizes execution. Review and decide pending requests in `/approvals/history`, using **Refresh** to discover requests created after the page opened. Approval continues the original held request on the same connection, so the caller must not re-send it; rejection, expiry or timeout returns HTTP 403 `approval_failed` (code `7001`). An absent global preference uses **Writes only**: read-class operations proceed without approval, while write and destructive operations require it. Explicit stored true selects **All requests** and false selects **Off**; existing booleans keep their meaning. Lazy notification settings creation preserves the absent preference. The implicit global default exempts auto-connected (auto-provisioned, credential-free) services; explicit per-service and org `ServiceApprovalConfig` policies retain their precedence and existing grant semantics. Direct browser sessions (session cookie auth) bypass approval requirements; explicit Deny rules still refuse execution. Upgrade and drain all serving replicas and participating workers before relying on this contract; see [security rollout readiness](SECURITY_ROLLOUT_READINESS.md).
 
 **Approval controls** apply to authenticated proxy requests.
 
 | Header | Behavior |
 | --- | --- |
-| `X-NyxID-Approval-Mode: async` | An eligible v2 proposal returns `approval_required` with a request ID for same-credential readback at `GET /api/v1/approvals/requests/{id}/status`. |
+| `X-NyxID-Approval-Mode: async` | An eligible v2 proposal returns `approval_required` with a request ID for same-credential readback at `GET /api/v1/approvals/requests/{id}/status`. After approval NyxID sends the retained request itself; never re-send it. Ineligible requests keep the connected wait. |
 | `X-NyxID-Approval-Wait-Seconds` | Supply one decimal integer from 10 through 300 to cap the connected wait and approval expiry from request receipt. The configured approval timeout and any shorter route deadline also apply. Omit the header to use the usual server wait. |
 
 An invalid or repeated budget returns HTTP 400 before approval creation. When
@@ -4331,7 +4332,9 @@ both controls are supplied, an eligible async proposal uses its async deadline.
 
 **Errors:**
 - `1000 bad_request` -- Service is inactive, service is a provider, invalid proxy path, or connection missing credential
-- `1002 forbidden` -- No active connection to this service, or approval was rejected/timed out
+- `1002 forbidden` -- No active connection to this service, or an approval policy Deny rule refused the operation
+- `7000 approval_required` -- An eligible async request or an assistant review needs approval; the request was not held (see Approval controls)
+- `7001 approval_failed` -- Approval was rejected, expired or timed out; the request was not sent
 - `1003 not_found` -- Service does not exist
 
 **Example:**
@@ -8758,7 +8761,7 @@ This prevents authenticated callers from polling approval requests that belong t
 
 Status values: `pending`, `approved`, `rejected`, `expired`.
 
-When status changes to `approved`, the caller can retry the original proxy request (the grant now exists).
+Do not re-send the original request when the status becomes `approved`. A connected request already received its response on its own connection. For a v2 proposal, NyxID sends the approved request itself and this response adds an `execution` field with its state and bounded result; v2 polls with a different credential receive a not-found-shaped response. See [execution permissions](EXECUTION_PERMISSIONS.md#external-requests-and-readback).
 
 **curl:**
 
@@ -9110,7 +9113,15 @@ Aurinko bot deletion returns HTTP 200 with `{"webhook_cleanup":"removed"}` or `{
 
 ### Inbound Triggers
 
-Triggers provide a provider-neutral inbound event relay. Management routes accept a normal user token or agent API key and reject delegated, relay, and service-account tokens.
+Triggers provide a provider-neutral inbound event relay. Every `/api/v1/triggers` route rejects delegated, relay, and service-account tokens. The remaining credential rules depend on the route and the trigger:
+
+| Routes | Credentials |
+|---|---|
+| Create, `GET`/`PATCH`/`DELETE /triggers/{id}`, `rotate-secret`, `rotate-delivery-secret`, `deliveries` and `redeliver` on a webhook-source trigger with `webhook`, `agent` or `notification` delivery | A normal user token or agent API key |
+| The same routes on an automation: a trigger with `source: "schedule"` or `assistant` delivery, including a create or `PATCH` that sets `assistant` delivery | A first-party human session only. `GET /triggers` omits automations for other credentials. Automations belong to a person, so create refuses `target_org_id` |
+| `POST /triggers/preview`, `GET /triggers/setup/{id}`, `GET /triggers/{id}/runs`, `POST /triggers/{id}/run` and `POST /triggers/{id}/runs/{run_id}/cancel`, for every trigger | A first-party human session only |
+
+A first-party human session is an account login from the NyxID web app, mobile app or CLI, with no OAuth client ID, API key or delegation. See [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations) for automation behaviour.
 
 #### Create and manage
 
@@ -9141,18 +9152,27 @@ Prefer bearer or HMAC verification. Query tokens are supported only for senders 
 `delivery` supports:
 
 - `{"type":"webhook","url":"https://receiver.example.com/events"}`. The create/update response includes a separate `delivery_signing_secret` once and `delivery_signing_key_id`; outbound delivery uses the timestamp-bound signature and stable-header contract above.
-- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active NyxID device conversation owned by the trigger owner; events enter the channel-event gateway and its conversation-bound agent routing. This target does not invoke an external application's agent runtime. Use `webhook` when events must reach external infrastructure; it is also the only target with durable cross-replica dedup and the delivery-history/replay contract described below.
+- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active NyxID device conversation owned by the trigger owner; events enter the channel-event gateway and its conversation-bound agent routing. The destination is the callback URL configured on the conversation's assigned agent key; use `webhook` to send to a URL set on the trigger itself. `webhook` is also the only target with the delivery-history/replay contract described below. Dedup differs by target; see [Public ingress](#public-ingress).
 - `{"type":"notification"}`. The envelope is delivered through the owner's configured notification channels.
+- `{"type":"assistant","agent_id":"...","instruction":"..."}` wakes a NyxBot agent as an automation. Its optional fields are described in [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations).
 
-Create returns `trigger`, the one-time inbound `secret`, and optional one-time `delivery_signing_secret` plus `delivery_signing_key_id`. Other routes are:
+Create also accepts the automation fields `source` (`webhook` by default, or `schedule`), `schedule`, `overlap` (`skip` by default, or `queue`) and `watch_id` (the opaque ID of a NyxBot setup link). Trigger responses add `source`, `schedule`, `overlap`, `next_runs`, `next_run_at`, `last_run`, `pause_reason`, and `inbound_url` (webhook-source triggers only).
+
+Create returns `trigger`, the one-time inbound `secret` (webhook-source triggers only), and optional one-time `delivery_signing_secret` plus `delivery_signing_key_id`. Other routes are:
 
 - `GET /api/v1/triggers` and `GET /api/v1/triggers/{id}`
-- `PATCH /api/v1/triggers/{id}` for `label`, `status`, or `delivery`
+- `PATCH /api/v1/triggers/{id}` for `label`, `status`, `delivery`, `schedule`, or `overlap`
 - `DELETE /api/v1/triggers/{id}`
 - `POST /api/v1/triggers/{id}/rotate-secret`
 - `POST /api/v1/triggers/{id}/rotate-delivery-secret` for webhook targets; returns a replacement `delivery_signing_secret` and `key_id` once.
 - `GET /api/v1/triggers/{id}/deliveries?page=1&per_page=20` for metadata-only delivery history, newest first (`per_page` maximum 100).
 - `POST /api/v1/triggers/{id}/deliveries/{event_id}/redeliver` to replay a retained encrypted envelope.
+- `POST /api/v1/triggers/preview` with `{"schedule": ...}` returns a `description` and `next_runs` for a schedule specification.
+- `GET /api/v1/triggers/setup/{id}` returns the owner's pending NyxBot setup-link prefill for an automation form.
+- `POST /api/v1/triggers/{id}/run` admits an immediate test run and returns its run metadata.
+- `GET /api/v1/triggers/{id}/runs` and `POST /api/v1/triggers/{id}/runs/{run_id}/cancel`; see [Automation coordinator completion](#automation-coordinator-completion).
+
+These automation routes are specified in [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations).
 
 Changing a trigger's `delivery` through `PATCH` intentionally mints a replacement delivery secret. Use `rotate-delivery-secret` when only key rotation is intended. Receivers should follow the two-key `X-NyxID-Key-Id` rotation procedure documented above.
 
@@ -9160,8 +9180,11 @@ The CLI adds `nyxid trigger deliveries <id>`, `nyxid trigger redeliver <id> <eve
 
 #### Automation coordinator completion
 
-When coordinator completion is enabled and every serving replica advertises
-`automation:coordinator-completion-v2`, newly admitted assistant runs track
+When coordinator completion is enabled and `automation:coordinator-completion-v2`
+is serving-ready (it is recorded active, immediately on a clean `ready` assessment or
+after 90 seconds of observed support, and every live generation supports it; advisory
+roster warnings do not block it; see [security readiness](SECURITY_ROLLOUT_READINESS.md)),
+newly admitted assistant runs track
 specialist assignments and group handoffs through the coordinator's final reply.
 Existing runs retain their admission protocol. See [schedules and rollout](NYXBOT_SCHEDULES.md)
 for the default-off configuration, bounds and downgrade procedure.
@@ -9174,8 +9197,8 @@ pending. The hard deadline terminates the run with `reason: "coordinator_timeout
 `POST /api/v1/triggers/{id}/runs/{run_id}/cancel` returns the owner's updated run
 metadata with HTTP 200. It cancels an enrolled run and fences its delegated work;
 already completed external actions remain completed. This route requires a
-first-party human session and rejects API keys, delegated tokens, service-account
-tokens and relay tokens. An unrelated waiting run survives ordinary chat Stop.
+first-party human session and rejects API keys, third-party OAuth-client tokens,
+delegated tokens, service-account tokens and relay tokens. An unrelated waiting run survives ordinary chat Stop.
 
 `GET /api/v1/admin/automation-continuations/readiness` requires admin or operator
 access and returns `configured`, fleet `readiness`, `rollback_safe` and
@@ -9209,8 +9232,9 @@ Event identity is taken from `X-NyxID-Event-Id`, then a top-level payload `event
 
 Delivery and dedup semantics depend on the target:
 
-- `webhook`: an atomic `trigger_deliveries` insert provides exactly-once admission and durable dedup across replicas and restarts. NyxID then returns `{"status":"accepted","event_id":"..."}` immediately and performs up to three bounded delivery attempts in the background. A sender retry returns `duplicate` even when delivery failed; use the delivery history and replay endpoint for recovery. Final failure creates a metadata-only audit event.
-- `agent` and `notification`: delivery completes before the ingress response, and the event ID enters a best-effort in-memory dedup cache only after success. Dedup is per process, bounded to the configured cache capacity and a five-minute default window, and does not coordinate replicas. Concurrent or cross-replica duplicates are possible, so senders should retry failures and consumers should remain idempotent.
+- `webhook`: an atomic `trigger_deliveries` insert provides unique admission and durable dedup across replicas and restarts for as long as the delivery record is retained (`TRIGGER_DELIVERY_RETENTION_HOURS`, or 72 hours when retention is `0`); once MongoDB's TTL monitor has removed the expired record, the same event ID is admitted again. NyxID then returns `{"status":"accepted","event_id":"..."}` immediately and performs up to three bounded delivery attempts in the background. A sender retry returns `duplicate` even when delivery failed; use the delivery history and replay endpoint for recovery. Final failure creates a metadata-only audit event.
+- `agent` and `notification`: ingress first takes a claim on the trigger and event ID in a shared MongoDB collection, so it applies across replicas. The claim lasts `CHANNEL_EVENT_DEDUP_TTL_SECS` (300 seconds by default). Delivery completes before the ingress response. On success the claim is committed and the event ID stays deduplicated for another `CHANNEL_EVENT_DEDUP_TTL_SECS`; on failure the claim is released so a retry can deliver. A repeat that arrives while a claim or committed entry is live returns `duplicate`, even if the claimed attempt later fails. Concurrent or cross-replica duplicates are possible, so senders should retry failures and consumers should remain idempotent.
+- `assistant`: ingress takes the same shared claim, then admits the run in one MongoDB transaction under a run ID derived from the trigger and event ID. A repeat returns `duplicate` while the claim or committed entry is live; after that, a repeat whose run is still retained in run history returns `accepted` without a second run or transcript event. Admission therefore does not depend on the claim lasting. See [Automations](NYXBOT_SCHEDULES.md#implementation-and-operations) for run-history retention.
 
 Webhook-target envelopes are encrypted at rest with the configured encryption keys and removed by a database TTL index after `TRIGGER_DELIVERY_RETENTION_HOURS` (72 hours by default). Delivery list responses never contain payloads. Setting retention to `0` stores metadata for the default 72-hour bounded window but no envelope, makes `replay_available` false, and causes redelivery to return `trigger_delivery_record_not_found` (11606). Agent and notification payloads are never persisted.
 
@@ -9310,6 +9334,14 @@ again. With the authoring flag off or fleet readiness blocked, PUT returns
 HTTP 403 `org_agent_access_authoring_unavailable`. The Admin can still read
 the saved lists. See [organization specialist agents](ORG_AGENTS.md).
 
+## Assistant setup handoff presentation
+
+The assistant conversation DTO and client-capability header are defined in the
+[engine API contract](chat/08-nyxagent-engine.md#browser-routes) and
+[session context contract](chat/08-nyxagent-engine.md#session-instructions-and-per-turn-context).
+The [browser handoff and setup contract](chat/05-frontend-ui.md#specialist-setup-handoffs)
+defines the user action and completion flow.
+
 ## Owner NyxBot invocations
 
 These endpoints let a first-party owner account session or access token drive
@@ -9370,6 +9402,63 @@ native `nyxid__list_notifications` tool uses the same authorized previews and
 never marks read. It is available to owner NyxBot threads and NyxBot automation
 turns with the flag enabled. Upgrade all replicas before enabling the flag.
 
+## Remote Machines
+
+Owner routes require a first-party human session; API-key, service-account,
+delegated and relay credentials are rejected. Quote, create, resume and rekey
+also require the `experimental:remote-machines` flag and a ready platform
+configuration (see [ENV.md](ENV.md#remote-machine-runtime-funding-and-bootstrap-verification));
+pause and delete do not. A create, resume or rekey whose exact request was
+already accepted (same idempotency key and body) can be recovered while platform
+probes are unavailable; the flag check still applies.
+
+Create always requires an `Idempotency-Key` and the current policy
+acknowledgements (`policy_version`, `data_policy_version`,
+`acknowledge_shared_environment`). A free-slot create (`free_slot: true`) needs
+nothing more. A paid create or resume additionally requires an accepted
+`quote_id` and `accept_account_balance: true`.
+Request and response fields, profile/rate rules, bounded reads and deletion are
+specified in
+[Remote Machine source recovery and owner read contracts](REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md).
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/remote-machine-entitlement` | Entitlement and advisory billing preflight for a profile. |
+| POST | `/api/v1/remote-machine-quotes` | Quote a new Machine or the resume of an existing one. |
+| GET | `/api/v1/remote-machines` | Owner Machines, cursor-paged; `include_deleted=true` adds retained records. |
+| POST | `/api/v1/remote-machines` | Create a Machine: free slot, or paid from an accepted quote (`Idempotency-Key` required; see above). |
+| GET | `/api/v1/remote-machines/{machine_id}` | Machine detail. |
+| DELETE | `/api/v1/remote-machines/{machine_id}` | Delete the Machine and its workspace (`Idempotency-Key` required). |
+| POST | `/api/v1/remote-machines/{machine_id}/actions` | Owner lifecycle action: `pause`, `resume`, `rekey` or `delete` (`Idempotency-Key` required). |
+| POST | `/api/v1/remote-machines/{machine_id}/rekey` | Fenced owner-authorized credential recovery (`Idempotency-Key` required). |
+| GET | `/api/v1/remote-machines/{machine_id}/events` | Lifecycle events, `(created_at, _id)` seek cursor. |
+| GET | `/api/v1/remote-machines/{machine_id}/operations` | Lifecycle operations for the Machine. |
+| GET | `/api/v1/remote-machine-operations/{operation_id}` | One lifecycle operation. |
+| POST | `/api/v1/remote-machine-operations/{operation_id}/retry-delete` | Retry a failed deletion (`Idempotency-Key` required). |
+| GET | `/api/v1/remote-machines/{machine_id}/billing` | Runtime billing detail (optional `run_id`, `offset`). |
+| GET | `/api/v1/remote-machines/{machine_id}/billing/runs` | Funded runtime runs. |
+| GET | `/api/v1/remote-machines/{machine_id}/usage` | Storage usage observations. |
+| GET | `/api/v1/remote-machines/{machine_id}/jobs` | External execution jobs on this Machine. |
+| GET | `/api/v1/remote-machines/{machine_id}/jobs/{job_id}/output` | Job output. |
+| POST | `/api/v1/remote-machines/{machine_id}/jobs/{job_id}/cancel` | Cancel a job. |
+| GET | `/api/v1/remote-machines/{machine_id}/grants` | External execution grants for this Machine. |
+| POST | `/api/v1/remote-machines/{machine_id}/confirmations/{id}/decision` | Decide a pending execution confirmation bound to this Machine. |
+
+Admin routes require a first-party human admin or operator for reads and an
+admin for writes; runtime rate writes also require the flag for the acting admin.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/v1/admin/remote-machines/platform` | Platform configuration, controller health and investigations. |
+| GET | `/api/v1/admin/billing/runtime` | Runtime rates and their synchronization state. |
+| POST | `/api/v1/admin/billing/runtime/rates` | Stage a runtime rate. |
+| POST | `/api/v1/admin/billing/runtime/rates/{id}/resync` | Retry rate synchronization. |
+| POST | `/api/v1/admin/billing/runtime/rates/{id}/retire` | Retire a rate. |
+
+The managed workload calls `POST /api/v1/machines/managed/prepare` and
+`POST /api/v1/machines/managed/bootstrap` without a user credential; they accept
+only workload authentication (72 KiB body limit).
+
 ## NyxBot CMA Sandbox management scope
 
 `GET /api/v1/assistant/nyxagent/sandboxes` lists only Sandboxes with a
@@ -9380,6 +9469,32 @@ human owner and the CMA feature flag. The response includes `sandboxes`,
 and connection aliases; `limit` is `1`. Creating or logging into a Sandbox
 directly in CMA does not make it a NyxID-created resource.
 
+All management paths below use the prefix `/api/v1/assistant/nyxagent`; `{id}`
+is NyxID's local reference ID. Handlers require a first-party human, an active
+personal owner and `assistant:cma-sandboxes`. Delegated `account:read` is denied
+for every read, stream and upgrade path. Accepted lifecycle commands return
+`202` while pending; acknowledgement alone is not completion.
+
+| Method | Path | Behavior |
+| --- | --- | --- |
+| GET | `/sandboxes` | NyxID-created resources and account allocation status |
+| GET | `/sandboxes/{id}` | Live detail with durable unknown/pending facts |
+| PATCH | `/sandboxes/{id}` | Local label change bound to generation |
+| POST | `/sandboxes/{id}/commands` | `pause` or `revive`, bound to generation and one stable `Idempotency-Key`; `recover_creation`, bound to generation |
+| DELETE | `/sandboxes/{id}` | Retirement intent bound to generation and one stable `Idempotency-Key`; release only after exact retirement observation |
+| GET | `/sandboxes/{id}/events` | Bounded Sandbox lifecycle events |
+| GET | `/cma-agents/{id}` | Exact Agent detail and safe profile |
+| GET | `/cma-agents/{id}/transcript` | Authoritative conversation turns and compatible flat messages |
+| GET | `/cma-agents/{id}/events/snapshot` | Agent event snapshot; the `cursor` query maps to CMA's `page_cursor` |
+| GET | `/cma-agents/{id}/events` | Agent SSE; resume with `after_cursor` or `Last-Event-ID` |
+| GET | `/cma-agents/{id}/responses/{response_id}` | Exact response bound to that Agent |
+| GET | `/cma-agents/{id}/responses/{response_id}/events` | Response SSE; resume with a numeric `after_cursor` or `Last-Event-ID` (CMA's `starting_after`) |
+| GET | `/cma-agents/{id}/desktop` | Availability/descriptor for the exact Agent |
+| GET | `/cma-agents/{id}/desktop/ws` | Authorized RFB WebSocket relay |
+
+`GET /api/v1/assistant/nyxagent/cma-sessions` is the read-only session-card
+projection described in [CMA session status cards](chat/12-cma-sessions.md).
+
 The same scope applies to Sandbox detail, label, lifecycle and event routes,
 Agent parent bindings, `nyxid__list_cma_resources`, and cached assistant context.
 External `discovered`, `claimed`, or `conflict` references are hidden and cannot
@@ -9387,8 +9502,8 @@ be used to manage an external Sandbox. There are no Sandbox `claim` or
 `unregistered` management endpoints. Raw CMA catalog proxy reads retain CMA's
 own response and may list other resources in the upstream account.
 
-The Agent summaries in `nyxid__list_cma_resources` and the cached CMA context
-include nullable `last_known_response_id`, taken from an existing observed
+The Agent summaries in `nyxid__list_cma_resources` include nullable
+`last_known_response_id`, taken from an existing observed
 submission. This lets another NyxBot chat locate that work without copying the
 source chat's transcript. It is a historical lookup hint, not the current task
 or permission to control it. Read the live Response and verify its conversation,
@@ -10008,7 +10123,7 @@ units, retry semantics and rollout requirements are in [CMA billing](CMA_BILLING
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/api/v1/billing/sandboxes/quotes` | Quote the existing catalog service prices for an owner and full Sandbox allocation. |
+| POST | `/api/v1/billing/sandboxes/quotes` | Quote the effective CMA rate card, synchronized for the configured plan, for an owner and full Sandbox allocation. |
 | POST | `/api/v1/billing/sandboxes/windows` | Atomically reserve at most 300 seconds across all applicable resource metrics. |
 | GET | `/api/v1/billing/sandboxes/cursors/{sandbox_id}` | Recover the durable ordered allocation-evidence checkpoint. |
 | GET | `/api/v1/billing/sandboxes/receipts/{request_id}` | Recover an already committed producer request, including during an admission/provider outage. |

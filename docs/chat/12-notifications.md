@@ -331,15 +331,22 @@ Push consent and payload kind use that original kind. Source access, labels and
 preview follow the latest activity, so merging chat and event replies cannot
 invent or omit a channel visibility check. Group mentions retain their original
 mention title using the current group label.
-The worker rechecks preferences, visibility and the
-existing FCM/APNs configuration. It permits at most one push per person/source
+The worker rechecks preferences, visibility, the account
+push switch (`push_enabled`), at least one registered device and the existing
+FCM/APNs configuration. It permits at most one push per person/source
 in ten minutes and at most thirty pushes per person/hour, across replicas.
 
 The row's durable send barrier is:
 
 ```text
-pending → sending → sent | failed | unknown | skipped
+pending → sending → sent | failed | unknown | retrying
+retrying → sending            (once retry_at is due)
+pending | retrying → skipped | failed   (decided before any send)
 ```
+
+`skipped` records a deliberate non-send (for example `preference_off` at row
+creation, `already_seen`, `source_rate` or `hourly_limit`); `failed` at claim
+means the retry budget is exhausted.
 
 A dedicated notification task runs every 15 seconds, including decision-expiry
 resolution. It does not run inline with the shared assistant sweep, so provider
@@ -386,8 +393,9 @@ retry deadline and attempt budget before it can authorize another send.
 No provider prose or preview enters delivery diagnostics.
 
 The body uses the current source's title and at most 200 preview characters.
-Data includes the kind, `notification_id` and canonical `deeplink`. An automation
-whose own destination is `deliver_to: notification` suppresses the feed's push,
+Data includes `type` and `kind` (both the push kind), `notification_id`,
+canonical `deeplink`, and `conversation_id` when the row's source records one.
+An automation whose own destination is `deliver_to: notification` suppresses the feed's push,
 including its problem result; the run still appears in the feed. Existing pause
 notice push must likewise retain only one external delivery.
 

@@ -1,5 +1,7 @@
 # Remote Machine：由 Sandbox 生命周期驱动删除与权限收敛方案
 
+> **Status:** Historical — implemented in code and the Manager RBAC manifests. Current spec: [Remote Machine deletion recovery](../REMOTE_MACHINE_DELETE_RECOVERY.md).
+
 日期：2026-10-20
 
 状态：待实施的设计方案。本文记录本次讨论结论，不表示代码、RBAC 或线上环境已完成调整。实施前现行行为仍以 `docs/REMOTE_MACHINE_DELETE_RECOVERY.md` 为准；本方案不能作为提前撤销权限的依据。

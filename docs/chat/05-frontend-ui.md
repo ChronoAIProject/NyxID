@@ -144,10 +144,11 @@ setting up a channel bot, or connecting a service. Version 1 contains exactly
 The task must stand alone, include only relevant user-supplied context, and
 exclude credentials, private memory, and unrelated history.
 
-Only the first top-level artifact in an eligible, completed direct-user reply
-renders an active **Continue with NyxBot** card. The server marks private,
-personal specialist threads eligible; shared/organization specialists,
-guests, groups, channels, automations and other turn origins remain inert.
+Only the first top-level artifact in a completed assistant reply with
+`origin: user`, no `via`, and server `handoff_eligible: true` renders an active
+**Continue with NyxBot** card. Thread eligibility is defined in the
+[engine's conversation DTO contract](08-nyxagent-engine.md#browser-routes). Other replies
+render the artifact as inert code.
 The entire proposed task is visible and the CTA says it will be sent as the
 person's message. Known credential patterns (NyxID, bearer, Telegram, OpenAI,
 GitHub, Slack, JWT and PEM, among others) are refused. This screening does not
@@ -167,12 +168,10 @@ serialize duplicate clicks across tabs where available. Receipts are local to
 this browser (at most 200); they are not a server-wide or cross-device
 exactly-once guarantee.
 
-Handoff instructions are stable for the private specialist thread, so changing
-turn origins does not reset live model context. The current turn advertises
-presentation support through `X-NyxID-Chat-Capabilities: nyxbot-handoff-v1`;
-only that fact varies in turn context. Unsupported clients are not instructed
-to generate the card. Native mobile/CLI history may show a historical browser
-artifact as inert fenced text; active handoff rendering is a browser feature.
+The browser advertises support through the engine's
+[current-turn capability contract](08-nyxagent-engine.md#session-instructions-and-per-turn-context).
+Active handoff rendering is a browser feature; native mobile/CLI history renders
+browser artifacts as inert fenced text.
 
 ## Platform setup and navigation over chat
 
@@ -199,16 +198,15 @@ never synthesizes a continuation into that chat.
 
 Same-origin links are classified through an explicit allowlist. Modified clicks
 retain browser behavior. External, credentialed, fragmented and unsupported
-queries are excluded. Bot dialogs inherit app theme and accessibility settings;
-Escape/outside dismissal is blocked so a stray click cannot discard a one-time
-setup result. Embedded setup suppresses bot-management links and callback
-navigation. Standalone links keep their existing behavior. Telegram and other
-provider authorization steps retain their external flow.
+queries are excluded. Bot dialogs inherit app theme and accessibility settings.
+Hosted bot dialogs and the Agent Key one-time result block Escape/outside
+dismissal. Hosted bot embedding follows the
+[bot-link contract](../CHANNEL_BOT_RELAY.md#bot-link-implementation-and-compatibility).
+Telegram and other provider authorization steps retain their external flow.
 
-Advanced Studio links use their existing full app pages rather than newly
-invented modal forms. This change establishes the shared setup/completion path
-for the concrete supported journeys above; it does not add an executable
-artifact for every account-management operation.
+Advanced Studio links use their existing full app pages. The supported journeys
+above use the shared setup/completion path; other account-management operations
+retain their existing controls.
 
 ## Conversation selection
 

@@ -127,14 +127,24 @@ for refusal codes and the `login --agent-key` unattended path.
 
 ## notification
 
-Control how approval requests reach you.
+Set your global approval preference and the account-wide notification switches.
 
 ```bash
 nyxid notification settings
-nyxid notification update --approval-email true --approval-push false --approval-telegram true
+nyxid notification update --approval-mode writes_only   # or: all, off
+nyxid notification update --approval-push false --approval-telegram true
 nyxid notification telegram-link        # link a Telegram account
 nyxid notification telegram-disconnect
 ```
+
+Each `update` flag writes one account setting:
+
+| Flag | Settings field | Effect |
+|---|---|---|
+| `--approval-mode <mode>` | `global_approval_mode` | Global approval preference: `writes_only` (the default; approval for writes and destructive operations only), `all` or `off`. |
+| `--approval-push <bool>` | `push_enabled` | Account-wide push switch. `false` stops every push to your devices, not only approvals (NyxBot Notifications included). `true` requires a registered device. |
+| `--approval-telegram <bool>` | `telegram_enabled` | Account-wide switch for the NyxID Telegram bot's notices, not only approvals. `true` requires a linked Telegram account. |
+| `--approval-email <bool>` | `approval_required` | Legacy global approval toggle, kept for compatibility: `true` selects **All requests**, `false` selects **Off**. It does not send email; NyxID has no email notification channel. Cannot be combined with `--approval-mode`. |
 
 ## approval
 
@@ -147,8 +157,8 @@ nyxid approval approve <id>
 nyxid approval deny <id> [--reason <text>]
 nyxid approval grants                    # standing time-based grants
 nyxid approval revoke-grant <id> [--yes]
-nyxid approval enable                    # require approval globally
-nyxid approval disable [--yes]
+nyxid approval enable                    # global preference: All requests
+nyxid approval disable [--yes]           # global preference: Off
 nyxid approval service-configs           # per-service policy list
 nyxid approval set-config <id> --require-approval true --approval-mode grant
 ```

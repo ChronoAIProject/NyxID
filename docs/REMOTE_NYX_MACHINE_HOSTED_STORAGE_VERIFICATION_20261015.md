@@ -1,5 +1,7 @@
 # Hosted image and optional StorageClass verification — 2026-10-15
 
+> **Status:** Historical — point-in-time verification evidence that cites local artifacts not kept in the repository. Current spec: [Remote Machine source recovery and owner read contracts](REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md).
+
 This record covers the owner-authorized optional `NYXID_REMOTE_MACHINE_STORAGE_CLASS` and Dockerfile relocation revision. Results below apply to this revision only; earlier single-current/Heca measurements are not current results for the renamed image. The final current-source image and all scoped local checks have passed; environment and test-double boundaries are recorded below.
 
 ## Acceptance contract

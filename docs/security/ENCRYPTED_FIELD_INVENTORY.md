@@ -369,12 +369,21 @@ this API or prove every encrypted field is context-bound.
 
 ### Generated Sandbox files (#2037)
 
-`async_service_operation_artifacts.data_encrypted` uses contextual v3 envelope AAD:
+Write mode and stored format are separate. New writes of both generated-file
+fields below use legacy envelope encryption without a version marker unless
+`CONTEXTUAL_RECORD_WRITES=true` (enabling it requires
+`CONTEXTUAL_RECORD_WRITERS_DRAINED=true`); contextual writes store the formats
+below and set `secret_context_versions.data_encrypted` to `3`. Reads follow each
+row's version marker. See
+[Generated Sandbox files](../chat/10-uploads.md#generated-sandbox-files).
+
+In contextual format, `async_service_operation_artifacts.data_encrypted` uses
+contextual v3 envelope AAD:
 collection, pending record ID and owner, then `data_encrypted`, conversation,
 originating turn, watch, operation and source-result identity. Only pending rows
 retain ciphertext; materialized/expired/discarded/missing rows clear it and their
-context-version map. `assistant_attachments.data_encrypted` with generated origin
-uses the existing attachment/owner/conversation/completion-turn AAD plus originating
+context-version map. In contextual format, `assistant_attachments.data_encrypted`
+with generated origin uses the existing attachment/owner/conversation/completion-turn AAD plus originating
 turn, watch, operation and source-result identity. Legacy attachment AAD is unchanged.
 The selected metadata summary reuses `assistant_async_operations.result_encrypted`
 and its existing adapter. Delivery/content-series metadata contains no ciphertext;
