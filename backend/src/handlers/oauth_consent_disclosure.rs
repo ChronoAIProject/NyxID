@@ -263,8 +263,8 @@ mod tests {
             .await
             .unwrap();
         let state = test_utils::test_app_state(db);
-        let (public, _) = crate::routes::build_router_with_state(state.clone());
-        let app = public.with_state(state);
+        let (public, private) = crate::routes::build_router_with_state(state.clone());
+        let app = public.merge(private).with_state(state);
         for cookie in [None, Some(format!("nyx_session={}", session.session_token))] {
             let mut request = Request::post("/api/v1/user-services/consent-disclosure")
                 .header(header::CONTENT_TYPE, "application/json");
