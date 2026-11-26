@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { useKeys } from "@/hooks/use-keys";
 import {
   Card,
@@ -14,14 +14,17 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Check, Loader2, ShieldCheck, X } from "lucide-react";
-import { cn } from "@/lib/utils";
 import type { ApiKey, AllowedServiceInfo } from "@/types/api";
 import {
-  FIRST_PROXY_CALL_SUCCEEDED_EVENT,
-  VERIFY_KEY_LOADING_END_EVENT,
-  VERIFY_KEY_LOADING_START_EVENT,
+  beginProxyVerification,
+  recordFirstProxyCallSucceeded,
 } from "@/hooks/use-proxy-onboarding";
-import { probeAgentKey, type ProbeOutcome } from "@/lib/proxy-probe";
+import {
+  probeAgentKey,
+  proxyCallSucceeded,
+  type ProbeOutcome,
+} from "@/lib/proxy-probe";
+import { useAuthStore } from "@/stores/auth-store";
 
 /**
  * Sentinel slug guaranteed never to match a real user service. Used for
@@ -41,32 +44,14 @@ interface ProbeResult {
   readonly ok: boolean;
 }
 
-export function VerifyKeyCard({
-  apiKey,
-}: {
-  readonly apiKey: ApiKey;
-}) {
+export function VerifyKeyCard({ apiKey }: { readonly apiKey: ApiKey }) {
   useUiTranslation();
   const [pastedKey, setPastedKey] = useState("");
   const [status, setStatus] = useState<ResultStatus>("idle");
-  const [results, setResults] = useState<
-    readonly ProbeResult[]
-  >([]);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [results, setResults] = useState<readonly ProbeResult[]>([]);
   const [overrideSlug, setOverrideSlug] = useState<string | null>(null);
-  const firedSuccessRef = useRef(false);
-  const loadingStartDispatchedRef = useRef(false);
 
   const { data: userServices } = useKeys();
-
-  useEffect(() => {
-    return () => {
-      if (loadingStartDispatchedRef.current) {
-        window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_END_EVENT));
-        loadingStartDispatchedRef.current = false;
-      }
-    };
-  }, []);
 
   // Build the candidate list of slugs the user can probe against. For a key
   // with blanket access, all the user's connected services are candidates;
@@ -85,9 +70,7 @@ export function VerifyKeyCard({
       }));
     }
     const allowedSet = new Set(
-      (apiKey.allowed_services ?? []).map(
-        (a: AllowedServiceInfo) => a.slug,
-      ),
+      (apiKey.allowed_services ?? []).map((a: AllowedServiceInfo) => a.slug),
     );
     return activeUserServices
       .filter(
@@ -129,13 +112,11 @@ export function VerifyKeyCard({
 
   async function runTest() {
     if (!allowedSlug || !pastedKey.trim()) return;
+    const auth = useAuthStore.getState();
+    const userId = auth.isAuthenticated ? (auth.user?.id ?? null) : null;
+    const finishVerification = beginProxyVerification(userId);
     setStatus("pending");
     setResults([]);
-    setErrorMessage(null);
-    if (firedSuccessRef.current === false) {
-      window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_START_EVENT));
-      loadingStartDispatchedRef.current = true;
-    }
 
     async function probeSide(
       expected: "allowed" | "denied",
@@ -144,55 +125,35 @@ export function VerifyKeyCard({
     ): Promise<ProbeResult> {
       const outcome = await probeAgentKey(slug, {
         bearerToken: pastedKey.trim(),
+        expectedKeyId: apiKey.id,
       });
-      // Twin-probe verdict — "allowed" side must have the agent-id
-      // header (NyxID accepted the key + scope for this slug). "Denied"
-      // side must NOT have it (NyxID rejected either at scope or slug
-      // resolution — either is a valid enforcement outcome).
+      if (expected === "allowed" && proxyCallSucceeded(outcome)) {
+        // Provider success is independent of the sentinel's verdict.
+        recordFirstProxyCallSucceeded(userId);
+      }
+      // Keep key/scope evidence separate from provider success.
       const ok =
-        expected === "allowed"
-          ? outcome.agentKeyValid
-          : !outcome.agentKeyValid;
+        expected === "allowed" ? outcome.agentKeyValid : outcome.gatewayDenied;
       return { slug, label, expected, outcome, ok };
     }
 
-    const [allowedRes, deniedRes] = await Promise.all([
-      probeSide("allowed", allowedSlug, allowedLabel),
-      probeSide("denied", deniedSlug, deniedLabel),
-    ]);
+    try {
+      const [allowedRes, deniedRes] = await Promise.all([
+        probeSide("allowed", allowedSlug, allowedLabel),
+        probeSide("denied", deniedSlug, deniedLabel),
+      ]);
 
-    const nextResults = [allowedRes, deniedRes];
-    setResults(nextResults);
+      const current = useAuthStore.getState();
+      if (
+        (current.isAuthenticated ? (current.user?.id ?? null) : null) !== userId
+      )
+        return;
+      const nextResults = [allowedRes, deniedRes];
+      setResults(nextResults);
 
-    const bothOk = allowedRes.ok && deniedRes.ok;
-    if (bothOk) {
-      setStatus("success");
-      if (!firedSuccessRef.current) {
-        firedSuccessRef.current = true;
-        window.dispatchEvent(
-          new CustomEvent(FIRST_PROXY_CALL_SUCCEEDED_EVENT),
-        );
-      }
-    } else {
-      setStatus("failure");
-      const failing = nextResults.filter((r) => !r.ok);
-      const explanations = failing.map((r) => {
-        if (r.expected === "allowed") {
-          // The allowed probe failed => Agent Key or scope broken.
-          // Use the shared diagnostic (proxy-probe already classifies
-          // the NyxID-layer rejection: 401/403/404/network/etc.).
-          return `Allowed probe against "${r.slug}" failed. ${r.outcome.diagnostic}`;
-        }
-        // The denied probe should NOT have succeeded — if it did, the
-        // gateway isn't enforcing scope (real problem, flag it).
-        return `Denied probe against "${r.slug}" unexpectedly succeeded (HTTP ${String(r.outcome.httpStatus ?? "—")}). The gateway may be leaking access — flag this.`;
-      });
-      setErrorMessage(explanations.join(" "));
-    }
-
-    if (loadingStartDispatchedRef.current) {
-      window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_END_EVENT));
-      loadingStartDispatchedRef.current = false;
+      setStatus(allowedRes.ok && deniedRes.ok ? "success" : "failure");
+    } finally {
+      finishVerification();
     }
   }
 
@@ -203,14 +164,17 @@ export function VerifyKeyCard({
           <ShieldCheck className="h-4 w-4 text-primary-text" />
           <CardTitle className="text-15">{translateUi("Verify key")}</CardTitle>
         </div>
-        <CardDescription>{translateUi("Prove this key is scoped correctly — it should reach an allowed service and be blocked from a denied one.")}</CardDescription>
+        <CardDescription>
+          {translateUi(
+            "Check that this key reaches an allowed service and NyxID rejects a deliberately invalid slug.",
+          )}
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="space-y-1.5">
-          <Label
-            htmlFor="verify-key-paste"
-            className="text-foreground"
-          >{translateUi("Agent key")}</Label>
+          <Label htmlFor="verify-key-paste" className="text-foreground">
+            {translateUi("Agent key")}
+          </Label>
           <Input
             id="verify-key-paste"
             type="password"
@@ -221,15 +185,18 @@ export function VerifyKeyCard({
             onChange={(e) => setPastedKey(e.target.value)}
             disabled={status === "pending"}
           />
-          <p className="text-13 text-muted-foreground">{translateUi("Paste the agent key you copied when you created it. NyxID does not store this paste — it's only used for this test.")}</p>
+          <p className="text-13 text-muted-foreground">
+            {translateUi(
+              "Paste the agent key you copied when you created it. NyxID does not store this paste — it's only used for this test.",
+            )}
+          </p>
         </div>
 
         {candidateSlugs.length > 1 && (
           <div className="space-y-1.5">
-            <Label
-              htmlFor="verify-key-slug-picker"
-              className="text-foreground"
-            >{translateUi("Test against")}</Label>
+            <Label htmlFor="verify-key-slug-picker" className="text-foreground">
+              {translateUi("Test against")}
+            </Label>
             <select
               id="verify-key-slug-picker"
               value={allowedSlug ?? ""}
@@ -243,7 +210,11 @@ export function VerifyKeyCard({
                 </option>
               ))}
             </select>
-            <p className="text-13 text-muted-foreground">{translateUi("Pick a service whose downstream credential is fully configured. The test will probe this slug (should return 2xx) and a deliberately-invalid slug (should return 4xx).")}</p>
+            <p className="text-13 text-muted-foreground">
+              {translateUi(
+                "Pick a service whose credential is fully configured. Activation requires a successful proxied 2xx; the invalid slug should return a NyxID 403/404.",
+              )}
+            </p>
           </div>
         )}
 
@@ -253,14 +224,20 @@ export function VerifyKeyCard({
             onClick={runTest}
             disabled={!canRun}
             isLoading={status === "pending"}
-          >{translateUi("Test key")}</Button>
+          >
+            {translateUi("Test key")}
+          </Button>
           {status === "success" && (
             <Badge variant="success">
-              <Check className="mr-1 h-3 w-3" />{translateUi("Scope verified")}</Badge>
+              <Check className="mr-1 h-3 w-3" />
+              {translateUi("Gateway checks passed")}
+            </Badge>
           )}
           {status === "failure" && (
             <Badge variant="destructive">
-              <X className="mr-1 h-3 w-3" />{translateUi("Unexpected result")}</Badge>
+              <X className="mr-1 h-3 w-3" />
+              {translateUi("Unexpected result")}
+            </Badge>
           )}
         </div>
 
@@ -269,47 +246,62 @@ export function VerifyKeyCard({
             {results.map((r) => (
               <li
                 key={`${r.expected}-${r.slug}`}
-                className="flex items-center justify-between rounded-lg border border-border/50 px-3 py-2"
+                className="space-y-1 rounded-lg border border-border/50 px-3 py-2"
               >
-                <span className="inline-flex items-center gap-2 text-14">
-                  {r.ok ? (
-                    <Check className="h-3.5 w-3.5 text-success" />
-                  ) : (
-                    <X className="h-3.5 w-3.5 text-destructive" />
-                  )}
-                  <span className="font-mono text-foreground">
-                    {r.outcome.httpStatus ?? "—"}
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-2 text-14">
+                    {r.ok ? (
+                      <Check className="h-3.5 w-3.5 text-success" />
+                    ) : (
+                      <X className="h-3.5 w-3.5 text-destructive" />
+                    )}
+                    <span className="font-mono text-foreground">
+                      {r.outcome.httpStatus ?? "—"}
+                    </span>
+                    <span className="text-muted-foreground">{r.slug}</span>
                   </span>
-                  <span className="text-muted-foreground">{r.slug}</span>
-                </span>
-                <span
-                  className={cn(
-                    "type-secondary-emphasis ",
-                    r.expected === "allowed"
-                      ? "text-success/80"
-                      : "text-destructive/80",
+                  <span className="type-secondary-emphasis text-muted-foreground">
+                    {r.expected === "allowed"
+                      ? r.ok
+                        ? translateUi("allowed")
+                        : translateUi("Access unverified")
+                      : r.ok
+                        ? translateUi("denied (expected)")
+                        : translateUi("Denial unverified")}
+                  </span>
+                </div>
+                <p className="text-13 text-muted-foreground">
+                  {r.expected === "denied" && !r.ok && (
+                    <>
+                      {translateUi(
+                        "Gateway rejection was not verified. Expected a NyxID 403/404 error.",
+                      )}{" "}
+                    </>
                   )}
-                >
-                  {r.expected === "allowed" ? translateUi("allowed") : translateUi("denied (expected)")}
-                </span>
+                  {r.expected === "denied" && r.ok
+                    ? translateUi(
+                        "NyxID rejected the invalid slug. This does not test exclusion of another existing service.",
+                      )
+                    : r.outcome.diagnostic}
+                </p>
               </li>
             ))}
           </ul>
         )}
 
-        {errorMessage && (
-          <p className="text-13 text-destructive">
-            {errorMessage}
-          </p>
-        )}
-
         {allowedSlug === null && (
-          <p className="text-13 text-muted-foreground">{translateUi("Connect a service first so this key has something allowed to call.")}</p>
+          <p className="text-13 text-muted-foreground">
+            {translateUi(
+              "Connect a service first so this key has something allowed to call.",
+            )}
+          </p>
         )}
 
         {status === "pending" && (
           <p className="inline-flex items-center gap-1.5 text-13 text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" />{translateUi("Probing…")}</p>
+            <Loader2 className="h-3 w-3 animate-spin" />
+            {translateUi("Probing…")}
+          </p>
         )}
       </CardContent>
     </Card>

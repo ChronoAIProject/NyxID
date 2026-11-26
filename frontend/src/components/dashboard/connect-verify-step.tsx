@@ -8,13 +8,14 @@ import { CopyableField } from "@/components/shared/copyable-field";
 import { StepHeader } from "@/components/dashboard/step-header";
 import { useCreateApiKey } from "@/hooks/use-api-keys";
 import {
-  FIRST_PROXY_CALL_SUCCEEDED_EVENT,
-  VERIFY_KEY_LOADING_END_EVENT,
-  VERIFY_KEY_LOADING_START_EVENT,
+  beginProxyVerification,
+  recordFirstProxyCallSucceeded,
 } from "@/hooks/use-proxy-onboarding";
+import { useAuthStore } from "@/stores/auth-store";
 import {
   isTestable,
   probeAgentKey,
+  proxyCallSucceeded,
   type ProbeOutcome,
 } from "@/lib/proxy-probe";
 import type { ApiKeyCreateResponse } from "@/types/api";
@@ -32,10 +33,8 @@ const OPENAI_SHAPED_HINTS =
  * automatically. test comes after key is created"). Nothing fires in
  * the background.
  *
- * `probe_success` means "the Agent Key is valid" — the downstream may
- * have returned any HTTP status (see proxy-probe.ts). `probe_failed`
- * means NyxID itself rejected the request (bad key, scope violation,
- * unknown slug, network error).
+ * `probe_success` requires a successful proxied 2xx. Other outcomes
+ * retain their diagnostic and offer a retry without minting another key.
  */
 export type Phase =
   | "connected"
@@ -78,10 +77,9 @@ function proxyBaseUrl(slug: string): string {
  *   key_ready      → Agent Key panel + I'll wire / Test Agent Key
  *   probing        → panel stays visible + inline spinner
  *   probe_success  → panel + env snippet + probe diagnostic + Done
- *                    (success is defined by proxy-probe classification —
- *                    "agent key valid", not "downstream returned 2xx")
+ *                    (a successful proxied 2xx)
  *   probe_failed   → panel + inline error + Retry test / Done
- *                    (only reached when NyxID itself rejected the request)
+ *                    (gateway, network or provider failure)
  */
 export function ConnectVerifyStep({
   createdKey,
@@ -123,38 +121,27 @@ export function ConnectVerifyStep({
 
   async function triggerProbe() {
     if (!agentKey) return;
+    const auth = useAuthStore.getState();
+    const userId = auth.isAuthenticated ? auth.user?.id ?? null : null;
+    const finishVerification = beginProxyVerification(userId);
     setPhase("probing");
     setProbe(null);
-    window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_START_EVENT));
 
-    const outcome = await probeAgentKey(createdKey.slug, {
-      bearerToken: agentKey.full_key,
-    });
-
-    window.dispatchEvent(new CustomEvent(VERIFY_KEY_LOADING_END_EVENT));
-    setProbe(outcome);
-
-    // Success = the Agent Key + scope + route all resolved on NyxID's
-    // side. A downstream 401/404/500 is diagnostic, not blocking, so
-    // we still transition to probe_success and let the diagnostic
-    // copy explain what happened downstream. The one thing that
-    // fails the test is a NyxID-layer rejection (bad key, scope
-    // violation, network failure) — those land in probe_failed.
-    //
-    // FIRST_PROXY_CALL_SUCCEEDED_EVENT is gated on
-    // `downstreamStatus === "ok"` — a downstream 401/404 means the
-    // Agent Key works but the setup isn't end-to-end yet, and we
-    // shouldn't tick the dashboard "first proxy call succeeded"
-    // checklist item on a broken stored credential. Matches the
-    // VerifyKeyCard twin-probe's strictness (allowed AND denied
-    // both hold).
-    if (outcome.agentKeyValid) {
-      setPhase("probe_success");
-      if (outcome.downstreamStatus === "ok") {
-        window.dispatchEvent(new CustomEvent(FIRST_PROXY_CALL_SUCCEEDED_EVENT));
+    try {
+      const outcome = await probeAgentKey(createdKey.slug, {
+        bearerToken: agentKey.full_key,
+        expectedKeyId: agentKey.id,
+      });
+      if (proxyCallSucceeded(outcome)) {
+        // Persist even after navigation, using the initiating account.
+        recordFirstProxyCallSucceeded(userId);
       }
-    } else {
-      setPhase("probe_failed");
+      const current = useAuthStore.getState();
+      if ((current.isAuthenticated ? current.user?.id ?? null : null) !== userId) return;
+      setProbe(outcome);
+      setPhase(proxyCallSucceeded(outcome) ? "probe_success" : "probe_failed");
+    } finally {
+      finishVerification();
     }
   }
 

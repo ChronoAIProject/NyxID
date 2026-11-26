@@ -7,6 +7,7 @@ import {
   probeAgentKey,
   probePathForSlug,
   recipeForSlug,
+  proxyCallSucceeded,
 } from "./proxy-probe";
 
 /** Build a Response whose headers include X-NyxID-Agent-Id. */
@@ -307,6 +308,217 @@ describe("classifyProbe — network / timeout", () => {
   });
 });
 
+describe("activation and gateway evidence", () => {
+  it.each([200, 201, 204, 299, 301, 302, 400, 401, 403, 404, 429, 500, 503])(
+    "keeps proxied HTTP %s separate from activation",
+    (status) => {
+      const response = new Response(null, {
+        status,
+        headers: { "x-nyxid-agent-id": "ag-123" },
+      });
+      const outcome = classifyProbe("api-github", response, status);
+      expect(outcome.agentKeyValid).toBe(true);
+      expect(outcome.gatewayDenied).toBe(false);
+      expect(proxyCallSucceeded(outcome)).toBe(status >= 200 && status < 300);
+    },
+  );
+
+  it("rejects headerless 200, blank evidence and responses reached by following redirects", () => {
+    for (const agentId of [null, "", "   "]) {
+      const response = new Response(null, {
+        status: 200,
+        headers: agentId === null ? {} : { "x-nyxid-agent-id": agentId },
+      });
+      expect(
+        proxyCallSucceeded(classifyProbe("api-github", response, 200)),
+      ).toBe(false);
+    }
+    const response = nyxidResponse(200);
+    Object.defineProperty(response, "redirected", { value: true });
+    expect(proxyCallSucceeded(classifyProbe("api-github", response, 200))).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    [403, { error: "forbidden", error_code: 1002 }, true],
+    [403, { error: "api_key_scope_forbidden", error_code: 9000 }, true],
+    [404, { error: "not_found", error_code: 1003 }, true],
+    [401, { error: "unauthorized", error_code: 1001 }, false],
+    [500, { error: "forbidden", error_code: 1002 }, false],
+    [403, null, false],
+    [404, { error: "not_found" }, false],
+    [403, { error: "forbidden", error_code: 1003 }, false],
+  ])("requires a genuine gateway denial (%s, %j)", (status, body, expected) => {
+    expect(
+      classifyProbe("sentinel", rejectionResponse(status), status, body)
+        .gatewayDenied,
+    ).toBe(expected);
+    expect(
+      classifyProbe("sentinel", nyxidResponse(status), status, body)
+        .gatewayDenied,
+    ).toBe(false);
+  });
+});
+
+describe("pending authentication diagnostic", () => {
+  const envelope = {
+    error: "bad_request",
+    error_code: 1000,
+    message: "Bad request: API key is pending_auth",
+  };
+
+  it("recognizes the exact pinned gateway envelope through fetch", async () => {
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(Response.json(envelope, { status: 400 }));
+    const outcome = await probeAgentKey("api-github-2", {
+      expectedKeyId: "ag-123",
+      bearerToken: "secret-not-for-diagnostics",
+      fetchImpl,
+    });
+    expect(outcome.agentKeyValid).toBe(false);
+    expect(outcome.diagnostic).toMatch(/Continue authentication/);
+    expect(outcome.diagnostic).toMatch(/test again/);
+    expect(outcome.diagnostic).not.toMatch(
+      /devtools|secret-not-for-diagnostics/,
+    );
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "/api/v1/proxy/s/api-github-2/user",
+      expect.objectContaining({ redirect: "manual" }),
+    );
+  });
+
+  it.each([
+    { status: 400, body: { ...envelope, error: "upstream_error" } },
+    { status: 400, body: { ...envelope, error_code: "1000" } },
+    { status: 400, body: { ...envelope, message: "API key is pending_auth" } },
+    {
+      status: 400,
+      body: { ...envelope, message: "Bad request: API key is failed" },
+    },
+    { status: 500, body: envelope },
+    { status: 400, body: null },
+  ])("preserves other errors: %j", ({ status, body }) => {
+    const outcome = classifyProbe(
+      "api-github",
+      rejectionResponse(status),
+      status,
+      body,
+    );
+    expect(outcome.diagnostic).not.toMatch(/Continue authentication/);
+    expect(outcome.diagnostic).not.toContain("API key is failed");
+  });
+
+  it("preserves a proxied provider's response even with an identical body", () => {
+    const outcome = classifyProbe(
+      "api-github",
+      nyxidResponse(400),
+      400,
+      envelope,
+    );
+    expect(outcome.agentKeyValid).toBe(true);
+    expect(outcome.diagnostic).not.toMatch(/Continue authentication/);
+    expect(proxyCallSucceeded(outcome)).toBe(false);
+  });
+
+  it("handles non-JSON error bodies without exposing them", async () => {
+    const outcome = await probeAgentKey("api-github", {
+      expectedKeyId: "ag-123",
+      bearerToken: "secret",
+      fetchImpl: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response("<html>secret</html>", { status: 400 }),
+        ),
+    });
+    expect(outcome.diagnostic).toMatch(/Unexpected NyxID response/);
+    expect(outcome.diagnostic).not.toContain("secret");
+  });
+});
+
+describe("bounded gateway diagnostics and selected key", () => {
+  it("rejects a different returned key ID without exposing IDs", async () => {
+    const outcome = await probeAgentKey("api-github", {
+      bearerToken: "secret-b",
+      expectedKeyId: "synthetic-key-a",
+      fetchImpl: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(nyxidResponse(200, "synthetic-key-b")),
+    });
+    expect(outcome.agentKeyValid).toBe(false);
+    expect(proxyCallSucceeded(outcome)).toBe(false);
+    expect(outcome.diagnostic).toMatch(/does not match the selected Agent Key/);
+    expect(outcome.diagnostic).not.toMatch(/synthetic-key|secret-b/);
+  });
+
+  it.each([400, 402, 403, 404])(
+    "never reads a marked provider HTTP %s body",
+    async (status) => {
+      const response = Response.json(
+        {
+          error: "bad_request",
+          error_code: 1000,
+          message: "Bad request: API key is pending_auth",
+        },
+        {
+          status,
+          headers: { "x-nyxid-agent-id": "ag-123" },
+        },
+      );
+      const read = vi.spyOn(response.body!, "getReader");
+      const clone = vi.spyOn(response, "clone");
+      const outcome = await probeAgentKey("api-github", {
+        expectedKeyId: "ag-123",
+        bearerToken: "secret",
+        fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(response),
+      });
+      expect(read).not.toHaveBeenCalled();
+      expect(clone).not.toHaveBeenCalled();
+      expect(outcome.agentKeyValid).toBe(true);
+      expect(outcome.diagnostic).not.toMatch(/Continue authentication/);
+    },
+  );
+
+  it("cancels an oversized gateway envelope and retains the HTTP failure", async () => {
+    const cancel = vi.fn();
+    const response = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(4097));
+        },
+        cancel,
+      }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+    const outcome = await probeAgentKey("api-github", {
+      expectedKeyId: "ag-123",
+      bearerToken: "secret",
+      fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(response),
+    });
+    expect(cancel).toHaveBeenCalled();
+    expect(outcome.httpStatus).toBe(400);
+    expect(outcome.diagnostic).not.toMatch(/Continue authentication/);
+  });
+
+  it("bounds a stalled gateway body by the probe timeout", async () => {
+    const cancel = vi.fn();
+    const response = new Response(new ReadableStream({ cancel }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+    const outcome = await probeAgentKey("api-github", {
+      expectedKeyId: "ag-123",
+      bearerToken: "secret",
+      timeoutMs: 10,
+      fetchImpl: vi.fn<typeof fetch>().mockResolvedValue(response),
+    });
+    expect(cancel).toHaveBeenCalled();
+    expect(outcome.httpStatus).toBe(400);
+    expect(outcome.diagnostic).not.toMatch(/Continue authentication/);
+  });
+});
+
 describe("classifyProbe — NyxID rejects (no X-NyxID-Agent-Id header)", () => {
   it("401 → agent key invalid, diagnostic mentions revoked/scope/rotate", () => {
     const outcome = classifyProbe("openai", rejectionResponse(401), 401);
@@ -423,6 +635,7 @@ describe("probeAgentKey — fetch integration", () => {
       .mockResolvedValue(nyxidResponse(200));
 
     await probeAgentKey("llm-openai", {
+      expectedKeyId: "ag-123",
       bearerToken: "nyxid_ag_test",
       fetchImpl: fetchMock,
     });
@@ -448,6 +661,7 @@ describe("probeAgentKey — fetch integration", () => {
       .mockResolvedValue(nyxidResponse(200));
 
     await probeAgentKey("custom", {
+      expectedKeyId: "ag-123",
       bearerToken: "tok",
       probePath: "custom/path",
       fetchImpl: fetchMock,
@@ -464,6 +678,7 @@ describe("probeAgentKey — fetch integration", () => {
       .mockRejectedValue(new TypeError("network down"));
 
     const outcome = await probeAgentKey("openai", {
+      expectedKeyId: "ag-123",
       bearerToken: "tok",
       fetchImpl: fetchMock,
     });
@@ -482,6 +697,7 @@ describe("probeAgentKey — fetch integration", () => {
       .mockResolvedValue(nyxidResponse(200));
 
     await probeAgentKey("openai", {
+      expectedKeyId: "ag-123",
       bearerToken: "tok",
       fetchImpl: fetchMock,
     });
@@ -511,6 +727,7 @@ describe("probeAgentKey — fetch integration", () => {
     );
 
     const outcome = await probeAgentKey("openai", {
+      expectedKeyId: "ag-123",
       bearerToken: "tok",
       fetchImpl: fetchMock,
       timeoutMs: 10,
@@ -524,9 +741,8 @@ describe("probeAgentKey — fetch integration", () => {
 
 describe("probeAgentKey credits exhaustion", () => {
   it("reports NyxID's 402 insufficient_credits inline without opening the dialog", async () => {
-    const { useCreditsDenialStore } = await import(
-      "@/stores/credits-denial-store"
-    );
+    const { useCreditsDenialStore } =
+      await import("@/stores/credits-denial-store");
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -534,10 +750,11 @@ describe("probeAgentKey credits exhaustion", () => {
           error_code: 11300,
           message: "Insufficient credits",
         }),
-        { status: 402, headers: { "x-nyxid-agent-id": "ag-1" } },
+        { status: 402, headers: { "content-type": "application/json" } },
       ),
     );
     const outcome = await probeAgentKey("llm-openai", {
+      expectedKeyId: "ag-123",
       bearerToken: "tok",
       fetchImpl: fetchMock,
     });

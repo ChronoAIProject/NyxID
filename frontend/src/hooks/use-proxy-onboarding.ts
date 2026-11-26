@@ -1,94 +1,100 @@
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
+import { useAuthStore } from "@/stores/auth-store";
 
-/**
- * localStorage key for the "make first proxy call" activation step.
- * Mirrors the brief's `nyxid.first_proxy_call_succeeded`. Set once the
- * user runs the verify-key card from the api-key detail page and the
- * brokered proxy test returns a green 200 / red 4xx pair.
- *
- * Kept separate from the existing per-user onboarding takeover state in
- * `hooks/use-onboarding.ts` (which gates a first-run wizard over the
- * dashboard chrome). This key is a lightweight client-side flag that
- * surfaces the activation aha on the dashboard checklist — it does not
- * ride through `/users/me` or block any route.
- */
-export const FIRST_PROXY_CALL_SUCCEEDED_KEY = "nyxid.first_proxy_call_succeeded";
-
-/**
- * Custom event dispatched by the VerifyKeyCard after a successful brokered
- * proxy test (200 allowed + 4xx denied). The dashboard listens for it and
- * flips the onboarding checklist's "make first proxy call" step to done.
- */
+/** Prefix only. Never adopt the legacy unowned value at this exact key. */
+export const FIRST_PROXY_CALL_SUCCEEDED_KEY =
+  "nyxid.first_proxy_call_succeeded";
 export const FIRST_PROXY_CALL_SUCCEEDED_EVENT =
   "nyxid:first-proxy-call-succeeded";
-
-/**
- * Lifecycle events dispatched by the VerifyKeyCard while the brokered test
- * is in flight. The dashboard's checklist CTA shows a spinner-disabled
- * state while loading so the user sees "test running" instead of a stale
- * CTA when they return.
- */
 export const VERIFY_KEY_LOADING_START_EVENT = "nyxid:verify-key-loading-start";
 export const VERIFY_KEY_LOADING_END_EVENT = "nyxid:verify-key-loading-end";
 
-function readStoredFlag(): boolean {
-  if (typeof window === "undefined") return false;
-  try {
-    return localStorage.getItem(FIRST_PROXY_CALL_SUCCEEDED_KEY) === "1";
-  } catch {
-    return false;
-  }
+const sessionSuccesses = new Set<string>();
+const pendingProbes = new Map<string, number>();
+
+function storageKey(userId: string): string {
+  return `${FIRST_PROXY_CALL_SUCCEEDED_KEY}:${encodeURIComponent(userId)}`;
 }
 
-function writeStoredFlag(value: boolean): void {
-  if (typeof window === "undefined") return;
+function readStoredFlag(userId: string | null): boolean {
+  if (!userId || typeof window === "undefined") return false;
   try {
-    localStorage.setItem(FIRST_PROXY_CALL_SUCCEEDED_KEY, value ? "1" : "0");
-  } catch {
-    // localStorage may be blocked (private mode / storage quota). Swallow —
-    // the in-memory state still flips via the event listener.
-  }
-}
-
-/**
- * Tracks whether the user has ever completed the "make first proxy call"
- * activation step. Persists to localStorage so the flag survives reloads.
- * Also surfaces a transient `verifyKeyLoading` flag — driven by custom
- * events emitted from the VerifyKeyCard — so the checklist's primary CTA
- * can show a spinner while the in-flight test runs on another route.
- */
-export function useProxyOnboarding() {
-  const [firstProxyCallSucceeded, setFirstProxyCallSucceeded] = useState<boolean>(
-    readStoredFlag,
-  );
-  const [verifyKeyLoading, setVerifyKeyLoading] = useState(false);
-
-  useEffect(() => {
-    function onSucceeded() {
-      writeStoredFlag(true);
-      setFirstProxyCallSucceeded(true);
-    }
-    function onLoadingStart() {
-      setVerifyKeyLoading(true);
-    }
-    function onLoadingEnd() {
-      setVerifyKeyLoading(false);
-    }
-    window.addEventListener(
-      FIRST_PROXY_CALL_SUCCEEDED_EVENT,
-      onSucceeded,
+    return (
+      localStorage.getItem(storageKey(userId)) === "1" ||
+      sessionSuccesses.has(userId)
     );
-    window.addEventListener(VERIFY_KEY_LOADING_START_EVENT, onLoadingStart);
-    window.addEventListener(VERIFY_KEY_LOADING_END_EVENT, onLoadingEnd);
-    return () => {
-      window.removeEventListener(
-        FIRST_PROXY_CALL_SUCCEEDED_EVENT,
-        onSucceeded,
-      );
-      window.removeEventListener(VERIFY_KEY_LOADING_START_EVENT, onLoadingStart);
-      window.removeEventListener(VERIFY_KEY_LOADING_END_EVENT, onLoadingEnd);
-    };
-  }, []);
+  } catch {
+    return sessionSuccesses.has(userId);
+  }
+}
 
+/** Call at completion with the identity captured BEFORE starting the request. */
+export function recordFirstProxyCallSucceeded(userId: string | null): void {
+  if (!userId || typeof window === "undefined") return;
+  try {
+    localStorage.setItem(storageKey(userId), "1");
+  } catch {
+    // Storage can be blocked; retain a session-only result for this owner.
+    sessionSuccesses.add(userId);
+  }
+  window.dispatchEvent(
+    new CustomEvent(FIRST_PROXY_CALL_SUCCEEDED_EVENT, {
+      detail: { userId },
+    }),
+  );
+}
+
+/** Loading outlives route unmounts; concurrent probes finish independently. */
+export function beginProxyVerification(userId: string | null): () => void {
+  if (!userId || typeof window === "undefined") return () => {};
+  pendingProbes.set(userId, (pendingProbes.get(userId) ?? 0) + 1);
+  window.dispatchEvent(
+    new CustomEvent(VERIFY_KEY_LOADING_START_EVENT, {
+      detail: { userId },
+    }),
+  );
+  let finished = false;
+  return () => {
+    if (finished) return;
+    finished = true;
+    const remaining = (pendingProbes.get(userId) ?? 1) - 1;
+    if (remaining > 0) pendingProbes.set(userId, remaining);
+    else pendingProbes.delete(userId);
+    window.dispatchEvent(
+      new CustomEvent(VERIFY_KEY_LOADING_END_EVENT, {
+        detail: { userId },
+      }),
+    );
+  };
+}
+
+function subscribe(onChange: () => void): () => void {
+  const events = [
+    FIRST_PROXY_CALL_SUCCEEDED_EVENT,
+    VERIFY_KEY_LOADING_START_EVENT,
+    VERIFY_KEY_LOADING_END_EVENT,
+    "storage",
+  ];
+  for (const event of events) window.addEventListener(event, onChange);
+  return () => {
+    for (const event of events) window.removeEventListener(event, onChange);
+  };
+}
+
+/** Dashboard consumes persisted results; it does not own their recording. */
+export function useProxyOnboarding() {
+  const userId = useAuthStore((s) =>
+    s.isAuthenticated ? (s.user?.id ?? null) : null,
+  );
+  const firstProxyCallSucceeded = useSyncExternalStore(
+    subscribe,
+    () => readStoredFlag(userId),
+    () => false,
+  );
+  const verifyKeyLoading = useSyncExternalStore(
+    subscribe,
+    () => userId !== null && (pendingProbes.get(userId) ?? 0) > 0,
+    () => false,
+  );
   return { firstProxyCallSucceeded, verifyKeyLoading } as const;
 }

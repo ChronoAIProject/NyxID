@@ -1,4 +1,5 @@
 import { isInsufficientCreditsHttp } from "@/lib/credits-denial";
+import { translateUi } from "@/i18n/use-ui-translation";
 
 /**
  * Shared "verify AI service" probe used by the aha ConnectVerifyStep
@@ -24,10 +25,9 @@ import { isInsufficientCreditsHttp } from "@/lib/credits-denial";
  *   2. The scope check passed (this key is allowed to call this slug)
  *   3. NyxID resolved the service + proxied through to downstream
  *
- * So "Test Agent Key" should classify success by that header, NOT by
- * whether downstream returned 2xx. The downstream response body/
- * status is diagnostic (did the stored credential actually work?)
- * but it does not affect the agent-key verdict.
+ * This evidence is separate from activation: a successful first proxy
+ * call also requires a downstream 2xx. Provider errors retain key/scope
+ * evidence and diagnostics without completing activation.
  *
  * ## Probe path
  *
@@ -39,6 +39,8 @@ import { isInsufficientCreditsHttp } from "@/lib/credits-denial";
 
 /** Max wait per probe. Keeps the UI from stalling on a dead downstream. */
 export const PROBE_TIMEOUT_MS = 8000;
+/** Gateway diagnostics are small; never buffer arbitrary provider responses. */
+const MAX_GATEWAY_ENVELOPE_BYTES = 4096;
 
 /**
  * Per-provider probe metadata. Known providers with a cheap, well-known
@@ -56,7 +58,7 @@ export interface ProbeRecipe {
   readonly path: string;
   /**
    * When set, downstream must return one of these to count as `ok`.
-   * When omitted, any 2xx/3xx counts as `ok`. Useful for providers
+   * When omitted, any 2xx counts as `ok`. Useful for providers
    * whose "hello" endpoint always returns 200 (e.g. Discord Bot
    * v10/users/@me returns 200 with body {id, username, ...}).
    */
@@ -257,11 +259,13 @@ export interface ProbeOutcome {
    */
   readonly reachedNyxid: boolean;
   /**
-   * The truth signal — `X-NyxID-Agent-Id` header present on response.
-   * When true, the Agent Key is provably valid + scoped correctly +
-   * NyxID reached downstream. When false, one of those three failed.
+   * Key/scope evidence: nonempty `X-NyxID-Agent-Id` matches the expected
+   * selected key, and the response did not follow a redirect. Provider
+   * success is evaluated separately.
    */
   readonly agentKeyValid: boolean;
+  /** A headerless 403/404 with NyxID's matching error symbol and code. */
+  readonly gatewayDenied: boolean;
   /** Downstream classification. Meaningful only when agentKeyValid. */
   readonly downstreamStatus: DownstreamStatus;
   /** One-sentence human diagnostic explaining the outcome. */
@@ -270,6 +274,8 @@ export interface ProbeOutcome {
 
 interface ProbeOptions {
   readonly bearerToken: string;
+  /** Verify the selected key, not another key whose secret was pasted. */
+  readonly expectedKeyId: string;
   /** Override the default per-slug probe path. */
   readonly probePath?: string;
   /** Test seam — inject a fetch impl. */
@@ -307,6 +313,7 @@ export async function probeAgentKey(
     response = await doFetch(url, {
       method: "GET",
       credentials: "omit",
+      redirect: "manual",
       headers: {
         Authorization: `Bearer ${opts.bearerToken}`,
         "Content-Type": "application/json",
@@ -314,11 +321,14 @@ export async function probeAgentKey(
       signal: controller.signal,
     });
     httpStatus = response.status;
-    if (httpStatus === 402) {
-      body = await response
-        .clone()
-        .json()
-        .catch(() => null);
+    if (
+      !response.redirected &&
+      !response.headers.get("x-nyxid-agent-id")?.trim() &&
+      [400, 402, 403, 404].includes(httpStatus) &&
+      response.headers.get("content-type")?.split(";")[0]?.trim() ===
+        "application/json"
+    ) {
+      body = await readGatewayEnvelope(response, controller.signal);
     }
   } catch {
     // Network error / abort / CORS — response stays null.
@@ -326,7 +336,39 @@ export async function probeAgentKey(
     window.clearTimeout(timer);
   }
 
-  return classifyProbe(slug, response, httpStatus, body);
+  return classifyProbe(slug, response, httpStatus, body, opts.expectedKeyId);
+}
+
+async function readGatewayEnvelope(
+  response: Response,
+  signal: AbortSignal,
+): Promise<unknown> {
+  if (!response.body || signal.aborted) return null;
+  const reader = response.body.getReader();
+  const cancel = () => {
+    void reader.cancel().catch(() => {});
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  const decoder = new TextDecoder();
+  let length = 0;
+  let text = "";
+  try {
+    while (!signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done)
+        return signal.aborted ? null : JSON.parse(text + decoder.decode());
+      length += value.byteLength;
+      if (length > MAX_GATEWAY_ENVELOPE_BYTES) return null;
+      text += decoder.decode(value, { stream: true });
+    }
+  } catch {
+    // Invalid, interrupted or oversized envelopes remain an ordinary HTTP error.
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    cancel();
+    reader.releaseLock();
+  }
+  return null;
 }
 
 /**
@@ -349,15 +391,18 @@ export function classifyProbe(
   response: Response | null,
   httpStatus: number | null,
   body: unknown = null,
+  expectedKeyId?: string,
 ): ProbeOutcome {
   if (!response || httpStatus === null) {
     return {
       httpStatus: null,
       reachedNyxid: false,
       agentKeyValid: false,
+      gatewayDenied: false,
       downstreamStatus: "unexpected",
-      diagnostic:
+      diagnostic: translateUi(
         "The probe timed out, was blocked by the browser, or lost network. Retry, or check the browser devtools network tab.",
+      ),
     };
   }
 
@@ -366,22 +411,30 @@ export function classifyProbe(
   // no value; `Headers.has()` returns true for that. We want the
   // truth signal to be the actual agent id string, so require length.
   // Header lookup is case-insensitive per WHATWG fetch spec.
-  if (isNyxidCreditsEnvelope(httpStatus, body)) {
+  if (
+    !response.headers.get("x-nyxid-agent-id")?.trim() &&
+    isNyxidCreditsEnvelope(httpStatus, body)
+  ) {
     // The gate may refuse before scope checks, so this proves nothing about
     // the key's reach; report it as not verified rather than as valid.
     return {
       httpStatus,
       reachedNyxid: true,
       agentKeyValid: false,
+      gatewayDenied: false,
       downstreamStatus: "credits_exhausted",
-      diagnostic:
+      diagnostic: translateUi(
         "The account this key bills to is out of credits, so NyxID didn't run the test request. Test again once credits are added.",
+      ),
     };
   }
 
   const agentIdHeader = response.headers.get("x-nyxid-agent-id");
   const agentKeyValid =
-    typeof agentIdHeader === "string" && agentIdHeader.length > 0;
+    !response.redirected &&
+    typeof agentIdHeader === "string" &&
+    agentIdHeader.trim().length > 0 &&
+    (expectedKeyId === undefined || agentIdHeader === expectedKeyId);
   const reachedNyxid = true;
 
   if (!agentKeyValid) {
@@ -389,8 +442,31 @@ export function classifyProbe(
       httpStatus,
       reachedNyxid,
       agentKeyValid: false,
+      gatewayDenied:
+        !response.redirected &&
+        !agentIdHeader?.trim() &&
+        (isGatewayEnvelope(httpStatus, body, 403, "forbidden", 1002) ||
+          isGatewayEnvelope(
+            httpStatus,
+            body,
+            403,
+            "api_key_scope_forbidden",
+            9000,
+          ) ||
+          isGatewayEnvelope(httpStatus, body, 404, "not_found", 1003)),
       downstreamStatus: "unexpected",
-      diagnostic: diagnoseNyxidRejection(httpStatus, slug),
+      diagnostic:
+        agentIdHeader?.trim() &&
+        expectedKeyId !== undefined &&
+        agentIdHeader !== expectedKeyId
+          ? translateUi(
+              "The response does not match the selected Agent Key. Check that you are using this key's full secret, then test again. You can also open the matching Agent Key's detail page.",
+            )
+          : isPendingAuthentication(httpStatus, body)
+            ? translateUi(
+                "This service is waiting for authentication. Open its detail page in AI Services, choose Continue authentication, and finish signing in with the provider. Then return here and test again.",
+              )
+            : diagnoseNyxidRejection(httpStatus, slug),
     };
   }
 
@@ -399,13 +475,46 @@ export function classifyProbe(
     httpStatus,
     reachedNyxid,
     agentKeyValid: true,
+    gatewayDenied: false,
     downstreamStatus,
     diagnostic: diagnoseDownstream(downstreamStatus, httpStatus),
   };
 }
 
+function isGatewayEnvelope(
+  status: number,
+  body: unknown,
+  expectedStatus: number,
+  error: string,
+  errorCode: number,
+): boolean {
+  if (status !== expectedStatus || !body || typeof body !== "object")
+    return false;
+  const envelope = body as Record<string, unknown>;
+  return envelope.error === error && envelope.error_code === errorCode;
+}
+
+function isPendingAuthentication(status: number, body: unknown): boolean {
+  return (
+    isGatewayEnvelope(status, body, 400, "bad_request", 1000) &&
+    (body as Record<string, unknown>).message ===
+      "Bad request: API key is pending_auth"
+  );
+}
+
+/** Key/scope evidence alone cannot complete the first-call checklist. */
+export function proxyCallSucceeded(outcome: ProbeOutcome): boolean {
+  return (
+    outcome.agentKeyValid &&
+    outcome.httpStatus !== null &&
+    outcome.httpStatus >= 200 &&
+    outcome.httpStatus < 300 &&
+    outcome.downstreamStatus === "ok"
+  );
+}
+
 function classifyDownstream(status: number): DownstreamStatus {
-  if (status >= 200 && status < 400) return "ok";
+  if (status >= 200 && status < 300) return "ok";
   if (status === 401 || status === 403) return "auth_rejected";
   if (status === 404) return "not_found";
   if (status >= 500) return "server_error";
@@ -414,15 +523,26 @@ function classifyDownstream(status: number): DownstreamStatus {
 
 function diagnoseNyxidRejection(status: number, slug: string): string {
   if (status === 401) {
-    return "NyxID rejected the Agent Key. The key may be revoked, expired, or missing the `proxy` scope. Rotate the key and try again.";
+    return translateUi(
+      "NyxID rejected the Agent Key. The key may be revoked, expired, or missing the `proxy` scope. Rotate the key and try again.",
+    );
   }
   if (status === 403) {
-    return `NyxID rejected the request as out-of-scope. This Agent Key isn't allowed to call \`${slug}\` — add the service to the key's allowlist, or use a key with \`allow_all_services\`.`;
+    return translateUi(
+      "NyxID rejected the request as out-of-scope. This Agent Key isn't allowed to call `{{slug}}` — add the service to the key's allowlist, or use a key with `allow_all_services`.",
+      { slug },
+    );
   }
   if (status === 404) {
-    return `NyxID doesn't know the slug \`${slug}\`. Was the service deleted, or is the slug spelled differently in your setup?`;
+    return translateUi(
+      "NyxID doesn't know the slug `{{slug}}`. Was the service deleted, or is the slug spelled differently in your setup?",
+      { slug },
+    );
   }
-  return `Unexpected NyxID response (HTTP ${String(status)}). This shouldn't happen — check the browser devtools network tab for the response body.`;
+  return translateUi(
+    "Unexpected NyxID response (HTTP {{status}}). This shouldn't happen — check the browser devtools network tab for the response body.",
+    { status },
+  );
 }
 
 function diagnoseDownstream(
@@ -431,15 +551,30 @@ function diagnoseDownstream(
 ): string {
   switch (status) {
     case "ok":
-      return `End-to-end verified (HTTP ${String(httpStatus)}). NyxID accepted your Agent Key and the downstream returned success. Copy the Agent Key + Base URL above into your AI tool.`;
+      return translateUi(
+        "End-to-end verified (HTTP {{status}}). NyxID accepted your Agent Key and the downstream returned success. Use this Agent Key with the service's NyxID proxy URL in your AI tool.",
+        { status: httpStatus },
+      );
     case "auth_rejected":
-      return `Your Agent Key works (proxied through NyxID). The downstream rejected the stored credential (HTTP ${String(httpStatus)}) — reconnect the service, or update the credential from /keys.`;
+      return translateUi(
+        "Your Agent Key works (proxied through NyxID). The downstream rejected the stored credential (HTTP {{status}}) — reconnect the service, or update the credential from /keys.",
+        { status: httpStatus },
+      );
     case "not_found":
-      return `Your Agent Key works (proxied through NyxID). The downstream returned HTTP ${String(httpStatus)} on the probe path — this is normal for services without a suitable status endpoint, and does not mean the key is broken.`;
+      return translateUi(
+        "Your Agent Key works (proxied through NyxID). The downstream returned HTTP {{status}} on the probe path. This does not mean the key is broken, but a successful service call is still unverified. Check the service endpoint and test again.",
+        { status: httpStatus },
+      );
     case "server_error":
-      return `Your Agent Key works (proxied through NyxID). The downstream is having issues (HTTP ${String(httpStatus)}). Retry in a minute.`;
+      return translateUi(
+        "Your Agent Key works (proxied through NyxID). The downstream is having issues (HTTP {{status}}). Retry in a minute.",
+        { status: httpStatus },
+      );
     case "unexpected":
     case "credits_exhausted":
-      return `Your Agent Key works (proxied through NyxID). The downstream returned HTTP ${String(httpStatus)} — inspect the request in your AI tool to confirm the intended call succeeds.`;
+      return translateUi(
+        "Your Agent Key works (proxied through NyxID). The downstream returned HTTP {{status}} — inspect the request in your AI tool to confirm the intended call succeeds.",
+        { status: httpStatus },
+      );
   }
 }

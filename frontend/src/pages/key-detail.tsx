@@ -1,6 +1,7 @@
 import { CredentialCheck } from "@/components/assistant/credential-check";
 import { credentialVerificationMeta } from "@/lib/credential-verification";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { recipeForSlug } from "@/lib/proxy-probe";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -1447,6 +1448,9 @@ function ApiUsageSection({
   useUiTranslation();
   const proxyUrl = `${window.location.origin}/api/v1/proxy/s/${slug}`;
   const catalogSlug = catalogServiceSlug ?? catalogEntry?.slug ?? slug;
+  const githubRecipe = /^api-github(?:-pat)?(?:-\d+)?$/.test(catalogSlug)
+    ? recipeForSlug(catalogSlug)
+    : null;
   const slugText = serviceText([slug, catalogSlug]);
   const metadataText = serviceText([
     slug,
@@ -1464,15 +1468,17 @@ function ApiUsageSection({
   const genericExamplePath = showGenericEndpointExample
     ? genericEndpointPathFor(metadataText)
     : null;
-  const examplePath = showGenericEndpointExample
-    ? genericExamplePath
-    : llmExamplePath;
+  const examplePath = githubRecipe
+    ? `/${githubRecipe.path}`
+    : showGenericEndpointExample
+      ? genericExamplePath
+      : llmExamplePath;
   const exampleUrl = examplePath ? `${proxyUrl}${examplePath}` : null;
   const modelExample = llmDetected
     ? exampleModelForSlug(slugText)
     : { model: "gpt-4o", needsProviderModelNote: false };
   const requestBody =
-    showGenericEndpointExample || !exampleUrl
+    githubRecipe || showGenericEndpointExample || !exampleUrl
       ? null
       : JSON.stringify({
           model: modelExample.model,
@@ -1617,6 +1623,7 @@ function ApiUsageSection({
         {apiKeyExample && (
           <div>
             <p className="mb-1.5 type-secondary-emphasis text-muted-foreground">{translateUi("Example (with API key)")}</p>
+            <p className="mb-1.5 text-13 text-muted-foreground">{translateUi("Before running the copied command, replace the masked preview or nyx_... placeholder in X-API-Key with your full Agent Key saved at creation. The preview cannot authenticate.")}</p>
             {modelExample.needsProviderModelNote && requestBody && (
               <p className="mb-1.5 text-13 text-muted-foreground">{translateUi("Replace")}{" "}
                 <code className="rounded bg-background px-1">gpt-4o</code>{translateUi(" with your provider's model.")}</p>

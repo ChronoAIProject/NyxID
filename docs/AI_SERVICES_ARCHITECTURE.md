@@ -746,6 +746,45 @@ for false/absent flags.
 
 ## Adding a Service: User Flows
 
+Web connection completion leads to the optional Agent Key creation and verification
+step. OAuth and device-code authorization complete credential setup; they do not
+count as a successful proxied call. Verification uses the selected connection's
+actual slug, including repeat-connect suffixes, and the shared provider probe
+recipe. GitHub API Usage examples use that recipe's read-only `GET /user` request.
+Other providers retain their existing examples and base-relative paths.
+
+The verification UI distinguishes Agent Key/scope evidence from provider success.
+A nonempty `X-NyxID-Agent-Id` matching the selected or newly minted key's ID on
+a response that did not follow a redirect proves that NyxID accepted that key
+and resolved the route. A different key's header produces secret-free wrong-key
+guidance and cannot verify the selected key or complete activation. Provider errors
+retain this evidence and show their diagnostic with a retry action. Activation requires this
+evidence plus a successful downstream 2xx response. A denied-leg verdict requires
+a headerless HTTP 403 `forbidden`/1002 or `api_key_scope_forbidden`/9000,
+or 404 `not_found`/1003 NyxID error envelope;
+network failures, other statuses and provider responses are inconclusive. The
+deliberately nonexistent sentinel checks gateway rejection, not exclusion of
+another existing service from the key's allowlist.
+
+Both verification entry points persist activation when the allowed call succeeds,
+independently of the denied leg and whether Dashboard is mounted. The browser flag
+is keyed by the signed-in user who started the call. Late completions retain that
+owner and cannot complete another account's checklist. Dashboard reads only the
+current user's flag; the legacy unowned flag is not adopted. The flag survives
+navigation and reload in the same browser. If browser storage is unavailable,
+completion remains visible for the current page session. Loading is transient and
+scoped to the initiating user.
+
+A headerless HTTP 400 NyxID `bad_request`/1000 envelope with the exact message
+`Bad request: API key is pending_auth` directs the user to continue authentication
+on the service detail page, then retest. Provider responses and other errors keep
+their diagnostics. Diagnostics are localized, including interpolated statuses and
+slugs. Only unmarked JSON responses at eligible gateway-error statuses are read,
+within 4 KiB and the probe timeout; provider bodies are not read. The UI never
+displays raw response bodies or stored secrets. API Usage states that copied
+commands require replacing the masked preview or placeholder with the full Agent
+Key saved at creation.
+
 ```mermaid
 flowchart TD
     START["User wants to add an AI service"]
