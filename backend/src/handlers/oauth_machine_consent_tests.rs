@@ -253,6 +253,11 @@ async fn machine_oauth_management_status_follows_signed_client_journey() {
         .db
         .collection::<mongodb::bson::Document>("oauth_clients");
     let consents = f.state.db.collection::<Consent>("consents");
+    let control = consents
+        .find_one(doc! {"_id": &control.id})
+        .await
+        .unwrap()
+        .unwrap();
 
     let mut authorize = url::form_urlencoded::Serializer::new(String::new());
     authorize.extend_pairs([
