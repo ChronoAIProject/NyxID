@@ -1618,6 +1618,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             restart_admission: None,
             execution_attempt: None,
             group_reply_in_settlement: false,
+            channel_guest: None,
             platform_model_context: None,
             automation_work: None,
             artifact_watch_id: None,

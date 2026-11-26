@@ -20,6 +20,7 @@ pub(super) fn respond(
     headers: HeaderMap,
     request: Value,
     idempotency: &str,
+    checked: crate::services::platform_bot_authority::PersonalRouteCheck,
 ) -> futures::future::BoxFuture<'static, Response> {
     Box::pin(respond_impl(
         state,
@@ -27,6 +28,7 @@ pub(super) fn respond(
         headers,
         request,
         idempotency.to_owned(),
+        checked,
     ))
 }
 
@@ -36,6 +38,7 @@ async fn respond_impl(
     headers: HeaderMap,
     request: Value,
     idempotency: String,
+    checked: crate::services::platform_bot_authority::PersonalRouteCheck,
 ) -> Response {
     // CMA retries only this exact refusal as proven pre-admission. A generic
     // 503 is an uncertain submission and must never be used for preparation.
@@ -47,7 +50,7 @@ async fn respond_impl(
         )
             .into_response(), "conversation_not_ready");
     }
-    match Box::pin(accept(&state, &row, &request, &idempotency)).await {
+    match Box::pin(accept(&state, &row, &request, &idempotency, &checked)).await {
         Ok(stored) => stream(state, row, headers, stored.response_id, None),
         Err(error) => {
             let code = match &error {
@@ -69,6 +72,7 @@ async fn accept(
     row: &NyxbotChannel,
     request: &Value,
     idempotency: &str,
+    checked: &crate::services::platform_bot_authority::PersonalRouteCheck,
 ) -> AppResult<StoredResponse> {
     if !source::ready(row) {
         return Err(AppError::OAuthAuthorityUnavailable);
@@ -102,8 +106,12 @@ async fn accept(
         row.gateway_source.as_ref(),
         Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
     ) {
-        let bot =
-            crate::services::channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+        let bot = crate::services::platform_bot_authority::bot_with(
+            &state.db,
+            &row.channel_bot_id,
+            Some(checked),
+        )
+        .await?;
         let config = crate::services::whatsapp_native::load(&state.db, &bot)
             .await?
             .ok_or_else(|| AppError::Forbidden("native_whatsapp_identity_unavailable".into()))?;
@@ -148,6 +156,12 @@ async fn accept(
         None
     } else {
         claim_message(state, row, activity).await?
+    };
+    use crate::services::channel_guest_access::HostedAdmission;
+    let guest_admission = if claim.is_some() {
+        HostedAdmission::from_selection(checked.guest_mode(&state.db).await)
+    } else {
+        HostedAdmission::Legacy
     };
     let now = Utc::now();
     let event_key = dispatch_identity::native_event(&response_id);
@@ -311,7 +325,13 @@ async fn accept(
                     .session(&mut *session).await?;
                 if committed.matched_count!=1 {return Err(AppError::Conflict("Native admission changed".into()));}
             }
-            db.collection::<NyxbotEvent>(EVENTS).insert_one(&event).session(&mut *session).await?;
+            if guest_admission == HostedAdmission::Legacy {
+                db.collection::<NyxbotEvent>(EVENTS).insert_one(&event).session(&mut *session).await?;
+            } else {
+                let mut stored_event = bson::to_document(&event).map_err(|_| AppError::OAuthAuthorityUnavailable)?;
+                stored_event.insert("channel_guest_admission", bson::to_bson(&guest_admission).map_err(|_| AppError::OAuthAuthorityUnavailable)?);
+                db.collection::<bson::Document>(EVENTS).insert_one(stored_event).session(&mut *session).await?;
+            }
             db.collection::<StoredResponse>(RESPONSES).insert_one(&inserted).session(&mut *session).await?;
             Ok(())
         }.await;
@@ -391,6 +411,9 @@ pub(super) fn native_sender(activity: &Value) -> Sender<'_> {
     use crate::models::channel_thread::ThreadSenderKind as Kind;
     Sender {
         truncated_original_bytes: None,
+        guest_facts: Default::default(),
+        guest_mode: None,
+        native_discord_activity: None,
         original_kind: Some(match activity["actor"]["kind"].as_str() {
             Some("human") => Kind::Human,
             Some("bot") => Kind::Bot,
@@ -417,7 +440,36 @@ async fn execute(
     let partition = stored.partition.as_str();
     let event_key = stored.event_key.as_str();
     let mut thread_reply = false;
-    let sender = native_sender(activity);
+    let mut sender = native_sender(activity);
+    if matches!(
+        row.gateway_source.as_ref(),
+        Some(crate::models::nyxbot_channel::GatewaySource::WhatsApp { .. })
+    ) {
+        use crate::services::channel_guest_access::{
+            AnswerAudience, HostedAdmission, hosted_admission,
+        };
+        let admission = hosted_admission(&state.db, event_key, &row.id).await?;
+        sender.guest_mode = Some(admission);
+        if matches!(admission, HostedAdmission::AddOn { .. }) {
+            let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+            let config = crate::services::whatsapp_native::load(&state.db, &bot)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Forbidden("native_whatsapp_identity_unavailable".into())
+                })?;
+            let account = crate::services::whatsapp_native::verified_account(
+                &config,
+                &bot,
+                row.gateway_channel_id.as_deref().unwrap_or_default(),
+                context,
+            )
+            .ok_or_else(|| AppError::Forbidden("native_whatsapp_identity_unavailable".into()))?;
+            sender.guest_facts = crate::services::channel_guest_access::transport::TransportFacts {
+                sender_id: Some(account),
+                audience: AnswerAudience::Private,
+            };
+        }
+    }
     let text = if row.platform == "whatsapp"
         && crate::services::whatsapp_native::has_unavailable_media(activity)
     {
@@ -554,9 +606,14 @@ async fn snapshot_inner(
         Err(error) => return provider_refusal::error(error),
     };
     match current(&state, &row, &id, !output).await {
-        Ok(Some((stored, body, trace))) => {
+        Ok(Some((stored, body, trace, hosted))) => {
             if let Err(error) = recovery::observe_answer_output(&state.db, &stored, &body).await {
                 return provider_refusal::error(error);
+            }
+            if let Some(hosted) = &hosted
+                && !late_delivery::hosted_stream_allowed(&state, &stored.event_key, hosted).await
+            {
+                return problem(StatusCode::NOT_FOUND, "response_not_found");
             }
             if let Some(trace) = trace {
                 crate::turn_trace::associate(trace);
@@ -625,7 +682,7 @@ async fn events_inner(
         Err(error) => return provider_refusal::error(error),
     };
     match current(&state, &row, &id, !output).await {
-        Ok(Some((_, body, trace))) if after.is_none_or(|n| n < body.frames.len() as u64) => {
+        Ok(Some((_, body, trace, _))) if after.is_none_or(|n| n < body.frames.len() as u64) => {
             if let Some(trace) = trace {
                 crate::turn_trace::associate(trace);
             }
@@ -646,6 +703,7 @@ async fn current(
         StoredResponse,
         recovery::Payload,
         Option<crate::turn_trace::TurnContext>,
+        Option<late_delivery::HostedReply>,
     )>,
 > {
     if row.transport != "gateway"
@@ -662,6 +720,19 @@ async fn current(
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"_id":&stored.event_key})
         .await?;
+    let hosted = event
+        .as_ref()
+        .and_then(late_delivery::HostedReply::for_event);
+    if stored
+        .conversation_id
+        .as_deref()
+        .is_some_and(crate::services::channel_guest_access::is_hosted_conversation)
+        && event.as_ref().is_none_or(|event| {
+            event.delivery.is_none() || event.conversation_id != stored.conversation_id
+        })
+    {
+        return Ok(None);
+    }
     if let Some(event) = event.as_ref() {
         provider_refusal::partition_known();
         provider_refusal::event(&event.event_id);
@@ -696,6 +767,7 @@ async fn current(
         }
     }
     drop(event);
+    let original_event_key = stored.event_key.clone();
     let event_key = &stored.event_key;
     recovery::refresh(
         &state.db,
@@ -716,6 +788,36 @@ async fn current(
         return Ok(None);
     };
     let mut payload = recovery::payload(&state.encryption_keys, &stored).await?;
+    let hosted = match hosted {
+        Some(hosted) => {
+            if stored.event_key != original_event_key
+                || !hosted.is_for_conversation(stored.conversation_id.as_deref())
+            {
+                return Ok(None);
+            }
+            Some(hosted)
+        }
+        None if stored
+            .conversation_id
+            .as_deref()
+            .is_some_and(crate::services::channel_guest_access::is_hosted_conversation) =>
+        {
+            // The first event read may precede the transaction that admits the turn.
+            let Some(event) = state
+                .db
+                .collection::<NyxbotEvent>(EVENTS)
+                .find_one(
+                    doc! {"_id": &original_event_key, "conversation_id": &stored.conversation_id},
+                )
+                .await?
+                .filter(|event| event.id == stored.event_key)
+            else {
+                return Ok(None);
+            };
+            late_delivery::HostedReply::for_event(&event)
+        }
+        None => None,
+    };
     if row.gateway_source.is_none() && stored.terminal {
         let event = state
             .db
@@ -733,7 +835,12 @@ async fn current(
             relay_responses::suppress_output(&mut payload);
         }
     }
-    Ok(Some((stored, payload, trace)))
+    if let Some(hosted) = &hosted
+        && !late_delivery::hosted_stream_allowed(state, &stored.event_key, hosted).await
+    {
+        return Ok(None);
+    }
+    Ok(Some((stored, payload, trace, hosted)))
 }
 pub(super) fn stream(
     state: AppState,
@@ -749,7 +856,7 @@ pub(super) fn stream(
         let deadline=tokio::time::Instant::now()+Duration::from_secs(if row.gateway_source.is_some() {55} else {570});
         let mut next=after.map_or(0,|n|n+1);
         let mut trace_operation: Option<crate::turn_trace::Operation> = None;
-        loop {
+        'responses: loop {
             // Recheck the fresh key and binding, including while a stream waits.
             let live=provider_channel(&state,&headers).await;
             let result=match live {
@@ -757,7 +864,7 @@ pub(super) fn stream(
                 _=>Err(AppError::OAuthAuthorityUnavailable),
             };
             match result {
-                Ok(Some((stored,mut body, trace)))=>{
+                Ok(Some((stored,mut body, trace, hosted)))=>{
                     if trace_operation.is_none() && trace.is_some() {
                         trace_operation = Some(crate::turn_trace::Operation::start(trace, crate::turn_trace::Stage::Replay));
                     }
@@ -771,6 +878,13 @@ pub(super) fn stream(
                         break;
                     }
                     for frame in body.frames.iter().skip(next as usize) {
+                        if let Some(hosted) = &hosted
+                            && late_delivery::frame_has_answer(frame)
+                            && !late_delivery::hosted_stream_allowed(&state, &stored.event_key, hosted).await
+                        {
+                            yield Ok(axum::response::sse::Event::default().event("error").data(r#"{"type":"error","code":"provider_unavailable"}"#));
+                            break 'responses;
+                        }
                         let seq=frame["sequence_number"].as_u64().unwrap_or_default();
                         next=seq+1;
                         yield Ok::<_,Infallible>(axum::response::sse::Event::default()
@@ -1132,6 +1246,7 @@ async fn send_update_impl(
         };
         let mut outcome = "reply_confirmed";
         let replies_path = format!("/events/{}/replies", urlencode(reference));
+        let hosted = late_delivery::HostedReply::new(conversation, event.turn_id.as_deref());
         for (index, part) in reply_parts.into_iter().enumerate() {
             let mut part_trace = crate::turn_trace::Operation::part(
                 crate::turn_trace::TurnContext::current(),
@@ -1173,6 +1288,11 @@ async fn send_update_impl(
                 if saved_plan.is_some() {
                     crate::services::channel_platform::revalidate_post_effect().await?;
                 }
+            }
+            if let Some(hosted) = &hosted
+                && !late_delivery::hosted_stream_allowed(state, &event.id, hosted).await
+            {
+                return Err(unavailable());
             }
             let attempt = if let Some(plan) = &saved_plan {
                 match preparation::claim(&state.db, plan, index).await? {

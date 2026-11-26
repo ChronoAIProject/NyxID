@@ -851,6 +851,7 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
     let mut chat = crate::services::assistant_acknowledgement_service::ChatAuthority {
         key_version: 0,
         voice_parent_conversation_id: None,
+        channel_guest: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: None,

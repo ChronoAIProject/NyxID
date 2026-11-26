@@ -16,6 +16,10 @@ Creating or linking a bot is allowed while onboarding is incomplete. New binding
 
 Do not propose `update_channel_access private_chats=everyone` until the owner asks or the actual configuration and a customer scenario support readiness. An explicit owner choice can open access immediately: disclose unresolved questions and the returned `audience_readiness`, without another confirmation. `guest_readiness=ready` proves only model-route readiness; instructions/persona presence and memory/skill/grant counts cannot prove complete store information or a successful test. Full access returns the same facts without an action card.
 
+When the connection result includes `guest_experience`, share its owner settings link. The owner can choose Owner only, select verified guests observed on the bot, or use the existing channel admission settings. The same Guest experience editor opens during web setup, resumes a saved draft, and appears in existing bot settings. Keep guest setup pending until the owner applies their choice. In an enabled pilot, a bot without an applied policy starts with zero guest data grants.
+
+Help the owner identify the information sources, actions and reply audiences they need. Let the owner make the access choice and apply it in the browser. The two-guest preview uses the runtime evaluator with sample records. Report live channel delivery and independent service approval only when verified in a live scenario.
+
 
 ## X DMs: applicable setup and actual route
 

@@ -890,7 +890,8 @@ async fn prepared_instagram_installation(reconnect: bool) {
     if reconnect {
         bots.update_one(
             doc! {"_id": &bot.id},
-            doc! {"$set": {"platform_bot_id":"777", "meta_binding.grant_subject_id":""}},
+            doc! {"$set": {"platform_bot_id":"777", "meta_binding.grant_subject_id":"",
+            "guest_access_v1":false,"guest_access_v1_revision":2_i64}},
         )
         .await
         .unwrap();
@@ -942,6 +943,11 @@ async fn prepared_instagram_installation(reconnect: bool) {
         .unwrap();
     assert_eq!(managed.id == bot.id, reconnect);
     assert_eq!(managed.credential_source, "platform");
+    assert_eq!(managed.guest_access_v1, !reconnect);
+    assert_eq!(
+        managed.guest_access_v1_revision,
+        if reconnect { 2 } else { 1 }
+    );
     assert_eq!(
         settings
             .find_one(id)

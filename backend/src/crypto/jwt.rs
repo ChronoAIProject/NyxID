@@ -139,6 +139,8 @@ pub struct Claims {
     /// Agent key ID that triggered the relay (for scope inheritance).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_api_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_guest_assignment: Option<String>,
     /// Agent key name (for audit attribution).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_api_key_name: Option<String>,
@@ -187,6 +189,8 @@ pub struct Cnf {
 }
 
 pub const RELAY_REPLY_AUDIENCE: &str = "channel-relay/reply";
+pub(crate) const GUEST_RELAY_REPLY_AUDIENCE: &str = "channel-relay/guest-reply-v1";
+const GUEST_RELAY_DATA_AUDIENCE: &str = "channel-relay/guest-data-v1";
 pub const RELAY_REPLY_TOKEN_TYPE: &str = "relay_reply";
 const RELAY_REPLY_CLOCK_SKEW_SECS: i64 = 60;
 pub const RELAY_CALLBACK_AUDIENCE: &str = "channel-relay/callback";
@@ -644,6 +648,7 @@ fn generate_access_token_for_client(
         cnf,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -732,6 +737,7 @@ pub fn generate_assistant_forward_access_token(
         cnf: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -777,6 +783,26 @@ pub fn generate_relay_access_token(
     rbac: Option<&RbacClaimData>,
     agent_scope: &RelayAgentScope,
 ) -> Result<String, AppError> {
+    generate_relay_access_token_with_assignment(
+        keys,
+        config,
+        user_id,
+        scope,
+        rbac,
+        agent_scope,
+        None,
+    )
+}
+
+pub(crate) fn generate_relay_access_token_with_assignment(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    rbac: Option<&RbacClaimData>,
+    agent_scope: &RelayAgentScope,
+    relay_guest_assignment: Option<String>,
+) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
     let claims = Claims {
@@ -805,6 +831,7 @@ pub fn generate_relay_access_token(
         cnf: None,
         relay: Some(true),
         relay_api_key_id: Some(agent_scope.api_key_id.clone()),
+        relay_guest_assignment,
         relay_api_key_name: Some(agent_scope.api_key_name.clone()),
         relay_allowed_service_ids: Some(agent_scope.allowed_service_ids.clone()),
         relay_allowed_node_ids: Some(agent_scope.allowed_node_ids.clone()),
@@ -835,11 +862,69 @@ pub fn generate_relay_reply_token(
     inbound_message_id: &str,
     platform: &str,
 ) -> Result<String, AppError> {
+    sign_relay_reply_token(
+        keys,
+        config,
+        api_key_id,
+        conversation_id,
+        inbound_message_id,
+        platform,
+        RELAY_REPLY_AUDIENCE,
+    )
+}
+
+pub(crate) fn generate_guest_relay_reply_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    api_key_id: &str,
+    conversation_id: &str,
+    inbound_message_id: &str,
+    platform: &str,
+) -> Result<String, AppError> {
+    sign_relay_reply_token(
+        keys,
+        config,
+        api_key_id,
+        conversation_id,
+        inbound_message_id,
+        platform,
+        GUEST_RELAY_REPLY_AUDIENCE,
+    )
+}
+
+pub(crate) fn generate_guest_relay_data_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    api_key_id: &str,
+    conversation_id: &str,
+    inbound_message_id: &str,
+    platform: &str,
+) -> Result<String, AppError> {
+    sign_relay_reply_token(
+        keys,
+        config,
+        api_key_id,
+        conversation_id,
+        inbound_message_id,
+        platform,
+        GUEST_RELAY_DATA_AUDIENCE,
+    )
+}
+
+fn sign_relay_reply_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    api_key_id: &str,
+    conversation_id: &str,
+    inbound_message_id: &str,
+    platform: &str,
+    audience: &str,
+) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
 
     let claims = RelayReplyClaims {
         iss: config.jwt_issuer.clone(),
-        aud: RELAY_REPLY_AUDIENCE.to_string(),
+        aud: audience.to_string(),
         exp: now + config.jwt_relay_reply_ttl_secs,
         iat: now,
         jti: Uuid::new_v4().to_string(),
@@ -921,6 +1006,7 @@ pub fn generate_refresh_token(
         cnf: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -979,6 +1065,7 @@ pub fn reissue_refresh_token(
         cnf: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -1140,6 +1227,7 @@ fn generate_delegated_access_token_inner(
         cnf: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -1291,6 +1379,7 @@ pub fn generate_service_account_token(
         cnf: None,
         relay: None,
         relay_api_key_id: None,
+        relay_guest_assignment: None,
         relay_api_key_name: None,
         relay_allowed_service_ids: None,
         relay_allowed_node_ids: None,
@@ -1344,10 +1433,41 @@ pub fn verify_token(keys: &JwtKeys, config: &AppConfig, token: &str) -> Result<C
 }
 
 /// Verify and decode a relay reply token.
+#[cfg(test)]
 pub fn validate_relay_reply_token(
     keys: &JwtKeys,
     config: &AppConfig,
     token: &str,
+) -> Result<RelayReplyClaims, AppError> {
+    decode_relay_reply_token(keys, config, token, &[RELAY_REPLY_AUDIENCE])
+}
+
+pub(crate) fn validate_channel_reply_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    token: &str,
+) -> Result<RelayReplyClaims, AppError> {
+    decode_relay_reply_token(
+        keys,
+        config,
+        token,
+        &[RELAY_REPLY_AUDIENCE, GUEST_RELAY_REPLY_AUDIENCE],
+    )
+}
+
+pub(crate) fn validate_guest_relay_data_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    token: &str,
+) -> Result<RelayReplyClaims, AppError> {
+    decode_relay_reply_token(keys, config, token, &[GUEST_RELAY_DATA_AUDIENCE])
+}
+
+fn decode_relay_reply_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    token: &str,
+    allowed_audiences: &[&str],
 ) -> Result<RelayReplyClaims, AppError> {
     let mut validation = Validation::new(Algorithm::RS256);
     // Expiry, audience, and required-claim enforcement is done manually below
@@ -1379,7 +1499,7 @@ pub fn validate_relay_reply_token(
     }
 
     if claims.token_type != RELAY_REPLY_TOKEN_TYPE
-        || claims.aud != RELAY_REPLY_AUDIENCE
+        || !allowed_audiences.contains(&claims.aud.as_str())
         || !config.accepts_jwt_issuer(&claims.iss)
     {
         return Err(AppError::Unauthorized(
@@ -1966,6 +2086,7 @@ mod tests {
             cnf: None,
             relay: None,
             relay_api_key_id: None,
+            relay_guest_assignment: None,
             relay_api_key_name: None,
             relay_allowed_service_ids: None,
             relay_allowed_node_ids: None,
@@ -2088,6 +2209,7 @@ mod tests {
             cnf: None,
             relay: None,
             relay_api_key_id: None,
+            relay_guest_assignment: None,
             relay_api_key_name: None,
             relay_allowed_service_ids: None,
             relay_allowed_node_ids: None,

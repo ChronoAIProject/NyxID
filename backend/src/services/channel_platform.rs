@@ -66,6 +66,17 @@ pub(crate) async fn with_post_effect_guard<F: std::future::Future>(
     guard: PostEffectGuard,
     send: F,
 ) -> F::Output {
+    let guard = match POST_EFFECT_GUARD.try_with(Clone::clone) {
+        Ok(parent) => std::sync::Arc::new(move || {
+            let parent = parent.clone();
+            let guard = guard.clone();
+            Box::pin(async move {
+                parent().await?;
+                guard().await
+            }) as futures::future::BoxFuture<'static, AppResult<()>>
+        }),
+        Err(_) => guard,
+    };
     POST_EFFECT_GUARD.scope(guard, send).await
 }
 

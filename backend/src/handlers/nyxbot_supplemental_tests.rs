@@ -219,7 +219,10 @@ async fn live(f: &Fixture, failed: bool) -> String {
                 f.event.id.clone(),
                 "response".into(),
                 json!({"type":"response.created"}),
-                receiver,
+                InboundTurn {
+                    receiver,
+                    hosted_reply: None,
+                },
                 Utc::now(),
             )),
         )
@@ -1257,6 +1260,7 @@ async fn post_turn_result_meta_reply_keeps_grant_and_claims_destination_once() {
         // the running-turn writer. Signed admission is covered by the Meta
         // integration fixtures.
         start.channel_context = Some(ChannelTurnContext {
+            channel_guest: None,
             meta_grant: Some(grant.clone()),
             text_completeness: None,
             org_origin: None,
@@ -1578,7 +1582,10 @@ async fn private_chat_handoff_ordinary_subscriber_close_keeps_failure_copy() {
         fixture.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        closed(),
+        InboundTurn {
+            receiver: closed(),
+            hosted_reply: None,
+        },
         Utc::now(),
     ))
     .await;

@@ -28,6 +28,12 @@ const CHANNELS: &str = crate::models::nyxbot_channel::COLLECTION_NAME;
 pub(crate) async fn required(db: &Database, bot: &str, grant: &str) -> AppResult<bool> {
     if scopes::has_history(db, bot).await?
         || db
+            .collection::<Document>(BOTS)
+            .find_one(doc! {"_id":bot,"channel_guest_data_present":true})
+            .projection(doc! {"_id":1})
+            .await?
+            .is_some()
+        || db
             .collection::<Document>(GRANT_SCOPES)
             .find_one(doc! {"bot_id":bot,"grant_id":grant,"purge":{"$exists":true}})
             .projection(doc! {"_id":1})
@@ -362,6 +368,21 @@ async fn pass_authorized(
             },
         )
         .await?;
+        return Ok(false);
+    }
+    if stored
+        .get_document("purge")
+        .is_ok_and(|progress| progress.get_i32("phase") == Ok(19))
+        && state
+            .db
+            .collection::<Document>(BOTS)
+            .find_one(doc! {"_id": bot, "channel_guest_data_present": true})
+            .projection(doc! {"_id": 1})
+            .await?
+            .is_some()
+        && !crate::services::channel_guest_access::purge_meta_grant_batch(&state.db, bot, grant)
+            .await?
+    {
         return Ok(false);
     }
     #[cfg(test)]
@@ -1951,6 +1972,16 @@ async fn finish(db: &Database, tx: &mut ClientSession, scope: &Document) -> AppR
             tx,
         )
         .await?;
+        if db
+            .collection::<Document>(BOTS)
+            .find_one(doc! {"_id":bot,"channel_guest_data_present":true})
+            .projection(doc! {"_id":1})
+            .session(&mut *tx)
+            .await?
+            .is_some()
+        {
+            crate::services::channel_guest_access::setup::purge_bot_in_session(db, tx, bot).await?;
+        }
         if db.collection::<ChannelBot>(BOTS).delete_one(doc! {"_id":bot,"is_active":false,"meta_binding.grant_id":grant,
             "meta_binding.generation":parent.meta_binding.as_ref().map(|binding|binding.generation),"meta_binding.subscription":"removed"})
             .session(&mut *tx).await?.deleted_count!=1 {return Err(grants::incomplete())}
@@ -2107,7 +2138,32 @@ async fn step(
             .await
         }
         18 => retire_shared(db, tx, scope, progress, phase).await,
-        19 => finish(db, tx, scope).await,
+        19 => {
+            // Existing in-progress scopes can already be at phase 19.
+            // Drain this grant's records before writing the completion proof.
+            if db
+                .collection::<Document>(BOTS)
+                .find_one(doc! {"_id":bot,"channel_guest_data_present":true})
+                .projection(doc! {"_id":1})
+                .session(&mut *tx)
+                .await?
+                .is_some()
+            {
+                let records = erase_page(
+                    db,
+                    tx,
+                    scope,
+                    crate::models::channel_guest_personal_record::COLLECTION_NAME,
+                    doc! {"bot_id":bot,"meta_grant_id":grant},
+                    phase,
+                )
+                .await?;
+                if records.progress.get_i32("phase") == Ok(phase) {
+                    return Ok(records);
+                }
+            }
+            finish(db, tx, scope).await
+        }
         _ => Err(grants::incomplete()),
     }
 }

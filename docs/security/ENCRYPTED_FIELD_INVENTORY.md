@@ -16,7 +16,7 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 50 entries for 48 collections, with 50 implemented adapters
+The registry has 51 entries for 49 collections, with 51 implemented adapters
 and 0 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
@@ -51,7 +51,7 @@ A collection may use separate adapters for different fields.
 | `downstream_services` | `ssh_config.ca_private_key_encrypted` | [ssh_ca_record_service.rs](../../backend/src/services/ssh_ca_record_service.rs) | Implemented |
 | `nyxbot_channels` | `agent_key_ciphertext` | [nyxbot_channel_key.rs](../../backend/src/services/nyxbot_channel_key.rs) | Implemented |
 | `nyxbot_threads` | `event_ref_ciphertext` | [Thread reference storage](../../backend/src/services/nyxbot_thread_reference.rs) | Implemented |
-| `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload`, `response_reply.ciphertext` | [Event storage](../../backend/src/services/nyxbot_event_record.rs) | Implemented |
+| `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload`, `response_reply.ciphertext`, `channel_guest_setup_payload` | [Event storage](../../backend/src/services/nyxbot_event_record.rs) | Implemented |
 | `mobile_social_deliveries` | `ciphertext` | [Mobile sign-in delivery](../../backend/src/services/mobile_social_service/record.rs) | Implemented |
 | `oauth_broker_bindings` | `refresh_token_encrypted` | [oauth_broker_record_service.rs](../../backend/src/services/oauth_broker_record_service.rs) | Implemented |
 | `oauth_clients` | `revocation_webhook_secret_encrypted`, `connection_webhook_secret_encrypted` | [OAuth client webhooks](../../backend/src/services/oauth_client_webhook_record.rs) | Implemented |
@@ -72,6 +72,11 @@ A collection may use separate adapters for different fields.
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | [Reattach window storage](../../backend/src/services/assistant_reattach_window_record.rs) | Implemented |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | [Approval proposal storage](../../backend/src/services/execution_permission_dispatch/proposals/record.rs) | Implemented |
 | `channel_meta_oauth_sessions` | `assets_encrypted` | [Meta OAuth consent assets](../../backend/src/services/channel_meta_service/asset_record.rs) | Implemented |
+| `channel_messages` | `thread_id` | [Discord guest reply handle](../../backend/src/services/channel_guest_access/relay.rs) | Implemented |
+
+For `channel_messages.thread_id`, the walk selects sealed Discord guest reply
+handles with the `guest-interaction.v3:` prefix. The relay adapter authenticates
+the record binding and rewraps eligible handles under the current key.
 
 OAuth client webhook signing keys use the registration ID, the persisted creator
 and a separate field path for each webhook. System, dynamic and ownerless

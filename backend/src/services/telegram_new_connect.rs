@@ -128,6 +128,8 @@ impl TelegramNewService<'_> {
                 x_events: None,
                 last_verification: None,
                 ownership_version: 0,
+                guest_access_v1: true,
+                guest_access_v1_revision: 1,
                 id: id.into(),
                 user_id: request.owner_user_id.clone(),
                 platform: PLATFORM.into(),

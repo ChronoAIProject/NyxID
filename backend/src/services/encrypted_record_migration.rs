@@ -70,6 +70,7 @@ enum Adapter {
     NodeDevice,
     AuthDevice,
     MetaConsentAssets,
+    ChannelGuestReplyHandle,
 }
 
 struct Entry {
@@ -267,6 +268,7 @@ const REGISTRY: &[Entry] = &[
             "event_context_ciphertext",
             "guest_setup_payload",
             "response_reply.ciphertext",
+            "channel_guest_setup_payload",
         ],
     },
     Entry {
@@ -380,6 +382,11 @@ const REGISTRY: &[Entry] = &[
         collection: "channel_meta_oauth_sessions",
         adapter: Adapter::MetaConsentAssets,
         fields: &["assets_encrypted"],
+    },
+    Entry {
+        collection: "channel_messages",
+        adapter: Adapter::ChannelGuestReplyHandle,
+        fields: &["thread_id"],
     },
 ];
 
@@ -572,6 +579,25 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
             REGISTRY
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
+        )?,
+        Some(previous_labels::BEFORE_CHANNEL_GUEST_DIGEST) => project_labels(
+            &row,
+            REGISTRY
+                .iter()
+                .take_while(|entry| !matches!(entry.adapter, Adapter::ChannelGuestReplyHandle))
+                .map(|entry| {
+                    let fields = if entry.collection == "nyxbot_events" {
+                        &[
+                            "delivery.target_ciphertext",
+                            "event_context_ciphertext",
+                            "guest_setup_payload",
+                            "response_reply.ciphertext",
+                        ]
+                    } else {
+                        entry.fields
+                    };
+                    (entry.collection, fields)
+                }),
         )?,
         Some(
             previous_labels::EVENT_REPLY_DIGEST
@@ -867,6 +893,13 @@ async fn verify(
         Adapter::MetaConsentAssets => {
             Box::pin(super::channel_meta_service::asset_record::verify(keys, row)).await
         }
+        Adapter::ChannelGuestReplyHandle => {
+            if !has_material(entry, row) {
+                return Ok(());
+            }
+            Box::pin(super::channel_guest_access::relay::verify_reply_handle_record(keys, row))
+                .await
+        }
     }
 }
 
@@ -1058,6 +1091,10 @@ async fn migrate(
             ))
             .await
         }
+        Adapter::ChannelGuestReplyHandle => {
+            Box::pin(super::channel_guest_access::relay::migrate_reply_handle_record(db, keys, row))
+                .await
+        }
     }
 }
 
@@ -1069,7 +1106,12 @@ fn path<'a>(row: &'a Document, field: &str) -> Option<&'a Bson> {
     }
     Some(value)
 }
-fn field_has_material(row: &Document, field: &str) -> bool {
+fn field_has_material(entry: &Entry, row: &Document, field: &str) -> bool {
+    if matches!(entry.adapter, Adapter::ChannelGuestReplyHandle) {
+        return row.get_str(field).is_ok_and(|thread| {
+            thread.starts_with(super::channel_guest_access::relay::REPLY_HANDLE_PREFIX)
+        });
+    }
     path(row, field).is_some_and(|value| match value {
         Bson::Null => false,
         Bson::Document(map) => !map.is_empty(),
@@ -1083,7 +1125,7 @@ fn has_material(entry: &Entry, row: &Document) -> bool {
     entry
         .fields
         .iter()
-        .any(|field| field_has_material(row, field))
+        .any(|field| field_has_material(entry, row, field))
 }
 
 fn diagnostic_id(index: usize, id: &Bson) -> AppResult<String> {
@@ -1434,6 +1476,10 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
     if let Some(cursor) = run.get("cursor").filter(|cursor| **cursor != Bson::Null) {
         filter.insert("_id", doc! {"$gt":cursor});
     }
+    if matches!(entry.adapter, Adapter::ChannelGuestReplyHandle) {
+        let prefix = regex::escape(super::channel_guest_access::relay::REPLY_HANDLE_PREFIX);
+        filter.insert("thread_id", doc! {"$regex":format!("^{prefix}")});
+    }
     let large = matches!(
         entry.adapter,
         Adapter::GeneratedArtifact | Adapter::Attachment | Adapter::ToolResult
@@ -1604,7 +1650,7 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
                 "verification_blocked"
             } else if verified_winner.is_none() {
                 "source_removed_observed"
-            } else if !field_has_material(verified_winner.as_ref().unwrap(), field) {
+            } else if !field_has_material(entry, verified_winner.as_ref().unwrap(), field) {
                 "no_material_observed"
             } else {
                 "authenticated_current"

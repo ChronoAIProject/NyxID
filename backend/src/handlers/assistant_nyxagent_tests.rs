@@ -1907,6 +1907,84 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
 }
 
 #[tokio::test]
+async fn hosted_guest_conversations_are_private_to_the_channel() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let ordinary = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: None,
+            text: "Ordinary message".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let mut hosted = ordinary.clone();
+    hosted.id = "nyxag-11111111111111111111111111111111".into();
+    hosted.active_turn = None;
+    state
+        .db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .insert_one(&hosted)
+        .await
+        .unwrap();
+
+    assert!(engine::get(&state.db, OWNER, &hosted.id).await.is_ok());
+    let auth = test_auth_user(OWNER);
+    let Json(index) = list(
+        State(state.clone()),
+        auth.clone(),
+        Query(PageQuery::default()),
+    )
+    .await
+    .unwrap();
+    assert!(index.conversations.iter().any(|row| row.id == ordinary.id));
+    assert!(index.conversations.iter().all(|row| row.id != hosted.id));
+
+    let Json(page) = history(
+        State(state.clone()),
+        auth.clone(),
+        Path(ordinary.id.clone()),
+        Query(HistoryQuery::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.conversation.id, ordinary.id);
+    assert_eq!(page.messages.len(), 1);
+    assert!(matches!(
+        history(
+            State(state.clone()),
+            auth.clone(),
+            Path(hosted.id.clone()),
+            Query(HistoryQuery::default()),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        context(State(state.clone()), auth.clone(), Path(hosted.id.clone())).await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        attachment(
+            State(state),
+            auth,
+            Path((hosted.id, Uuid::new_v4().to_string())),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    server.abort();
+}
+
+#[tokio::test]
 async fn stale_fences_are_hidden_in_index_and_history_dtos() {
     let (state, _, server) = setup(None, Duration::ZERO).await;
     let row = engine::begin_turn(

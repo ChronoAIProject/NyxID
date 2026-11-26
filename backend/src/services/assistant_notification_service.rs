@@ -698,6 +698,7 @@ pub async fn record_turn_settled_in_session(
         .and_then(|channel| channel.org_execution.as_ref())
         .is_some_and(|execution| execution.guest);
     if (turn.notifications_enabled != Some(true) && !org_guest)
+        || super::channel_guest_access::is_hosted_conversation_namespace(&row.id)
         || row.guest_model_setup
         || row.collaboration.is_some()
         || row.group_id.is_some()
@@ -973,7 +974,9 @@ pub async fn record_card_pending_in_session(
     card: &AssistantAcknowledgement,
     conversation: &AssistantConversation,
 ) -> AppResult<()> {
-    if card.status != "pending" {
+    if card.status != "pending"
+        || super::channel_guest_access::is_hosted_conversation_namespace(&conversation.id)
+    {
         return Ok(());
     }
     let audience = conversation
@@ -1555,6 +1558,7 @@ pub async fn list(state: &AppState, user_id: &str, query: &ListQuery) -> AppResu
     let as_of = Utc::now();
     let limit = query.limit.clamp(1, MAX_LIST_LIMIT);
     let mut filter = doc! {fields::USER_ID: user_id};
+    filter.extend(public_notification_sources());
     if query.unread_only {
         filter.insert("unread", true);
     }
@@ -2654,6 +2658,15 @@ fn build(
     lookups: &Lookups,
     now: DateTime<Utc>,
 ) -> Built {
+    if super::channel_guest_access::is_hosted_conversation_namespace(&row.source.id)
+        || row
+            .source
+            .conversation_id
+            .as_deref()
+            .is_some_and(super::channel_guest_access::is_hosted_conversation_namespace)
+    {
+        return Built::Hidden;
+    }
     let mut built = build_source(user_id, frontend, row, lookups, now);
     if let Built::Item { item, .. } = &mut built {
         let source = &row.source;
@@ -2821,6 +2834,13 @@ fn lookup_by_id(from: &str, local: &str, as_: &str, projection: Document) -> Doc
     }}
 }
 
+fn public_notification_sources() -> Document {
+    doc! {
+        fields::SOURCE_CONVERSATION_ID: super::channel_guest_access::exclude_hosted_conversations(),
+        fields::SOURCE_ID: super::channel_guest_access::exclude_hosted_conversations(),
+    }
+}
+
 /// The summary's live access check, mirroring [`Lookups`] inside the single
 /// aggregate: every referenced parent is joined by id and the person's
 /// current membership is joined for organization-owned sources.
@@ -2935,14 +2955,16 @@ fn summary_pipeline(user_id: &str, now: bson::DateTime) -> Vec<Document> {
         "$conv0.agent_owner_id",
         {"$ifNull": ["$grp0.user_id", "$chan0.org_specialist.org_id"]},
     ]};
+    let mut filter = public_notification_sources();
+    filter.extend(doc! {
+        fields::USER_ID: user_id, "unread": true, "resolved_at": bson::Bson::Null,
+        "$or": [
+            {fields::KIND: {"$ne": needs_decision}},
+            {"card_expires_at": {"$gt": now}},
+        ],
+    });
     vec![
-        doc! {"$match": {
-            fields::USER_ID: user_id, "unread": true, "resolved_at": bson::Bson::Null,
-            "$or": [
-                {fields::KIND: {"$ne": needs_decision}},
-                {"card_expires_at": {"$gt": now}},
-            ],
-        }},
+        doc! {"$match": filter},
         lookup_by_id(
             CONVERSATIONS,
             fields::SOURCE_CONVERSATION_ID,
@@ -3137,6 +3159,7 @@ pub enum ReadScope {
 pub async fn mark_read(db: &Database, user_id: &str, scope: ReadScope) -> AppResult<u64> {
     let now = Utc::now();
     let mut filter = doc! {fields::USER_ID: user_id, "unread": true};
+    filter.extend(public_notification_sources());
     match scope {
         ReadScope::Ids(ids) => {
             if ids.is_empty() || ids.len() > MAX_READ_IDS {

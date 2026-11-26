@@ -1,6 +1,7 @@
 use super::{binding, coordinator, profiles, protocol, session};
 use crate::{
     AppState,
+    errors::AppError,
     models::{
         assistant_agent::{AgentKind, AssistantAgent, GuestAccess},
         assistant_conversation::AssistantConversation,
@@ -41,6 +42,7 @@ use uuid::Uuid;
 fn binding(profile: Profile, owner: &str) -> Binding {
     let now = Utc::now();
     Binding {
+        parent_channel_bot_id: None,
         id: Uuid::new_v4().to_string(),
         user_id: owner.into(),
         profile,
@@ -1996,6 +1998,112 @@ async fn receipt_recovers_response_lost_send_without_replay_and_rejects_second_j
 }
 
 #[tokio::test]
+async fn channel_guest_call_adapters_close_unclassified_utterances_and_preserve_flag_off() {
+    use crate::services::{
+        channel_guest_access as guest,
+        feature_flag_service::{self as flags, FlagTarget},
+        security_readiness_service::ready_test_replica,
+    };
+    let mut fixture = fixture(Profile::TwilioSms, false).await;
+    let state = &fixture.state;
+    let db = &state.db;
+    let parent = Uuid::new_v4().to_string();
+    let stamp = bson::DateTime::now();
+    db.collection::<bson::Document>("channel_bots").insert_one(doc! {
+        "_id":&parent, "user_id":&fixture.b.user_id, "platform":"telegram", "label":"Call parent",
+        "bot_token_encrypted":bson::Binary { subtype:bson::spec::BinarySubtype::Generic, bytes:vec![] },
+        "platform_bot_id":"test", "platform_bot_username":"test", "webhook_registered":false,
+        "webhook_secret_hash":"", "status":"active", "is_active":true, "created_at":stamp, "updated_at":stamp,
+        "guest_access_v1":true, "guest_access_v1_revision":1_i64,
+    }).await.unwrap();
+    session::require_legacy_guest_lane(db, &fixture.b)
+        .await
+        .unwrap();
+    fixture.b.parent_channel_bot_id = Some(parent.clone());
+    db.collection::<bson::Document>(BINDINGS)
+        .update_one(
+            doc! {"_id": &fixture.b.id},
+            doc! {"$set": {"parent_channel_bot_id": &parent}},
+        )
+        .await
+        .unwrap();
+    let binding = &fixture.b;
+    let (call, _) = session::prepare(
+        state,
+        binding,
+        "guest-lane-test",
+        "+14155550199",
+        &binding.phone_number,
+    )
+    .await
+    .unwrap();
+    assert!(
+        session::require_legacy_guest_lane(db, binding)
+            .await
+            .is_ok()
+    );
+    ready_test_replica(db).await;
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    let actor = crate::services::audit_service::AuditActor {
+        user_id: binding.user_id.clone(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
+    };
+    guest::set_pilot(
+        db,
+        guest::PilotSelection {
+            bot_ids: Some(vec![parent]),
+            fleet: false,
+        },
+        &actor,
+    )
+    .await
+    .unwrap();
+    flags::set_platform_override(db, guest::FLAG, &FlagTarget::Global, true, &binding.user_id)
+        .await
+        .unwrap();
+    let mut tx = db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    guest::update_activation_in_session(db, &mut tx, true)
+        .await
+        .unwrap();
+    tx.commit_transaction().await.unwrap();
+    assert!(matches!(
+        session::admit(
+            state,
+            binding,
+            &call,
+            "sms:fixture",
+            "unverified caller",
+            None
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    assert!(matches!(
+        session::fence(state, &call).await,
+        Err(AppError::Forbidden(_))
+    ));
+    flags::set_platform_override(
+        db,
+        guest::FLAG,
+        &FlagTarget::Global,
+        false,
+        &binding.user_id,
+    )
+    .await
+    .unwrap();
+    assert!(
+        session::require_legacy_guest_lane(db, binding)
+            .await
+            .is_ok()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn prepared_session_cannot_outlive_removed_binding_and_reused_claim_is_write_fenced() {
     let f = fixture(Profile::TwilioSms, false).await;
     super::management::disable(&f.state, &f.b.user_id, &f.b.id)
@@ -3431,6 +3539,7 @@ async fn trusted_platform_key_rotation_and_forged_ingress_never_control_another_
     );
     assert!(commands.lock().await.is_empty());
     let input = binding::SetupInput {
+        parent_channel_bot_id: None,
         adapter_id: profiles::id(f.b.profile).into(),
         contract_version: 1,
         label: "forged key".into(),

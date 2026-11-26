@@ -157,7 +157,7 @@ pub async fn list(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     if let Some(id) = &query.conversation_id {
-        engine::get(&state.db, &owner, id).await?;
+        engine::get_public(&state.db, &owner, id).await?;
     }
     let mut rows = desktop::list(&state.db, &owner, query.conversation_id.as_deref()).await?;
     if let Some(context_id) = &query.context_id {
@@ -329,7 +329,7 @@ pub async fn upgrade(
         ));
     }
     if let Some(id) = &query.conversation_id {
-        engine::get(&state.db, &owner, id).await?;
+        engine::get_public(&state.db, &owner, id).await?;
     }
     let row = desktop::open_display_for_context(
         &state.db,

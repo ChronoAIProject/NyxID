@@ -93,7 +93,7 @@ Turn instructions contain exact root skill IDs in a tool-ready `skill` field,
 bounded names, one-line descriptions and exact versions by default, with an explicit
 untrusted-guidance notice. The reader defaults to `SKILL.md`; `path: "/"`
 lists package files. Reuse already-read guidance within a session while current
-and fetch only the references needed for the task. Guest turns omit skills.
+and fetch only the references needed for the task. Legacy guest turns omit skills.
 `nyxid__skill_read` reads only the live calling agent's attached root or pinned
 dependency, defaults to `SKILL.md`, and supports byte-offset paging at UTF-8
 boundaries. Serialized results remain below 10,000 characters. A file listing
@@ -208,7 +208,46 @@ The prepared content is reused by that turn's automatic continuations. There
 is no package cache or cross-person content reuse: automatic preloading still
 performs authorized server-side retrieval at turn preparation and does not
 eliminate that network latency. File contents consume model context tokens.
-Guest turns receive no skill contents and perform no preload reads.
+Legacy guest turns receive no skill contents and perform no preload reads.
+
+## Skills in enrolled channel guest turns
+
+In the channel guest add-on, each currently enabled pin is offered for both
+private and shared replies by default. The bot's maintainer can restrict either
+audience in **Guest access → Skills available to guests**. The editor includes
+pins from the default agent and from maintainable agents assigned to the bot's
+chats. An audience choice applies to the same skill ID across those chats.
+Each turn uses the exact version and dependencies pinned by the agent
+answering that chat. The model receives
+exact skill GUIDs and versions in its instructions. It can fetch the root or
+its pinned dependencies with `nyxid__skill_read`. The same authorization is
+required for a preload, a file listing, or a supporting file. Every package is
+checked against the pin's ZIP hash before its files are used.
+
+A maintainer can explicitly approve reads of a default agent's pin under
+**All Requests**. That approval covers the exact agent, pin and pinned
+dependencies in the selected audience and expires when the skill revision changes. Explicit
+service approval, service denies, operation scopes, billing, and the registry's
+content authorization still apply. The server never queues a guest approval
+request when a read is refused. A bot relink, revoked membership, disabled
+pin, or obsolete guest turn invalidates the associated read capability.
+
+Guest downloads send only the bot-purpose credential
+(`X-NyxID-Channel-Skill-Capability`) to the configured Ornn catalog transport.
+The credential is a 60-second JWT with type `nyxid-ornn-channel-skill+jwt` and
+audience `nyxid:ornn-channel-skill`. Ornn can verify it against
+`GET /api/v1/orgs/ornn-channel-skill` by passing it as a bearer. The callback
+returns the bot ID, the organization ID for an organization-owned specialist,
+the current reply audience and the exact package GUID, version and SHA-256.
+It rechecks the live guest turn and the attachment maintainer's authority.
+
+Ornn needs to consume this capability on the exact download endpoint and
+check a live publisher grant for that bot and audience to serve private
+content. It must compare the callback's package identity to the requested
+package and deny on failed verification. The documented Ornn ACL currently
+supports user and organization grants. Those grants establish personal or
+organization use and do not establish publisher consent for a channel bot to
+share the package with its guests.
 
 Preloaded content participates in the stable instruction fingerprint. A file
 selection, pin change, removal, disable or access failure can reset an existing

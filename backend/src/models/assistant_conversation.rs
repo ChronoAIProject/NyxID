@@ -117,6 +117,8 @@ pub struct AgentEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelTurnContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_guest: Option<super::channel_guest_access::GuestTurn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meta_grant: Option<super::channel_meta::GrantRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_completeness: Option<super::channel_message::TextCompleteness>,
@@ -455,6 +457,8 @@ pub struct OutputPartLength {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_guest: Option<super::channel_guest_access::GuestTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_eligibility: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

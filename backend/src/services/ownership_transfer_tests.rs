@@ -1509,6 +1509,17 @@ async fn bot_transfer_retires_routes_without_moving_history_or_agent_keys() {
     f.db.collection::<Document>(BOTS).update_one(doc! { "_id": &bot.id },
         doc! { "$set": { "updated_at": bson::DateTime::from_millis(bot.updated_at.timestamp_millis() + 1), "status": "active" } })
         .await.unwrap();
+    f.db.collection::<Document>(BOTS)
+        .update_one(doc! {"_id":&bot.id}, doc! {"$set":{
+            "guest_access_v1":true,"guest_access_v1_revision":1_i64,"channel_guest_data_present":true,
+        }})
+        .await.unwrap();
+    let records =
+        f.db.collection::<Document>(crate::models::channel_guest_personal_record::COLLECTION_NAME);
+    records
+        .insert_one(doc! {"_id":"retiring-record","bot_id":&bot.id,"bot_ownership_version":0_i64})
+        .await
+        .unwrap();
     assert!(require_current_bot(&f.db, &bot).await.is_ok());
     let conversation = Uuid::new_v4().to_string();
     let agent = Uuid::new_v4().to_string();
@@ -1551,6 +1562,29 @@ async fn bot_transfer_retires_routes_without_moving_history_or_agent_keys() {
             .unwrap();
     assert_eq!(saved.user_id, f.destination);
     assert_eq!(saved.ownership_version, 1);
+    assert!(saved.guest_access_v1);
+    assert_eq!(saved.guest_access_v1_revision, 2);
+    records
+        .insert_one(doc! {"_id":"current-record","bot_id":&bot.id,"bot_ownership_version":1_i64})
+        .await
+        .unwrap();
+    super::channel_bot_service::sweep_guest_retirement(&f.db)
+        .await
+        .unwrap();
+    assert!(
+        records
+            .find_one(doc! {"_id":"retiring-record"})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        records
+            .find_one(doc! {"_id":"current-record"})
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert_ne!(saved.bot_token_encrypted, bot.bot_token_encrypted);
     let keys = test_utils::test_encryption_keys();
     assert_eq!(

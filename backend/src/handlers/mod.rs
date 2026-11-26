@@ -53,6 +53,7 @@ pub mod channel_bots;
 pub mod channel_connect_links;
 pub mod channel_conversations;
 pub mod channel_events;
+pub(crate) mod channel_guest_setup;
 pub mod channel_managed;
 #[cfg(test)]
 pub(crate) mod channel_managed_tests;

@@ -224,6 +224,7 @@ feature flags requires deployment readiness:
 | Capability | Existing boundary retained |
 | --- | --- |
 | `channel:discord-gateway` | Relay socket ownership and gateway transport handoff; every transport writer must wait for relay shutdown before remote setup. The socket worker additionally requires live readiness at acquisition and renewal. |
+| `nyxbot:guest-audience-v1` | Global-only channel guest access with per-bot opt-in, rollout selection, and work revision checks. |
 | `approval:org-service-named-approvers-v1` | Organization service approver authoring. Effective enables, clear-that-enables and every approver-list PUT require activation and support from every live generation. |
 | `assistant:org-agents` | Creation/configuration and use-oriented organization-agent discovery gate (`delegation_summaries`); direct use retains live membership/resource ACLs. |
 | `assistant:org-agent-access-lists-v1` | Organization specialist access-list authoring. Effective flag enables, clearing an override that enables authoring, and each policy PUT require durable activation and live fleet support. |
@@ -502,3 +503,51 @@ revisions. Disabling the flag preserves each saved policy and outstanding
 revocations. Keep pre-reader replicas out of ingress, execution and delivery
 while restricted data or work exists. Heartbeats can assess only observed
 generations. See [organization specialist agents](ORG_AGENTS.md).
+
+## Channel guest audience rollout
+
+`nyxbot:guest-audience-v1` is a default-off global flag. With it off, ordinary
+channel settings govern fresh events. Configure the pilot while the flag is
+off using `GET` or `PUT /api/v1/admin/feature-flags/nyxbot-guest-audience/pilot`.
+An absent or empty selection includes zero bots. A named pilot selects up to
+100 bot IDs. The explicit fleet choice selects present and future opted-in
+bots. Existing bots with no saved setting are off. Newly created bots
+save on even while the global flag is off. Reconnects, retries and ownership
+transfers preserve the existing setting. Both switches and rollout membership
+must permit fresh guest work. Enabling uses the fleet serving-readiness
+gate described above.
+
+Before enrollment, inventory affected installations, workflows, skill pins
+and relay keys. Maintainers may prepare an exact draft revision. Activation
+rechecks its ownership, permissions, verified destinations and pins. A stale
+draft keeps that bot in ordinary mode with a visible reason. A bot with no
+prepared or applied policy starts with zero guest data grants and the
+documented attached-skill defaults. An external binding that uses a shared
+key stays in ordinary mode until a dedicated key is assigned.
+
+Disabling or clearing the global override commits an activation generation
+change. A fresh legacy message can take its ordinary channel conversation and
+capacity slot while the previous add-on turn settles. The add-on reserves a
+separate conversation for each actor, room, audience, generation and policy
+revision. Each bot also has a revision. Switching that bot off and on invalidates its earlier
+work while the other enrolled bots retain their own revisions. NyxID rotates the assistant key for every add-on source and rebuilds
+NyxAgent context from the bounded recap of that conversation. The old key
+cannot authenticate against a later source. Retain upgraded workers during
+rollback so they can terminate queued work and settle already dispatched usage.
+
+Preserve each provider’s acknowledgement and retry contract. An unreadable
+authoritative selection supplies no execution or delivery authority, and
+transient failures stay retryable. External callbacks use their original
+authenticated inbound receipt and reply identity. A proven obsolete late
+reply is suppressed and settled terminally with the provider. Test retry and
+durable recovery for each pilot transport before enrolling it.
+
+Retained setup waits use the encrypted event record with a separate field
+and context version for add-on work. Upgrade the readers, then follow the
+existing contextual-writer cutover and migration procedure. Before a binary
+downgrade, turn off the add-on and keep upgraded workers until admitted work
+has terminated, replies are suppressed and dispatched usage has settled.
+Compare flag-off behavior and the full integrated backend suite against the
+current dev baseline. Record fixture results and authorized live Telegram,
+Lark/Feishu and Discord acceptance separately.
+[Channel guest access specification](CHANNEL_BOT_GUEST_ACCESS_SPEC.md)

@@ -101,6 +101,7 @@ pub async fn request(
     Path((id, rid)): Path<(String, String)>,
 ) -> AppResult<Json<RequestResponse>> {
     super::login_client_context::require_first_party_human(&auth)?;
+    engine::require_public_conversation(&id)?;
     crate::services::voice::application::request(&state, &auth, id, rid)
         .await
         .map(Json)
@@ -112,6 +113,7 @@ pub async fn cancel(
     Path((id, rid)): Path<(String, String)>,
 ) -> AppResult<()> {
     super::login_client_context::require_first_party_human(&auth)?;
+    engine::require_public_conversation(&id)?;
     let cancelled = crate::services::voice::application::cancel(&state, &auth, id, rid).await?;
     for conversation in cancelled {
         super::mcp_transport::async_operations::drain_cancellations(

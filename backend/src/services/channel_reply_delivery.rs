@@ -374,6 +374,27 @@ pub async fn send_parts(
                 ));
             }
             delivery.attempting(db, index).await?;
+            if original.guest_relay.is_some() {
+                use crate::models::channel_conversation::{COLLECTION_NAME, ChannelConversation};
+                let route = db
+                    .collection::<ChannelConversation>(COLLECTION_NAME)
+                    .find_one(doc! {"_id": &original.conversation_id, "is_active": true})
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::Forbidden("Guest reply route is unavailable".into())
+                    })?;
+                super::channel_guest_access::relay::revalidate_effect(
+                    db,
+                    original,
+                    &route,
+                    bot,
+                    attributed_key,
+                )
+                .await?;
+            }
+            if !super::channel_adapters::meta::is_meta(&bot.platform) {
+                super::channel_platform::revalidate_post_effect().await?;
+            }
             let mut outcome = super::telegram_formatting::scope(
                 db,
                 delivery.formatting_receipt(index),
@@ -396,7 +417,7 @@ pub async fn send_parts(
             if let Some(record) = &mut outcome.observation {
                 record.waba_id = bot.app_id.clone();
             }
-            let stored = super::channel_relay_service::store_outbound_message(
+            let stored = super::channel_relay_service::store_outbound_with_guest_turn(
                 db,
                 &bot.id,
                 &original.conversation_id,
@@ -408,6 +429,7 @@ pub async fn send_parts(
                 Some(chat),
                 "text",
                 outcome.observation.clone(),
+                original.guest_relay.as_ref(),
             )
             .await?;
             let ids = outcome.observation.as_ref().map_or_else(
