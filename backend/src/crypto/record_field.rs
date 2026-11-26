@@ -1,7 +1,9 @@
-//! Server-encrypted binary fields whose historical format used unbound encryption.
-//! Services supply trusted identities and interpret the stored field version.
-//! Fields with historical AAD use their owning adapter. Recipient-sealed
-//! deliveries use the recipient protocol and key.
+//! Server-encrypted record fields. Services validate the row identity and select
+//! the stored format. Historical bindings and the Oracle worker envelope have
+//! purpose-specific operations. Recipient-sealed deliveries use their own protocol.
+pub(crate) mod historical;
+pub(crate) mod oracle;
+
 use super::aes::EncryptionKeys;
 pub(crate) use super::aes::RecordContext;
 use crate::errors::{AppError, AppResult};
