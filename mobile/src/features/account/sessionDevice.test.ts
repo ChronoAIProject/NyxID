@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { setAppTranslationLanguage } from "../../i18n/appTranslation";
 import { sessionDeviceLabel } from "./sessionDevice";
 
 test("session rows name the browser/app and device instead of the raw user agent", () => {
@@ -25,6 +26,7 @@ test("session rows name the browser/app and device instead of the raw user agent
       "NyxID app on iPhone",
     ],
     ["NyxID mobile", "NyxID app"],
+    ["NyxIDWatch/1.0.4 (watchOS 11.2; Watch7,3)", "NyxID on Apple Watch"],
     ["nyxid-cli/0.77.0", "NyxID CLI"],
     ["", "Unknown device"],
     [null, "Unknown device"],
@@ -32,4 +34,13 @@ test("session rows name the browser/app and device instead of the raw user agent
   ];
   for (const [ua, label] of cases)
     assert.equal(sessionDeviceLabel(ua), label, String(ua));
+});
+
+test("Apple Watch session labels follow the app language and retain both product names", (t) => {
+  t.after(() => setAppTranslationLanguage("en"));
+  for (const lang of ["zh-CN", "zh-TW"] as const) {
+    setAppTranslationLanguage(lang);
+    assert.equal(sessionDeviceLabel("NyxIDWatch/1.0"), "Apple Watch 上的 NyxID");
+    assert.equal(sessionDeviceLabel("custom-client/2"), "custom-client/2");
+  }
 });

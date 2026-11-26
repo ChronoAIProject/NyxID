@@ -350,7 +350,7 @@ impl AssistantLive {
         let mut workers = tokio::task::JoinSet::new();
         let live = self.clone();
         let worker_db = db.clone();
-        workers.spawn(async move {
+        crate::services::shutdown::process().spawn_worker_joined(&mut workers, async move {
             org_group_worker(pending, |id| {
                 live.publish_resolved(
                     &worker_db,

@@ -923,3 +923,77 @@ async fn contracts_are_readable_flag_off_by_admin_operator_only_and_match_valida
     }
     state.db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn admin_execution_projection_serves_overlap_including_family_contract_and_refuses_missing_support_or_activation()
+ {
+    use crate::models::{security_capability_activation as activation, security_replica};
+    use crate::services::{
+        platform_model_execution::certification, security_readiness_service as readiness,
+    };
+    for capability in [
+        registry::REGISTRY_READINESS,
+        registry::EXECUTION_READINESS,
+        registry::BILLING_READINESS,
+        certification::READINESS,
+    ] {
+        let (state, admin, _, _) = setup().await;
+        readiness::ready_test_replica(&state.db).await;
+        readiness::stop_test_replica(&state.db).await;
+        let sibling = readiness::overlapping_test_replica(&state.db).await;
+        let Json(model) = create(State(state.clone()), admin.clone(), Json(input()))
+            .await
+            .unwrap();
+        let (_, mut tariff, _) = crate::services::billing::model_tariffs::tests::fixture();
+        tariff.model_id = model.id.clone();
+        tariff.contract.fixture_sha256 =
+            fixture_digest(certification::family_fixture(tariff.contract.family).unwrap());
+        state
+            .db
+            .collection::<crate::models::platform_model_tariff::ModelTariff>(
+                crate::models::platform_model_tariff::COLLECTION_NAME,
+            )
+            .insert_one(tariff)
+            .await
+            .unwrap();
+        assert!(
+            admin_get(State(state.clone()), admin.clone(), Path(model.id.clone()))
+                .await
+                .unwrap()
+                .0
+                .execution_ready
+        );
+        readiness::remove_test_replica_capability(&state.db, &sibling, capability).await;
+        assert!(
+            !admin_get(State(state.clone()), admin.clone(), Path(model.id.clone()))
+                .await
+                .unwrap()
+                .0
+                .execution_ready
+        );
+        state
+            .db
+            .collection::<security_replica::SecurityReplica>(security_replica::COLLECTION_NAME)
+            .replace_one(doc! {"_id":&sibling.id}, &sibling)
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<bson::Document>(activation::COLLECTION_NAME)
+            .delete_one(doc! {"record_kind":activation::RECORD_KIND,"capability":capability})
+            .await
+            .unwrap();
+        assert!(
+            !admin_get(State(state.clone()), admin, Path(model.id))
+                .await
+                .unwrap()
+                .0
+                .execution_ready
+        );
+    }
+}
+
+fn fixture_digest(value: &str) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(value.as_bytes()))
+}

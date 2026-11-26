@@ -343,7 +343,7 @@ pub(crate) async fn dispatch(
     let update = update.clone();
     let api_base = service.api.base_url.to_owned();
     let manager_id = service.manager_id;
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let _permit = permit;
         let service = crate::services::telegram_new_service::TelegramNewService {
             manager_id,

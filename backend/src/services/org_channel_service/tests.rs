@@ -43,6 +43,125 @@ pub(crate) struct Fixture {
     pub(crate) agent: AssistantAgent,
     bot: ChannelBot,
 }
+
+#[tokio::test]
+async fn meta_member_confirmation_and_admission_require_the_current_consent() {
+    use crate::services::channel_meta_service::scopes;
+    let mut f = Fixture::new("meta_member_grants").await;
+    let db = &f.org.state.db;
+    f.bot.platform = "instagram".into();
+    f.channel.platform = "instagram".into();
+    f.bot.meta_binding = Some(bson::from_document(doc! {
+        "grant_id":uuid::Uuid::new_v4().to_string(),"generation":1_i64,"grant_start_generation":1_i64,
+        "token_fingerprint":"a".repeat(64),"grant_actor_id":&f.org.admin,"grant_subject_id":"900",
+        "app_id":"111","exclusive_routing_verified":true,"subscription":"active","authorized_at":bson::DateTime::now(),
+    }).unwrap());
+    db.collection::<ChannelBot>("channel_bots")
+        .replace_one(doc! {"_id":&f.bot.id}, &f.bot)
+        .await
+        .unwrap();
+    db.collection::<NyxbotChannel>("nyxbot_channels")
+        .replace_one(doc! {"_id":&f.channel.id}, &f.channel)
+        .await
+        .unwrap();
+    let actor = &f.org.member;
+    let a = scopes::reference(&f.bot).unwrap();
+    let issued = links::issue(db, actor, &f.channel).await.unwrap();
+    assert!(
+        links::receive_for_grant(
+            db,
+            &f.channel,
+            "same-participant",
+            issued["code"].as_str().unwrap(),
+            None,
+            Some(&a)
+        )
+        .await
+        .unwrap()
+    );
+    links::confirm(db, actor, &f.channel, issued["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        sender(db, &f.channel, "same-participant", true, &f.agent.id)
+            .await
+            .is_ok()
+    );
+    let delayed = links::issue(db, actor, &f.channel).await.unwrap();
+    assert!(
+        links::receive_for_grant(
+            db,
+            &f.channel,
+            "second-participant",
+            delayed["code"].as_str().unwrap(),
+            None,
+            Some(&a)
+        )
+        .await
+        .unwrap()
+    );
+    let mut b = f.bot.clone();
+    let binding = b.meta_binding.as_mut().unwrap();
+    binding.grant_id = uuid::Uuid::new_v4().to_string();
+    binding.grant_subject_id = "901".into();
+    binding.generation = 2;
+    binding.grant_start_generation = 2;
+    crate::services::transaction_service::run_db_only(
+        db,
+        &(db, &f.bot, &b),
+        |tx, &(db, old, next)| {
+            Box::pin(async move {
+                scopes::cutover(db, tx, old, next.meta_binding.as_ref().unwrap()).await?;
+                db.collection::<ChannelBot>("channel_bots")
+                    .replace_one(doc! {"_id":&old.id}, next)
+                    .session(tx)
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        links::confirm(db, actor, &f.channel, delayed["id"].as_str().unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        sender(db, &f.channel, "same-participant", true, &f.agent.id)
+            .await
+            .is_err()
+    );
+    let fresh = links::issue(db, actor, &f.channel).await.unwrap();
+    let b = scopes::reference(&b).unwrap();
+    assert!(
+        links::receive_for_grant(
+            db,
+            &f.channel,
+            "same-participant",
+            fresh["code"].as_str().unwrap(),
+            None,
+            Some(&b)
+        )
+        .await
+        .unwrap()
+    );
+    links::confirm(db, actor, &f.channel, fresh["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        sender(db, &f.channel, "same-participant", true, &f.agent.id)
+            .await
+            .is_ok()
+    );
+    let stored = db
+        .collection::<SenderLink>(LINKS)
+        .find_one(doc! {"channel_id":&f.channel.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.meta_grant.as_ref().unwrap().grant_id, b.grant_id);
+}
 impl Fixture {
     pub(crate) async fn new(name: &str) -> Self {
         let mut org = crate::services::org_agent_tests::Fixture::new(name).await;
@@ -54,6 +173,14 @@ impl Fixture {
         let (agent, _) = org.create().await;
         let db = &org.state.db;
         ensure_indexes(db).await.unwrap();
+        db.collection::<bson::Document>("audit_log")
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! {"event_type":1,"created_at":-1})
+                    .build(),
+            )
+            .await
+            .unwrap();
         crate::services::feature_flag_service::set_platform_override(
             db,
             FLAG,
@@ -70,10 +197,15 @@ impl Fixture {
             .insert_one(&bot)
             .await
             .unwrap();
-        let binding = link_target(db, &org.admin, &bot, &agent)
+        let mut binding = link_target(db, &org.admin, &bot, &agent)
             .await
             .unwrap()
             .unwrap();
+        // Legacy scenarios start with a pre-release, untouched Off policy.
+        binding.guests = GuestPolicy {
+            daily_credits: Some(management::default_daily_credits()),
+            ..Default::default()
+        };
         let channel:NyxbotChannel=bson::from_document(doc!{"_id":uuid::Uuid::new_v4().to_string(),"user_id":&org.admin,"channel_bot_id":&bot.id,"bot_owner_id":&org.org,
             "platform":"lark","bot_label":"Organization bot","transport":"direct","status":"active","route_api_key_id":uuid::Uuid::new_v4().to_string(),
             "route_id":uuid::Uuid::new_v4().to_string(),"agent_id":&agent.id,"org_specialist":bson::to_bson(&binding).unwrap(),"private_chats":"everyone",
@@ -102,7 +234,7 @@ impl Fixture {
             bot,
         }
     }
-    async fn link(&self, actor: &str, sender_id: &str) -> ChannelOrigin {
+    pub(crate) async fn link(&self, actor: &str, sender_id: &str) -> ChannelOrigin {
         let db = &self.org.state.db;
         let issued = links::issue(db, actor, &self.channel).await.unwrap();
         assert!(
@@ -147,6 +279,7 @@ impl Fixture {
                 service_ids: Some(ids),
                 daily_credits: Some(Credits::from_whole(1)),
             },
+            None,
         )
         .await
         .unwrap();
@@ -442,7 +575,8 @@ async fn exact_guest_billing_lane_preserves_ordinary_platform_key_payers() {
                 enabled: true,
                 service_ids: Some(vec![]),
                 daily_credits: Some(Credits::from_whole(1))
-            }
+            },
+            None
         )
         .await
         .is_err()
@@ -557,7 +691,8 @@ async fn guest_delegation_requires_admin_and_live_agent_policy_intersection() {
                     enabled: true,
                     service_ids: Some(vec![id.clone()]),
                     daily_credits: Some(Credits::from_whole(1))
-                }
+                },
+                None
             )
             .await
             .is_err()
@@ -766,6 +901,7 @@ async fn guest_budget_reserves_fractional_tax_upward_at_the_exact_cap() {
                 service_ids: Some(vec![]),
                 daily_credits: Some(Credits::from_pico(cap).unwrap()),
             },
+            None,
         )
         .await
         .unwrap();
@@ -1280,6 +1416,7 @@ async fn org_channel_rotated_guest_key_keeps_typed_lane_and_is_revoked_with_expo
             service_ids: Some(vec![]),
             daily_credits: Some(Credits::from_whole(1)),
         },
+        None,
     )
     .await
     .unwrap();
@@ -1438,7 +1575,8 @@ async fn public_transcript_excludes_private_messages_and_erasure_purges_actor_co
             &f.org.member,
             &row.id,
             work.clone(),
-            Some("Queued public question")
+            Some("Queued public question"),
+            false
         )
         .await
         .unwrap()
@@ -1449,7 +1587,8 @@ async fn public_transcript_excludes_private_messages_and_erasure_purges_actor_co
             &f.org.member,
             &row.id,
             work,
-            Some("Duplicate question")
+            Some("Duplicate question"),
+            false
         )
         .await
         .is_err()
@@ -1549,14 +1688,20 @@ async fn member_private_home_remains_usable_from_own_session_after_unlink() {
     let f = Fixture::new("org_channel_member_home_unlink").await;
     let origin = f.link(&f.org.member, "member").await;
     let db = &f.org.state.db;
-    let home = Box::pin(team::home_thread_for(
-        db,
-        &f.org.state.encryption_keys,
-        &f.org.member,
-        &f.agent,
-    ))
-    .await
-    .unwrap();
+    let homes = db.collection::<Document>("assistant_conversations");
+    let filter = team::thread_filter_for(&f.org.member, &f.agent);
+    assert_eq!(homes.count_documents(filter.clone()).await.unwrap(), 0);
+    let first_dm = || {
+        Box::pin(team::home_thread_for(
+            db,
+            &f.org.state.encryption_keys,
+            &f.org.member,
+            &f.agent,
+        ))
+    };
+    let (home, other) = tokio::try_join!(first_dm(), first_dm()).unwrap();
+    assert_eq!(home.id, other.id);
+    assert_eq!(homes.count_documents(filter).await.unwrap(), 1);
     let request = engine::TurnRequest {
         acknowledgement_id: None,
         retry_of: None,
@@ -1721,6 +1866,7 @@ async fn narrowing_guest_exposure_stops_guest_and_setup_keys_but_preserves_membe
             service_ids: Some(vec![]),
             daily_credits: Some(Credits::from_whole(1)),
         },
+        None,
     )
     .await
     .unwrap();
@@ -2238,3 +2384,141 @@ async fn notifications_are_purged_by_exact_org_channel_actor_and_thread() {
 
 #[path = "grants_cutover_tests.rs"]
 mod grants_cutover;
+
+impl Fixture {
+    pub(crate) async fn followed_guest(&self) -> AssistantConversation {
+        self.followed_guest_with_policy("active").await
+    }
+
+    pub(crate) async fn followed_guest_with_policy(&self, policy: &str) -> AssistantConversation {
+        use crate::models::channel_thread::{
+            ChannelThreadFacts, ThreadAddress, ThreadKind, ThreadSenderKind,
+        };
+        use crate::services::{
+            channel_thread_follow_service as follow, channel_thread_service::ThreadReplyTarget,
+        };
+        let f = self;
+        let db = &f.org.state.db;
+        let mut origin = f.guest("fixture-sender").await;
+        crate::services::feature_flag_service::set_platform_override(
+            db,
+            crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            &f.org.admin,
+        )
+        .await
+        .unwrap();
+        db.collection::<Document>("nyxbot_threads")
+        .insert_one(doc! {
+            "_id":"parent","user_id":&f.org.admin,"channel_id":&f.channel.id,"partition":"parent",
+            "kind":"group","platform_chat_id":"group","members":"everyone",
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+        })
+        .await
+        .unwrap();
+        let facts = ChannelThreadFacts {
+            version: 1,
+            kind: ThreadKind::ReplyChain,
+            chat_id: "group".into(),
+            message_id: "message".into(),
+            root_id: Some("message".into()),
+            sender_kind: ThreadSenderKind::Human,
+            address: ThreadAddress::Mention,
+            ..Default::default()
+        };
+        let inbound:crate::services::channel_platform::InboundMessage=serde_json::from_value(serde_json::json!({
+        "platform_message_id":"message","conversation_id":"group","conversation_type":"group","sender_platform_id":"fixture-sender",
+        "content_type":"text","text":"Question","attachments":[],"raw_data":{}
+    })).unwrap();
+        let mut source = crate::services::channel_relay_service::inbound_metadata(
+            &f.bot.id,
+            f.channel.route_id.as_deref().unwrap(),
+            &f.org.org,
+            "lark",
+            &inbound,
+            &f.channel.route_api_key_id,
+            "source",
+        );
+        source.thread_context = Some(facts.clone());
+        db.collection::<crate::models::channel_message::ChannelMessage>("channel_messages")
+            .insert_one(source)
+            .await
+            .unwrap();
+        let follow::Selection::Child(child, binding) = follow::select(
+            db,
+            &f.org.admin,
+            &f.channel.id,
+            "parent",
+            "parent",
+            &ThreadReplyTarget::fixture("lark", facts),
+            "source",
+            "fixture-sender",
+            true,
+            false,
+            &f.agent.id,
+            true,
+        )
+        .await
+        .unwrap() else {
+            panic!("guest must open followed thread")
+        };
+        assert!(binding.guest);
+        origin.partition = child.partition.clone();
+        origin.thread = Some(Box::new(binding));
+        let (conversation, _) = transcript::lane(db, &origin, &f.org.org, &f.agent.id)
+            .await
+            .unwrap();
+        match policy {
+            "flag_off" => {
+                crate::services::feature_flag_service::set_platform_override(
+                    db,
+                    crate::services::feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,
+                    &crate::services::feature_flag_service::FlagTarget::Global,
+                    false,
+                    &f.org.admin,
+                )
+                .await
+                .unwrap();
+                db.collection::<Document>("nyxbot_threads")
+                    .update_one(
+                        doc! {"_id":&child.id},
+                        doc! {"$set":{"follow_state":"stopped"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            "stopped" | "expired" => {
+                db.collection::<Document>("nyxbot_threads")
+                    .update_one(doc! {"_id":"parent"}, doc! {"$set":{"reply_mode":"all"}})
+                    .await
+                    .unwrap();
+                db.collection::<Document>("nyxbot_threads").update_one(doc!{"_id":&child.id},
+                    doc!{"$set":{"follow_state":policy,"follow_expires_at":bson::DateTime::from_millis(0)}}).await.unwrap();
+            }
+            "active" => {}
+            _ => panic!("unknown admission policy"),
+        }
+        let mut tx = db.client().start_session().await.unwrap();
+        tx.start_transaction().await.unwrap();
+        follow::admit_turn(db, &f.org.org, &origin, &conversation, &mut tx)
+            .await
+            .unwrap();
+        tx.commit_transaction().await.unwrap();
+        follow::validate_delivery(db, &f.org.org, &origin, &conversation)
+            .await
+            .unwrap();
+        assert!(
+            follow::validate_delivery(db, &f.org.admin, &origin, &conversation)
+                .await
+                .is_err()
+        );
+        let row = channel_turn(f, &origin, "Guest follow question").await;
+        assert!(row.guest_turn && row.channel.as_ref().unwrap().thread.is_some());
+        assert_eq!(row.user_id, f.org.org);
+        row
+    }
+}
+
+#[path = "defaults_tests.rs"]
+mod defaults_2482;

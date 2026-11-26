@@ -7,8 +7,11 @@ use crate::{
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
         nyxbot_channel::ChannelTurnDelivery,
     },
-    services::channel_turn_delivery as delivery,
+    services::{channel_turn_delivery as delivery, channel_turn_preparation as preparation},
 };
+
+#[path = "nyxbot_late_text.rs"]
+mod text;
 
 // CMA's default hard limit is 600 s from ingress, not from provider admission.
 // Finish early enough for its terminal frames and normal delivery pacing. An
@@ -19,7 +22,7 @@ const INCOMPLETE: &str = "\n\n[Incomplete — I could not finish this turn.]";
 pub(super) fn answer(text: &str, failed: bool) -> String {
     if failed {
         if text.trim().is_empty() {
-            "I could not finish that. Please try again.".into()
+            engine::TurnError::new("outcome_unknown").message
         } else {
             format!("{text}{INCOMPLETE}")
         }
@@ -37,6 +40,7 @@ pub(super) async fn prepare(
     sender: &Sender<'_>,
     guest: bool,
     addressed: bool,
+    notice_language: Option<NoticeLanguage>,
 ) -> AppResult<()> {
     let events = state.db.collection::<NyxbotEvent>(EVENTS);
     let row = events
@@ -45,6 +49,20 @@ pub(super) async fn prepare(
         .await?
         .ok_or_else(|| AppError::Conflict("Channel event already admitted".into()))?;
     let mut metadata = ChannelTurnDelivery {
+        restart_owner_verified: sender.owner_eligible
+            && sender.original_message
+            && !guest
+            && channel.bot_owner_id.is_none()
+            && channel.org_specialist.is_none()
+            && origin.native_event_id.as_deref() == Some(event)
+            && origin.thread.is_none()
+            && channel.gateway_source.is_some()
+            && sender.execution_kind() != crate::models::channel_thread::ThreadSenderKind::Bot
+            && channel
+                .owner_sender_ids
+                .iter()
+                .any(|owner| owner == sender.id),
+        notice_language,
         execution_source_bound: false,
         execution_owner_verified: crate::services::execution_permission_channel::verified_owner(
             channel,
@@ -73,6 +91,7 @@ pub(super) async fn prepare(
         stream_deadline: row.created_at + ChronoDuration::seconds(STREAM_SECS),
         checked_at: row.created_at,
         claim_id: None,
+        target_context_version: None,
         target_ciphertext: None,
         target_expires_at: None,
     };
@@ -106,7 +125,7 @@ pub(super) async fn prepare(
     }
     let metadata = bson::to_bson(&metadata)
         .map_err(|_| AppError::Internal("Channel delivery unavailable".into()))?;
-    let prepared = events.update_one(doc! {"_id": event, "media.interrupted": {"$ne":true}, "turn_id": bson::Bson::Null},
+    let prepared = events.update_one(doc! {"_id": event, "media.interrupted": {"$ne":true}, "turn_id": bson::Bson::Null, "org_notice": null},
         vec![doc! {"$set": {"delivery": {"$mergeObjects": [
             {"$literal": metadata},
             {"$cond": [{"$eq": ["$gateway_replay_claimed", true]}, {"state":"replay"},
@@ -134,9 +153,11 @@ impl Drop for StreamGuard {
         if self.armed {
             let state = self.state.clone();
             let event = self.event.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 let _ = delivery::detach(&state.db, &event).await;
-                process(&state, &event).await;
+                if !state.shutdown.is_stopped() {
+                    process(&state, &event).await;
+                }
             });
         }
     }
@@ -205,15 +226,34 @@ fn provider_stream_inner(
     sse(async_stream::stream! {
         yield created;
         match tokio::time::timeout_at(deadline, final_reply(receiver)).await {
+            Ok(Err(error)) if error.stage == "subscriber_closed" && may_detach(&state, &event_key).await.unwrap_or(true) => {
+                let _ = delivery::detach(&state.db, &event_key).await;
+                guard.disarm();
+                for frame in message_frames(&response_id, None) { yield frame; }
+                process(&state, &event_key).await;
+            }
             Ok(outcome) => {
-                let (allowed,org_guest)=org_stream_authority(&state,&event_key).await.unwrap_or((false,false));
+                let (allowed,org_guest,language)=org_stream_authority(&state,&event_key).await.unwrap_or((false,false,None));
                 if !allowed {
                     let _=refuse(&state,&event_key).await;
                     guard.disarm();
                     for frame in message_frames(&response_id,None) {yield frame;}
                     return;
                 }
-                let outcome=if org_guest {outcome.map_err(|_|Box::new(engine::TurnError::new("org_channel_guest_unavailable")))} else {outcome};
+                let outcome=outcome.map_err(|mut error| {
+                    if org_guest {
+                        let notice = Notice::org_guest_failure(Some(error.code));
+                        *error = engine::TurnError::new("org_channel_guest_unavailable");
+                        error.message = notice.text(language).into();
+                    } else if error.code == "channel_retry_attachment_unavailable" {
+                        error.message = Notice::RetryAttachmentUnavailable.text(language).into();
+                    } else if error.code == "assistant_start_unavailable" {
+                        error.message = Notice::DependencyUnavailable.text(language).into();
+                    } else if error.code == "capacity_exceeded" {
+                        error.message = crate::services::channel_notices::capacity(language,error.capacity_wait_ms());
+                    }
+                    error
+                });
                 let status = if outcome.is_ok() { "completed" } else { "failed" };
                 // A completed empty result still owns a terminal delivery
                 // decision. Never acquire the stream/send barrier for silence.
@@ -235,19 +275,19 @@ fn provider_stream_inner(
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
-                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
+                        Err(error) if matches!(error.code, "channel_retry_attachment_unavailable" | "capacity_exceeded" | "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
-                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
                             for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
                         Err(error) => {
                             let wake_state = state.clone();
                             let wake_event = event_key.clone();
-                            tokio::spawn(async move { process(&wake_state, &wake_event).await; });
+                            crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
                             yield json!({"type": "response.failed", "response": {
                                 "id": &response_id, "status": "failed",
                                 "error": {"code": identifier(error.code), "message": "NyxBot could not finish this turn."}}});
@@ -268,7 +308,7 @@ fn provider_stream_inner(
                             let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
                             for frame in message_frames(&response_id, Some(&text)) { yield frame; }
                         },
-                        Err(error) if matches!(error.code, "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
+                        Err(error) if matches!(error.code, "channel_retry_attachment_unavailable" | "capacity_exceeded" | "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
                             for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
                         },
                         Err(error) => yield json!({"type": "response.failed", "response": {
@@ -295,17 +335,42 @@ fn provider_stream_inner(
     })
 }
 
+async fn may_detach(state: &AppState, event_key: &str) -> AppResult<bool> {
+    let Some(event) = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":event_key})
+        .await?
+    else {
+        return Ok(false);
+    };
+    let (Some(conversation), Some(turn)) = (event.conversation_id, event.turn_id) else {
+        return Ok(false);
+    };
+    if state.db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find_one(doc! {"_id":&conversation,"user_id":&event.user_id,"active_turn.turn_id":&turn,"active_turn.restart_admission.version":4}).projection(doc! {"_id":1}).await?.is_some() {return Ok(true)}
+    Ok(state.db.collection::<bson::Document>(MESSAGES).find_one(doc! {"conversation_id":conversation,"user_id":event.user_id,"turn_id":turn,"role":"assistant","settled_by_attempt":{"$exists":true}}).projection(doc! {"_id":1}).await?.is_some())
+}
+
 /// A separate bounded worker: provider I/O must never stall the shared live
 /// change stream or the team wake-up sweep. Old events have no delivery version
 /// and are deliberately never picked up (old stream writers cannot claim it).
 pub(crate) fn spawn_sweep(state: AppState) {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             if sweep(&state).await.is_err() {
                 tracing::warn!(stage = "sweep", "Channel answer delivery deferred");
+            }
+            if super::handoff_delivery::sweep(&state).await.is_err() {
+                tracing::warn!(stage = "sweep", "Saved channel reply delivery deferred");
+            }
+            if super::images::recovery::sweep(&state).await.is_err() {
+                tracing::warn!(stage = "sweep", "Attachment recovery deferred");
             }
         }
     });
@@ -323,6 +388,9 @@ pub(super) async fn sweep(state: &AppState) -> AppResult<()> {
         .try_collect()
         .await?;
     for response in pending {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let event_key = &response.event_key;
         crate::services::nyxbot_response_recovery::refresh(
             &state.db,
@@ -340,21 +408,45 @@ pub(super) async fn sweep(state: &AppState) -> AppResult<()> {
         )
         .await?;
     }
-    let rows: Vec<NyxbotEvent> = state
+    let receipt_rows: Vec<NyxbotEvent> = state
         .db
         .collection(EVENTS)
-        .find(doc! {
-            "delivery.version": 1, "delivery.state": {"$in": ["waiting", "pending"]},
-            "$or": [{"turn_id": {"$type": "string"}}, {"status": "queued"}],
-        })
-        .sort(doc! {"delivery.checked_at": 1})
+        .find(preparation::gateway::due(Utc::now()))
+        .hint(mongodb::options::Hint::Name(
+            preparation::gateway::DUE_INDEX.into(),
+        ))
+        .sort(doc! {"delivery.receipt_due_at":1})
         .limit(32)
         .await?
         .try_collect()
         .await?;
     use futures::StreamExt;
+    futures::stream::iter(receipt_rows)
+        .for_each_concurrent(4, |event| async move {
+            let Some(_work) = state.shutdown.background() else {
+                return;
+            };
+            if text::resume_receipt(state, &event).await.is_err() {
+                tracing::warn!(event_id=%event.id, "Gateway receipt observation deferred");
+            }
+        })
+        .await;
+    let rows: Vec<NyxbotEvent> = state
+        .db
+        .collection(EVENTS)
+        .find(doc! {"$and":[preparation::due(), {
+            "$or": [{"turn_id": {"$type": "string"}}, {"status": "queued"}],
+        }]})
+        .sort(doc! {"delivery.checked_at": 1})
+        .limit(32)
+        .await?
+        .try_collect()
+        .await?;
     futures::stream::iter(rows)
         .for_each_concurrent(4, |event| async move {
+            let Some(_work) = state.shutdown.background() else {
+                return;
+            };
             process(state, &event.id).await;
         })
         .await;
@@ -395,7 +487,11 @@ async fn refuse(state: &AppState, event_id: &str) -> AppResult<()> {
         .db
         .collection::<NyxbotEvent>(EVENTS)
         .find_one_and_update(
-            doc! {"_id": event_id, "delivery.state": {"$in": ["waiting", "pending"]}},
+            doc! {"_id": event_id, "$or":[
+                {"delivery.state":{"$in":["waiting","pending"]}},
+                {"delivery.state":"preparing_text","delivery.preparation.version":1,
+                 "$expr":{"$lte":["$delivery.preparation.lease_until","$$NOW"]}},
+            ]},
             doc! {"$set": {"delivery.state": "refused"}},
         )
         .await?
@@ -416,8 +512,8 @@ async fn refuse(state: &AppState, event_id: &str) -> AppResult<()> {
 
 async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> AppResult<()> {
     let events = state.db.collection::<NyxbotEvent>(EVENTS);
-    let mut filter = doc! {"_id": event_id, "delivery.version": 1,
-    "delivery.state": {"$in": ["waiting", "pending"]}};
+    let mut filter = preparation::due();
+    filter.insert("_id", event_id);
     if gateway_only {
         filter.insert("delivery.transport", "gateway");
     }
@@ -432,22 +528,40 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
     let Some(mut d) = event.delivery.clone() else {
         return Ok(());
     };
+    if d.state == "sending" {
+        if d.transport == "gateway"
+            && let Some(recovered) = preparation::gateway::recover(&state.db,event_id).await?
+        {
+            return Box::pin(text::resume_receipt(state, &recovered)).await;
+        }
+        if preparation::unconfirmed(&state.db,event_id,None).await? {
+            x_diagnostics::for_event(&state.db,event_id,XOutcome::ReplyUnconfirmed).await;
+            audit(state,&event.user_id,"nyxbot_channel_answer_delivery",
+                json!({"event_id":event.id,"conversation_id":event.conversation_id,"turn_id":event.turn_id,
+                    "transport":d.transport,"outcome":"unknown","reason":"interrupted_dispatch"})).await;
+        }
+        return Ok(());
+    }
     let Some(conversation_id) = &event.conversation_id else {
         return Ok(());
     };
     let now = Utc::now();
-    events
-        .update_one(
-            doc! {"_id": event_id},
-            doc! {"$set": {"delivery.checked_at": bson::DateTime::from_chrono(now)}},
-        )
-        .await?;
-    if d.state == "waiting" && d.stream_deadline <= now {
+    let checked = doc! {"$set": {"delivery.checked_at": bson::DateTime::from_chrono(now)}};
+    if d.state == "waiting" {
+        // Older observers could persist the disconnect and exit before detach.
+        // The stream and replay claims still arbitrate against the release.
+        let previous = state.db.collection::<bson::Document>(EVENTS)
+            .find_one_and_update(doc! {"_id": event_id, "delivery.state": "waiting"}, checked)
+            .projection(doc! {"_id": 0, "gateway_observer_detached": 1})
+            .await?;
+        let Some(previous) = previous else { return Ok(()); };
+        if d.stream_deadline > now && previous.get_bool("gateway_observer_detached") != Ok(true) {
+            return Ok(());
+        }
         delivery::detach(&state.db, event_id).await?;
         d.state = "pending".into();
-    }
-    if d.state == "waiting" {
-        return Ok(());
+    } else {
+        events.update_one(doc! {"_id": event_id}, checked).await?;
     }
     let conversation = engine::get(
         &state.db,
@@ -455,12 +569,10 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         conversation_id,
     )
     .await?;
-    let Some((channel, _)) = eligible(state, &event, &d, &conversation).await? else {
+    let Some((channel, thread)) = eligible(state, &event, &d, &conversation).await? else {
         refuse(state, event_id).await?;
         return Ok(());
     };
-    // Mint while the original reference is live; this has no message effect.
-    // Stored encrypted and bound to the original event, never the newest chat.
     if d.transport == "gateway" && d.target_ciphertext.is_none() {
         mint_target(state, &event, &channel, &mut d).await?;
     }
@@ -484,47 +596,14 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         }
         return Ok(());
     }
-    let text = if let Some(code) = message.error_code.as_deref() {
-        let failure = if d.origin.org_execution.as_ref().is_some_and(|e| e.guest) {
-            crate::services::org_channel_service::UNAVAILABLE.into()
-        } else if code == "capacity_exceeded" {
-            crate::services::assistant_turn_observability::capacity_message(
-                message
-                    .error_detail
-                    .as_ref()
-                    .and_then(|detail| detail.capacity_wait_ms),
-            )
-        } else {
-            engine::TurnError::new(code)
-                .with_model_route_reason(
-                    message
-                        .turn_metadata
-                        .as_ref()
-                        .and_then(|data| data.failure_reason.as_ref())
-                        .and_then(|reason| reason.model_route.as_ref())
-                        .map(|route| route.reason.as_str()),
-                )
-                .message
-        };
-        if message.text.trim().is_empty() {
-            failure
-        } else {
-            format!("{}\n\n{}", message.text.trim(), failure)
-        }
-    } else {
-        answer(&message.text, message.status != "completed")
-    };
-    // Preflight above can be slow: re-resolve authority immediately before the
-    // irreversible barrier. Concurrent losers never reach a provider.
-    let Some((channel, thread)) = eligible(state, &event, &d, &conversation).await? else {
-        refuse(state, event_id).await?;
-        return Ok(());
-    };
+    let text = settled_answer(&message, &d);
+    // The first check authorizes preparation; each provider boundary revalidates
+    // after credential and attachment loading.
     let claim = Uuid::new_v4().to_string();
-    if !delivery::claim_send(&state.db, event_id, &claim).await? {
+    let Some(saved) = preparation::acquire(&state.db,event_id,&message.id,&claim).await? else {
         return Ok(());
-    }
-    let report = event_images(
+    };
+    let report = crate::services::channel_reply_notice::supplemental(event_images(
         state,
         &event,
         &d,
@@ -533,21 +612,14 @@ async fn process_inner(state: &AppState, event_id: &str, gateway_only: bool) -> 
         &conversation,
         &message,
         None,
-    )
+    ))
     .await;
-    let text = super::images::append_failure(&text, &report);
-    let result = if text.trim().is_empty() {
-        // Image-only output has already been dispatched through its own claims.
-        Ok(report.unknown == 0 && report.failed == 0)
-    } else {
-        dispatch(state, &event, &d, &channel, &conversation, &text).await
-    };
-    let status = match result {
-        Ok(true) => "sent",
-        Ok(false) | Err(_) => "unknown",
-    };
-    crate::turn_trace::milestone(turn_id, crate::turn_trace::Stage::Channel, None, Some(if status == "sent" { crate::turn_trace::Outcome::Confirmed } else { crate::turn_trace::Outcome::Unknown }));
-    delivery::finish(&state.db, event_id, &claim, status).await?;
+    if d.transport == "gateway" {
+        events.update_one(doc! {"_id":event_id}, doc! {"$set":{"status":if message.status=="completed" {"completed"} else {"failed"}}}).await?;
+    }
+    let Some(confirmed) = Box::pin(text::send(state,&event,&d,&channel,&thread,&conversation,&claim,saved,&text,&report)).await? else { return Ok(()); };
+    let status=if confirmed { "sent" } else { "unknown" };
+    crate::turn_trace::milestone(turn_id, crate::turn_trace::Stage::Channel, None, Some(if confirmed { crate::turn_trace::Outcome::Confirmed } else { crate::turn_trace::Outcome::Unknown }));
     x_diagnostics::for_channel(&state.db, &channel, if status == "sent" { XOutcome::ReplySent } else { XOutcome::ReplyUnconfirmed }).await;
     events.update_one(doc! {"_id": event_id}, doc! {"$set": {"status": if message.status == "completed" { "completed" } else { "failed" }}}).await?;
     audit(
@@ -585,6 +657,9 @@ async fn event_images(
     report_or_failure(
         state,
         ImageSendContext {
+            source: crate::models::image_preparation::Source::Event {
+                event_id: event.id.clone(),
+            },
             owner: crate::services::org_channel_service::event_actor(event),
             conversation_id: &conversation.id,
             turn_id: &message.turn_id,
@@ -645,11 +720,74 @@ pub(super) async fn stream_images(
     }
 }
 
+pub(crate) async fn retry_expiry(
+    state: &AppState,
+    conversation: &AssistantConversation,
+    source: &str,
+) -> AppResult<chrono::DateTime<Utc>> {
+    let turn = conversation
+        .active_turn
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let event = state.db.collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":source,"conversation_id":&conversation.id,"turn_id":&turn.turn_id,"delivery.version":1})
+        .await?.ok_or(AppError::AssistantTurnRequired)?;
+    let d = event
+        .delivery
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    if crate::services::org_channel_service::event_actor(&event) != conversation.user_id {
+        return Err(AppError::AssistantTurnRequired);
+    }
+    let mut expiry = event.expires_at;
+    if let Some(target) = d.target_expires_at {
+        expiry = expiry.min(target);
+    } else if d.transport == "gateway" {
+        expiry = expiry.min(event.created_at + ChronoDuration::minutes(29));
+    }
+    if expiry > Utc::now() {
+        let (channel, _) = eligible(state, &event, d, conversation)
+            .await?
+            .ok_or(AppError::AssistantTurnRequired)?;
+        if !crate::services::nyxbot_gateway_source::ready(&channel)
+            && channel.gateway_source.is_some()
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        if channel.route_id != d.source_route_id
+            || d.source_route_api_key_id.as_deref() != Some(&channel.route_api_key_id)
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        let route = channel
+            .route_id
+            .as_deref()
+            .ok_or(AppError::AssistantTurnRequired)?;
+        if state.db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id":route,"user_id":bot_owner(&channel),"channel_bot_id":&channel.channel_bot_id,
+                "agent_api_key_id":&channel.route_api_key_id,"is_active":true,"retired_by_transfer":{"$ne":true}})
+            .projection(doc! {"_id":1}).await?.is_none() {
+            return Err(AppError::AssistantTurnRequired);
+        }
+    }
+    Ok(expiry)
+}
+
 pub(super) async fn eligible(
     state: &AppState,
     event: &NyxbotEvent,
     d: &ChannelTurnDelivery,
     conversation: &AssistantConversation,
+) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
+    eligible_with(state, event, d, conversation, None).await
+}
+
+pub(super) async fn eligible_with(
+    state: &AppState,
+    event: &NyxbotEvent,
+    d: &ChannelTurnDelivery,
+    conversation: &AssistantConversation,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
 ) -> AppResult<Option<(NyxbotChannel, NyxbotThread)>> {
     let (channel, thread) = if d.origin.thread.is_some() {
         // Each admitted native-thread turn has its own source binding. A newer
@@ -667,7 +805,14 @@ pub(super) async fn eligible(
             thread,
         )
     } else {
-        let Some(target) = delivery_target(state, conversation, &d.origin).await? else {
+        let Some(target) = crate::services::channel_turn_delivery::target_with(
+            &state.db,
+            conversation,
+            &d.origin,
+            checked,
+        )
+        .await?
+        else {
             return Ok(None);
         };
         target
@@ -676,7 +821,7 @@ pub(super) async fn eligible(
         return Ok(None);
     }
     // An unavailable rollout/dependency leaves pending delivery retryable.
-    require_org_access(state, &channel).await?;
+    require_org_access_with(state, &channel, checked).await?;
     if state
         .db
         .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
@@ -798,7 +943,12 @@ pub(super) async fn eligible(
     {
         return Ok(None);
     }
-    let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
+    let bot = crate::services::platform_bot_authority::bot_with(
+        &state.db,
+        &channel.channel_bot_id,
+        checked,
+    )
+    .await?;
     if !bot.is_active || bot.status == "suspended" {
         return Ok(None);
     }
@@ -817,7 +967,12 @@ async fn event_reference(state: &AppState, event: &NyxbotEvent) -> AppResult<Zer
         .event_context_ciphertext
         .as_ref()
         .ok_or_else(|| AppError::NotFound("Channel event unavailable".into()))?;
-    let bytes = Zeroizing::new(state.encryption_keys.decrypt(ciphertext).await?);
+    let bytes = crate::services::nyxbot_event_record::event_context(
+        &state.encryption_keys,
+        event,
+        ciphertext,
+    )
+    .await?;
     let context: Value = serde_json::from_slice(&bytes)
         .map_err(|_| AppError::Internal("Channel event unavailable".into()))?;
     context["event_ref"]
@@ -835,9 +990,41 @@ async fn mint_target(
 ) -> AppResult<()> {
     fetch_target(state, event, channel, d).await?;
     if let (Some(sealed), Some(expires)) = (&d.target_ciphertext, d.target_expires_at) {
-        state.db.collection::<NyxbotEvent>(EVENTS).update_one(doc! {"_id": &event.id, "delivery.target_ciphertext": bson::Bson::Null},
-            doc! {"$set": {"delivery.target_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: sealed.clone()}, "delivery.target_expires_at": bson::DateTime::from_chrono(expires)}}).await?;
+        let update = event_record::set_material(
+            doc! {
+                "delivery.target_ciphertext": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: sealed.clone() },
+                "delivery.target_expires_at": bson::DateTime::from_chrono(expires),
+            },
+            "delivery.target_context_version",
+            d.target_context_version,
+        );
+        state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .update_one(
+                doc! {
+                    "_id": &event.id,
+                    "user_id": &event.user_id,
+                    "channel_id": &event.channel_id,
+                    "delivery.state": {"$in":["pending","preparing_text"]},
+                    "delivery.target_ciphertext": bson::Bson::Null,
+                },
+                update,
+            )
+            .await?;
     }
+    let canonical = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {
+            "_id":&event.id,
+        })
+        .await?
+        .and_then(|e| e.delivery)
+        .ok_or_else(preparation::lost)?;
+    d.target_ciphertext = canonical.target_ciphertext;
+    d.target_context_version = canonical.target_context_version;
+    d.target_expires_at = canonical.target_expires_at;
     Ok(())
 }
 
@@ -879,24 +1066,18 @@ async fn fetch_target(
     if expires <= Utc::now() || expires > Utc::now() + ChronoDuration::hours(24) {
         return Ok(());
     }
-    let sealed = state.encryption_keys.encrypt(target.as_bytes()).await?;
+    let sealed = event_record::seal(
+        &state.encryption_keys,
+        &event.id,
+        &event.user_id,
+        &[event_record::TARGET, &event.channel_id],
+        target.as_bytes(),
+    )
+    .await?;
     d.target_ciphertext = Some(sealed);
+    d.target_context_version = event_record::version(&state.encryption_keys);
     d.target_expires_at = Some(expires);
     Ok(())
-}
-
-async fn dispatch(
-    state: &AppState,
-    event: &NyxbotEvent,
-    d: &ChannelTurnDelivery,
-    channel: &NyxbotChannel,
-    conversation: &AssistantConversation,
-    text: &str,
-) -> AppResult<bool> {
-    Ok(
-        dispatch_occurrence(state, event, d, channel, conversation, text, None).await?
-            == "confirmed",
-    )
 }
 
 pub(super) async fn dispatch_occurrence(
@@ -906,8 +1087,13 @@ pub(super) async fn dispatch_occurrence(
     channel: &NyxbotChannel,
     conversation: &AssistantConversation,
     text: &str,
-    occurrence: Option<&str>,
-) -> AppResult<&'static str> {
+    deadline: chrono::DateTime<Utc>,
+) -> AppResult<crate::models::gateway_reply::Reply> {
+    use crate::models::gateway_reply::{Observation, Outcome, Reply};
+    let classified = |outcome| Reply {
+        outcome,
+        observation: Observation::default(),
+    };
     let mut operation = crate::turn_trace::Operation::start(
         event
             .turn_id
@@ -915,95 +1101,129 @@ pub(super) async fn dispatch_occurrence(
             .and_then(crate::turn_trace::TurnContext::for_turn),
         crate::turn_trace::Stage::Channel,
     );
-    let result: AppResult<&'static str> = crate::turn_trace::scope(operation.context(), async {
-        if d.origin.thread.is_some() && d.transport == "direct" {
-            thread_follow::send(
-                state,
-                &event.user_id,
-                &d.origin,
-                &conversation.id,
-                text,
-                None,
-            )
-            .await?;
-            return Ok("confirmed");
-        }
-        if d.transport == "direct" {
-            // Route-key auth rechecks the current route; an expired callback token
-            // never extends the sender's authority. The exact inbound preserves topics.
-            direct_reply(state, channel, &event.event_id, text, None).await?;
-            return Ok("confirmed");
-        }
-        let Some(key) = decrypt_agent_key(state, channel).await? else {
-            return Ok("rejected");
-        };
-        let (path, idempotency) = if let Some(ciphertext) = &d.target_ciphertext {
-            if d.target_expires_at.is_none_or(|t| t <= Utc::now()) {
-                return Ok("rejected");
+    let result: AppResult<crate::models::gateway_reply::Reply> =
+        crate::turn_trace::scope(operation.context(), async {
+            if d.origin.thread.is_some() && d.transport == "direct" {
+                thread_follow::send(
+                    state,
+                    &event.user_id,
+                    &d.origin,
+                    &conversation.id,
+                    text,
+                    None,
+                )
+                .await?;
+                return Ok(classified(Outcome::Confirmed));
             }
-            let reference = Zeroizing::new(
-                String::from_utf8(state.encryption_keys.decrypt(ciphertext).await?)
-                    .map_err(|_| AppError::Internal("Channel target unavailable".into()))?,
-            );
-            (
-                Zeroizing::new(format!("/reply-targets/{}/messages", urlencode(&reference))),
-                Some(occurrence.unwrap_or(event.id.as_str())),
-            )
-        } else {
-            // Compatibility with gateways predating reply targets: the original
-            // short-lived event is safe once, but never replaced by a newer event.
-            if event.created_at + ChronoDuration::minutes(29) <= Utc::now() {
-                return Ok("rejected");
+            if d.transport == "direct" {
+                // Route-key auth rechecks the current route; an expired callback token
+                // never extends the sender's authority. The exact inbound preserves topics.
+                direct_reply(state, channel, &event.event_id, text, None).await?;
+                return Ok(classified(Outcome::Confirmed));
             }
-            let reference = event_reference(state, event).await?;
-            (
-                Zeroizing::new(format!("/events/{}/replies", urlencode(&reference))),
-                occurrence,
-            )
-        };
-        let mut message = json!({"text": text});
-        if d.origin.thread.is_some() {
-            message["thread_reply"] = json!(true);
-        }
-        let response = gateway_call(
-            state,
-            reqwest::Method::POST,
-            &path,
-            &key,
-            Some(&message),
-            idempotency,
-        )
-        .await?;
-        if !(200..300).contains(&response.status) {
-            // A gateway failure can follow a platform send; it is not proof of rejection.
-            return Ok(if (500..600).contains(&response.status) {
-                "unknown"
+            let Some(key) = decrypt_agent_key(state, channel).await? else {
+                return Ok(classified(Outcome::Rejected));
+            };
+            let (path, idempotency) = if let Some(ciphertext) = &d.target_ciphertext {
+                if d.target_expires_at.is_none_or(|t| t <= Utc::now()) {
+                    return Ok(classified(Outcome::Rejected));
+                }
+                let reference = crate::crypto::guarded_utf8(
+                    crate::services::nyxbot_event_record::delivery_target(
+                        &state.encryption_keys,
+                        event,
+                        d,
+                        ciphertext,
+                    )
+                    .await?,
+                )
+                .map_err(|_| AppError::Internal("Channel target unavailable".into()))?;
+                (
+                    Zeroizing::new(format!("/reply-targets/{}/messages", urlencode(&reference))),
+                    Some(event.id.as_str()),
+                )
             } else {
-                "rejected"
-            });
-        }
-        let outcome = response
-            .body
-            .pointer("/delivery/outcome")
-            .or_else(|| response.body.pointer("/message/delivery/outcome"))
-            .and_then(Value::as_str);
-        Ok(match outcome {
-            Some("confirmed") => "confirmed",
-            Some("rejected") => "rejected",
-            _ => "unknown",
+                // Compatibility with gateways predating reply targets: the original
+                // short-lived event is safe once, but never replaced by a newer event.
+                if event.created_at + ChronoDuration::minutes(29) <= Utc::now() {
+                    return Ok(classified(Outcome::Rejected));
+                }
+                let reference = event_reference(state, event).await?;
+                (
+                    Zeroizing::new(format!("/events/{}/replies", urlencode(&reference))),
+                    None,
+                )
+            };
+            let mut message = json!({"text": text});
+            if d.origin.thread.is_some() {
+                message["thread_reply"] = json!(true);
+            }
+            crate::services::nyxbot_gateway_service::reply_call(
+                state,
+                &path,
+                &key,
+                &message,
+                idempotency,
+                d.target_ciphertext.is_some(),
+                deadline,
+            )
+            .await
         })
-    })
-    .await;
+        .await;
     operation.finish(
         match &result {
-            Ok("confirmed") => crate::turn_trace::Outcome::Confirmed,
-            Ok("rejected") => crate::turn_trace::Outcome::Rejected,
+            Ok(reply) if reply.outcome == Outcome::Confirmed => {
+                crate::turn_trace::Outcome::Confirmed
+            }
+            Ok(reply) if reply.outcome == Outcome::Rejected => crate::turn_trace::Outcome::Rejected,
             _ => crate::turn_trace::Outcome::Unknown,
         },
         None,
         None,
     );
     result
+}
+
+fn settled_answer(message: &AssistantMessage, d: &ChannelTurnDelivery) -> String {
+    if let Some(code) = message.error_code.as_deref() {
+        let failure = if d.origin.org_execution.as_ref().is_some_and(|e| e.guest) {
+            Notice::org_guest_failure(Some(code))
+                .text(d.notice_language)
+                .into()
+        } else if code == "channel_retry_attachment_unavailable" {
+            Notice::RetryAttachmentUnavailable
+                .text(d.notice_language)
+                .into()
+        } else if code == "assistant_start_unavailable" {
+            Notice::DependencyUnavailable.text(d.notice_language).into()
+        } else if code == "capacity_exceeded" {
+            crate::services::channel_notices::capacity(
+                d.notice_language,
+                message
+                    .error_detail
+                    .as_ref()
+                    .and_then(|detail| detail.capacity_wait_ms),
+            )
+        } else {
+            engine::TurnError::new(code)
+                .with_model_route_reason(
+                    message
+                        .turn_metadata
+                        .as_ref()
+                        .and_then(|data| data.failure_reason.as_ref())
+                        .and_then(|reason| reason.model_route.as_ref())
+                        .map(|route| route.reason.as_str()),
+                )
+                .message
+        };
+        if message.text.trim().is_empty() {
+            failure
+        } else {
+            format!("{}\n\n{}", message.text.trim(), failure)
+        }
+    } else {
+        answer(&message.text, message.status != "completed")
+    }
 }
 
 fn successful_silence(message: &AssistantMessage) -> bool {
@@ -1044,24 +1264,26 @@ async fn silent_result(state: &AppState, event_id: &str) -> AppResult<bool> {
 
 // Ordinary channels retain their existing response path. Org channel answers
 // must recheck the original actor and source immediately before streaming.
-async fn org_stream_authority(state: &AppState, id: &str) -> AppResult<(bool, bool)> {
+async fn org_stream_authority(
+    state: &AppState,
+    id: &str,
+) -> AppResult<(bool, bool, Option<NoticeLanguage>)> {
     let Some(event) = state
         .db
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"_id":id})
         .await?
     else {
-        return Ok((true, false));
+        return Ok((true, false, None));
     };
-    let Some(d) = event
-        .delivery
-        .as_ref()
-        .filter(|d| d.origin.org_execution.is_some())
-    else {
-        return Ok((true, false));
+    let Some(d) = &event.delivery else {
+        return Ok((true, false, None));
     };
+    if d.origin.org_execution.is_none() {
+        return Ok((true, false, d.notice_language));
+    }
     let Some(conversation) = event.conversation_id.as_deref() else {
-        return Ok((false, d.guest));
+        return Ok((false, d.guest, d.notice_language));
     };
     let row = engine::get(
         &state.db,
@@ -1069,5 +1291,9 @@ async fn org_stream_authority(state: &AppState, id: &str) -> AppResult<(bool, bo
         conversation,
     )
     .await?;
-    Ok((eligible(state, &event, d, &row).await?.is_some(), d.guest))
+    Ok((
+        eligible(state, &event, d, &row).await?.is_some(),
+        d.guest,
+        d.notice_language,
+    ))
 }

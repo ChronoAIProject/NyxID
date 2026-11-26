@@ -628,6 +628,12 @@ fn error_result_inner(
                     "message": message}),
             };
         }
+        AppError::Unauthorized(_) if chat.is_some_and(|chat| chat.execution_voice_task) => {
+            "Authentication failed for this tool call."
+        }
+        AppError::Conflict(_) if chat.is_some_and(|chat| chat.execution_voice_task) => {
+            "The resource state conflicts with this tool call."
+        }
         AppError::Unauthorized(_) => {
             "This operation requires a conversation key and human acknowledgement."
         }
@@ -702,10 +708,11 @@ impl AccountTools<'_> {
         let chat = if let Some(chat) = auth.assistant_chat.as_deref() {
             Ok(Some(chat.clone()))
         } else if auth.auth_method == AuthMethod::ApiKey {
-            Box::pin(acks::for_key_with_access(
+            Box::pin(acks::chat_for_key_version(
                 self.db,
                 &user,
                 auth.api_key_id.as_deref(),
+                auth.thread_key_version(),
                 auth.org_agent_access.as_ref(),
             ))
             .await
@@ -845,7 +852,9 @@ impl AccountTools<'_> {
     async fn mutable_key(&self, user: &str, id: &str) -> AppResult<ApiKey> {
         let key = key_service::get_api_key(self.db, user, id).await?;
         if key.platform.as_deref() == Some(ASSISTANT_PLATFORM)
-            || acks::for_key(self.db, user, Some(id)).await?.is_some()
+            || acks::chat_for_authenticated_key(self.db, &key, None)
+                .await?
+                .is_some()
         {
             return Err(AppError::ValidationError(
                 "Assistant chat keys cannot be modified by chat tools".into(),
@@ -1074,11 +1083,17 @@ impl AccountTools<'_> {
             }
             "delete_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
-                format!(
+                let mut summary = format!(
                     "Delete {}channel bot '{}' and all its routes",
                     self.org_prefix(user, &bot.user_id).await?,
                     short(&bot.label)
-                )
+                );
+                if super::channel_adapters::meta::is_meta(&bot.platform)
+                    && bot.credential_source != "platform"
+                {
+                    summary.push_str(". After unsubscribe, NyxID erases this inbox's guest conversations, message records and delivery history.");
+                }
+                summary
             }
             "delete_channel_route" => {
                 let route = self.managed_route(user, text(args, "route_id")).await?;
@@ -1146,7 +1161,7 @@ impl AccountTools<'_> {
             }
             "list_nodes" | "delete_node" => Box::pin(self.dispatch_nodes(user, name, args)),
             "list_approval_configs" | "set_approval_mode" | "list_pending_approvals" => {
-                Box::pin(self.dispatch_approvals(user, name, args))
+                Box::pin(self.dispatch_approvals(user, auth, name, args))
             }
             _ => Box::pin(async { Err(AppError::NotFound("Account tool not found".into())) }),
         }
@@ -1326,10 +1341,29 @@ impl AccountTools<'_> {
             "update_channel_bot" | "delete_channel_bot" => {
                 let bot = self.managed_bot(user, text(args, "bot_id")).await?;
                 // Org bots are managed as their org, like in the UI.
-                let user = bot.user_id.as_str();
+                let owner = bot.user_id.as_str();
                 let adapter =
                     channel_adapters::resolve_adapter(&bot.platform, self.token_exchange_cache)?;
                 if name == "delete_channel_bot" {
+                    if super::channel_adapters::meta::is_meta(&bot.platform) {
+                        let cleanup = channel_bot_service::delete_meta_bot(
+                            self.db,
+                            self.config,
+                            self.http,
+                            self.keys,
+                            &bot,
+                            user,
+                        )
+                        .await?;
+                        let mut result =
+                            json!({"local_delivery_stopped": true, "webhook_cleanup": cleanup});
+                        if cleanup == Some("failed") {
+                            result["next_step"] = json!(
+                                "NyxID has stopped delivery and will retry removing the inbox subscription."
+                            );
+                        }
+                        return Ok(result);
+                    }
                     channel_bot_service::delete_bot(
                         self.db,
                         self.config,
@@ -1337,18 +1371,21 @@ impl AccountTools<'_> {
                         self.keys,
                         adapter.as_ref(),
                         &bot.id,
-                        user,
+                        owner,
                     )
                     .await?;
                     Ok(json!({"deleted": true}))
                 } else {
-                    let bot = channel_bot_service::update_bot(
+                    let bot = channel_bot_service::update_bot_as_actor(
                         self.db,
                         self.keys,
                         self.http,
                         adapter.as_ref(),
                         &bot.id,
-                        user,
+                        channel_bot_service::UpdateBotAuthority {
+                            actor_id: user,
+                            owner_id: owner,
+                        },
                         channel_bot_service::UpdateBotParams {
                             x_events: None,
                             label: args["label"].as_str(),
@@ -1559,7 +1596,13 @@ impl AccountTools<'_> {
         }
     }
 
-    async fn dispatch_approvals(&self, user: &str, name: &str, args: &Value) -> AppResult<Value> {
+    async fn dispatch_approvals(
+        &self,
+        user: &str,
+        auth: &AuthUser,
+        name: &str,
+        args: &Value,
+    ) -> AppResult<Value> {
         match name {
             "list_approval_configs" => {
                 let rows = approval_service::list_service_approval_configs(self.db, user).await?;
@@ -1583,7 +1626,7 @@ impl AccountTools<'_> {
                 let mode = serde_json::from_value(args["approval_mode"].clone())
                     .map_err(|_| AppError::ValidationError("Invalid approval mode".into()))?;
                 let id = service.catalog_service_id.as_deref().unwrap_or(&service.id);
-                let row = approval_service::set_service_approval_config(
+                let row = approval_service::set_config(
                     self.db,
                     user,
                     id,
@@ -1592,6 +1635,10 @@ impl AccountTools<'_> {
                     Some(&mode),
                     None,
                     None,
+                    approval_service::ConfigAudit {
+                        actor: audit_service::AuditActor::from_auth_user(auth),
+                        user_service_id: Some(service.id.clone()),
+                    },
                 )
                 .await?;
                 Ok(json!({

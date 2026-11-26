@@ -403,7 +403,7 @@ async fn relay_events(
             }
         }
     };
-    Ok((
+    let mut response = (
         StatusCode::OK,
         [
             ("content-type", "text/event-stream"),
@@ -412,7 +412,13 @@ async fn relay_events(
         ],
         Body::from_stream(stream),
     )
-        .into_response())
+        .into_response();
+    // These GETs observe a remote task; cursors resume recorded events without
+    // starting it again. Desktop upgrades and execution streams stay work.
+    response
+        .extensions_mut()
+        .insert(crate::services::shutdown::RecoverableSubscription);
+    Ok(response)
 }
 
 fn admit_desktop(frontend: &str, api: &str, auth: &AuthUser, headers: &HeaderMap) -> AppResult<()> {
@@ -493,9 +499,9 @@ pub async fn desktop_ws(
     Ok(ws
         .max_message_size(MAX_DESKTOP_FRAME_BYTES)
         .max_frame_size(MAX_DESKTOP_FRAME_BYTES)
-        .on_upgrade(move |socket| {
+        .on_upgrade(state.shutdown.clone().upgrade_callback(move |socket| {
             desktop_relay(state, auth, row, gateway, upstream, socket, checked)
-        }))
+        })))
 }
 
 async fn desktop_relay(

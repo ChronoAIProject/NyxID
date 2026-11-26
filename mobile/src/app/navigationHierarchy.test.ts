@@ -9,6 +9,7 @@ import {
   type NavigationState,
 } from "@react-navigation/routers";
 import { workspaceStateFromPath } from "./workspaceCanonicalLinks";
+import { workspaceChatNavigationAction } from "./workspaceChatNavigation";
 import { navigationLinkingConfig } from "./navigationLinking";
 import { desktopRouteParams } from "../features/machines/desktopEntry";
 import {
@@ -42,6 +43,37 @@ function linked(path: string) {
   assert.ok(state, path);
   return state;
 }
+
+test("SSH links use the catalog id and preserve an optional exact connection", () => {
+  const deep = linked("ssh/catalog/terminal?principal=ops");
+  const deepRoute = selected(content(hydrate(deep)));
+  assert.equal(deepRoute.name, "SshTerminal");
+  assert.deepEqual(deepRoute.params, {
+    serviceId: "catalog",
+    principal: "ops",
+  });
+
+  const exact = linked(
+    "ssh/catalog/terminal?connectionId=connection&principal=ops",
+  );
+  assert.deepEqual(selected(content(hydrate(exact))).params, {
+    serviceId: "catalog",
+    connectionId: "connection",
+    principal: "ops",
+  });
+
+  const stringAutoConnect = getStateFromPath(
+    "ssh/catalog/terminal?autoConnect=true",
+    navigationLinkingConfig,
+  );
+  const linkedAutoConnect = stringAutoConnect
+    ? selected(content(hydrate(stringAutoConnect))).params as
+        | { autoConnect?: unknown }
+        | undefined
+    : undefined;
+  assert.notEqual(linkedAutoConnect?.autoConnect, true);
+});
+
 const mainEntries = [
   ["AssistantDetails", { agentId: "agent", conversationId: "thread" }],
   ["AssistantHistory", { agentId: "agent" }],
@@ -50,6 +82,10 @@ const mainEntries = [
   ["Agents", { tab: "groups" }],
   ["Plugins", { tab: "skills" }],
   ["Services", undefined],
+  [
+    "SshTerminal",
+    { serviceId: "catalog", connectionId: "connection", principal: "ops" },
+  ],
   ["Machines", undefined],
   ["Activity", { challengeId: "pending" }],
   ["WorkspaceSearch", undefined],
@@ -155,6 +191,31 @@ test("Settings alone uses a sheet, preserving the complete content history on cl
   }
   assert.equal(dismissWorkspaceSheetAction(caller), null);
   assert.equal(dismissWorkspaceSheetAction(undefined), null);
+});
+
+test("a thread chosen in the quick rail's Recent chats sheet replaces the sheet with that thread", () => {
+  const caller = pushContent(fixture(), "Machines");
+  const sheet = apply(caller, openWorkspaceSheetAction("RecentChats"));
+  assert.equal(selected(selected(sheet).state!).name, "RecentChats");
+  for (const target of [
+    { kind: "agent", agentId: "duo", conversationId: "nyxa-recent" },
+    { kind: "group", groupId: "nyxg-recent" },
+  ] as const) {
+    const next = apply(sheet, workspaceChatNavigationAction(sheet, target));
+    assert.deepEqual(
+      next.routes.map((route) => route.name),
+      ["Workspace"],
+      "the sheet is gone",
+    );
+    const shown = selected(selected(next).state!);
+    if (target.kind === "group") {
+      assert.equal(shown.name, "GroupChat");
+      assert.equal((shown.params as any).groupId, target.groupId);
+    } else {
+      assert.equal(shown.name, "Assistant");
+      assert.equal((shown.params as any).conversationId, target.conversationId);
+    }
+  }
 });
 
 test("main navigation from a Settings quick action closes that sheet before showing the addressed approval", () => {

@@ -36,6 +36,8 @@ pub(super) async fn call(
     let context = mcp_service::McpExecContext {
         strict_response_utf8: false,
         execution_permission: None,
+
+        attachment_owner_key: false,
         assistant_chat: chat.as_ref(),
         response_body_limit: None,
         actor_user_id: Some(&f.subject),
@@ -241,15 +243,18 @@ async fn actual_nyxbot_mcp_and_rest_egress_mint_exact_proofs_without_redirects()
 async fn all_header_layers_cannot_spoof_resource_request_authority() {
     let f = Fixture::new().await;
     let mut target = f.target().await;
-    target.catalog_default_headers = vec![
-        crate::models::default_request_header::ResolvedDefaultRequestHeader {
-            name: HEADER.into(),
-            value: "catalog-spoof".to_owned().into(),
-            overridable: false,
-            sensitive: false,
-        },
-    ];
-    target.user_service_default_headers = target.catalog_default_headers.clone();
+    target.catalog_default_headers = crate::services::proxy_service::CatalogHeaders::for_base(
+        &target.base_url,
+        vec![
+            crate::models::default_request_header::ResolvedDefaultRequestHeader {
+                name: HEADER.into(),
+                value: "catalog-spoof".to_owned().into(),
+                overridable: false,
+                sensitive: false,
+            },
+        ],
+    );
+    target.user_service_default_headers = target.catalog_headers().to_vec();
     let spoof = vec![(HEADER.to_owned(), "caller-spoof".into())];
     let headers = proxy_service::build_effective_outbound_headers(
         &target,

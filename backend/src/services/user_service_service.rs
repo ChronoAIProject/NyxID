@@ -18,6 +18,11 @@ use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
 use crate::models::user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::SERVICE_DELEGATION_SCOPES;
+use crate::services::api_key_mutation_service::{map_transaction_error, transaction_result};
+use crate::services::service_history::{
+    self,
+    transaction::{self, Transaction},
+};
 use crate::services::{
     agent_binding_service, audit_service, node_service, org_service, ws_frame_injector,
 };
@@ -444,16 +449,12 @@ pub async fn commit_user_service_mutation(
     session: &mut crate::services::service_history::transaction::Transaction,
     owner_id: &str,
     service_id: &str,
-    mut extra_set: Document,
+    extra_set: Document,
 ) -> AppResult<UserService> {
-    extra_set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
     crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
         .find_one_and_update(
             doc! { "_id": service_id, "user_id": owner_id },
-            doc! {
-                "$set": extra_set,
-                "$inc": { "state_version": 1_i64 },
-            },
+            versioned_service_update(extra_set),
         )
         .return_document(ReturnDocument::After)
         .session(session)
@@ -1186,14 +1187,10 @@ pub async fn create_user_service_with_id(
         return Err(AppError::ServicePoolSlugTaken(slug.to_string()));
     }
 
-    if let Some(node_id) = node_id {
-        // Actor-based check: the human (or API key) making the request must
-        // have write access to the node. This lets an admin route an
-        // org-owned service through their personal node, where they're the
-        // direct owner. The service's effective owner (user_id) does not
-        // need to match the node's owner.
-        node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
-    }
+    let target = match node_id {
+        Some(id) => Some(node_service::RouteNode::authorize(db, actor_user_id, id).await?),
+        None => None,
+    };
 
     let now = Utc::now();
     let service = UserService {
@@ -1240,9 +1237,34 @@ pub async fn create_user_service_with_id(
         credential_verification: None,
     };
 
-    crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
-        .insert_one(&service)
-        .await?;
+    if let (Some(target), Some(catalog)) = (target.as_ref(), catalog_service_id) {
+        let context = (db, &service, catalog, target);
+        transaction::run_send(db, &context, |tx, &(db, service, catalog, target)| {
+            Box::pin(async move {
+                service_history::collection::<UserService>(db, COLLECTION_NAME)
+                    .insert_one(service)
+                    .session(&mut *tx)
+                    .await?;
+                transaction_result(
+                    node_service::sync_node_binding_for_user_service(
+                        db,
+                        tx,
+                        &service.user_id,
+                        Some(catalog),
+                        None,
+                        Some(target),
+                    )
+                    .await,
+                )
+            })
+        })
+        .await
+        .map_err(map_transaction_error)?;
+    } else {
+        service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .insert_one(&service)
+            .await?;
+    }
 
     if !service.admin_only {
         crate::services::org_role_scope_service::add_service_to_configured_role_scope(
@@ -1370,6 +1392,173 @@ pub async fn update_user_service_with_keys(
     ws_frame_injections: Option<&[WsFrameInjection]>,
     admin_only: Option<bool>,
 ) -> AppResult<()> {
+    let prepared = prepare_service_update(
+        db,
+        encryption_keys,
+        user_id,
+        actor_user_id,
+        service_id,
+        auth_method,
+        auth_key_name,
+        node_id,
+        node_priority,
+        is_active,
+        identity,
+        custom_user_agent,
+        default_request_headers,
+        ws_frame_injections,
+        admin_only,
+    )
+    .await?;
+    let matched = if node_id.is_some() {
+        prepared.commit_route(db).await?
+    } else {
+        service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .update_one(prepared.filter, prepared.update)
+            .await?
+            .matched_count
+            > 0
+    };
+    if !matched {
+        if default_request_headers.is_some() {
+            return Err(AppError::Conflict(
+                "Default headers or owner changed; reload and retry".into(),
+            ));
+        }
+        return Err(AppError::NotFound("User service not found".to_string()));
+    }
+
+    if admin_only == Some(false) {
+        crate::services::org_role_scope_service::add_service_to_configured_role_scope(
+            db,
+            user_id,
+            OrgRole::Member,
+            service_id,
+            actor_user_id,
+        )
+        .await?;
+    }
+
+    // Audit per-user default header mutations (NyxID#356). Names only —
+    // values never reach the audit store, even when non-sensitive,
+    // because clients sometimes mistake which entries hold secrets.
+    // Mirrors the admin `service_default_headers_updated` event so org
+    // observability covers both surfaces uniformly.
+    if let Some(names) = prepared.audit_default_header_names {
+        crate::services::audit_service::log_async(
+            db.clone(),
+            Some(actor_user_id.to_string()),
+            "user_service_default_headers_updated".to_string(),
+            Some(serde_json::json!({
+                "user_service_id": service_id,
+                "owner_user_id": user_id,
+                "header_names": names,
+            })),
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+
+    Ok(())
+}
+
+pub(super) struct PreparedServiceUpdate {
+    filter: Document,
+    update: Document,
+    target: Option<node_service::RouteNode>,
+    audit_default_header_names: Option<Vec<String>>,
+}
+
+impl PreparedServiceUpdate {
+    async fn commit_route(&self, db: &Database) -> AppResult<bool> {
+        transaction::run_send(db, &(db, self), |tx, &(db, edit)| {
+            Box::pin(async move { transaction_result(edit.apply_route(db, tx).await) })
+        })
+        .await
+        .map_err(map_transaction_error)
+    }
+
+    async fn apply_route(&self, db: &Database, tx: &mut Transaction) -> AppResult<bool> {
+        let before = service_history::collection::<UserService>(db, COLLECTION_NAME)
+            .find_one_and_update(self.filter.clone(), self.update.clone())
+            .return_document(ReturnDocument::Before)
+            .session(&mut *tx)
+            .await?;
+        let Some(before) = before else {
+            return Ok(false);
+        };
+        node_service::sync_node_binding_for_user_service(
+            db,
+            tx,
+            &before.user_id,
+            before.catalog_service_id.as_deref(),
+            before.node_id.as_deref(),
+            self.target.as_ref(),
+        )
+        .await?;
+        Ok(true)
+    }
+}
+
+pub(crate) async fn set_service_route(
+    db: &Database,
+    owner: &str,
+    id: &str,
+    target: Option<node_service::RouteNode>,
+) -> AppResult<()> {
+    if target.is_none() {
+        let current = get_user_service(db, owner, id).await?;
+        validate_direct_route(db, &current).await?;
+    }
+    let edit = PreparedServiceUpdate {
+        filter: doc! {"_id": id, "user_id": owner},
+        update: versioned_service_update(doc! {"node_id":target.as_ref().map(|node| node.id())}),
+        target,
+        audit_default_header_names: None,
+    };
+    if !edit.commit_route(db).await? {
+        return Err(AppError::NotFound("User service not found".into()));
+    }
+    Ok(())
+}
+
+async fn validate_direct_route(db: &Database, current: &UserService) -> AppResult<()> {
+    if current.service_type == "ssh" {
+        return Ok(());
+    }
+    let endpoint =
+        super::user_endpoint_service::get_endpoint(db, &current.user_id, &current.endpoint_id)
+            .await?;
+    super::url_validation::validate_user_endpoint_url(&endpoint.url, false, "endpoint_url").await
+}
+
+fn versioned_service_update(mut fields: Document) -> Document {
+    fields.insert("updated_at", bson::DateTime::now());
+    doc! { "$set":fields, "$inc":{"state_version":1_i64} }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_service_update(
+    db: &mongodb::Database,
+    encryption_keys: Option<&crate::crypto::aes::EncryptionKeys>,
+    user_id: &str,
+    actor_user_id: &str,
+    service_id: &str,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    node_priority: Option<i32>,
+    is_active: Option<bool>,
+    identity: Option<&IdentityConfig>,
+    custom_user_agent: Option<&str>,
+    default_request_headers: Option<
+        &Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+    >,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: Option<bool>,
+) -> AppResult<PreparedServiceUpdate> {
     let current = get_user_service(db, user_id, service_id).await?;
     super::ifttt_oauth_service::validate_key_route(
         db,
@@ -1426,9 +1615,7 @@ pub async fn update_user_service_with_keys(
             "IFTTT does not support WebSocket frame injection".into(),
         ));
     }
-    let mut set_doc = doc! {
-        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-    };
+    let mut set_doc = Document::new();
 
     if let Some(am) = auth_method {
         validate_auth_method(am)?;
@@ -1443,13 +1630,15 @@ pub async fn update_user_service_with_keys(
     if let Some(akn) = auth_key_name {
         set_doc.insert("auth_key_name", akn);
     }
+    let mut target = None;
     if let Some(nid) = node_id {
         if nid.is_empty() {
+            validate_direct_route(db, &current).await?;
             // Empty string clears the node_id
             set_doc.insert("node_id", bson::Bson::Null);
         } else {
             // Actor-based check: see `create_user_service` for rationale.
-            node_service::ensure_node_writable_by_actor(db, actor_user_id, nid).await?;
+            target = Some(node_service::RouteNode::authorize(db, actor_user_id, nid).await?);
             set_doc.insert("node_id", nid);
         }
     }
@@ -1629,61 +1818,13 @@ pub async fn update_user_service_with_keys(
         );
     }
 
-    let update_filter =
-        header_source_filter.unwrap_or_else(|| doc! { "_id": service_id, "user_id": user_id });
-    let result = crate::services::service_history::collection::<UserService>(db, COLLECTION_NAME)
-        .update_one(
-            update_filter,
-            doc! {
-                "$set": set_doc,
-                "$inc": { "state_version": 1_i64 },
-            },
-        );
-    let result = result.await?;
-
-    if result.matched_count == 0 {
-        if default_request_headers.is_some() {
-            return Err(AppError::Conflict(
-                "Default headers or owner changed; reload and retry".into(),
-            ));
-        }
-        return Err(AppError::NotFound("User service not found".to_string()));
-    }
-
-    if admin_only == Some(false) {
-        crate::services::org_role_scope_service::add_service_to_configured_role_scope(
-            db,
-            user_id,
-            OrgRole::Member,
-            service_id,
-            actor_user_id,
-        )
-        .await?;
-    }
-
-    // Audit per-user default header mutations (NyxID#356). Names only —
-    // values never reach the audit store, even when non-sensitive,
-    // because clients sometimes mistake which entries hold secrets.
-    // Mirrors the admin `service_default_headers_updated` event so org
-    // observability covers both surfaces uniformly.
-    if let Some(names) = audit_default_header_names {
-        crate::services::audit_service::log_async(
-            db.clone(),
-            Some(actor_user_id.to_string()),
-            "user_service_default_headers_updated".to_string(),
-            Some(serde_json::json!({
-                "user_service_id": service_id,
-                "owner_user_id": user_id,
-                "header_names": names,
-            })),
-            None,
-            None,
-            None,
-            None,
-        );
-    }
-
-    Ok(())
+    Ok(PreparedServiceUpdate {
+        filter: header_source_filter
+            .unwrap_or_else(|| doc! { "_id": service_id, "user_id": user_id }),
+        update: versioned_service_update(set_doc),
+        target,
+        audit_default_header_names,
+    })
 }
 
 pub fn validate_service_icon_url(raw_url: &str) -> AppResult<()> {
@@ -2418,19 +2559,25 @@ async fn validate_ssh_auth_mode_transition(
     )
 }
 
-/// Deactivate a user service (soft delete).
-///
-/// `actor_user_id` is the human/API key making the request -- forwarded to
-/// `update_user_service` for symmetry, but not actually used since
-/// deactivation doesn't change the node_id.
+/// Deactivate a connection and remove its unshared catalog binding.
 pub async fn deactivate_user_service(
-    db: &mongodb::Database,
+    db: &Database,
     user_id: &str,
     actor_user_id: &str,
     service_id: &str,
 ) -> AppResult<()> {
-    update_user_service(
+    deactivate_user_services(db, user_id, actor_user_id, &[service_id.to_owned()]).await
+}
+
+pub(super) async fn prepare_service_deactivation(
+    db: &Database,
+    user_id: &str,
+    actor_user_id: &str,
+    service_id: &str,
+) -> AppResult<PreparedServiceUpdate> {
+    prepare_service_update(
         db,
+        None,
         user_id,
         actor_user_id,
         service_id,
@@ -2445,8 +2592,60 @@ pub async fn deactivate_user_service(
         None,
         None,
     )
-    .await?;
+    .await
+}
 
+impl PreparedServiceUpdate {
+    pub(super) fn require_api_key(&mut self, id: &str) {
+        self.filter.insert("api_key_id", id);
+    }
+
+    pub(super) async fn deactivate_in_transaction(
+        &self,
+        db: &Database,
+        tx: &mut Transaction,
+    ) -> AppResult<()> {
+        if !self.apply_route(db, tx).await? {
+            return Err(AppError::NotFound("User service not found".into()));
+        }
+        Ok(())
+    }
+}
+
+pub(super) async fn deactivate_user_services(
+    db: &Database,
+    user_id: &str,
+    actor_user_id: &str,
+    service_ids: &[String],
+) -> AppResult<()> {
+    if service_ids.is_empty() {
+        return Ok(());
+    }
+    let mut edits = Vec::with_capacity(service_ids.len());
+    for id in service_ids {
+        edits.push(prepare_service_deactivation(db, user_id, actor_user_id, id).await?);
+    }
+    transaction::run_send(db, &(db, edits), |tx, (db, edits)| {
+        Box::pin(async move {
+            for edit in edits {
+                transaction_result(edit.deactivate_in_transaction(db, tx).await)?;
+            }
+            Ok(())
+        })
+    })
+    .await
+    .map_err(map_transaction_error)?;
+    for id in service_ids {
+        cleanup_deactivated_service(db, user_id, id).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn cleanup_deactivated_service(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<()> {
     // Cascade-clean any agent service bindings that referenced this
     // service. Without this, the Agent Key detail page keeps showing
     // bindings pointing at a now-inactive service (issue #324).
@@ -2749,6 +2948,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_destination_node_clear_validates_saved_endpoint() {
+        let db = connect_test_database("proxy_destination_node_clear")
+            .await
+            .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint("ep", &owner, "node", "http://192.168.1.1", None, None);
+        db.collection::<UserEndpoint>(crate::models::user_endpoint::COLLECTION_NAME)
+            .insert_one(endpoint)
+            .await
+            .unwrap();
+        let service = test_user_service("svc", &owner, "test-node", "ep", None, Some("node"));
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(service)
+            .await
+            .unwrap();
+        let result = update_user_service(
+            &db,
+            &owner,
+            &owner,
+            "svc",
+            None,
+            None,
+            Some(""),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::ValidationError(_))));
+        assert_eq!(
+            get_user_service(&db, &owner, "svc")
+                .await
+                .unwrap()
+                .node_id
+                .as_deref(),
+            Some("node")
+        );
+    }
+
+    #[tokio::test]
     async fn update_user_service_round_trips_admin_only_policy() {
         let Some(db) = connect_test_database("user_service_admin_only_update").await else {
             eprintln!("skipping user service admin-only update test: no local MongoDB available");
@@ -2907,6 +3150,8 @@ mod tests {
             requires_user_credential: false,
             is_active: true,
             created_by: "test".to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

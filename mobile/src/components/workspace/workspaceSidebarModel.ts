@@ -1,7 +1,9 @@
+import { translateApp } from "../../i18n/appTranslation";
 import type { WorkspaceChatTarget } from "../../app/workspaceChatNavigation";
 import type { AssistantConversation } from "../../features/assistant/assistantTypes";
 import type { AssistantAgent } from "../../features/agents/agentContracts";
 import type { Group } from "../../features/groups/groupContracts";
+import type { NotificationMarkers } from "../../features/notifications/notificationPresentation";
 import { threadStatus, threadTitle } from "./workspaceChatListModel";
 
 export const SIDEBAR_BAR_GAP = 12;
@@ -15,6 +17,17 @@ export type WorkspaceRecent = {
   status?: string;
   target: WorkspaceChatTarget;
 };
+/** Unread notifications attributed to a recent thread or crew. */
+export function recentUnread(
+  item: Pick<WorkspaceRecent, "target">,
+  markers: NotificationMarkers,
+): number {
+  const target = item.target;
+  if (target.kind === "group") return markers.groups[target.groupId] ?? 0;
+  if (target.kind === "agent" && target.conversationId)
+    return markers.conversations[target.conversationId] ?? 0;
+  return 0;
+}
 export function workspaceRecents(
   conversations: readonly AssistantConversation[],
   crews: readonly Group[],
@@ -57,9 +70,9 @@ export function sidebarAgentOwner(agent: AssistantAgent) {
   return agent.owner_kind === "org"
     ? {
         key: `org:${agent.owner_id || agent.owner_name || agent.id}`,
-        label: agent.owner_name || "Organization",
+        label: agent.owner_name || translateApp("Organization"),
       }
-    : { key: "personal", label: "Personal" };
+    : { key: "personal", label: translateApp("Personal") };
 }
 export function sidebarOrderedAgents(agents: readonly AssistantAgent[]) {
   return [...agents].sort((a, b) => {

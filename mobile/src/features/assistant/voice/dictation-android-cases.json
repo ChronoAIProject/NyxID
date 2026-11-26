@@ -1,0 +1,37 @@
+[
+  {
+    "name": "empty locale list",
+    "locales": [],
+    "expected": ""
+  },
+  {
+    "name": "rejected locale discovery",
+    "locales": [],
+    "reject": true,
+    "expected": ""
+  },
+  {
+    "name": "Mandarin alias",
+    "locales": ["cmn-Hans-CN"],
+    "preferred": ["zh-Hans-CN"],
+    "expected": "cmn-Hans-CN"
+  },
+  {
+    "name": "saved unsupported",
+    "locales": ["en-US"],
+    "saved": "ja-JP",
+    "hardError": true
+  },
+  {
+    "name": "saved with empty list",
+    "locales": [],
+    "saved": "ja-JP",
+    "expected": "ja-JP"
+  },
+  {
+    "name": "unmatched device language",
+    "locales": ["en-US"],
+    "preferred": ["ja-JP"],
+    "expected": ""
+  }
+]

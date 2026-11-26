@@ -568,7 +568,7 @@ impl Drop for TurnGuard {
         let db = self.db.clone();
         let id = self.id.clone();
         let forwarded = self.forwarded;
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_cleanup(async move {
             let _ = release(&db, &id, forwarded).await;
         });
     }
@@ -780,14 +780,13 @@ async fn guide_text_inner(
         reqwest::header::CONTENT_TYPE,
         reqwest::header::HeaderValue::from_static("application/json"),
     );
-    let extra = if protocol == InferenceWireProtocol::AnthropicMessages {
-        vec![("anthropic-version".into(), "2023-06-01".into())]
-    } else {
-        vec![]
-    };
+    let mut extra = vec![super::llm_usage_service::identity_encoding_header()];
+    if protocol == InferenceWireProtocol::AnthropicMessages {
+        extra.push(("anthropic-version".into(), "2023-06-01".into()));
+    }
     let response = Box::pin(
         super::proxy_service::forward_request_with_extra_outbound_headers(
-            &state.http_client,
+            super::proxy_service::Redirects::SameOrigin,
             &target,
             reqwest::Method::POST,
             path,
@@ -805,6 +804,7 @@ async fn guide_text_inner(
     )
     .await
     .map_err(|_| denied())?;
+    super::llm_usage_service::warn_http_usage_encoding(&target.service.id, &response);
     let status = response.status();
     let success = status.is_success();
     let mut stream = response.bytes_stream();
@@ -1115,7 +1115,7 @@ async fn discover_models_inner(
     };
     let response = Box::pin(
         super::proxy_service::forward_request_with_extra_outbound_headers(
-            &state.http_client,
+            super::proxy_service::Redirects::SameOrigin,
             &target,
             reqwest::Method::GET,
             "models",
@@ -1566,6 +1566,7 @@ mod tests {
             .unwrap();
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
+            .and(wiremock::matchers::header("accept-encoding", "identity"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "model": "test-model", "choices": [{"message": {"content": "Bounded reply"}}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}

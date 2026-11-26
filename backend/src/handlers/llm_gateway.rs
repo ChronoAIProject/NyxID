@@ -441,6 +441,7 @@ async fn llm_proxy_request_inner(
     // Resolve the downstream service for this provider slug
     let (service, _provider) =
         llm_gateway_service::resolve_llm_service_by_slug(&state.db, &provider_slug).await?;
+    crate::services::shutdown::diagnostics::resolved_catalog(&service);
 
     let service_id = service.id.clone();
 
@@ -448,6 +449,8 @@ async fn llm_proxy_request_inner(
     // policies can short-circuit without decrypting downstream credentials.
     let request_method_str = request.method().as_str().to_string();
     let method = request.method().clone();
+    let caller_uri = request.uri().clone();
+    let caller_path = path.clone();
     let query = request.uri().query().map(String::from);
     let headers = request.headers().clone();
     let body_bytes =
@@ -1056,8 +1059,14 @@ async fn llm_proxy_request_inner(
             let reqwest_headers = convert_headers(&headers);
 
             state.billing.mark_forwarded(&metered).await?;
+            let location = super::proxy::AsyncLocationContext::new(
+                &target,
+                &caller_uri,
+                &caller_path,
+                &delegated,
+            );
             let downstream_result = proxy_service::forward_request_with_egress_guard(
-                llm_scope.client(&state.http_client),
+                llm_scope.redirects(),
                 &target,
                 reqwest_method,
                 &path,
@@ -1069,7 +1078,7 @@ async fn llm_proxy_request_inner(
                 None,
                 &state.token_exchange_cache,
                 &state.cloud_response_cache,
-                Vec::new(),
+                vec![llm_usage_service::identity_encoding_header()],
                 billing_egress_permit,
                 egress_guard.as_ref(),
             )
@@ -1091,6 +1100,7 @@ async fn llm_proxy_request_inner(
                     downstream_result,
                 )
                 .await?;
+            llm_usage_service::warn_http_usage_encoding(&service_id, &downstream_response);
 
             let usage_context = llm_usage_service::UsageAuditContext {
                 db: state.db.clone(),
@@ -1103,8 +1113,10 @@ async fn llm_proxy_request_inner(
                 api_key_name: auth_user.api_key_name.clone(),
             };
 
+            let location = location.map(|ctx| ctx.after_redirects(&downstream_response));
             build_filtered_response(
                 downstream_response,
+                location.as_ref(),
                 Some(usage_context),
                 state.config.proxy_stream_idle_timeout_secs,
                 metered.clone(),
@@ -1400,6 +1412,7 @@ async fn gateway_provider_request(
     // Resolve the downstream service
     let (service, _provider) =
         llm_gateway_service::resolve_llm_service_by_slug(&state.db, &provider_slug).await?;
+    crate::services::shutdown::diagnostics::resolved_catalog(&service);
 
     let service_id = service.id.clone();
 
@@ -2007,8 +2020,10 @@ async fn gateway_provider_request(
             .await?
         } else {
             state.billing.mark_forwarded(&metered).await?;
+            // The body selects the provider, so only external downloads have a caller URL.
+            let location = super::proxy::AsyncLocationContext::for_target(&target, &delegated);
             let downstream_result = proxy_service::forward_request_with_egress_guard(
-                llm_scope.client(&state.http_client),
+                llm_scope.redirects(),
                 &target,
                 reqwest_method,
                 &final_path,
@@ -2020,7 +2035,7 @@ async fn gateway_provider_request(
                 None,
                 &state.token_exchange_cache,
                 &state.cloud_response_cache,
-                Vec::new(),
+                vec![llm_usage_service::identity_encoding_header()],
                 billing_egress_permit,
                 egress_guard.as_ref(),
             )
@@ -2042,9 +2057,10 @@ async fn gateway_provider_request(
                     downstream_result,
                 )
                 .await?;
+            llm_usage_service::warn_http_usage_encoding(&service_id, &downstream_response);
 
             // If translator needs translation, parse and translate the response
-            if translator.needs_translation() {
+            if translator.needs_translation() && !downstream_response.status().is_redirection() {
                 if is_streaming {
                     // Streaming: translate SSE events on the fly
                     build_translated_sse_response(
@@ -2072,6 +2088,7 @@ async fn gateway_provider_request(
             } else {
                 build_filtered_response(
                     downstream_response,
+                    location.as_ref(),
                     Some(usage_context),
                     idle_timeout_secs,
                     metered.clone(),
@@ -2366,6 +2383,7 @@ async fn read_response_with_limit(response: reqwest::Response) -> AppResult<byte
 
 async fn build_filtered_response(
     downstream_response: reqwest::Response,
+    location: Option<&super::proxy::AsyncLocationContext>,
     usage_context: Option<llm_usage_service::UsageAuditContext>,
     idle_timeout_secs: u64,
     metered: crate::services::billing::MeteredProxyContext,
@@ -2389,6 +2407,14 @@ async fn build_filtered_response(
         if is_sse && name_lower == "content-length" {
             continue;
         }
+        if status.is_redirection() && name_lower == "location" {
+            if let Some(value) = location
+                .and_then(|context| context.header_value(status, &name_lower, value.to_str().ok()?))
+            {
+                response_builder = response_builder.header(name, value);
+            }
+            continue;
+        }
         if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
             && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
@@ -2409,31 +2435,37 @@ async fn build_filtered_response(
                 .as_ref()
                 .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
-            crate::turn_trace::spawn(async move {
+            let checkpoint_eligible = status.is_success()
+                && crate::services::billing::usage_checkpoint::supports_path(
+                    downstream_response.url().path(),
+                );
+            crate::turn_trace::spawn_cleanup(async move {
                 let mut buffer = String::new();
                 let mut stream = downstream_response.bytes_stream();
                 let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
                 let mut response_len: i64 = 0;
+                let mut checkpoints =
+                    stream_billing.stream_checkpoints(&stream_metered, checkpoint_eligible);
 
                 loop {
-                    match tokio::time::timeout(idle_timeout, stream.next()).await {
+                    match {
+                        let shutdown = crate::services::shutdown::process();
+                        tokio::select! {
+                            biased;
+                            () = shutdown.stopped() => break,
+                            result = tokio::time::timeout(idle_timeout, stream.next()) => result,
+                        }
+                    } {
                         Ok(Some(Ok(bytes))) => {
                             response_len += bytes.len() as i64;
-                            buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-                            while let Some(event) = parse_next_sse_event(&mut buffer) {
-                                if let Some((mut usage, mode)) =
-                                    llm_usage_service::extract_reported_usage_from_sse_event(
-                                        event.event_type.as_deref(),
-                                        &event.data,
-                                    )
-                                {
-                                    if !status.is_success() {
-                                        usage.images = 0;
-                                    }
-                                    accumulator.observe(usage, mode);
-                                }
-                            }
+                            crate::services::proxy_http_response::observe_sse_chunk(
+                                &mut buffer,
+                                &mut accumulator,
+                                &mut checkpoints,
+                                &bytes,
+                                status.is_success(),
+                            )
+                            .await;
 
                             if tx.send(Ok(bytes)).await.is_err() {
                                 break;
@@ -2707,26 +2739,48 @@ async fn build_translated_sse_response(
         .as_ref()
         .and_then(|ctx| ctx.resale.as_ref().map(|spec| spec.metric));
 
-    crate::turn_trace::spawn(async move {
+    let checkpoint_eligible = downstream_response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(crate::mw::security_headers::is_sse_media_type)
+        && crate::services::billing::usage_checkpoint::supports_path(
+            downstream_response.url().path(),
+        );
+    crate::turn_trace::spawn_cleanup(async move {
         let mut buffer = String::new();
         let mut state = llm_gateway_service::StreamTranslationState::default();
         let mut stream = downstream_response.bytes_stream();
         let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
         let mut response_len: i64 = 0;
+        let mut checkpoints =
+            stream_billing.stream_checkpoints(&stream_metered, checkpoint_eligible);
 
         loop {
-            match tokio::time::timeout(idle_timeout, stream.next()).await {
+            match {
+                let shutdown = crate::services::shutdown::process();
+                tokio::select! {
+                    biased;
+                    () = shutdown.stopped() => break,
+                    result = tokio::time::timeout(idle_timeout, stream.next()) => result,
+                }
+            } {
                 Ok(Some(Ok(bytes))) => {
                     buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                     while let Some(event) = parse_next_sse_event(&mut buffer) {
-                        if let Some((usage, mode)) =
-                            llm_usage_service::extract_reported_usage_from_sse_event(
-                                event.event_type.as_deref(),
-                                &event.data,
-                            )
-                        {
-                            accumulator.observe(usage, mode);
+                        if let Ok(value) = serde_json::from_str(&event.data) {
+                            checkpoints
+                                .observe_value(event.event_type.as_deref(), &value)
+                                .await;
+                            if let Some((usage, mode)) =
+                                llm_usage_service::extract_reported_usage_from_value(
+                                    event.event_type.as_deref(),
+                                    &value,
+                                )
+                            {
+                                accumulator.observe(usage, mode);
+                            }
                         }
 
                         if let Some(translated) =
@@ -2965,11 +3019,7 @@ pub(super) async fn check_llm_approval_descriptor(
         approval_service::ApprovalOutcome::NeedsApproval(pending) => pending,
     };
 
-    crate::services::assistant_model_observer::before_approval_request(
-        &state.config.frontend_url,
-        false,
-    )
-    .await?;
+    crate::services::assistant_model_observer::before_approval_request(None).await?;
     let notify_user_ids = approval_service::approval_notification_recipients(
         &state.db,
         &approval_owner_user_id,
@@ -2994,6 +3044,7 @@ pub(super) async fn check_llm_approval_descriptor(
         auth_user.api_key_id.as_deref(),
     )
     .await?;
+    request_operation.apply_connected_budget(timeout_secs);
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -3170,11 +3221,11 @@ impl LlmOperationScope {
         )
     }
 
-    fn client<'a>(&self, shared: &'a reqwest::Client) -> &'a reqwest::Client {
+    fn redirects(&self) -> proxy_service::Redirects {
         if self.guest || self.identity.is_some() {
-            proxy_service::no_redirect_http_client()
+            proxy_service::Redirects::Return
         } else {
-            shared
+            proxy_service::Redirects::SameOrigin
         }
     }
 }
@@ -3485,6 +3536,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.requires_user_credential = true;
         let target = crate::services::proxy_service::ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
@@ -3496,7 +3548,7 @@ mod tests {
             auth_key_name: "Authorization".into(),
             credential: "test-token".to_owned().into(),
             service,
-            catalog_default_headers: Vec::new(),
+            catalog_default_headers: Default::default(),
             user_service_default_headers: Vec::new(),
             ws_frame_injections: Vec::new(),
             connection_id: None,

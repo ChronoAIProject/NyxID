@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 export const guestServiceSchema = z.object({
   id: z.string(),
@@ -13,12 +14,13 @@ export const orgGuestSettingsSchema = z.object({
   guest_revision: z.string().default(""),
   guest_enabled: z.boolean(),
   grants_ready: z.boolean().default(false),
+  binding_limits_guest_services: z.boolean().default(false),
   guest_policy_mode: z.enum(["legacy", "grants"]).default("legacy"),
   channel_status: z.string().optional(),
   readiness_reason: z.string().nullish(),
   effective_guest_services: z.array(guestServiceSchema).default([]),
-  spent_today_credits: z.string(),
-  reserved_today_credits: z.string(),
+  spent_today_credits: z.string().optional(),
+  reserved_today_credits: z.string().optional(),
 });
 export const orgGuestReviewSchema = z.object({
   ready: z.boolean(),
@@ -36,8 +38,16 @@ export function orgGuestSwitchPayload(
   return { enabled, expected_revision };
 }
 export const GUEST_ACCESS_LABEL = {
-  none: "No guest access",
-  read: "Look things up only",
-  use: "Use, but not change or delete",
-  all: "Everything this agent can do",
+  get none() {
+    return translateApp("No guest access");
+  },
+  get read() {
+    return translateApp("Look things up only");
+  },
+  get use() {
+    return translateApp("Use, but not change or delete");
+  },
+  get all() {
+    return translateApp("Everything this agent can do");
+  },
 };

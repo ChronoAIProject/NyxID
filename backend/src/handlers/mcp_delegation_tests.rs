@@ -190,6 +190,24 @@ impl Fixture {
         headers: &HeaderMap,
         arguments: Value,
     ) {
+        let response =
+            Box::pin(self.call_service_response(slug, mcp, universal, headers, arguments)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
+        if mcp {
+            assert!(body.get("error").is_none(), "{body}");
+            assert_eq!(body["result"]["isError"], false, "{body}");
+        }
+    }
+    async fn call_service_response(
+        &self,
+        slug: &str,
+        mcp: bool,
+        universal: bool,
+        headers: &HeaderMap,
+        arguments: Value,
+    ) -> axum::response::Response {
         let body = if mcp {
             let params = if universal {
                 json!({"name":"nyx__call_tool", "arguments":{"tool_name":format!("{slug}__execute"), "arguments_json":arguments.to_string()}})
@@ -213,14 +231,7 @@ impl Fixture {
         request
             .headers_mut()
             .insert("content-type", "application/json".parse().unwrap());
-        let response = Box::pin(self.router().oneshot(request)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body: Value =
-            serde_json::from_slice(&to_bytes(response.into_body(), 32768).await.unwrap()).unwrap();
-        if mcp {
-            assert!(body.get("error").is_none(), "{body}");
-            assert_eq!(body["result"]["isError"], false, "{body}");
-        }
+        Box::pin(self.router().oneshot(request)).await.unwrap()
     }
     fn take_claims(&self) -> Option<Value> {
         let headers = self

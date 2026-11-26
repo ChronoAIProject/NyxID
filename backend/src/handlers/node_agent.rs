@@ -24,6 +24,8 @@ pub struct DeclinePendingCredentialRequest {
 
 #[derive(Debug, Serialize)]
 pub struct NodeAgentPendingCredentialInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<&'static str>,
     pub id: String,
     pub service_slug: String,
     pub injection_method: String,
@@ -80,6 +82,8 @@ fn pending_info(
     };
 
     NodeAgentPendingCredentialInfo {
+        message: node_pending_credential_service::target_delivery_unknown(&pending, node_id)
+            .then_some(node_pending_credential_service::DELIVERY_UNKNOWN),
         id: pending.id,
         service_slug: pending.service_slug,
         injection_method: pending.injection_method.as_str().to_string(),
@@ -304,6 +308,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         }
@@ -458,6 +464,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: vec![
                 fan_out_target_state(
                     primary_node_id,

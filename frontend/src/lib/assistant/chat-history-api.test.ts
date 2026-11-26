@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import {
   chatHistoryApi,
   ChatHistoryContractError,
@@ -13,6 +15,23 @@ const META = {
 };
 
 describe("chat history API", () => {
+  it.each([204, 503])("removes a pin only after a successful DELETE (HTTP %s)", async (status) => {
+    transitionAssistantIdentity("owner");
+    useAssistantPinsStore.getState().bindAccount(null);
+    useAssistantPinsStore.getState().bindAccount("owner");
+    useAssistantPinsStore.getState().toggle("owner", META.id);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status })));
+    if (status === 204) {
+      await chatHistoryApi.deleteConversation(META.id);
+      expect(useAssistantPinsStore.getState().ids).toEqual([]);
+    } else {
+      await expect(chatHistoryApi.deleteConversation(META.id)).rejects.toThrow();
+      expect(useAssistantPinsStore.getState().ids).toEqual([META.id]);
+    }
+    useAssistantPinsStore.getState().bindAccount(null);
+    transitionAssistantIdentity(null);
+  });
+
   beforeEach(() => {
     vi.unstubAllGlobals();
     globalThis.__nyxidAssistantHttpMock = undefined;

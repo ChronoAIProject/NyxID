@@ -9,6 +9,7 @@ import {
 } from "@/lib/telemetry";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 
@@ -30,6 +31,7 @@ function clearAccountIdentity(): void {
   // Reset attribution before publishing the cleared account state.
   telemetryReset();
   useConsentStore.getState().bindAccount(null);
+  useAssistantPinsStore.getState().bindAccount(null);
   clearAccountLocalState();
   transitionAssistantIdentity(null);
 }
@@ -39,6 +41,7 @@ function applyIdentityTransition(
   nextUser: User | null,
 ): void {
   useConsentStore.getState().bindAccount(nextUser?.id ?? null);
+  useAssistantPinsStore.getState().bindAccount(nextUser?.id ?? null);
   if (previousUser?.id === nextUser?.id) return;
   telemetryReset();
   useServiceCardView.setState({
@@ -185,6 +188,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         if (!ephemeral) {
           clearAccountIdentity();
         } else {
+          useAssistantPinsStore.getState().bindAccount(null);
           transitionAssistantIdentity(null);
         }
         set({ user: null, isAuthenticated: false, isLoading: false });

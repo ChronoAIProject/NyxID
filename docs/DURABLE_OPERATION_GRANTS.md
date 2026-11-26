@@ -87,3 +87,32 @@ and organization admins may list or mutate grant receipts.
 Stable durable error codes are `9008` through `9016`: missing, mismatch,
 expired, revoked, contract drift, quota exhausted, duplicate operation,
 conflicting operation reuse, and outcome uncertain, respectively.
+
+## Reauthorization audit and interrupted requests
+
+Reauthorization retains two fail-closed units. The first transaction revokes the
+old grants and records one durable `durable_grant_revoked` audit occurrence per
+changed grant with `reason: "reauthorization"`. The second inserts replacements
+and records `durable_grants_reauthorized`. The relay appends each occurrence to
+the audit chain exactly once. Scope-plan resolution, including any node or
+provider work, completes before either transaction.
+
+If the process stops between the units, the old grants stay revoked and no
+replacements exist. The active-grant list is empty; `--include-revoked` shows
+the historical receipts. The audit records the revocations without a
+reauthorized event. The owner must preview the current scope and reauthorize
+again; no worker finishes the request automatically. Failure of the second
+unit never restores old authority. A retry does not record a second revocation
+for an already-revoked grant.
+
+The measured bulk envelope is 10,000 active old grants and 500 replacements on
+an otherwise quiet key, using MongoDB 8 with a 1 GiB WiredTiger cache. The probe
+also retained one already-revoked historical row. Revocation plus its intents
+took 811 ms and replacement publication took 9 ms, with two transaction starts
+and no body retries; the whole request took 24.3 seconds, including existing
+scope-plan resolution. These measurements do not establish a contention bound.
+The API's existing input limits are unchanged. Above this measured envelope,
+split scheduling across keys or validate the specific size and write load first.
+Successive reauthorization requests replace the set; they do not accumulate
+replacement chunks. The manual `reauthorization_scale_probe` is ignored by
+default; small deterministic fixtures verify rollback of both units.

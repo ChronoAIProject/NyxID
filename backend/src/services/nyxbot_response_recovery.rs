@@ -1,10 +1,17 @@
 //! Durable provider responses. Reads never recreate or resubmit model/tool work.
+pub(crate) mod storage;
+
 use crate::{
-    crypto::aes::EncryptionKeys,
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::{
+        assistant_message::AssistantMessage,
         nyxbot_channel::{EVENTS_COLLECTION_NAME as EVENTS, NyxbotChannel, NyxbotEvent},
         nyxbot_gateway_response::{COLLECTION_NAME as RESPONSES, GatewayResponse},
+        nyxbot_response_read::ReplyPayload,
     },
 };
 use bson::{Document, doc};
@@ -53,6 +60,11 @@ pub fn metadata(value: &Value) -> AppResult<BTreeMap<String, String>> {
     }
     Ok(map)
 }
+pub(crate) fn conversation_identity(channel: &str, binding: &str, partition: &str) -> String {
+    let hash = crate::crypto::token::hash_token(&format!("{channel}:{binding}:{partition}"));
+    format!("nyxbot_{}", &hash[..32])
+}
+
 impl Payload {
     pub fn new(id: &str, identity: &str, metadata: BTreeMap<String, String>) -> Self {
         let snapshot = json!({"id":id,"object":"response","status":"queued", "output":[],
@@ -63,6 +75,11 @@ impl Payload {
         };
         result.lifecycle("created");
         result
+    }
+    fn has_output(&self) -> bool {
+        self.snapshot["output"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
     }
     fn lifecycle(&mut self, name: &str) {
         self.frames.push(
@@ -82,7 +99,7 @@ impl Payload {
         let text = text.map(|text| text.chars().take(MAX_TEXT_CHARS).collect::<String>());
         self.finish_text(text.as_deref(), failed);
     }
-    fn finish_text(&mut self, text: Option<&str>, failed: bool) {
+    pub(crate) fn finish_text(&mut self, text: Option<&str>, failed: bool) {
         self.progress();
         if let Some(text) = text.filter(|s| !s.trim().is_empty()) {
             let item = json!({"id":format!("msg_{}",self.snapshot["id"].as_str().unwrap_or_default()),
@@ -100,22 +117,70 @@ impl Payload {
         }
         self.lifecycle(if failed { "failed" } else { "completed" });
     }
-    pub async fn seal(&self, keys: &EncryptionKeys) -> AppResult<Vec<u8>> {
+    pub(crate) fn encoded(&self) -> AppResult<zeroize::Zeroizing<Vec<u8>>> {
         let bytes = zeroize::Zeroizing::new(serde_json::to_vec(self).map_err(|_| unavailable())?);
         if bytes.len() > MAX_PAYLOAD_BYTES {
             return Err(unavailable());
         }
-        keys.encrypt(&bytes).await
+        Ok(bytes)
+    }
+    #[cfg(test)]
+    pub async fn seal_legacy(&self, keys: &EncryptionKeys) -> AppResult<Vec<u8>> {
+        keys.encrypt(&self.encoded()?).await
     }
 }
 pub async fn payload(keys: &EncryptionKeys, row: &GatewayResponse) -> AppResult<Payload> {
-    let bytes = zeroize::Zeroizing::new(keys.decrypt(&row.payload_ciphertext).await?);
+    decode(&storage::open(keys, row).await?)
+}
+
+pub(crate) async fn event_reply(
+    keys: &EncryptionKeys,
+    event_id: &str,
+    channel: &NyxbotChannel,
+    response_id: &str,
+    reply: &ReplyPayload,
+) -> AppResult<Payload> {
+    let field = [super::nyxbot_event_record::REPLY, &channel.id, response_id];
+    let context = RecordContext::new(EVENTS, event_id, &channel.user_id, &field)?;
+    open_payload(keys, &context, reply.context_version, &reply.ciphertext).await
+}
+
+async fn open_payload(
+    keys: &EncryptionKeys,
+    context: &RecordContext<'_>,
+    version: Option<u8>,
+    ciphertext: &[u8],
+) -> AppResult<Payload> {
+    let bytes = record_field::decrypt_context(keys, context, version, ciphertext).await?;
+    decode(&bytes)
+}
+
+pub(super) fn decode(bytes: &[u8]) -> AppResult<Payload> {
     if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(unavailable());
     }
-    serde_json::from_slice(&bytes).map_err(|_| unavailable())
+    serde_json::from_slice(bytes).map_err(|_| unavailable())
 }
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    super::nyxbot_response_read::ensure_indexes(db).await?;
+    use super::channel_bot_health::answer;
+    for (collection, partial) in [
+        (EVENTS, answer::event_filter()),
+        (RESPONSES, answer::response_filter()),
+    ] {
+        db.collection::<Document>(collection)
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"channel_id":1,"created_at":-1,"_id":-1})
+                    .options(
+                        IndexOptions::builder()
+                            .partial_filter_expression(partial)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+    }
     for (keys, opts) in [
         (
             doc! {"response_id":1},
@@ -192,17 +257,31 @@ pub async fn finish(
         .collection::<NyxbotEvent>(EVENTS)
         .find_one(doc! {"_id":&row.event_key})
         .await?;
-    let text = text.map(|text| {
-        if event.as_ref().is_some_and(|event| {
-            event.relay_message_id.is_none() && event.source_media_declared.unwrap_or(0) > 0
-        }) && !text.contains(MEDIA_UNAVAILABLE)
-        {
-            let prefix: String = text.chars().take(MAX_TEXT_CHARS - 512).collect();
-            format!("{prefix}\n\n{MEDIA_UNAVAILABLE}")
-        } else {
-            text.to_owned()
+    let mut text = text.map(str::to_owned);
+    if let (Some(event), Some(text)) = (event.as_ref(), text.as_mut())
+        && event.relay_message_id.is_none()
+        && event.source_media_declared.unwrap_or(0) > 0
+    {
+        use super::channel_notices::Notice;
+        use crate::models::nyxbot_channel::NoticeLanguage;
+        let has_notice = [
+            NoticeLanguage::English,
+            NoticeLanguage::Simplified,
+            NoticeLanguage::Traditional,
+        ]
+        .into_iter()
+        .any(|language| text.contains(Notice::MediaUnavailable.text(Some(language))));
+        if !has_notice {
+            let language = if let Some(delivery) = &event.delivery {
+                delivery.notice_language
+            } else {
+                super::channel_notices::chat_language(db, &row.channel_id, &row.partition).await?
+            };
+            *text = text.chars().take(MAX_TEXT_CHARS - 512).collect();
+            text.push_str("\n\n");
+            text.push_str(Notice::MediaUnavailable.text(language));
         }
-    });
+    }
     if event
         .as_ref()
         .is_some_and(|event| event.relay_message_id.is_some())
@@ -211,12 +290,20 @@ pub async fn finish(
     } else {
         body.finish(text.as_deref(), failed);
     }
-    let sealed = body.seal(keys).await?;
     // No upsert: a concurrent purge always wins. All frames and the snapshot
     // become visible atomically, before any network byte is exposed.
-    let changed = db.collection::<GatewayResponse>(RESPONSES).update_one(doc! {"_id":&row.id,"terminal":false,"revision":row.revision,
-        "expires_at":{"$gt":bson::DateTime::now()}}, doc! {"$set":{"terminal":true,
-        "payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:sealed}},"$inc":{"revision":1_i64}}).await?;
+    let mut terminal = doc! {"terminal": true};
+    if event.as_ref().is_some_and(|e| e.turn_id.is_some()) && body.has_output() {
+        terminal.insert("answer_delivery", "prepared");
+    }
+    let changed = db
+        .collection::<GatewayResponse>(RESPONSES)
+        .update_one(
+            doc! {"_id":&row.id,"terminal":false,"revision":row.revision,
+            "expires_at":{"$gt":bson::DateTime::now()}},
+            storage::revision_update(keys, row, &body, terminal).await?,
+        )
+        .await?;
     if changed.modified_count == 1 {
         super::audit_service::log_async(
             db.clone(),
@@ -239,6 +326,65 @@ pub async fn finish(
             doc! {"$set":{"gateway_native_delivery":if failed {"response_failed"} else {"response_ready"}}}).await?;
     }
     Ok(())
+}
+
+/// The provider successfully returns a notice for a failed relay turn. Only a
+/// proven start refusal may tell the caller that nothing was done.
+fn relay_failure_reply(
+    message: &AssistantMessage,
+    org_guest: bool,
+    language: Option<crate::models::nyxbot_channel::NoticeLanguage>,
+) -> String {
+    use super::channel_notices::Notice;
+
+    let code = message.error_code.as_deref();
+    if code == Some("guest_model_route_required")
+        && message.activity_count == Some(0)
+        && message.activities.is_empty()
+        && message.activity_total == 0
+        && message.text.trim().is_empty()
+        && !message
+            .turn_metadata
+            .as_ref()
+            .and_then(|m| m.work.as_ref())
+            .is_some_and(|work| work.business_system_success)
+    {
+        let reason = message
+            .turn_metadata
+            .as_ref()
+            .and_then(|m| m.failure_reason.as_ref())
+            .and_then(|r| r.model_route.as_ref())
+            .map(|route| route.reason.as_str());
+        let notice = if org_guest {
+            Notice::GuestModelRouteNoTools
+        } else if reason.is_some_and(super::assistant_guest_model_setup::failure_code) {
+            Notice::GuestSetupNoTools
+        } else {
+            Notice::NoTools
+        };
+        return notice.text(language).into();
+    }
+
+    let notice = if org_guest
+        && matches!(
+            code,
+            Some(
+                "capacity_exceeded"
+                    | "session_busy"
+                    | "queue_timeout"
+                    | "guest_model_route_required"
+            )
+        ) {
+        Notice::org_guest_failure(code)
+    } else {
+        Notice::OutcomeUnknown
+    }
+    .text(language);
+    if org_guest || message.text.trim().is_empty() {
+        notice.into()
+    } else {
+        format!("{}\n\n{notice}", message.text)
+    }
 }
 
 /// Called by snapshots/replay and the existing delivery sweep. Transcript is
@@ -270,16 +416,33 @@ where
         return finish(db, keys, row, None, true).await;
     };
     if let (Some(conversation), Some(turn)) = (&event.conversation_id, &event.turn_id) {
-        use crate::models::assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES};
+        use crate::models::assistant_message::COLLECTION_NAME as MESSAGES;
         if let Some(message) = db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {"user_id":super::org_channel_service::event_actor(&event),
             "conversation_id":conversation,"turn_id":turn,"role":"assistant", "status":{"$in":["completed","failed","cancelled","interrupted"]}}).await? {
-            let guest_refused=event.delivery.as_ref().and_then(|d|d.origin.org_execution.as_ref()).is_some_and(|e|e.guest) && message.status!="completed";
-            let start_refused = message.error_code.as_deref() == Some("assistant_start_unavailable") || guest_refused;
-            let mut text = if guest_refused {super::org_channel_service::UNAVAILABLE.into()} else if start_refused { super::assistant_nyxagent::TurnError::new("assistant_start_unavailable").message } else { message.text };
+            let org_guest = event.delivery.as_ref().and_then(|d| d.origin.org_execution.as_ref()).is_some_and(|e| e.guest);
+            let language = event.delivery.as_ref().and_then(|d| d.notice_language);
+            let (mut text, failed) = if message.status == "completed" {
+                (message.text, false)
+            } else if message.error_code.as_deref() == Some("channel_retry_attachment_unavailable") && !org_guest {
+                (super::channel_notices::Notice::RetryAttachmentUnavailable.text(language).into(), false)
+            } else if message.error_code.as_deref() == Some("capacity_exceeded") && !org_guest {
+                let notice = super::channel_notices::capacity(language,message.error_detail.as_ref().and_then(|d| d.capacity_wait_ms));
+                let text = if message.text.trim().is_empty() { notice } else { format!("{}\n\n{notice}", message.text.trim()) };
+                (text, false)
+            } else if message.error_code.as_deref() == Some("assistant_start_unavailable") && (!org_guest || event.relay_message_id.is_some()) {
+                (super::channel_notices::Notice::DependencyUnavailable.text(language).into(), false)
+            } else if event.relay_message_id.is_some() {
+                (relay_failure_reply(&message, org_guest, language), false)
+            } else if org_guest {
+                (super::channel_notices::Notice::org_guest_failure(message.error_code.as_deref()).text(language).into(), false)
+            } else {
+                (message.text, true)
+            };
             let images=super::assistant_nyxagent::turn_tool_attachments(db,super::org_channel_service::event_actor(&event),conversation,turn).await?;
             if event.relay_message_id.is_none() && images.iter().any(super::assistant_nyxagent::chat_tool_image) {
                 text = text.chars().take(MAX_TEXT_CHARS - 512).collect();
-                text.push_str("\n\nImages are unavailable on this native gateway connection. View them in NyxID.");
+                text.push_str("\n\n");
+                text.push_str(super::channel_notices::Notice::ImagesUnavailable.text(language));
             }
             if event.relay_message_id.is_some() && images.iter().any(super::assistant_nyxagent::chat_tool_image) {
                 // The HTTP/delivery layer supplies the existing relay image
@@ -287,13 +450,14 @@ where
                 // replay cannot change the answer or repeat uncertain sends.
                 text = relay_images(text).await;
             }
-            finish(db,keys,row,Some(&text),message.status != "completed" && !start_refused).await?;
+            finish(db,keys,row,Some(&text),failed).await?;
         } else {
             let mut body=payload(keys,row).await?;
             if body.progress() {
-                let sealed=body.seal(keys).await?;
-                db.collection::<GatewayResponse>(RESPONSES).update_one(doc! {"_id":&row.id,"revision":row.revision,"terminal":false},
-                    doc! {"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:sealed}},"$inc":{"revision":1_i64}}).await?;
+                let update = storage::revision_update(keys, row, &body, Document::new()).await?;
+                db.collection::<GatewayResponse>(RESPONSES)
+                    .update_one(doc! {"_id": &row.id, "revision": row.revision, "terminal": false}, update)
+                    .await?;
             }
         }
     } else if event.status != "queued"
@@ -317,6 +481,49 @@ where
         }
     }
     Ok(())
+}
+
+pub async fn observe_answer_output(
+    db: &Database,
+    row: &GatewayResponse,
+    body: &Payload,
+) -> AppResult<()> {
+    if row.answer_delivery.as_deref() == Some("prepared") && body.has_output() {
+        db.collection::<Document>(RESPONSES)
+            .update_one(
+                doc! {"_id":&row.id,"answer_delivery":"prepared"},
+                doc! {"$set":{"answer_delivery":"unconfirmed"}},
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+pub fn suppress_output(body: &mut Payload) {
+    body.snapshot["output"] = json!([]);
+    body.snapshot["status"] = json!("completed");
+    body.snapshot
+        .as_object_mut()
+        .expect("snapshot")
+        .remove("error");
+    body.frames.retain(|frame| {
+        matches!(
+            frame["type"].as_str(),
+            Some(
+                "response.created"
+                    | "response.in_progress"
+                    | "response.completed"
+                    | "response.failed"
+            )
+        )
+    });
+    for (sequence, frame) in body.frames.iter_mut().enumerate() {
+        frame["sequence_number"] = json!(sequence);
+    }
+    if let Some(last) = body.frames.last_mut() {
+        last["type"] = json!("response.completed");
+        last["response"] = body.snapshot.clone();
+    }
 }
 
 #[cfg(test)]

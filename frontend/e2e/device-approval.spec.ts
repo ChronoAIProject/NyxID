@@ -223,6 +223,56 @@ test("back from app verification cancels the proof and stops polling", async ({ 
   await expect(page.getByRole("button", { name: "Continue to approval" })).toHaveCount(0);
 });
 
+test("expanded approval distinguishes connection owners and creates a Key with the edited name", async ({ page }, info) => {
+  const inventory = loginInventory();
+  inventory.connections[0]!.label = "GitHub";
+  inventory.connections.push({
+    ...inventory.connections[0]!,
+    id: "org-service",
+    owner_id: "org",
+    permission_snapshot: "o".repeat(64),
+  });
+  inventory.options.services.push({
+    id: "org-service",
+    name: inventory.options.services[0]!.name,
+    owner_id: "org",
+    owner_name: "Engineering",
+  });
+  const requests = await fixture(page, true, false, true, inventory);
+  await page.goto(`/login/device?${hints}&key_name=Build+agent&key_source=new`);
+  await restricted(page);
+  await page.getByRole("button", { name: "Create new Agent Key", exact: true }).click();
+  const name = page.getByRole("textbox", { name: "Name", exact: true });
+  await expect(name).toBeVisible();
+  await expect(name).toHaveValue("Build agent");
+  await name.fill("Engineering build agent");
+  const review = page.getByRole("region", { name: "Authorize access" });
+  await expect(review.getByRole("heading", { name: "Engineering build agent", exact: true })).toBeVisible();
+  await expect(review.locator("details.group\\/row[open]")).toHaveCount(2);
+  const personal = review.getByRole("checkbox", { name: "Grant connection GitHub (Personal)", exact: true });
+  const organization = review.getByRole("checkbox", { name: "Grant connection GitHub (Organization · Engineering)", exact: true });
+  await expect(personal).toBeChecked();
+  await expect(organization).not.toBeChecked();
+  await personal.uncheck();
+  await organization.check();
+  await expect(personal).not.toBeChecked();
+  const row = review.locator('details[aria-label="GitHub access"]');
+  await expect(row.locator("summary")).toContainText("GitHub (Organization · Engineering)");
+  for (const width of [1280, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath(`connection-owners-${width}.png`), fullPage: true });
+  }
+  await row.locator("summary").click();
+  await expect(row.locator("summary")).toContainText("Organization · Engineering");
+  expect(requests.filter((r) => r.path.includes("approve"))).toEqual([]);
+  await page.getByRole("button", { name: "Create & continue" }).click();
+  await expect(page.getByText("Approved — return to the requesting device")).toBeVisible();
+  expect(requests.find((r) => r.path.endsWith("/approve-agent-key"))?.body).toMatchObject({
+    selection: { kind: "new", name: "Engineering build agent", allowed_service_ids: ["org-service"] },
+  });
+});
+
 test("one dropdown chooses permissions and an explicit connection when accounts are ambiguous", async ({
   page,
 }, info) => {
@@ -265,10 +315,13 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
     page.locator('details[aria-label="GitHub access"] summary'),
   ).toContainText("Choose account");
   const inlineAccount = page.locator('details[aria-label="GitHub access"]');
+  await expect(inlineAccount).toHaveAttribute("open", "");
   await inlineAccount.locator("summary").focus();
   await page.keyboard.press("Enter");
+  await expect(inlineAccount).not.toHaveAttribute("open");
+  await page.keyboard.press("Enter");
   const workAccount = inlineAccount.getByRole("checkbox", {
-    name: "Grant connection GitHub work",
+    name: "Grant connection GitHub work (Personal)",
   });
   await workAccount.check();
   await expect(
@@ -295,7 +348,7 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
   await allConnections.check();
   await search.fill("GitHub");
   await expect(
-    page.getByRole("checkbox", { name: "Grant connection GitHub personal" }),
+    page.getByRole("checkbox", { name: "Grant connection GitHub personal (Personal)" }),
   ).toBeDisabled();
   await search.press("ArrowDown");
   await expect(
@@ -305,13 +358,13 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
   await allConnections.uncheck();
   await search.fill("GitHub");
   await expect(
-    page.getByRole("checkbox", { name: "Grant connection GitHub personal" }),
+    page.getByRole("checkbox", { name: "Grant connection GitHub personal (Personal)" }),
   ).not.toBeChecked();
   await expect(
-    page.getByRole("checkbox", { name: "Grant connection GitHub work" }),
+    page.getByRole("checkbox", { name: "Grant connection GitHub work (Personal)" }),
   ).not.toBeChecked();
   await page
-    .getByRole("checkbox", { name: "Grant connection GitHub work" })
+    .getByRole("checkbox", { name: "Grant connection GitHub work (Personal)" })
     .check();
   await search.fill("Read calendar");
   await expect(page.getByText("Not connected", { exact: true })).toBeVisible();
@@ -320,7 +373,7 @@ test("one dropdown chooses permissions and an explicit connection when accounts 
   ).toHaveCount(0);
   await search.fill("github-work");
   await expect(
-    page.getByRole("checkbox", { name: "Grant connection GitHub work" }),
+    page.getByRole("checkbox", { name: "Grant connection GitHub work (Personal)" }),
   ).toBeChecked();
   expect(requests.filter((r) => r.path.includes("approve"))).toEqual([]);
   for (const [width, height] of [
@@ -419,7 +472,7 @@ test("adding another service changes the new key draft without creating a servic
   await page.getByText("Customize", { exact: true }).click();
   await search.fill("Slack");
   await page
-    .getByRole("checkbox", { name: "Grant connection Slack workspace" })
+    .getByRole("checkbox", { name: "Grant connection Slack workspace (Personal)" })
     .check();
   await search.press("Escape");
   await page.getByText("Customize", { exact: true }).click();
@@ -430,12 +483,11 @@ test("adding another service changes the new key draft without creating a servic
   await expect(
     review.getByText("Creates new key", { exact: true }),
   ).toBeVisible();
-  await expect(review.locator("details[open]")).toHaveCount(0);
+  await expect(review.locator("details.group\\/row[open]")).toHaveCount(3);
   await expect(
-    review.getByText("Matched + 2 extras", { exact: true }),
+    review.getByText("Matched + 2 extra permissions", { exact: true }),
   ).toBeVisible();
   const slackRow = review.locator('details[aria-label="Slack access"]');
-  await slackRow.locator("summary").click();
   await expect(
     slackRow.getByRole("heading", { name: "Extra access included" }),
   ).toBeVisible();
@@ -443,6 +495,11 @@ test("adding another service changes the new key draft without creating a servic
   await expect(
     slackRow.getByRole("heading", { name: "Extra access included" }),
   ).toBeHidden();
+  // Users can still collapse the initially expanded rows for a compact review.
+  const expandedRows = review.locator("details.group\\/row[open]");
+  for (let remaining = await expandedRows.count(); remaining > 0; remaining--) {
+    await expandedRows.first().locator("summary").click();
+  }
   expect(writes).toEqual([]);
   for (const [width, height] of [
     [1280, 900],
@@ -586,7 +643,7 @@ for (const grant of ["account", "agent-key"] as const) {
       await expect(
         review.getByText("Existing key", { exact: true }),
       ).toBeVisible();
-      await expect(review.locator("details[open]")).toHaveCount(0);
+      await expect(review.locator("details.group\\/row[open]")).toHaveCount(2);
       await expect(
         review.getByText("Effective permissions", { exact: true }),
       ).toBeHidden();

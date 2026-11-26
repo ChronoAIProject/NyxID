@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useState } from "react";
 import { Pressable, View } from "react-native";
 import {
@@ -34,6 +36,7 @@ function EventRow({
   automation?: boolean;
   onOpenAutomations: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [open, setOpen] = useState(false);
   const Icon = automation
@@ -63,7 +66,9 @@ function EventRow({
         : notice.tone === "warning"
           ? colors.warningTone.text
           : colors.textMuted;
-  const label = `NyxID event: ${notice.summary}`;
+  const label = translateApp("NyxID event: {{summary}}", {
+    summary: notice.summary,
+  });
   const head = (
     <>
       <Icon size={14} color={tone} />
@@ -124,13 +129,13 @@ function EventRow({
           {automation ? (
             <Pressable
               accessibilityRole="link"
-              accessibilityLabel="Open Automations"
+              accessibilityLabel={translateApp("Open Automations")}
               hitSlop={{ top: 7, bottom: 7 }}
               style={{ minHeight: 30, justifyContent: "center", alignSelf: "flex-start" }}
               onPress={onOpenAutomations}
             >
               <Label style={{ fontSize: 13, color: colors.primary }}>
-                Open Automations
+                {translateApp("Open Automations")}
               </Label>
             </Pressable>
           ) : null}
@@ -148,11 +153,12 @@ export function AssistantSystemMessage({
   conversationId?: string;
   onOpenAutomations: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   if (message.role === "orchestrator")
     return (
       <View
-        accessibilityLabel="Message from NyxBot"
+        accessibilityLabel={translateApp("Message from NyxBot")}
         style={{ alignItems: "flex-end", gap: 4 }}
       >
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
@@ -161,7 +167,7 @@ export function AssistantSystemMessage({
             size="xs"
           />
           <Label muted style={{ fontSize: 10 }}>
-            From NyxBot
+            {translateApp("From NyxBot")}
           </Label>
         </View>
         <View
@@ -186,14 +192,14 @@ export function AssistantSystemMessage({
         {
           kind: "notice" as const,
           tone: "neutral" as const,
-          summary: `${message.id.startsWith("trigger-event:") ? "Webhook event" : "Automation"}${message.automation?.label ? ` · ${message.automation.label}` : " run"}`,
+          summary: (message.id.startsWith("trigger-event:") ? (message.automation?.label ? translateApp("Webhook event · {{label}}", { label: message.automation.label}) : translateApp("Webhook event run")) : (message.automation?.label ? translateApp("Automation · {{label}}", { label: message.automation.label }) : translateApp("Automation run"))),
           detail: message.text.trim() || undefined,
         },
       ]
     : eventNotices(message.text).map(describeEventNotice);
   return (
     <View
-      accessibilityLabel="NyxID updates"
+      accessibilityLabel={translateApp("NyxID updates")}
       accessibilityLiveRegion="polite"
       style={{
         backgroundColor: colors.segmentTrack,

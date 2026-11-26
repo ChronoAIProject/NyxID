@@ -1,0 +1,300 @@
+[
+  {
+    "name": "issue 2415 backchannel acknowledgement answer ignore turn and overlapping offsets",
+    "rows": [
+      {
+        "id": "6",
+        "text": "嗯。",
+        "turn_id": "backchannel",
+        "voice": {
+          "session_id": "call-a",
+          "segment_id": "6",
+          "sealed": true,
+          "complete": true
+        },
+        "start_ms": 1000,
+        "end_ms": 3000
+      },
+      {
+        "id": "7",
+        "text": "我来查一下。",
+        "turn_id": "ack",
+        "voice": {
+          "session_id": "call-a",
+          "segment_id": "7",
+          "sealed": true,
+          "complete": true
+        },
+        "start_ms": 2000,
+        "end_ms": 3500
+      },
+      {
+        "id": "8",
+        "text": "答案在这里。",
+        "turn_id": "answer",
+        "voice": {
+          "session_id": "call-a",
+          "segment_id": "8",
+          "sealed": true,
+          "complete": true
+        }
+      }
+    ],
+    "groups": [["6", "7", "8"]],
+    "anchors": ["8"],
+    "copy": ["嗯。\n\n我来查一下。\n\n答案在这里。"]
+  },
+  {
+    "name": "user interruption",
+    "rows": [
+      {
+        "id": "a",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "a",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "u",
+        "role": "user"
+      },
+      {
+        "id": "b",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "b",
+          "sealed": true,
+          "complete": true
+        }
+      }
+    ],
+    "groups": [["a"], ["u"], ["b"]]
+  },
+  {
+    "name": "session boundary",
+    "rows": [
+      {
+        "id": "a",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "a",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "b",
+        "voice": {
+          "session_id": "other",
+          "segment_id": "b",
+          "sealed": true,
+          "complete": true
+        }
+      }
+    ],
+    "groups": [["a"], ["b"]]
+  },
+  {
+    "name": "error receipt approval task result system and link rows are boundaries",
+    "rows": [
+      {
+        "id": "a",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "a",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "error",
+        "status": "failed",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "e",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "receipt"
+      },
+      {
+        "id": "approval"
+      },
+      {
+        "id": "task-result"
+      },
+      {
+        "id": "system",
+        "role": "system"
+      },
+      {
+        "id": "link",
+        "text": "<https://nyxid.ai/connect/bot/nyx_bcl_example>"
+      },
+      {
+        "id": "b",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "b",
+          "sealed": true,
+          "complete": true
+        }
+      }
+    ],
+    "groups": [
+      ["a"],
+      ["error"],
+      ["receipt"],
+      ["approval"],
+      ["task-result"],
+      ["system"],
+      ["link"],
+      ["b"]
+    ]
+  },
+  {
+    "name": "15-second continuation parts join one group",
+    "rows": [
+      {
+        "id": "a",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "a",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "b",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "b",
+          "sealed": true,
+          "complete": false
+        }
+      },
+      {
+        "id": "c",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "c",
+          "sealed": true,
+          "complete": true
+        }
+      }
+    ],
+    "groups": [["a", "b", "c"]]
+  },
+  {
+    "name": "latest feedback segment is deterministic anchor",
+    "rows": [
+      {
+        "id": "a",
+        "feedback": {
+          "vote": "down"
+        },
+        "voice": {
+          "session_id": "s",
+          "segment_id": "a",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "b",
+        "feedback": {
+          "vote": "up"
+        },
+        "voice": {
+          "session_id": "s",
+          "segment_id": "b",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "c",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "c",
+          "sealed": true,
+          "complete": true
+        }
+      }
+    ],
+    "groups": [["a", "b", "c"]],
+    "anchors": ["b"]
+  },
+  {
+    "name": "card and approval rows separate surrounding mobile speech groups",
+    "rows": [
+      {
+        "id": "before",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "before",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "card",
+        "role": "assistant",
+        "text": "Review this card"
+      },
+      {
+        "id": "approval",
+        "role": "assistant",
+        "text": "Approval requested"
+      },
+      {
+        "id": "after",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "after",
+          "sealed": true,
+          "complete": true
+        }
+      }
+    ],
+    "groups": [["before"], ["card"], ["approval"], ["after"]]
+  },
+  {
+    "name": "explicitly interrupted segment closes its group without an intervening user row",
+    "rows": [
+      {
+        "id": "before",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "before",
+          "sealed": true,
+          "complete": true
+        }
+      },
+      {
+        "id": "interrupted",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "interrupted",
+          "sealed": true,
+          "complete": false,
+          "interrupted": true
+        }
+      },
+      {
+        "id": "after",
+        "voice": {
+          "session_id": "s",
+          "segment_id": "after",
+          "sealed": true,
+          "complete": true
+        }
+      }
+    ],
+    "groups": [["before", "interrupted"], ["after"]]
+  }
+]

@@ -575,6 +575,9 @@ async fn enrolled_credential_executes_only_allowed_proxy_with_live_parent_bindin
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    crate::services::security_effect_service::sweep(db, &server.state.encryption_keys)
+        .await
+        .unwrap();
     let logs = db.collection::<mongodb::bson::Document>("audit_log");
     let revoked = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {

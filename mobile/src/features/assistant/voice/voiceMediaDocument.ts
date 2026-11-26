@@ -1,3 +1,4 @@
+import { localizedError } from "../../../i18n/localizedError";
 /** Ephemeral media only: no authentication, HTTP requests, storage, or app tools. */
 export const VOICE_MEDIA_ENGINE = String.raw`
 (() => {
@@ -274,6 +275,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     for (const reject of iceWaiters) reject(new Error('cancelled'));
     iceWaiters.clear();
     media?.getTracks().forEach((track) => track.stop());
+    if (media) emit({ type: 'capture', active: false });
     media = undefined;
     source?.disconnect();
     worklet?.disconnect();
@@ -482,6 +484,7 @@ export const VOICE_MEDIA_ENGINE = String.raw`
     });
     if (!alive(id)) { localMedia.getTracks().forEach((track) => track.stop()); throw new Error('cancelled'); }
     media = localMedia;
+    emit({ type: 'capture', active: true });
     localMedia.getAudioTracks().forEach((track) => { track.enabled = false; });
     const mockCapture = localMedia.getAudioTracks().some((track) => typeof track.label === 'string' && track.label.length === 19 && /^Mock audio device [1-4]$/.test(track.label));
     diagnostic(id, 'input_source', 'ready', { mock_capture: mockCapture ? 1 : 0 });
@@ -708,7 +711,7 @@ const BASE64 =
 export function voicePcmToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   if (!bytes.length || bytes.length > 1920 || bytes.length % 2)
-    throw new Error("Invalid voice audio frame");
+    throw localizedError("Invalid voice audio frame");
   let result = "";
   for (let i = 0; i < bytes.length; i += 3) {
     const value =
@@ -729,12 +732,12 @@ export function voicePcmFromBase64(value: string): ArrayBuffer {
     value.length % 4 ||
     !/^[A-Za-z0-9+/]+={0,2}$/.test(value)
   )
-    throw new Error("Invalid voice audio frame");
+    throw localizedError("Invalid voice audio frame");
   const size =
     (value.length / 4) * 3 -
     (value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0);
   if (!size || size > 1920 || size % 2)
-    throw new Error("Invalid voice audio frame");
+    throw localizedError("Invalid voice audio frame");
   const bytes = new Uint8Array(size);
   let output = 0;
   for (let i = 0; i < value.length; i += 4) {

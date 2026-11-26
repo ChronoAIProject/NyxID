@@ -1,3 +1,9 @@
+import { discardUploadDraft } from "../assistant/assistantDraftStore";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
+import { getAuthEpoch } from "../../lib/auth/authEpoch";
+import { localizedError } from "../../i18n/localizedError";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { useEffect, useState } from "react";
 import { Alert, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
@@ -37,6 +43,7 @@ export function CollaborationGroupControls({
   onSaved: (id: string) => void;
   onRemoved: () => void;
 }) {
+  useAppLanguage();
   const session = useCollaborationSession();
   const detail = useQuery({
     queryKey: [...session.key, "group", group.id],
@@ -87,17 +94,15 @@ export function CollaborationGroupControls({
   const apply = (change: CollaborationChange) =>
     void session.run(
       async () => {
-        if (!policy) throw new Error("Reload group settings first.");
+        if (!policy) throw localizedError("Reload group settings first.");
         const fresh = await groupsApi.detail(group.id);
         if (!session.valid())
-          throw new Error("Keep group settings open to save.");
+          throw localizedError("Keep group settings open to save.");
         if (
           fresh.collaboration?.membership_revision !==
           policy.membership_revision
         )
-          throw new Error(
-            "This group changed elsewhere. Refresh and review its current participants before saving.",
-          );
+          throw localizedError("This group changed elsewhere. Refresh and review its current participants before saving.");
         return collaborationApi.change(
           group.id,
           policy.membership_revision,
@@ -110,8 +115,15 @@ export function CollaborationGroupControls({
         if (
           !result.group &&
           (change.action === "leave" || change.action === "delete")
-        )
+        ) {
+          const owner = getAuthAccountId();
+          const epoch = getAuthEpoch();
+          void discardUploadDraft(owner, `crew:${group.id}`).catch(() => {
+            if (epoch === getAuthEpoch() && owner === getAuthAccountId())
+              Alert.alert(translateApp("The draft could not be discarded. Try again."));
+          });
           onRemoved();
+        }
       },
       {
         feature:
@@ -137,10 +149,10 @@ export function CollaborationGroupControls({
       },
     );
   const confirm = (message: string, change: CollaborationChange) =>
-    Alert.alert("Confirm group change", message, [
-      { text: "Cancel", style: "cancel" },
+    Alert.alert(translateApp("Confirm group change"), message, [
+      { text: translateApp("Cancel"), style: "cancel" },
       {
-        text: "Confirm",
+        text: translateApp("Confirm"),
         style:
           change.action === "delete" ||
           change.action === "remove" ||
@@ -152,13 +164,15 @@ export function CollaborationGroupControls({
     ]);
   if (!session.active)
     return (
-      <WorkspacePage title="Group settings">
-        <Label muted>Return to this view to reload current group rights.</Label>
+      <WorkspacePage title={translateApp("Group settings")}>
+        <Label muted>
+          {translateApp("Return to this view to reload current group rights.")}
+        </Label>
       </WorkspacePage>
     );
   return (
     <WorkspacePage
-      title="Group participants and agents"
+      title={translateApp("Group participants and agents")}
       onRefresh={pull.onRefresh}
       refreshing={pull.refreshing}
     >
@@ -166,7 +180,9 @@ export function CollaborationGroupControls({
       {detail.isError && (
         <Notice
           tone="error"
-          message="Group access changed or settings could not load. Refresh to review. Actions are disabled."
+          message={translateApp(
+            "Group access changed or settings could not load. Refresh to review. Actions are disabled.",
+          )}
         />
       )}
       {policy && current ? (
@@ -175,38 +191,39 @@ export function CollaborationGroupControls({
           {policy.can_manage && (
             <Card>
               <Field
-                label="Group name"
+                label={translateApp("Group name")}
                 value={name}
                 onChangeText={setName}
                 editable={!disabled}
                 maxLength={60}
               />
               <ActionButton
-                label="Save group name"
+                label={translateApp("Save group name")}
                 disabled={disabled || !name.trim() || name === current.name}
                 onPress={() => apply({ action: "rename", name: name.trim() })}
               />
             </Card>
           )}
           <Card>
-            <Label>
-              Participants ({current.participants?.length ?? 0} of 16)
-            </Label>
+            <Label>{translateApp("Participants ({{count}} of 16)", { count: current.participants?.length ?? 0})}</Label>
             {current.participants?.map((person) => (
               <View key={person.id} style={{ gap: 8 }}>
                 <Label>
-                  {person.display_name}
-                  {person.id === policy.creator_user_id ? " · Creator" : ""}
+                  {(person.id === policy.creator_user_id ? translateApp("{{name}} · Creator", { name: person.display_name }) : person.display_name)}
                 </Label>
                 {policy.can_manage && person.id !== policy.creator_user_id && (
                   <>
                     <ActionButton
                       compact
-                      label={`Transfer management to ${person.display_name}`}
+                      label={translateApp("Transfer management to {{name}}", {
+                        name: person.display_name,
+                      })}
                       disabled={disabled}
                       onPress={() =>
                         confirm(
-                          "They must accept management before you can leave. This does not transfer any agent or credentials.",
+                          translateApp(
+                            "They must accept management before you can leave. This does not transfer any agent or credentials.",
+                          ),
                           { action: "propose_transfer", person_id: person.id },
                         )
                       }
@@ -214,11 +231,15 @@ export function CollaborationGroupControls({
                     <ActionButton
                       compact
                       variant="danger"
-                      label={`Remove ${person.display_name}`}
+                      label={translateApp("Remove {{name}}", {
+                        name: person.display_name,
+                      })}
                       disabled={disabled}
                       onPress={() =>
                         confirm(
-                          "Their group access ends immediately and queued work is cancelled.",
+                          translateApp(
+                            "Their group access ends immediately and queued work is cancelled.",
+                          ),
                           { action: "remove", person_id: person.id },
                         )
                       }
@@ -229,31 +250,36 @@ export function CollaborationGroupControls({
             ))}
             {policy.transfer_to_user_id === session.identity.data?.id ? (
               <ActionButton
-                label="Accept group management"
+                label={translateApp("Accept group management")}
                 disabled={disabled}
                 onPress={() =>
                   confirm(
-                    "You will manage group participants and invitations. Agent ownership stays unchanged.",
+                    translateApp(
+                      "You will manage group participants and invitations. Agent ownership stays unchanged.",
+                    ),
                     { action: "accept_transfer" },
                   )
                 }
               />
             ) : policy.transfer_to_user_id ? (
               <Label muted>
-                Waiting for the proposed creator to accept management.
+                {translateApp(
+                  "Waiting for the proposed creator to accept management.",
+                )}
               </Label>
             ) : null}
           </Card>
           {policy.can_manage && (
             <Card>
               <ActionButton
-                label="Create invitation link"
+                label={translateApp("Create invitation link")}
                 disabled={disabled || (current.participants?.length ?? 0) >= 16}
                 onPress={() => apply({ action: "invite" })}
               />
               <Label muted>
-                Single use, expires in seven days. Share it yourself. Joining
-                exposes the full retained group history.
+                {translateApp(
+                  "Single use, expires in seven days. Share it yourself. Joining exposes the full retained group history.",
+                )}
               </Label>
               {invite && (
                 <>
@@ -261,14 +287,13 @@ export function CollaborationGroupControls({
                     {invitationLink(getFrontendUrl(), invite.token) ??
                       invite.token}
                   </Label>
-                  <Label muted>
-                    Expires {new Date(invite.expires_at).toLocaleString()}
+                  <Label muted>{translateApp("Expires {{time}}", { time: new Date(invite.expires_at).toLocaleString(appLocale()) })}
                   </Label>
                   <ActionButton
                     label={
                       invitationLink(getFrontendUrl(), invite.token)
-                        ? "Copy invitation link"
-                        : "Copy invitation token"
+                        ? translateApp("Copy invitation link")
+                        : translateApp("Copy invitation token")
                     }
                     disabled={disabled}
                     onPress={() =>
@@ -284,7 +309,11 @@ export function CollaborationGroupControls({
                 <ActionButton
                   key={row.id}
                   variant="secondary"
-                  label={`Revoke invitation · ${new Date(row.expires_at).toLocaleDateString()}`}
+                  label={translateApp("Revoke invitation · {{date}}", {
+                    date: new Date(row.expires_at).toLocaleDateString(
+                      appLocale(),
+                    ),
+                  })}
                   disabled={disabled}
                   onPress={() =>
                     apply({ action: "cancel_invite", invite_id: row.id })
@@ -292,8 +321,8 @@ export function CollaborationGroupControls({
                 />
               ))}
               <WorkspaceSelectionField
-                label="Quick-add from organization"
-                title="Choose a shared organization"
+                label={translateApp("Quick-add from organization")}
+                title={translateApp("Choose a shared organization")}
                 options={(orgs.data ?? []).map((row) => ({
                   value: row.id,
                   label: row.display_name ?? row.slug,
@@ -306,7 +335,7 @@ export function CollaborationGroupControls({
               {people.isError && (
                 <Notice
                   tone="error"
-                  message="Organization members could not load."
+                  message={translateApp("Organization members could not load.")}
                 />
               )}
               {(people.data ?? [])
@@ -319,13 +348,17 @@ export function CollaborationGroupControls({
                   <ActionButton
                     key={person.user_id}
                     compact
-                    label={`Add ${person.display_name ?? person.email ?? "member"}`}
+                    label={translateApp("Add {{email}}", {
+                      email: person.display_name ?? person.email ?? "member",
+                    })}
                     disabled={
                       disabled || (current.participants?.length ?? 0) >= 16
                     }
                     onPress={() =>
                       confirm(
-                        "This person will immediately see the full retained group history.",
+                        translateApp(
+                          "This person will immediately see the full retained group history.",
+                        ),
                         {
                           action: "quick_add",
                           person_id: person.user_id,
@@ -338,7 +371,7 @@ export function CollaborationGroupControls({
             </Card>
           )}
           <Card>
-            <Label>Agents</Label>
+            <Label>{translateApp("Agents")}</Label>
             {current.members.map((agent) => {
               const guest = policy.guest_access.find(
                 (row) => row.agent_id === agent.id,
@@ -346,18 +379,22 @@ export function CollaborationGroupControls({
               return (
                 <View key={agent.id} style={{ gap: 8 }}>
                   <Label>
-                    {agent.display_name ?? agent.name}
-                    {agent.shared ? " · Shared" : ""}
+                    {(agent.shared ? translateApp("{{agent}} · Shared", { agent: agent.display_name ?? agent.name}) : agent.display_name ?? agent.name)}
                   </Label>
                   <Label muted>
                     {guest?.lane === "guest"
-                      ? "Guest replies use the owner's services and bill the agent owner."
+                      ? translateApp(
+                          "Guest replies use the owner's services and bill the agent owner.",
+                        )
                       : agent.unavailable
-                        ? "Ask this agent's owner to share it with you."
-                        : "Your requests use your own access and billing rules."}
+                        ? translateApp(
+                            "Ask this agent's owner to share it with you.",
+                          )
+                        : translateApp(
+                            "Your requests use your own access and billing rules.",
+                          )}
                   </Label>
-                  <Label muted>
-                    Guest replies: {guest?.enabled ? "On" : "Off"}
+                  <Label muted>{(guest?.enabled ? translateApp("Guest replies: On") : translateApp("Guest replies: Off"))}
                   </Label>
                   {guest &&
                     (guest.enabled ? guest.can_disable : guest.can_enable) && (
@@ -365,8 +402,8 @@ export function CollaborationGroupControls({
                         compact
                         label={
                           guest.enabled
-                            ? "Disable guest replies"
-                            : "Enable guest replies"
+                            ? translateApp("Disable guest replies")
+                            : translateApp("Enable guest replies")
                         }
                         disabled={disabled}
                         onPress={() =>
@@ -378,7 +415,9 @@ export function CollaborationGroupControls({
                                 guest_revision: guest.revision,
                               })
                             : confirm(
-                                "Current and future participants without use rights can use your guest service policy. You pay. They cannot approve actions or use private account tools.",
+                                translateApp(
+                                  "Current and future participants without use rights can use your guest service policy. You pay. They cannot approve actions or use private account tools.",
+                                ),
                                 {
                                   action: "guest_access",
                                   agent_id: agent.id,
@@ -394,7 +433,7 @@ export function CollaborationGroupControls({
                       {current.lead_agent_id !== agent.id && (
                         <ActionButton
                           compact
-                          label="Set default recipient"
+                          label={translateApp("Set default recipient")}
                           disabled={disabled}
                           onPress={() =>
                             apply({ action: "lead", agent_id: agent.id })
@@ -404,11 +443,16 @@ export function CollaborationGroupControls({
                       <ActionButton
                         compact
                         variant="danger"
-                        label={`Remove agent ${agent.name}`}
+                        label={translateApp("Remove agent {{name}}", {
+                          name: agent.name,
+                        })}
                         disabled={disabled || current.members.length <= 1}
                         onPress={() =>
                           confirm(
-                            `${agent.name} leaves this group and its queued work here is cancelled. The agent itself is not deleted.`,
+                            translateApp(
+                              "{{name}} leaves this group and its queued work here is cancelled. The agent itself is not deleted.",
+                              { name: agent.name },
+                            ),
                             { action: "remove_agent", agent_id: agent.id },
                           )
                         }
@@ -420,9 +464,10 @@ export function CollaborationGroupControls({
             })}
             <WorkspaceSelectionField
               label={
-                policy.can_manage ? "Add specialist" : "Propose specialist"
+                policy.can_manage ? translateApp("Add specialist")
+                  : translateApp("Propose specialist")
               }
-              title="Choose a specialist"
+              title={translateApp("Choose a specialist")}
               value={[]}
               options={(agents.data?.agents ?? [])
                 .filter(
@@ -449,47 +494,53 @@ export function CollaborationGroupControls({
             />
             {policy.proposals.map((row) => (
               <View key={row.id}>
-                <Label>Proposed agent {row.agent_id}</Label>
+                <Label>{translateApp("Proposed agent {{agentId}}", { agentId: row.agent_id })}</Label>
                 {policy.can_manage ? (
                   <ActionButton
-                    label="Accept proposed agent"
+                    label={translateApp("Accept proposed agent")}
                     disabled={disabled}
                     onPress={() =>
                       apply({ action: "accept_agent", proposal_id: row.id })
                     }
                   />
                 ) : (
-                  <Label muted>Awaiting creator</Label>
+                  <Label muted>{translateApp("Awaiting creator")}</Label>
                 )}
               </View>
             ))}
           </Card>
           <ActionButton
-            label="Done"
+            label={translateApp("Done")}
             variant="secondary"
             onPress={() => onSaved(group.id)}
           />
           <ActionButton
-            label="Leave group"
+            label={translateApp("Leave group")}
             variant="danger"
             disabled={disabled}
             onPress={() =>
               confirm(
                 policy.can_manage
-                  ? "Transfer management first. Leaving as creator without an accepted transfer deletes this group for everyone."
-                  : "You will lose access to group history. Your queued work is cancelled.",
+                  ? translateApp(
+                      "Transfer management first. Leaving as creator without an accepted transfer deletes this group for everyone.",
+                    )
+                  : translateApp(
+                      "You will lose access to group history. Your queued work is cancelled.",
+                    ),
                 { action: "leave" },
               )
             }
           />
           {policy.can_manage && (
             <ActionButton
-              label="Delete group for everyone"
+              label={translateApp("Delete group for everyone")}
               variant="danger"
               disabled={disabled}
               onPress={() =>
                 confirm(
-                  "Delete the group and transcript for everyone? This cannot be undone.",
+                  translateApp(
+                    "Delete the group and transcript for everyone? This cannot be undone.",
+                  ),
                   { action: "delete" },
                 )
               }
@@ -499,7 +550,7 @@ export function CollaborationGroupControls({
       ) : detail.isError ? null : (
         <SkeletonRows
           rows={4}
-          accessibilityLabel="Loading current group rights"
+          accessibilityLabel={translateApp("Loading current group rights")}
         />
       )}
     </WorkspacePage>
@@ -511,6 +562,7 @@ export function CollaborationEntry({
 }: {
   onOpenGroup: (id: string) => void;
 }) {
+  useAppLanguage();
   const session = useCollaborationSession("assistant:shared-agents", true);
   const [mode, setMode] = useState<"create" | "join">();
   const [name, setName] = useState("");
@@ -542,10 +594,12 @@ export function CollaborationEntry({
       <Card>
         <Notice
           tone="error"
-          message="Collaboration availability could not be verified."
+          message={translateApp(
+            "Collaboration availability could not be verified.",
+          )}
         />
         <ActionButton
-          label="Retry collaboration availability"
+          label={translateApp("Retry collaboration availability")}
           onPress={() => void session.identity.refetch()}
         />
       </Card>
@@ -558,18 +612,19 @@ export function CollaborationEntry({
   const disabled = !session.active || session.busy;
   return (
     <Card>
-      <Label>Multi-person collaboration</Label>
+      <Label>{translateApp("Multi-person collaboration")}</Label>
       {session.error && <Notice tone="error" message={session.error} />}
       {!available && (
         <Label muted>
-          New collaboration work is unavailable until the server rollout is
-          ready. Existing groups and membership controls remain available.
+          {translateApp(
+            "New collaboration work is unavailable until the server rollout is ready. Existing groups and membership controls remain available.",
+          )}
         </Label>
       )}
       {!mode ? (
         <>
           <ActionButton
-            label="Create multi-person group"
+            label={translateApp("Create multi-person group")}
             disabled={disabled || !available}
             onPress={() => {
               if (disabled) return;
@@ -578,7 +633,7 @@ export function CollaborationEntry({
             }}
           />
           <ActionButton
-            label="Join with invitation"
+            label={translateApp("Join with invitation")}
             variant="secondary"
             disabled={disabled || !available}
             onPress={() => {
@@ -591,15 +646,15 @@ export function CollaborationEntry({
       ) : mode === "create" ? (
         <>
           <Field
-            label="New group name"
+            label={translateApp("New group name")}
             value={name}
             onChangeText={setName}
             maxLength={60}
             editable={!disabled}
           />
           <WorkspaceSelectionField
-            label="Specialists"
-            title="Choose group specialists"
+            label={translateApp("Specialists")}
+            title={translateApp("Choose group specialists")}
             multiple
             maxSelected={8}
             value={members}
@@ -622,11 +677,13 @@ export function CollaborationEntry({
           {agents.isError && (
             <Notice
               tone="error"
-              message="Specialists could not load. Refresh the crew list and try again."
+              message={translateApp(
+                "Specialists could not load. Refresh the crew list and try again.",
+              )}
             />
           )}
           <ActionButton
-            label="Create group"
+            label={translateApp("Create group")}
             disabled={disabled || !available || !name.trim() || !members.length}
             onPress={() =>
               void session.run(
@@ -647,7 +704,7 @@ export function CollaborationEntry({
       ) : (
         <>
           <Field
-            label="Invitation link or token"
+            label={translateApp("Invitation link or token")}
             value={token}
             onChangeText={(value) => {
               session.clearError();
@@ -660,7 +717,7 @@ export function CollaborationEntry({
           />
           {!preview ? (
             <ActionButton
-              label="Preview invitation"
+              label={translateApp("Preview invitation")}
               disabled={disabled || !token.trim()}
               onPress={() =>
                 void session.run(
@@ -672,27 +729,26 @@ export function CollaborationEntry({
           ) : (
             <>
               <Label>
-                {preview.group_name} · {preview.creator_name ?? "Group creator"}
+                {translateApp("{{name}} · {{nameOther}}", { name: preview.group_name, nameOther: preview.creator_name ?? translateApp("Group creator") })}
               </Label>
               <Label muted>
                 {preview.participants?.map((p) => p.display_name).join(" · ")}
               </Label>
               <Notice message={preview.history_disclosure} />
-              <Label muted>
-                Expires {new Date(preview.expires_at).toLocaleString()}
+              <Label muted>{translateApp("Expires {{time}}", { time: new Date(preview.expires_at).toLocaleString(appLocale()) })}
               </Label>
               <ActionButton
                 label={
                   disclosed
-                    ? "History disclosure acknowledged"
-                    : "I understand the history disclosure"
+                    ? translateApp("History disclosure acknowledged")
+                    : translateApp("I understand the history disclosure")
                 }
                 variant="secondary"
                 disabled={disabled}
                 onPress={() => setDisclosed((value) => !value)}
               />
               <ActionButton
-                label="Join group"
+                label={translateApp("Join group")}
                 disabled={
                   disabled ||
                   !available ||
@@ -715,7 +771,7 @@ export function CollaborationEntry({
       )}
       {mode && (
         <ActionButton
-          label="Cancel"
+          label={translateApp("Cancel")}
           variant="secondary"
           disabled={session.busy}
           onPress={() => {
@@ -740,6 +796,7 @@ export function CollaborationCards({
   group: Group;
   decisions: readonly CollaborationDecision[];
 }) {
+  useAppLanguage();
   const session = useCollaborationSession();
   if (!session.readable) return null;
   return (
@@ -750,7 +807,10 @@ export function CollaborationCards({
           <Label>
             {card.can_decide
               ? card.summary
-              : `Waiting for ${group.participants?.find((p) => p.id === card.requester_id)?.display_name ?? "participant"}`}
+              : translateApp("Waiting for {{details}}", {
+                  details:
+                    group.participants?.find((p) => p.id === card.requester_id)?.display_name ?? "participant",
+                })}
           </Label>
           {card.can_decide &&
             card.requester_id === session.identity.data?.id &&
@@ -758,23 +818,22 @@ export function CollaborationCards({
             card.kind && (
               <>
                 <Label muted>
-                  {card.audience ?? "Everyone in this group can see the reply."}
+                  {card.audience ??
+                    translateApp("Everyone in this group can see the reply.")}
                 </Label>
                 {card.connection_id && (
-                  <Label>
-                    Your connection:{" "}
-                    {card.connection_name ?? card.connection_id}
+                  <Label>{translateApp("Your connection: {{name}}", { name: card.connection_name ?? card.connection_id })}
                   </Label>
                 )}
                 {(card.kind === "consent"
                   ? [
-                      ["once", "Allow once"],
-                      ["always", "Always"],
-                      ["skip", "Skip"],
+                      ["once", translateApp("Allow once")],
+                      ["always", translateApp("Always")],
+                      ["skip", translateApp("Skip")],
                     ]
                   : [
-                      ["allow", "Allow"],
-                      ["deny", "Deny"],
+                      ["allow", translateApp("Allow")],
+                      ["deny", translateApp("Deny")],
                     ]
                 ).map(([decision, label]) => (
                   <ActionButton
@@ -804,16 +863,18 @@ export function CollaborationCards({
           key={id}
           compact
           variant="danger"
-          label="Stop my group request"
+          label={translateApp("Stop my group request")}
           disabled={session.busy || !session.active}
           onPress={() =>
             Alert.alert(
-              "Stop your group request?",
-              "Queued and running work for this request is cancelled.",
+              translateApp("Stop your group request?"),
+              translateApp(
+                "Queued and running work for this request is cancelled.",
+              ),
               [
-                { text: "Keep running", style: "cancel" },
+                { text: translateApp("Keep running"), style: "cancel" },
                 {
-                  text: "Stop request",
+                  text: translateApp("Stop request"),
                   style: "destructive",
                   onPress: () =>
                     void session.run(() =>
@@ -839,6 +900,7 @@ export function GroupAgentAccessRequest({
   group: Group;
   member: GroupMember;
 }) {
+  useAppLanguage();
   const session = useCollaborationSession();
   const policy = group.collaboration?.guest_access.find(
     (row) => row.agent_id === member.id,
@@ -852,15 +914,15 @@ export function GroupAgentAccessRequest({
       {session.error && <Notice tone="error" message={session.error} />}
       {request?.status === "pending" ? (
         <>
-          <Label muted>
-            Owner approval pending · expires{" "}
-            {new Date(request.expires_at).toLocaleDateString()}
+          <Label muted>{translateApp("Owner approval pending · expires {{time}}", { time: new Date(request.expires_at).toLocaleDateString(appLocale()) })}
           </Label>
           {request.can_cancel && (
             <ActionButton
               compact
               variant="secondary"
-              label={`Cancel access request for ${member.name}`}
+              label={translateApp("Cancel access request for {{name}}", {
+                name: member.name,
+              })}
               disabled={disabled}
               onPress={() =>
                 void session.run(() =>
@@ -879,11 +941,13 @@ export function GroupAgentAccessRequest({
         <>
           {(request?.status === "expired" ||
             request?.status === "cancelled") && (
-            <Label muted>Previous request {request.status}.</Label>
+            <Label muted>{translateApp("Previous request {{status}}.", { status: request.status})}</Label>
           )}
           <ActionButton
             compact
-            label={`Ask ${owner} to allow participants`}
+            label={translateApp("Ask {{organization}} to allow participants", {
+              organization: owner,
+            })}
             disabled={disabled}
             onPress={() =>
               void session.run(() =>

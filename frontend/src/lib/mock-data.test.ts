@@ -19,6 +19,16 @@ describe("mock catalog", () => {
   });
 });
 
+it("uses lowercase API node statuses in personal and admin fixtures", () => {
+  for (const endpoint of ["/nodes", "/admin/nodes"]) {
+    const response = getMockResponse(endpoint) as { nodes: { status: string }[] };
+    expect(response.nodes.length).toBeGreaterThan(0);
+    for (const node of response.nodes) {
+      expect(["online", "offline", "draining"]).toContain(node.status);
+    }
+  }
+});
+
 describe("auth device preview mock", () => {
   it("returns a live, richly attributed browser request", () => {
     vi.useFakeTimers();

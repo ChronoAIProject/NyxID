@@ -375,3 +375,7 @@ export function useChangeNyxAgentModel() {
     },
   });
 }
+
+export function usePreviewOrgChannel() {
+  return useMutation({ mutationFn: ({ botId, agentId, channelId }: { botId: string; agentId: string; channelId?: string }) => nyxBotApi.previewChannel(botId, agentId, channelId) });
+}

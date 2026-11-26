@@ -1,6 +1,7 @@
+import { onboardingText } from "../../../../../shared/onboardingCopy";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowUp } from "lucide-react";
 import { ChatMessageBubble } from "@/components/assistant/chat-message";
 import { NyxAgentAcknowledgementCard } from "@/components/assistant/nyxagent-acknowledgement-card";
@@ -16,6 +17,7 @@ import { cn } from "@/lib/utils";
 
 import {
   EMPTY,
+  finalScene,
   RESEARCH,
   PAUSE_AFTER_MS,
   replayScript,
@@ -27,9 +29,8 @@ export type { LiveReplayKind } from "../../../../../shared/onboardingReplay";
 
 /** Play `beats` in a loop; reduced motion shows the finished scene. */
 function useScript(beats: readonly Beat[], still: boolean): Scene {
-  const [scene, setScene] = useState<Scene>(() =>
-    still ? beats.reduce((current, beat) => beat.apply(current), EMPTY) : EMPTY,
-  );
+  const stillScene = useMemo(() => still ? finalScene(beats) : EMPTY, [beats, still]);
+  const [frame, setFrame] = useState({ beats, scene: EMPTY });
   useEffect(() => {
     if (still) return;
     let index = 0;
@@ -43,14 +44,15 @@ function useScript(beats: readonly Beat[], still: boolean): Scene {
       }
       index += 1;
       timer = window.setTimeout(() => {
-        setScene((current) => beat.apply(current));
+        setFrame((current) => ({ beats, scene: beat.apply(current.beats === beats ? current.scene : EMPTY) }));
         play();
       }, beat.wait);
     };
     play();
     return () => window.clearTimeout(timer);
   }, [beats, still]);
-  return scene;
+  if (still) return stillScene;
+  return frame.beats === beats ? frame.scene : EMPTY;
 }
 
 export function LiveReplay({
@@ -64,9 +66,11 @@ export function LiveReplay({
   /** What the replay shows, for assistive tech. */
   readonly label: string;
 }) {
-  useUiTranslation();
+  const { i18n } = useUiTranslation();
+  const language = i18n.resolvedLanguage;
   const still = useMediaQuery("(prefers-reduced-motion: reduce)");
-  const [beats] = useState(() => replayScript(kind, topics));
+  const topicKey = topics.join(",");
+  const beats = useMemo(() => replayScript(kind, topicKey.split(","), language), [kind, topicKey, language]);
   const scene = useScript(beats, still);
   return (
     <figure className="overflow-hidden rounded-xl border border-border bg-background shadow-sm">
@@ -88,7 +92,7 @@ export function LiveReplay({
               </div>
               {scene.specialist?.after === entry.id ? (
                 <div className="flex items-center gap-2 pl-[1.875rem] text-13 text-muted-foreground animate-in fade-in-0 duration-300 motion-reduce:animate-none">
-                  <AgentAvatar agent={RESEARCH} size="xs" />
+                  <AgentAvatar agent={{ ...RESEARCH, display_name: onboardingText(language, RESEARCH.display_name) }} size="xs" />
                   {scene.specialist.state === "working" ? (
                     <span className="flex items-center gap-1.5">
                       <span className="h-1.5 w-1.5 rounded-full bg-success motion-safe:animate-pulse" />{translateUi("Research is working on it")}</span>

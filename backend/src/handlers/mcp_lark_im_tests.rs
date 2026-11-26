@@ -363,7 +363,7 @@ async fn lark_im_image_is_a_guest_change_and_refuses_exact_dispatch() {
     let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, &args).unwrap();
     assert!(mcp_service::build_mcp_operation_descriptor(service, endpoint, &args).is_err());
     assert!(mcp_service::prepare_exact_proxy_tool_call(service, endpoint, &args, None).is_err());
-    let effects = prepared.guest_effects(service.durable_endpoint_metadata[&endpoint.endpoint_id]);
+    let effects = prepared.effects();
     assert!(!effects.reads && effects.uses && !effects.destructive);
     auth.chat.as_mut().unwrap().guest = true;
     for (level, allowed) in [("read", false), ("use", true)] {

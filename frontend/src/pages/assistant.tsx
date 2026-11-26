@@ -1,3 +1,5 @@
+import { watchAssistantSession } from "@/lib/assistant/account-session";
+import { getAssistantIdentityRevision, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -9,6 +11,8 @@ import {
   lazy,
   Suspense,
   useCallback,
+  useLayoutEffect,
+  useSyncExternalStore,
   type ComponentType,
   type LazyExoticComponent,
 } from "react";
@@ -305,7 +309,13 @@ function NyxAgentWorkspacePage({ view }: { readonly view: WorkspaceView }) {
   );
 }
 
-export function AssistantPage({
+export function AssistantPage(props: { readonly view?: "chat" | WorkspaceView }) {
+  const account = useSyncExternalStore(subscribeAssistantIdentity, getAssistantIdentityRevision);
+  useLayoutEffect(watchAssistantSession, []);
+  return <AssistantContent key={account} {...props} />;
+}
+
+function AssistantContent({
   view = "chat",
 }: {
   readonly view?: "chat" | WorkspaceView;

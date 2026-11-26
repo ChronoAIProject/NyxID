@@ -1,3 +1,6 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { Alert, AppState } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -13,12 +16,14 @@ export const machineKeys = (epoch: number) =>
   ["workspace", "machines", epoch] as const;
 export function machineError(cause: unknown) {
   if (cause instanceof ApiError)
-    return `${cause.message} (code ${cause.errorCode}${cause.reason ? `, ${cause.reason}` : ""})`;
+    return (cause.reason ? translateApp("{{message}} (code {{code}}, {{reason}})", { message: cause.message, code: cause.errorCode, reason: cause.reason }) : translateApp("{{message}} (code {{code}})", { message: cause.message, code: cause.errorCode}));
   if (cause instanceof z.ZodError)
-    return "The server returned unsupported machine data. Refresh or open Machines on the web.";
+    return translateApp(
+      "The server returned unsupported machine data. Refresh or open Machines on the web.",
+    );
   return cause instanceof Error
     ? cause.message
-    : "Could not complete this machine action.";
+    : translateApp("Could not complete this machine action.");
 }
 export async function openMachineWeb(path: string) {
   await WebBrowser.openBrowserAsync(
@@ -27,6 +32,7 @@ export async function openMachineWeb(path: string) {
 }
 
 export function useMachineRuntime() {
+  useAppLanguage();
   const focused = useIsFocused();
   const [foreground, setForeground] = useState(
     AppState.currentState === "active",
@@ -61,11 +67,12 @@ export function useMachineRuntime() {
 }
 
 export function useMachineWrite() {
+  useAppLanguage();
   const runtime = useMachineRuntime();
   const lock = useRef(false);
   const needsReview = useRef(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const [uncertain, setUncertain] = useState(false);
   async function run(action: (current: () => boolean) => Promise<void>) {
     if (lock.current || needsReview.current || !runtime.interactive()) return;
@@ -82,7 +89,7 @@ export function useMachineWrite() {
         needsReview.current = unknown;
         setUncertain(unknown);
         setError(
-          `${machineError(cause)}${unknown ? " The action may have reached the server. Refresh and review status before taking another action." : ""}`,
+          () => ((unknown ? translateApp("{{machineError}} The action may have reached the server. Refresh and review status before taking another action.", { machineError: machineError(cause) }) : machineError(cause))),
         );
       }
     } finally {
@@ -110,11 +117,11 @@ export function confirmDiscard(dirty: boolean, leave: () => void) {
     return;
   }
   Alert.alert(
-    "Discard machine changes?",
-    "Your unsaved changes will be lost.",
+    translateApp("Discard machine changes?"),
+    translateApp("Your unsaved changes will be lost."),
     [
-      { text: "Keep editing", style: "cancel" },
-      { text: "Discard", style: "destructive", onPress: leave },
+      { text: translateApp("Keep editing"), style: "cancel" },
+      { text: translateApp("Discard"), style: "destructive", onPress: leave },
     ],
   );
 }

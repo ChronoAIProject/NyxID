@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
@@ -14,6 +14,8 @@ import { WebDeviceLogin } from "./web-device-login";
 import { LoginPage } from "@/pages/login";
 import { useConsentStore } from "@/stores/consent-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { useWebAuthDeviceLogin } from "@/hooks/use-auth-device";
+import { useLoginApproval } from "@/hooks/use-login-approval";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
 
 vi.mock("qrcode", () => ({
@@ -28,13 +30,18 @@ let completeProfile: (response: Response) => void;
 const profile = {
   id: "qr-person",
   email: "qr@example.com",
+  display_name: null,
+  avatar_url: null,
   mfa_enabled: true,
+  is_admin: false,
   is_active: true,
   email_verified: true,
+  created_at: "2026-08-20T09:00:00Z",
 };
 beforeEach(() => {
   window.history.replaceState({}, "", "/login");
   localStorage.clear();
+  sessionStorage.clear();
   useConsentStore.getState().bindAccount(null);
   useAuthStore.setState({
     user: null,
@@ -85,7 +92,69 @@ afterEach(() => {
   window.history.replaceState({}, "", "/");
   vi.unstubAllGlobals();
   useAuthStore.setState(initial);
+  vi.useRealTimers();
 });
+
+it.each(["regenerate", "close", "unmount"])(
+  "fences a request-bound profile response after final delivery and %s",
+  async (action) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    const identity = {
+      id: "22c851d2-a23d-4a81-8f8e-804c3aa6f7c1",
+      flow: "device",
+      user_code: "WXYZ2345",
+      verified: false,
+      mfa_required: false,
+      keep_signed_in: true,
+      expires_at: "2026-08-20T10:10:00Z",
+      user: null,
+    };
+    let completePoll!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (url) => {
+      if (url === "/api/v1/auth/approval") return Response.json(identity);
+      if (url === `/api/v1/auth/approval/${identity.id}/app`) return Response.json({
+        device_code: "nyx_adc_private",
+        user_code: "ABCD-EFGH",
+        verification_uri: "https://id.example/login/device",
+        verification_uri_complete: "https://id.example/login/device?user_code=ABCD-EFGH",
+        expires_in: 60,
+        interval: 119,
+      });
+      if (url === `/api/v1/auth/approval/${identity.id}/app/poll`)
+        return new Promise<Response>((resolve) => { completePoll = resolve; });
+      if (url === "/api/v1/users/me")
+        return new Promise<Response>((resolve) => { completeProfile = resolve; });
+      throw new Error(`Unexpected request: ${String(url)}`);
+    }));
+    const { result, unmount } = renderHook(() => {
+      const approval = useLoginApproval("device", "WXYZ2345", "?user_code=WXYZ2345");
+      return useWebAuthDeviceLogin(approval.appTransport(true));
+    });
+    await act(async () => { result.current.start(); });
+    await vi.waitFor(async () => {
+      await act(async () => {});
+      expect(result.current).toMatchObject({ phase: "pending", error: null });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(120_100); });
+    await act(async () => {
+      completePoll(Response.json({ ...identity, verified: true, user: { ...profile, display_name: null } }));
+    });
+    expect(callsTo("/users/me")).toHaveLength(1);
+    expect(result.current.phase).toBe("pending");
+    if (action === "regenerate") await act(async () => { result.current.generateNew(); });
+    else if (action === "close") act(() => result.current.close());
+    else unmount();
+    // A different completed sign-in must survive the older profile response.
+    useAuthStore.setState({ user: { ...profile, id: "new-profile" }, isAuthenticated: true });
+    await act(async () => { completeProfile(Response.json(profile)); });
+    expect(useAuthStore.getState().user?.id).toBe("new-profile");
+    expect(useAuthStore.getState().isAuthenticated).toBe(true);
+    if (action === "regenerate") expect(result.current.phase).toBe("pending");
+    else if (action === "close") expect(result.current.phase).toBe("idle");
+    expect(callsTo(`/auth/approval/${identity.id}/app/poll`)).toHaveLength(1);
+  },
+);
 
 it("clears a pending password MFA challenge only after QR profile verification and navigates authenticated", async () => {
   const client = new QueryClient({

@@ -7,7 +7,7 @@ use std::sync::{
 
 use chrono::{DateTime, Utc};
 use mongodb::{
-    Database,
+    ClientSession, Database,
     bson::{self, doc},
 };
 use uuid::Uuid;
@@ -95,7 +95,7 @@ impl Drop for Completion {
             let conversation = self.conversation.clone();
             let turn = self.turn.clone();
             let elapsed = self.started.elapsed();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 let _ = complete_request(&db, &conversation, &turn, elapsed).await;
             });
         }
@@ -143,15 +143,21 @@ impl ModelRequest {
         })
     }
 
-    async fn interactive(&self) -> AppResult<Option<bool>> {
+    async fn interactive(&self, session: Option<&mut ClientSession>) -> AppResult<Option<bool>> {
         if self.presentation_loaded || self.approval_interactive.is_none() {
             return Ok(self.approval_interactive);
         }
         // Only a real approval requirement on an ineligible shape needs to
         // resolve presentation. No default/exempt path reaches this read.
-        let row = self.db.collection::<AssistantConversation>(COLLECTION_NAME).find_one(
+        let conversations = self.db.collection::<AssistantConversation>(COLLECTION_NAME);
+        let find = conversations.find_one(
             doc! {"_id":&self.conversation,"credential_api_key_id":&self.key,"active_turn.turn_id":&self.turn,"active_turn.stop_requested":false}
-        ).await?.ok_or(AppError::AssistantTurnRequired)?;
+        );
+        let row = match session {
+            Some(session) => find.session(session).await?,
+            None => find.await?,
+        }
+        .ok_or(AppError::AssistantTurnRequired)?;
         Ok(Some(
             row.group_id.is_none()
                 && row.channel.is_none()
@@ -357,6 +363,15 @@ impl ModelRequest {
     }
 
     pub(crate) async fn block_policy(&self, code: &str, error: &AppError) -> AppResult<bool> {
+        self.block_policy_in_session(code, error, None).await
+    }
+
+    async fn block_policy_in_session(
+        &self,
+        code: &str,
+        error: &AppError,
+        session: Option<&mut ClientSession>,
+    ) -> AppResult<bool> {
         let _ = self.completion.policy_failure.compare_exchange(
             0,
             match code {
@@ -377,11 +392,17 @@ impl ModelRequest {
             "active_turn.model_refusal.code",
             doc! {"$nin": POLICY_CODES},
         );
-        let changed = self.db.collection::<bson::Document>(COLLECTION_NAME).update_one(filter,
+        let conversations = self.db.collection::<bson::Document>(COLLECTION_NAME);
+        let update = conversations.update_one(filter,
             doc! {"$set":{"active_turn.model_refusal":{
                 "code":code,"http_status":i32::from(error.status_code().as_u16()),
                 "error_code":i64::from(error.error_code()),"attempt_id":&self.attempt,"at":bson::DateTime::now()
-            }}}).await?.matched_count;
+            }}});
+        let changed = match session {
+            Some(session) => update.session(session).await?,
+            None => update.await?,
+        }
+        .matched_count;
         Ok(changed == 1)
     }
 
@@ -396,13 +417,20 @@ impl ModelRequest {
         Ok(())
     }
 
-    async fn before_approval_request(&self, _frontend: &str, proposal: bool) -> AppResult<()> {
-        let Some(interactive) = self.interactive().await? else {
+    async fn before_approval_request(
+        &self,
+        mut proposal: Option<&mut ClientSession>,
+    ) -> AppResult<()> {
+        let Some(interactive) = self.interactive(proposal.as_deref_mut()).await? else {
             return Ok(());
         };
-        if !interactive || proposal {
+        if !interactive || proposal.is_some() {
             let first = self
-                .block_policy(MODEL_APPROVAL_REQUIRED, &AppError::ApprovalUnsupported)
+                .block_policy_in_session(
+                    MODEL_APPROVAL_REQUIRED,
+                    &AppError::ApprovalUnsupported,
+                    proposal,
+                )
                 .await?;
             if !interactive || !first {
                 return Err(AppError::ApprovalUnsupported);
@@ -463,9 +491,26 @@ impl ModelRequest {
 // General service calls, guests and shared agents retain their existing gates.
 tokio::task_local! { pub(crate) static CURRENT_MODEL: Option<ModelRequest>; }
 
-pub(crate) async fn before_approval_request(frontend: &str, proposal: bool) -> AppResult<()> {
+/// A proposal's refusal must commit with the approval and its audit: the stop
+/// watcher can settle the turn as soon as that refusal becomes visible.
+/// None preserves the ordinary connected-approval presentation gate.
+pub(crate) async fn before_approval_request(proposal: Option<&mut ClientSession>) -> AppResult<()> {
     if let Some(request) = CURRENT_MODEL.try_with(Clone::clone).ok().flatten() {
-        request.before_approval_request(frontend, proposal).await?;
+        request.before_approval_request(proposal).await?;
+    }
+    Ok(())
+}
+
+/// Call only after proposal creation has failed and its transaction has ended.
+/// The original failure still reaches the callback; the turn retains its
+/// model-approval outcome instead of retrying an operation it cannot execute.
+pub(crate) async fn failed_approval_proposal() -> AppResult<()> {
+    if let Some(request) = CURRENT_MODEL.try_with(Clone::clone).ok().flatten()
+        && request.approval_interactive.is_some()
+    {
+        request
+            .block_policy(MODEL_APPROVAL_REQUIRED, &AppError::ApprovalUnsupported)
+            .await?;
     }
     Ok(())
 }
@@ -780,10 +825,14 @@ pub fn failure_reason(
     now: DateTime<Utc>,
 ) -> Option<Box<crate::models::assistant_message::TurnFailureReason>> {
     use crate::models::assistant_message::TurnFailureReason;
+    if error.code == "cancelled" {
+        return None;
+    }
     if is_policy_failure(error.code)
         && let Some(fact) = &turn.model_refusal
     {
         return Some(Box::new(TurnFailureReason {
+            guest_setup_step: None,
             source: "nyxid".into(),
             stage: "model_approval".into(),
             code: error.code.into(),
@@ -792,11 +841,22 @@ pub fn failure_reason(
             model_route: None,
         }));
     }
-    if error.stage == "guest_setup" && error.code == "guest_model_route_required" {
-        return error
+    if error.stage == "guest_setup"
+        && error.code == "guest_model_route_required"
+        && let Some(reason) = error
             .metadata
             .as_ref()
-            .and_then(|m| m.failure_reason.clone());
+            .and_then(|m| m.failure_reason.clone())
+    {
+        return Some(reason);
+    }
+    if error.origin == engine::TurnErrorOrigin::NyxId && error.upstream_code.is_none() {
+        return Some(Box::new(TurnFailureReason::new(
+            "nyxid",
+            error.stage,
+            error.code,
+            error.http_status,
+        )));
     }
     let model_route = turn
         .model_route_diagnostic
@@ -827,6 +887,7 @@ pub fn failure_reason(
         })
     {
         return Some(Box::new(TurnFailureReason {
+            guest_setup_step: None,
             model_route: model_route.clone(),
             source: "nyxid".into(),
             stage: "model_proxy".into(),
@@ -835,16 +896,18 @@ pub fn failure_reason(
             nyxid_error_code: fact.error_code,
         }));
     }
-    error.upstream_code.as_ref().map(|code| {
-        Box::new(TurnFailureReason {
-            model_route: model_route.clone(),
-            source: "nyxagent".into(),
-            stage: error.stage.into(),
-            code: code.to_string(),
-            http_status: error.http_status,
-            nyxid_error_code: None,
-        })
-    })
+    Some(Box::new(TurnFailureReason {
+        model_route,
+        ..TurnFailureReason::new(
+            "nyxagent",
+            error.stage,
+            error
+                .upstream_code
+                .as_deref()
+                .unwrap_or("unrecognized_failure"),
+            error.http_status,
+        )
+    }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

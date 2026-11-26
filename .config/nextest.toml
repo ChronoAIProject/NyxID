@@ -84,3 +84,46 @@ threads-required = "num-cpus"
 [[profile.ci.overrides]]
 filter = "test(=routes::remote_machine_flag_tests::flag_absent_and_explicit_off_block_all_mounted_admission_before_effects_for_users_and_admins)"
 threads-required = "num-cpus"
+
+# The shutdown runner contract is a one-second ordinary-settlement allowance.
+# Isolate the real MongoDB scenario from unrelated fixture creation/drop work,
+# preserving that production allowance and the test's one-second assertion.
+[[profile.ci.overrides]]
+filter = "test(=handlers::assistant_nyxagent::tests::shutdown_tests::shutdown_new_turn_after_signal_outlives_wait_and_settles_within_runner_grace)"
+threads-required = "num-cpus"
+
+# The real-process drain asserts completion within the subscription grace plus
+# five seconds. Reserve the runner's slots; keep the bound.
+[[profile.ci.overrides]]
+filter = "test(=handlers::assistant_nyxagent::tests::shutdown_tests::shutdown_actual_server_idle_node_and_subscriptions_exit_idle_after_grace)"
+threads-required = "num-cpus"
+
+# The default-budget process test proves real settlement, claim release and exit
+# before 25s. Keep unrelated fixture churn outside that observation window.
+[[profile.ci.overrides]]
+filter = "test(=handlers::assistant_nyxagent::tests::shutdown_tests::shutdown_default_actual_server_settles_stream_turn_and_held_claim_before_25_seconds)"
+threads-required = "num-cpus"
+
+# failCommand is one server-wide setting: appName scopes its effects, but a
+# second configureFailPoint replaces the first test's setting. Reserve the
+# runner slots while these fixtures install and clear their failure injection.
+# Index-build failpoints pause server-wide builders. The approval causal test
+# briefly holds back the replica set's majority commit point.
+[[profile.ci.overrides]]
+filter = """
+test(db::index_tests::races::) |
+test(::causal::decisions_see_the_pending_approval_during_a_concurrent_insert) |
+test(handlers::oauth::tests::round3_) |
+test(=tests::round2_stale_permissive_broker_read_failure_is_retryable) |
+test(=tests::broker_policy_reload_failure_expires_only_the_unhealthy_replica) |
+test(=services::channel_image_delivery::tests::channel_image_claims_fail_closed_on_uncommitted_and_committed_uncertain_writes) |
+test(=services::assistant_upload_retention::tests::cancelling_upload_deletion_during_get_more_preserves_chunks) |
+test(=services::audit_service::durability_tests::rejected_commit_does_not_report_success_or_publish_partial_revocation)
+"""
+threads-required = "num-cpus"
+
+# A failCommand write-boundary matrix owns the server-wide failpoint until its
+# injection is cleared; other failpoint tests must not replace it concurrently.
+[[profile.ci.overrides]]
+filter = "test(db::startup_migration_tests::startup_migration_) | test(::route_sync::route_write_boundaries)"
+threads-required = "num-cpus"

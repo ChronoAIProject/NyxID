@@ -242,7 +242,9 @@ pub async fn create(
         let text = engine::turn_input(&claim.conversation, &start);
         let replaced = start.conversation_id.is_some();
         let owner = owner.clone();
+        let shutdown_work = state.shutdown.work();
         crate::turn_trace::spawn(async move {
+            let _shutdown_work = shutdown_work;
             claim.log_reclaimed();
             crate::services::assistant_agent_credential_service::audit_provision(
                 &state2.db,

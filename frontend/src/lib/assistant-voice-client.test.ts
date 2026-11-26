@@ -783,3 +783,55 @@ it("cancelled gesture preparation cannot create a metered voice session", async 
   expect(mocks.post).not.toHaveBeenCalled();
   expect(client.isClosed).toBe(true);
 });
+
+describe("uncertain start ownership", () => {
+  it("ends an orphan with this attempt's request id and permits the next call", async () => {
+    let requestId: string | undefined;
+    mocks.create.mockImplementation(async (_path, options) => {
+      requestId = options.body.client_request_id;
+      throw new Error("lost response");
+    });
+    mocks.get.mockImplementation(async () => ({
+      session: { ...session, client_request_id: requestId },
+    }));
+    const conflict = vi.fn();
+    const client = new AssistantVoiceClient(
+      "thread",
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      conflict,
+    );
+    await client.start(preferences);
+    expect(conflict).not.toHaveBeenCalled();
+    expect(mocks.post).toHaveBeenCalledWith(
+      expect.stringContaining(`/${session.id}/control`),
+      expect.objectContaining({ action: "end" }),
+    );
+    expect(client.isClosed).toBe(true);
+    mocks.create.mockResolvedValue({ session, sdp_answer: "answer" });
+    const next = new AssistantVoiceClient("thread", vi.fn(), vi.fn());
+    await next.start(preferences);
+    expect(next.isClosed).toBe(false);
+    await next.end();
+  });
+  it("retains the foreign-call conflict and never sends End to it", async () => {
+    mocks.create.mockRejectedValue(new Error("lost response"));
+    mocks.get.mockResolvedValue({
+      session: { ...session, client_request_id: crypto.randomUUID() },
+    });
+    const conflict = vi.fn();
+    const client = new AssistantVoiceClient(
+      "thread",
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      conflict,
+    );
+    await client.start(preferences);
+    expect(conflict).toHaveBeenCalledWith(
+      expect.objectContaining({ id: session.id }),
+    );
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+});

@@ -584,7 +584,7 @@ async fn commit_once(
             if let Some((observed, authority)) = &mutation {
                 let (live, admin) = super::catalog_mutation_service::validate_parent(db, session, observed, Some(authority)).await?;
                 super::catalog_mutation_service::require_desired_kind(&live, &metadata, authority, admin)?;
-                super::catalog_mutation_service::validate_update_fields(db, session, &live, &metadata, authority, admin).await?;
+                super::catalog_mutation_service::validate_update_fields(db, session, &live, &metadata, authority, admin, audit.as_ref().map(|(_,key)|key.as_slice())).await?;
                 if metadata.get_str("offering_kind") == Ok("tool") {
                     super::catalog_mutation_service::require_providerless_tool(db, session, &live).await?;
                 }
@@ -641,6 +641,10 @@ async fn commit_once(
             let service = db.collection::<DownstreamService>(SERVICES).find_one_and_update(filter,
                 doc! {"$set": set, "$unset": {"api_spec_url": ""}}).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?
                 .ok_or_else(|| AppError::Conflict("Service changed or has unresolved identity reconciliation; reload before retrying".into()))?;
+            if current.caller_token_approved_destinations != service.caller_token_approved_destinations {
+                let (actor,key) = audit.as_ref().ok_or_else(||AppError::Internal("Catalog destination approval needs an audit actor".into()))?;
+                super::caller_token_approval::audit_change(db,session,key,Some(actor),&current,&service.caller_token_approved_destinations).await?;
+            }
             if changed {
                 db.collection::<CatalogSkillRevision>(HISTORY).insert_one(CatalogSkillRevision {
                     id: Uuid::new_v4().to_string(), service_id: service_id.into(), previous_revision: current.skills_revision,

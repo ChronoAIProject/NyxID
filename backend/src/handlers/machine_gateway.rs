@@ -220,7 +220,7 @@ impl Session {
         let target_client = crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER
             .try_with(Clone::clone)
             .ok();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             let execute = execute_service_response(
                 &state,
                 &session,

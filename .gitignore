@@ -64,3 +64,7 @@ k8s/
 
 # Python bytecode from repository scripts
 __pycache__/
+
+# Private diagnostic symbol artifacts
+/crash-artifacts/
+mobile/release/crash-artifacts/

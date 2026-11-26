@@ -1,5 +1,18 @@
 # React + TypeScript + Vite
 
+## Mobile app download link
+
+Both dashboard download buttons use `src/lib/mobile-app-link.ts`. Set the
+build-time `VITE_MOBILE_APP_URL` to a provisioned HTTPS download URL to change both
+destinations together. For local builds, place it in `frontend/.env.local` or
+the build environment. Docker builds accept `--build-arg VITE_MOBILE_APP_URL=...`.
+Changing a runtime container variable does not alter a built Vite bundle.
+
+An unset or invalid override (including HTTP or native-scheme URLs) uses the
+existing OneLink fallback. Store routing must be provisioned at the download
+URL separately from the built-in login links; see
+[the app-link runbook](../mobile/docs/APP_LINKS.md). Track the migration checks in [issue #2599](https://github.com/ChronoAIProject/NyxID/issues/2599).
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:

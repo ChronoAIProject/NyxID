@@ -12,9 +12,18 @@ function diagnosticId(value: string | null | undefined): string | undefined {
 }
 
 export function errorDiagnostics(headers?: ErrorHeaders) {
+  const retry = headers?.get("Retry-After");
+  const seconds = retry == null || !retry.trim() ? NaN : Number(retry);
+  const retryAfterMs =
+    retry == null
+      ? undefined
+      : Number.isFinite(seconds)
+        ? Math.max(0, seconds * 1000)
+        : Math.max(0, Date.parse(retry) - Date.now());
   return {
     requestId: diagnosticId(headers?.get("x-request-id")),
     traceId: diagnosticId(headers?.get("X-NyxID-Trace-Id")),
+    ...(Number.isFinite(retryAfterMs) ? { retryAfterMs } : {}),
   };
 }
 
@@ -53,6 +62,7 @@ export function buildApiError(
         errorKey: symbolic ? String(obj.error) : `request_failed_${status}`,
         errorCode: typeof obj.error_code === "number" ? obj.error_code : 0,
         statusCode: status,
+        hasErrorEnvelope: Number.isInteger(obj.error_code) && Number(obj.error_code) >= 0,
         message:
           typeof obj.message === "string" && obj.message.length
             ? obj.message
@@ -82,7 +92,9 @@ export function buildApiError(
     errorKey: status === 0 ? "network_error" : "invalid_error_response",
     errorCode: 0,
     statusCode: status,
+    hasErrorEnvelope: false,
     message,
+    sourceMessage: message,
     ...diagnostics,
   });
 }

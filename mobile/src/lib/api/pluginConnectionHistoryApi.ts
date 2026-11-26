@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { requestJson } from "./http";
 import {
   parseConnectionHistory,
@@ -41,6 +42,6 @@ export const pluginConnectionHistoryApi = {
       offset = page.next_offset;
       version = page.version;
     }
-    throw new Error("History filters exceed the supported page limit.");
+    throw localizedError("History filters exceed the supported page limit.");
   },
 };

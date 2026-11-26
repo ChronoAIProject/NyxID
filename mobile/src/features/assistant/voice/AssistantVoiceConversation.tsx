@@ -1,3 +1,6 @@
+import { localizedError } from "../../../i18n/localizedError";
+import { useLocalizedState } from "../../../i18n/useLocalizedState";
+import { translateApp } from "../../../i18n/appTranslation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import {
@@ -47,6 +50,7 @@ import type {
   VoicePreferences,
   VoiceSnapshot,
 } from "./voiceContracts";
+import { useRailScrollIndicator } from "../../../components/workspace/workspaceFloatingInset";
 
 type Props = {
   thread: string;
@@ -65,17 +69,27 @@ type Task = VoiceSnapshot["tasks"][number];
 type CallSelection = { option: VoiceOption; preferences: VoicePreferences };
 
 const TASK_STATE: Record<Task["state"], string> = {
-  queued: "Queued",
-  claimed: "Running",
-  awaiting_confirmation: "Needs your OK",
-  completed: "Done",
-  cancelled: "Ended",
+  get queued() {
+    return translateApp("Queued");
+  },
+  get claimed() {
+    return translateApp("Running");
+  },
+  get awaiting_confirmation() {
+    return translateApp("Needs your OK");
+  },
+  get completed() {
+    return translateApp("Done");
+  },
+  get cancelled() {
+    return translateApp("Ended");
+  },
 };
 
 function taskState(task: Task) {
   if (task.state !== "cancelled") return TASK_STATE[task.state];
-  if (task.outcome === "failed") return "Failed";
-  if (task.outcome === "cancelled") return "Stopped";
+  if (task.outcome === "failed") return translateApp("Failed");
+  if (task.outcome === "cancelled") return translateApp("Stopped");
   return TASK_STATE.cancelled;
 }
 
@@ -98,7 +112,7 @@ async function loadVoiceSelection<T>(
       "name" in cause &&
       cause.name === "VoiceRequestTimeoutError"
     )
-      throw new Error("Voice options could not load.");
+      throw localizedError("Voice options could not load.");
     throw cause;
   } finally {
     signal.removeEventListener("abort", cancel);
@@ -107,13 +121,15 @@ async function loadVoiceSelection<T>(
 
 /** Voice replaces the text composer; the main chat keeps all words and cards. */
 export function AssistantVoiceConversation(props: Props) {
+  useAppLanguage();
   const [setup] = useState(() => {
     try {
       return { environment: nativeVoiceEnvironment() };
     } catch {
       return {
-        error:
+        error: translateApp(
           "Voice needs the configured NyxID frontend and API addresses. You can continue chatting with text.",
+        ),
       };
     }
   });
@@ -125,9 +141,9 @@ export function AssistantVoiceConversation(props: Props) {
     />
   ) : (
     <ChatComposerFrame style={styles.frame} bounce={false}>
-      <Notice message={setup.error ?? "Voice is unavailable."} tone="error" />
+      <Notice message={setup.error ?? translateApp("Voice is unavailable.")} tone="error" />
       <ActionButton
-        label="Return to chat"
+        label={translateApp("Return to chat")}
         variant="secondary"
         onPress={props.onClose}
       />
@@ -148,6 +164,8 @@ function VoiceConversation({
 }: Props & {
   environment: ReturnType<typeof nativeVoiceEnvironment>;
 }) {
+  const railIndicator = useRailScrollIndicator();
+  const appLanguage = useAppLanguage().language;
   const { colors } = useTheme();
   const { t } = useAppLanguage();
   const reducedMotion = useReducedMotion();
@@ -186,7 +204,7 @@ function VoiceConversation({
   const restartIntent = useRef<Restart | undefined>(undefined);
   const restartConsidered = useRef(false);
   const [restartExpired, setRestartExpired] = useState(false);
-  const [restartNotice, setRestartNotice] = useState<string>();
+  const [restartNotice, setRestartNotice] = useLocalizedState<string>();
   const entry = useRef({ thread, epoch: environment.epoch, attempted: false });
   const closed = useRef(false);
   const mounted = useRef(true);
@@ -305,12 +323,16 @@ function VoiceConversation({
     (task) => task.state === "cancelled" && task.outcome === "failed",
   ).length;
   const taskActivity = needsOk
-    ? "Needs your OK"
+    ? translateApp("Needs your OK")
     : pendingTasks
-      ? `${pendingTasks} ${pendingTasks === 1 ? "task" : "tasks"} in progress`
+      ? (pendingTasks === 1 ? translateApp("{{pendingTasks}} task in progress", { pendingTasks: pendingTasks }) : translateApp("{{pendingTasks}} tasks in progress", { pendingTasks: pendingTasks }))
       : failedTasks
-        ? `${failedTasks} ${failedTasks === 1 ? "task" : "tasks"} failed`
-        : "Task activity";
+        ? translateApp(
+            failedTasks === 1 ? "{{count}} task failed"
+              : "{{count}} tasks failed",
+            { count: failedTasks },
+          )
+        : translateApp("Task activity");
   const hasCall =
     active ||
     (!!session && !terminal) ||
@@ -363,45 +385,45 @@ function VoiceConversation({
   };
   const status = restarting
     ? restart.phase === "starting"
-      ? "Starting new call…"
-      : "Disconnecting previous call…"
+      ? translateApp("Starting new call…")
+      : translateApp("Disconnecting previous call…")
     : checking
-      ? "Checking call status…"
+      ? translateApp("Checking call status…")
       : ending
-        ? "Ending…"
+        ? translateApp("Ending…")
         : confirmingEnd
-          ? "Finishing call…"
+          ? translateApp("Finishing call…")
           : uncertain
-            ? "Call status unconfirmed"
+            ? translateApp("Call status unconfirmed")
             : conflict
-              ? "Call already active"
+              ? translateApp("Call already active")
               : !isConnected
-                ? "Offline"
+                ? translateApp("Offline")
                 : voice.starting
-                  ? "Connecting…"
+                  ? translateApp("Connecting…")
                   : voice.connected
                     ? outputActive
-                      ? "Assistant is speaking"
+                      ? translateApp("Assistant is speaking")
                       : muted
-                        ? "Microphone off"
+                        ? translateApp("Microphone off")
                         : listening
-                          ? "Listening"
+                          ? translateApp("Listening")
                           : inputMode === "push_to_talk" && !microphoneBlocked
-                            ? "Hold to talk"
-                            : "Microphone paused"
+                            ? translateApp("Hold to talk")
+                            : translateApp("Microphone paused")
                     : voice.error || voice.recovery
-                      ? "Unable to start"
+                      ? translateApp("Unable to start")
                       : terminal
-                        ? "Call ended"
+                        ? translateApp("Call ended")
                         : missingVoice
-                          ? "Choose a voice"
+                          ? translateApp("Choose a voice")
                           : options.error ||
                               settings.error ||
                               (selectionReady && !option?.available)
-                            ? "Voice unavailable"
+                            ? translateApp("Voice unavailable")
                             : selectionReady
-                              ? "Connecting…"
-                              : "Preparing voice…";
+                              ? translateApp("Connecting…")
+                              : translateApp("Preparing voice…");
   // "–" until the provider is ready, then the call clock from 00:00.
   const duration =
     voice.starting || voice.connectedAt === undefined
@@ -488,7 +510,7 @@ function VoiceConversation({
     ) {
       if (endedForAnotherReason)
         setRestartNotice(
-          "The previous call ended. Start a new call when ready.",
+          () => (translateApp("The previous call ended. Start a new call when ready.")),
         );
       cancelRestart();
       return;
@@ -504,7 +526,9 @@ function VoiceConversation({
       void start().then((accepted) => {
         if (accepted === false && restartIntent.current === starting) {
           cancelRestart();
-          setRestartNotice("The new call did not start. Try again when ready.");
+          setRestartNotice(
+            () => (translateApp("The new call did not start. Try again when ready.")),
+          );
         }
       });
     }
@@ -524,6 +548,7 @@ function VoiceConversation({
     canStart,
     voice.connected,
     voice.starting,
+    appLanguage,
   ]);
   useEffect(() => {
     if (!restart || restart.phase !== "disconnecting") return;
@@ -549,11 +574,7 @@ function VoiceConversation({
   }, [restart]);
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) => {
-      if (
-        state === "background" ||
-        (state !== "active" && restartIntent.current?.phase === "disconnecting")
-      )
-        cancelRestart();
+      if (state === "background") cancelRestart();
     });
     return () => {
       subscription.remove();
@@ -784,13 +805,16 @@ function VoiceConversation({
       <View key={task.id} style={styles.taskRow}>
         <View style={styles.taskHeader}>
           <Label style={styles.fill}>
-            {`Task ${index + 1} · ${taskState(task)}`}
+            {translateApp("Task {{index}} · {{taskState}}", {
+              index: index + 1,
+              taskState: taskState(task),
+            })}
           </Label>
           <View style={styles.taskActions}>
             {hasDetails ? (
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`${detailsOpen ? "Hide" : "Show"} details for task ${index + 1}`}
+                accessibilityLabel={(detailsOpen ? translateApp("Hide details for task {{number}}", { number: index + 1 }) : translateApp("Show details for task {{number}}", { number: index + 1 }))}
                 accessibilityState={{ expanded: detailsOpen }}
                 onPress={() => {
                   if (voice.holding) voice.hold(false);
@@ -798,12 +822,13 @@ function VoiceConversation({
                 }}
                 style={styles.taskDetailsButton}
               >
-                <Label muted>{detailsOpen ? "Hide details" : "Details"}</Label>
+                <Label muted>{detailsOpen ? translateApp("Hide details")
+                    : translateApp("Details")}</Label>
               </Pressable>
             ) : null}
             {task.state === "awaiting_confirmation" && onReview ? (
               <ActionButton
-                label="Review in chat"
+                label={translateApp("Review in chat")}
                 variant="secondary"
                 compact
                 onPress={() => review(task.pending_acknowledgement_ids[0])}
@@ -811,7 +836,7 @@ function VoiceConversation({
             ) : null}
             {task.state === "queued" || task.state === "claimed" ? (
               <ActionButton
-                label="Stop task"
+                label={translateApp("Stop task")}
                 variant="secondary"
                 compact
                 onPress={() => void voice.stopTask(task.id)}
@@ -824,7 +849,7 @@ function VoiceConversation({
             {task.title?.trim() ? (
               <>
                 <Label muted style={styles.taskState}>
-                  Request from voice assistant
+                  {translateApp("Request from voice assistant")}
                 </Label>
                 <Label selectable>{task.title}</Label>
               </>
@@ -869,7 +894,10 @@ function VoiceConversation({
       ) : null}
       <ChatComposerFrame style={styles.frame} bounce={false}>
         <View
-          accessibilityLabel={`Voice conversation with ${agentName}`}
+          accessibilityLabel={translateApp(
+            "Voice conversation with {{name}}",
+            { name: agentName },
+          )}
           style={styles.bar}
         >
           <View style={styles.identity}>
@@ -893,11 +921,12 @@ function VoiceConversation({
               </Text>
               {session ? (
                 <Text
-                  accessibilityLabel={`Call time ${duration}`}
+                  accessibilityLabel={translateApp("Call time {{duration}}", {
+                    duration: duration,
+                  })}
                   style={[styles.elapsed, quiet]}
                 >
-                  {duration}
-                  {muted && outputActive ? " · Microphone off" : ""}
+                  {(muted && outputActive ? translateApp("{{duration}} · Microphone off", { duration: duration }) : duration)}
                 </Text>
               ) : null}
             </View>
@@ -906,8 +935,10 @@ function VoiceConversation({
             inputMode === "push_to_talk" && !muted ? (
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Hold to talk"
-                accessibilityHint="Press and hold to speak; release to stop sending audio"
+                accessibilityLabel={translateApp("Hold to talk")}
+                accessibilityHint={translateApp(
+                  "Press and hold to speak; release to stop sending audio",
+                )}
                 accessibilityState={{
                   disabled: microphoneBlocked,
                   selected: voice.holding,
@@ -915,7 +946,8 @@ function VoiceConversation({
                 accessibilityActions={[
                   {
                     name: "activate",
-                    label: voice.holding ? "Stop talking" : "Start talking",
+                    label: voice.holding ? translateApp("Stop talking")
+                      : translateApp("Start talking"),
                   },
                 ]}
                 disabled={microphoneBlocked}
@@ -940,12 +972,15 @@ function VoiceConversation({
                 <Text
                   style={[styles.controlText, { color: colors.textPrimary }]}
                 >
-                  {voice.holding ? "Release" : "Hold to talk"}
+                  {voice.holding ? translateApp("Release")
+                    : translateApp("Hold to talk")}
                 </Text>
               </Pressable>
             ) : (
               <IconButton
-                label={muted ? "Unmute microphone" : "Mute microphone"}
+                label={muted ? translateApp("Unmute microphone")
+                    : translateApp("Mute microphone")
+                }
                 selected={muted}
                 onPress={() => void voice.mute(!muted)}
               >
@@ -961,12 +996,12 @@ function VoiceConversation({
             accessibilityRole="button"
             accessibilityLabel={
               returnToChat
-                ? "Return to chat"
+                ? translateApp("Return to chat")
                 : conflict
-                  ? "End existing call"
+                  ? translateApp("End existing call")
                   : hasCall
-                    ? "End voice"
-                    : "Return to chat"
+                    ? translateApp("End voice")
+                    : translateApp("Return to chat")
             }
             accessibilityState={{ disabled: endDisabled }}
             disabled={endDisabled}
@@ -985,14 +1020,16 @@ function VoiceConversation({
               <PhoneOff size={17} color={colors.bg} />
             )}
             <Text style={[styles.controlText, { color: colors.bg }]}>
-              {returnToChat ? "Back to chat" : hasCall ? "End" : "Close"}
+              {returnToChat ? translateApp("Back to chat")
+                : hasCall ? translateApp("End")
+                  : translateApp("Close")}
             </Text>
           </Pressable>
         </View>
         {preferencesOpen === undefined ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Voice preferences"
+            accessibilityLabel={translateApp("Voice preferences")}
             accessibilityState={{ expanded: preferencesVisible }}
             onPress={() => setLocalPreferencesOpen((value) => !value)}
             style={styles.preferencesFallback}
@@ -1004,31 +1041,45 @@ function VoiceConversation({
           <View style={styles.recovery}>
             <Label muted>
               {restarting
-                ? "Disconnecting the previous call. Your new call will start once disconnection is confirmed."
+                ? translateApp(
+                    "Disconnecting the previous call. Your new call will start once disconnection is confirmed.",
+                  )
                 : restartExpired
-                  ? "The previous call is still disconnecting. Check its status and try again shortly."
+                  ? translateApp(
+                      "The previous call is still disconnecting. Check its status and try again shortly.",
+                    )
                   : checking
-                    ? "Checking whether the previous call has ended. This does not reconnect your microphone."
+                    ? translateApp(
+                        "Checking whether the previous call has ended. This does not reconnect your microphone.",
+                      )
                     : confirmingEnd
-                      ? "The previous call is finishing. A new call can start once it closes. You can continue with text."
+                      ? translateApp(
+                          "The previous call is finishing. A new call can start once it closes. You can continue with text.",
+                        )
                       : conflict
                         ? voice.conflictThread &&
                           voice.conflictThread !== thread
-                          ? "A voice call is open in another chat. Only one voice call can run at a time. End that call to start a new one here, or continue with text."
-                          : "A voice call is already open. Only one voice call can run at a time. End it to start a new one, or continue with text."
-                        : "The previous call's status has not been confirmed. Check whether it has ended before starting a new call, or continue with text."}
+                          ? translateApp(
+                              "A voice call is open in another chat. Only one voice call can run at a time. End that call to start a new one here, or continue with text.",
+                            )
+                          : translateApp(
+                              "A voice call is already open. Only one voice call can run at a time. End it to start a new one, or continue with text.",
+                            )
+                        : translateApp(
+                            "The previous call's status has not been confirmed. Check whether it has ended before starting a new call, or continue with text.",
+                          )}
             </Label>
             <View style={styles.recoveryActions}>
               {conflict && !restarting ? (
                 <ActionButton
-                  label="End previous call and start here"
+                  label={translateApp("End previous call and start here")}
                   compact
                   disabled={!canReplaceCall}
                   onPress={() => void replaceCall()}
                 />
               ) : null}
               <ActionButton
-                label="Check call status"
+                label={translateApp("Check call status")}
                 variant="secondary"
                 compact
                 loading={checking}
@@ -1037,7 +1088,7 @@ function VoiceConversation({
               />
               {!returnToChat ? (
                 <ActionButton
-                  label="Return to chat"
+                  label={translateApp("Return to chat")}
                   variant="secondary"
                   compact
                   disabled={ending}
@@ -1051,13 +1102,13 @@ function VoiceConversation({
           <Card>
             <Notice message={voice.recovery.message} tone="error" />
             <ActionButton
-              label="Review billing on Web"
+              label={translateApp("Review billing on Web")}
               variant="secondary"
               onPress={openBilling}
             />
             {!hasCall ? (
               <ActionButton
-                label="Continue with text"
+                label={translateApp("Continue with text")}
                 variant="secondary"
                 onPress={closeOnce}
               />
@@ -1065,7 +1116,8 @@ function VoiceConversation({
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={
-                showErrorDetails ? "Hide error details" : "Show error details"
+                showErrorDetails ? translateApp("Hide error details")
+                  : translateApp("Show error details")
               }
               accessibilityState={{
                 expanded: showErrorDetails,
@@ -1074,7 +1126,8 @@ function VoiceConversation({
               style={styles.textButton}
             >
               <Label muted>
-                {showErrorDetails ? "Hide error details" : "Show error details"}
+                {showErrorDetails ? translateApp("Hide error details")
+                  : translateApp("Show error details")}
               </Label>
             </Pressable>
             {showErrorDetails ? <Label muted>{voice.error}</Label> : null}
@@ -1085,19 +1138,28 @@ function VoiceConversation({
         {restartNotice ? <Notice message={restartNotice} /> : null}
         {billingOpenError ? (
           <Notice
-            message="Billing could not open. Visit Billing & Usage on the NyxID website to review your available credits and benefits."
+            message={translateApp(
+              "Billing could not open. Visit Billing & Usage on the NyxID website to review your available credits and benefits.",
+            )}
             tone="error"
           />
         ) : null}
         {!isConnected ? (
-          <Notice message="You’re offline. Reconnect to start a voice call." />
+          <Notice message={translateApp(
+              "You’re offline. Reconnect to start a voice call.",
+            )}
+          />
         ) : null}
         {session?.idle_warning && !terminal && !confirmingEnd ? (
           <Notice
             message={
               inputMode === "automatic"
-                ? "The call will end soon because you haven’t spoken. Say something to continue."
-                : "The call will end soon because you haven’t spoken. Hold to talk to continue."
+                ? translateApp(
+                    "The call will end soon because you haven’t spoken. Say something to continue.",
+                  )
+                : translateApp(
+                    "The call will end soon because you haven’t spoken. Hold to talk to continue.",
+                  )
             }
           />
         ) : null}
@@ -1105,7 +1167,7 @@ function VoiceConversation({
           <>
             {options.isPending || settings.isPending ? (
               <ActivityIndicator
-                accessibilityLabel="Loading voice options"
+                accessibilityLabel={translateApp("Loading voice options")}
                 color={colors.primary}
               />
             ) : null}
@@ -1117,12 +1179,12 @@ function VoiceConversation({
                       ? options.error.message
                       : settings.error instanceof Error
                         ? settings.error.message
-                        : "Voice options could not load.",
+                        : translateApp("Voice options could not load."),
                   )}
                   tone="error"
                 />
                 <ActionButton
-                  label="Retry voice options"
+                  label={translateApp("Retry voice options")}
                   variant="secondary"
                   onPress={() => {
                     void options.refetch();
@@ -1132,28 +1194,50 @@ function VoiceConversation({
               </>
             ) : null}
             {selectionReady && saved && !option ? (
-              <Notice message="Your saved voice source is no longer available for this chat. Reconnect it or update your voice source on Web before starting a call." />
+              <Notice message={translateApp(
+                  "Your saved voice source is no longer available for this chat. Reconnect it or update your voice source on Web before starting a call.",
+                )}
+              />
             ) : options.isSuccess && !choices.length ? (
-              <Notice message="No voice sources are available for this chat. Voice needs an eligible connected provider or platform connection." />
+              <Notice message={translateApp(
+                  "No voice sources are available for this chat. Voice needs an eligible connected provider or platform connection.",
+                )}
+              />
             ) : null}
             {option && !option.available ? (
               <Notice
                 message={
                   option.unavailable_reason ??
-                  "Voice is unavailable. Reconnect your provider and try again."
+                  translateApp(
+                    "Voice is unavailable. Reconnect your provider and try again.",
+                  )
                 }
               />
             ) : null}
             {missingVoice ? (
               <Notice
-                message={`Your saved voice (${nextVoice}) is no longer available. Choose a voice in Voice preferences before starting a call.`}
+                message={translateApp(
+                  "Your saved voice ({{nextVoice}}) is no longer available. Choose a voice in Voice preferences before starting a call.",
+                  { nextVoice: nextVoice },
+                )}
               />
             ) : null}
           </>
         ) : null}
-        {needsRetry && showPreCall ? (
+        {voice.microphonePermission && showPreCall ? (
           <ActionButton
-            label="Try again"
+            label={t("Open Settings")}
+            variant="secondary"
+            compact
+            onPress={voice.openSettings}
+          />
+        ) : null}
+        {needsRetry &&
+        showPreCall &&
+        (!voice.microphonePermission ||
+          voice.microphonePermission.canAskAgain) ? (
+          <ActionButton
+            label={translateApp("Try again")}
             variant="secondary"
             compact
             disabled={!canStart}
@@ -1164,7 +1248,8 @@ function VoiceConversation({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={
-              tasksOpen ? "Hide agent tasks" : "Show agent tasks"
+              tasksOpen ? translateApp("Hide agent tasks")
+                : translateApp("Show agent tasks")
             }
             accessibilityState={{ expanded: tasksOpen }}
             onPress={() => {
@@ -1204,17 +1289,22 @@ function VoiceConversation({
         ) : null}
         {tasksOpen && tasks.length ? (
           <ScrollView
-            accessibilityLabel="Agent tasks"
+            accessibilityLabel={translateApp("Agent tasks")}
             style={[styles.tray, { backgroundColor: colors.segmentTrack }]}
             contentContainerStyle={styles.trayContent}
+            {...railIndicator}
           >
-            <Label>Task activity</Label>
+            <Label>{translateApp("Task activity")}</Label>
             {tasks.map(taskRow)}
             {running || needsOk ? (
               <Label muted style={styles.footnote}>
                 {running
-                  ? "Tasks can continue after the call ends. Stop a task to cancel it."
-                  : "Review the pending request in chat to continue."}
+                  ? translateApp(
+                      "Tasks can continue after the call ends. Stop a task to cancel it.",
+                    )
+                  : translateApp(
+                      "Review the pending request in chat to continue.",
+                    )}
               </Label>
             ) : null}
           </ScrollView>
@@ -1224,39 +1314,45 @@ function VoiceConversation({
             style={[styles.preferences, { borderColor: colors.composerBorder }]}
           >
             <View style={styles.preferencesHeader}>
-              <Label>Voice preferences</Label>
+              <Label>{translateApp("Voice preferences")}</Label>
               <IconButton
-                label="Close voice preferences"
+                label={translateApp("Close voice preferences")}
                 onPress={closePreferences}
               >
                 <X size={18} color={colors.textPrimary} />
               </IconButton>
             </View>
             <ScrollView
-              accessibilityLabel="Voice preferences"
+              accessibilityLabel={translateApp("Voice preferences")}
               style={styles.preferencesScroll}
               contentContainerStyle={styles.trayContent}
+              {...railIndicator}
             >
               {!currentOption ? (
-                <Label muted>Voice source unavailable</Label>
+                <Label muted>{translateApp("Voice source unavailable")}</Label>
               ) : voice.connected && currentVoice !== nextVoice ? (
                 <Label
                   muted
-                >{`Current call: ${voiceLabel ?? "Default voice"}`}</Label>
+                >{translateApp("Current call: {{label}}", {
+                    label: voiceLabel ?? "Default voice",
+                  })}</Label>
               ) : null}
               <Label muted style={styles.footnote}>
-                Changes apply to your next call.
+                {translateApp("Changes apply to your next call.")}
               </Label>
               {option ? (
                 <SettingsRow
-                  label="Voice"
+                  label={translateApp("Voice")}
                   value={
                     option.voice.voices.find((row) => row.id === nextVoice)
                       ?.label ??
-                    (missingVoice ? "Unavailable" : "Choose a voice")
+                    (missingVoice ? translateApp("Unavailable")
+                      : translateApp("Choose a voice"))
                   }
                   disabled={!canChangePreferences}
-                  accessibilityHint="Choose the voice for your next call"
+                  accessibilityHint={translateApp(
+                    "Choose the voice for your next call",
+                  )}
                   accessibilityState={{
                     expanded: voicePickerScope === selectionScope,
                   }}
@@ -1279,7 +1375,9 @@ function VoiceConversation({
               {option && !isGrok ? (
                 <View
                   accessibilityRole="radiogroup"
-                  accessibilityLabel="Listening mode for next call"
+                  accessibilityLabel={translateApp(
+                    "Listening mode for next call",
+                  )}
                   style={styles.preferencesChoices}
                 >
                   {(["automatic", "push_to_talk"] as const).map((mode) => (
@@ -1287,8 +1385,8 @@ function VoiceConversation({
                       key={mode}
                       label={
                         mode === "automatic"
-                          ? "Hands-free mode"
-                          : "Hold to talk mode"
+                          ? translateApp("Hands-free mode")
+                          : translateApp("Hold to talk mode")
                       }
                       selected={nextMode === mode}
                       disabled={!canChangePreferences}
@@ -1297,17 +1395,21 @@ function VoiceConversation({
                   ))}
                 </View>
               ) : isGrok ? (
-                <Label muted>Grok supports Hold to talk.</Label>
+                <Label muted>
+                  {translateApp("Grok supports Hold to talk.")}
+                </Label>
               ) : null}
               {savingPreferences ? (
                 <ActivityIndicator
-                  accessibilityLabel="Saving voice preferences"
+                  accessibilityLabel={translateApp("Saving voice preferences")}
                   color={colors.primary}
                 />
               ) : null}
               {preferencesError ? (
                 <Notice
-                  message="Voice preferences could not be saved. Try again."
+                  message={translateApp(
+                    "Voice preferences could not be saved. Try again.",
+                  )}
                   tone="error"
                 />
               ) : null}
@@ -1315,14 +1417,15 @@ function VoiceConversation({
                 <View style={styles.recoveryActions}>
                   <ActionButton
                     label={
-                      voice.speakerMuted ? "Enable speaker" : "Mute speaker"
+                      voice.speakerMuted ? translateApp("Enable speaker")
+                        : translateApp("Mute speaker")
                     }
                     variant="secondary"
                     compact
                     onPress={() => voice.muteSpeaker(!voice.speakerMuted)}
                   />
                   <ActionButton
-                    label="No sound? Resume audio"
+                    label={translateApp("No sound? Resume audio")}
                     variant="secondary"
                     compact
                     onPress={() => void voice.resumeAudio()}
@@ -1332,14 +1435,16 @@ function VoiceConversation({
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={
-                  pricingOpen ? "Hide voice pricing" : "View voice pricing"
+                  pricingOpen ? translateApp("Hide voice pricing")
+                    : translateApp("View voice pricing")
                 }
                 accessibilityState={{ expanded: pricingOpen }}
                 onPress={() => setPricingOpen((value) => !value)}
                 style={styles.textButton}
               >
                 <Label muted>
-                  {pricingOpen ? "Hide voice pricing" : "View voice pricing"}
+                  {pricingOpen ? translateApp("Hide voice pricing")
+                    : translateApp("View voice pricing")}
                 </Label>
               </Pressable>
               {pricingOpen && currentOption ? (
@@ -1355,11 +1460,11 @@ function VoiceConversation({
         <WorkspaceSelectionSheet
           key={selectionScope}
           scopeKey={selectionScope}
-          label="Voice"
-          title="Choose voice"
+          label={translateApp("Voice")}
+          title={translateApp("Choose voice")}
           presentationStyle="overFullScreen"
           keepOpenWhenDisabled
-          description="Changes apply to your next call."
+          description={translateApp("Changes apply to your next call.")}
           options={voicePickerContent.current.options}
           value={voicePickerContent.current.value}
           disabled={!canChangePreferences}
@@ -1394,6 +1499,7 @@ function IconButton({
   onPress: () => void;
   children: ReactNode;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Pressable
@@ -1425,6 +1531,7 @@ function Choice({
   disabled: boolean;
   onPress: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Pressable
@@ -1444,7 +1551,7 @@ function Choice({
       ]}
     >
       <Text style={[styles.controlText, { color: colors.textPrimary }]}>
-        {label.replace(" mode", "")}
+        {label}
       </Text>
     </Pressable>
   );
@@ -1462,6 +1569,7 @@ function VoiceWave({
   quiet: boolean;
   reducedMotion: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View
@@ -1495,6 +1603,7 @@ function VoiceWaveBar({
   reducedMotion: boolean;
   color: string;
 }) {
+  useAppLanguage();
   const animated = useAnimatedStyle(() => ({
     transform: [
       {

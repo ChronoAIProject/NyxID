@@ -727,7 +727,7 @@ async fn curation_revoke_after_transaction_reads_fences_token_and_grant() {
                     .await
                     .unwrap();
             } else {
-                super::super::curation_grant_service::revoke(&db, &sa.id)
+                super::super::curation_grant_service::revoke(&db, &sa.id, None)
                     .await
                     .unwrap();
             }
@@ -921,9 +921,10 @@ async fn catalog_editor_legacy_generation_writes_and_rotation_rejects_old_token(
     .unwrap();
     assert!(result.changed);
     assert_eq!(result.revision, 1);
-    let (rotated, _) = super::super::service_account_service::rotate_secret(&db, &sa.id, true)
-        .await
-        .unwrap();
+    let (rotated, _) =
+        super::super::service_account_service::rotate_secret(&db, &sa.id, true, None)
+            .await
+            .unwrap();
     assert_eq!(rotated.credential_generation, 1);
     let result = write(
         &db,

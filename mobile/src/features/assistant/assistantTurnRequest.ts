@@ -1,9 +1,12 @@
+import { localizedError } from "../../i18n/localizedError";
 import { conversationIdSchema } from "./assistantTypes";
 import { z } from "zod";
+import { ApiError } from "../../lib/api/ApiError";
 
 export type AssistantTurnInput = {
   conversationId?: string;
   agentId?: string;
+  model?: string;
   text: string;
   retryOf?: string;
   /** The allowed card this turn resumes; the server records it as `continuation_of`. */
@@ -14,30 +17,29 @@ export type AssistantTurnInput = {
 export function assistantTurnBody(input: AssistantTurnInput) {
   const ids = input.attachmentIds ?? [];
   if (ids.length > 10 || new Set(ids).size !== ids.length)
-    throw new Error("Choose up to 10 distinct attachments.");
+    throw localizedError("Choose up to 10 distinct attachments.");
   ids.forEach((id) => z.string().uuid().parse(id));
   if (
     (!input.text.trim() && !ids.length && !input.retryOf) ||
     [...input.text].length > 32768
   )
-    throw new Error(
-      "Enter a message or attach a file (up to 32,768 characters).",
-    );
+    throw localizedError("Enter a message or attach a file (up to 32,768 characters).");
   if (ids.length && !input.conversationId)
-    throw new Error("Upload files to this chat before sending.");
+    throw localizedError("Upload files to this chat before sending.");
   if (input.retryOf && ids.length)
-    throw new Error("Retry uses the original message's attachments.");
+    throw localizedError("Retry uses the original message's attachments.");
   if (input.conversationId) conversationIdSchema.parse(input.conversationId);
   if (input.acknowledgementId !== undefined) {
     z.string().uuid().parse(input.acknowledgementId);
     if (!input.conversationId)
-      throw new Error("A decision can only resume its own chat.");
+      throw localizedError("A decision can only resume its own chat.");
   }
   return {
     ...(input.conversationId
       ? { conversation_id: input.conversationId }
       : {
           ...(input.agentId ? { agent_id: input.agentId } : {}),
+          ...(input.model ? { model: input.model } : {}),
         }),
     text: input.text,
     ...(input.retryOf ? { retry_of: input.retryOf } : {}),
@@ -61,5 +63,15 @@ export function restoreRefusedAssistantSend(
     typeof cause.statusCode === "number" &&
     cause.statusCode >= 400 &&
     cause.statusCode < 500
+  );
+}
+
+/** Bind failures are an atomic refusal. The response does not identify a row. */
+export function isAttachmentBindRefusal(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.hasErrorEnvelope && (
+    (cause.statusCode === 410 && cause.errorKey === "attachment_expired" &&
+      cause.errorCode === 12101) ||
+    (cause.statusCode === 404 && cause.errorKey === "not_found" && cause.errorCode === 1003 &&
+      ["Not found: Attachment not found", "Not found: Attachment not found or expired"].includes(cause.message))
   );
 }

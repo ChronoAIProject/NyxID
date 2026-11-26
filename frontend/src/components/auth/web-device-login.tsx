@@ -1,7 +1,4 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
-import { getFormattingLocale } from "@/lib/formatting-locale";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import QRCode from "qrcode";
 import {
@@ -15,9 +12,16 @@ import {
   RefreshCw,
   ScanLine,
 } from "lucide-react";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
+import { getFormattingLocale } from "@/lib/formatting-locale";
+import { useMediaQuery } from "@/hooks/use-media-query";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { Button, ButtonIcon } from "@/components/ui/button";
-import { formatAuthDeviceUserCodeInput } from "@/schemas/auth-device";
+import {
+  Dialog, DialogClose, DialogContent, DialogDescription, DialogFooter,
+  DialogHeader, DialogTitle, DialogTrigger,
+} from "@/components/ui/dialog";
+import { formatAuthDeviceUserCodeInput, type AuthDeviceRequestResponse } from "@/schemas/auth-device";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { copyToClipboard } from "@/lib/utils";
 import { formatWebAuthDeviceRemaining } from "@/lib/auth-device-time";
@@ -33,6 +37,13 @@ interface WebDeviceLoginProps {
   readonly disabled?: boolean;
   readonly transport?: WebAuthDeviceTransport;
   readonly onVerified?: () => void;
+  /** Only LoginPage opts into native QR payloads and mobile handoff confirmation. */
+  readonly allowAppHandoff?: boolean;
+}
+
+interface HandoffSelection {
+  readonly request: AuthDeviceRequestResponse;
+  readonly url: string;
 }
 
 export function WebDeviceLogin({
@@ -44,22 +55,35 @@ export function WebDeviceLogin({
   disabled = false,
   transport,
   onVerified,
+  allowAppHandoff = false,
 }: WebDeviceLoginProps) {
   useUiTranslation();
   const navigate = useNavigate();
   const [internalOpen, setInternalOpen] = useState(false);
-  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [qrImage, setQrImage] = useState<{ payload: string; dataUrl: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
+  const [handoff, setHandoff] = useState<HandoffSelection | null>(null);
   const deviceLogin = useWebAuthDeviceLogin(transport);
   const verifiedRef = useRef(onVerified);
   useEffect(() => { verifiedRef.current = onVerified; }, [onVerified]);
   const isOpen = controlledOpen ?? internalOpen;
+  const appLink = allowAppHandoff ? deviceLogin.request?.app_verification_uri : undefined;
+  const isCoarsePointer = useMediaQuery("(pointer: coarse)");
+  const qrPayload = appLink ?? deviceLogin.request?.verification_uri_complete;
+  const qrDataUrl = qrImage?.payload === qrPayload ? qrImage?.dataUrl : null;
+  const canHandoff = Boolean(isOpen && isCoarsePointer && appLink && qrDataUrl &&
+    deviceLogin.phase === "pending" && deviceLogin.remainingSeconds !== 0);
+  const handoffOpen = canHandoff && handoff !== null &&
+    handoff.request === deviceLogin.request && handoff.url === appLink;
+  // Retire the selection in this render so eligibility returning later cannot
+  // revive it, and a replacement never inherits the old confirmation.
+  if (handoff !== null && !handoffOpen) setHandoff(null);
 
   useEffect(() => {
     let cancelled = false;
-    const payload = deviceLogin.request?.verification_uri_complete;
+    const payload = qrPayload;
     if (!isOpen || !payload) {
       return () => {
         cancelled = true;
@@ -72,15 +96,15 @@ export function WebDeviceLogin({
       width: 208,
       color: { dark: "#0c0b14", light: "#e8e4f0" },
     }).then((dataUrl) => {
-      if (!cancelled) setQrDataUrl(dataUrl);
+      if (!cancelled) setQrImage({ payload, dataUrl });
     }).catch(() => {
-      if (!cancelled) setQrDataUrl(null);
+      if (!cancelled) setQrImage(null);
     });
 
     return () => {
       cancelled = true;
     };
-  }, [deviceLogin.request?.verification_uri_complete, isOpen]);
+  }, [qrPayload, isOpen]);
 
   useEffect(() => {
     if (isOpen) headingRef.current?.focus();
@@ -107,14 +131,16 @@ export function WebDeviceLogin({
 
   function openPanel() {
     setCopied(false);
-    setQrDataUrl(null);
+    setQrImage(null);
     setOpen(true);
+    setHandoff(null);
     deviceLogin.start();
   }
 
   function closePanel() {
+    setHandoff(null);
     setCopied(false);
-    setQrDataUrl(null);
+    setQrImage(null);
     deviceLogin.close();
     setOpen(false);
     window.setTimeout(() => triggerRef.current?.focus(), 0);
@@ -122,8 +148,27 @@ export function WebDeviceLogin({
 
   function generateNew() {
     setCopied(false);
-    setQrDataUrl(null);
+    setQrImage(null);
+    setHandoff(null);
     deviceLogin.generateNew();
+  }
+
+  function isHandoffCurrent(selection: HandoffSelection) {
+    return canHandoff && selection.request === deviceLogin.request &&
+      selection.url === appLink && selection.url === selection.request.app_verification_uri &&
+      window.matchMedia?.("(pointer: coarse)").matches &&
+      deviceLogin.isRequestActive(selection.request);
+  }
+
+  function changeHandoffOpen(open: boolean) {
+    const selection = deviceLogin.request && appLink
+      ? { request: deviceLogin.request, url: appLink } : null;
+    setHandoff(open && selection && isHandoffCurrent(selection) ? selection : null);
+  }
+
+  function confirmHandoff(event: MouseEvent<HTMLAnchorElement>) {
+    if (!handoff || !isHandoffCurrent(handoff)) event.preventDefault();
+    setHandoff(null);
   }
 
   async function copyCode() {
@@ -203,22 +248,53 @@ export function WebDeviceLogin({
           <RefreshCw className="size-3.5 animate-spin" />{translateUi("Loading your approved account...")}</div>
       )}
 
-      {deviceLogin.request && pending && (
+      {pending && (!deviceLogin.request || deviceLogin.remainingSeconds === 0) && (
+        <div className="mt-8 flex items-center justify-center gap-2 text-14 unthemed:text-12 text-muted-foreground" role="status">
+          <RefreshCw className="size-3.5 animate-spin" />{translateUi("Checking your request…")}</div>
+      )}
+
+      {deviceLogin.request && pending && deviceLogin.remainingSeconds !== 0 && (
         <div className="mt-6 space-y-5">
           <div className="flex justify-center">
-            <div className="relative flex size-[216px] items-center justify-center rounded-lg border border-border bg-[#0c0b14] p-1">
-              {qrDataUrl ? (
-                <img
-                  src={qrDataUrl}
-                  alt={translateUi("QR code to continue with the NyxID app")}
-                  className="size-[208px] rounded-md object-contain"
-                />
-              ) : (
-                <div className="flex size-[208px] items-center justify-center gap-2 text-14 unthemed:text-12 text-muted-foreground">
-                  <ScanLine className="size-4" />{translateUi("Preparing QR code...")}</div>
+            <Dialog open={handoffOpen} onOpenChange={changeHandoffOpen}>
+              <QrFrame interactive={canHandoff}>
+                {qrDataUrl ? (
+                  <img
+                    src={qrDataUrl}
+                    alt={translateUi("QR code to continue with the NyxID app")}
+                    className="size-[208px] rounded-md object-contain"
+                  />
+                ) : (
+                  <div className="flex size-[208px] items-center justify-center gap-2 text-14 unthemed:text-12 text-muted-foreground">
+                    <ScanLine className="size-4" />{translateUi("Preparing QR code...")}</div>
+                )}
+              </QrFrame>
+              {handoffOpen && handoff && (
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>{translateUi("Open NyxID app?")}</DialogTitle>
+                    <DialogDescription>{translateUi("Open this login in the app without scanning. Review and approve it, then return to this browser tab.")}</DialogDescription>
+                  </DialogHeader>
+                  <DialogFooter>
+                    <DialogClose asChild><Button variant="outline">{translateUi("Cancel")}</Button></DialogClose>
+                    <Button asChild variant="primary" className="flex-1 whitespace-normal md:flex-none">
+                      <a
+                        href={handoff.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        referrerPolicy="no-referrer"
+                        onClick={confirmHandoff}
+                      >
+                        {translateUi("Open NyxID app")}
+                      </a>
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
               )}
-            </div>
+            </Dialog>
           </div>
+
+          {canHandoff && <p className="text-center type-secondary text-muted-foreground">{translateUi("Tap the QR code to open NyxID, or scan it with another device.")}</p>}
 
           <div className="text-center">
             <p className="text-13 unthemed:text-11 uppercase text-text-tertiary">{translateUi("Manual code")}</p>
@@ -300,5 +376,21 @@ export function WebDeviceLogin({
         </div>
       )}
     </section>
+  );
+}
+
+function QrFrame({ interactive, children }: {
+  readonly interactive: boolean;
+  readonly children: ReactNode;
+}) {
+  const className = "relative flex size-[216px] items-center justify-center rounded-lg border border-border bg-[#0c0b14] p-1";
+  return interactive ? (
+    <DialogTrigger asChild>
+      <button type="button" className={`${className} cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`} aria-label={translateUi("Open NyxID app from QR code")}>
+        {children}
+      </button>
+    </DialogTrigger>
+  ) : (
+    <div className={className}>{children}</div>
   );
 }

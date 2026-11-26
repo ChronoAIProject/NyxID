@@ -1,3 +1,6 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { AuthSubmitButton } from "./AuthSubmitButton";
 import { AuthTextInput } from "./AuthTextInput";
 import { useMemo, useState } from "react";
@@ -24,6 +27,7 @@ export function AgentKeyCreateForm({
   disabled: boolean;
   onReview: (input: NewAgentKey) => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createDeviceLoginStyles(colors), [colors]);
   const [draft, setDraft] = useState(() => initialValues ? {
@@ -33,15 +37,15 @@ export function AgentKeyCreateForm({
   const [expiry, setExpiry] = useState(
     initialValues?.never_expires ? "none" : initialValues?.expires_at ? "custom" : "90",
   );
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useLocalizedState<string | null>(null);
   function update<K extends keyof NewAgentKey>(key: K, value: NewAgentKey[K]) {
     setDraft((current) => ({ ...current, [key]: value }));
   }
   return (
     <View style={styles.inputSection}>
-      <Text style={styles.inputLabel}>Name</Text>
+      <Text style={styles.inputLabel}>{translateApp("Name")}</Text>
       <AuthTextInput
-        accessibilityLabel="Key name"
+        accessibilityLabel={translateApp("Key name")}
         value={draft.name}
         maxLength={64}
         onChangeText={(value) => update("name", value)}
@@ -49,14 +53,14 @@ export function AgentKeyCreateForm({
         style={[styles.codeInput, { textAlign: "left" }]}
       />
       <WorkspaceSelectionField surfaceColors={colors}
-        label="Owner"
-        title="Choose key owner"
+        label={translateApp("Owner")}
+        title={translateApp("Choose key owner")}
         options={[
-          { value: "personal", label: "Personal" },
+          { value: "personal", label: translateApp("Personal") },
           ...options.orgs.map((org) => ({
             value: org.id,
             label: org.name,
-            description: "Organization",
+            description: translateApp("Organization"),
             searchText: org.id,
           })),
         ]}
@@ -79,8 +83,8 @@ export function AgentKeyCreateForm({
         }}
       />
       <WorkspaceSelectionField surfaceColors={colors}
-        label="Scopes"
-        title="Choose key scopes"
+        label={translateApp("Scopes")}
+        title={translateApp("Choose key scopes")}
         options={agentKeyScopes.map((scope) => ({
           value: scope,
           label: scope,
@@ -111,9 +115,16 @@ export function AgentKeyCreateForm({
                 },
               ]}
             >
-              <Text style={styles.inputLabel}>Allow all {kind}</Text>
+              <Text style={styles.inputLabel}>
+                {kind === "services"
+                  ? translateApp("Allow all services")
+                  : translateApp("Allow all nodes")}</Text>
               <Switch
-                accessibilityLabel={`Allow all ${kind}`}
+                accessibilityLabel={
+                  kind === "services"
+                    ? translateApp("Allow all services")
+                    : translateApp("Allow all nodes")
+                }
                 disabled={disabled}
                 value={draft[allField]}
                 onValueChange={(value) =>
@@ -123,8 +134,12 @@ export function AgentKeyCreateForm({
             </View>
             {!draft[allField] && (
               <WorkspaceSelectionField surfaceColors={colors}
-                label={kind === "services" ? "Service access" : "Node access"}
-                title={kind === "services" ? "Choose services" : "Choose nodes"}
+                label={kind === "services" ? translateApp("Service access")
+                    : translateApp("Node access")
+                }
+                title={kind === "services" ? translateApp("Choose services")
+                    : translateApp("Choose nodes")
+                }
                 options={resources.map((item) => {
                   const sameOwner =
                     item.owner_id ===
@@ -138,11 +153,15 @@ export function AgentKeyCreateForm({
                     value: item.id,
                     label: item.name,
                     description: implied
-                      ? "Included by auto-connected platform access"
+                      ? translateApp(
+                          "Included by auto-connected platform access",
+                        )
                       : item.auto_connected
                         ? sameOwner
-                          ? "Platform service"
-                          : "Organization platform service; select individually"
+                          ? translateApp("Platform service")
+                          : translateApp(
+                              "Organization platform service; select individually",
+                            )
                         : undefined,
                     searchText: item.id,
                     disabled: implied,
@@ -193,8 +212,9 @@ export function AgentKeyCreateForm({
               (draft.target_org_id &&
               !resources.some((item) => item.auto_connected) ? (
                 <Text style={styles.signInText}>
-                  This org-owned key cannot use platform services from your
-                  personal account.
+                  {translateApp(
+                    "This org-owned key cannot use platform services from your personal account.",
+                  )}
                 </Text>
               ) : (
                 <View
@@ -208,11 +228,14 @@ export function AgentKeyCreateForm({
                   ]}
                 >
                   <Text style={[styles.detailValue, { flex: 1 }]}>
-                    Allow all auto-connected platform services (includes ones
-                    added later)
+                    {translateApp(
+                      "Allow all auto-connected platform services (includes ones added later)",
+                    )}
                   </Text>
                   <Switch
-                    accessibilityLabel="Allow all auto-connected platform services (includes ones added later)"
+                    accessibilityLabel={translateApp(
+                      "Allow all auto-connected platform services (includes ones added later)",
+                    )}
                     disabled={disabled}
                     value={draft.allow_auto_connected_services}
                     onValueChange={(value) =>
@@ -222,22 +245,26 @@ export function AgentKeyCreateForm({
                 </View>
               ))}
             {!draft[allField] && resources.length === 0 && (
-              <Text style={styles.signInText}>No {kind} available.</Text>
+              <Text style={styles.signInText}>
+                {kind === "services"
+                  ? translateApp("No services available.")
+                  : translateApp("No nodes available.")}
+              </Text>
             )}
           </View>
         );
       })}
       <WorkspaceSelectionField surfaceColors={colors}
-        label="Key expiry"
-        title="Choose key expiry"
+        label={translateApp("Key expiry")}
+        title={translateApp("Choose key expiry")}
         options={["7", "30", "90", "365", "custom", "none"].map((choice) => ({
           value: choice,
           label:
             choice === "none"
-              ? "No expiry"
+              ? translateApp("No expiry")
               : choice === "custom"
-                ? "Custom date"
-                : `${choice} days`,
+                ? translateApp("Custom date")
+                : translateApp("{{choice}} days", {choice: choice }),
         }))}
         value={[expiry]}
         disabled={disabled}
@@ -259,8 +286,8 @@ export function AgentKeyCreateForm({
       />
       {expiry === "custom" && (
         <AuthTextInput
-          accessibilityLabel="Custom key expiry"
-          placeholder="YYYY-MM-DD"
+          accessibilityLabel={translateApp("Custom key expiry")}
+          placeholder={translateApp("YYYY-MM-DD")}
           placeholderTextColor={colors.textMuted}
           value={draft.expires_at ?? ""}
           editable={!disabled}
@@ -272,18 +299,18 @@ export function AgentKeyCreateForm({
         <View key={field} style={styles.inputSection}>
           <Text style={styles.inputLabel}>
             {field === "rate_limit_per_second"
-              ? "Requests per second"
-              : "Burst"}
+              ? translateApp("Requests per second")
+              : translateApp("Burst")}
           </Text>
           <AuthTextInput
             accessibilityLabel={
               field === "rate_limit_per_second"
-                ? "Requests per second"
-                : "Burst"
+                ? translateApp("Requests per second")
+                : translateApp("Burst")
             }
             keyboardType="number-pad"
             value={draft[field]?.toString() ?? ""}
-            placeholder="Default"
+            placeholder={translateApp("Default")}
             placeholderTextColor={colors.textMuted}
             editable={!disabled}
             onChangeText={(value) =>
@@ -294,10 +321,10 @@ export function AgentKeyCreateForm({
         </View>
       ))}
       <WorkspaceSelectionField surfaceColors={colors}
-        label="Platform"
-        title="Choose client platform"
+        label={translateApp("Platform")}
+        title={translateApp("Choose client platform")}
         options={[
-          { value: "generic", label: "Generic" },
+          { value: "generic", label: translateApp("Generic") },
           { value: "claude-code", label: "Claude Code" },
           { value: "cursor", label: "Cursor" },
           { value: "codex", label: "Codex" },
@@ -315,17 +342,18 @@ export function AgentKeyCreateForm({
         </Text>
       )}
       <AuthSubmitButton
-        label="Review permissions"
+        label={translateApp("Review permissions")}
         disabled={disabled}
         onPress={() => {
           const parsed = newAgentKeySchema.safeParse(draft);
           if (expiry === "custom" && !draft.expires_at) {
-            setError("Choose a custom expiry date.");
+            setError(() => (translateApp("Choose a custom expiry date.")));
             return;
           }
           if (!parsed.success) {
             setError(
-              parsed.error.issues[0]?.message ?? "Check the key details.",
+              () => (parsed.error.issues[0]?.message ??
+                translateApp("Check the key details.")),
             );
             return;
           }

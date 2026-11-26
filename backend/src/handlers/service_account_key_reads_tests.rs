@@ -447,7 +447,7 @@ async fn sa_key_read_curation_requires_both_grants() {
             .0,
         StatusCode::OK
     );
-    curation_grant_service::revoke(&f.state.db, &f.sa.id)
+    curation_grant_service::revoke(&f.state.db, &f.sa.id, None)
         .await
         .unwrap();
     assert_eq!(
@@ -633,6 +633,7 @@ async fn sa_key_read_revalidates_endpoint_lifecycle_and_preserves_invalid_replac
                 &f.sa.id,
                 &f.owner,
                 std::slice::from_ref(&svc.id),
+                None,
                 None
             )
             .await
@@ -675,6 +676,7 @@ async fn sa_key_read_revalidates_endpoint_lifecycle_and_preserves_invalid_replac
             &f.sa.id,
             &f.owner,
             std::slice::from_ref(&svc.id),
+            None,
             None
         )
         .await
@@ -706,7 +708,7 @@ async fn sa_key_read_replacement_custom_response_and_upgrade_boundaries() {
         .map(|_| Uuid::new_v4().to_string())
         .collect::<Vec<_>>();
     assert!(
-        reads::issue(&f.state.db, &f.sa.id, &f.owner, &too_many, None)
+        reads::issue(&f.state.db, &f.sa.id, &f.owner, &too_many, None, None)
             .await
             .is_err()
     );

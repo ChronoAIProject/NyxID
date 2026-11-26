@@ -37,6 +37,23 @@ test("greeting follows the web's local-time boundaries", () => {
     [23, "Good evening"],
   ] as const) {
     assert.equal(greetingFor(new Date(2026, 9, 28, hour)), expected);
+    // With a name: one whole phrase, never the greeting plus ", name".
+    assert.equal(greetingFor(new Date(2026, 9, 28, hour), "Sim"), `${expected}, Sim`);
+  }
+});
+
+test("named greetings are one translated phrase with the language's own punctuation", async () => {
+  const { setAppTranslationLanguage } = await import("../../i18n/appTranslation");
+  try {
+    for (const [language, expected] of [
+      ["zh-CN", "下午好，Sim"],
+      ["zh-TW", "午安，Sim"],
+    ] as const) {
+      setAppTranslationLanguage(language);
+      assert.equal(greetingFor(new Date(2026, 9, 28, 14), "Sim"), expected);
+    }
+  } finally {
+    setAppTranslationLanguage("en");
   }
 });
 

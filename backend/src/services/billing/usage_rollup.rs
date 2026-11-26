@@ -351,6 +351,19 @@ pub async fn state(db: &Database) -> AppResult<Option<UsageRollupState>> {
     Ok(state)
 }
 
+pub fn handover_valid(
+    before: &Option<UsageRollupState>,
+    after: &Option<UsageRollupState>,
+    active: bool,
+    snapshot: bool,
+) -> bool {
+    snapshot
+        || (!active
+            && after.as_ref().is_none_or(|state| state.batch.is_none())
+            && before.as_ref().map(|state| state.sequence).unwrap_or(0)
+                == after.as_ref().map(|state| state.sequence).unwrap_or(0))
+}
+
 async fn required_state(db: &Database) -> AppResult<UsageRollupState> {
     state(db)
         .await?
@@ -961,6 +974,7 @@ async fn apply_increments(
 async fn finish(
     db: &Database,
     batch: &UsageRollupBatch,
+    now: DateTime<Utc>,
     mut session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<()> {
     let sources = db.collection::<Document>(if batch.hourly_sources {
@@ -968,12 +982,30 @@ async fn finish(
     } else {
         METERS
     });
-    let (marker, update) = if batch.hourly_sources {
-        ("daily_pending", doc! { "$set": { "daily_pending": false } })
+    let (marker, update): (&str, mongodb::options::UpdateModifications) = if batch.hourly_sources {
+        (
+            "daily_pending",
+            doc! { "$set": { "daily_pending": false } }.into(),
+        )
     } else {
+        let expires_at = bson::DateTime::from_chrono(
+            now + chrono::Duration::days(super::reconcile::ACKED_RETENTION_DAYS),
+        );
         (
             "rollup_pending",
-            doc! { "$set": { "rollup_pending": false, "rolled_up_at": bson::DateTime::from_chrono(batch.claimed_at) } },
+            vec![doc! { "$set": {
+                "rollup_pending": false,
+                "rolled_up_at": bson::DateTime::from_chrono(batch.claimed_at),
+                "expires_at": { "$cond": [
+                    { "$and": [
+                        { "$eq": [{ "$ifNull": ["$wallet_id", null] }, null] },
+                        { "$eq": [{ "$ifNull": ["$expires_at", null] }, null] },
+                    ] },
+                    expires_at,
+                    "$expires_at",
+                ] },
+            } }]
+            .into(),
         )
     };
     let action = sources.update_many(
@@ -1022,6 +1054,11 @@ pub async fn fold_once(db: &Database, now: DateTime<Utc>) -> AppResult<usize> {
             None => return Ok(0),
         },
     };
+    #[cfg(test)]
+    if let Ok((claimed, resume)) = TEST_FOLD_PAUSE.try_with(Clone::clone) {
+        claimed.notify_one();
+        resume.notified().await;
+    }
     if supports_transactions(db).await? {
         let mut session = db.client().start_session().await?;
         let db = db.clone();
@@ -1037,7 +1074,7 @@ pub async fn fold_once(db: &Database, now: DateTime<Utc>) -> AppResult<usize> {
             .and_run2(async move |session| {
                 let operation: AppResult<()> = async {
                     apply(&db, &transaction_batch, Some(&mut *session)).await?;
-                    finish(&db, &transaction_batch, Some(&mut *session)).await
+                    finish(&db, &transaction_batch, Utc::now(), Some(&mut *session)).await
                 }
                 .await;
                 crate::services::api_key_mutation_service::transaction_result(operation)
@@ -1046,7 +1083,7 @@ pub async fn fold_once(db: &Database, now: DateTime<Utc>) -> AppResult<usize> {
             .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
     } else {
         apply(db, &batch, None).await?;
-        finish(db, &batch, None).await?;
+        finish(db, &batch, Utc::now(), None).await?;
     }
     Ok(batch.row_ids.len())
 }
@@ -1061,43 +1098,57 @@ pub fn spawn_worker(db: Database, config: Arc<AppConfig>) -> Option<tokio::task:
     if seconds == 0 {
         return None;
     }
-    Some(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(seconds));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            let start = std::time::Instant::now();
-            let budget = match state(&db).await {
-                Ok(state) => tick_budget(
-                    state
-                        .filter(|s| s.daily_ready)
-                        .map(|s| s.rolled_up_through)
-                        .unwrap_or(DateTime::UNIX_EPOCH),
-                    Utc::now(),
-                ),
-                Err(_) => {
-                    tracing::warn!("Usage rollup state unavailable; retrying next tick");
-                    continue;
-                }
-            };
-            let mut folded = 0;
-            for _ in 0..MAX_BATCHES_PER_TICK {
-                match fold_once(&db, Utc::now()).await {
-                    Ok(0) => break,
-                    Ok(rows) => folded += rows,
+    Some(
+        crate::services::shutdown::process().spawn_worker(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(seconds));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                let Some(_work) = crate::services::shutdown::process()
+                    .tick(&mut interval)
+                    .await
+                else {
+                    break;
+                };
+                let start = std::time::Instant::now();
+                let budget = match state(&db).await {
+                    Ok(state) => tick_budget(
+                        state
+                            .filter(|s| s.daily_ready)
+                            .map(|s| s.rolled_up_through)
+                            .unwrap_or(DateTime::UNIX_EPOCH),
+                        Utc::now(),
+                    ),
                     Err(_) => {
-                        tracing::warn!("Usage rollup batch retained for retry");
+                        tracing::warn!("Usage rollup state unavailable; retrying next tick");
+                        continue;
+                    }
+                };
+                let mut folded = 0;
+                for _ in 0..MAX_BATCHES_PER_TICK {
+                    match fold_once(&db, Utc::now()).await {
+                        Ok(0) => break,
+                        Ok(rows) => folded += rows,
+                        Err(_) => {
+                            tracing::warn!("Usage rollup batch retained for retry");
+                            break;
+                        }
+                    }
+                    if start.elapsed() >= budget {
                         break;
                     }
                 }
-                if start.elapsed() >= budget {
-                    break;
-                }
+                tracing::debug!(rows_folded = folded, "Usage rollup tick completed");
             }
-            tracing::debug!(rows_folded = folded, "Usage rollup tick completed");
-        }
-    }))
+        }),
+    )
 }
+
+pub(super) mod retention;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_FOLD_PAUSE: (std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Notify>);
+}

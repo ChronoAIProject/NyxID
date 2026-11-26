@@ -17,7 +17,102 @@ type HmacSha256 = Hmac<Sha256>;
 pub const GENESIS_PREV_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
 const RECORD_SEPARATOR: u8 = 0x1e;
-const MAX_APPEND_ATTEMPTS: usize = 8;
+// Default server transaction lifetime is 60 seconds. Include queueing in the
+// budget, with another 60 seconds for expiry cleanup and the chain to advance.
+const APPEND_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+static ORDINARY_APPENDER: OrdinaryAppender = OrdinaryAppender::new();
+
+const GATE_WARNING_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+const GATE_WARNING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+struct OrdinaryAppender {
+    gate: tokio::sync::Mutex<()>,
+    waiting: std::sync::atomic::AtomicUsize,
+    last_warning: std::sync::Mutex<Option<tokio::time::Instant>>,
+}
+
+struct GateWait<'a>(&'a std::sync::atomic::AtomicUsize);
+
+impl<'a> GateWait<'a> {
+    fn new(waiting: &'a std::sync::atomic::AtomicUsize) -> Self {
+        waiting.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self(waiting)
+    }
+}
+impl Drop for GateWait<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl OrdinaryAppender {
+    const fn new() -> Self {
+        Self {
+            gate: tokio::sync::Mutex::const_new(()),
+            waiting: std::sync::atomic::AtomicUsize::new(0),
+            last_warning: std::sync::Mutex::new(None),
+        }
+    }
+
+    async fn acquire(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, mongodb::error::Error> {
+        if let Ok(guard) = self.gate.try_lock() {
+            return Ok(guard);
+        }
+        let _waiting = GateWait::new(&self.waiting);
+        let started = tokio::time::Instant::now();
+        let mut next_warning = started + GATE_WARNING_AFTER;
+        let acquire = self.gate.lock();
+        tokio::pin!(acquire);
+        loop {
+            tokio::select! {
+                biased;
+                guard = &mut acquire => return Ok(guard),
+                () = tokio::time::sleep_until(deadline) => return Err(append_deadline_error()),
+                () = tokio::time::sleep_until(next_warning) => {
+                    let now = tokio::time::Instant::now();
+                    self.warn_waiter(started, now);
+                    next_warning = now + GATE_WARNING_INTERVAL;
+                }
+            }
+        }
+    }
+
+    fn warn_waiter(&self, started: tokio::time::Instant, now: tokio::time::Instant) {
+        let mut last = self
+            .last_warning
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if last.is_some_and(|last| now.saturating_duration_since(last) < GATE_WARNING_INTERVAL) {
+            return;
+        }
+        *last = Some(now);
+        drop(last);
+        tracing::warn!(
+            queue_wait_ms = now.saturating_duration_since(started).as_millis() as u64,
+            waiting = self.waiting.load(std::sync::atomic::Ordering::Relaxed),
+            "Ordinary audit append is waiting for the process gate"
+        );
+    }
+
+    async fn append_until(
+        &self,
+        db: &mongodb::Database,
+        entry: AuditLog,
+        key: &[u8],
+        deadline: tokio::time::Instant,
+    ) -> Result<AuditLog, mongodb::error::Error> {
+        // Queue before any database work: local waiters never occupy sockets.
+        let _guard = self.acquire(deadline).await?;
+        append_serialized(db, entry, key, deadline).await
+    }
+}
+
+fn append_deadline_error() -> mongodb::error::Error {
+    mongodb::error::Error::custom("audit chain append deadline exceeded")
+}
 pub const DEFAULT_VERIFY_LIMIT: i64 = 10_000;
 pub const MAX_VERIFY_LIMIT: i64 = 10_000;
 
@@ -85,26 +180,75 @@ pub fn prepare_chained_entry(
 
 pub async fn append_chained_entry(
     db: &mongodb::Database,
+    entry: AuditLog,
+    key: &[u8],
+) -> Result<AuditLog, mongodb::error::Error> {
+    ORDINARY_APPENDER
+        .append_until(db, entry, key, tokio::time::Instant::now() + APPEND_BUDGET)
+        .await
+}
+
+async fn append_serialized(
+    db: &mongodb::Database,
     mut entry: AuditLog,
     key: &[u8],
+    deadline: tokio::time::Instant,
 ) -> Result<AuditLog, mongodb::error::Error> {
     let collection = db.collection::<AuditLog>(AUDIT_LOG);
     let mut last_error = None;
+    let mut session = db.client().start_session().await?;
 
-    for attempt in 1..=MAX_APPEND_ATTEMPTS {
-        let tail = read_tail(db).await?;
-        let (seq, prev_hash) = match tail {
-            Some(tail) => (tail.seq + 1, tail.entry_hash),
-            None => (1, GENESIS_PREV_HASH.to_string()),
-        };
-
-        if let Err(error) = prepare_chained_entry(&mut entry, seq, prev_hash, key) {
-            return Err(mongodb::error::Error::custom(error.to_string()));
+    let mut attempt = 0_usize;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(last_error.unwrap_or_else(append_deadline_error));
         }
-
-        match collection.insert_one(&entry).await {
-            Ok(_) => return Ok(entry),
-            Err(error) if is_duplicate_key_error(&error) => {
+        attempt = attempt.saturating_add(1);
+        // A plain unique insert can hold the socket until another transaction
+        // expires, beyond our retry deadline (and strand COMMIT with pool one).
+        // Transactional conflicts release it so both the holder and retry clock
+        // can progress. Never cancel an in-flight commit to enforce this budget.
+        session
+            .start_transaction()
+            .read_concern(mongodb::options::ReadConcern::snapshot())
+            .write_concern(mongodb::options::WriteConcern::majority())
+            .await?;
+        let attempt_result = async {
+            let tail = collection
+                .find_one(doc! {"seq": {"$exists": true}})
+                .sort(doc! {"seq": -1})
+                .session(&mut session)
+                .await?;
+            let tail = tail.and_then(|row| {
+                Some(ChainTail {
+                    seq: row.seq?,
+                    entry_hash: row.entry_hash?,
+                })
+            });
+            let (seq, prev_hash) = match tail {
+                Some(tail) => (tail.seq + 1, tail.entry_hash),
+                None => (1, GENESIS_PREV_HASH.to_owned()),
+            };
+            prepare_chained_entry(&mut entry, seq, prev_hash, key)
+                .map_err(|error| mongodb::error::Error::custom(error.to_string()))?;
+            collection.insert_one(&entry).session(&mut session).await?;
+            session.commit_transaction().await
+        }
+        .await;
+        if let Err(error) = &attempt_result {
+            // An unknown commit may already have published this UUID. Return
+            // that uncertainty, never abort/replay it as a definite failure.
+            if error.contains_label("UnknownTransactionCommitResult") {
+                return Err(error.clone());
+            }
+            let _ = session.abort_transaction().await;
+        }
+        match attempt_result {
+            Ok(()) => return Ok(entry),
+            Err(error)
+                if is_duplicate_key_error(&error)
+                    || error.contains_label("TransientTransactionError") =>
+            {
                 if let Some(existing) = collection.find_one(doc! { "_id": &entry.id }).await? {
                     if immutable_entry_matches(&existing, &entry)
                         && existing.seq.is_some()
@@ -120,18 +264,12 @@ pub async fn append_chained_entry(
                         "Audit UUID already exists with different immutable content",
                     ));
                 }
-                if attempt == MAX_APPEND_ATTEMPTS {
-                    return Err(error);
-                }
                 last_error = Some(error);
-                sleep_before_retry(attempt).await;
+                let _ = tokio::time::timeout_at(deadline, sleep_before_retry(attempt)).await;
             }
             Err(error) => return Err(error),
         }
     }
-
-    Err(last_error
-        .unwrap_or_else(|| mongodb::error::Error::custom("audit chain append exhausted retries")))
 }
 
 #[derive(Debug)]
@@ -801,3 +939,11 @@ mod tests {
         assert_eq!(report.pre_chain_count, 1);
     }
 }
+
+#[cfg(test)]
+#[path = "audit_contention_tests.rs"]
+mod contention_tests;
+
+#[cfg(test)]
+#[path = "audit_queue_warning_tests.rs"]
+mod queue_warning_tests;

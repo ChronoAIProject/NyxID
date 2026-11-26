@@ -130,10 +130,13 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
         assistant_voice::REQUESTS,
     };
-    voice::publish_completed_results(&state.db).await?;
+    voice::publish_completed_results(state).await?;
     voice::recover(&state.db).await?;
     let rows = voice::queued(&state.db).await?;
     for request in rows {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let result: AppResult<()> = Box::pin(async {
             if request.expires_at <= chrono::Utc::now() {
                 return Err(AppError::Conflict("Voice request expired".into()));
@@ -160,7 +163,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
             .await?;
             let message = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
                 "_id":&request.message_id,"user_id":&request.user_id,"conversation_id":&request.conversation_id,
-                "turn_id":&request.turn_id,"execution_pending":true,
+                "turn_id":&request.turn_id,"execution_pending":true,"role":"user","via":"voice",
             }).await?.ok_or_else(|| AppError::NotFound("Voice input unavailable".into()))?;
             let mut start = engine::TurnStart::from(&engine::TurnRequest {
             acknowledgement_id: None,
@@ -221,7 +224,7 @@ pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
         }
         // Pool/active-turn/temporary database errors leave the durable queue intact.
     }
-    voice::publish_completed_results(&state.db).await?;
+    voice::publish_completed_results(state).await?;
     Ok(())
 }
 
@@ -251,9 +254,15 @@ fn require_origin(state: &AppState, headers: &axum::http::HeaderMap) -> AppResul
 }
 
 pub(crate) fn spawn_dispatch(state: AppState) {
-    tokio::spawn(Box::pin(async move {
+    state.shutdown.clone().spawn_worker(Box::pin(async move {
         loop {
-            crate::services::voice::dispatch_wakeup().await;
+            tokio::select! {
+                () = state.shutdown.intake_stopped() => break,
+                () = crate::services::voice::dispatch_wakeup() => {},
+            }
+            let Some(_work) = state.shutdown.background() else {
+                break;
+            };
             if sweep(&state).await.is_err() {
                 tracing::warn!("Voice request dispatch deferred to reconciliation");
             }

@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import { creditUnits, legacyCredits, sumCredits } from "./credits";
 
@@ -10,7 +11,13 @@ const legacy = z.number().refine(Number.isInteger).nullable().optional();
 const instant = z.string().datetime({ offset: true });
 export const creditsSchema = z.string().max(80).refine((value) => {
   try { creditUnits(value); return true; } catch { return false; }
-}, "Invalid exact credit amount");
+},
+    {
+      get error() {
+        return () => translateApp("Invalid exact credit amount");
+      },
+    },
+  );
 const money = creditsSchema.nullable().optional();
 
 function exact(value: string | null | undefined, fallback: number | null | undefined, scale: "whole" | "micros" = "micros"): string | null {
@@ -46,7 +53,7 @@ const usageRowSchema = z.object({
   metric: z.string().min(1), layer: z.string(), model: z.string().nullish(),
   quantity: z.number().int().safe(), billable: z.boolean().default(true),
 }).transform((row) => ({
-  service: row.service_slug ?? "Other service", serviceId: row.service_id,
+  service: row.service_slug ?? translateApp("Other service"), serviceId: row.service_id,
   metric: row.metric, layer: row.layer, model: row.model, quantity: row.quantity,
   billable: row.billable, ...fundingSchema.parse(row),
 }));
@@ -101,9 +108,9 @@ export function serviceUsage(rows: BillingUsage["rows"]) {
   }
   return [...groups].map(([key, entries]) => ({
     key, name: entries[0]!.service,
-    cost: sumCredits(entries.map((row) => row.billable ? row.cost : "0")),
-    wallet: sumCredits(entries.map((row) => row.billable ? row.wallet : "0")),
-    grants: sumCredits(entries.map((row) => row.billable ? row.grants : "0")),
+    cost: sumCredits(entries.map((row) => (row.billable ? row.cost : "0"))),
+    wallet: sumCredits(entries.map((row) => (row.billable ? row.wallet : "0"))),
+    grants: sumCredits(entries.map((row) => (row.billable ? row.grants : "0"))),
     rows: entries,
     meteringOnly: entries.every((row) => !row.billable),
   })).sort((a, b) => a.name.localeCompare(b.name));

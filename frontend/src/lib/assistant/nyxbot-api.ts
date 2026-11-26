@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { orgChannelPreviewSchema } from "@/schemas/org-specialist-channel";
 import { publicModelListSchema } from "@/schemas/platform-models";
 import { assistantJson } from "@/lib/assistant/assistant-http";
 import {
@@ -137,10 +138,16 @@ export const nyxBotApi = {
       await assistantJson(`${ROOT}/onboarding`, { method: "PUT", body: answers }),
     );
   },
-  /** Hides the home's suggestions until the intro is retaken. */
+  /** Hides the home's suggestions until restored or the intro is retaken. */
   async hideSuggestions() {
     return assistantOnboardingSchema.parse(
       await assistantJson(`${ROOT}/onboarding/suggestions/hide`, { method: "POST" }),
+    );
+  },
+  /** Restores the home's suggestions without changing the intro answers. */
+  async showSuggestions() {
+    return assistantOnboardingSchema.parse(
+      await assistantJson(`${ROOT}/onboarding/suggestions/show`, { method: "POST" }),
     );
   },
   async channels() {
@@ -151,6 +158,11 @@ export const nyxBotApi = {
    * Connects a channel bot to an agent (NyxBot by default), or issues a fresh
    * owner link and relinks when it is already connected.
    */
+  async previewChannel(botId: string, agentId: string, channelId?: string) {
+    return orgChannelPreviewSchema.parse(await assistantJson(`${ROOT}/channels/preview`, {
+      method: "POST", body: { bot_id: botId, agent_id: agentId, ...(channelId ? { channel_id: channelId } : {}) },
+    }));
+  },
   async connectChannel(botId: string, agentId?: string) {
     return nyxAgentChannelConnectSchema.parse(
       await assistantJson(`${ROOT}/channels`, {

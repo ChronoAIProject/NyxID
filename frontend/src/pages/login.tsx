@@ -34,6 +34,7 @@ export function LoginPage() {
           </>
         )}
         <WebDeviceLogin
+          allowAppHandoff
           returnTo={returnTo}
           isOpen={appLoginOpen}
           onOpenChange={setAppLoginOpen}
@@ -48,6 +49,7 @@ export function LoginPage() {
         <p role="alert" className="mb-4 rounded-lg bg-destructive/10 p-3 text-14 text-destructive">{translateUi("Your verification expired. Please sign in again.")}</p>
       )}
       <AuthFlow
+        allowAppHandoff
         initialPanel={0}
         enableEmailLogin={params.get("enable_email") === "true" || undefined}
         returnTo={returnTo}

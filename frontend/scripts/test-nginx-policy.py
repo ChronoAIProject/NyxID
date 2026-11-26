@@ -60,6 +60,14 @@ class PolicyInputs(unittest.TestCase):
             "https://oauth.telegram.org",
         })
 
+    def test_export_preserves_length_and_propagates_abort(self):
+        config = self.render({})["default.conf"]
+        location = config.split("location = /api/v1/users/me/export {", 1)[1].split("}", 1)[0]
+        self.assertIn("gzip off;", location)
+        self.assertIn("proxy_buffering off;", location)
+        self.assertIn("proxy_pass http://backend:3001;", location)
+        self.assertIn("proxy_set_header Host $host;", location)
+
     @staticmethod
     def render(env):
         template = Path(__file__).parents[1].joinpath("nginx.conf.template").read_text()

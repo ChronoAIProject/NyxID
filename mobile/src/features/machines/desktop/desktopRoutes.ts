@@ -1,3 +1,4 @@
+import { localizedError } from "../../../i18n/localizedError";
 export type MachineDesktopParams = {
   nodeId: string;
   conversationId?: string;
@@ -16,7 +17,7 @@ export function desktopQuery(params: MachineDesktopParams): string {
 
 export function desktopSocketUrl(apiBase: string, params: MachineDesktopParams): string {
   const url = new URL(apiBase.replace(/\/+$/, '').replace(/\/mobile$/, ''));
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('Desktop API URL unavailable');
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw localizedError('Desktop API URL unavailable');
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.pathname = `${url.pathname.replace(/\/+$/, '')}/assistant/nyxagent/machines/${encodeURIComponent(params.nodeId)}/desktop`;
   url.search = desktopQuery(params); url.hash = '';

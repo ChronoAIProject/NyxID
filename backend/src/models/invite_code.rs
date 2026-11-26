@@ -15,6 +15,15 @@ pub struct InviteCodeUsage {
     pub email: Option<String>,
 }
 
+/// Pending capacity belonging to one signup. Old documents have no entries.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InviteCodeReservation {
+    pub id: String,
+    pub email: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InviteCode {
     #[serde(rename = "_id")]
@@ -34,6 +43,8 @@ pub struct InviteCode {
     /// usage-tracking change landed.
     #[serde(default)]
     pub usages: Vec<InviteCodeUsage>,
+    #[serde(default)]
+    pub reservations: Vec<InviteCodeReservation>,
 }
 
 #[cfg(test)]
@@ -52,6 +63,7 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            reservations: vec![],
             usages: vec![InviteCodeUsage {
                 user_id: uuid::Uuid::new_v4().to_string(),
                 used_at: Utc::now(),
@@ -80,11 +92,14 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             usages: vec![],
+            reservations: vec![],
         };
         let mut doc = bson::to_document(&code).expect("serialize");
         doc.remove("usages");
+        doc.remove("reservations");
         let restored: InviteCode = bson::from_document(doc).expect("deserialize");
         assert!(restored.usages.is_empty());
+        assert!(restored.reservations.is_empty());
     }
 
     #[test]

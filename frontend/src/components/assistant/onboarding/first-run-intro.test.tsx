@@ -1,3 +1,4 @@
+import { appI18n } from "@/i18n";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -86,14 +87,12 @@ function renderIntro(
   onStart = vi.fn(),
   onOpenChange = vi.fn(),
   onTour?: () => void,
-  entryPoint: "first_run" | "account_menu" = "account_menu",
 ) {
   render(
     <QueryClientProvider client={client}>
       <FirstRunIntro
         open
         state={state()}
-        entryPoint={entryPoint}
         onOpenChange={onOpenChange}
         onStart={onStart}
         onTour={onTour}
@@ -105,7 +104,7 @@ function renderIntro(
 
 it("a first-timer is greeted by name before the questions", async () => {
   const user = userEvent.setup();
-  renderIntro(vi.fn(), vi.fn(), undefined, "first_run");
+  renderIntro();
   expect(screen.getByRole("heading", { name: "Welcome, Owner" })).toBeTruthy();
   expect(screen.queryByLabelText(/Step 1 of/)).toBeNull();
   await user.click(screen.getByRole("button", { name: "Let's get started" }));
@@ -116,7 +115,7 @@ it("a first-timer is greeted by name before the questions", async () => {
 
 it("skipping from the greeting records a skipped intro", async () => {
   const user = userEvent.setup();
-  const { onOpenChange } = renderIntro(vi.fn(), vi.fn(), undefined, "first_run");
+  const { onOpenChange } = renderIntro();
   await user.click(screen.getByRole("button", { name: "Skip for now" }));
   expect(onOpenChange).toHaveBeenCalledWith(false);
   await waitFor(() =>
@@ -133,6 +132,7 @@ it("skipping from the greeting records a skipped intro", async () => {
 it("skipping saves the picks as a skipped intro and closes", async () => {
   const user = userEvent.setup();
   const { onOpenChange } = renderIntro();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   await user.click(screen.getByRole("checkbox", { name: /Email & inbox/ }));
   await user.click(screen.getByRole("button", { name: "Skip intro" }));
   expect(onOpenChange).toHaveBeenCalledWith(false);
@@ -150,6 +150,7 @@ it("skipping saves the picks as a skipped intro and closes", async () => {
 it("finishing saves once and starts a ranked next step", async () => {
   const user = userEvent.setup();
   const { onStart, onOpenChange } = renderIntro();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   await user.click(screen.getByRole("checkbox", { name: /Research & news/ }));
   await user.click(screen.getByRole("radio", { name: /My team/ }));
   await user.click(screen.getByRole("button", { name: "Continue" }));
@@ -177,6 +178,7 @@ it("the last step offers the on-screen tour", async () => {
   const user = userEvent.setup();
   const onTour = vi.fn();
   const { onOpenChange } = renderIntro(vi.fn(), vi.fn(), onTour);
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   for (const name of ["Continue without picking", "Next", "Next", "Next"]) {
     await user.click(screen.getByRole("button", { name }));
   }
@@ -189,6 +191,7 @@ it("the last step offers the on-screen tour", async () => {
 it("topics follow who NyxBot is for and drop picks that no longer apply", async () => {
   const user = userEvent.setup();
   renderIntro();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   expect(screen.queryByRole("checkbox", { name: /Sales & leads/ })).toBeNull();
   await user.click(screen.getByRole("checkbox", { name: /Research & news/ }));
   await user.click(screen.getByRole("checkbox", { name: /Email & inbox/ }));
@@ -206,6 +209,7 @@ it("topics follow who NyxBot is for and drop picks that no longer apply", async 
 it("step bars jump anywhere; suggestions show at once and later changes save again", async () => {
   const user = userEvent.setup();
   renderIntro();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   await user.click(screen.getByRole("button", { name: /Step 5 of 5: First steps/ }));
   // Suggestions show while the save runs.
   expect(
@@ -222,6 +226,7 @@ it("step bars jump anywhere; suggestions show at once and later changes save aga
 it("arrow keys move between intro screens", async () => {
   const user = userEvent.setup();
   renderIntro();
+  await user.click(screen.getByRole("button", { name: "Let's get started" }));
   await user.click(screen.getByRole("checkbox", { name: /Email & inbox/ }));
   await user.keyboard("{ArrowRight}");
   expect(screen.getByRole("heading", { name: "Meet NyxBot, your chief of staff" })).toBeTruthy();
@@ -237,4 +242,32 @@ it("next-step cards start their step and carry no per-card dismiss", async () =>
   expect(screen.queryByRole("button", { name: /Dismiss/ })).toBeNull();
   await user.click(screen.getByRole("button", { name: /Connect your inbox description/ }));
   expect(onStart).toHaveBeenCalledTimes(1);
+});
+
+it("renders Chinese replay guidance, step tooltips and API recommendations including after returning Home", async () => {
+  try {
+    await appI18n.changeLanguage("zh-CN");
+    const onStart = vi.fn();
+    const recommendation = {
+      id: "morning_brief",
+      title: "Get a daily brief",
+      description: "A short weekday summary of what needs you, every morning.",
+      prompt: "Set up a weekday morning brief at 8am covering my calendar, important email and anything I should know.",
+      icon: "sunrise",
+    };
+    renderIntro();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /让我们开始|开始吧|开始使用/ }));
+    const chief = screen.getByTitle("幕僚长");
+    expect(chief.getAttribute("aria-label")).toContain("幕僚长");
+    await user.click(chief);
+    expect(screen.getByText(/只.*NyxID|通过 NyxID/)).toBeTruthy();
+    cleanup();
+    render(<NextStepCards steps={[recommendation]} onStart={onStart} />);
+    await user.click(screen.getByRole("button", { name: /获取每日简报/ }));
+    expect(onStart).toHaveBeenCalledWith({ ...recommendation, prompt: expect.stringContaining("每个工作日") });
+  } finally {
+    cleanup();
+    await appI18n.changeLanguage("en");
+  }
 });

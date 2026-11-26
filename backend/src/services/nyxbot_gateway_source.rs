@@ -111,9 +111,7 @@ pub async fn select(
             "gateway_native_unavailable".into(),
         ));
     }
-    let token = zeroize::Zeroizing::new(
-        super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?,
-    );
+    let token = super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?;
     let identity = discord_read(bot, &token, "/users/@me").await?;
     if identity["id"].as_str() != Some(&bot.platform_bot_id)
         || identity["bot"] != true
@@ -125,6 +123,15 @@ pub async fn select(
         bot_id: bot.platform_bot_id.clone(),
     }))
 }
+/// Local release fencing is not a refusal from the native gateway.
+pub(crate) fn selection_error_code(error: AppError) -> &'static str {
+    if matches!(error, AppError::Conflict(ref code) if code == "gateway_native_draining") {
+        "gateway_native_draining"
+    } else {
+        "gateway_native_unavailable"
+    }
+}
+
 pub fn discord_capable(caps: &Value) -> bool {
     let caps = &caps["relay_authoring"];
     caps["native_discord_writes_enabled"] == true
@@ -192,9 +199,8 @@ pub async fn credentials(
             if bot_id != &bot.platform_bot_id {
                 return Err(AppError::Forbidden("gateway_bot_identity_mismatch".into()));
             }
-            let token = zeroize::Zeroizing::new(
-                super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?,
-            );
+            let token =
+                super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?;
             Ok(json!({"agent_key":agent,"discord_bot_token":token.as_str()}))
         }
         Some(GatewaySource::WhatsApp {
@@ -221,21 +227,18 @@ pub async fn credentials(
                     "native_whatsapp_identity_mismatch".into(),
                 ));
             }
-            let app_secret = state
-                .encryption_keys
-                .decrypt(
-                    bot.app_secret_encrypted
-                        .as_deref()
-                        .ok_or_else(|| AppError::OAuthAuthorityUnavailable)?,
-                )
-                .await
+            let app_secret = super::channel_registration::open_secret(
+                &state.encryption_keys,
+                bot,
+                "app_secret_encrypted",
+            )
+            .await
+            .map_err(|_| AppError::OAuthAuthorityUnavailable)?
+            .ok_or_else(|| AppError::OAuthAuthorityUnavailable)?;
+            let app_secret = crate::crypto::guarded_utf8(app_secret)
                 .map_err(|_| AppError::OAuthAuthorityUnavailable)?;
-            let app_secret = zeroize::Zeroizing::new(
-                String::from_utf8(app_secret).map_err(|_| AppError::OAuthAuthorityUnavailable)?,
-            );
-            let token = zeroize::Zeroizing::new(
-                super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?,
-            );
+            let token =
+                super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, bot).await?;
             // The relay Verify Token is hash-only. Native management receives a
             // separate, envelope-encrypted token generated on its first
             // management request; it is never returned by the settings API.
@@ -305,88 +308,205 @@ async fn discord_read_at(base: &str, token: &str, path: &str) -> AppResult<Value
     .map_err(|_| AppError::OAuthAuthorityUnavailable)?
 }
 
-pub(crate) fn discord_context(row: &NyxbotChannel, context: &Value) -> bool {
-    use super::discord_gateway::valid_message_id as snowflake;
-    let Some(GatewaySource::Discord { bot_id }) = &row.gateway_source else {
-        return false;
-    };
-    let a = &context["activity"];
-    let c = &a["conversation"];
-    let event = a["event_id"].as_str().unwrap_or_default();
-    let prefix = format!("discord:{bot_id}:");
-    row.platform == "discord"
-        && a["source"].as_object().is_some_and(|s| s.len() == 2)
-        && context["schema_version"] == 1
-        && a["schema_version"] == 1
-        && context["channel_id"].as_str() == row.gateway_channel_id.as_deref()
-        && row.binding_id.is_some()
-        && row.gateway_bot_id.as_deref() == Some(bot_id)
-        && a["source"]["type"] == "discord"
-        && a["source"]["bot_id"].as_str() == Some(bot_id)
-        && event.strip_prefix(&prefix).is_some_and(snowflake)
-        && a["kind"]["type"] == "message"
-        && a["kind"]["mentions_bot"].is_boolean()
-        && a["kind"]["reply_to"].is_null()
-        && a["thread"].is_null()
-        && a["kind"]["text"]
-            .as_str()
-            .is_some_and(|s| s.len() <= 32 * 1024)
-        && a["kind"]["attachments"]
-            .as_array()
-            .is_some_and(|s| s.len() <= 32)
-        && a["actor"]["kind"] == "human"
-        && a["actor"]["id"]
-            .as_str()
-            .is_some_and(|s| snowflake(s) && s != bot_id)
-        && matches!(c["kind"].as_str(), Some("private" | "group"))
-        && c["id"].as_str().is_some_and(snowflake)
-        && (c["thread_id"].is_null() || (c["kind"] == "group" && c["thread_id"] == c["id"]))
-        && context["event_ref"]
-            .as_str()
-            .is_some_and(|s| !s.is_empty() && s.len() <= 4096)
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeActivity {
+    Message,
+    Notification,
 }
 
-pub(crate) fn provider_context(row: &NyxbotChannel, context: &Value) -> bool {
-    match &row.gateway_source {
-        Some(GatewaySource::Discord { .. }) => discord_context(row, context),
-        Some(GatewaySource::WhatsApp {
+fn nonempty(value: &Value, bound: usize) -> bool {
+    value
+        .as_str()
+        .is_some_and(|s| !s.is_empty() && s.len() <= bound)
+}
+
+fn interaction(kind: &Value) -> bool {
+    kind["type"] == "interaction"
+        && nonempty(&kind["block_id"], 512)
+        && nonempty(&kind["action_id"], 512)
+        && kind.get("values").is_none_or(Value::is_object)
+}
+
+/// Retained changes name both their own dispatch and a different original.
+/// Only their identities are interpreted. The patch, author and reaction data
+/// never become message input, addressing evidence or execution authority.
+fn message_change<'a>(activity: &'a Value, source: &str) -> Option<(&'a str, &'a str)> {
+    let kind = &activity["kind"];
+    let ce = &kind["ce"];
+    let subject = ce["subject"].as_str()?;
+    let original = &ce["data"]["original_event_id"];
+    (kind["type"] == "event"
+        && ce["specversion"] == "1.0"
+        && ce["source"] == source
+        && ce["id"] == activity["event_id"]
+        && nonempty(&ce["subject"], 512)
+        && ce["data"]["message_id"] == subject
+        && nonempty(original, 512)
+        && original != &ce["id"])
+        .then_some((ce["type"].as_str()?, subject))
+}
+
+fn discord_activity(row: &NyxbotChannel, context: &Value, bot: &str) -> Option<NativeActivity> {
+    use super::discord_gateway::valid_message_id as snowflake;
+    let a = &context["activity"];
+    let c = &a["conversation"];
+    if row.platform != "discord"
+        || row.binding_id.is_none()
+        || row.gateway_bot_id.as_deref() != Some(bot)
+        || a["source"].as_object().is_none_or(|s| s.len() != 2)
+        || a["source"]["type"] != "discord"
+        || a["source"]["bot_id"] != bot
+        || !matches!(c["kind"].as_str(), Some("private" | "group"))
+        || !c["id"].as_str().is_some_and(snowflake)
+        || !(c["thread_id"].is_null() || (c["kind"] == "group" && c["thread_id"] == c["id"]))
+    {
+        return None;
+    }
+    let event = a["event_id"]
+        .as_str()?
+        .strip_prefix("discord:")?
+        .strip_prefix(bot)?
+        .strip_prefix(':')?;
+    let human = a["actor"]["kind"] == "human"
+        && a["actor"]["id"]
+            .as_str()
+            .is_some_and(|s| snowflake(s) && s != bot);
+    let kind = &a["kind"];
+    if kind["type"] == "message" {
+        return (human
+            && snowflake(event)
+            && kind["mentions_bot"].is_boolean()
+            && kind["reply_to"].is_null()
+            && a["thread"].is_null()
+            && kind["text"].as_str().is_some_and(|s| s.len() <= 32 * 1024)
+            && kind["attachments"]
+                .as_array()
+                .is_some_and(|s| s.len() <= 32))
+        .then_some(NativeActivity::Message);
+    }
+    if interaction(kind) {
+        return (human && event.strip_prefix("interaction:").is_some_and(snowflake))
+            .then_some(NativeActivity::Notification);
+    }
+    let (change, message) = message_change(a, &format!("urn:cmaeg:discord:{bot}"))?;
+    if !snowflake(message) {
+        return None;
+    }
+    let unknown = a["actor"]["kind"] == "unknown" && a["actor"]["id"] == "unknown";
+    let data = &kind["ce"]["data"];
+    let original = data["original_event_id"]
+        .as_str()?
+        .strip_prefix("discord:")?
+        .strip_prefix(bot)?
+        .strip_prefix(':')?;
+    if change == "cma.message.reaction.updated.v1" {
+        // For a confirmed outbound reply, CMA names the reply in the subject
+        // and the dispatch that produced it in the receipt's original_event_id.
+        let target_matches = match data["target_kind"].as_str()? {
+            "inbound" => original == message,
+            "outbound" => {
+                !original.is_empty()
+                    && original != message
+                    && data["target_author"]["kind"] == "bot"
+                    && data["target_author"]["id"] == bot
+            }
+            _ => false,
+        };
+        return ((human || unknown)
+            && target_matches
+            && event
+                .strip_prefix("reaction:")
+                .is_some_and(|id| uuid::Uuid::try_parse(id).is_ok()))
+        .then_some(NativeActivity::Notification);
+    }
+    let suffix = event.strip_prefix(message)?.strip_prefix(':')?;
+    if original != message {
+        return None;
+    }
+    let valid = match change {
+        "cma.message.deleted.v1" => unknown && suffix == "delete",
+        "cma.message.updated.v1" => {
+            human
+                && suffix
+                    .strip_prefix("edit:")
+                    .is_some_and(|s| s.parse::<u128>().is_ok())
+        }
+        _ => false,
+    };
+    valid.then_some(NativeActivity::Notification)
+}
+
+pub(crate) fn provider_activity(row: &NyxbotChannel, context: &Value) -> Option<NativeActivity> {
+    let a = &context["activity"];
+    if context["schema_version"] != 1
+        || a["schema_version"] != 1
+        || context["channel_id"].as_str()? != row.gateway_channel_id.as_deref()?
+        || !nonempty(&context["event_ref"], 4096)
+    {
+        return None;
+    }
+    match row.gateway_source.as_ref()? {
+        GatewaySource::Discord { bot_id } => discord_activity(row, context, bot_id),
+        GatewaySource::WhatsApp {
             app_id,
             waba_id,
             phone_number_id,
-        }) => {
-            let activity = &context["activity"];
-            let source = &activity["source"];
-            let actor = &activity["actor"];
-            let conversation = &activity["conversation"];
-            row.platform == "whatsapp"
-                && context["schema_version"] == 1
-                && activity["schema_version"] == 1
-                && context["channel_id"].as_str() == row.gateway_channel_id.as_deref()
-                && context["event_ref"]
-                    .as_str()
-                    .is_some_and(|v| !v.is_empty() && v.len() <= 4096)
-                && source["type"] == "whatsapp"
-                && source["app_id"].as_str() == Some(app_id)
-                && source["waba_id"].as_str() == Some(waba_id)
-                && source["phone_number_id"].as_str() == Some(phone_number_id)
-                && actor["kind"] == "unknown"
-                && super::whatsapp_native::numeric_id(actor["id"].as_str().unwrap_or_default())
-                && conversation["kind"] == "private"
-                && conversation["id"] == actor["id"]
-                && conversation["thread_id"].is_null()
-                && activity["kind"]["type"] == "message"
-                && activity["kind"]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.len() <= 32 * 1024)
-                && activity["kind"]["attachments"]
-                    .as_array()
-                    .is_none_or(|items| items.len() <= 32)
-                && activity["event_id"]
-                    .as_str()
-                    .is_some_and(|v| !v.is_empty() && v.len() <= 256)
+        } => {
+            let source = &a["source"];
+            let actor = &a["actor"];
+            let c = &a["conversation"];
+            if row.platform != "whatsapp"
+                || source["type"] != "whatsapp"
+                || source["app_id"].as_str() != Some(app_id)
+                || source["waba_id"].as_str() != Some(waba_id)
+                || source["phone_number_id"].as_str() != Some(phone_number_id)
+                || actor["kind"] != "unknown"
+                || !super::whatsapp_native::numeric_id(actor["id"].as_str()?)
+                || c["kind"] != "private"
+                || c["id"] != actor["id"]
+                || !c["thread_id"].is_null()
+                || !nonempty(&a["event_id"], 256)
+            {
+                return None;
+            }
+            let kind = &a["kind"];
+            if kind["type"] == "message" {
+                return (kind["text"].as_str().is_some_and(|s| s.len() <= 32 * 1024)
+                    && kind["attachments"]
+                        .as_array()
+                        .is_none_or(|items| items.len() <= 32))
+                .then_some(NativeActivity::Message);
+            }
+            let id = a["event_id"].as_str()?;
+            let digest = if interaction(kind) {
+                id.strip_prefix("native-whatsapp-flow:")
+                    .or_else(|| id.strip_prefix("whatsapp:"))?
+            } else {
+                id.strip_prefix("whatsapp:")?
+            };
+            if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return None;
+            }
+            let uri = format!("urn:cma:whatsapp:{app_id}:{waba_id}:{phone_number_id}");
+            (interaction(kind)
+                || matches!(
+                    message_change(a, &uri),
+                    Some((
+                        "cma.message.updated.v1"
+                            | "cma.message.deleted.v1"
+                            | "cma.message.reaction.updated.v1",
+                        _
+                    ))
+                ))
+            .then_some(NativeActivity::Notification)
         }
-        None | Some(GatewaySource::Unsupported) => false,
+        GatewaySource::Unsupported => None,
     }
+}
+
+/// A delayed outbound send may use only an original message's reference.
+pub(crate) fn provider_context(row: &NyxbotChannel, context: &Value) -> bool {
+    provider_activity(row, context) == Some(NativeActivity::Message)
 }
 pub(crate) fn message_identity<'a>(
     row: &NyxbotChannel,

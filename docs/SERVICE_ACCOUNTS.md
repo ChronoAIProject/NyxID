@@ -607,6 +607,12 @@ All service account operations are logged:
 | `sa.token_issued` | Successful authentication |
 | `sa.auth_failed` | Failed authentication attempt |
 
+Administrator creation, settings/deactivation, deletion, secret rotation and bulk token revocation commit a bounded audit intent with the effective source change; the existing relay appends each event to the audit chain exactly once. The records preserve their existing metadata and omit secret hashes, prefixes, raw secrets and tokens; rotation and deletion still perform token-row cleanup after the generation change, so a later cleanup error can report failure after that change has committed with its audit evidence.
+
+Administrator provider and service connections commit their bounded audit intent with local credential publication or revocation; OAuth and device initiation commit attempt evidence with the state row, after preparation succeeds. Provider HTTP stays outside these transactions, and provider disconnect retains its existing per-credential cleanup units: later cleanup can fail after local revocation and its evidence have committed. Ordinary user connections keep their existing behavior and command counts. Admin device polling requires the stored target account to match the URL before any state mutation or provider request.
+
+Bulk administrator revocation commits its generation bump, token-row updates and the actual revoked-count audit together. Its measured operating range is 20,000 token rows per account with a writer offering 25 row updates per second; this is not a new input limit, and larger populations or heavier write load should use a quiet maintenance window. A definite transaction failure rolls back that unit and returns the existing error; an unconfirmed commit can already have committed the entire unit, as with other administrative transactions.
+
 ---
 
 ## Configuration Reference
@@ -769,7 +775,7 @@ The dedicated routes are `POST` and `DELETE /api/v1/admin/service-accounts/{id}/
 
 Issuance permanently sets `purpose=curation` and `platform_protected=true`. Revocation removes the live grant while both fields remain. Expiry and revocation fail closed for curation reads, writes, and Ornn proxy requests. Protected metadata, scope/role changes, disable, rotation, and provider/connection management require platform admin; direct owner or org-admin status is insufficient. Service-account role IDs stay under platform-admin control for downstream assertions and do not become NyxID platform-admin privileges.
 
-Grant and history responses contain no credentials or secret hashes. The original issuer's later demotion does not revoke a standing workload grant. During offboarding, rotate any client secret or Ornn credential a former administrator could retain, and revoke the grant or disable the account when the workload itself should stop.
+Curation grant issuance and removal commit their audit intent with the guarded grant write; a rejected intent rolls that write back, and repeated removal without a grant creates no new change event. Grant and history responses contain no credentials or secret hashes. The original issuer's later demotion does not revoke a standing workload grant. During offboarding, rotate any client secret or Ornn credential a former administrator could retain, and revoke the grant or disable the account when the workload itself should stop.
 
 ### Runtime confinement and token revocation
 
@@ -1046,7 +1052,7 @@ Content-Type: application/json
 }
 ```
 
-`expires_at` is optional. Issuance/replacement accepts 1–100 distinct existing connection UUIDs, replaces the entire grant, and validates the SA owner's access to every target and its backing endpoint before saving. Invalid replacements leave the prior grant intact. The grant binds the effective SA owner and each target's owner. `GET` on this admin route returns the grant or `null`; platform admins and operators may inspect it. `PUT` and `DELETE` require platform admin. `DELETE` revokes the grant. Issuance and revocation produce SA grant audit events; a metadata read creates no service history mutation.
+`expires_at` is optional. Issuance/replacement accepts 1–100 distinct existing connection UUIDs, replaces the entire grant, and validates the SA owner's access to every target and its backing endpoint before saving. Invalid replacements leave the prior grant intact. The grant binds the effective SA owner and each target's owner. `GET` on this admin route returns the grant or `null`; platform admins and operators may inspect it. `PUT` and `DELETE` require platform admin. `DELETE` revokes the grant. Issuance and revocation commit their audit intent with the grant replacement or deletion; a repeated deletion without a grant succeeds without another change event. Audit identifier lists retain a bounded prefix with the complete count and digest when shortened; the stored grant and returned targets remain complete. A metadata read creates no service history mutation.
 
 The SA detail response contains only `id`, `slug`, `name`, `label`, `service_type`, `is_active`, catalog ID/slug/name, `recommended_skills`, `recommended_skill_refs`, `skills_revision`, and `skills_manifest_digest`. The list wraps the same projected entries in a `keys` array. Both omit credential material, headers, frame injections, raw endpoint/spec URLs, node configuration, OAuth configuration, and credential IDs. No credential decryption, provisioning, or OAuth reconciliation occurs. Responses use `Cache-Control: private, no-store`.
 

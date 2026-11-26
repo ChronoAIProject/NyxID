@@ -114,12 +114,7 @@ pub(crate) async fn verify_image_attestation(
     version: &str,
     datastore: Option<&std::path::Path>,
 ) -> Result<(), ImageVerificationError> {
-    let attestations = fetch_github_attestations(client, "ChronoAIProject", "NyxID", digest, true)
-        .await
-        .map_err(|_| ImageVerificationError::AttestationUnavailable)?;
-    let root = trust::load_github(client.clone(), datastore)
-        .await
-        .map_err(|_| ImageVerificationError::TrustRootUnavailable)?;
+    let (attestations, root) = load_image_evidence(client, digest, datastore).await?;
     let identity = format!(
         "https://github.com/ChronoAIProject/NyxID/.github/workflows/publish-images.yml@refs/tags/v{version}"
     );
@@ -129,6 +124,29 @@ pub(crate) async fn verify_image_attestation(
         }
     }
     Err(ImageVerificationError::AttestationInvalid)
+}
+
+#[cfg(test)]
+tokio::task_local! { pub(crate) static PUBLISHED_MACHINE_EVIDENCE: (); }
+
+async fn load_image_evidence(
+    client: &reqwest::Client,
+    digest: &str,
+    datastore: Option<&std::path::Path>,
+) -> Result<(Vec<Attestation>, trust::Root), ImageVerificationError> {
+    #[cfg(test)]
+    if let Ok((attestation, root)) =
+        PUBLISHED_MACHINE_EVIDENCE.try_with(|()| tests::machine_image_fixture())
+    {
+        return Ok((vec![attestation], root));
+    }
+    let attestations = fetch_github_attestations(client, "ChronoAIProject", "NyxID", digest, true)
+        .await
+        .map_err(|_| ImageVerificationError::AttestationUnavailable)?;
+    let root = trust::load_github(client.clone(), datastore)
+        .await
+        .map_err(|_| ImageVerificationError::TrustRootUnavailable)?;
+    Ok((attestations, root))
 }
 
 async fn fetch_github_attestations(
@@ -734,6 +752,24 @@ struct Attestation {
     bundle_url: Option<String>,
 }
 
+#[cfg(test)]
+#[derive(Deserialize)]
+pub(super) struct LocalReleaseFixture {
+    pub archives: std::collections::HashMap<String, String>,
+    #[serde(flatten)]
+    attestation: Attestation,
+    #[serde(rename = "trustedRoot")]
+    root: Value,
+}
+
+#[cfg(test)]
+impl LocalReleaseFixture {
+    pub fn verify(&self, digest: &str, identity: &str) -> Result<()> {
+        let root = trust::Root::from_authenticated_json(&serde_json::to_vec(&self.root)?)?;
+        verify_single_attestation(&self.attestation, &root, digest, identity)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct SigstoreBundle {
     #[serde(rename = "mediaType")]
@@ -1084,8 +1120,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn verifies_published_machine_image_workflow_bundle() {
+    pub(super) fn machine_image_fixture() -> (Attestation, trust::Root) {
         let attestation = Attestation {
             bundle: Some(
                 serde_json::from_slice(include_bytes!(
@@ -1096,6 +1131,12 @@ mod tests {
             bundle_url: None,
         };
         let (_, root, _) = fixture("0.71.0");
+        (attestation, root)
+    }
+
+    #[test]
+    fn verifies_published_machine_image_workflow_bundle() {
+        let (attestation, root) = machine_image_fixture();
         let digest = "e634854db76b1f7230e79312bab23cb394831a4909920f8a93890878bffe0c1d";
         let identity = "https://github.com/ChronoAIProject/NyxID/.github/workflows/publish-images.yml@refs/tags/v0.71.0";
         verify_single_attestation(&attestation, &root, digest, identity).unwrap();

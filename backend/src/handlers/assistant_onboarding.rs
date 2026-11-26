@@ -209,7 +209,7 @@ pub async fn save_onboarding(
 
 /// POST /api/v1/assistant/nyxagent/onboarding/suggestions/hide
 ///
-/// Hides the home's suggestions until the intro is retaken; returns the
+/// Hides the home's suggestions until restored or the intro is retaken; returns the
 /// refreshed state.
 pub async fn hide_suggestions(
     State(state): State<AppState>,
@@ -219,6 +219,21 @@ pub async fn hide_suggestions(
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
     onboarding::hide_suggestions(&state.db, &owner).await?;
+    let profile = onboarding::get(&state.db, &owner).await?;
+    Ok(Json(
+        respond(&state, &owner, profile, onboarding::DEFAULT_RECOMMENDATIONS).await?,
+    ))
+}
+
+/// POST /api/v1/assistant/nyxagent/onboarding/suggestions/show
+pub async fn show_suggestions(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> AppResult<Json<OnboardingResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    let owner = auth.user_id.to_string();
+    engine::require_enabled(&state.db, &owner).await?;
+    onboarding::show_suggestions(&state.db, &owner).await?;
     let profile = onboarding::get(&state.db, &owner).await?;
     Ok(Json(
         respond(&state, &owner, profile, onboarding::DEFAULT_RECOMMENDATIONS).await?,

@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useMemo } from "react";
 import {
   Image,
@@ -27,6 +29,7 @@ export function AssistantImagePreview({
   onClose: () => void;
   onError?: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const pan = useMemo(
     () =>
@@ -71,8 +74,10 @@ export function AssistantImagePreview({
           <View {...pan.panHandlers} style={styles.fill}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Dismiss image preview"
-              accessibilityHint="Tap or swipe down to return to the conversation."
+              accessibilityLabel={translateApp("Dismiss image preview")}
+              accessibilityHint={translateApp(
+                "Tap or swipe down to return to the conversation.",
+              )}
               onPress={onClose}
               style={styles.fill}
             >

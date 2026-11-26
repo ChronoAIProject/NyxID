@@ -187,7 +187,7 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function setupFanOutPage() {
+function setupFanOutPage(loseForwardReply = false) {
   window.history.pushState(
     null,
     "",
@@ -220,6 +220,7 @@ function setupFanOutPage() {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   let pubkeysCalls = 0;
   let ciphertextCalls = 0;
+  let pollsAfterSubmit = 0;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url =
       typeof input === "string" || input instanceof URL ? String(input) : input.url;
@@ -234,6 +235,14 @@ function setupFanOutPage() {
       return jsonResponse(runtimeConfig());
     }
     if (endpoint === "/api/v1/nodes/credentials/pending/fanout-1/fan-out") {
+      if (loseForwardReply && ciphertextCalls === 1) {
+        pollsAfterSubmit += 1;
+        if (pollsAfterSubmit === 1) {
+          return jsonResponse({ ...fanOutStatusResponse(), remote_state: "delivery_unknown",
+            expires_at: new Date(nowMs + 90_000).toISOString() });
+        }
+        return jsonResponse(fanOutPartialResponse());
+      }
       return jsonResponse(fanOutStatusResponse());
     }
     if (endpoint === "/api/v1/nodes/credentials/pending/fanout-1/fan-out/pubkeys") {
@@ -243,7 +252,9 @@ function setupFanOutPage() {
     if (endpoint === "/api/v1/nodes/credentials/pending/fanout-1/fan-out/ciphertexts") {
       ciphertextCalls += 1;
       if (ciphertextCalls === 1) {
-        return jsonResponse(fanOutPartialResponse());
+        const response = fanOutPartialResponse();
+        if (loseForwardReply) response.remote_state = "delivery_unknown";
+        return jsonResponse(response);
       }
       return jsonResponse({
         fanout_id: "fanout-1",
@@ -310,13 +321,18 @@ function setupFanOutPage() {
     document,
     storage,
     now: () => nowMs,
-    delay: async () => {},
+    delay: async () => {
+      if (loseForwardReply && ciphertextCalls === 1) {
+        expect(root.textContent).toContain("The credential may or may not have been installed");
+      }
+    },
   });
 
   return { calls, fetchMock, root, storage };
 }
 
 function setupPage(params: {
+  readonly afterUnknown?: "consumed" | "expired";
   readonly runtime?: RuntimeConfigFixture;
   readonly optOut?: boolean;
 }) {
@@ -367,22 +383,39 @@ function setupPage(params: {
       return jsonResponse(pubkeyResponse(Boolean(params.optOut)));
     }
     if (endpoint === "/api/v1/nodes/node-1/credentials/pending?include_history=true") {
-      return jsonResponse(pendingListResponse());
+      const list = pendingListResponse();
+      if (params.afterUnknown && calls.some((call) => call.init?.method === "POST")) {
+        const pending = list.pending_credentials[0]!;
+        pending.remote_state = "delivery_unknown";
+        if (clockMs > nowMs) {
+          if (params.afterUnknown === "consumed") pending.remote_state = "consumed";
+          else pending.expires_at = new Date(clockMs).toISOString();
+        }
+      }
+      return jsonResponse(list);
     }
     if (endpoint === "/api/v1/nodes/node-1/credentials/pending/pending-1/ciphertext") {
-      return jsonResponse({ delivery_status: "sent", remote_state: "consumed" });
+      return jsonResponse(params.afterUnknown
+        ? { delivery_status: "unknown", remote_state: "delivery_unknown" }
+        : { delivery_status: "sent", remote_state: "consumed" });
     }
     return jsonResponse({ message: `unexpected ${endpoint}`, error_code: 9999 }, 500);
   });
 
+  let clockMs = nowMs;
   bootCredentialAcceptPage(root, {
     fetch: fetchMock as unknown as typeof fetch,
     location: window.location,
     window,
     document,
     storage,
-    now: () => nowMs,
-    delay: async () => {},
+    now: () => clockMs,
+    delay: async () => {
+      if (params.afterUnknown) {
+        expect(root.textContent).toContain("The credential may or may not have been installed");
+        clockMs += 61_000;
+      }
+    },
   });
 
   return { calls, fetchMock, root, storage };
@@ -493,6 +526,18 @@ describe("standalone credential accept page", () => {
     );
   });
 
+  it.each(["consumed", "expired"] as const)("polls an unknown delivery until %s", async (outcome) => {
+    const { calls } = setupPage({ optOut: true, afterUnknown: outcome });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Accept" })).not.toBeDisabled());
+    const input = screen.getByLabelText("Credential value") as HTMLInputElement;
+    input.value = "fixture";
+    fireEvent.submit(input.closest("form")!);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Accept" })).not.toBeDisabled());
+    expect(screen.getByText(outcome === "consumed" ? "Stored" : "Delivery unknown")).toBeVisible();
+    expect(calls.filter((call) => call.url.includes("include_history"))).toHaveLength(3);
+    expect(calls.filter((call) => call.init?.method === "POST")).toHaveLength(1);
+  });
+
   it("allows org policy opt-out and sends opt-out integrity metadata", async () => {
     const { calls } = setupPage({
       runtime: runtimeConfig({ enabled: false, manifest_url: null }),
@@ -527,8 +572,8 @@ describe("standalone credential accept page", () => {
     );
   });
 
-  it("retries failed fan-out targets with fresh scoped ciphertexts without leaking plaintext", async () => {
-    const { calls, root, storage } = setupFanOutPage();
+  it.each([false, true])("retries failed fan-out targets with fresh scoped ciphertexts after forward reply loss=%s", async (lostReply) => {
+    const { calls, root, storage } = setupFanOutPage(lostReply);
     const secret = "fanout-secret-fixture";
 
     await waitFor(() => {

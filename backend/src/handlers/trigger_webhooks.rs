@@ -71,7 +71,6 @@ pub async fn receive_trigger(
         trigger_service::dispatch_webhook_event(
             state.db.clone(),
             state.encryption_keys.clone(),
-            state.http_client.clone(),
             trigger,
             *record,
             body,
@@ -209,7 +208,12 @@ mod tests {
             .await
             .expect("bind receiver");
         let address = listener.local_addr().expect("receiver address");
-        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve receiver") });
+        let origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
+        tokio::spawn(async move {
+            let _origin = origin;
+            axum::serve(listener, app).await.expect("serve receiver")
+        });
         (format!("http://{address}/hook"), count)
     }
 
@@ -244,6 +248,7 @@ mod tests {
                 None
             };
         let trigger = Trigger {
+            assistant_target_owner: None,
             secret_context_versions: Default::default(),
             source: Default::default(),
             setup_watch_id: None,
@@ -538,6 +543,8 @@ mod tests {
             .await
             .expect("bind slow receiver");
         let address = listener.local_addr().expect("slow receiver address");
+        let _origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
@@ -636,6 +643,8 @@ mod tests {
             .await
             .expect("bind failing trigger receiver");
         let address = listener.local_addr().expect("failing trigger address");
+        let _origin =
+            crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
         tokio::spawn(async move {
             axum::serve(listener, app)
                 .await

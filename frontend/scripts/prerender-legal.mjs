@@ -23,7 +23,7 @@ function escapeHtml(value) {
   })[char]);
 }
 
-for (const slug of ["privacy", "terms"]) {
+for (const slug of ["privacy", "terms", "data-deletion"]) {
   const markdown = await fs.readFile(path.join(root, "public", "legal", `${slug}.md`), "utf8");
   const frontMatter = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n/);
   if (!frontMatter) throw new Error(`Missing front matter in legal/${slug}.md`);

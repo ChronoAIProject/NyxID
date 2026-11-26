@@ -14,7 +14,8 @@ pub(super) async fn start(
 ) -> AppResult<Response> {
     let db = state.db.clone();
     let billing = state.billing.clone();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_cleanup(async move {
+        let shutdown = crate::services::shutdown::process();
         let mut stats = ConnectionUsageStats::default();
         let started = std::time::Instant::now();
         let opened = async {
@@ -35,15 +36,26 @@ pub(super) async fn start(
             Ok::<_, AppError>((client, upstream))
         };
         if let Ok(Ok((mut client, mut upstream))) =
-            tokio::time::timeout(std::time::Duration::from_secs(10), opened).await
+            tokio::select! {
+                biased;
+                () = shutdown.stopped() => Ok(Err(AppError::ClientDisconnected)),
+                result = tokio::time::timeout(std::time::Duration::from_secs(10), opened) => result,
+            }
         {
             let work = relay(&db, &binding, &mut client, &mut upstream, &mut stats);
             tokio::select! {
+                () = shutdown.stopped() => {},
                 _ = work => {},
                 _ = async { if let Some(lease) = &lease { lease.cancelled().await } else { std::future::pending().await } } => {},
             }
-            let _ = client.shutdown().await;
-            let _ = upstream.shutdown().await;
+            if shutdown.is_stopped() {
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+                    let _ = tokio::join!(client.shutdown(), upstream.shutdown());
+                }).await;
+            } else {
+                let _ = client.shutdown().await;
+                let _ = upstream.shutdown().await;
+            }
         }
         stats.duration = started.elapsed();
         let mut event = serde_json::json!({"connection_id":binding.connection, "duration_secs": stats.duration.as_secs(),

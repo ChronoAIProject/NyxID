@@ -454,7 +454,7 @@ async fn flag_is_default_off_activation_is_blocked_and_disabling_works() {
     );
     security_readiness_service::ready_test_replica(&db).await;
     assert!(
-        security_readiness_service::require_activation(&db, REGISTRY_READINESS)
+        security_readiness_service::require_flag_enable(&db, REGISTRY_READINESS)
             .await
             .is_ok()
     );
@@ -1000,4 +1000,70 @@ async fn route_only_service_is_never_callable_through_proxy_or_mcp() {
     .unwrap();
     assert!(catalog.services.iter().any(|s| s.service_id == connection));
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_update_enable_and_routes_serve_overlap_but_require_recorded_supported_capabilities()
+ {
+    use crate::models::{security_capability_activation as activation, security_replica};
+    use crate::services::security_readiness_service as readiness;
+    for capability in [REGISTRY_READINESS, EXECUTION_READINESS, BILLING_READINESS] {
+        let (db, _, actor) = setup().await;
+        readiness::ready_test_replica(&db).await;
+        readiness::stop_test_replica(&db).await;
+        let sibling = readiness::overlapping_test_replica(&db).await;
+        let mut row = model(&db, &actor).await;
+        let input = |row: &PlatformModel, enabled| ModelUpdate {
+            expected_revision: row.revision,
+            display_name: row.display_name.clone(),
+            description: row.description.clone(),
+            capabilities: row.capabilities.clone(),
+            lifecycle: Lifecycle::Active,
+            enabled,
+            billing_service_id: None,
+        };
+        row = update(&db, &actor, &row.id, input(&row, false))
+            .await
+            .unwrap();
+        row = update(&db, &actor, &row.id, input(&row, true))
+            .await
+            .unwrap();
+        let credential = credential(&db).await;
+        row = set_routes(&db, &actor, &row.id, row.revision, vec![route(&credential)])
+            .await
+            .unwrap();
+        assert!(row.enabled && row.lifecycle == Lifecycle::Active);
+        for case in ["unsupported", "never_recorded"] {
+            if case == "unsupported" {
+                readiness::remove_test_replica_capability(&db, &sibling, capability).await;
+            } else {
+                db.collection::<security_replica::SecurityReplica>(
+                    security_replica::COLLECTION_NAME,
+                )
+                .replace_one(doc! {"_id": &sibling.id}, &sibling)
+                .await
+                .unwrap();
+                db.collection::<Document>(activation::COLLECTION_NAME)
+                    .delete_one(
+                        doc! {"record_kind":activation::RECORD_KIND,"capability":capability},
+                    )
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                matches!(
+                    update(&db, &actor, &row.id, input(&row, true)).await,
+                    Err(AppError::SecurityReadinessUnavailable)
+                ),
+                "{capability}/{case}"
+            );
+            assert!(
+                matches!(
+                    set_routes(&db, &actor, &row.id, row.revision, vec![route(&credential)]).await,
+                    Err(AppError::SecurityReadinessUnavailable)
+                ),
+                "{capability}/{case}"
+            );
+        }
+    }
 }

@@ -1,12 +1,41 @@
+const LANGUAGE_ALIASES: Record<string, string> = {
+  cmn: "zh",
+  iw: "he",
+  in: "id",
+  ji: "yi",
+  no: "nb",
+  tl: "fil",
+};
+
 type Tag = { language: string; script?: string; region?: string };
 
 function parse(value: string): Tag {
   const [language = "", ...rest] = value.replace(/_/g, "-").toLowerCase().split("-");
   return {
-    language,
+    language: LANGUAGE_ALIASES[language] ?? language,
     script: rest.find((part) => /^[a-z]{4}$/.test(part)),
     region: rest.find((part) => /^([a-z]{2}|\d{3})$/.test(part)),
   };
+}
+
+/** Saved choices may use a recognizer alias, but never silently change region. */
+export function supportedDictationLocale(
+  preferred: string,
+  supported: readonly string[],
+) {
+  const wanted = parse(preferred);
+  return supported.find((value) => {
+    const candidate = parse(value);
+    return (
+      (candidate.language === wanted.language ||
+        (["hk", "mo"].includes(wanted.region ?? "") &&
+          [candidate.language, wanted.language].every((language) =>
+            ["zh", "yue"].includes(language),
+          ))) &&
+      candidate.region === wanted.region &&
+      (!candidate.script || !wanted.script || candidate.script === wanted.script)
+    );
+  });
 }
 
 // Chinese recognizers are keyed by region, so a script-only phone language
@@ -33,9 +62,34 @@ export function dictationLocale(
   const exact = candidates.find(
     ({ value }) => value.replace(/_/g, "-").toLowerCase() === normalized,
   );
-  if (exact) return exact.value;
+  if (
+    exact &&
+    !(wanted.language === "zh" && ["hk", "mo"].includes(wanted.region ?? ""))
+  ) return exact.value;
+  // Apple's zh-HK recognizer is Cantonese; Android spells it yue.
+  if (
+    ["zh", "yue"].includes(wanted.language) &&
+    ["hk", "mo"].includes(wanted.region ?? "")
+  ) {
+    const cantonese = candidates.find(
+      ({ tag }) =>
+        (tag.language === "yue" || tag.language === "zh") &&
+        tag.region === wanted.region,
+    );
+    const yue = candidates.find(
+      ({ tag }) => tag.language === "yue" && tag.region === wanted.region,
+    );
+    if (yue || cantonese) return (yue ?? cantonese)!.value;
+    wanted.language = "zh";
+    wanted.script = "hant";
+    return candidates.find(
+      ({ tag }) => tag.language === "zh" &&
+        (tag.script === "hant" || ["tw", "hk", "mo"].includes(tag.region ?? "")),
+    )?.value;
+  }
   const language = candidates.filter(
-    ({ tag }) => tag.language === wanted.language,
+    ({ tag }) => tag.language === wanted.language &&
+      (!tag.script || !wanted.script || tag.script === wanted.script),
   );
   const inRegion = (region?: string) =>
     region ? language.find(({ tag }) => tag.region === region) : undefined;

@@ -4,10 +4,18 @@ use super::{
 };
 use crate::errors::{AppError, AppResult};
 
+#[path = "channel_reply_format.rs"]
+mod format;
+
+#[cfg(test)]
+#[path = "channel_reply_format_tests.rs"]
+pub(crate) mod format_tests;
+
 /// Fully plan before the first provider effect. Routing metadata is copied;
 /// interactive content cannot be duplicated across multiple messages.
 pub fn text_parts(reply: &OutboundReply, platform: &str) -> AppResult<Vec<OutboundReply>> {
-    if commonmark(reply.metadata.as_ref()) && matches!(platform, "telegram" | "telegram-new") {
+    if commonmark(reply.metadata.as_ref()) && supports_commonmark(platform) {
+        let telegram = matches!(platform, "telegram" | "telegram-new");
         if reply
             .metadata
             .as_ref()
@@ -27,26 +35,46 @@ pub fn text_parts(reply: &OutboundReply, platform: &str) -> AppResult<Vec<Outbou
                 "Reply exceeds the 64-part limit".into(),
             ));
         }
-        if parts.len() > 1
-            && (!reply.attachments.is_empty()
-                || reply
-                    .metadata
-                    .as_ref()
-                    .is_some_and(|m| m.get("reply_markup").is_some()))
-        {
+        let interactive = if telegram {
+            reply
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.get("reply_markup").is_some())
+        } else {
+            has_structured_content(reply)
+        };
+        if parts.len() > 1 && (!reply.attachments.is_empty() || interactive) {
             return Err(AppError::ValidationError(
                 "Long interactive replies require a separate complete text reply".into(),
             ));
         }
+        if !telegram && parts.is_empty() {
+            if reply.attachments.is_empty() && !interactive {
+                return Err(AppError::ValidationError(
+                    "CommonMark produced no display text".into(),
+                ));
+            }
+            parts.push(OutboundReply {
+                text: None,
+                attachments: vec![],
+                metadata: None,
+                reply_to_platform_message_id: None,
+            });
+        }
         for part in &mut parts {
-            let entities = part.metadata.take().unwrap_or_default()["entities"].clone();
+            // The opt-in was consumed. Keep routing and controls, and let the
+            // planner own the renderer version and native formatting fields.
             let mut metadata = reply
                 .metadata
-                .clone()
-                .unwrap_or_else(|| serde_json::json!({}));
-            metadata["text_format"] = "telegram_entities".into();
-            metadata["entities"] = entities;
-            part.metadata = Some(metadata);
+                .as_ref()
+                .and_then(|m| m.as_object())
+                .cloned()
+                .unwrap_or_default();
+            metadata.remove("text_format");
+            if let Some(serde_json::Value::Object(format)) = part.metadata.take() {
+                metadata.extend(format);
+            }
+            part.metadata = (!metadata.is_empty()).then_some(serde_json::Value::Object(metadata));
             part.attachments = reply.attachments.clone();
             part.reply_to_platform_message_id = reply.reply_to_platform_message_id.clone();
         }
@@ -90,6 +118,30 @@ pub fn text_parts(reply: &OutboundReply, platform: &str) -> AppResult<Vec<Outbou
 /// Explicit opt-in: public relay callers retain their existing syntax otherwise.
 pub fn commonmark(metadata: Option<&serde_json::Value>) -> bool {
     metadata.is_some_and(|m| m["text_format"] == "commonmark")
+}
+
+fn relay_renderer(platform: &str) -> bool {
+    matches!(platform, "lark" | "feishu" | "discord")
+}
+
+pub fn supports_commonmark(platform: &str) -> bool {
+    matches!(platform, "telegram" | "telegram-new") || relay_renderer(platform)
+}
+
+pub fn uses_relay_renderer(platform: &str, metadata: Option<&serde_json::Value>) -> bool {
+    relay_renderer(platform) && commonmark(metadata)
+}
+
+/// Edits address one provider message. Rich sends also need a single text
+/// component so their adapter can keep the controls and attachments together.
+pub fn single_text_part(reply: &OutboundReply, platform: &str) -> AppResult<OutboundReply> {
+    let mut parts = text_parts(reply, platform)?;
+    if parts.len() != 1 {
+        return Err(AppError::ValidationError(
+            "The text must fit one platform message".into(),
+        ));
+    }
+    Ok(parts.remove(0))
 }
 
 pub fn assistant_metadata(platform: &str) -> Option<serde_json::Value> {
@@ -153,16 +205,52 @@ pub fn ordinary(
 /// parsing fragments of Markdown. One entity can continue across messages;
 /// offsets and lengths are clipped in UTF-16 units for each part.
 pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<OutboundReply> {
+    assistant_parts_impl(
+        text,
+        platform,
+        overflow_url,
+        renderer_version(platform).is_some(),
+    )
+}
+
+pub fn renderer_version(platform: &str) -> Option<u32> {
+    matches!(platform, "discord" | "whatsapp").then_some(2)
+}
+
+pub fn recorded_assistant_parts(
+    text: &str,
+    platform: &str,
+    overflow_url: &str,
+    version: Option<u32>,
+) -> AppResult<Vec<OutboundReply>> {
+    match version {
+        // Replay only: v1 Discord/WhatsApp rendering finishes already-recorded plans.
+        None | Some(1) => Ok(assistant_parts_impl(text, platform, overflow_url, false)),
+        Some(2) => Ok(assistant_parts(text, platform, overflow_url)),
+        _ => Err(AppError::Conflict("Multipart delivery plan changed".into())),
+    }
+}
+
+fn assistant_parts_impl(
+    text: &str,
+    platform: &str,
+    overflow_url: &str,
+    modern: bool,
+) -> Vec<OutboundReply> {
     let telegram = matches!(platform, "telegram" | "telegram-new");
     let markdown = matches!(platform, "discord" | "slack" | "whatsapp");
-    let (mut body, mut entities) = if telegram || markdown {
+    let (mut body, mut entities) = if modern {
+        format::parse(text)
+    } else if telegram || markdown {
         telegram_text(text)
     } else {
         (text.to_owned(), Vec::new())
     };
     let limit = TextLimit::for_platform(platform);
     let slack_plain = platform == "slack" && body.contains('`');
-    if telegram || markdown {
+    if modern {
+        format::expand_links(&mut body, &mut entities, limit, platform);
+    } else if telegram || markdown {
         expand_long_links(&mut body, &mut entities, limit, markdown, slack_plain);
     }
     let mut rest = body.as_str();
@@ -171,10 +259,13 @@ pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<Ou
     while !rest.is_empty() && parts.len() <= MAX_REPLY_PARTS {
         let mut budget = limit.budget();
         let (chunk, rendered, local) = loop {
-            let minimum = if telegram {
+            let minimum = if telegram || modern {
                 entities
                     .iter()
                     .filter_map(|e| {
+                        if modern && e["type"] != "url" && e["type"] != "text_link" {
+                            return None;
+                        }
                         let start = e["offset"].as_u64()? as usize;
                         let size = e["length"].as_u64()? as usize;
                         (start <= offset && size <= budget)
@@ -189,10 +280,13 @@ pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<Ou
             let length = chunk.encode_utf16().count();
             // Keep a fitting entity whole. Oversized spans are intentionally
             // represented by independent continuation entities in each part.
-            if telegram
+            if (telegram || modern)
                 && let Some(start) = entities
                     .iter()
                     .filter_map(|e| {
+                        if modern && e["type"] != "url" && e["type"] != "text_link" {
+                            return None;
+                        }
                         let start = e["offset"].as_u64()? as usize;
                         let size = e["length"].as_u64()? as usize;
                         (start > offset
@@ -211,7 +305,9 @@ pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<Ou
                 budget = (budget / 2).max(8);
                 continue;
             }
-            let mut rendered = if markdown && !slack_plain {
+            let mut rendered = if modern {
+                format::render(chunk, &local, platform)
+            } else if markdown && !slack_plain {
                 render_markdown(chunk, &local, platform)
             } else {
                 chunk.to_owned()
@@ -241,9 +337,13 @@ pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<Ou
                 // scalar. Retain the link; long/nested targets were expanded.
                 let links: Vec<_> = local
                     .into_iter()
-                    .filter(|e| e["type"] == "text_link")
+                    .filter(|e| e["type"] == "text_link" || (modern && e["type"] == "url"))
                     .collect();
-                let rendered = render_markdown(chunk, &links, platform);
+                let rendered = if modern {
+                    format::render(chunk, &links, platform)
+                } else {
+                    render_markdown(chunk, &links, platform)
+                };
                 break (chunk, rendered, links);
             }
             budget = next;
@@ -275,6 +375,12 @@ pub fn assistant_parts(text: &str, platform: &str, overflow_url: &str) -> Vec<Ou
             metadata: Some(if telegram { serde_json::json!({"entities":[],"text_format":"telegram_entities","text_overflow":true}) } else { serde_json::json!({"text_overflow":true}) }),
         });
     }
+    if modern {
+        for part in &mut parts {
+            part.metadata.get_or_insert_with(|| serde_json::json!({}))["nyxid_text_renderer"] =
+                2.into();
+        }
+    }
     parts
 }
 
@@ -285,7 +391,7 @@ fn expand_long_links(
     markdown: bool,
     expand_all: bool,
 ) {
-    let mut links = entities
+    let links = entities
         .iter()
         .enumerate()
         .filter(|(index, e)| {
@@ -315,6 +421,15 @@ fn expand_long_links(
         })
         .map(|(_, link)| link.clone())
         .collect::<Vec<_>>();
+    expand_selected_links(body, entities, links, false);
+}
+
+fn expand_selected_links(
+    body: &mut String,
+    entities: &mut Vec<serde_json::Value>,
+    mut links: Vec<serde_json::Value>,
+    preserve_urls: bool,
+) {
     links.sort_by_key(|e| std::cmp::Reverse(e["offset"].as_u64().unwrap_or(0)));
     for planned in links {
         // Inner expansion changes an enclosing link's length. Reload it before
@@ -364,6 +479,9 @@ fn expand_long_links(
             } else if start + length >= end {
                 entity["length"] = (length + added).into();
             }
+        }
+        if preserve_urls && !target.is_empty() {
+            entities.push(serde_json::json!({"type":"url", "offset":if label_is_target { link["offset"].as_u64().unwrap_or(0) } else {end + 2}, "length":target.encode_utf16().count(), "url":target}));
         }
     }
 }

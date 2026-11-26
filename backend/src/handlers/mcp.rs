@@ -110,10 +110,11 @@ pub async fn get_mcp_config(
         mcp_service::NodeScope::Allowed(auth_user.allowed_node_ids.as_slice())
     };
 
-    let chat = crate::services::assistant_acknowledgement_service::for_key_with_access(
+    let chat = crate::services::assistant_acknowledgement_service::chat_for_key_version(
         &state.db,
         &user_id,
         auth_user.api_key_id.as_deref(),
+        auth_user.thread_key_version(),
         auth_user.org_agent_access.as_ref(),
     )
     .await

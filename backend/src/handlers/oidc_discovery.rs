@@ -176,6 +176,39 @@ pub async fn openai_apps_challenge(State(state): State<AppState>) -> Response {
     }
 }
 
+fn native_app_link_paths() -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct ClaimedPaths {
+        paths: Vec<String>,
+    }
+    serde_json::from_str::<ClaimedPaths>(include_str!("../../../shared/native-app-links.json"))
+        .expect("checked native app link manifest")
+        .paths
+}
+
+/// Public Digital Asset Links. Identity is deployment configuration; serving
+/// hosts use the same app and the mobile build attaches the shared path list.
+pub async fn android_asset_links(State(state): State<AppState>) -> Response {
+    let Some(package) = state.config.android_app_package.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if state.config.android_app_sha256_cert_fingerprints.is_empty() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    (
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "public, max-age=300"),
+        ],
+        Json(serde_json::json!([{
+            "relation": ["delegate_permission/common.handle_all_urls"],
+            "target": { "namespace": "android_app", "package_name": package,
+                "sha256_cert_fingerprints": state.config.android_app_sha256_cert_fingerprints }
+        }])),
+    )
+        .into_response()
+}
+
 /// GET /.well-known/apple-app-site-association
 ///
 /// Apple fetches this file without authentication. Keep the response
@@ -184,48 +217,15 @@ pub async fn openai_apps_challenge(State(state): State<AppState>) -> Response {
 /// from the existing APNs configuration; without it, claiming links would be
 /// worse than returning a cacheable 404.
 pub async fn apple_app_site_association(State(state): State<AppState>) -> Response {
-    let team_id = state
-        .config
-        .apns_team_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
-    let bundle_id = state
-        .config
-        .apns_topic
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
-    let (Some(team_id), Some(bundle_id)) = (team_id, bundle_id) else {
+    let Some(app_id) = crate::config::mobile_app_links::apple_app_id(&state.config) else {
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    let app_id = format!("{team_id}.{bundle_id}");
     let body = serde_json::json!({
         "applinks": {
             "details": [{
                 "appID": app_id,
-                "paths": [
-                    "/login/device",
-                    "/login/agent-key",
-                    "/assistant/machines",
-                    "/assistant/machines/*",
-                    "/chat",
-                    "/chat/*",
-                    "/groups/*",
-                    "/search",
-                    "/recents",
-                    "/automations",
-                    "/automations/*",
-                    "/assistant/automations",
-                    "/agents",
-                    "/agents/*",
-                    "/plugins",
-                    "/services",
-                    "/activity",
-                    "/account",
-                    "/account/*",
-                    "/terms",
-                    "/privacy"
-                ]
+                "paths": native_app_link_paths()
             }]
         }
     });
@@ -403,9 +403,17 @@ mod tests {
 
     #[tokio::test]
     async fn apple_app_site_association_is_not_found_without_apns_identity() {
-        let state = crate::test_utils::test_app_state_no_db().await;
-        let response = apple_app_site_association(State(state)).await;
-        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        for (team, bundle) in [
+            (None, None),
+            (Some("TEAM123"), Some(" ")),
+            (Some("\t"), Some("com.example.nyxid")),
+        ] {
+            state.config.apns_team_id = team.map(str::to_owned);
+            state.config.apns_topic = bundle.map(str::to_owned);
+            let response = apple_app_site_association(State(state.clone())).await;
+            assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test]
@@ -607,6 +615,49 @@ mod tests {
         assert_eq!(
             value["bearer_methods_supported"],
             serde_json::json!(["header"])
+        );
+    }
+    #[tokio::test]
+    async fn android_assetlinks_identity_cache_and_unconfigured() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        assert_eq!(
+            super::android_asset_links(State(state.clone()))
+                .await
+                .status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+        state.config.android_app_package = Some("fun.chronoai.nyxid".into());
+        assert_eq!(
+            super::android_asset_links(State(state.clone()))
+                .await
+                .status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+        state.config.android_app_sha256_cert_fingerprints =
+            vec![["AB"; 32].join(":"), ["CD"; 32].join(":")];
+        let response = super::android_asset_links(State(state)).await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=300"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 16384)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            value[0]["relation"],
+            serde_json::json!(["delegate_permission/common.handle_all_urls"])
+        );
+        assert_eq!(value[0]["target"]["namespace"], "android_app");
+        assert_eq!(value[0]["target"]["package_name"], "fun.chronoai.nyxid");
+        assert_eq!(
+            value[0]["target"]["sha256_cert_fingerprints"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
         );
     }
 }

@@ -194,37 +194,37 @@ impl RealtimeLlmUsageCollector {
         }
     }
 
-    pub fn observe_downstream_text(&mut self, text: &str) {
+    pub fn observe_downstream_text(&mut self, text: &str) -> bool {
         if !self.enabled {
-            return;
+            return false;
         }
 
         self.add_segment_bytes(text.len());
         let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-            return;
+            return false;
         };
         let Some(event_type) = value.get("type").and_then(serde_json::Value::as_str) else {
-            return;
+            return false;
         };
 
         if event_type != "response.done" {
             if event_type.starts_with("response.") {
                 self.segment_has_response_activity = true;
             }
-            return;
+            return false;
         }
 
         let segment_was_active = self.segment_has_response_activity;
         self.segment_has_response_activity = true;
         let Some(done) = extract_realtime_response_done(&value) else {
-            return;
+            return false;
         };
         if !self.seen_response_ids.insert(done.response_id) {
             self.segment_bytes = self
                 .segment_bytes
                 .saturating_sub(i64::try_from(text.len()).unwrap_or(i64::MAX));
             self.segment_has_response_activity = segment_was_active;
-            return;
+            return false;
         }
 
         match done.usage {
@@ -240,6 +240,19 @@ impl RealtimeLlmUsageCollector {
 
         self.segment_bytes = 0;
         self.segment_has_response_activity = false;
+        true
+    }
+
+    /// Snapshot only completed arrival segments; the unfinished tail is added
+    /// by normal close, never guessed by crash recovery.
+    pub(crate) fn completed_prefix(&self) -> RealtimeLlmUsageSummary {
+        RealtimeLlmUsageSummary {
+            collection_enabled: self.enabled,
+            reported_usage: self.reported_usage.clone().finalize(),
+            uncovered_bytes: self.uncovered_bytes,
+            reported_response_count: self.reported_response_count,
+            estimated_response_count: self.estimated_response_count,
+        }
     }
 
     pub fn observe_downstream_binary(&mut self, bytes: usize) {
@@ -439,6 +452,60 @@ pub fn force_stream_options_include_usage(body: &mut serde_json::Value) -> bool 
             );
             true
         }
+    }
+}
+
+pub(crate) fn identity_encoding_header() -> (String, String) {
+    ("accept-encoding".into(), "identity".into())
+}
+
+pub(crate) fn warn_http_usage_encoding(service_id: &str, response: &reqwest::Response) {
+    warn_usage_encoding(
+        service_id,
+        response.status().as_u16(),
+        response
+            .headers()
+            .get_all(http::header::CONTENT_ENCODING)
+            .iter()
+            .map(|value| value.to_str().unwrap_or("<invalid>")),
+    );
+}
+
+pub(crate) fn warn_node_usage_encoding(
+    service_id: &str,
+    status: u16,
+    headers: &[(String, String)],
+) {
+    warn_usage_encoding(
+        service_id,
+        status,
+        headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-encoding"))
+            .map(|(_, value)| value.as_str()),
+    );
+}
+
+fn warn_usage_encoding<'a>(service_id: &str, status: u16, values: impl Iterator<Item = &'a str>) {
+    if let Some(coding) = values
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .find(|coding| !coding.eq_ignore_ascii_case("identity"))
+    {
+        let content_encoding = if coding.len() <= 64
+            && !coding.is_empty()
+            && coding.bytes().all(|b| b.is_ascii_graphic())
+        {
+            coding
+        } else {
+            "<invalid>"
+        };
+        tracing::warn!(
+            service_id,
+            status,
+            content_encoding,
+            "Encoded response received for usage capture"
+        );
     }
 }
 
@@ -737,12 +804,39 @@ pub struct BoundedUsageEvents {
 }
 impl BoundedUsageEvents {
     pub fn push(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            if let Some(Ok(event)) = self.decoder.push_byte(byte)
-                && let Some((usage, mode)) =
-                    extract_reported_usage_from_sse_event(event.event_type.as_deref(), &event.data)
-            {
-                self.accumulator.observe(usage, mode);
+        self.push_with(bytes, true, |_| {});
+    }
+    pub(crate) fn push_observed(
+        &mut self,
+        bytes: &[u8],
+        capture_usage: bool,
+    ) -> Vec<ObservedUsageEvent> {
+        let mut events = Vec::new();
+        self.push_with(bytes, capture_usage, |event| events.push(event));
+        events
+    }
+    fn push_with(
+        &mut self,
+        bytes: &[u8],
+        capture_usage: bool,
+        mut observe: impl FnMut(ObservedUsageEvent),
+    ) {
+        for event in self.decoder.push(bytes) {
+            match event {
+                Ok(event) => {
+                    if let Ok(value) = serde_json::from_str(&event.data) {
+                        if capture_usage
+                            && let Some((usage, mode)) = extract_reported_usage_from_value(
+                                event.event_type.as_deref(),
+                                &value,
+                            )
+                        {
+                            self.accumulator.observe(usage, mode);
+                        }
+                        observe(Ok((event.event_type, value)));
+                    }
+                }
+                Err(error) => observe(Err(error)),
             }
         }
     }
@@ -758,6 +852,9 @@ impl BoundedUsageEvents {
         })
     }
 }
+
+pub(crate) type ObservedUsageEvent =
+    Result<(Option<String>, serde_json::Value), super::sse_parser::EventDecodeError>;
 
 /// Bounded callers supply already-captured bodies; no additional body reads.
 pub fn usage_from_body(body: &[u8], path: &str, successful: bool) -> Option<ReportedLlmUsage> {
@@ -833,12 +930,19 @@ pub fn extract_reported_usage_from_sse_event(
     }
 
     let value = serde_json::from_str::<serde_json::Value>(data).ok()?;
+    extract_reported_usage_from_value(event_type, &value)
+}
+
+pub(crate) fn extract_reported_usage_from_value(
+    event_type: Option<&str>,
+    value: &serde_json::Value,
+) -> Option<(ReportedLlmUsage, UsageAggregationMode)> {
     let image_event = event_type.or_else(|| value.get("type").and_then(serde_json::Value::as_str));
     if matches!(
         image_event,
         Some("image_generation.completed" | "image_edit.completed")
     ) {
-        let mut usage = extract_reported_usage(&value).unwrap_or_default();
+        let mut usage = extract_reported_usage(value).unwrap_or_default();
         usage.image_output_tokens = usage.completion_tokens;
         usage.images = 1;
         usage.completed_image_index = Some(
@@ -850,7 +954,7 @@ pub fn extract_reported_usage_from_sse_event(
         );
         return Some((usage, UsageAggregationMode::Delta));
     }
-    let usage = extract_reported_usage(&value)?;
+    let usage = extract_reported_usage(value)?;
 
     let mode = match event_type {
         Some("message_start")
@@ -858,7 +962,7 @@ pub fn extract_reported_usage_from_sse_event(
         | Some("response.completed")
         | Some("response.incomplete") => UsageAggregationMode::Snapshot,
         Some("usage.delta") | Some("response.usage.delta") => UsageAggregationMode::Delta,
-        _ if has_explicit_total(&value) => UsageAggregationMode::Snapshot,
+        _ if has_explicit_total(value) => UsageAggregationMode::Snapshot,
         _ => return None,
     };
 

@@ -1,12 +1,13 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { ServiceIcon } from "../../components/ServiceIcon";
 import { useNativeSheetDismiss } from "../../components/workspace/useNativeSheetDismiss";
 import { useRef, useState } from "react";
 import {
   FlatList,
   Keyboard,
-  KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,6 +15,7 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
 } from "react-native";
 import {
   Check,
@@ -23,6 +25,7 @@ import {
   X,
 } from "lucide-react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
+import { KeyboardViewport } from "../../components/workspace/KeyboardViewport";
 import { SkeletonRows } from "../../components/Skeleton";
 import {
   SettingsGroup,
@@ -56,19 +59,36 @@ const GUEST_LEVELS: {
 }[] = [
   {
     value: "read",
-    label: "Read",
-    description: "Guests can use read-only operations for this service.",
+    get label() {
+      return translateApp("Read");
+    },
+    get description() {
+      return translateApp(
+        "Guests can use read-only operations for this service.",
+      );
+    },
   },
   {
     value: "use",
-    label: "Use",
-    description:
-      "Guests can look things up, create and act, but cannot change or delete existing content.",
+    get label() {
+      return translateApp("Use");
+    },
+    get description() {
+      return translateApp(
+        "Guests can look things up, create and act, but cannot change or delete existing content.",
+      );
+    },
   },
   {
     value: "all",
-    label: "All granted",
-    description: "Guests can use all operations already granted to this agent.",
+    get label() {
+      return translateApp("All granted");
+    },
+    get description() {
+      return translateApp(
+        "Guests can use all operations already granted to this agent.",
+      );
+    },
   },
 ];
 const guestLabel = (level: GuestLevel) =>
@@ -91,6 +111,7 @@ type Props = {
 
 /** Editing is local to each presentation; dismissing never mutates grants. */
 export function AgentPermissionsField(props: Props) {
+  useAppLanguage();
   const [editing, setEditing] = useState(false);
   const labels = new Map(props.options.map((row) => [row.value, row.label]));
   const count = props.value.services.length;
@@ -104,27 +125,34 @@ export function AgentPermissionsField(props: Props) {
     Keyboard.dismiss();
     setEditing(true);
   };
-  const hint = props.readOnly ? "Shows the granted permissions" : "Edits permissions";
+  const hint = props.readOnly ? translateApp("Shows the granted permissions")
+    : translateApp("Edits permissions");
   return (
     <>
-      <SettingsGroup inset={false} title={props.title ?? "Service permissions"}>
+      <SettingsGroup inset={false} title={props.title ?? translateApp("Service permissions")}>
         <SettingsRow
-          label="Services"
-          value={`${count} ${count === 1 ? "service" : "services"} selected`}
+          label={translateApp("Services")}
+          value={(count === 1 ? translateApp("{{count}} service selected", { count: count }) : translateApp("{{count}} services selected", { count: count }))}
           detail={
             count
-              ? `${preview}${count > 2 ? ` +${count - 2} more` : ""}`
-              : "No service access. Choose only what this agent needs."
+              ? (count > 2 ? translateApp("{{preview}} +{{count}} more", { preview: preview, count: count - 2}) : preview)
+              : translateApp(
+                  "No service access. Choose only what this agent needs.",
+                )
           }
-          accessibilityLabel={props.readOnly ? "View permissions" : "Edit permissions"}
+          accessibilityLabel={props.readOnly ? translateApp("View permissions")
+              : translateApp("Edit permissions")
+          }
           accessibilityHint={hint}
           disabled={blocked}
           onPress={open}
         />
         {(props.allowAccountRead ?? true) && (
           <SettingsRow
-            label="Account information"
-            value={props.value.account_read ? "Allowed" : "Off"}
+            label={translateApp("Account information")}
+            value={props.value.account_read ? translateApp("Allowed")
+                : translateApp("Off")
+            }
             accessibilityHint={hint}
             disabled={blocked}
             onPress={open}
@@ -152,6 +180,7 @@ export function AgentPermissionsSheet({
   onSave,
   onClose,
 }: Props & { onClose: () => void }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const sheet = useNativeSheetDismiss(onClose);
   const [draft, setDraft] = useState<AgentPermissions>(() => ({
@@ -160,11 +189,13 @@ export function AgentPermissionsSheet({
     guest_access: { ...value.guest_access },
   }));
   const [query, setQuery] = useState("");
+  const { fontScale } = useWindowDimensions();
+  const [compactSearch, setCompactSearch] = useState(false);
   const [selectedOnly, setSelectedOnly] = useState(false);
   const [guestService, setGuestService] = useState<ServiceOption>();
   const [saving, setSaving] = useState(false);
   const [failedSave, setFailedSave] = useState(false);
-  const [unexpectedError, setUnexpectedError] = useState<string>();
+  const [unexpectedError, setUnexpectedError] = useLocalizedState<string>();
   const savingRef = useRef(false);
   const blocked = disabled || readOnly || saving;
   const known = new Set(options.map((row) => row.value));
@@ -179,7 +210,7 @@ export function AgentPermissionsSheet({
   const search = query.trim().toLocaleLowerCase();
   const filtered = rows.filter(
     (row) =>
-      (!selectedOnly || draft.services.includes(row.value)) &&
+      (compactSearch || !selectedOnly || draft.services.includes(row.value)) &&
       `${row.label} ${row.detail ?? ""} ${row.value}`
         .toLocaleLowerCase()
         .includes(search),
@@ -209,9 +240,9 @@ export function AgentPermissionsSheet({
       else setFailedSave(true);
     } catch (cause) {
       setUnexpectedError(
-        cause instanceof Error
+        () => (cause instanceof Error
           ? cause.message
-          : "Could not save permissions. Try again.",
+          : translateApp("Could not save permissions. Try again.")),
       );
       setFailedSave(true);
     } finally {
@@ -223,21 +254,29 @@ export function AgentPermissionsSheet({
     <View style={styles.listHeader}>
       <Label muted>
         {readOnly
-          ? "Services granted to this specialist. These permissions are read only."
+          ? translateApp(
+              "Services granted to this specialist. These permissions are read only.",
+            )
           : creating
-            ? "Choose the services this specialist can use. Permissions take effect when you create the agent."
-            : "Choose the services this specialist can use. Changes take effect only when you save."}
+            ? translateApp(
+                "Choose the services this specialist can use. Permissions take effect when you create the agent.",
+              )
+            : translateApp(
+                "Choose the services this specialist can use. Changes take effect only when you save.",
+              )}
       </Label>
       {allowAccountRead && (
         <View style={[styles.account, { borderColor: colors.border }]}>
           <View style={styles.flex}>
-            <Label>Read account information</Label>
+            <Label>{translateApp("Read account information")}</Label>
             <Label muted>
-              Read account metadata through existing account tools.
+              {translateApp(
+                "Read account metadata through existing account tools.",
+              )}
             </Label>
           </View>
           <Switch
-            accessibilityLabel="Read account information"
+            accessibilityLabel={translateApp("Read account information")}
             value={draft.account_read}
             disabled={blocked}
             onValueChange={(account_read) => {
@@ -250,25 +289,37 @@ export function AgentPermissionsSheet({
       )}
       {allowGuestAccess && !!draft.services.length && (
         <Label muted>
-          Guest access controls how guests use a selected service in shared
-          conversations.
+          {translateApp(
+            "Guest access controls how guests use a selected service in shared conversations.",
+          )}
         </Label>
       )}
+    </View>
+  );
+
+  const listHeader = !compactSearch || connectionsLoading || connectionsError ? (
+    <View>
+      {!compactSearch && header}
       {connectionsLoading && (
-        <SkeletonRows rows={3} accessibilityLabel="Loading services" />
+        <SkeletonRows rows={3} accessibilityLabel={translateApp("Loading services")}
+        />
       )}
       {connectionsError && (
         <Notice
           message={
             creating
-              ? "Could not load available connections. You can create the agent without service access and add it later."
-              : "Could not load available connections. Existing grants are preserved. Cancel and reload the agent to try again."
+              ? translateApp(
+                  "Could not load available connections. You can create the agent without service access and add it later.",
+                )
+              : translateApp(
+                  "Could not load available connections. Existing grants are preserved. Cancel and reload the agent to try again.",
+                )
           }
           tone="error"
         />
       )}
     </View>
-  );
+  ) : null;
 
   return (
     <Modal
@@ -281,15 +332,18 @@ export function AgentPermissionsSheet({
     >
       <SafeAreaProvider>
         <SafeAreaView style={[styles.fill, { backgroundColor: colors.bg }]}>
-          <KeyboardAvoidingView
-            style={styles.fill}
-            behavior={Platform.OS === "ios" ? "padding" : "height"}
+          <KeyboardViewport
+            onViewportChange={(frame) =>
+              // Preserve two usable result rows after the fixed controls.
+              // Tall windows keep their ordinary filters and save footer.
+              setCompactSearch(Boolean(frame && frame.height < 420 * Math.max(1, fontScale)))
+            }
           >
             <View style={[styles.header, { borderColor: colors.border }]}>
               {guestService ? (
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel="Back to services"
+                  accessibilityLabel={translateApp("Back to services")}
                   style={styles.iconButton}
                   disabled={saving}
                   onPress={() => {
@@ -305,11 +359,12 @@ export function AgentPermissionsSheet({
                 accessibilityRole="header"
                 style={[styles.heading, { color: colors.textPrimary }]}
               >
-                {guestService ? "Guest access" : "Service permissions"}
+                {guestService ? translateApp("Guest access")
+                  : translateApp("Service permissions")}
               </Text>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Cancel permission changes"
+                accessibilityLabel={translateApp("Cancel permission changes")}
                 style={styles.iconButton}
                 disabled={saving}
                 onPress={close}
@@ -333,9 +388,9 @@ export function AgentPermissionsSheet({
                   {guestService.value}
                 </Label>
                 <Label muted>
-                  Choose what guests can do through this service. This does not
-                  add to the agent's own permissions. Actions requiring your
-                  approval still need it.
+                  {translateApp(
+                    "Choose what guests can do through this service. This does not add to the agent's own permissions. Actions requiring your approval still need it.",
+                  )}
                 </Label>
                 {GUEST_LEVELS.map((level) => {
                   const selected =
@@ -395,23 +450,33 @@ export function AgentPermissionsSheet({
                   >
                     <Search size={18} color={colors.textMuted} />
                     <TextInput
-                      accessibilityLabel="Search service permissions"
-                      placeholder="Search services"
+                      accessibilityLabel={compactSearch && selectedOnly
+                        ? translateApp("Search all services")
+                        : translateApp("Search service permissions")}
+                      placeholder={compactSearch && selectedOnly
+                        ? translateApp("Search all services")
+                        : translateApp("Search services")}
                       placeholderTextColor={colors.textMuted}
                       value={query}
                       onChangeText={setQuery}
                       autoCapitalize="none"
                       autoCorrect={false}
+                      returnKeyType="done"
+                      onSubmitEditing={() => Keyboard.dismiss()}
                       editable={!saving}
                       style={[
                         styles.searchInput,
                         { color: colors.textPrimary },
                       ]}
                     />
+                    {compactSearch && selectedOnly &&
+                      <Label muted>{translateApp("All services")}</Label>}
                     {!!query && (
                       <Pressable
                         accessibilityRole="button"
-                        accessibilityLabel="Clear service search"
+                        accessibilityLabel={translateApp(
+                          "Clear service search",
+                        )}
                         style={styles.iconButton}
                         disabled={saving}
                         onPress={() => setQuery("")}
@@ -420,13 +485,14 @@ export function AgentPermissionsSheet({
                       </Pressable>
                     )}
                   </View>
-                  <View accessibilityRole="tablist" style={styles.tabs}>
+                  {!compactSearch && <View accessibilityRole="tablist" style={styles.tabs}>
                     {[false, true].map((only) => (
                       <Pressable
                         key={String(only)}
                         accessibilityRole="tab"
                         accessibilityLabel={
-                          only ? "Selected services" : "All services"
+                          only ? translateApp("Selected services")
+                            : translateApp("All services")
                         }
                         accessibilityState={{ selected: selectedOnly === only }}
                         onPress={() => setSelectedOnly(only)}
@@ -446,31 +512,39 @@ export function AgentPermissionsSheet({
                       >
                         <Label>
                           {only
-                            ? `Selected (${draft.services.length})`
-                            : `All (${rows.length})`}
+                            ? translateApp("Selected ({{count}})", {
+                                count: draft.services.length,
+                              })
+                            : translateApp("All ({{count}})", {
+                                count: rows.length,
+                              })}
                         </Label>
                       </Pressable>
                     ))}
-                  </View>
+                  </View>}
                 </View>
                 <FlatList
                   style={styles.fill}
                   data={filtered}
                   keyExtractor={(item) => item.value}
                   keyboardShouldPersistTaps="handled"
-                  keyboardDismissMode="on-drag"
+                  keyboardDismissMode={compactSearch ? "none" : "on-drag"}
                   contentContainerStyle={styles.list}
-                  ListHeaderComponent={header}
+                  ListHeaderComponent={listHeader}
                   ListEmptyComponent={
-                    // While connections load, the header's skeleton rows
-                    // stand in for the list.
-                    !search && !selectedOnly && connectionsLoading ? null : (
+                    connectionsLoading || connectionsError ? null : (
                       <Label muted>
                         {search
-                          ? "No matching services. Try another name or service ID."
-                          : selectedOnly
-                            ? "No services selected. Choose services from All."
-                            : "No connected services yet. You can grant access later."}
+                          ? translateApp(
+                              "No matching services. Try another name or service ID.",
+                            )
+                          : selectedOnly && !compactSearch
+                            ? translateApp(
+                                "No services selected. Choose services from All.",
+                              )
+                            : translateApp(
+                                "No connected services yet. You can grant access later.",
+                              )}
                       </Label>
                     )
                   }
@@ -522,7 +596,9 @@ export function AgentPermissionsSheet({
                             </Label>
                             {!known.has(item.value) && (
                               <Label muted>
-                                Existing grant · connection unavailable
+                                {translateApp(
+                                  "Existing grant · connection unavailable",
+                                )}
                               </Label>
                             )}
                           </View>
@@ -547,7 +623,13 @@ export function AgentPermissionsSheet({
                         {selected && allowGuestAccess && (
                           <Pressable
                             accessibilityRole="button"
-                            accessibilityLabel={`Guest access for ${item.label}: ${guestLabel(draft.guest_access[item.value] ?? "use")}`}
+                            accessibilityLabel={translateApp(
+                              "Guest access for {{service}}: {{access}}",
+                              {
+                                service: item.label,
+                                access: guestLabel(draft.guest_access[item.value] ?? "use"),
+                              },
+                            )}
                             disabled={saving || (disabled && !readOnly)}
                             style={[
                               styles.guestRow,
@@ -563,7 +645,7 @@ export function AgentPermissionsSheet({
                               }
                             }}
                           >
-                            <Label muted>Guest access</Label>
+                            <Label muted>{translateApp("Guest access")}</Label>
                             <View style={styles.guestValue}>
                               <Label>
                                 {guestLabel(
@@ -583,7 +665,7 @@ export function AgentPermissionsSheet({
                 />
               </>
             )}
-            <View
+            {(!compactSearch || guestService) && <View
               style={[
                 styles.footer,
                 { backgroundColor: colors.bg, borderColor: colors.border },
@@ -594,32 +676,32 @@ export function AgentPermissionsSheet({
                   message={
                     unexpectedError ??
                     saveError ??
-                    "Could not save permissions. Try again."
+                    translateApp("Could not save permissions. Try again.")
                   }
                   tone="error"
                 />
               )}
               <Label muted>
-                {draft.services.length}{" "}
-                {draft.services.length === 1 ? "service" : "services"} selected
-                {allowAccountRead && draft.account_read
-                  ? " · Account read allowed"
-                  : ""}
+                {(draft.services.length === 1 ? (allowAccountRead && draft.account_read
+                  ? translateApp("{{count}} service selected · Account read allowed", { count: draft.services.length }) : translateApp("{{count}} service selected", { count: draft.services.length })) : (allowAccountRead && draft.account_read ? translateApp("{{count}} services selected · Account read allowed", { count: draft.services.length }) : translateApp("{{count}} services selected", { count: draft.services.length })))}
               </Label>
               {readOnly ? (
-                <Label muted>These permissions are read only.</Label>
+                <Label muted>
+                  {translateApp("These permissions are read only.")}
+                </Label>
               ) : (
                 <ActionButton
                   label={
-                    creating ? "Use these permissions" : "Save permissions"
+                    creating ? translateApp("Use these permissions")
+                      : translateApp("Save permissions")
                   }
                   disabled={disabled || !changed}
                   loading={saving}
                   onPress={() => void save()}
                 />
               )}
-            </View>
-          </KeyboardAvoidingView>
+            </View>}
+          </KeyboardViewport>
         </SafeAreaView>
       </SafeAreaProvider>
     </Modal>
@@ -627,7 +709,7 @@ export function AgentPermissionsSheet({
 }
 
 const styles = StyleSheet.create({
-  fill: { flex: 1 },
+  fill: { flex: 1, minHeight: 0 },
   flex: { flex: 1, minWidth: 0 },
   header: {
     flexDirection: "row",

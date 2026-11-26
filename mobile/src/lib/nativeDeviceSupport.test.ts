@@ -28,13 +28,14 @@ const { setInitialOrientation } =
       infoPlist: Record<string, unknown>,
     ): Record<string, unknown>;
   };
-const { validateIosDeviceSupport } =
+const { validateIosDeviceSupport, deviceFamilies } =
   require("../../scripts/lib/native-device-support") as {
     validateIosDeviceSupport(
       config: ExpoConfig,
       nativeInfoPlist: Record<string, unknown>,
       xcodeProject: string,
     ): string[];
+    deviceFamilies(xcodeProject: string): { ios: string[]; watch: string[] };
   };
 const nativeInfoPlist = plist.parse(
   readFileSync(
@@ -80,7 +81,22 @@ function fixture() {
 test("Expo configuration and committed Debug/Release targets support iPad without changing iPhone defaults", () => {
   const { config, native, project } = fixture();
   assert.deepEqual(validateIosDeviceSupport(config, native, project), []);
-  assert.equal([...project.matchAll(/TARGETED_DEVICE_FAMILY\s*=/g)].length, 2);
+  // Debug and Release of the iPhone app, then of the embedded watch app.
+  assert.deepEqual(deviceFamilies(project), {
+    ios: ["1,2", "1,2"],
+    watch: ["4", "4"],
+  });
+});
+
+test("the embedded watch app never counts as an iPhone-only iOS target", () => {
+  const { config, native, project } = fixture();
+  const watchAsPhone = project.replace(
+    /(SDKROOT = watchos;[\s\S]*?TARGETED_DEVICE_FAMILY = )4;/,
+    "$11;",
+  );
+  assert.deepEqual(validateIosDeviceSupport(config, native, watchAsPhone), [
+    "every watchOS build configuration must target Apple Watch (4)",
+  ]);
 });
 
 test("installed Expo native transforms generate the committed universal device and orientation settings", () => {

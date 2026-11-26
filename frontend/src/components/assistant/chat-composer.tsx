@@ -27,6 +27,7 @@ import {
   stripAttachmentMention,
   type AttachmentMention,
 } from "@/lib/assistant/attachment-mentions";
+import { autoFocusAllowed } from "@/lib/assistant/composer-focus";
 import { isAdmittedSendError } from "@/lib/assistant/send-admission";
 import { useComposerDictation } from "./composer-dictation";
 import type { AudioActivity } from "@/lib/microphone-capture";
@@ -100,21 +101,6 @@ function getScrollEdges(element: HTMLElement): ScrollEdges {
 function cssPixels(value: string): number {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : 0;
-}
-
-/**
- * Whether the composer may take focus without being asked to.
- *
- * On a touch device, focusing a textarea raises the on-screen keyboard over
- * half the screen. Opening a conversation to read it is the common case there,
- * so autofocus would cost a dismiss on nearly every visit; a pointer is the
- * closest available proxy for "typing is cheap here".
- */
-function autoFocusAllowed(): boolean {
-  if (typeof window === "undefined") return false;
-  // No matchMedia (jsdom, older engines) means no evidence of a touch device.
-  if (typeof window.matchMedia !== "function") return true;
-  return !window.matchMedia("(pointer: coarse)").matches;
 }
 
 /**
@@ -212,6 +198,8 @@ interface ChatComposerProps {
   readonly onLongText?: (text: string) => string | undefined;
   /** The text a saved draft keeps, when it differs from what is on screen. */
   readonly draftText?: (content: string) => string;
+  /** Refuse before clearing the editor, persisted draft or pending uploads. */
+  readonly beforeSend?: () => boolean;
   readonly onSend: (content: string) => Promise<void>;
   readonly onContentChange?: (content: string) => void;
   readonly onStop: () => Promise<void>;
@@ -257,6 +245,7 @@ function DraftedChatComposer({
   attachmentMentions,
   onLongText,
   draftText,
+  beforeSend,
   onSend,
   onContentChange,
   onStop,
@@ -882,6 +871,7 @@ function DraftedChatComposer({
       dictation.active
     )
       return;
+    if (beforeSend && !beforeSend()) return;
     cancelScheduledSave();
     const userId = ownerUserIdRef.current;
     const key = draftKeyRef.current;
@@ -1140,7 +1130,7 @@ function DraftedChatComposer({
                 className={`relative flex min-w-0 flex-1 gap-x-1.5 gap-y-0.5 ${
                   expanded
                     ? "flex-col items-stretch"
-                    : "composer-compact items-start"
+                    : "composer-compact items-center"
                 }`}
               >
                 {!expanded && attachmentButton && (

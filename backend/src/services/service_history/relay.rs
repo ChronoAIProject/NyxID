@@ -89,6 +89,9 @@ pub async fn sweep(db: &Database) -> AppResult<()> {
         .map_or(0, |e| (Utc::now() - e.committed_at).num_seconds().max(0));
     let mut failures = 0;
     for event in events {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         if let Err(error) = publish(db, &event, key).await {
             failures += 1;
             let delay = 10_i64 * (1_i64 << event.audit_attempts.min(8));
@@ -129,10 +132,15 @@ pub fn mirror_matches(event: &ServiceChangeEvent, stored: &AuditLog) -> bool {
 }
 
 pub fn start(db: Database) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
-            interval.tick().await;
+            let Some(_work) = crate::services::shutdown::process()
+                .tick(&mut interval)
+                .await
+            else {
+                break;
+            };
             if let Err(error) = sweep(&db).await {
                 tracing::error!(%error, "Service history relay failed; will retry");
             }

@@ -78,6 +78,7 @@ it.each(["sidebar", "mobile", "drawer"])("keeps the %s header actions in one non
     // on a wrapped line the negative margin aligns the first glyph with the brand.
     expect(actions).not.toHaveClass("justify-end", "self-end");
     for (const button of header.querySelectorAll("button")) expect(actions).toContainElement(button);
+    expect(within(actions as HTMLElement).getByRole("button", { name: "Notifications" })).toBeInTheDocument();
     expect(within(actions as HTMLElement).getByRole("button", { name: "Search" })).toBeInTheDocument();
     expect(actions.parentElement).toBe(header);
   } finally {

@@ -56,7 +56,7 @@ pub(crate) fn relay_response<'a>(
         // non-SSE bodies with an explicit cap/deadline, including chunked JSON.
         context.should_stream = context.is_sse;
         Box::pin(async move {
-            crate::turn_trace::spawn(async move {
+            crate::turn_trace::spawn_cleanup(async move {
                 Box::pin(relay_response_inner(&state, context, downstream_response)).await
             })
             .await
@@ -89,6 +89,9 @@ async fn relay_response_inner(
         exchange_diagnostics,
     } = context;
     let service_id = service_id.as_str();
+    if usage_context.is_some() {
+        llm_usage_service::warn_http_usage_encoding(service_id, &downstream_response);
+    }
     let path = path.as_str();
     let setup_model = model_request
         .as_ref()
@@ -115,13 +118,17 @@ async fn relay_response_inner(
             let request_len = request_body_len;
             let task_cancellation = downstream_cancellation.clone();
             let model_protocol = crate::services::assistant_model_observer::protocol(path);
+            let checkpoint_eligible = status.is_success()
+                && crate::services::billing::usage_checkpoint::supports_path(path);
             let model_request = model_request.clone().filter(|_| status.is_success());
 
-            crate::turn_trace::spawn(async move {
+            crate::turn_trace::spawn_cleanup(async move {
                 let mut exchange_diagnostics = ProxyStreamDiagnostics::new(exchange_diagnostics);
                 let mut usage_accumulator =
                     llm_usage_service::ReportedLlmUsageAccumulator::default();
                 let mut response_len: i64 = 0;
+                let mut checkpoints =
+                    stream_billing.stream_checkpoints(&stream_metered, checkpoint_eligible);
                 // Billing keeps the full SSE event; the bounded model observer is diagnostic only.
                 let mut sse_buffer = String::new();
                 let mut model_observer = model_request.as_ref().map(|_| {
@@ -131,11 +138,12 @@ async fn relay_response_inner(
                 let mut framing_fault_recorded = false;
 
                 loop {
-                    let next = until_client_disconnect(
-                        &task_cancellation,
-                        tokio::time::timeout(idle_timeout, upstream_stream.next()),
-                    )
-                    .await;
+                    let shutdown = crate::services::shutdown::process();
+                    let next = tokio::select! {
+                        biased;
+                        () = shutdown.stopped() => Err(crate::downstream_disconnect::ClientDisconnected),
+                        result = until_client_disconnect(&task_cancellation, tokio::time::timeout(idle_timeout, upstream_stream.next())) => result,
+                    };
                     match next {
                         Err(_) => {
                             if let Some(model_request) = &model_request {
@@ -170,22 +178,14 @@ async fn relay_response_inner(
                         }
                         Ok(Ok(Some(Ok(bytes)))) => {
                             response_len += bytes.len() as i64;
-                            sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
-                            while let Some(event) =
-                                super::sse_parser::parse_next_event(&mut sse_buffer)
-                            {
-                                if let Some((mut usage, mode)) =
-                                    llm_usage_service::extract_reported_usage_from_sse_event(
-                                        event.event_type.as_deref(),
-                                        &event.data,
-                                    )
-                                {
-                                    if !status.is_success() {
-                                        usage.images = 0;
-                                    }
-                                    usage_accumulator.observe(usage, mode);
-                                }
-                            }
+                            observe_sse_chunk(
+                                &mut sse_buffer,
+                                &mut usage_accumulator,
+                                &mut checkpoints,
+                                &bytes,
+                                status.is_success(),
+                            )
+                            .await;
 
                             if let (Some(observer), Some(request)) =
                                 (&mut model_observer, &model_request)
@@ -611,7 +611,7 @@ async fn relay_response_inner(
             // Poll funding separately from the deep proxy stack, and await its
             // durable release before allowing the provider retry.
             let billing = state.billing.clone();
-            let settlement = crate::turn_trace::spawn(async move {
+            let settlement = crate::turn_trace::spawn_cleanup(async move {
                 Box::pin(billing.settle(
                     &metered,
                     PlatformUsage::default(),
@@ -700,14 +700,16 @@ pub(crate) async fn observe_model_response(
     let protocol = crate::services::assistant_model_observer::protocol(path);
     let (parts, body) = response.into_parts();
     let (tx, rx) = tokio::sync::mpsc::channel(1);
-    crate::turn_trace::spawn(async move {
+    crate::turn_trace::spawn_cleanup(async move {
         let mut body = body.into_data_stream();
         let mut observer = crate::services::assistant_model_observer::StreamObserver::new(protocol);
         let mut provider_fault_recorded = false;
         let mut framing_fault_recorded = false;
+        let shutdown = crate::services::shutdown::process();
         loop {
             let chunk = tokio::select! {
                 biased;
+                () = shutdown.stopped() => { let _ = request.fault("consumer_cancelled", false).await; let _ = request.complete().await; return; }
                 _ = tx.closed() => { let _ = request.fault("consumer_cancelled", false).await; let _ = request.complete().await; return; }
                 chunk = body.next() => chunk,
             };
@@ -997,6 +999,33 @@ pub(crate) fn llm_platform_usage(
     fallback_bytes: i64,
 ) -> PlatformUsage {
     llm_usage_service::platform_usage(usage, fallback_bytes, true)
+}
+
+/// The checkpoint reuses the relay's framing and decoded usage value.
+pub(crate) async fn observe_sse_chunk(
+    buffer: &mut String,
+    accumulator: &mut llm_usage_service::ReportedLlmUsageAccumulator,
+    checkpoints: &mut crate::services::billing::usage_checkpoint::StreamCheckpoints,
+    bytes: &[u8],
+    successful: bool,
+) {
+    buffer.push_str(&String::from_utf8_lossy(bytes));
+    while let Some(event) = super::sse_parser::parse_next_event(buffer) {
+        if let Ok(value) = serde_json::from_str(&event.data) {
+            checkpoints
+                .observe_value(event.event_type.as_deref(), &value)
+                .await;
+            if let Some((mut usage, mode)) = llm_usage_service::extract_reported_usage_from_value(
+                event.event_type.as_deref(),
+                &value,
+            ) {
+                if !successful {
+                    usage.images = 0;
+                }
+                accumulator.observe(usage, mode);
+            }
+        }
+    }
 }
 
 pub(crate) async fn settle_meter_async(

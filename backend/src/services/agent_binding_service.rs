@@ -1,3 +1,5 @@
+pub(crate) mod audit;
+
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{Document, doc};
@@ -64,6 +66,28 @@ pub async fn create_binding_with_scope_authorization(
     user_service_id: &str,
     user_api_key_id: &str,
 ) -> AppResult<AgentServiceBinding> {
+    create_binding_with_audit(
+        db,
+        user_id,
+        scope_actor_user_id,
+        api_key_id,
+        user_service_id,
+        user_api_key_id,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_binding_with_audit(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    api_key_id: &str,
+    user_service_id: &str,
+    user_api_key_id: &str,
+    audit_actor: Option<&super::audit_service::AuditActor>,
+) -> AppResult<AgentServiceBinding> {
     create_binding_with_scope_authorization_inner(
         db,
         user_id,
@@ -71,6 +95,7 @@ pub async fn create_binding_with_scope_authorization(
         api_key_id,
         user_service_id,
         user_api_key_id,
+        audit_actor,
         #[cfg(test)]
         None,
     )
@@ -93,11 +118,13 @@ async fn create_binding_with_collision_hook(
         api_key_id,
         user_service_id,
         user_api_key_id,
+        None,
         Some(collision_hook),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_binding_with_scope_authorization_inner(
     db: &mongodb::Database,
     user_id: &str,
@@ -105,174 +132,209 @@ async fn create_binding_with_scope_authorization_inner(
     api_key_id: &str,
     user_service_id: &str,
     user_api_key_id: &str,
+    audit_actor: Option<&super::audit_service::AuditActor>,
     #[cfg(test)] collision_hook: Option<key_mutations::TransactionCollisionHook>,
 ) -> AppResult<AgentServiceBinding> {
     let now = Utc::now();
     let binding = AgentServiceBinding {
         id: Uuid::new_v4().to_string(),
-        api_key_id: api_key_id.to_string(),
-        user_service_id: user_service_id.to_string(),
-        user_api_key_id: user_api_key_id.to_string(),
-        user_id: user_id.to_string(),
+        api_key_id: api_key_id.into(),
+        user_service_id: user_service_id.into(),
+        user_api_key_id: user_api_key_id.into(),
+        user_id: user_id.into(),
         created_at: now,
         updated_at: now,
     };
-
-    let db = db.clone();
-    let user_id = user_id.to_string();
-    let api_key_id = api_key_id.to_string();
-    let user_service_id = user_service_id.to_string();
-    let user_api_key_id = user_api_key_id.to_string();
-    let actor_id = scope_actor_user_id.map(str::to_string);
-    let binding_for_transaction = binding.clone();
+    let audit = audit_actor
+        .map(|actor| audit::created(actor, &binding))
+        .transpose()?;
+    let context = CreateBinding {
+        db: db.clone(),
+        user_id: user_id.into(),
+        api_key_id: api_key_id.into(),
+        actor_id: scope_actor_user_id.map(str::to_owned),
+        user_service_id: user_service_id.into(),
+        user_api_key_id: user_api_key_id.into(),
+        binding_for_transaction: binding.clone(),
+        audit,
+        #[cfg(test)]
+        collision_hook,
+    };
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
         .and_run2(async move |session| {
-            #[cfg(test)]
-            if let Some(hook) = collision_hook.as_ref() {
-                hook.begin_attempt();
-            }
-            let operation: AppResult<()> = async {
-                let api_key = db
-                    .collection::<ApiKey>(API_KEYS)
-                    .find_one(doc! {
-                        "_id": &api_key_id,
-                        "user_id": &user_id,
-                        "is_active": true,
-                    })
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
-
-                super::key_service::require_ordinary_purpose(api_key.purpose)?;
-                if api_key.purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
-                    return Err(AppError::Forbidden(
-                        "Permission-bound credentials cannot be overridden".into(),
-                    ));
-                }
-
-                if api_key
-                    .assistant_agent_owner_id
-                    .as_deref()
-                    .is_some_and(|owner| owner != user_id)
-                {
-                    return Err(AppError::Forbidden(
-                        "Organization agent threads cannot bind personal credentials".into(),
-                    ));
-                }
-                let authorization = ScopeAuthorization::for_actor(actor_id.as_deref());
-                api_key_scope_service::validate_owner_service_write_with_session(
-                    &db,
-                    &user_id,
-                    &user_service_id,
-                    authorization,
-                    &mut *session,
-                )
-                .await?;
-
-                crate::services::service_history::collection::<UserService>(&db, USER_SERVICES)
-                    .find_one(doc! {
-                        "_id": &user_service_id,
-                        "user_id": &user_id,
-                        "is_active": true,
-                    })
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
-
-                let credential =
-                    crate::services::service_history::collection::<UserApiKey>(&db, USER_API_KEYS)
-                        .find_one(doc! { "_id": &user_api_key_id, "user_id": &user_id })
-                        .session(&mut *session)
-                        .await?
-                        .ok_or_else(|| {
-                            AppError::NotFound("External credential not found".to_string())
-                        })?;
-                super::destination_routing::validate_override_recipient(
-                    &db,
-                    &user_service_id,
-                    &credential,
-                )
-                .await?;
-                if credential.status != "active" {
-                    return Err(AppError::ValidationError(format!(
-                        "credential is not active (status: {})",
-                        credential.status
-                    )));
-                }
-
-                if db
-                    .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-                    .find_one(doc! {
-                        "api_key_id": &api_key_id,
-                        "user_service_id": &user_service_id,
-                    })
-                    .session(&mut *session)
-                    .await?
-                    .is_some()
-                {
-                    return Err(AppError::Conflict(
-                        "Binding already exists for this API key and service".to_string(),
-                    ));
-                }
-
-                #[cfg(test)]
-                if let Some(hook) = collision_hook.as_ref() {
-                    hook.after_reads().await;
-                }
-
-                let fenced = crate::services::service_history::mutation::fence_backing_reference(
-                    &db,
-                    USER_API_KEYS,
-                    &user_api_key_id,
-                    &user_id,
-                    &mut *session,
-                )
-                .await?;
-                if !fenced {
-                    return Err(AppError::NotFound(
-                        "External credential not found".to_string(),
-                    ));
-                }
-
-                db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
-                    .insert_one(&binding_for_transaction)
-                    .session(&mut *session)
-                    .await?;
-
-                let key_update = if !api_key.allow_all_services
-                    && !api_key.allowed_service_ids.contains(&user_service_id)
-                {
-                    doc! { "$addToSet": { "allowed_service_ids": &user_service_id } }
-                } else {
-                    doc! {}
-                };
-                let key_result = key_mutations::update_one(
-                    &db,
-                    doc! {
-                        "_id": &api_key_id,
-                        "user_id": &user_id,
-                        "is_active": true,
-                    },
-                    key_update,
-                    Some(&mut *session),
-                )
-                .await?;
-                if key_result.matched_count != 1 {
-                    return Err(AppError::Conflict(
-                        "API key changed while creating the binding".to_string(),
-                    ));
-                }
-                Ok(())
-            }
-            .await;
-            key_mutations::transaction_result(operation)
+            key_mutations::transaction_result(create_binding_in_session(&context, session).await)
         })
         .await
         .map_err(key_mutations::map_transaction_error)?;
-
     Ok(binding)
+}
+
+struct CreateBinding {
+    db: mongodb::Database,
+    user_id: String,
+    api_key_id: String,
+    actor_id: Option<String>,
+    user_service_id: String,
+    user_api_key_id: String,
+    binding_for_transaction: AgentServiceBinding,
+    audit: Option<crate::models::security_effect_intent::SecurityEffectIntent>,
+    #[cfg(test)]
+    collision_hook: Option<key_mutations::TransactionCollisionHook>,
+}
+
+async fn create_binding_in_session(
+    context: &CreateBinding,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let CreateBinding {
+        db,
+        user_id,
+        api_key_id,
+        actor_id,
+        user_service_id,
+        user_api_key_id,
+        binding_for_transaction,
+        audit,
+        #[cfg(test)]
+        collision_hook,
+    } = context;
+    #[cfg(test)]
+    if let Some(hook) = collision_hook.as_ref() {
+        hook.begin_attempt();
+    }
+    let api_key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {
+            "_id": api_key_id,
+            "user_id": user_id,
+            "is_active": true,
+        })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+
+    super::key_service::require_ordinary_purpose(api_key.purpose)?;
+    if api_key.purpose == crate::models::api_key::ApiKeyPurpose::PermissionBound {
+        return Err(AppError::Forbidden(
+            "Permission-bound credentials cannot be overridden".into(),
+        ));
+    }
+
+    if api_key
+        .assistant_agent_owner_id
+        .as_deref()
+        .is_some_and(|owner| owner != user_id)
+    {
+        return Err(AppError::Forbidden(
+            "Organization agent threads cannot bind personal credentials".into(),
+        ));
+    }
+    let authorization = ScopeAuthorization::for_actor(actor_id.as_deref());
+    api_key_scope_service::validate_owner_service_write_with_session(
+        db,
+        user_id,
+        user_service_id,
+        authorization,
+        &mut *session,
+    )
+    .await?;
+
+    crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
+        .find_one(doc! {
+            "_id": user_service_id,
+            "user_id": user_id,
+            "is_active": true,
+        })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
+
+    let credential = crate::services::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+        .find_one(doc! { "_id": user_api_key_id, "user_id": user_id })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("External credential not found".to_string()))?;
+    super::destination_routing::validate_override_recipient(db, user_service_id, &credential)
+        .await?;
+    if credential.status != "active" {
+        return Err(AppError::ValidationError(format!(
+            "credential is not active (status: {})",
+            credential.status
+        )));
+    }
+
+    if db
+        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .find_one(doc! {
+            "api_key_id": api_key_id,
+            "user_service_id": user_service_id,
+        })
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::Conflict(
+            "Binding already exists for this API key and service".to_string(),
+        ));
+    }
+
+    #[cfg(test)]
+    if let Some(hook) = collision_hook.as_ref() {
+        hook.after_reads().await;
+    }
+
+    let fenced = crate::services::service_history::mutation::fence_backing_reference(
+        db,
+        USER_API_KEYS,
+        user_api_key_id,
+        user_id,
+        &mut *session,
+    )
+    .await?;
+    if !fenced {
+        return Err(AppError::NotFound(
+            "External credential not found".to_string(),
+        ));
+    }
+
+    db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .insert_one(binding_for_transaction)
+        .session(&mut *session)
+        .await?;
+
+    let key_update =
+        if !api_key.allow_all_services && !api_key.allowed_service_ids.contains(user_service_id) {
+            doc! { "$addToSet": { "allowed_service_ids": user_service_id } }
+        } else {
+            doc! {}
+        };
+    let key_result = key_mutations::update_one(
+        db,
+        doc! {
+            "_id": api_key_id,
+            "user_id": user_id,
+            "is_active": true,
+        },
+        key_update,
+        Some(&mut *session),
+    )
+    .await?;
+    if key_result.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "API key changed while creating the binding".to_string(),
+        ));
+    }
+    if let Some(audit) = audit {
+        super::security_effect_service::enqueue_in_session(
+            db,
+            session,
+            std::slice::from_ref(audit),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// List all bindings for a specific API key.
@@ -356,12 +418,33 @@ pub async fn delete_binding_with_scope_authorization(
     api_key_id: &str,
     binding_id: &str,
 ) -> AppResult<()> {
+    delete_binding_with_audit(
+        db,
+        user_id,
+        scope_actor_user_id,
+        api_key_id,
+        binding_id,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn delete_binding_with_audit(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    api_key_id: &str,
+    binding_id: &str,
+    audit_actor: Option<&super::audit_service::AuditActor>,
+) -> AppResult<()> {
     delete_binding_with_scope_authorization_inner(
         db,
         user_id,
         scope_actor_user_id,
         api_key_id,
         binding_id,
+        audit_actor,
         #[cfg(test)]
         None,
     )
@@ -382,109 +465,151 @@ async fn delete_binding_with_collision_hook(
         None,
         api_key_id,
         binding_id,
+        None,
         Some(collision_hook),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn delete_binding_with_scope_authorization_inner(
     db: &mongodb::Database,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
     api_key_id: &str,
     binding_id: &str,
+    audit_actor: Option<&super::audit_service::AuditActor>,
     #[cfg(test)] collision_hook: Option<key_mutations::TransactionCollisionHook>,
 ) -> AppResult<()> {
-    let db = db.clone();
-    let user_id = user_id.to_string();
-    let api_key_id = api_key_id.to_string();
-    let binding_id = binding_id.to_string();
-    let actor_id = scope_actor_user_id.map(str::to_string);
+    let audit = audit_actor
+        .map(|actor| audit::deleted(actor, api_key_id, binding_id))
+        .transpose()?;
+    let context = DeleteBinding {
+        db: db.clone(),
+        user_id: user_id.into(),
+        api_key_id: api_key_id.into(),
+        actor_id: scope_actor_user_id.map(str::to_owned),
+        binding_id: binding_id.into(),
+        audit,
+        #[cfg(test)]
+        collision_hook,
+    };
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
         .and_run2(async move |session| {
-            #[cfg(test)]
-            if let Some(hook) = collision_hook.as_ref() {
-                hook.begin_attempt();
-            }
-            let operation: AppResult<()> = async {
-                let api_key = db
-                    .collection::<ApiKey>(API_KEYS)
-                    .find_one(doc! {
-                        "_id": &api_key_id,
-                        "user_id": &user_id,
-                        "is_active": true,
-                    })
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
-                super::key_service::require_ordinary_purpose(api_key.purpose)?;
-                let binding = db
-                    .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-                    .find_one(doc! {
-                        "_id": &binding_id,
-                        "api_key_id": &api_key_id,
-                        "user_id": &user_id,
-                    })
-                    .session(&mut *session)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound("Binding not found".to_string()))?;
-
-                api_key_scope_service::validate_owner_service_write_with_session(
-                    &db,
-                    &user_id,
-                    &binding.user_service_id,
-                    ScopeAuthorization::for_actor(actor_id.as_deref()),
-                    &mut *session,
-                )
-                .await?;
-
-                #[cfg(test)]
-                if let Some(hook) = collision_hook.as_ref() {
-                    hook.after_reads().await;
-                }
-
-                let deleted = db
-                    .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-                    .delete_one(doc! { "_id": &binding_id })
-                    .session(&mut *session)
-                    .await?;
-                if deleted.deleted_count != 1 {
-                    return Err(AppError::Conflict(
-                        "binding changed while deleting it".to_string(),
-                    ));
-                }
-
-                let key_update = if api_key.allow_all_services {
-                    doc! {}
-                } else {
-                    doc! { "$pull": { "allowed_service_ids": &binding.user_service_id } }
-                };
-                let key_result = key_mutations::update_one(
-                    &db,
-                    doc! {
-                        "_id": &api_key_id,
-                        "user_id": &user_id,
-                        "is_active": true,
-                    },
-                    key_update,
-                    Some(&mut *session),
-                )
-                .await?;
-                if key_result.matched_count != 1 {
-                    return Err(AppError::Conflict(
-                        "API key changed while deleting the binding".to_string(),
-                    ));
-                }
-                Ok(())
-            }
-            .await;
-            key_mutations::transaction_result(operation)
+            key_mutations::transaction_result(delete_binding_in_session(&context, session).await)
         })
         .await
         .map_err(key_mutations::map_transaction_error)?;
+    Ok(())
+}
 
+struct DeleteBinding {
+    db: mongodb::Database,
+    user_id: String,
+    api_key_id: String,
+    actor_id: Option<String>,
+    binding_id: String,
+    audit: Option<crate::models::security_effect_intent::SecurityEffectIntent>,
+    #[cfg(test)]
+    collision_hook: Option<key_mutations::TransactionCollisionHook>,
+}
+
+async fn delete_binding_in_session(
+    context: &DeleteBinding,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let DeleteBinding {
+        db,
+        user_id,
+        api_key_id,
+        actor_id,
+        binding_id,
+        audit,
+        #[cfg(test)]
+        collision_hook,
+    } = context;
+    #[cfg(test)]
+    if let Some(hook) = collision_hook.as_ref() {
+        hook.begin_attempt();
+    }
+    let api_key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {
+            "_id": api_key_id,
+            "user_id": user_id,
+            "is_active": true,
+        })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+    super::key_service::require_ordinary_purpose(api_key.purpose)?;
+    let binding = db
+        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .find_one(doc! {
+            "_id": binding_id,
+            "api_key_id": api_key_id,
+            "user_id": user_id,
+        })
+        .session(&mut *session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Binding not found".to_string()))?;
+
+    api_key_scope_service::validate_owner_service_write_with_session(
+        db,
+        user_id,
+        &binding.user_service_id,
+        ScopeAuthorization::for_actor(actor_id.as_deref()),
+        &mut *session,
+    )
+    .await?;
+
+    #[cfg(test)]
+    if let Some(hook) = collision_hook.as_ref() {
+        hook.after_reads().await;
+    }
+
+    let deleted = db
+        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .delete_one(doc! { "_id": binding_id })
+        .session(&mut *session)
+        .await?;
+    if deleted.deleted_count != 1 {
+        return Err(AppError::Conflict(
+            "binding changed while deleting it".to_string(),
+        ));
+    }
+
+    let key_update = if api_key.allow_all_services {
+        doc! {}
+    } else {
+        doc! { "$pull": { "allowed_service_ids": &binding.user_service_id } }
+    };
+    let key_result = key_mutations::update_one(
+        db,
+        doc! {
+            "_id": api_key_id,
+            "user_id": user_id,
+            "is_active": true,
+        },
+        key_update,
+        Some(&mut *session),
+    )
+    .await?;
+    if key_result.matched_count != 1 {
+        return Err(AppError::Conflict(
+            "API key changed while deleting the binding".to_string(),
+        ));
+    }
+    if let Some(audit) = audit {
+        super::security_effect_service::enqueue_in_session(
+            db,
+            session,
+            std::slice::from_ref(audit),
+        )
+        .await?;
+    }
     Ok(())
 }
 

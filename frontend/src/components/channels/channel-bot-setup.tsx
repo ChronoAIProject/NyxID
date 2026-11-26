@@ -1,3 +1,4 @@
+import { MetaCustomerSetup } from "./meta-customer-setup";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -319,6 +320,7 @@ export function ChannelBotSetup({
       )}
       {completedId ? (
         <div className="space-y-4">
+          {["messenger", "instagram"].includes(platform) && completedId && <MetaCustomerSetup botId={completedId} orgId={targetOrgId ?? null} />}
           {(fullPage || stayInPlace) && (
             <div
               role="status"
@@ -610,7 +612,8 @@ export function ChannelBotSetup({
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent
         ref={dialogContentRef}
-        className="channel-connect-dialog max-h-[90dvh] overflow-y-auto md:max-w-md"
+        // scroll-py-1 keeps keyboard-focused controls fully inside the scrollport when native focus scrolling lands on a fractional edge at larger text sizes (#2218).
+        className="channel-connect-dialog max-h-[90dvh] scroll-py-1 overflow-y-auto md:max-w-md"
       >
         {content}
       </DialogContent>

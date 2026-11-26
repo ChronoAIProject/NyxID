@@ -223,6 +223,16 @@ async fn lease_handover_fences_stale_admission_status_and_checkpoint_and_dedupli
         sequence: Some(12),
     };
     checkpoint(&state.db, &old, &resume).await.unwrap();
+    let migrated = crate::services::channel_credential_continuity::rewrap_fixture(
+        &state.db,
+        &state.encryption_keys,
+        &old.bot,
+        &["bot_token_encrypted"],
+    )
+    .await;
+    assert!(old.current(&state.db).await.unwrap());
+    status(&state.db, &old, "connected", None).await.unwrap();
+    checkpoint(&state.db, &old, &resume).await.unwrap();
     let first = message(&old, "500");
     assert!(
         super::super::channel_admission_service::store_discord(&state.db, first.clone(), &old)
@@ -251,7 +261,7 @@ async fn lease_handover_fences_stale_admission_status_and_checkpoint_and_dedupli
     .unwrap();
     let new = Fence {
         lease,
-        bot: old.bot.clone(),
+        bot: migrated,
     };
     assert!(new.current(&state.db).await.unwrap());
     assert!(status(&state.db, &old, "connected", None).await.is_err());
@@ -344,6 +354,7 @@ async fn shared_pipeline_sends_one_signed_callback_with_versioned_facts_and_no_p
         .await
         .unwrap();
     let server = MockServer::start().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     let agent = uuid::Uuid::new_v4().to_string();
     state.db.collection::<Document>(crate::models::api_key::COLLECTION_NAME).insert_one(doc! {
         "_id":&agent,"user_id":&fence.bot.user_id,"name":"agent","key_prefix":"nyxid_ag","key_hash":"deadbeef".repeat(8),

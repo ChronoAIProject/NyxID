@@ -170,7 +170,7 @@ pub async fn ssh_web_terminal(
 
     // Keep session state off the upgrade and lease polling frames.
     Ok(ws
-        .on_upgrade(move |socket| {
+        .on_upgrade(state.shutdown.clone().upgrade_callback(move |socket| {
             Box::pin(async move {
                 let work = Box::pin(async {
                     handle_web_terminal(
@@ -200,7 +200,7 @@ pub async fn ssh_web_terminal(
                     let _ = work.await;
                 }
             })
-        })
+        }))
         .into_response())
 }
 
@@ -247,8 +247,15 @@ async fn handle_web_terminal(
         return;
     }
     let ephemeral = if auth_mode == SshAuthMode::Cert {
-        match generate_ephemeral_credentials(&state, &ssh_svc, &service_id, &user_id, &principal)
-            .await
+        match generate_ephemeral_credentials(
+            &state,
+            &ssh_svc,
+            &service_id,
+            &user_id,
+            &principal,
+            true,
+        )
+        .await
         {
             Ok(creds) => Some(creds),
             Err(error) => {
@@ -757,6 +764,7 @@ pub(crate) async fn generate_ephemeral_credentials(
     service_id: &str,
     user_id: &str,
     principal: &str,
+    permit_pty: bool,
 ) -> AppResult<EphemeralSshCredentials> {
     let mut rng = rand::rngs::OsRng;
     let ephemeral_key = ssh_key::PrivateKey::random(&mut rng, ssh_key::Algorithm::Ed25519)
@@ -786,6 +794,7 @@ pub(crate) async fn generate_ephemeral_credentials(
         &user.email,
         &public_key_openssh,
         principal,
+        permit_pty,
     )
     .await?;
 

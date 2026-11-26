@@ -304,7 +304,15 @@ async fn channel_guest_media_flag_revoked_after_decryption_denies_model_but_keep
     tokio::time::timeout(Duration::from_secs(10), decrypt.entered.notified())
         .await
         .unwrap();
+    guest::recheck_retry_inputs(&state.db, &row, std::slice::from_ref(&id))
+        .await
+        .unwrap();
     state.db.collection::<bson::Document>("feature_flag_overrides").update_one(doc! {"flag_key":crate::services::feature_flag_service::ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY},doc! {"$set":{"enabled":false}}).await.unwrap();
+    assert!(
+        guest::recheck_retry_inputs(&state.db, &row, std::slice::from_ref(&id))
+            .await
+            .is_err()
+    );
     decrypt.release.notify_one();
     assert!(fetch.await.unwrap().is_err());
     let (inputs, note) = guest::input_for_turn(&state, &row, message.attachments)
@@ -558,6 +566,84 @@ async fn channel_guest_media_document_input_is_bounded_untrusted_and_owner_retai
 }
 
 #[tokio::test]
+async fn channel_guest_truncated_png_retains_original_names_without_signature_fallbacks() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    for original in [None, Some("attachment"), Some("original.png")] {
+        let (state, mut channel, _, calls, server) =
+            media_fixture("guest_opaque_filename", "direct").await;
+        enable_guest(&state).await;
+        expose(&state, &mut channel).await;
+        let bytes = b"\x89PNG\r\n\x1a\ntruncated raster".to_vec();
+        let _provider = ingestion_provider(&state, &channel, bytes.clone()).await;
+        source(&state, &channel, "guest-truncated", "visitor").await;
+        state.db.collection::<bson::Document>(MESSAGES).update_one(doc! {"_id":"guest-truncated"},
+            doc! {"$set":{"attachments.0.filename":original,"attachments.0.size_bytes":bytes.len() as i64}}).await.unwrap();
+        let (_watch, completion) = watch_relay_callback(&channel.id, "guest-truncated");
+        assert_eq!(
+            direct_private(
+                &state,
+                &channel,
+                "guest-truncated",
+                "visitor",
+                "Describe my image"
+            )
+            .await,
+            StatusCode::ACCEPTED
+        );
+        done(completion).await;
+        let event = state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .find_one(doc! {"event_id":"guest-truncated"})
+            .await
+            .unwrap()
+            .unwrap();
+        let message = state
+            .db
+            .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+            .find_one(doc! {"turn_id":&event.turn_id,"role":"user"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(message.attachments.len(), 1);
+        let row = state
+            .db
+            .collection::<AssistantUpload>(crate::models::assistant_upload::COLLECTION_NAME)
+            .find_one(doc! {"_id":&message.attachments[0].id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.content_type, "application/octet-stream");
+        assert_eq!(row.label, original.unwrap_or("attachment"));
+        assert_eq!(row.filename_is_original, Some(original.is_some()));
+        assert!(row.source.as_ref().unwrap().guest.is_some());
+        assert!(
+            !calls
+                .lock()
+                .await
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("input_image")
+        );
+        assert_eq!(
+            uploads::owner_read(
+                &state.db,
+                &state.encryption_keys,
+                OWNER,
+                event.conversation_id.as_deref().unwrap(),
+                &row.id
+            )
+            .await
+            .unwrap()
+            .1,
+            bytes
+        );
+        server.abort();
+    }
+}
+
+#[tokio::test]
 async fn channel_guest_media_org_specialist_guest_stays_deferred_even_with_flag() {
     let (state, _, server) = setup("guest_media_org_deferred").await;
     let (mut channel, _, _, org_id) =
@@ -650,6 +736,7 @@ async fn channel_guest_media_text_only_model_omits_urls_and_retains_owner_image(
                     crate::services::assistant_nyxagent_model_cache::ModelInfo {
                         id: row.model.clone(),
                         label: "Text only".into(),
+                        inference_credential: None,
                         available: true,
                         description: None,
                         input_modalities: Some(vec!["text".into()]),

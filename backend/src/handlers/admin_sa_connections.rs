@@ -17,7 +17,11 @@ use crate::models::user_service_connection::{
     COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
 };
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, connection_service, service_account_service};
+use crate::services::{
+    audit_service, connection_service,
+    service_account_connection_audit::{self, Event},
+    service_account_service,
+};
 
 // --- Request types ---
 
@@ -175,7 +179,15 @@ pub async fn connect_sa_service(
     }
 
     // Reuse existing connection_service -- pass sa.id as user_id
-    let result = connection_service::connect_user(
+    let audit = service_account_connection_audit::intent(
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+        &sa_id,
+        &service_id,
+        Event::ServiceConnected {
+            has_credential: body.credential.is_some(),
+        },
+    )?;
+    let result = connection_service::connect_user_with_audit(
         &state.db,
         &state.encryption_keys,
         state.node_ws_manager.as_ref(),
@@ -183,19 +195,9 @@ pub async fn connect_sa_service(
         &service_id,
         body.credential.as_deref(),
         body.credential_label.as_deref(),
+        Some(&audit),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.service_connected",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-            "service_id": &service_id,
-            "has_credential": body.credential.is_some(),
-        })),
-    );
 
     Ok(Json(AdminSaConnectResponse {
         service_id,
@@ -224,25 +226,22 @@ pub async fn update_sa_connection_credential(
         ));
     }
 
-    connection_service::update_credential(
+    let audit = service_account_connection_audit::intent(
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+        &sa_id,
+        &service_id,
+        Event::CredentialUpdated,
+    )?;
+    connection_service::update_credential_with_audit(
         &state.db,
         &state.encryption_keys,
         &sa_id,
         &service_id,
         &body.credential,
         body.credential_label.as_deref(),
+        Some(&audit),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.service_credential_updated",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-            "service_id": &service_id,
-        })),
-    );
 
     Ok(Json(AdminSaConnectionActionResponse {
         message: "Credential updated".to_string(),
@@ -270,17 +269,20 @@ pub async fn disconnect_sa_service(
         ));
     }
 
-    connection_service::disconnect_user(&state.db, &sa_id, &service_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.service_disconnected",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-            "service_id": &service_id,
-        })),
-    );
+    let audit = service_account_connection_audit::intent(
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+        &sa_id,
+        &service_id,
+        Event::ServiceDisconnected,
+    )?;
+    connection_service::disconnect_user_with_audit(
+        &state.db,
+        &sa_id,
+        &service_id,
+        None,
+        Some(&audit),
+    )
+    .await?;
 
     Ok(Json(AdminSaConnectionActionResponse {
         message: "Service disconnected from service account".to_string(),

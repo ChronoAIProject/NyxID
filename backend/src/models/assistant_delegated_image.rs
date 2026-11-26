@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DelegatedImages {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text_report_in_settlement: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment: Option<Assignment>,
     /// A business refusal while publishing the result; the legacy settlement
@@ -17,6 +19,8 @@ pub struct DelegatedImages {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Assignment {
+    #[serde(default)]
+    pub org_use_revision: i64,
     pub id: String,
     pub actor: String,
     pub source_agent: String,

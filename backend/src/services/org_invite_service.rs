@@ -12,10 +12,11 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 use crate::models::org_invite::{COLLECTION_NAME, OrgInvite};
 use crate::models::org_membership::{MemberScopeSource, OrgRole};
-use crate::services::org_service;
+use crate::services::{audit_service::AuditActor, org_membership_authority, org_service};
+use mongodb::ClientSession;
 
 /// Default TTL for new invites (24 hours). Configurable per-call via
-/// [`create_invite`]'s `ttl` parameter.
+/// [`create_invite_as`]'s `ttl` parameter.
 pub const DEFAULT_INVITE_TTL: Duration = Duration::hours(24);
 
 const NONCE_PREFIX: &str = "ORGINV-";
@@ -42,9 +43,7 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
             if we.code == 11000
     )
 }
-
-/// Issue a new invite for an org. The caller must be an admin of the org
-/// (enforced at the handler level via [`org_service::is_admin`]).
+#[cfg(test)]
 pub async fn create_invite(
     db: &mongodb::Database,
     org_user_id: &str,
@@ -54,10 +53,33 @@ pub async fn create_invite(
     allowed_service_ids: Option<Vec<String>>,
     ttl: Option<Duration>,
 ) -> AppResult<OrgInvite> {
+    let mut actor = org_service::audit::fixture_actor();
+    actor.user_id = created_by.to_owned();
+    create_invite_as(
+        db,
+        org_user_id,
+        role,
+        scope_source,
+        allowed_service_ids,
+        ttl,
+        &actor,
+    )
+    .await
+}
+
+/// Issue an invite after verifying the issuer’s admin role in the membership transaction.
+pub async fn create_invite_as(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    role: OrgRole,
+    scope_source: MemberScopeSource,
+    allowed_service_ids: Option<Vec<String>>,
+    ttl: Option<Duration>,
+    actor: &AuditActor,
+) -> AppResult<OrgInvite> {
     // Verify the org exists and is an org.
     let _ = org_service::get_org_user(db, org_user_id).await?;
 
-    let collection = db.collection::<OrgInvite>(COLLECTION_NAME);
     let now = Utc::now();
     let expires_at = now + ttl.unwrap_or(DEFAULT_INVITE_TTL);
 
@@ -69,23 +91,23 @@ pub async fn create_invite(
             role,
             scope_source,
             allowed_service_ids: allowed_service_ids.clone(),
-            created_by: created_by.to_string(),
+            created_by: actor.user_id.clone(),
             expires_at,
             redeemed_by: None,
             redeemed_at: None,
             created_at: now,
         };
 
-        match collection.insert_one(&invite).await {
+        match insert_invite(db, &invite, actor).await {
             Ok(_) => return Ok(invite),
-            Err(e) if is_duplicate_key_error(&e) => {
+            Err(AppError::DatabaseError(e)) if is_duplicate_key_error(&e) => {
                 tracing::warn!(
                     attempt = attempt + 1,
                     "Org invite nonce collision, retrying"
                 );
                 continue;
             }
-            Err(e) => return Err(AppError::DatabaseError(e)),
+            Err(e) => return Err(e),
         }
     }
 
@@ -108,18 +130,48 @@ pub async fn list_invites_for_org(
     let invites: Vec<OrgInvite> = cursor.try_collect().await?;
     Ok(invites)
 }
-
-/// Cancel a pending invite by id. Removes the row entirely. Returns
-/// `OrgInviteInvalid` if the invite does not exist or has already been
-/// redeemed (deletion of a redeemed invite would lose audit information).
+#[cfg(test)]
 pub async fn cancel_invite(
     db: &mongodb::Database,
     org_user_id: &str,
     invite_id: &str,
 ) -> AppResult<()> {
+    cancel_invite_as(
+        db,
+        org_user_id,
+        invite_id,
+        &org_service::audit::fixture_actor(),
+    )
+    .await
+}
+
+/// Cancel a pending invite by id. Removes the row entirely. Returns
+/// `OrgInviteInvalid` if the invite does not exist or has already been
+/// redeemed (deletion of a redeemed invite would lose audit information).
+pub async fn cancel_invite_as(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    invite_id: &str,
+    actor: &AuditActor,
+) -> AppResult<()> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result = cancel_in_session(db, org_user_id, invite_id, actor, &mut tx).await;
+    org_membership_authority::finish(tx, result).await
+}
+async fn cancel_in_session(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    invite_id: &str,
+    actor: &AuditActor,
+    tx: &mut ClientSession,
+) -> AppResult<()> {
     let collection = db.collection::<OrgInvite>(COLLECTION_NAME);
     let row = collection
         .find_one(doc! { "_id": invite_id, "org_user_id": org_user_id })
+        .session(&mut *tx)
         .await?
         .ok_or_else(|| AppError::OrgInviteInvalid("invite not found".to_string()))?;
 
@@ -129,17 +181,129 @@ pub async fn cancel_invite(
         ));
     }
 
-    collection.delete_one(doc! { "_id": invite_id }).await?;
+    let removed = collection
+        .delete_one(doc! { "_id": invite_id, "org_user_id":org_user_id, "redeemed_at":null })
+        .session(&mut *tx)
+        .await?;
+    if removed.deleted_count != 1 {
+        return Err(AppError::OrgInviteInvalid("invite not found".into()));
+    }
+    org_service::audit::invite(
+        db,
+        Some(actor),
+        "org_invite_cancelled",
+        org_user_id,
+        invite_id,
+        tx,
+    )
+    .await?;
     Ok(())
+}
+/// The membership transaction owns the organization fence. Returning only the
+/// row ID keeps capability material out of the cancellation and audit path.
+pub(crate) async fn retire_issuer_in_session(
+    db: &mongodb::Database,
+    org: &str,
+    issuer: &str,
+    actor: Option<&AuditActor>,
+    tx: &mut ClientSession,
+) -> AppResult<()> {
+    let rows = db.collection::<bson::Document>(COLLECTION_NAME);
+    let filter = doc! {
+        "org_user_id": org, "redeemed_at": null, "expires_at": {"$gt": bson::DateTime::now()},
+        "created_by": {"$in": [issuer, "", bson::Bson::Null]}
+    };
+    while let Some(row) = rows
+        .find_one_and_delete(filter.clone())
+        .projection(doc! {"_id":1})
+        .session(&mut *tx)
+        .await?
+    {
+        let id = row
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Invalid org invite ID".into()))?;
+        org_service::audit::invite(db, actor, "org_invite_cancelled", org, id, tx).await?;
+    }
+    Ok(())
+}
+
+async fn fence_issuer(
+    db: &mongodb::Database,
+    invite: &OrgInvite,
+    tx: &mut ClientSession,
+) -> AppResult<()> {
+    let invalid = || {
+        AppError::OrgInviteInvalid("invite issuer is no longer an active organization admin".into())
+    };
+    if invite.created_by.is_empty() {
+        return Err(invalid());
+    }
+    match org_membership_authority::fence_live_member(db, &invite.created_by, &mut *tx).await {
+        Err(AppError::Conflict(_)) => return Err(invalid()),
+        result => result?,
+    }
+    if db
+        .collection::<bson::Document>(crate::models::org_membership::COLLECTION_NAME)
+        .find_one(
+            doc! {"org_user_id": &invite.org_user_id, "member_user_id": &invite.created_by,
+            "role": "admin", "revoked_at": null},
+        )
+        .projection(doc! {"_id":1})
+        .session(tx)
+        .await?
+        .is_none()
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub async fn redeem_invite(
+    db: &mongodb::Database,
+    nonce: &str,
+    member_user_id: &str,
+) -> AppResult<crate::models::org_membership::OrgMembership> {
+    redeem_invite_as(
+        db,
+        nonce,
+        member_user_id,
+        &org_service::audit::fixture_actor(),
+    )
+    .await
 }
 
 /// Atomically redeem an invite for the given member. On success returns the
 /// new [`crate::models::org_membership::OrgMembership`] and marks the invite
 /// as redeemed.
-pub async fn redeem_invite(
+pub async fn redeem_invite_as(
     db: &mongodb::Database,
     nonce: &str,
     member_user_id: &str,
+    actor: &AuditActor,
+) -> AppResult<crate::models::org_membership::OrgMembership> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result = redeem_in_session(db, nonce, member_user_id, actor, &mut tx).await;
+    let membership = org_membership_authority::finish(tx, result).await?;
+    // The membership has committed; scheduled credits are best effort.
+    crate::services::billing::schedules::eligibility::after_org_joined(
+        db,
+        &membership.org_user_id,
+        &membership.member_user_id,
+        membership.created_at,
+    )
+    .await;
+    Ok(membership)
+}
+async fn redeem_in_session(
+    db: &mongodb::Database,
+    nonce: &str,
+    member_user_id: &str,
+    actor: &AuditActor,
+    tx: &mut ClientSession,
 ) -> AppResult<crate::models::org_membership::OrgMembership> {
     let collection = db.collection::<OrgInvite>(COLLECTION_NAME);
     let now = Utc::now();
@@ -160,6 +324,7 @@ pub async fn redeem_invite(
                 }
             },
         )
+        .session(&mut *tx)
         .await?;
 
     let invite = match claimed {
@@ -167,7 +332,10 @@ pub async fn redeem_invite(
         None => {
             // Distinguish "no such invite" from "expired" / "already redeemed"
             // for better UX. One extra round-trip but worth it for clarity.
-            let lookup = collection.find_one(doc! { "nonce": nonce }).await?;
+            let lookup = collection
+                .find_one(doc! { "nonce": nonce })
+                .session(&mut *tx)
+                .await?;
             return Err(match lookup {
                 None => AppError::OrgInviteInvalid("unknown invite".to_string()),
                 Some(i) if i.is_redeemed() => {
@@ -179,39 +347,58 @@ pub async fn redeem_invite(
         }
     };
 
-    // Now create the membership. If membership creation fails (e.g. duplicate)
-    // we rollback the redemption flag so the user can retry. This is a
-    // best-effort rollback -- a hard crash between the two writes would leave
-    // the invite marked redeemed without a membership, which is an
-    // acceptable failure mode (admin can issue a fresh invite).
-    let membership = match org_service::create_membership(
+    fence_issuer(db, &invite, tx).await?;
+
+    // Reuse the ordinary membership preparation and fences. Its existing
+    // transaction now also owns the invite claim and the required occurrence.
+    let creation = org_service::membership::prepare_creation(
         db,
         &invite.org_user_id,
         member_user_id,
         invite.role,
         invite.scope_source,
-        invite.allowed_service_ids.clone(),
+        invite.allowed_service_ids,
+        None,
+    )
+    .await?;
+    let membership = org_service::membership::create_in_session(db, creation, tx).await?;
+    org_service::audit::member(db, Some(actor), "org_member_joined", &membership, tx).await?;
+    Ok(membership)
+}
+
+async fn insert_invite(
+    db: &mongodb::Database,
+    invite: &OrgInvite,
+    actor: &AuditActor,
+) -> AppResult<()> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result = insert_invite_in_session(db, invite, actor, &mut tx).await;
+    org_membership_authority::finish(tx, result).await
+}
+async fn insert_invite_in_session(
+    db: &mongodb::Database,
+    invite: &OrgInvite,
+    actor: &AuditActor,
+    tx: &mut ClientSession,
+) -> AppResult<()> {
+    org_membership_authority::fence_org(db, &invite.org_user_id, &mut *tx).await?;
+    fence_issuer(db, invite, tx).await?;
+    db.collection::<OrgInvite>(COLLECTION_NAME)
+        .insert_one(invite)
+        .session(&mut *tx)
+        .await?;
+    org_service::audit::invite(
+        db,
+        Some(actor),
+        "org_invite_created",
+        &invite.org_user_id,
+        &invite.id,
+        tx,
     )
     .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            let _ = collection
-                .update_one(
-                    doc! { "_id": &invite.id },
-                    doc! {
-                        "$set": {
-                            "redeemed_by": bson::Bson::Null,
-                            "redeemed_at": bson::Bson::Null,
-                        }
-                    },
-                )
-                .await;
-            return Err(e);
-        }
-    };
-
-    Ok(membership)
 }
 
 #[cfg(test)]
@@ -250,6 +437,18 @@ mod tests {
             .expect("insert test user");
     }
 
+    async fn insert_admin(db: &mongodb::Database, org: &str, admin: &str) {
+        db.collection::<crate::models::org_membership::OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(crate::test_utils::test_membership(
+                org,
+                admin,
+                OrgRole::Admin,
+                None,
+            ))
+            .await
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn create_list_and_cancel_invite_for_org() {
         let db = connect_test_database("orginv_crud")
@@ -260,6 +459,9 @@ mod tests {
         let admin_id = Uuid::new_v4().to_string();
         insert_user(&db, &org_id, UserType::Org).await;
         insert_user(&db, &other_org_id, UserType::Org).await;
+        insert_user(&db, &admin_id, UserType::Person).await;
+        insert_admin(&db, &org_id, &admin_id).await;
+        insert_admin(&db, &other_org_id, &admin_id).await;
 
         let invite = create_invite(
             &db,
@@ -317,6 +519,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invite_claim_requires_attributed_live_admin_and_preserves_pending_row() {
+        let db = connect_test_database("orginv_live_issuer").await.unwrap();
+        let org = Uuid::new_v4().to_string();
+        let admin = Uuid::new_v4().to_string();
+        let member = Uuid::new_v4().to_string();
+        insert_user(&db, &org, UserType::Org).await;
+        insert_user(&db, &admin, UserType::Person).await;
+        insert_user(&db, &member, UserType::Person).await;
+        insert_admin(&db, &org, &admin).await;
+        let invite = create_invite(
+            &db,
+            &org,
+            &admin,
+            OrgRole::Member,
+            MemberScopeSource::Inherit,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.collection::<bson::Document>(ORG_MEMBERSHIPS)
+            .update_one(
+                doc! {"org_user_id":&org,"member_user_id":&admin},
+                doc! {"$set":{"role":"member"}},
+            )
+            .await
+            .unwrap();
+        let rows = db.collection::<bson::Document>(COLLECTION_NAME);
+        for change in [
+            None,
+            Some(doc! {"$unset":{"created_by":""}}),
+            Some(doc! {"$set":{"created_by":null}}),
+        ] {
+            if let Some(update) = change {
+                rows.update_one(doc! {"_id":&invite.id}, update)
+                    .await
+                    .unwrap();
+            }
+            assert!(matches!(
+                redeem_invite(&db, &invite.nonce, &member).await,
+                Err(AppError::OrgInviteInvalid(_))
+            ));
+            assert_eq!(
+                rows.count_documents(doc! {"_id":&invite.id,"redeemed_at":null})
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn create_invite_rejects_non_org_owner() {
         let db = connect_test_database("orginv_nonorg")
             .await
@@ -347,6 +602,8 @@ mod tests {
         let member_id = Uuid::new_v4().to_string();
         insert_user(&db, &org_id, UserType::Org).await;
         insert_user(&db, &member_id, UserType::Person).await;
+        insert_user(&db, "admin-id", UserType::Person).await;
+        insert_admin(&db, &org_id, "admin-id").await;
 
         let invite = create_invite(
             &db,
@@ -411,6 +668,8 @@ mod tests {
         let second_member_id = Uuid::new_v4().to_string();
         insert_user(&db, &org_id, UserType::Org).await;
         insert_user(&db, &member_id, UserType::Person).await;
+        insert_user(&db, "admin-id", UserType::Person).await;
+        insert_admin(&db, &org_id, "admin-id").await;
         insert_user(&db, &second_member_id, UserType::Person).await;
 
         // A freshly generated invite code that was never persisted -> unknown.
@@ -470,6 +729,8 @@ mod tests {
         let member_id = Uuid::new_v4().to_string();
         insert_user(&db, &org_id, UserType::Org).await;
         insert_user(&db, &member_id, UserType::Person).await;
+        insert_user(&db, "admin-id", UserType::Person).await;
+        insert_admin(&db, &org_id, "admin-id").await;
 
         let invite = create_invite(
             &db,
@@ -504,6 +765,8 @@ mod tests {
         let member_id = Uuid::new_v4().to_string();
         insert_user(&db, &org_id, UserType::Org).await;
         insert_user(&db, &member_id, UserType::Person).await;
+        insert_user(&db, "admin-id", UserType::Person).await;
+        insert_admin(&db, &org_id, "admin-id").await;
 
         org_service::create_membership(
             &db,

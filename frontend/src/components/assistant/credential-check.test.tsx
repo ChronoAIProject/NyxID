@@ -6,7 +6,7 @@ import { CredentialCheck } from "./credential-check";
 import { api } from "@/lib/api-client";
 import type { KeyInfo } from "@/types/keys";
 import { appI18n } from "@/i18n/instance";
-import zh from "@/i18n/locales/zh-CN.json";
+import zh from "@/i18n/locales/app/zh-CN";
 
 vi.mock("@/lib/api-client", () => ({ api: { post: vi.fn() } }));
 const key = { id: "own/key", status: "active", credential_type: "api_key", node_id: null, credential_verification: { state: "not_verified", reason_code: "not_checked", can_check: true } } as KeyInfo;
@@ -30,7 +30,7 @@ it("renders Chinese copy and permission-aware rejection", async () => {
   appI18n.addResourceBundle("zh-CN", "app", zh, true, true);
   await act(() => appI18n.changeLanguage("zh-CN"));
   render(<CredentialCheck connection={{ ...key, credential_verification: { state: "rejected", reason_code: "provider_forbidden", can_check: true } }} canManage />);
-  expect(screen.getByText(zh["The provider refused this check. Review the credential's permissions; this does not necessarily mean the key is invalid."])).toBeInTheDocument();
+  expect(screen.getByText(zh["The provider refused this check. Review the credential's permissions; this does not necessarily mean the key is invalid."]!)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "检查凭据" })).toBeInTheDocument();
 });
 

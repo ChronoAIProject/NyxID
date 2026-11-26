@@ -229,11 +229,12 @@ async fn lark_model_turns(profile: &str, legacy: bool) {
         let (_guard, completed) = watch_relay_callback(&channel.id, id);
         let body = json!({"message_id":id,"correlation_id":format!("jti-{id}"),"platform":"lark",
             "agent":{"api_key_id":channel.route_api_key_id,"name":"route"},
-            "conversation":{"id":"route","platform_id":"oc_test","type":"group"},
+            "conversation":{"id":channel.route_id,"platform_id":"oc_test","type":"group"},
             "sender":{"platform_id":sender},"content":{"type":"text","text":format!("@_user_1 hello {id}")},
             "timestamp":"2026-09-30T00:00:00Z",
             "raw_platform_data":{"event":{"sender":{"sender_type":"user","sender_id":{"open_id":sender}},
                 "message":{"mentions":[{"key":"@_user_1","id":{"open_id":"ou_bot"},"name":"Helper bot"}]}}}});
+        store_direct_source(&state, &channel, &body).await;
         let bytes = serde_json::to_vec(&body).unwrap();
         let token = crate::crypto::jwt::generate_relay_callback_token(
             &state.jwt_keys,

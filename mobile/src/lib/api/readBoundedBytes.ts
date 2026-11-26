@@ -1,9 +1,10 @@
+import { localizedError } from "../../i18n/localizedError";
 /** Bound native downloads while consuming the stream, before saving or decoding. */
 export async function readBoundedBytes(
   body: ReadableStream<Uint8Array> | null,
   maximum: number,
 ): Promise<Uint8Array> {
-  if (!body) throw new Error("The attachment download is unavailable.");
+  if (!body) throw localizedError("The attachment download is unavailable.");
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let length = 0;
@@ -14,7 +15,7 @@ export async function readBoundedBytes(
       length += value.byteLength;
       if (length > maximum) {
         await reader.cancel().catch(() => undefined);
-        throw new Error("The attachment exceeds the download limit.");
+        throw localizedError("The attachment exceeds the download limit.");
       }
       chunks.push(value);
     }

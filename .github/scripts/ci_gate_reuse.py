@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping
+from urllib.parse import quote
 
 
 WORKFLOW_PATH = ".github/workflows/ci.yml"
@@ -228,13 +229,20 @@ _MATRIX_EXPRESSION = re.compile(
 )
 
 
-def _has_event_sensitive_steps(job: Mapping[str, Any]) -> bool:
+_PROFILE_MARKERS = ("github.base_ref", "github.event.pull_request.base.ref", "needs.changes.outputs.profile")
+_EVENT_MARKERS = ("github.event_name", "github.ref", *_PROFILE_MARKERS)
+
+
+def _has_event_sensitive_steps(job: Mapping[str, Any], *, coverage: bool = False) -> bool:
     """Keep jobs whose PR steps differ from a force-all main invocation."""
 
     details = {key: value for key, value in job.items()
                if key not in {"name", "if", "needs", "strategy", "uses"}}
     text = json.dumps(details, sort_keys=True)
-    return any(marker in text for marker in ("github.event_name", "github.ref", "inputs.force-all"))
+    # Coverage has PR-only delta reporting. Its threshold is reusable, but
+    # a future profile-specific measurement must still run on main.
+    markers = _PROFILE_MARKERS if coverage else (*_EVENT_MARKERS, "inputs.force-all")
+    return any(marker in text for marker in markers)
 
 
 def _runs_under_force_all(job_id: str, job: Mapping[str, Any]) -> bool:
@@ -247,7 +255,7 @@ def _runs_under_force_all(job_id: str, job: Mapping[str, Any]) -> bool:
         return True
     # A condition tied only to the pull_request event remains skipped on main;
     # it cannot be credited as a reusable force-all check.
-    return "github.event_name" not in condition or "inputs.force-all" in condition
+    return "inputs.force-all" in condition or not any(marker in condition for marker in _EVENT_MARKERS)
 
 
 def _name_kind(name: str) -> tuple[str, tuple[str, ...]]:
@@ -467,8 +475,7 @@ def analyze_workflow(
         # it. This also supports older workflow files that predate reuse guards;
         # those callers ignore the input and run the eligible job normally.
         eligible = nested or (job_id in required and _runs_under_force_all(job_id, raw_job))
-        event_sensitive = (not nested and not job_id.startswith("coverage-")
-                           and _has_event_sensitive_steps(raw_job))
+        event_sensitive = not nested and _has_event_sensitive_steps(raw_job, coverage=job_id.startswith("coverage-"))
         if "uses" in raw_job:
             if "name" not in raw_job:
                 parent_name = job_id
@@ -658,6 +665,43 @@ def _validated_merged_main_pr(
     return number, full_name
 
 
+def _release_test_tree(
+    run: Mapping[str, Any], repository: str, number: int,
+    git_tree: Callable[[str], str], api: Callable[[str], Any],
+) -> str:
+    # Local reusable workflows run from the caller's commit. Actions records
+    # their resolved refs and SHAs even when the merged run has no PR array.
+    ref = f"refs/pull/{number}/merge"
+    prefix = f"{repository}/.github/workflows/backend-tests.yml@"
+    matches = [
+        item for item in run.get("referenced_workflows") or []
+        if item.get("ref") == ref and isinstance(item.get("path"), str)
+        and item["path"].startswith(prefix)
+    ]
+    if len(matches) != 1:
+        raise WorkflowIdentityError("release_test_commit_unavailable")
+    entry = matches[0]
+    suffix = entry["path"][len(prefix):]
+    commit = entry.get("sha")
+    if not suffix or not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+        raise WorkflowIdentityError("release_test_commit_unavailable")
+    commit = commit.lower()
+    if re.fullmatch(r"[0-9a-fA-F]{40}", suffix) and suffix.lower() != commit:
+        raise WorkflowIdentityError("release_test_commit_unavailable")
+    try:
+        return git_tree(commit)
+    except subprocess.CalledProcessError:
+        # GitHub may stop advertising the synthetic merge after the PR closes.
+        obj = api(f"repos/{repository}/git/commits/{commit}")
+        if not isinstance(obj, Mapping) or obj.get("sha") != commit:
+            raise WorkflowIdentityError("release_test_tree_unavailable")
+        tree = obj.get("tree")
+        tree_sha = tree.get("sha") if isinstance(tree, Mapping) else None
+        if not isinstance(tree_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", tree_sha):
+            raise WorkflowIdentityError("release_test_tree_unavailable")
+        return tree_sha
+
+
 def decide_from_api(
     *,
     api: Callable[[str], Any],
@@ -730,18 +774,14 @@ def decide_from_api(
         if not isinstance(head, Mapping) or not isinstance(head.get("sha"), str):
             return _fallback("pull_request_head_missing", "main", current_tree=current_tree)
         head_sha = head["sha"]
-        pr_h = _exactly_one_pr(
-            api(f"repos/{repository}/commits/{head_sha}/pulls"), "head_commit_pr_ambiguous"
-        )
         number_m, head_repository = _validated_merged_main_pr(pr_m, repository, sha, head_sha)
-        number_h, head_repository_h = _validated_merged_main_pr(pr_h, repository, sha, head_sha)
-        if number_m != number_h or head_repository != head_repository_h:
-            return _fallback("associated_pr_mismatch", "main", current_tree=current_tree,
-                             head_sha=head_sha)
-
+        head_branch = head.get("ref")
+        release = (head_repository == repository and isinstance(head_branch, str)
+                   and (head_branch == "dev" or head_branch.startswith("release/")))
         runs_response = api(
             f"repos/{repository}/actions/workflows/ci.yml/runs"
             f"?event=pull_request&head_sha={head_sha}&per_page=100"
+            + (f"&branch={quote(head_branch, safe='')}" if release else "")
         )
         runs = runs_response.get("workflow_runs", []) if isinstance(runs_response, Mapping) else runs_response
         runs = [run for run in (runs or []) if run.get("event") == "pull_request"]
@@ -757,8 +797,7 @@ def decide_from_api(
             return _fallback("run_head_repository_mismatch", "main", current_tree=current_tree,
                              head_sha=head_sha)
         run_pull_requests = run.get("pull_requests") or []
-        # Merged runs commonly expose an empty array. The two exact-one commit
-        # lookups above prove the PR/base/merge identity in that case.
+        # Merged runs commonly expose an empty array. Validate it when present.
         if run_pull_requests:
             if len(run_pull_requests) != 1 or not isinstance(run_pull_requests[0], Mapping):
                 return _fallback("run_pull_request_ambiguous", "main", current_tree=current_tree,
@@ -770,15 +809,35 @@ def decide_from_api(
                     or run_head.get("sha") != head_sha):
                 return _fallback("run_pull_request_mismatch", "main", current_tree=current_tree,
                                  head_sha=head_sha)
-        if git_parent is None or git_is_ancestor is None:
-            return _fallback("git_history_unavailable", "main", current_tree=current_tree,
-                             head_sha=head_sha)
-        parent_sha = git_parent(sha)
-        if not git_is_ancestor(parent_sha, head_sha):
-            return _fallback("pr_behind_main", "main", current_tree=current_tree,
-                             head_sha=head_sha)
+        if release:
+            if run.get("head_branch") != head_branch:
+                return _fallback("release_head_branch_mismatch", "main", current_tree=current_tree)
+            # The dev tip can also introduce a feature PR, and the previous
+            # main release merge need not be in dev's history. Identify the
+            # exact release PR and its synthetic merge using run provenance.
+            if not run.get("referenced_workflows"):
+                run_details = api(f"repos/{repository}/actions/runs/{int(run['id'])}"
+                                  f"/attempts/{int(run['run_attempt'])}")
+            else:
+                run_details = run
+            tested_tree = _release_test_tree(run_details, repository, number_m, git_tree, api)
+        else:
+            pr_h = _exactly_one_pr(
+                api(f"repos/{repository}/commits/{head_sha}/pulls"), "head_commit_pr_ambiguous"
+            )
+            number_h, head_repository_h = _validated_merged_main_pr(pr_h, repository, sha, head_sha)
+            if number_m != number_h or head_repository != head_repository_h:
+                return _fallback("associated_pr_mismatch", "main", current_tree=current_tree,
+                                 head_sha=head_sha)
+            if git_parent is None or git_is_ancestor is None:
+                return _fallback("git_history_unavailable", "main", current_tree=current_tree,
+                                 head_sha=head_sha)
+            parent_sha = git_parent(sha)
+            if not git_is_ancestor(parent_sha, head_sha):
+                return _fallback("pr_behind_main", "main", current_tree=current_tree,
+                                 head_sha=head_sha)
+            tested_tree = git_tree(head_sha)
         jobs = _run_jobs(api, int(run["id"]))
-        tested_tree = git_tree(head_sha)
         return assess_tree_and_jobs(
             workflow=workflow, reusable_workflows=reusable_workflows,
             current_tree=current_tree, tested_tree=tested_tree, jobs=jobs,

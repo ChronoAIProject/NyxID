@@ -1,3 +1,7 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { Pager } from "../../components/settings/Pager";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import { useEffect, useRef, useState } from "react";
@@ -48,7 +52,7 @@ const titleOf = (agent: AssistantAgent) => agent.display_name || agent.name;
 const failure = (cause: unknown) =>
   cause instanceof Error
     ? cause.message
-    : "The request could not be completed. Try again.";
+    : translateApp("The request could not be completed. Try again.");
 /** The catalog and every pin belong to the explicitly selected agent. */
 export function PluginSkills({ agentId }: { agentId?: string }) {
   const { t } = useAppLanguage();
@@ -94,19 +98,21 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
           subtitle={t("Reconnect to load agents and their skills.")}
         />
       )}
-      <SettingsGroup title="Agent">
+      <SettingsGroup title={translateApp("Agent")}>
         <SettingsRow
           leading={agent ? <AgentAvatar agent={agent} size="md" /> : undefined}
-          label={agent ? titleOf(agent) : "Choose an agent"}
+          label={agent ? titleOf(agent) : translateApp("Choose an agent")}
           detail={
             agent
               ? agent.owner_kind === "org"
-                ? (agent.owner_name ?? "Organization")
-                : "Personal"
+                ? (agent.owner_name ?? translateApp("Organization"))
+                : translateApp("Personal")
               : undefined
           }
-          accessibilityLabel={`Agent for skills: ${agent ? titleOf(agent) : "Choose an agent"}`}
-          accessibilityHint="Opens a list of agents whose skills you can manage"
+          accessibilityLabel={(agent ? translateApp("Agent for skills: {{agent}}", { agent: titleOf(agent) }) : translateApp("Agent for skills: Choose an agent"))}
+          accessibilityHint={translateApp(
+            "Opens a list of agents whose skills you can manage",
+          )}
           accessibilityState={{
             expanded: picking,
             disabled: !manageable.length,
@@ -118,16 +124,16 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
       </SettingsGroup>
       {picking && (
         <WorkspaceSelectionSheet
-          label="Agent for skills"
-          title="Choose an agent"
+          label={translateApp("Agent for skills")}
+          title={translateApp("Choose an agent")}
           options={manageable.map((item) => ({
             value: item.id,
             label: titleOf(item),
             leading: <AgentAvatar agent={item} size="lg" />,
             description:
               item.owner_kind === "org"
-                ? (item.owner_name ?? "Organization")
-                : "Personal",
+                ? (item.owner_name ?? translateApp("Organization"))
+                : translateApp("Personal"),
           }))}
           value={agent ? [agent.id] : []}
           allowEmpty={false}
@@ -146,7 +152,7 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
         <SkeletonRows
           rows={3}
           title
-          accessibilityLabel="Loading agents for skills"
+          accessibilityLabel={translateApp("Loading agents for skills")}
         />
       )}
       {agents.isError && (
@@ -154,7 +160,7 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
           <Notice tone="error" message={failure(agents.error)} />
           <SettingsGroup inset={false}>
             <SettingsRow
-              label="Retry agents"
+              label={translateApp("Retry agents")}
               tone="action"
               disabled={!canFetch}
               onPress={() => {
@@ -167,8 +173,10 @@ export function PluginSkills({ agentId }: { agentId?: string }) {
       {isConnected && !agents.isPending && !agents.isError && !agent && (
         <Text style={[styles.note, { color: colors.textMuted }]}>
           {chosen
-            ? "Requested agent unavailable. It may have been deleted or your maintenance access changed. Choose another agent to manage its skills."
-            : "No agent you can maintain is available."}
+            ? translateApp(
+                "Requested agent unavailable. It may have been deleted or your maintenance access changed. Choose another agent to manage its skills.",
+              )
+            : translateApp("No agent you can maintain is available.")}
         </Text>
       )}
       {agent && <AgentSkillsManager key={agent.id} agent={agent} />}
@@ -210,14 +218,17 @@ export function PluginSkillPage({
         <OfflineBanner subtitle={t("Reconnect to load this skill's agent.")} />
       )}
       {isConnected && agent.isPending && (
-        <SkeletonRows rows={3} title accessibilityLabel="Loading skill agent" />
+        <SkeletonRows rows={3} title accessibilityLabel={translateApp("Loading skill agent")}
+        />
       )}
       {agent.isError && <Notice tone="error" message={failure(agent.error)} />}
       {agent.data &&
         (agent.data.agent.can_maintain === false ||
           agent.data.agent.status === "destroyed") && (
           <Text style={[styles.note, { color: colors.textMuted }]}>
-            This agent is unavailable or your maintenance access changed.
+            {translateApp(
+              "This agent is unavailable or your maintenance access changed.",
+            )}
           </Text>
         )}
       {agent.data &&
@@ -242,6 +253,7 @@ function SkillPageGuard({
   busy: boolean;
   onBack: () => void;
 }) {
+  useAppLanguage();
   useWorkspaceBack({
     active: false,
     onBack,
@@ -288,8 +300,8 @@ function AgentSkillsManager({
   const [selectedVersion, setSelectedVersion] = useState<SkillVersion>();
   const [testing, setTesting] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const lock = useRef(false);
   const authEpoch = useRef(getAuthEpoch());
   const currentKey = [...ROOT, agent.id] as const;
@@ -381,12 +393,10 @@ function AgentSkillsManager({
     setNotice(undefined);
     try {
       if (authEpoch.current !== getAuthEpoch())
-        throw new Error(
-          "Your account session changed. Reopen Plugins to continue.",
-        );
+        throw localizedError("Your account session changed. Reopen Plugins to continue.");
       await action();
     } catch (cause) {
-      setError(failure(cause));
+      setError(() => (failure(cause)));
     } finally {
       lock.current = false;
       setBusy(false);
@@ -404,28 +414,24 @@ function AgentSkillsManager({
         latestAgent.agent.can_maintain === false ||
         latestAgent.agent.status === "destroyed"
       )
-        throw new Error(
-          "This agent can no longer be changed. Reload to review its current state.",
-        );
+        throw localizedError("This agent can no longer be changed. Reload to review its current state.");
       assertSkillRevision(agent.id, baseline, latest);
       const selection = buildSkillSelection(latest, change);
       if (authEpoch.current !== getAuthEpoch())
-        throw new Error(
-          "Your account session changed. Reopen Plugins to continue.",
-        );
+        throw localizedError("Your account session changed. Reopen Plugins to continue.");
       if (!currentCanFetch.current)
         throw new Error(
           currentTranslation.current(
-            "Reconnect before changing this agent's skills.",
+            translateApp("Reconnect before changing this agent's skills."),
           ),
         );
       await api.write(agent.id, selection);
       await refresh();
       setTesting(false);
       setNotice(
-        change.type === "detach"
-          ? "Skill removed from agent."
-          : "Exact skill version attached.",
+        () => (change.type === "detach"
+          ? translateApp("Skill removed from agent.")
+          : translateApp("Exact skill version attached.")),
       );
       if (change.type === "detach") navigation.goBack();
       else if (change.type === "attach")
@@ -529,7 +535,7 @@ function AgentSkillsManager({
               <Notice tone="error" message={error} />
               <SettingsGroup inset={false}>
                 <SettingsRow
-                  label="Reload current skills"
+                  label={translateApp("Reload current skills")}
                   tone="action"
                   disabled={busy || !canFetch}
                   onPress={() => {
@@ -548,12 +554,14 @@ function AgentSkillsManager({
                 inset={false}
                 footer={
                   current.data
-                    ? "Showing last loaded attached skills. Retry to confirm before changing versions or removing a skill."
+                    ? translateApp(
+                        "Showing last loaded attached skills. Retry to confirm before changing versions or removing a skill.",
+                      )
                     : undefined
                 }
               >
                 <SettingsRow
-                  label="Retry attached skills"
+                  label={translateApp("Retry attached skills")}
                   tone="action"
                   disabled={busy || !canFetch || current.isFetching}
                   accessory={
@@ -577,50 +585,59 @@ function AgentSkillsManager({
                   icon={BookOpen}
                   label={detail.name}
                   detail={
-                    pin ? `Attached to ${titleOf(agent)}` : "Ornn catalog"
+                    pin ? translateApp("Attached to {{title}}", {
+                          title: titleOf(agent),
+                        })
+                      : translateApp("Ornn catalog")
                   }
                 />
               </SettingsGroup>
               <SettingsGroup
-                title="Version"
+                title={translateApp("Version")}
                 inset={false}
                 footer={
                   pin?.disabled
-                    ? "This skill is disabled. Ask NyxBot to enable it before changing its version."
+                    ? translateApp(
+                        "This skill is disabled. Ask NyxBot to enable it before changing its version.",
+                      )
                     : undefined
                 }
               >
                 <SettingsRow
                   label={
                     current.isError && current.data
-                      ? "Last loaded version"
-                      : "Pinned version"
+                      ? translateApp("Last loaded version")
+                      : translateApp("Pinned version")
                   }
-                  detail={pinnedLatest ? "Latest version" : undefined}
+                  detail={pinnedLatest ? translateApp("Latest version") : undefined}
                   value={
                     pin?.version ??
                     (isConnected && current.isPending
-                      ? "Loading attached version…"
+                      ? translateApp("Loading attached version…")
                       : currentReady
-                        ? "Not attached"
-                        : "Attachment status unavailable")
+                        ? translateApp("Not attached")
+                        : translateApp("Attachment status unavailable"))
                   }
                 />
                 {pin && metadata?.size_bytes !== undefined && (
                   <SettingsRow
-                    label="Package size"
-                    value={`${metadata.size_bytes.toLocaleString()} bytes`}
+                    label={translateApp("Package size")}
+                    value={translateApp("{{size}} bytes", {
+                      size: metadata.size_bytes.toLocaleString(appLocale()),
+                    })}
                   />
                 )}
                 {pin && (
                   <SettingsRow
-                    label="Pinned dependencies"
+                    label={translateApp("Pinned dependencies")}
                     value={String(pin.dependencies.length)}
                   />
                 )}
                 {latestVersion && !pinnedLatest && (
                   <SettingsRow
-                    label={`Use latest (v${latestVersion.version})`}
+                    label={translateApp("Use latest (v{{version}})", {
+                      version: latestVersion.version,
+                    })}
                     tone="action"
                     disabled={busy || !currentReady || Boolean(pin?.disabled)}
                     onPress={() => {
@@ -629,7 +646,9 @@ function AgentSkillsManager({
                   />
                 )}
                 <SettingsRow
-                  label={pin ? "Choose exact version" : "Attach exact version"}
+                  label={pin ? translateApp("Choose exact version")
+                      : translateApp("Attach exact version")
+                  }
                   disabled={busy || !currentReady}
                   onPress={() => {
                     openView("versions");
@@ -640,10 +659,10 @@ function AgentSkillsManager({
               </SettingsGroup>
               <SettingsGroup
                 inset={false}
-                footer="To change this skill, ask NyxBot."
+                footer={translateApp("To change this skill, ask NyxBot.")}
               >
                 <SettingsRow
-                  label="Ask NyxBot"
+                  label={translateApp("Ask NyxBot")}
                   tone="action"
                   disabled={busy || !focused}
                   onPress={() => {
@@ -659,15 +678,17 @@ function AgentSkillsManager({
               {pin && (
                 <>
                   <SettingsGroup
-                    title="Test attached skill"
+                    title={translateApp("Test attached skill")}
                     inset={false}
-                    footer="Read the exact package this agent uses."
+                    footer={translateApp(
+                      "Read the exact package this agent uses.",
+                    )}
                   >
                     <SettingsRow
                       label={
                         isConnected && tested.isFetching && testing
-                          ? "Testing attached skill…"
-                          : "Read pinned package"
+                          ? translateApp("Testing attached skill…")
+                          : translateApp("Read pinned package")
                       }
                       tone="action"
                       disabled={
@@ -699,7 +720,9 @@ function AgentSkillsManager({
                   {testing && tested.isError && (
                     <Notice
                       tone="error"
-                      message={`Test failed: ${failure(tested.error)}`}
+                      message={translateApp("Test failed: {{failure}}", {
+                        failure: failure(tested.error),
+                      })}
                     />
                   )}
                   {testing &&
@@ -710,24 +733,42 @@ function AgentSkillsManager({
                         tone={tested.data.readable ? "success" : "info"}
                         message={
                           tested.data.readable
-                            ? `Test passed: the agent reads ${tested.data.name} ${tested.data.version} (${tested.data.size_bytes.toLocaleString()} bytes).`
-                            : `${tested.data.name} ${tested.data.version} is disabled, so the agent does not read it.`
+                            ? translateApp(
+                                "Test passed: the agent reads {{name}} {{version}} ({{bytes}} bytes).",
+                                {
+                                  name: tested.data.name,
+                                  version: tested.data.version,
+                                  bytes:
+                                    tested.data.size_bytes.toLocaleString(
+                                      appLocale(),
+                                    ),
+                                },
+                              )
+                            : translateApp(
+                                "{{name}} {{version}} is disabled, so the agent does not read it.",
+                                {
+                                  name: tested.data.name,
+                                  version: tested.data.version,
+                                },
+                              )
                         }
                       />
                     )}
                   <SettingsGroup inset={false}>
                     <SettingsRow
-                      label="Skill history"
+                      label={translateApp("Skill history")}
                       disabled={busy}
                       onPress={() => openView("history")}
                     />
                   </SettingsGroup>
                   <SettingsGroup
                     inset={false}
-                    footer="Other attached skills stay in place. The skill stays in Ornn."
+                    footer={translateApp(
+                      "Other attached skills stay in place. The skill stays in Ornn.",
+                    )}
                   >
                     <SettingsRow
-                      label="Remove from agent"
+                      label={translateApp("Remove from agent")}
                       tone="danger"
                       disabled={busy || !canFetch || !currentReady}
                       onPress={() =>
@@ -754,7 +795,7 @@ function AgentSkillsManager({
                   rows={4}
                   icon={false}
                   title
-                  accessibilityLabel="Loading skill versions"
+                  accessibilityLabel={translateApp("Loading skill versions")}
                 />
               )}
               {versions.isError && (
@@ -762,7 +803,7 @@ function AgentSkillsManager({
                   <Notice tone="error" message={failure(versions.error)} />
                   <SettingsGroup inset={false}>
                     <SettingsRow
-                      label="Retry versions"
+                      label={translateApp("Retry versions")}
                       tone="action"
                       disabled={!canFetch}
                       onPress={() => retry(() => versions.refetch())}
@@ -777,14 +818,19 @@ function AgentSkillsManager({
               )}
               {versions.data?.items.length === 0 && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>
-                  No published versions are visible through your Ornn access.
+                  {translateApp(
+                    "No published versions are visible through your Ornn access.",
+                  )}
                 </Text>
               )}
               {versions.data?.items.length ? (
                 <SettingsGroup
-                  title="Versions"
+                  title={translateApp("Versions")}
                   inset={false}
-                  footer={`Choose which version of ${detail.name} this agent uses. Skills change how the agent works.`}
+                  footer={translateApp(
+                    "Choose which version of {{name}} this agent uses. Skills change how the agent works.",
+                    { name: detail.name},
+                  )}
                 >
                   {versions.data.items.map((item) => {
                     const selected = selectedVersion?.version === item.version;
@@ -795,21 +841,21 @@ function AgentSkillsManager({
                         mono
                         detail={
                           item.deprecated
-                            ? "Deprecated version"
+                            ? translateApp("Deprecated version")
                             : pin?.version === item.version
-                              ? "Current pinned version"
-                              : "Published version"
+                              ? translateApp("Current pinned version")
+                              : translateApp("Published version")
                         }
                         value={
                           item.version === latestVersion?.version
-                            ? "Latest"
+                            ? translateApp("Latest")
                             : undefined
                         }
                         chevron={false}
                         accessibilityRole="radio"
                         accessibilityState={{ checked: selected, selected }}
-                        accessibilityLabel={`Select version ${item.version}${item.deprecated ? ", deprecated" : ""}`}
-                        accessibilityHint={selected ? "Selected" : undefined}
+                        accessibilityLabel={(item.deprecated ? translateApp("Select version {{version}}, deprecated", { version: item.version }) : translateApp("Select version {{version}}", { version: item.version }))}
+                        accessibilityHint={selected ? translateApp("Selected") : undefined}
                         disabled={busy}
                         onPress={() => setSelectedVersion(item)}
                         accessory={
@@ -829,20 +875,22 @@ function AgentSkillsManager({
                 </SettingsGroup>
               ) : null}
               {versions.data && versions.data.total_pages > 1 && (
-                <Pagination
-                  page={versionPage}
-                  total={versions.data.total_pages}
-                  disabled={busy || !canFetch || versions.isFetching}
-                  onChange={(value) => {
-                    if (!currentCanFetch.current) return;
-                    setVersionPage(value);
-                    setSelectedVersion(undefined);
-                  }}
-                />
+                <SettingsGroup inset={false}>
+                  <Pager
+                    page={versionPage}
+                    total={versions.data.total_pages}
+                    disabled={busy || !canFetch || versions.isFetching}
+                    onChange={(value) => {
+                      if (!currentCanFetch.current) return;
+                      setVersionPage(value);
+                      setSelectedVersion(undefined);
+                    }}
+                  />
+                </SettingsGroup>
               )}
               {isConnected && selectedVersion && preview.isFetching && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>
-                  Verifying package…
+                  {translateApp("Verifying package…")}
                 </Text>
               )}
               {preview.isError && (
@@ -850,7 +898,7 @@ function AgentSkillsManager({
                   <Notice tone="error" message={failure(preview.error)} />
                   <SettingsGroup inset={false}>
                     <SettingsRow
-                      label="Retry package preview"
+                      label={translateApp("Retry package preview")}
                       tone="action"
                       disabled={!canFetch}
                       onPress={() => retry(() => preview.refetch())}
@@ -867,31 +915,36 @@ function AgentSkillsManager({
                 selectedVersion &&
                 (!preview.isFetching || !isConnected) && (
                   <SettingsGroup
-                    title="Package"
+                    title={translateApp("Package")}
                     inset={false}
                     footer={
                       selectedVersion.deprecated
-                        ? "This version is deprecated. Choose a supported version unless you intentionally need this exact package."
+                        ? translateApp(
+                            "This version is deprecated. Choose a supported version unless you intentionally need this exact package.",
+                          )
                         : preview.data.description || undefined
                     }
                   >
                     <SettingsRow
-                      label="Size"
-                      value={`${preview.data.size_bytes.toLocaleString()} bytes`}
+                      label={translateApp("Size")}
+                      value={translateApp("{{size}} bytes", {
+                        size:
+                          preview.data.size_bytes.toLocaleString(appLocale()),
+                      })}
                     />
                     <SettingsRow
-                      label="Pinned dependencies"
+                      label={translateApp("Pinned dependencies")}
                       value={String(preview.data.reference.dependencies.length)}
                     />
                     <SettingsRow
                       label={preview.data.reference.skill_id}
-                      detail="Skill ID"
+                      detail={translateApp("Skill ID")}
                       mono
                       selectable
                     />
                     <SettingsRow
                       label={preview.data.reference.sha256}
-                      detail="SHA-256"
+                      detail={"SHA-256"}
                       mono
                       selectable
                     />
@@ -901,14 +954,20 @@ function AgentSkillsManager({
                 inset={false}
                 footer={
                   pin?.disabled
-                    ? "Ask NyxBot to enable this skill before updating its exact version."
+                    ? translateApp(
+                        "Ask NyxBot to enable this skill before updating its exact version.",
+                      )
                     : !pin && pins.length >= 16
-                      ? "This agent already has 16 skills. Remove one from this agent before attaching another."
+                      ? translateApp(
+                          "This agent already has 16 skills. Remove one from this agent before attaching another.",
+                        )
                       : undefined
                 }
               >
                 <SettingsRow
-                  label={pin ? "Update exact version" : "Attach skill"}
+                  label={pin ? translateApp("Update exact version")
+                      : translateApp("Attach skill")
+                  }
                   tone="action"
                   accessory={
                     busy ? (
@@ -950,7 +1009,7 @@ function AgentSkillsManager({
                 <SkeletonRows
                   rows={4}
                   title
-                  accessibilityLabel="Loading skill history"
+                  accessibilityLabel={translateApp("Loading skill history")}
                 />
               )}
               {history.isError && (
@@ -958,7 +1017,7 @@ function AgentSkillsManager({
                   <Notice tone="error" message={failure(history.error)} />
                   <SettingsGroup inset={false}>
                     <SettingsRow
-                      label="Retry skill history"
+                      label={translateApp("Retry skill history")}
                       tone="action"
                       disabled={!canFetch}
                       onPress={() => retry(() => history.refetch())}
@@ -973,27 +1032,23 @@ function AgentSkillsManager({
               )}
               {history.data?.items.length === 0 && (
                 <Text style={[styles.note, { color: colors.textMuted }]}>
-                  No skill history yet.
+                  {translateApp("No skill history yet.")}
                 </Text>
               )}
               {history.data?.items.length ? (
-                <SettingsGroup title="History" inset={false}>
+                <SettingsGroup title={translateApp("History")} inset={false}>
                   {history.data.items.map((item) => (
                     <SettingsRow
                       key={item.id}
                       label={
                         SKILL_HISTORY_LABELS[item.event_type] ??
-                        "Skill activity"
+                        translateApp("Skill activity")
                       }
                       detail={[
-                        `${new Date(item.created_at).toLocaleString()}${
-                          item.revision !== null
-                            ? ` · Revision ${item.revision}`
-                            : ""
-                        }`,
+                        (item.revision !== null ? translateApp("{{time}} · Revision {{count}}", { time: new Date(item.created_at).toLocaleString(appLocale()), count: item.revision}) : new Date(item.created_at).toLocaleString(appLocale())),
                         ...item.skills.map(
                           (skill) =>
-                            `${skill.name} · ${skill.version}${skill.disabled ? " · Disabled" : ""}`,
+                            (skill.disabled ? translateApp("{{name}} · {{version}} · Disabled", { name: skill.name, version: skill.version}) : translateApp("{{name}} · {{version}}", { name: skill.name, version: skill.version })),
                         ),
                       ].join("\n")}
                     />
@@ -1011,43 +1066,18 @@ function AgentSkillsManager({
 /** iOS confirms removal in a system alert; the destructive choice is explicit. */
 function confirmRemoval(skill: string, agent: string, onConfirm: () => void) {
   Alert.alert(
-    "Remove from agent?",
-    `Remove ${skill} from ${agent}? Other attached skills stay in place. The skill stays in Ornn.`,
+    translateApp("Remove from agent?"),
+    translateApp(
+      "Remove {{skill}} from {{agent}}? Other attached skills stay in place. The skill stays in Ornn.",
+      {skill: skill, agent: agent },
+    ),
     [
-      { text: "Cancel", style: "cancel" },
-      { text: "Remove", style: "destructive", onPress: onConfirm },
+      { text: translateApp("Cancel"), style: "cancel" },
+      { text: translateApp("Remove"), style: "destructive", onPress: onConfirm },
     ],
   );
 }
 
-function Pagination({
-  page,
-  total,
-  disabled,
-  onChange,
-}: {
-  page: number;
-  total: number;
-  disabled?: boolean;
-  onChange: (page: number) => void;
-}) {
-  return (
-    <SettingsGroup title={`Page ${page} / ${total}`} inset={false}>
-      <SettingsRow
-        label="Previous"
-        tone="action"
-        disabled={disabled || page <= 1}
-        onPress={() => onChange(page - 1)}
-      />
-      <SettingsRow
-        label="Next"
-        tone="action"
-        disabled={disabled || page >= total}
-        onPress={() => onChange(page + 1)}
-      />
-    </SettingsGroup>
-  );
-}
 const styles = StyleSheet.create({
   grouped: {
     paddingHorizontal: spacing.xxl,

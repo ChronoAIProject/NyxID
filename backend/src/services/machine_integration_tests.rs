@@ -1816,6 +1816,7 @@ async fn machine_watches_and_jobs_carry_validated_report_provenance() {
         (7, Some("nyxa-assigning"), false, None),
     ] {
         let watch = NyxbotWatch {
+            wake_claim: None,
             source_connect_link_id: None,
             source_turn_id: None,
             invocation_id: None,

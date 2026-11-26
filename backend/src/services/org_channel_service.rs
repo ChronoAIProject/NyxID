@@ -18,9 +18,11 @@ use crate::{
 
 pub(crate) mod adoption;
 pub(crate) mod budget;
+pub(crate) mod defaults;
 pub(crate) mod lifecycle;
 pub(crate) mod links;
 pub(crate) mod management;
+pub(crate) mod preview;
 #[cfg(test)]
 pub(crate) mod tests;
 pub(crate) mod transcript;
@@ -48,6 +50,13 @@ pub(crate) async fn guest_grants_ready(db: &Database) -> AppResult<bool> {
         Err(AppError::SecurityReadinessUnavailable) => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// Frozen bindings keep their original permission digests until Grants adoption.
+fn guest_delegation_current(agent: &AssistantAgent, policy: &GuestPolicy) -> bool {
+    policy.service_authority.iter().all(|(id, digest)| {
+        agent.grants.service_ids.contains(id) && management::service_digest(agent, id) == *digest
+    })
 }
 
 /// Binding selection only: operation/guest classification remains in the shared
@@ -217,13 +226,29 @@ pub(crate) async fn link_target(
         version: 1,
         org_id: agent.user_id.clone(),
         revision: uuid::Uuid::new_v4().to_string(),
-        guests: GuestPolicy {
-            follows_agent_grants: guest_grants_ready(db).await?,
-            // Conservative compatibility fields for an old reader.
-            daily_credits: Some(management::default_daily_credits()),
-            ..Default::default()
-        },
+        guests: initial_guest_policy(guest_grants_ready(db).await?, &bot.platform),
     }))
+}
+
+/// Meta assignment requires a separate customer-access confirmation. Ordinary
+/// channels retain their established open default; restored policies supersede
+/// this initial choice through the shared continuity path.
+pub(crate) fn initial_guest_policy(grants_ready: bool, platform: &str) -> GuestPolicy {
+    let mut policy = new_guest_policy(grants_ready);
+    if super::channel_adapters::meta::is_meta(platform) {
+        policy.enabled = false;
+    }
+    policy
+}
+
+pub(crate) fn new_guest_policy(grants_ready: bool) -> GuestPolicy {
+    GuestPolicy {
+        enabled: true,
+        revision: uuid::Uuid::new_v4().to_string(),
+        follows_agent_grants: grants_ready,
+        daily_credits: Some(management::default_daily_credits()),
+        ..Default::default()
+    }
 }
 
 /// Preserve the existing closed/typed refusal before resolving any bot on
@@ -240,10 +265,9 @@ pub(crate) async fn require_target(
         return Err(AppError::organization_agent_channels_disabled());
     }
     enabled(db, actor).await?;
-    if !matches!(
-        super::org_agent_service::access(db, actor, &agent.user_id).await?,
-        super::org_service::OwnerAccess::AsOrgAdmin { .. }
-    ) {
+    let acl = super::org_agent_service::access(db, actor, &agent.user_id).await?;
+    let rights = super::org_agent_service::specialist_rights(actor, agent, &acl);
+    if !rights.can_govern || !rights.can_maintain {
         return Err(AppError::Forbidden(
             "Only an organization admin can connect this specialist to a channel bot".into(),
         ));
@@ -283,14 +307,26 @@ pub(crate) async fn sender(
         .collection::<SenderLink>(LINKS)
         .find_one(doc! {"channel_id":&row.id,"sender_hash":&hash})
         .await?;
-    let (actor, link_id, link_revision, admin, guest) = match link {
+    let (actor, link_id, link_revision, admin, guest, org_use_revision) = match link {
         Some(link) => {
             // A removed member is never silently downgraded to an org-paid guest.
             if !eligible || !link.active || link.binding_revision != binding.revision {
                 return Err(denied());
             }
+            if super::channel_adapters::meta::is_meta(&row.platform) {
+                let grant = link
+                    .meta_grant
+                    .as_ref()
+                    .filter(|grant| grant.bot_id == row.channel_bot_id)
+                    .ok_or_else(denied)?;
+                if db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&grant.bot_id,"is_active":true,"meta_binding.grant_id":&grant.grant_id})
+                    .projection(doc! {"_id":1}).await?.is_none() {return Err(denied());}
+            }
             let acl = super::org_agent_service::access(db, &link.user_id, &binding.org_id).await?;
-            if !super::org_agent_service::can_use(&acl) {
+            let agent = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
+                .find_one(doc! {"_id":agent_id,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null}).await?.ok_or_else(denied)?;
+            if !super::org_agent_service::specialist_rights(&link.user_id, &agent, &acl).can_use {
                 return Err(denied());
             }
             let admin = matches!(acl, super::org_service::OwnerAccess::AsOrgAdmin { .. });
@@ -300,6 +336,7 @@ pub(crate) async fn sender(
                 Some(link.revision),
                 admin,
                 false,
+                agent.org_use_revision,
             )
         }
         None if binding.guests.enabled => {
@@ -313,12 +350,13 @@ pub(crate) async fn sender(
             {
                 return Err(denied());
             }
-            (binding.org_id.clone(), None, None, false, true)
+            (binding.org_id.clone(), None, None, false, true, 0)
         }
         None => return Err(denied()),
     };
     Ok((
         Execution {
+            org_use_revision,
             version: 1,
             org_id: binding.org_id.clone(),
             revision: binding.revision.clone(),
@@ -372,149 +410,106 @@ pub(crate) async fn validate_in_session(
     fence: bool,
 ) -> AppResult<Access> {
     let execution = origin.org_execution.as_deref().ok_or_else(denied)?;
-    if execution.version != 1 || execution.actor_id != actor || execution.agent_id != agent_id {
-        return Err(denied());
-    }
-    let row = live_doc(
+    let audience = check_audience(
         db,
         session,
-        "nyxbot_channels",
-        doc! {"_id":&origin.nyxbot_channel_id,
-        "status":"active","org_specialist.version":1,
-        "org_specialist.org_id":&execution.org_id,"org_specialist.revision":&execution.revision,
-        "bot_owner_id":&execution.org_id},
+        origin,
+        actor,
+        agent_id,
         fence,
+        AudienceUse::Execution,
     )
     .await?;
-    let channel: NyxbotChannel = bson::from_document(row).map_err(|_| denied())?;
-    enabled(db, &channel.user_id).await?;
-    live_doc(
+    Ok(Access {
+        guest_grants_ready: audience.guest_grants_ready,
+        member_private_source: !execution.guest
+            && origin.thread.is_none()
+            && audience.settings.kind.as_deref() == Some("private"),
+        channel: audience.channel,
+        execution: execution.clone(),
+        origin: origin.clone(),
+        agent: audience.agent,
+    })
+}
+
+enum AudienceUse {
+    Execution,
+    FixedNotice,
+}
+
+struct CheckedAudience {
+    channel: NyxbotChannel,
+    agent: AssistantAgent,
+    child: Option<NyxbotThread>,
+    settings: NyxbotThread,
+    guest_grants_ready: bool,
+}
+
+/// A notice checks the same binding, sender and transport as admission. Only
+/// the execution entry point can construct Access or turn this proof into a payer.
+pub(crate) async fn notice_audience_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    origin: &ChannelOrigin,
+) -> AppResult<(NyxbotChannel, NyxbotThread, NyxbotThread)> {
+    let e = origin.org_execution.as_deref().ok_or_else(denied)?;
+    let audience = check_audience(
         db,
         session,
-        "users",
-        doc! {"_id":&execution.org_id,"is_active":true,"user_type":"org"},
-        fence,
+        origin,
+        &e.actor_id,
+        &e.agent_id,
+        true,
+        AudienceUse::FixedNotice,
     )
     .await?;
-    live_doc(
-        db,
-        session,
-        "users",
-        doc! {"_id":&channel.user_id,"is_active":true},
-        fence,
-    )
-    .await?;
-    live_doc(
-        db,
-        session,
-        "org_memberships",
-        doc! {"org_user_id":&execution.org_id,"member_user_id":&channel.user_id,
-        "revoked_at":bson::Bson::Null,"role":"admin"},
-        fence,
-    )
-    .await?;
-    live_doc(
-        db,
-        session,
-        "channel_bots",
-        doc! {"_id":&channel.channel_bot_id,"user_id":&execution.org_id,
-        "is_active":true,"status":{"$ne":"suspended"}},
-        fence,
-    )
-    .await?;
-    let agent: AssistantAgent = bson::from_document(
-        live_doc(
+    Ok((
+        audience.channel,
+        audience.child.ok_or_else(denied)?,
+        audience.settings,
+    ))
+}
+
+fn check_audience<'a>(
+    db: &'a Database,
+    session: &'a mut ClientSession,
+    origin: &'a ChannelOrigin,
+    actor: &'a str,
+    agent_id: &'a str,
+    fence: bool,
+    purpose: AudienceUse,
+) -> futures::future::BoxFuture<'a, AppResult<CheckedAudience>> {
+    Box::pin(async move {
+        let execution = origin.org_execution.as_deref().ok_or_else(denied)?;
+        if execution.version != 1 || execution.actor_id != actor || execution.agent_id != agent_id {
+            return Err(denied());
+        }
+        let row = live_doc(
             db,
             session,
-            "assistant_agents",
-            doc! {"_id":agent_id,
-            "user_id":&execution.org_id,"kind":"specialist","destroyed_at":bson::Bson::Null},
+            "nyxbot_channels",
+            doc! {"_id":&origin.nyxbot_channel_id,
+            "status":"active","org_specialist.version":1,
+            "org_specialist.org_id":&execution.org_id,"org_specialist.revision":&execution.revision,
+            "bot_owner_id":&execution.org_id},
             fence,
         )
-        .await?,
-    )
-    .map_err(|_| denied())?;
-    let mut thread: NyxbotThread = bson::from_document(
-        live_doc(
-            db,
-            session,
-            "nyxbot_threads",
-            doc! {
-            "channel_id":&channel.id,"partition":&origin.partition,"user_id":&channel.user_id},
-            fence,
-        )
-        .await?,
-    )
-    .map_err(|_| denied())?;
-    if origin.thread.is_some() {
-        thread = bson::from_document(
-            live_doc(
-                db,
-                session,
-                "nyxbot_threads",
-                doc! {"_id":&thread.follow.settings_chat_id,
-                "channel_id":&channel.id,"user_id":&channel.user_id},
-                fence,
-            )
-            .await?,
-        )
-        .map_err(|_| denied())?;
-    }
-    if thread
-        .agent_id
-        .as_ref()
-        .or(channel.agent_id.as_ref())
-        .map(String::as_str)
-        != Some(agent_id)
-    {
-        return Err(denied());
-    }
-    let guest_grants_ready = execution.guest && guest_grants_ready(db).await?;
-    if execution.guest {
-        let policy = &channel.org_specialist.as_ref().ok_or_else(denied)?.guests;
-        if actor != execution.org_id
-            || !policy.enabled
-            || execution.guest_revision.as_deref() != Some(policy.revision.as_str())
-            || policy.revision.is_empty()
-            || (!guest_grants_ready
-                && policy
-                    .daily_credits
-                    .is_none_or(|c| c <= crate::models::credits::Credits::ZERO))
-            || execution.link_id.is_some()
-            || execution.link_revision.is_some()
-            || (thread.kind.as_deref() == Some("private")
-                && channel.private_chats.as_deref() != Some("everyone"))
-            || (thread.kind.as_deref() != Some("private")
-                && !matches!(thread.members.as_deref(), Some("everyone"))
-                && !(thread.members.is_none() && thread.owner_seen))
-        {
-            return Err(denied());
-        }
-        // A claimed member identity must never be converted into guest authority.
-        if db
-            .collection::<Document>(LINKS)
-            .find_one(doc! {"org_id":&execution.org_id,"sender_hash":&execution.sender_hash})
-            .session(&mut *session)
-            .await?
-            .is_some()
-        {
-            return Err(denied());
-        }
-        if !(guest_grants_ready && policy.follows_agent_grants)
-            && policy.service_authority.iter().any(|(id, digest)| {
-                !agent.grants.service_ids.contains(id)
-                    || management::service_digest(&agent, id) != *digest
-            })
-        {
-            return Err(denied());
-        }
-        budget::require_wallet(db, &execution.org_id).await?;
-    } else {
+        .await?;
+        let channel: NyxbotChannel = bson::from_document(row).map_err(|_| denied())?;
+        enabled(db, &channel.user_id).await?;
         live_doc(
             db,
             session,
             "users",
-            doc! {"_id":actor,"is_active":true,"user_type":{"$ne":"org"}},
+            doc! {"_id":&execution.org_id,"is_active":true,"user_type":"org"},
+            fence,
+        )
+        .await?;
+        live_doc(
+            db,
+            session,
+            "users",
+            doc! {"_id":&channel.user_id,"is_active":true},
             fence,
         )
         .await?;
@@ -522,49 +517,193 @@ pub(crate) async fn validate_in_session(
             db,
             session,
             "org_memberships",
-            doc! {"org_user_id":&execution.org_id,"member_user_id":actor,
-            "revoked_at":bson::Bson::Null,"role":{"$in":["admin","member"]}},
+            doc! {"org_user_id":&execution.org_id,"member_user_id":&channel.user_id,
+            "revoked_at":bson::Bson::Null,"role":"admin"},
             fence,
         )
         .await?;
-        live_doc(db, session, LINKS, doc!{"_id":&execution.link_id,"channel_id":&channel.id,"user_id":actor,
-            "active":true,"revision":&execution.link_revision,"binding_revision":&execution.revision,"sender_hash":&execution.sender_hash}, fence).await?;
-    }
-    // Routes and keys are transport authority even for native sources. Fence
-    // their revocation in the same transaction as a turn or billed admission.
-    if fence {
-        super::platform_bot_authority::fence_personal_routes(
+        let status = match purpose {
+            AudienceUse::Execution => bson::Bson::Document(doc! {"$ne":"suspended"}),
+            AudienceUse::FixedNotice => bson::Bson::String("active".into()),
+        };
+        live_doc(
             db,
-            &channel.channel_bot_id,
-            &execution.org_id,
             session,
+            "channel_bots",
+            doc! {"_id":&channel.channel_bot_id,"user_id":&execution.org_id,
+            "is_active":true,"status":status},
+            fence,
         )
         .await?;
-    } else if !super::platform_bot_authority::permits_personal_routes(db, &channel.channel_bot_id)
+        let agent: AssistantAgent = bson::from_document(
+            live_doc(
+                db,
+                session,
+                "assistant_agents",
+                doc! {"_id":agent_id,
+                "user_id":&execution.org_id,"kind":"specialist","destroyed_at":bson::Bson::Null},
+                fence,
+            )
+            .await?,
+        )
+        .map_err(|_| denied())?;
+        let thread: NyxbotThread = bson::from_document(
+            live_doc(
+                db,
+                session,
+                "nyxbot_threads",
+                doc! {
+                "channel_id":&channel.id,"partition":&origin.partition,"user_id":&channel.user_id},
+                fence,
+            )
+            .await?,
+        )
+        .map_err(|_| denied())?;
+        let (child, thread) = if origin.thread.is_some() {
+            let settings = bson::from_document(
+                live_doc(
+                    db,
+                    session,
+                    "nyxbot_threads",
+                    doc! {"_id":&thread.follow.settings_chat_id,
+                    "channel_id":&channel.id,"user_id":&channel.user_id},
+                    fence,
+                )
+                .await?,
+            )
+            .map_err(|_| denied())?;
+            (Some(thread), settings)
+        } else {
+            (None, thread)
+        };
+        if thread
+            .agent_id
+            .as_ref()
+            .or(channel.agent_id.as_ref())
+            .map(String::as_str)
+            != Some(agent_id)
+        {
+            return Err(denied());
+        }
+        let executing = matches!(purpose, AudienceUse::Execution);
+        let guest_grants_ready = executing && execution.guest && guest_grants_ready(db).await?;
+        if execution.guest {
+            let policy = &channel.org_specialist.as_ref().ok_or_else(denied)?.guests;
+            if actor != execution.org_id
+                || !policy.enabled
+                || (executing
+                    && (execution.guest_revision.as_deref() != Some(policy.revision.as_str())
+                        || policy.revision.is_empty()))
+                || (executing
+                    && !guest_grants_ready
+                    && policy
+                        .daily_credits
+                        .is_none_or(|c| c <= crate::models::credits::Credits::ZERO))
+                || execution.link_id.is_some()
+                || execution.link_revision.is_some()
+                || (thread.kind.as_deref() == Some("private")
+                    && channel.private_chats.as_deref() != Some("everyone"))
+                || (thread.kind.as_deref() != Some("private")
+                    && !matches!(thread.members.as_deref(), Some("everyone"))
+                    && !(thread.members.is_none() && thread.owner_seen))
+            {
+                return Err(denied());
+            }
+            // A claimed member identity must never be converted into guest authority.
+            if db
+                .collection::<Document>(LINKS)
+                .find_one(doc! {"org_id":&execution.org_id,"sender_hash":&execution.sender_hash})
+                .session(&mut *session)
+                .await?
+                .is_some()
+            {
+                return Err(denied());
+            }
+            if executing
+                && !(guest_grants_ready && policy.follows_agent_grants)
+                && !guest_delegation_current(&agent, policy)
+            {
+                return Err(denied());
+            }
+            if executing {
+                budget::require_wallet(db, &execution.org_id).await?;
+            }
+        } else {
+            live_doc(
+                db,
+                session,
+                "users",
+                doc! {"_id":actor,"is_active":true,"user_type":{"$ne":"org"}},
+                fence,
+            )
+            .await?;
+            let member = live_doc(
+                db,
+                session,
+                "org_memberships",
+                doc! {"org_user_id":&execution.org_id,"member_user_id":actor,
+                "revoked_at":bson::Bson::Null,"role":{"$in":["admin","member"]}},
+                fence,
+            )
+            .await?;
+            let role = bson::from_bson(member.get("role").cloned().ok_or_else(denied)?)
+                .map_err(|_| denied())?;
+            if execution.org_use_revision != agent.org_use_revision
+                || !super::org_agent_service::member_rights(actor, &agent, role).can_use
+            {
+                return Err(denied());
+            }
+            let link = live_doc(db, session, LINKS, doc!{"_id":&execution.link_id,"channel_id":&channel.id,"user_id":actor,
+            "active":true,"revision":&execution.link_revision,"binding_revision":&execution.revision,"sender_hash":&execution.sender_hash}, fence).await?;
+            if super::channel_adapters::meta::is_meta(&channel.platform) {
+                let grant: crate::models::channel_meta::GrantRef =
+                    bson::from_bson(link.get("meta_grant").cloned().ok_or_else(denied)?)
+                        .map_err(|_| denied())?;
+                if grant.bot_id != channel.channel_bot_id {
+                    return Err(denied());
+                }
+                // The existing route fence below serializes this same parent
+                // with cutover; retain one bot write in this transaction.
+                live_doc(db,session,crate::models::channel_bot::COLLECTION_NAME,
+                    doc! {"_id":&grant.bot_id,"is_active":true,"meta_binding.grant_id":&grant.grant_id},false).await?;
+            }
+        }
+        // Routes and keys are transport authority even for native sources. Fence
+        // their revocation in the same transaction as a turn or billed admission.
+        if fence {
+            super::platform_bot_authority::fence_personal_routes(
+                db,
+                &channel.channel_bot_id,
+                &execution.org_id,
+                session,
+            )
+            .await?;
+        } else if !super::platform_bot_authority::permits_personal_routes(
+            db,
+            &channel.channel_bot_id,
+        )
         .await?
-    {
-        return Err(denied());
-    }
-    live_doc(
-        db,
-        session,
-        "api_keys",
-        doc! {"_id":&channel.route_api_key_id,"user_id":&execution.org_id,"is_active":true,
-        "$or":[{"expires_at":null},{"expires_at":{"$gt":bson::DateTime::now()}}]},
-        fence,
-    )
-    .await?;
-    live_doc(db,session,crate::models::channel_conversation::COLLECTION_NAME,doc!{"_id":&channel.route_id,"user_id":&execution.org_id,
+        {
+            return Err(denied());
+        }
+        live_doc(
+            db,
+            session,
+            "api_keys",
+            doc! {"_id":&channel.route_api_key_id,"user_id":&execution.org_id,"is_active":true,
+            "$or":[{"expires_at":null},{"expires_at":{"$gt":bson::DateTime::now()}}]},
+            fence,
+        )
+        .await?;
+        live_doc(db,session,crate::models::channel_conversation::COLLECTION_NAME,doc!{"_id":&channel.route_id,"user_id":&execution.org_id,
         "channel_bot_id":&channel.channel_bot_id,"agent_api_key_id":&channel.route_api_key_id,"is_active":true,"retired_by_transfer":{"$ne":true}},fence).await?;
-    Ok(Access {
-        guest_grants_ready,
-        member_private_source: !execution.guest
-            && origin.thread.is_none()
-            && thread.kind.as_deref() == Some("private"),
-        channel,
-        execution: execution.clone(),
-        origin: origin.clone(),
-        agent,
+        Ok(CheckedAudience {
+            channel,
+            agent,
+            child,
+            settings: thread,
+            guest_grants_ready,
+        })
     })
 }
 
@@ -594,18 +733,7 @@ pub(crate) async fn conversation_access(
             .await?;
             access.check_conversation(row)?;
             if origin.thread.is_some() {
-                let mut conversation = row.id.clone();
-                if row.guest_model_setup {
-                    let e = origin.org_execution.as_ref().ok_or_else(denied)?;
-                    let lane = db.collection::<Document>(crate::models::org_channel::LANES).find_one(doc!{
-                    "channel_id":&origin.nyxbot_channel_id,"partition":&origin.partition,"actor_id":&row.user_id,
-                    "agent_id":&e.agent_id,"binding_revision":&e.revision,"guest_revision":&e.guest_revision,
-                    "sender_hash":&e.sender_hash}).await?.ok_or_else(denied)?;
-                    conversation = lane
-                        .get_str("conversation_id")
-                        .map_err(|_| denied())?
-                        .into();
-                }
+                let conversation = follow_conversation(db, row, origin, None).await?;
                 Box::pin(super::channel_thread_follow_service::validate_delivery(
                     db,
                     &row.user_id,
@@ -618,6 +746,45 @@ pub(crate) async fn conversation_access(
         }
         None => Ok(None),
     }
+}
+
+/// Hidden setup owns its own credential and settlement. Only its follow check
+/// uses the originating guest's admitted lane, bound to the exact sender/policy.
+pub(crate) async fn follow_conversation(
+    db: &Database,
+    row: &AssistantConversation,
+    origin: &ChannelOrigin,
+    session: Option<&mut ClientSession>,
+) -> AppResult<String> {
+    let Some(e) = origin
+        .org_execution
+        .as_ref()
+        .filter(|_| row.guest_model_setup && origin.thread.is_some())
+    else {
+        return Ok(row.id.clone());
+    };
+    if !e.guest
+        || row.guest_turn
+        || e.actor_id != row.user_id
+        || row.agent_id.as_deref() != Some(&e.agent_id)
+    {
+        return Err(denied());
+    }
+    let lanes = db.collection::<Document>(crate::models::org_channel::LANES);
+    let lookup = lanes.find_one(doc! {
+        "channel_id":&origin.nyxbot_channel_id,"partition":&origin.partition,"actor_id":&row.user_id,
+        "agent_id":&e.agent_id,"binding_revision":&e.revision,"guest_revision":&e.guest_revision,
+        "sender_hash":&e.sender_hash
+    });
+    let lane = match session {
+        Some(session) => lookup.session(session).await?,
+        None => lookup.await?,
+    }
+    .ok_or_else(denied)?;
+    Ok(lane
+        .get_str("conversation_id")
+        .map_err(|_| denied())?
+        .to_owned())
 }
 
 pub(crate) async fn guest_rate(
@@ -649,7 +816,50 @@ pub(crate) fn event_actor(event: &crate::models::nyxbot_channel::NyxbotEvent) ->
         .map_or(event.user_id.as_str(), |e| e.actor_id.as_str())
 }
 
+/// The actor's event history needs a separate prefix from the resource owner.
+/// Keep this late startup addition separate from the base index sequence.
+pub(crate) async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    use futures::TryStreamExt;
+    use mongodb::{IndexModel, options::IndexOptions};
+    let collection = db.collection::<bson::Document>("org_channel_messages");
+    match collection.list_indexes().await {
+        Ok(mut indexes) => {
+            while let Some(index) = indexes.try_next().await? {
+                if index
+                    .keys
+                    .keys()
+                    .next()
+                    .is_some_and(|field| field == "author_user_id")
+                    && index
+                        .options
+                        .as_ref()
+                        .is_none_or(|options| options.partial_filter_expression.is_none())
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+            {}
+        Err(error) => return Err(error),
+    }
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"author_user_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("account_export_org_channel_messages_author_user_id".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
 pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    defaults::ensure_indexes(db).await?;
     use crate::models::org_channel::*;
     use mongodb::{IndexModel, options::IndexOptions};
     for (collection, keys) in [
@@ -778,6 +988,47 @@ pub(crate) async fn fence_management(
     row: &NyxbotChannel,
     actor: &str,
 ) -> AppResult<()> {
+    fence_binding_authority(db, tx, row, actor, true).await
+}
+
+/// The calling transaction fences the actor's Admin membership on the channel.
+pub(crate) async fn fence_binding_agent(
+    db: &Database,
+    tx: &mut ClientSession,
+    org: &str,
+    agent_id: &str,
+    manager: Option<&str>,
+) -> AppResult<()> {
+    let target = live_doc(
+        db,
+        tx,
+        crate::models::assistant_agent::COLLECTION_NAME,
+        doc! {"_id":agent_id,"user_id":org,"kind":"specialist","destroyed_at":null},
+        true,
+    )
+    .await?;
+    if let Some(actor) = manager {
+        let agent = bson::from_document(target).map_err(|_| denied())?;
+        if !super::org_agent_service::member_rights(
+            actor,
+            &agent,
+            crate::models::org_membership::OrgRole::Admin,
+        )
+        .can_maintain
+        {
+            return Err(denied());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn fence_binding_authority(
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &NyxbotChannel,
+    actor: &str,
+    maintenance: bool,
+) -> AppResult<()> {
     let b = row.org_specialist.as_ref().ok_or_else(denied)?;
     enabled(db, &row.user_id).await?;
     live_doc(
@@ -807,14 +1058,33 @@ pub(crate) async fn fence_management(
         true,
     )
     .await?;
+    fence_binding_agent(
+        db,
+        tx,
+        &b.org_id,
+        row.agent_id.as_deref().ok_or_else(denied)?,
+        maintenance.then_some(actor),
+    )
+    .await?;
+    fence_binding(db, tx, row).await
+}
+
+/// Revalidate old/new binding identity without reacquiring actor/org writes
+/// already held by the encompassing assignment transaction.
+pub(crate) async fn fence_binding(
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &NyxbotChannel,
+) -> AppResult<()> {
+    let b = row.org_specialist.as_ref().ok_or_else(denied)?;
     live_doc(
         db,
         tx,
-        "assistant_agents",
-        doc! {"_id":&row.agent_id,"user_id":&b.org_id,"kind":"specialist","destroyed_at":null},
+        "nyxbot_channels",
+        doc! {"_id":&row.id,"agent_id":&row.agent_id,
+        "org_specialist.revision":&b.revision,"status":{"$in":["active","pending"]}},
         true,
     )
     .await?;
-    live_doc(db,tx,"nyxbot_channels",doc!{"_id":&row.id,"org_specialist.revision":&b.revision,"status":{"$in":["active","pending"]}},true).await?;
     Ok(())
 }

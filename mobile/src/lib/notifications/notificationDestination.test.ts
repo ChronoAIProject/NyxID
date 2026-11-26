@@ -192,11 +192,33 @@ const backendPayloads: [
     { tab: "connectors" },
   ],
   [
+    "organization guest defaults with an additive notice type",
+    {
+      type: "channel_bot_guest_defaults",
+      bot_id: "bot",
+      recommended_action: "review_guest_access",
+      url: "https://nyx.example/channel-bots/bot",
+    },
+    "Plugins",
+    { tab: "connectors" },
+  ],
+  [
     "failed channel bot",
     {
       type: "channel_bot_failed",
       bot_id: "bot",
       recommended_action: "reconnect",
+      url: "https://nyx.example/channel-bots/bot",
+    },
+    "Plugins",
+    { tab: "connectors" },
+  ],
+  [
+    "restored channel bot",
+    {
+      type: "channel_bot_restored",
+      bot_id: "bot",
+      guest_enabled: "true",
       url: "https://nyx.example/channel-bots/bot",
     },
     "Plugins",
@@ -301,4 +323,11 @@ test("malformed relative URL candidates continue through alternatives and type f
   assert.equal(notificationDestination({ type: "channel_bot_failed", url: "//[" }, config), "nyxid://plugins?tab=connectors");
   assert.equal(notificationDestination({ url: "//[", reconnect_url: "/plugins" }, config), "nyxid://plugins");
   assert.equal(notificationDestination({ type: "unknown", url: "//[" }, config), null);
+});
+
+test("guest-default notices without a URL use the channel notice destination", () => {
+  assert.equal(
+    notificationDestination({ type: "channel_bot_guest_defaults", bot_id: "bot" }, config),
+    "nyxid://plugins?tab=connectors",
+  );
 });

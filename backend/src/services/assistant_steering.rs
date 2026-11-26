@@ -18,6 +18,44 @@ use uuid::Uuid;
 
 pub const MAX_CHARS: usize = 32_000;
 
+pub(crate) enum OwnerControl<'a> {
+    Capabilities,
+    Guidance(&'a Steering),
+}
+
+tokio::task_local! {
+    static CONTROL: (String, &'static str, String);
+}
+
+impl OwnerControl<'_> {
+    pub(crate) async fn send<F: Future>(self, owner: &str, request: F) -> F::Output {
+        let (method, resource) = match self {
+            Self::Capabilities => ("GET", "/v1/capabilities".to_owned()),
+            Self::Guidance(receipt) => (
+                "POST",
+                format!("/v1/conversations/{}/steer", receipt.session_id),
+            ),
+        };
+        CONTROL
+            .scope((owner.to_owned(), method, resource), request)
+            .await
+    }
+}
+
+pub(crate) fn personal_control(
+    actor: &str,
+    operation: &super::operation_descriptor::OperationDescriptor,
+) -> bool {
+    CONTROL
+        .try_with(|(owner, method, path)| {
+            owner == actor
+                && operation.protocol == super::operation_descriptor::Protocol::Http
+                && operation.method.as_deref() == Some(*method)
+                && operation.resource.as_deref() == Some(path.as_str())
+        })
+        .unwrap_or(false)
+}
+
 pub fn unavailable(row: &AssistantConversation, turn_id: &str) -> Option<&'static str> {
     if row.guest_turn
         || row.group_id.is_some()
@@ -57,8 +95,8 @@ pub async fn set_running_response(
     row: &AssistantConversation,
     response: Option<&RunningResponse>,
 ) -> AppResult<bool> {
-    let turn = row.active_turn.as_ref().expect("claimed turn");
-    let mut filter = doc! {"_id": &row.id, "user_id": &row.user_id, "active_turn.turn_id": &turn.turn_id, "active_turn.stop_requested": false};
+    let mut filter = super::assistant_nyxagent::WorkerFence::capture(row)?.filter();
+    filter.insert("active_turn.stop_requested", false);
     if let Some(response) = response {
         filter.insert("credential_api_key_id", &response.credential_api_key_id);
     }
@@ -115,6 +153,7 @@ pub async fn reserve(
             let response = row.active_turn.as_ref().unwrap().running_response.as_ref().unwrap();
             let now = Utc::now();
             let message = AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),
@@ -148,7 +187,17 @@ pub async fn reserve(
             row.message_count += 1;
             row.updated_at = now;
             conversations.replace_one(doc! {"_id": &id, "user_id": &owner}, &row).session(&mut *session).await?;
-            messages.insert_one(&message).session(&mut *session).await?;
+            let grants = engine::turn_meta_grants(row.active_turn.as_ref().ok_or(AppError::AssistantTurnRequired)?);
+            if grants.is_empty() {
+                messages.insert_one(&message).session(&mut *session).await?;
+            } else {
+                for grant in &grants {
+                    super::channel_meta_service::scopes::fence_reference(&db, session, grant, true).await?;
+                }
+                let mut stored = bson::to_document(&message).map_err(|_| AppError::Internal("Steering receipt unavailable".into()))?;
+                stored.insert("meta_grants", bson::to_bson(&grants).map_err(|_| AppError::Internal("Steering receipt unavailable".into()))?);
+                db.collection::<bson::Document>(MESSAGES).insert_one(stored).session(&mut *session).await?;
+            }
             Ok(Admission::Dispatch(message))
         }).await;
         transactions::transaction_result(operation)

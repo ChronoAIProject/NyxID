@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { AssistantSseDecoder } from "./assistantStream";
 import type { AssistantTurnEvent } from "./assistantTypes";
 
@@ -39,7 +40,7 @@ export async function readAssistantResponse(
       total += result.value.byteLength;
       if (total > 12 * 1024 * 1024) {
         if (terminal) break;
-        throw new Error("Assistant response exceeded its limit.");
+        throw localizedError("Assistant response exceeded its limit.");
       }
       if (terminal) continue;
       for (const event of frames.push(
@@ -51,9 +52,7 @@ export async function readAssistantResponse(
       }
     }
     if (!terminal)
-      throw new Error(
-        "The connection was interrupted. The assistant may still be working.",
-      );
+      throw localizedError("The connection was interrupted. The assistant may still be working.");
   } finally {
     // One cancellation owner: request abort errors the native stream. Calling
     // reader.cancel() as well can close it before a queued native completion.
@@ -75,9 +74,7 @@ async function readWithDeadline(
         timer = setTimeout(() => {
           controller.abort();
           reject(
-            new Error(
-              "The connection was interrupted. Refresh history before sending again.",
-            ),
+            localizedError("The connection was interrupted. Refresh history before sending again."),
           );
         }, milliseconds);
       }),

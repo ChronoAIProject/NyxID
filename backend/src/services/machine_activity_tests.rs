@@ -125,6 +125,7 @@ async fn machine_receipt_jobs_finish_cancel_and_do_not_resurrect_late_outcomes()
         ["finished", "error", "cancelled", "unknown"]
     );
     let mut activity = TurnActivity {
+        memory_recovery: None,
         decision: None,
         retry_identity: None,
         id: Uuid::new_v4().to_string(),
@@ -395,6 +396,7 @@ async fn machine_preview_consent_encryption_acl_expiry_and_late_result() {
             turn_id: Uuid::new_v4().to_string(),
             content_type: "text/plain".into(),
             size: 4,
+            chunks: 0,
             data_encrypted: f.state.encryption_keys.encrypt(b"test").await.unwrap(),
             created_at: Utc::now(),
         })
@@ -677,6 +679,7 @@ async fn machine_group_receipts_strip_private_refs_and_refuse_preview_consent() 
     receipt.preview_enabled = true;
     row.active_turn.as_mut().unwrap().activities.push(
         crate::models::assistant_conversation::TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             machine: Some(Box::new(receipt)),

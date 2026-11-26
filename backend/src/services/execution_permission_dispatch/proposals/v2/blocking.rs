@@ -27,12 +27,10 @@ impl WaitGuard {
 }
 impl Drop for WaitGuard {
     fn drop(&mut self) {
-        if self.armed.load(Ordering::Acquire)
-            && let Ok(runtime) = tokio::runtime::Handle::try_current()
-        {
+        if self.armed.load(Ordering::Acquire) && tokio::runtime::Handle::try_current().is_ok() {
             let db = self.db.clone();
             let id = self.id.clone();
-            runtime.spawn(async move {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 // A transaction cancelled at commit can resolve after its caller
                 // drops. Retry that cleanup briefly; the durable deadline and
                 // background=false fence remain fail-closed after a process crash.
@@ -59,7 +57,7 @@ pub(crate) async fn abandon(db: &Database, id: &str, code: &str) -> AppResult<bo
                     "execution_proposal.v2.state":{"$in":["pending","queued","preparing","waiting"]}},
                 doc! {"$set":{"status":"expired","expires_at":bson::DateTime::now(),
                     "execution_proposal.v2.state":"not_sent","execution_proposal.v2.failure_code":*code},
-                    "$unset":{"execution_proposal.v2.payload":"","execution_proposal.v2.result":""}},
+                    "$unset":Slot::V2.unset(&[Field::Payload, Field::Result])},
             ).session(&mut *session).await? else { return Ok(false); };
             super::super::lifecycle::retire_operations(db, session, std::slice::from_ref(&row.id)).await?;
             audit(db, session, &row.user_id, "execution_permission_wait_abandoned", &row.id).await?;
@@ -161,7 +159,7 @@ pub(crate) async fn complete(db: &Database, resume: &Resume, received: bool) -> 
             "execution_proposal.v2.claim_id":&resume.claim_id,"execution_proposal.v2.state":"dispatched"},
         doc! {"$set":{"execution_proposal.v2.state":if received {"completed"} else {"unknown"},
             "execution_proposal.v2.failure_code":if received {None} else {Some("provider_outcome_unknown")}},
-            "$unset":{"execution_proposal.v2.payload":""}},
+            "$unset":Slot::V2.unset(&[Field::Payload])},
     ).await?;
     Ok(())
 }

@@ -669,6 +669,7 @@ fn oauth_refresh_preserves_coverage_but_account_replacement_invalidates() {
     let service = crate::models::downstream_service::test_helpers::dummy_service();
     let mut resolution = UserServiceResolution {
         target: ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -680,7 +681,7 @@ fn oauth_refresh_preserves_coverage_but_account_replacement_invalidates() {
             auth_key_name: "Authorization".into(),
             credential: "first-oauth-token".to_owned().into(),
             service,
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: Some("oauth-account".into()),

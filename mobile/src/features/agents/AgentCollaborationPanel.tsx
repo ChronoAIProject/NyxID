@@ -1,3 +1,7 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { Alert, Switch, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
@@ -38,6 +42,7 @@ const personalOwner = (agent: AssistantAgent) =>
 
 /** Recipient controls never reuse the owner's grants, skills or private memory. */
 export function AgentCollaborationPanel({ agent }: { agent: AssistantAgent }) {
+  useAppLanguage();
   const session = useCollaborationSession("assistant:shared-agents");
   const eligible =
     agent.kind === "specialist" &&
@@ -54,10 +59,12 @@ export function AgentCollaborationPanel({ agent }: { agent: AssistantAgent }) {
       <Card>
         <Notice
           tone="error"
-          message="Agent sharing availability could not be verified."
+          message={translateApp(
+            "Agent sharing availability could not be verified.",
+          )}
         />
         <ActionButton
-          label="Retry sharing availability"
+          label={translateApp("Retry sharing availability")}
           onPress={() => void session.identity.refetch()}
         />
       </Card>
@@ -76,10 +83,12 @@ export function AgentCollaborationPanel({ agent }: { agent: AssistantAgent }) {
         <Card>
           <Notice
             tone="error"
-            message="Sharing settings are unavailable or access has changed."
+            message={translateApp(
+              "Sharing settings are unavailable or access has changed.",
+            )}
           />
           <ActionButton
-            label="Reload sharing"
+            label={translateApp("Reload sharing")}
             onPress={() => void sharing.refetch()}
             disabled={!session.active}
           />
@@ -109,8 +118,16 @@ export function AgentCollaborationPanel({ agent }: { agent: AssistantAgent }) {
           <Notice
             message={
               agent.share_role
-                ? `Shared by ${agent.owner_name ?? "agent owner"} · ${agent.share_role}. Your chats and private notes stay private. You pay for your model and service usage. Skills do not grant service authority.`
-                : "Publishing team memory is explicit. Your existing personal memories are never shared automatically."
+                ? translateApp(
+                    "Shared by {{owner}} · {{role}}. Your chats and private notes stay private. You pay for your model and service usage. Skills do not grant service authority.",
+                    {
+                      owner: agent.owner_name ?? "agent owner",
+                      role: agent.share_role,
+                    },
+                  )
+                : translateApp(
+                    "Publishing team memory is explicit. Your existing personal memories are never shared automatically.",
+                  )
             }
           />
           <SharedNotesEditor
@@ -143,6 +160,7 @@ function SharingEditor({
   agent: AssistantAgent;
   policy: Sharing;
 }) {
+  useAppLanguage();
   const [baseline, setBaseline] = useState(policy);
   const initial = (value: Sharing): SharingForm => ({
     enabled: value.enabled,
@@ -157,22 +175,27 @@ function SharingEditor({
   const [subject, setSubject] = useState("");
   const [kind, setKind] = useState<"person" | "org">("person");
   const [role, setRole] = useState<"user" | "manager">("user");
-  const [inputError, setInputError] = useState<string>();
+  const [inputError, setInputError] = useLocalizedState<string>();
   const stale = baseline.version !== policy.version;
   const disabled = session.busy || !session.active;
   function add() {
     const normalized = subject.trim().toLowerCase();
-    const parsed = shareAudienceSchema.safeParse(
+    const parseAudience = () => shareAudienceSchema.safeParse(
       kind === "person"
         ? { subject_kind: kind, email: normalized, role }
         : { subject_kind: kind, subject_id: normalized, role: "user" },
     );
+    const parsed = parseAudience();
     if (!parsed.success) {
-      setInputError(parsed.error.issues[0]?.message ?? "Check the audience.");
+      setInputError(() => {
+        const validation = parseAudience();
+        return (!validation.success && validation.error.issues[0]?.message) || translateApp("Check the audience.");
+      },
+      );
       return;
     }
     if (value.audience.some((a) => (a.email ?? a.subject_id) === normalized)) {
-      setInputError("This audience is already selected.");
+      setInputError(() => (translateApp("This audience is already selected.")));
       return;
     }
     setValue((old) => ({ ...old, audience: [...old.audience, parsed.data] }));
@@ -181,22 +204,22 @@ function SharingEditor({
   }
   function save() {
     Alert.alert(
-      "Publish sharing changes?",
-      "People you select can use this agent. Managers can edit its profile and published team memory. Only explicitly selected service permissions use your connections. Private chats and personal memories remain private.",
+      translateApp("Publish sharing changes?"),
+      translateApp(
+        "People you select can use this agent. Managers can edit its profile and published team memory. Only explicitly selected service permissions use your connections. Private chats and personal memories remain private.",
+      ),
       [
-        { text: "Cancel", style: "cancel" },
+        { text: translateApp("Cancel"), style: "cancel" },
         {
-          text: "Save sharing",
+          text: translateApp("Save sharing"),
           onPress: () =>
             void session.run(
               async () => {
                 const fresh = await collaborationApi.sharing(agent.id);
                 if (!session.valid() || fresh.role !== "owner")
-                  throw new Error("Only the live owner can change sharing.");
+                  throw localizedError("Only the live owner can change sharing.");
                 if (fresh.version !== baseline.version)
-                  throw new Error(
-                    "Sharing changed elsewhere. Reload and review before publishing.",
-                  );
+                  throw localizedError("Sharing changed elsewhere. Reload and review before publishing.");
                 await collaborationApi.saveSharing(
                   agent.id,
                   baseline.version,
@@ -216,7 +239,7 @@ function SharingEditor({
   }
   return (
     <Card>
-      <Label>Share this personal agent</Label>
+      <Label>{translateApp("Share this personal agent")}</Label>
       <View
         style={{
           flexDirection: "row",
@@ -224,17 +247,18 @@ function SharingEditor({
           alignItems: "center",
         }}
       >
-        <Label>Enable sharing</Label>
+        <Label>{translateApp("Enable sharing")}</Label>
         <Switch
-          accessibilityLabel="Enable agent sharing"
+          accessibilityLabel={translateApp("Enable agent sharing")}
           value={value.enabled}
           disabled={disabled}
           onValueChange={(enabled) => setValue((old) => ({ ...old, enabled }))}
         />
       </View>
       <Label muted>
-        Users can chat. Managers can edit profile and team memory. Organizations
-        receive User access for active Admins and Members.
+        {translateApp(
+          "Users can chat. Managers can edit profile and team memory. Organizations receive User access for active Admins and Members.",
+        )}
       </Label>
       {value.audience.map((entry, index) => {
         const view = baseline.audience.find(
@@ -257,7 +281,7 @@ function SharingEditor({
             <ActionButton
               compact
               variant="secondary"
-              label="Remove sharing audience"
+              label={translateApp("Remove sharing audience")}
               disabled={disabled}
               onPress={() =>
                 setValue((old) => ({
@@ -272,8 +296,8 @@ function SharingEditor({
                 variant="secondary"
                 label={
                   entry.role === "manager"
-                    ? "Change to User"
-                    : "Change to Manager"
+                    ? translateApp("Change to User")
+                    : translateApp("Change to Manager")
                 }
                 disabled={disabled}
                 onPress={() =>
@@ -295,12 +319,12 @@ function SharingEditor({
         );
       })}
       <WorkspaceSelectionField
-        label="Audience type"
-        title="Choose audience"
+        label={translateApp("Audience type")}
+        title={translateApp("Choose audience")}
         value={[kind]}
         options={[
-          { value: "person", label: "Person" },
-          { value: "org", label: "Organization" },
+          { value: "person", label: translateApp("Person") },
+          { value: "org", label: translateApp("Organization") },
         ]}
         onChange={([next]) => {
           setKind(next === "org" ? "org" : "person");
@@ -311,12 +335,12 @@ function SharingEditor({
       />
       {kind === "person" && (
         <WorkspaceSelectionField
-          label="Sharing role"
-          title="Choose role"
+          label={translateApp("Sharing role")}
+          title={translateApp("Choose role")}
           value={[role]}
           options={[
-            { value: "user", label: "User" },
-            { value: "manager", label: "Manager" },
+            { value: "user", label: translateApp("User") },
+            { value: "manager", label: translateApp("Manager") },
           ]}
           onChange={([next]) =>
             setRole(next === "manager" ? "manager" : "user")
@@ -326,7 +350,9 @@ function SharingEditor({
         />
       )}
       <Field
-        label={kind === "person" ? "Person email" : "Organization ID"}
+        label={kind === "person" ? translateApp("Person email")
+            : translateApp("Organization ID")
+        }
         value={subject}
         onChangeText={setSubject}
         keyboardType={kind === "person" ? "email-address" : "default"}
@@ -335,26 +361,29 @@ function SharingEditor({
       />
       {inputError && <Notice tone="error" message={inputError} />}
       <ActionButton
-        label="Add sharing audience"
+        label={translateApp("Add sharing audience")}
         disabled={disabled || !subject.trim() || value.audience.length >= 500}
         onPress={add}
       />
-      <Label>Services for shared users</Label>
+      <Label>{translateApp("Services for shared users")}</Label>
       <Label muted>
-        Withheld means no owner connection. People may separately consent to
-        their own connection. Machines and saved logins are unavailable.
+        {translateApp(
+          "Withheld means no owner connection. People may separately consent to their own connection. Machines and saved logins are unavailable.",
+        )}
       </Label>
       {policy.services.map((service) => (
         <WorkspaceSelectionField
           key={service.id}
           label={service.name}
-          title={`${service.name} shared permissions`}
+          title={translateApp("{{service}} shared permissions", {
+            service: service.name,
+          })}
           value={[value.shared_access[service.id] ?? "withheld"]}
           options={[
-            { value: "withheld", label: "Withheld" },
-            { value: "read", label: "Read" },
-            { value: "use", label: "Use" },
-            { value: "all", label: "All granted actions" },
+            { value: "withheld", label: translateApp("Withheld") },
+            { value: "read", label: translateApp("Read") },
+            { value: "use", label: translateApp("Use") },
+            { value: "all", label: translateApp("All granted actions") },
           ]}
           disabled={disabled}
           scopeKey={`${session.epoch}:${agent.id}:share-service:${service.id}`}
@@ -371,12 +400,14 @@ function SharingEditor({
       ))}
       {stale && (
         <Notice
-          message="Sharing changed elsewhere. Your draft is kept. Reload before saving."
+          message={translateApp(
+            "Sharing changed elsewhere. Your draft is kept. Reload before saving.",
+          )}
           tone="error"
         />
       )}
       <ActionButton
-        label="Reload sharing and discard draft"
+        label={translateApp("Reload sharing and discard draft")}
         variant="secondary"
         disabled={disabled}
         onPress={() => {
@@ -385,7 +416,7 @@ function SharingEditor({
         }}
       />
       <ActionButton
-        label="Save agent sharing"
+        label={translateApp("Save agent sharing")}
         disabled={
           disabled ||
           stale ||
@@ -408,6 +439,7 @@ function SharedNotesEditor({
   kind: "private-notes" | "shared-memory";
   editable: boolean;
 }) {
+  useAppLanguage();
   const query = useQuery({
     queryKey: [...session.key, id, kind],
     queryFn: ({ signal }) => collaborationApi.notes(id, kind, signal),
@@ -418,18 +450,24 @@ function SharedNotesEditor({
     <Card>
       <Label>
         {kind === "private-notes"
-          ? "Your private notes"
-          : "Published team memory"}
+          ? translateApp("Your private notes")
+          : translateApp("Published team memory")}
       </Label>
       <Label muted>
         {kind === "private-notes"
-          ? "Only you and this agent in your private chats can read these notes."
-          : "Everyone with access to this agent can read these notes. Only the owner or a manager can publish."}
+          ? translateApp(
+              "Only you and this agent in your private chats can read these notes.",
+            )
+          : translateApp(
+              "Everyone with access to this agent can read these notes. Only the owner or a manager can publish.",
+            )}
       </Label>
       {query.isError ? (
         <Notice
           tone="error"
-          message="Notes could not load or sharing access changed."
+          message={translateApp(
+            "Notes could not load or sharing access changed.",
+          )}
         />
       ) : query.data && query.dataUpdatedAt >= session.activationAt ? (
         <NotesDraft
@@ -444,12 +482,12 @@ function SharedNotesEditor({
           rows={2}
           icon={false}
           detail={false}
-          accessibilityLabel="Loading notes"
+          accessibilityLabel={translateApp("Loading notes")}
         />
       )}
       <ActionButton
         compact
-        label="Refresh notes"
+        label={translateApp("Refresh notes")}
         variant="secondary"
         disabled={!session.active || session.busy}
         onPress={() => void query.refetch()}
@@ -471,6 +509,7 @@ function NotesDraft({
   value: SharedNotes;
   editable: boolean;
 }) {
+  useAppLanguage();
   const [baseline, setBaseline] = useState(value);
   const [text, setText] = useState(value.notes.map((n) => n.text).join("\n"));
   const notes = text
@@ -485,8 +524,8 @@ function NotesDraft({
       <Field
         label={
           kind === "private-notes"
-            ? "Private notes, one per line"
-            : "Team notes, one per line"
+            ? translateApp("Private notes, one per line")
+            : translateApp("Team notes, one per line")
         }
         value={editable ? text : value.notes.map((n) => n.text).join("\n")}
         onChangeText={setText}
@@ -496,16 +535,21 @@ function NotesDraft({
       {!valid && (
         <Notice
           tone="error"
-          message="Use at most 50 notes, each at most 500 characters."
+          message={translateApp(
+            "Use at most 50 notes, each at most 500 characters.",
+          )}
         />
       )}
       {stale && editable && (
-        <Notice message="Notes changed elsewhere. Reload to review before saving your draft." />
+        <Notice message={translateApp(
+            "Notes changed elsewhere. Reload to review before saving your draft.",
+          )}
+        />
       )}
       {editable && (
         <>
           <ActionButton
-            label="Reload notes and discard draft"
+            label={translateApp("Reload notes and discard draft")}
             variant="secondary"
             disabled={disabled}
             onPress={() => {
@@ -516,8 +560,8 @@ function NotesDraft({
           <ActionButton
             label={
               kind === "private-notes"
-                ? "Save private notes"
-                : "Publish team memory"
+                ? translateApp("Save private notes")
+                : translateApp("Publish team memory")
             }
             disabled={
               disabled ||
@@ -534,12 +578,10 @@ function NotesDraft({
                       !session.valid() ||
                       !["owner", "manager"].includes(policy.role)
                     )
-                      throw new Error(
-                        "Only the owner or a current manager can publish team memory.",
-                      );
+                      throw localizedError("Only the owner or a current manager can publish team memory.");
                   }
                   if (!session.valid())
-                    throw new Error("Keep notes open to save.");
+                    throw localizedError("Keep notes open to save.");
                   await collaborationApi.saveNotes(
                     id,
                     kind,
@@ -569,6 +611,7 @@ export function SharedConsentCards({
   session: Session;
   id: string;
 }) {
+  useAppLanguage();
   const query = useQuery({
     queryKey: [...session.key, id, "consents"],
     queryFn: ({ signal }) => collaborationApi.consents(id, signal),
@@ -578,17 +621,20 @@ export function SharedConsentCards({
   });
   return (
     <Card>
-      <Label>Your connection consent</Label>
+      <Label>{translateApp("Your connection consent")}</Label>
       {!session.enabled && (
         <Label muted>
-          Agent sharing is disabled. You can still review and revoke your
-          existing connection consent.
+          {translateApp(
+            "Agent sharing is disabled. You can still review and revoke your existing connection consent.",
+          )}
         </Label>
       )}
       {query.isError && (
         <Notice
           tone="error"
-          message="Connection consent could not load. Retry before deciding."
+          message={translateApp(
+            "Connection consent could not load. Retry before deciding.",
+          )}
         />
       )}
       {!query.isError &&
@@ -599,21 +645,19 @@ export function SharedConsentCards({
               {row.connection_name ?? row.connection_id} · {row.operation}
             </Label>
             <Label muted>
-              {row.audience ?? "Only your private chat can see the reply."} You
-              pay for your model and service usage.
-            </Label>
+              {translateApp("{{audience}} You pay for your model and service usage.", { audience: row.audience ??
+                translateApp("Only your private chat can see the reply.") })}</Label>
             {row.expires_at && (
-              <Label muted>
-                Expires {new Date(row.expires_at).toLocaleString()}
+              <Label muted>{translateApp("Expires {{time}}", { time: new Date(row.expires_at).toLocaleString(appLocale()) })}
               </Label>
             )}
             {(session.enabled && row.decision === "pending"
               ? ([
-                  ["once", "Allow once"],
-                  ["always", "Always"],
-                  ["skip", "Skip"],
+                  ["once", translateApp("Allow once")],
+                  ["always", translateApp("Always")],
+                  ["skip", translateApp("Skip")],
                 ] as const)
-              : ([["revoked", "Revoke consent"]] as const)
+              : ([["revoked", translateApp("Revoke consent")]] as const)
             ).map(([decision, label]) => (
               <ActionButton
                 compact
@@ -646,12 +690,12 @@ export function SharedConsentCards({
       {!query.isError &&
         query.dataUpdatedAt >= session.activationAt &&
         query.data?.consents.length === 0 && (
-          <Label muted>No pending or active consent.</Label>
+          <Label muted>{translateApp("No pending or active consent.")}</Label>
         )}
       <ActionButton
         compact
         variant="secondary"
-        label="Refresh connection consent"
+        label={translateApp("Refresh connection consent")}
         disabled={!session.active || session.busy}
         onPress={() => void query.refetch()}
       />
@@ -666,26 +710,28 @@ export function SharedProfile({
   session: Session;
   agent: AssistantAgent;
 }) {
+  useAppLanguage();
   const [baseline, setBaseline] = useState(agent);
   const [name, setName] = useState(agent.display_name ?? "");
   const [description, setDescription] = useState(agent.description);
   const [persona, setPersona] = useState(agent.persona ?? "");
   return (
     <Card>
-      <Label>Shared manager profile</Label>
+      <Label>{translateApp("Shared manager profile")}</Label>
       <Label muted>
-        You can edit the published profile and team memory. Connection
-        permissions and agent lifecycle stay with its owner.
+        {translateApp(
+          "You can edit the published profile and team memory. Connection permissions and agent lifecycle stay with its owner.",
+        )}
       </Label>
       <Field
-        label="Shared agent display name"
+        label={translateApp("Shared agent display name")}
         value={name}
         onChangeText={setName}
         maxLength={40}
         editable={session.active && !session.busy}
       />
       <Field
-        label="Shared agent purpose"
+        label={translateApp("Shared agent purpose")}
         value={description}
         onChangeText={setDescription}
         maxLength={2048}
@@ -693,7 +739,7 @@ export function SharedProfile({
         editable={session.active && !session.busy}
       />
       <Field
-        label="Shared agent persona"
+        label={translateApp("Shared agent persona")}
         value={persona}
         onChangeText={setPersona}
         maxLength={2000}
@@ -701,7 +747,7 @@ export function SharedProfile({
         editable={session.active && !session.busy}
       />
       <ActionButton
-        label="Save shared profile"
+        label={translateApp("Save shared profile")}
         disabled={!session.active || session.busy || !description.trim()}
         onPress={() =>
           void session.run(
@@ -712,15 +758,13 @@ export function SharedProfile({
                 fresh.share_role !== "manager" ||
                 fresh.status === "destroyed"
               )
-                throw new Error("Manager access changed. Reload the agent.");
+                throw localizedError("Manager access changed. Reload the agent.");
               if (
                 fresh.description !== baseline.description ||
                 fresh.persona !== baseline.persona ||
                 fresh.display_name !== baseline.display_name
               )
-                throw new Error(
-                  "The profile changed elsewhere. Reopen this agent and review the current profile.",
-                );
+                throw localizedError("The profile changed elsewhere. Reopen this agent and review the current profile.");
               await agentsApi.update(
                 agent.id,
                 {
@@ -752,6 +796,7 @@ export function AgentOperationControls({
   agent: AssistantAgent;
   onOpenChat?: () => void;
 }) {
+  useAppLanguage();
   const session = useCollaborationSession();
   const features = session.identity.data?.enabled_features ?? [];
   if (
@@ -786,9 +831,7 @@ export function AgentOperationControls({
           />
         ) : (
           <Label key={String(guests)} muted>
-            {guests ? "Guest operation" : "Operation scope"} configuration is
-            not enabled. Existing limits still apply.
-          </Label>
+            {(guests ? translateApp("Guest operation configuration is not enabled. Existing limits still apply.") : translateApp("Operation scope configuration is not enabled. Existing limits still apply."))}</Label>
         ),
       )}
     </>
@@ -804,6 +847,7 @@ export function OperationList({
   agent: AssistantAgent;
   guests: boolean;
 }) {
+  useAppLanguage();
   const query = useQuery({
     queryKey: [
       ...session.key,
@@ -818,17 +862,24 @@ export function OperationList({
   return (
     <Card>
       <Label>
-        {guests ? "Guest service operations" : "Agent service operations"}
+        {guests ? translateApp("Guest service operations")
+          : translateApp("Agent service operations")}
       </Label>
       <Label muted>
         {guests
-          ? "These limits apply to guest turns only. Guest service levels, agent limits and confirmations still apply."
-          : "Restrict each granted service to the exact operations this specialist needs."}
+          ? translateApp(
+              "These limits apply to guest turns only. Guest service levels, agent limits and confirmations still apply.",
+            )
+          : translateApp(
+              "Restrict each granted service to the exact operations this specialist needs.",
+            )}
       </Label>
       {query.isError && (
         <Notice
           tone="error"
-          message="Operations could not load or your permissions changed."
+          message={translateApp(
+            "Operations could not load or your permissions changed.",
+          )}
         />
       )}
       {!query.isError &&
@@ -843,7 +894,7 @@ export function OperationList({
           />
         ))}
       <ActionButton
-        label="Refresh operations"
+        label={translateApp("Refresh operations")}
         variant="secondary"
         disabled={session.busy || !session.active}
         onPress={() => void query.refetch()}
@@ -886,6 +937,7 @@ export function OperationDraft({
   service: AgentServiceOperations;
   guests: boolean;
 }) {
+  useAppLanguage();
   const initial = (row: AgentServiceOperations): OperationSelection => ({
     expected_revision: row.revision,
     all_operations: row.all_operations,
@@ -915,20 +967,21 @@ export function OperationDraft({
   return (
     <View style={{ gap: 10 }}>
       <Label>
-        {service.service_name} · Revision {service.revision}
+        {translateApp("{{service}} · Revision {{count}}", { service: service.service_name, count: service.revision })}
       </Label>
       <WorkspaceSelectionField
-        label={`${service.service_name} ${guests ? "guest " : ""}operation access`}
-        title="Choose operation access"
+        label={(guests ? translateApp("{{service}} guest operation access", { service: service.service_name }) : translateApp("{{service}} operation access", { service: service.service_name }))}
+        title={translateApp("Choose operation access")}
         value={[value.all_operations ? "all" : "selected"]}
         options={[
           {
             value: "all",
-            label: guests ? "All permitted by guest level" : "All operations",
+            label: guests ? translateApp("All permitted by guest level")
+              : translateApp("All operations"),
           },
           {
             value: "selected",
-            label: "Selected operations (empty blocks all)",
+            label: translateApp("Selected operations (empty blocks all)"),
           },
         ]}
         disabled={disabled}
@@ -940,7 +993,9 @@ export function OperationDraft({
       {!value.all_operations && (
         <>
           <Field
-            label={`Search ${service.service_name} operations`}
+            label={translateApp("Search {{service}} operations", {
+              service: service.service_name,
+            })}
             value={search}
             onChangeText={setSearch}
             editable={!disabled}
@@ -949,7 +1004,7 @@ export function OperationDraft({
             <>
               <ActionButton
                 compact
-                label="Select all reads"
+                label={translateApp("Select all reads")}
                 variant="secondary"
                 disabled={disabled}
                 onPress={() =>
@@ -962,20 +1017,23 @@ export function OperationDraft({
                 }
               />
               <WorkspaceSelectionField
-                label="Selected endpoints"
-                title="Choose exact operations"
+                label={translateApp("Selected endpoints")}
+                title={translateApp("Choose exact operations")}
                 multiple
                 maxSelected={256}
                 value={value.endpoint_ids}
                 options={service.operations.map((op) => ({
                   value: op.endpoint_id,
-                  label: `${op.method} ${op.path}`,
+                  label: translateApp("{{method}} {{path}}", {
+                    method: op.method,
+                    path: op.path,
+                  }),
                   description: [
                     op.summary,
-                    op.read_only ? "Read only" : "",
-                    op.changes_existing ? "Changes existing" : "",
+                    op.read_only ? translateApp("Read only") : "",
+                    op.changes_existing ? translateApp("Changes existing") : "",
                     service.inputs?.[op.endpoint_id]
-                      ? "Saved value limits preserved"
+                      ? translateApp("Saved value limits preserved")
                       : "",
                   ]
                     .filter(Boolean)
@@ -996,15 +1054,14 @@ export function OperationDraft({
             </>
           ) : service.allows_explicit_rules ? (
             <>
-              <Label muted>
-                Exact methods and paths. A variable such as {"{id}"} matches one
-                segment.
-              </Label>
+              <Label muted>{translateApp("Exact methods and paths. A variable such as {id}matches one segment.")}</Label>
               {value.rules.map((rule, index) => (
                 <View key={index} style={{ gap: 8 }}>
                   <WorkspaceSelectionField
-                    label={`Rule ${index + 1} method`}
-                    title="HTTP method"
+                    label={translateApp("Rule {{index}} method", {
+                      index: index + 1,
+                    })}
+                    title={translateApp("HTTP method")}
                     value={[rule.method]}
                     options={[
                       "GET",
@@ -1042,7 +1099,9 @@ export function OperationDraft({
                     }
                   />
                   <Field
-                    label={`Rule ${index + 1} path`}
+                    label={translateApp("Rule {{index}} path", {
+                      index: index + 1,
+                    })}
                     value={rule.path_template}
                     editable={!disabled}
                     onChangeText={(path_template) =>
@@ -1056,7 +1115,7 @@ export function OperationDraft({
                   />
                   <ActionButton
                     compact
-                    label="Remove rule"
+                    label={translateApp("Remove rule")}
                     variant="secondary"
                     disabled={disabled}
                     onPress={() =>
@@ -1069,7 +1128,7 @@ export function OperationDraft({
                 </View>
               ))}
               <ActionButton
-                label="Add method/path rule"
+                label={translateApp("Add method/path rule")}
                 variant="secondary"
                 disabled={disabled || value.rules.length >= 256}
                 onPress={() =>
@@ -1084,13 +1143,13 @@ export function OperationDraft({
               />
             </>
           ) : (
-            <Label muted>No active catalog operations.</Label>
+            <Label muted>{translateApp("No active catalog operations.")}</Label>
           )}
           {value.endpoint_ids.some(
             (id) => !service.operations.some((op) => op.endpoint_id === id),
           ) && (
             <ActionButton
-              label="Remove unavailable selections"
+              label={translateApp("Remove unavailable selections")}
               variant="secondary"
               disabled={disabled}
               onPress={() =>
@@ -1107,18 +1166,22 @@ export function OperationDraft({
       )}
       {stale && (
         <Notice
-          message="Operation permissions changed elsewhere. Your draft is kept; reload before saving."
+          message={translateApp(
+            "Operation permissions changed elsewhere. Your draft is kept; reload before saving.",
+          )}
           tone="error"
         />
       )}
       <ActionButton
-        label="Reload operation selection"
+        label={translateApp("Reload operation selection")}
         variant="secondary"
         disabled={disabled}
         onPress={() => setValue(initial(service))}
       />
       <ActionButton
-        label={guests ? "Save guest operations" : "Save operations"}
+        label={guests ? translateApp("Save guest operations")
+            : translateApp("Save operations")
+        }
         disabled={!canSave}
         onPress={() => {
           if (!canSave) return;
@@ -1131,9 +1194,7 @@ export function OperationDraft({
                 fresh.share_role ||
                 fresh.status === "destroyed"
               )
-                throw new Error(
-                  "Only a current owner/organization maintainer can edit operation permissions.",
-                );
+                throw localizedError("Only a current owner/organization maintainer can edit operation permissions.");
               await collaborationApi.saveOperations(
                 agent.id,
                 guests,
@@ -1165,6 +1226,7 @@ export function VisitorReadiness({
   agent: AssistantAgent;
   onOpenChat?: () => void;
 }) {
+  useAppLanguage();
   const query = useQuery({
     queryKey: [...session.key, agent.id, "readiness"],
     queryFn: ({ signal }) => collaborationApi.readiness(agent.id, signal),
@@ -1181,42 +1243,46 @@ export function VisitorReadiness({
       : undefined;
   return (
     <Card>
-      <Label>Visitor model readiness</Label>
+      <Label>{translateApp("Visitor model readiness")}</Label>
       {query.isError && (
         <Notice
-          message="Current visitor readiness could not load."
+          message={translateApp("Current visitor readiness could not load.")}
           tone="error"
         />
       )}
       {!readiness && (
         <Label muted>
-          Visitor readiness is unverified. Recheck the current model setup.
+          {translateApp(
+            "Visitor readiness is unverified. Recheck the current model setup.",
+          )}
         </Label>
       )}
       {readiness && (
         <>
           <Label>
             {readiness.status === "ready"
-              ? "Model ready for visitors"
+              ? translateApp("Model ready for visitors")
               : readiness.status === "setting_up"
-                ? "Setting up for visitors…"
-                : "Visitor setup needs attention"}
+                ? translateApp("Setting up for visitors…")
+                : translateApp("Visitor setup needs attention")}
           </Label>
           <Label muted>
             {readiness.fix ??
-              "Service permissions still apply. Visitor usage is billed to you."}
+              translateApp(
+                "Service permissions still apply. Visitor usage is billed to you.",
+              )}
           </Label>
         </>
       )}
       <ActionButton
-        label="Recheck visitor readiness"
+        label={translateApp("Recheck visitor readiness")}
         variant="secondary"
         disabled={!session.active || session.busy}
         onPress={() => void query.refetch()}
       />
       {readiness?.status === "not_ready" && onOpenChat && (
         <ActionButton
-          label="Open agent chat to review visitor setup"
+          label={translateApp("Open agent chat to review visitor setup")}
           disabled={!session.active || session.busy}
           onPress={onOpenChat}
         />

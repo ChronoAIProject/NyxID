@@ -6,11 +6,11 @@ for enrolled private owner, shared-recipient and collaboration chat turns using
 MCP or HTTP proxy. Other callers retain #2194 Gap → legacy prompts. #2196 legacy
 mapping is not included. Unmarked traffic gains no preparation or database reads.
 
-Platform rollout enables and clear-that-enables require strict activation readiness.
-After activation is recorded, proposal creation/decisions, version selection,
-channel-source admission and worker execution use serving readiness and tolerate
-supported roster overlaps. Hard readiness loss retains the existing refusals and
-legacy fallbacks. See the exhaustive [clean-roster action list](SECURITY_ROLLOUT_READINESS.md#activation-versus-serving-entry-points).
+Flag enables and clear-that-enables require the same durable activation and live
+observed support as proposal creation/decisions, version selection, channel-source
+admission and worker execution. Roster/drain declarations are optional advisories;
+no operator readiness step is required. Hard readiness loss retains existing
+refusals and legacy fallbacks. See [readiness entry points](SECURITY_ROLLOUT_READINESS.md#entry-points-and-what-requires-a-clean-roster).
 
 ## Representation and scope
 
@@ -154,8 +154,8 @@ old record; no widening by inference.
 ## Rollout and unsupported behavior
 
 1. Deploy all readers and dispatchers first, with `permissions:execution-v1`
-   default off. Activation requires reader, dispatch and authoring capabilities in the
-   all-replica roster and drained-writer gate. Person/org/global overrides are supported;
+   default off. Enabling requires recorded reader, dispatch and authoring capabilities
+   supported by every live observation; roster/drain assertions are unnecessary. Person/org/global overrides are supported;
    broad activation additionally requires enrollment readiness. Reads and disabling
    remain available.
 2. Authoring requires `permissions:execution-authoring-v1` in addition to reader
@@ -191,7 +191,7 @@ Global/org activation and clears that enable inherited access additionally requi
 `permissions:execution-enrollment-v1`. Explicit disabling remains available.
 Activation requires
 `permissions:execution-v1` (reader), `permissions:execution-dispatch-v1`
-(enforcement) and `permissions:execution-authoring-v1` (human authoring) in the existing all-replica readiness/drained-writer gate.
+(enforcement) and `permissions:execution-authoring-v1` (human authoring) in the observed-support readiness gate (no roster/drain declaration).
 
 A personal override and its `User.execution_permission_enrollment` hint are
 written in the same transaction; disabling/clearing recomputes scoped inheritance. Authentication
@@ -282,8 +282,8 @@ the existing 30-day retention projection. Reusable permissions are not consumed.
 The remote send is linearized at the dispatch barrier; cancellation after it can
 stop further sends but cannot undo an already admitted provider effect.
 
-Upgrade readers and dispatchers, drain older writers, then activate the intended
-person/org/global cohorts through the readiness gate. Old replicas ignore additive fields and keep their legacy behavior;
+Upgrade readers and dispatchers; once their observed support is recorded, enable
+the intended person/org/global cohorts through the serving-readiness gate. Old replicas ignore additive fields and keep their legacy behavior;
 they must not serve an activated cohort. Before binary rollback, disable and
 drain marked roots and claims on upgraded replicas. The `expires_at` TTL remains
 unchanged, including persistent permission sentinel retention. No legacy migration, native-policy-key cutover or version bump is included.
@@ -439,8 +439,8 @@ bearer authority. The original caller's normal billing lane remains unchanged.
 
 ### Authoring rollout
 
-Deploy readers, dispatchers and authoring support to every replica and drain old
-writers before activation. Global/org enrollment additionally requires the
+Deploy readers, dispatchers and authoring support to every replica; observed
+support and durable activation permit enabling without roster/drain declarations. Global/org enrollment additionally requires the
 broad-enrollment capability below. No new env var, TTL migration or backfill is required. Old replicas ignore proposal payloads and retain legacy
 behavior; they must not serve activated cohorts. Disable enrollment and drain
 pending resumes/claims on upgraded replicas before binary rollback. The unchanged
@@ -569,8 +569,9 @@ available when readiness is red.
 
 Rollout:
 
-1. Deploy every serving API replica and worker, drain old writers, and confirm the
-   configured readiness roster reports reader, dispatch, authoring and enrollment.
+1. Deploy supporting API replicas/workers. Reader, dispatch, authoring and
+   enrollment activation converges automatically from their live observations;
+   inspect `serving_ready`, not the legacy diagnostic `ready`.
 2. Pilot an org or selected users. Watch the admin flag response's
    `execution_enrollment` job progress; new members get scoped hints at membership
    admission, and new people enter a global cohort without a signup hook.
@@ -644,6 +645,21 @@ NyxID control header is never forwarded to the provider. Opted-in calls return
 the same occurrence. Server-owned watches and voice continuations retain their existing
 durable source lifecycle. They do not borrow a foreground request's waiter.
 
+For a connected approval, callers can send `X-NyxID-Approval-Wait-Seconds`
+with one decimal integer from 10 through 300. The wait and the card expire
+together, measured from request receipt, at the shorter of that budget and
+the configured approval timeout. Existing route-specific deadlines still apply.
+Omitting the header uses the existing connected wait. An invalid or repeated
+value returns HTTP 400 before approval creation. On an eligible v2 proposal,
+`X-NyxID-Approval-Mode: async` takes precedence over a valid wait budget.
+NyxID consumes both control headers before dispatch.
+
+`nyxid proxy request` requests async approval and supplies an 80-second
+connected wait budget. Use `--approval-wait <secs>` to change the budget or
+`--no-approval-wait` to use the server's connected wait. A pending v2 response
+prints the request ID and exits with code 2. Run `nyxid approval status <id>`
+with the original credential to read the decision and execution result.
+
 For opted-in requests the approval-required response carries the opaque request ID. Poll
 `GET /api/v1/approvals/requests/{id}/status` with the **same parent key, login child
 (if any), and actor**. The additive `execution` field reports state, a safe failure
@@ -690,9 +706,9 @@ permission does not prolong an expired key, admission deadline or stopped task.
 Activation additionally requires `permissions:execution-authoring-v2` across all
 replicas, alongside the existing reader, dispatch, v1 authoring and broad-enrollment
 capabilities. Global activation is already live, so v2 becomes applicable to that
-cohort as soon as all replicas advertise the new capability.
-Deploy readers, source runners, indexes, refusal paths and web DTOs first; drain
-old writers before enrolling a cohort. Unenrolled requests perform no new
+cohort once every live observation advertises the new capability and activation is recorded.
+Deploy readers, source runners, indexes, refusal paths and web DTOs first; no
+roster/drain assertion is needed before enrolling a cohort. Unenrolled requests perform no new
 preparation or reads. V1 and legacy card decisions are unchanged, and legacy
 handlers refuse any proposal before mutation. Disable and drain pending v2 work
 on upgraded replicas before rollback. The existing `expires_at` TTL and
@@ -799,9 +815,12 @@ provider bodies or text enter the event. Decision causes distinguish:
   `additional_floor_required`.
 - `hard_denial`: explicit policy/ceiling, revoked or invalid permission, unsupported
   version, used claim, dead task, resource denial or ineligible decider. A marked
-  resume that no longer covers refuses; it cannot fall back to Full.
+  resume that no longer covers refuses. A rejected or expired review reports
+  `proposal_not_live`. A duplicate submission that finds an approved occurrence
+  reports `occurrence_already_reviewed` and keeps the original review handle.
 - `operational_error`: unavailable authority/readiness/enrollment resolution,
-  candidate overflow, required resource verification, uncertain outcome or
+  candidate overflow, required resource verification, an uncertain outcome
+  (including a retry that finds an `unknown` receipt), or
   `admission_abandoned` when a started admission future is dropped.
 - `legacy`: a stale-positive hint resolved off, unsupported source/transport, or
   no eligible floor. This is not a denial of the ordinary legacy path.
@@ -848,8 +867,8 @@ Invalid or overflowing counters refuse admission. Source fence counters remain
 transaction locks and do not count as policy changes in authority snapshots.
 
 The optional `permissions:execution-authoring-channel-v1` readiness capability
-requires every reader, worker and channel policy writer to be upgraded and old
-writers drained. Unknown/unready fresh sources remain legacy; marked work
+requires durable activation and observed support from every live reader, worker
+and channel policy writer; no roster/drain assertion is required. Unknown/unready fresh sources remain legacy; marked work
 refuses/drains when readiness, enrollment or original-source authority is lost.
 The channel ingress has no loaded person row: its zero-command candidacy uses
 only bounded global/personal snapshot hints. Org-only enrollment is not inferred
@@ -864,23 +883,37 @@ and is capped by the original task and reply-source deadline.
 
 Post-review results have a separate `execution_permission_deliveries` occurrence,
 committed with the ordinary stored assistant message. The outbox retains only
-references, not another copy of the answer. Preparation leases may be recovered;
-`dispatching` is irreversible, and an interrupted send becomes `unknown` without
-automatic resending. Source policy, task epoch, enrollment and readiness are
-fenced again before release. A completed task may release its stored receipt;
+references, not another copy of the answer. Version-5 deliveries keep a plan
+fingerprint, part count, confirmed-prefix position and receipt identifiers only.
+Their 180-second preparation lease uses MongoDB time and is recoverable until
+an exact claim/part fence commits `dispatching` immediately before provider I/O.
+That send has a fixed 120-second window. Each confirmed receipt advances the
+prefix atomically; recovery sends only the remaining suffix. A reclaimed lease
+fences the original preparer. `dispatching` is irreversible: a crash after that
+boundary, including acceptance without a saved receipt, becomes `unknown` and
+is never automatically resent. Source policy, task epoch, enrollment and
+readiness are fenced again before release. A completed task may release its stored receipt;
 a cancelled task or changed epoch may not. The original terminal stream/native
 replay claim is never reopened. Ordinary initial answers keep their existing
 transport behavior.
 
-Direct receipts reply to the original inbound message/topic. Gateway relay
-receipts use an original-event sealed reply target when available and a distinct
-occurrence idempotency key. Without a target they retain the original 29-minute
-bound. Eligible native receipts retain that short bound and exact native
-event; no latest-event, proactive-send or alternate-destination fallback is
+Direct and gateway-era relay receipts reply through the original local
+inbound message/topic, including sources with a sealed target; there is no
+fallback to the gateway or a newer local message. Native receipts use a distinct
+occurrence key on the original gateway event. Eligible native receipts retain
+the 29-minute bound and exact native event; no latest-event, proactive-send or alternate-destination fallback is
 allowed. Receipts are text-only; attachments remain accessible in the web thread.
 Expired/refused/unknown delivery is recovered through authenticated web history.
 Terminal outbox metadata is retained for at most 24 hours; TTL is cleanup only.
 
-Rollback: disable enrollment or remove channel readiness on upgraded binaries,
+For an ordinary rolling upgrade, operators do nothing. New workers promote only
+version-4 pending or expired-preparing rows; old workers ignore version-5 rows.
+Historical dispatching/unknown rows retain their original meaning. A binary
+rollback to version-4 delivery workers parks version-5 pending/preparing work
+until a supporting worker returns within the existing source expiry. Do not
+rewrite those rows or uncertain claims to force delivery.
+
+For rollback of the channel permission feature itself: disable enrollment or
+remove channel readiness on upgraded binaries,
 drain/cancel v4 work and preserve uncertain claims before rolling binaries back.
 Do not restart old readers/workers or policy writers while v4 work is outstanding.

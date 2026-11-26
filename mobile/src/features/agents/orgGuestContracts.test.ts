@@ -39,3 +39,9 @@ test("review preserves bot names, service names and guest operation narrowing", 
   assert.equal(value.services[0]!.access, "none");
   assert.equal(value.services[0]!.limited_operations, true);
 });
+
+test("member settings omit money without inventing a zero balance", () => {
+  const value = orgGuestSettingsSchema.parse({channel_id:"bot",org_id:"org",can_manage:false,guest_enabled:true,private_chats:"everyone",health:{action:"enable_billing",text:"Set up billing"}});
+  assert.equal(value.spent_today_credits,undefined);
+  assert.equal(value.reserved_today_credits,undefined);
+});

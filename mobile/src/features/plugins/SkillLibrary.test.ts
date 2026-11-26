@@ -121,7 +121,10 @@ function setup(
       StyleSheet: { create: (styles: unknown) => styles },
     },
     "lucide-react-native": Object.fromEntries(
-      ["BookOpen", "Search", "X"].map((name) => [name, name]),
+      ["BookOpen", "ChevronLeft", "ChevronRight", "Search", "X"].map((name) => [
+        name,
+        name,
+      ]),
     ),
     "../../components/settings/SettingsList": {
       SettingsGroup: "SettingsGroup",
@@ -137,6 +140,9 @@ function setup(
       useTheme: () => ({ colors: { primaryTone: {} } }),
     },
   });
+  harness.mock("../../components/settings/Pager", harness.load(
+    fileURLToPath(new URL("../../components/settings/Pager.tsx", import.meta.url)),
+  ));
   const source = harness.load(
     fileURLToPath(new URL("./SkillLibrary.tsx", import.meta.url)),
   ) as {
@@ -424,7 +430,7 @@ test("catalog pagination has explicit boundaries, busy state and no Added pagina
   assert.equal(busy.hasText("Searching skill catalog"), false);
   assert.throws(() => busy.control("Searching skill catalog"));
   // Paging belongs to the catalog section only; Added is never paged.
-  assert.match(setup({ totalPages: 4 }).text(), /Page 1 \/ 4/);
+  assert.match(setup({ totalPages: 4 }).text(), /1 \/ 4/);
 });
 
 test("blank descriptions offer review guidance rather than another opaque slug", () => {

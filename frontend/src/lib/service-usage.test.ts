@@ -18,6 +18,7 @@ const row = (overrides: Partial<BillingUsageRow>): BillingUsageRow => ({
   lago_acked: true,
   billable: true,
   ...overrides,
+  detail_retained: overrides.detail_retained ?? true,
 });
 
 describe("serviceUsageSummary", () => {
@@ -55,6 +56,15 @@ describe("serviceUsageSummary", () => {
         { name: null, calls: 1 },
       ],
     });
+  });
+
+  it("counts raw and permanent rollup rows together for a 90-day service total", () => {
+    const summary = serviceUsageSummary(
+      [row({ events: 2, detail_retained: true, api_key_id: "k1", api_key_name: "Current agent" }), row({ events: 3, detail_retained: false })],
+      "llm-deepseek",
+    );
+    expect(summary?.calls).toBe(5);
+    expect(summary?.agents).toEqual([{ name: "Current agent", calls: 2 }]);
   });
 
   it("reports metering-only usage without a charge and unsettled charges as unknown", () => {
@@ -143,7 +153,7 @@ describe("serviceUsageTrend", () => {
   it("differences nested period totals into per-day windows", () => {
     const calls = (events: number) => [row({ events })];
     const trend = serviceUsageTrend(
-      { "24h": calls(2), "7d": calls(8), "30d": calls(31), "90d": calls(151) },
+      { "24h": calls(2), "7d": calls(8), "30d": calls(31), "90d": [...calls(31), row({ events: 120, detail_retained: false })] },
       "llm-deepseek",
     );
     expect(

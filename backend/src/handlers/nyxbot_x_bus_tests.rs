@@ -142,48 +142,58 @@ async fn x_delivery(
         .unwrap_or_else(|| {
             panic!("X delivery {platform_message_id}/{expected_state}: inbound message missing")
         });
-    let mut last = "event not observed".to_owned();
-    for _ in 0..400 {
-        let event = state
-            .db
-            .collection::<NyxbotEvent>(EVENTS)
-            .find_one(doc! {"channel_id": channel_id, "event_id": &inbound.id})
-            .await
-            .unwrap_or_else(|_| {
-                panic!("X delivery {platform_message_id}/{expected_state}: event lookup failed")
-            });
-        let current = crate::services::channel_bot_service::get_bot(&state.db, &bot.id)
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "X delivery {platform_message_id}/{expected_state}: diagnostics lookup failed"
-                )
-            });
-        let delivery_state = event
-            .as_ref()
-            .and_then(|event| event.delivery.as_ref())
-            .map(|delivery| delivery.state.as_str());
-        let error = current.diagnostics.last_outbound_error.as_ref();
-        let reason = error.and_then(|error| error.reason.as_deref());
-        let diagnostics_match = match expected_reason {
-            Some(expected) => reason == Some(expected),
-            None => current.diagnostics.last_outbound_at.is_some() && error.is_none(),
-        };
-        if delivery_state == Some(expected_state) && diagnostics_match {
-            return current;
+    let events = state.db.collection::<NyxbotEvent>(EVENTS);
+    // Subscribe before reading so a terminal write on either side of the read is visible.
+    let mut changes = events
+        .watch()
+        .full_document(mongodb::options::FullDocumentType::UpdateLookup)
+        .pipeline([doc! {"$match": {
+            "fullDocument.channel_id": channel_id,
+            "fullDocument.event_id": &inbound.id,
+            "fullDocument.delivery.state": expected_state,
+        }}])
+        .await
+        .expect("watch X delivery");
+    let source = doc! {"channel_id": channel_id, "event_id": &inbound.id};
+    let mut event = events.find_one(source.clone()).await.expect("read X event");
+    if event
+        .as_ref()
+        .and_then(|e| e.delivery.as_ref())
+        .map(|d| d.state.as_str())
+        != Some(expected_state)
+    {
+        // Allow two CI slow-test intervals for the asynchronous turn and its delivery.
+        // On expiry read the durable state once more for the assertion's diagnostic.
+        if let Ok(change) =
+            tokio::time::timeout(std::time::Duration::from_secs(120), changes.try_next()).await
+        {
+            change
+                .expect("read X delivery change")
+                .expect("X delivery stream closed");
         }
-        last = format!(
-            "event_status={:?}, delivery_state={delivery_state:?}, last_outbound_at={:?}, error_reason={reason:?}, error_code={:?}",
-            event.as_ref().map(|event| event.status.as_str()),
-            current.diagnostics.last_outbound_at,
-            error.map(|error| error.code.as_str()),
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        event = events.find_one(source).await.expect("read final X event");
     }
-    panic!(
-        "X delivery {platform_message_id}/{expected_state} on channel {channel_id}, relay_message_id={}: expected_reason={expected_reason:?}; last {last}",
-        inbound.id,
+    let current = crate::services::channel_bot_service::get_bot(&state.db, &bot.id)
+        .await
+        .expect("read X outbound diagnostics");
+    let delivery_state = event
+        .as_ref()
+        .and_then(|e| e.delivery.as_ref())
+        .map(|d| d.state.as_str());
+    let error = current.diagnostics.last_outbound_error.as_ref();
+    let reason = error.and_then(|error| error.reason.as_deref());
+    assert_eq!(
+        delivery_state,
+        Some(expected_state),
+        "X delivery {platform_message_id}, event_status={:?}, error_reason={reason:?}",
+        event.as_ref().map(|event| &event.status),
     );
+    assert_eq!(reason, expected_reason, "X delivery {platform_message_id}");
+    if expected_reason.is_none() {
+        assert!(current.diagnostics.last_outbound_at.is_some());
+        assert!(error.is_none());
+    }
+    current
 }
 
 async fn idle(state: &AppState, conversation: &str) {
@@ -224,6 +234,8 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
     // NyxID itself, so the relay callback is a real HTTP request.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let _delivery_origin =
+        crate::services::resource_adapter::register_test_origin(&format!("http://{address}"));
     let (_, router) = crate::routes::build_router_with_state(state.clone());
     let app = router.with_state(state.clone());
     let nyxid = tokio::spawn(async move {
@@ -257,12 +269,10 @@ async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
     state
         .db
         .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
-        .insert_one(doc! {
-            "_id": Uuid::new_v4().to_string(), "user_id": OWNER, "channel_bot_id": &bot.id,
-            "platform": "x", "platform_conversation_id": "*", "platform_conversation_type": "private",
-            "agent_api_key_id": &row.route_api_key_id, "default_agent": true, "is_active": true,
-            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
-        })
+        .update_one(
+            doc! {"_id": &row.route_id},
+            doc! {"$set": {"channel_bot_id": &bot.id, "platform": "x"}},
+        )
         .await
         .unwrap();
     let deliver = |id: &str, sender: &str, text: &str| {
@@ -565,6 +575,7 @@ async fn org_x_verification_then_personal_specialist_dm_is_answered_and_private_
     assert_eq!(linked.owner_sender_ids, vec!["2"]);
     // A concurrent request holding the original link snapshot cannot claim success.
     let stale_sender = Sender {
+        truncated_original_bytes: None,
         original_kind: None,
         media: Vec::new(),
         original_message: true,

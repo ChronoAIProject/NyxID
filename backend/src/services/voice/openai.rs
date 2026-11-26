@@ -79,7 +79,7 @@ impl OpenAi {
 
     /// Reconcile a known native inference after a sideband error omitted its
     /// terminal event. Fixed provider origin, own credential, bounded read only.
-    pub(super) async fn response(&self, id: &str) -> AppResult<Value> {
+    pub(super) async fn response(&self, service_id: &str, id: &str) -> AppResult<Value> {
         if !valid_provider_id(id) {
             return Err(AppError::VoiceProviderUnavailable);
         }
@@ -93,10 +93,12 @@ impl OpenAi {
             let mut response = self
                 .client
                 .get(url)
+                .header(http::header::ACCEPT_ENCODING, "identity")
                 .bearer_auth(self.key.as_str())
                 .send()
                 .await
                 .map_err(|_| AppError::VoiceProviderUnavailable)?;
+            crate::services::llm_usage_service::warn_http_usage_encoding(service_id, &response);
             if !response.status().is_success() {
                 return Err(AppError::VoiceProviderUnavailable);
             }
@@ -247,7 +249,7 @@ pub fn start_payload(
     delegation_model: Option<&str>,
     delegation_instructions: Option<&str>,
 ) -> Value {
-    json!({"session":{"model":model,"store":false,"instructions":instructions,
+    json!({"session":{"model":model,"store":false,"instructions":format!("{instructions}\n{}", super::links::INSTRUCTIONS),
         "delegation":delegation_model.map(|model| super::responses::configuration(model, delegation_instructions)).unwrap_or_else(|| json!({"type":"client"})),"audio":{"output":{"voice":voice}},
         "client":{"data_channel":{"allowed_client_events":[],"allowed_server_events":[
             {"type":"session.started"},{"type":"session.closed"},{"type":"error"}

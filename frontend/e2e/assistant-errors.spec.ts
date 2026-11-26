@@ -49,16 +49,16 @@ test("the latest failed reply is dismissable above the composer with its durable
   const retryToast = page.locator("[data-sonner-toast]").filter({ hasText: "Could not retry your message" });
   await expect(retryToast).toContainText("NyxBot is temporarily unavailable. Try again shortly.");
   await expect(retryToast).not.toContainText("Trace ID:");
-  const retryNotice = page.getByRole("alert").filter({ hasText: "Trace ID: e48e2e01-6c09-4bb7-b5d2-2ab023038dea" });
+  const retryNotice = page.locator("[data-composer-dock]").getByRole("alert").filter({ hasText: "NyxBot is temporarily unavailable. Try again shortly." });
   await expect(retryNotice).toBeVisible();
-  await expect(page.locator("[data-composer-dock]").getByRole("alert")).toContainText("e48e2e01");
-  await expect(page.getByText("Trace ID: e48e2e01-6c09-4bb7-b5d2-2ab023038dea", { exact: false })).toHaveCount(1);
+  await expect(retryNotice).not.toContainText("e48e2e01");
+  await expect(retryNotice).not.toContainText("private upstream diagnostic");
   await retryNotice.getByRole("button", { name: "Dismiss", exact: true }).click();
   await expect(retryNotice).toHaveCount(0);
 });
 
 for (const mobile of [false, true]) {
-  test(`NyxBot keeps descriptive toasts separate from inline traces (${mobile ? "mobile" : "desktop"})`, async ({ page }) => {
+  test(`NyxBot shows safe toast and inline copy for a rejected send (${mobile ? "mobile" : "desktop"})`, async ({ page }) => {
     await page.setViewportSize(mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 });
     await openAssistant(page, { faults: { nyxagentEnabled: true } });
     await page.evaluate(() => {
@@ -81,9 +81,10 @@ for (const mobile of [false, true]) {
     await expect(toast).toContainText("NyxBot is temporarily unavailable. Try again shortly.");
     await expect(toast).not.toContainText("Trace ID:");
     await expect(toast).not.toContainText("private upstream diagnostic");
-    const notice = page.getByRole("alert").filter({ hasText: "Trace ID: 9ad6d0fa-bb8f-489e-8fdd-f8e34960921b" });
+    const notice = page.getByRole("alert").filter({ hasText: "NyxBot is temporarily unavailable. Try again shortly." });
     await expect(notice).toBeVisible();
-    await expect(notice).toContainText("NyxBot is temporarily unavailable. Try again shortly.");
+    await expect(notice).not.toContainText("9ad6d0fa");
+    await expect(notice).not.toContainText("private upstream diagnostic");
     await expect(page.locator("[data-sonner-toaster]")).toHaveAttribute("data-y-position", "top");
     const bounds = await toast.boundingBox();
     expect(bounds!.y).toBeLessThan(150);
@@ -98,7 +99,7 @@ for (const mobile of [false, true]) {
   });
 }
 
-test("an interrupted first reply keeps its trace in the adopted chat", async ({ page }) => {
+test("a saved first reply clears interruption feedback in the adopted chat", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true, progressStallMs: 4000 } });
   await page.evaluate(() => {
     const original = globalThis.__nyxidAssistantHttpMock;
@@ -113,6 +114,7 @@ test("an interrupted first reply keeps its trace in the adopted chat", async ({ 
           async pull(controller) {
             await new Promise((resolve) => setTimeout(resolve, 50));
             controller.error(new TypeError("network error"));
+            document.documentElement.dataset.replyStreamInterrupted = "true";
           },
         }), { headers: { ...Object.fromEntries(response.headers), "X-NyxID-Trace-Id": "9ad6d0fa-bb8f-489e-8fdd-f8e34960921b" } });
       }
@@ -121,10 +123,10 @@ test("an interrupted first reply keeps its trace in the adopted chat", async ({ 
   });
   await sendMessage(page, "Check my services");
   await expect(page).toHaveURL(/c=nyxa-/);
-  const toast = page.locator("[data-sonner-toast]").filter({ hasText: "Live reply interrupted" });
-  await expect(toast).toBeVisible();
-  await expect(toast).toContainText("NyxBot may still be working");
-  await expect(toast).not.toContainText("Trace ID:");
-  await expect(page.getByRole("alert").filter({ hasText: "Trace ID: 9ad6d0fa-bb8f-489e-8fdd-f8e34960921b" })).toBeVisible();
+  await expect(page.locator("html")).toHaveAttribute("data-reply-stream-interrupted", "true");
+  await expect(page.getByText("Your connected services are ready.", { exact: false })).toBeVisible();
+  await expect(page.locator("[data-sonner-toast]").filter({ hasText: /live reply interrupted/i })).toHaveCount(0);
+  await expect(page.getByRole("alert").filter({ hasText: /live reply was interrupted|9ad6d0fa/i })).toHaveCount(0);
   await expect(composerInput(page)).toHaveText("");
+  await expect(composerInput(page)).toBeEditable();
 });

@@ -1,9 +1,15 @@
 use super::*;
 use crate::handlers::billing::{self, BillingUsageResponse, BillingUsageRow, UsageQuery};
 use crate::models::credits::Credits;
-use crate::models::usage_meter::{BillingLayer, UsageFunding};
+use crate::models::usage_meter::{
+    AllowanceConsumptionAllocation, BillingLayer, GrantConsumptionAllocation, UsageFunding,
+    UsageStatus,
+};
+use crate::models::usage_rollup_hourly::UsageRollupMeasures;
+use crate::models::usage_rollup_state::STATE_ID;
 use crate::test_utils::test_auth_user;
 use axum::extract::{Query, State};
+use futures::TryStreamExt;
 
 pub(super) fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
     let now = Utc::now();
@@ -11,6 +17,7 @@ pub(super) fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
     UsageMeterRow {
         model_tariff: None,
         org_channel_guest: None,
+        stuck_request_exit: None,
         rollup_pending: true,
         id: id.clone(),
         transaction_id: id.clone(),
@@ -39,6 +46,8 @@ pub(super) fn meter(owner: &str, quantity: i64) -> UsageMeterRow {
         quantity: Some(quantity),
         pending_resale_quantity: None,
         pending_platform_usage: None,
+        usage_checkpoint: None,
+        realtime_session: None,
         pool_attempt: None,
         machine_usage: None,
         status: UsageStatus::Finalized,
@@ -1170,6 +1179,7 @@ async fn machine_job_usage_filters_are_applied_before_totals_and_keep_owner_scop
         .0;
         assert_eq!(result.machine_id.as_deref(), Some(machine.as_str()));
         assert_eq!(result.job_id, job_filter);
+        assert!(result.covers_from <= Utc::now());
         assert_eq!(result.totals.quantity, expected);
         assert!(
             result
@@ -1192,6 +1202,626 @@ async fn machine_job_usage_filters_are_applied_before_totals_and_keep_owner_scop
         )
         .await
         .is_err()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn long_usage_matches_raw_and_daily_rollup_and_survives_raw_expiry() {
+    let Some(db) = connect_test_database("billing_usage_rollup_parity").await else {
+        return;
+    };
+    let owner = insert_owner(&db).await;
+    let state = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
+    let mut raw = meter(&owner, 17);
+    raw.wallet_id = None;
+    raw.created_at = Utc::now() - chrono::Duration::days(60);
+    raw.updated_at = raw.created_at;
+    raw.finalized_at = Some(raw.created_at);
+    raw.token_breakdown = Some(crate::models::service_billing::TokenBreakdown {
+        prompt_tokens: 11,
+        completion_tokens: 6,
+        cached_tokens: 2,
+        cache_creation_tokens: 1,
+    });
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(&raw)
+        .await
+        .unwrap();
+
+    db.collection::<bson::Document>(crate::models::usage_rollup_state::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id": STATE_ID, "sequence": 0_i64, "batch": bson::Bson::Null,
+            "daily_ready": false,
+            "rolled_up_through": bson::DateTime::from_millis(0),
+        })
+        .await
+        .unwrap();
+    let read_started = Utc::now();
+    let raw_answer = billing::get_usage(
+        State(state.clone()),
+        test_auth_user(&owner),
+        Query(UsageQuery {
+            owner_id: None,
+            machine_id: None,
+            job_id: None,
+            period: Some("90d".into()),
+            bucket: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+
+    let all_answer = billing::get_usage(
+        State(state.clone()),
+        test_auth_user(&owner),
+        Query(UsageQuery {
+            owner_id: None,
+            machine_id: None,
+            job_id: None,
+            period: Some("all".into()),
+            bucket: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    for answer in [&raw_answer, &all_answer] {
+        assert!(
+            answer.covers_from >= read_started - chrono::Duration::days(29),
+            "raw-only long history must advertise the retention boundary"
+        );
+        assert!(answer.covers_from <= Utc::now() - chrono::Duration::days(28));
+        assert_eq!(answer.covers_from.time(), chrono::NaiveTime::MIN);
+    }
+
+    let day = raw
+        .created_at
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    let measures = UsageRollupMeasures {
+        quantity: 17,
+        events: 1,
+        requests: 0,
+        exact_cost_events: 0,
+        legacy_cost_events: 1,
+        legacy_quantity: 17,
+        legacy_allowance_quantity: 0,
+        legacy_grant_cost: Credits::ZERO,
+        gross_cost: Credits::ZERO,
+        wallet_cost: Credits::ZERO,
+        grant_cost: Credits::ZERO,
+        allowance_cost: Credits::ZERO,
+        prompt_tokens: 11,
+        completion_tokens: 6,
+        cached_tokens: 2,
+        cache_creation_tokens: 1,
+        audio_input_tokens: 0,
+        audio_output_tokens: 0,
+        image_input_tokens: 0,
+        image_output_tokens: 0,
+        rows_folded: 1,
+    };
+    let daily = crate::models::usage_rollup_daily::UsageRollupDaily {
+        id: Uuid::new_v4().to_string(),
+        day,
+        actor: owner.clone(),
+        owner: owner.clone(),
+        service_id: raw.service_id.clone(),
+        service_slug: raw.service_slug.clone(),
+        class: "nyxid_managed_master".into(),
+        metric: raw.metric.as_str().into(),
+        code: raw.lago_metric_code.clone(),
+        layer: "platform".into(),
+        model: raw.model.clone(),
+        billable: false,
+        exact: false,
+        measures,
+        cost_partitions: std::collections::BTreeMap::new(),
+        single_display_key: None,
+        query_costs: None,
+        last_batch: 1,
+    };
+    db.collection::<crate::models::usage_rollup_daily::UsageRollupDaily>(
+        crate::models::usage_rollup_daily::COLLECTION_NAME,
+    )
+    .insert_one(daily)
+    .await
+    .unwrap();
+    db.collection::<bson::Document>(crate::models::usage_rollup_state::COLLECTION_NAME)
+        .replace_one(
+            doc! { "_id": STATE_ID },
+            doc! {
+                "_id": STATE_ID, "sequence": 1_i64, "batch": bson::Bson::Null,
+                "daily_ready": true, "folded_before": bson::DateTime::from_chrono(Utc::now()),
+                "rolled_up_through": bson::DateTime::from_chrono(Utc::now()),
+            },
+        )
+        .await
+        .unwrap();
+    crate::services::billing::usage_rollup::ensure_indexes(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        db.collection::<bson::Document>(crate::models::usage_rollup_daily::COLLECTION_NAME)
+            .count_documents(doc! { "owner": &owner })
+            .await
+            .unwrap(),
+        1
+    );
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .delete_one(doc! { "_id": &raw.id })
+        .await
+        .unwrap();
+    let rollup_result = billing::get_usage(
+        State(state.clone()),
+        test_auth_user(&owner),
+        Query(UsageQuery {
+            owner_id: None,
+            machine_id: None,
+            job_id: None,
+            period: Some("90d".into()),
+            bucket: None,
+        }),
+    )
+    .await;
+    if let Err(error) = &rollup_result {
+        eprintln!("long rollup read error: {error}");
+    }
+    let rollup_answer = rollup_result.unwrap().0;
+    assert_eq!(rollup_answer.totals.quantity, raw_answer.totals.quantity);
+    assert_eq!(rollup_answer.totals.events, raw_answer.totals.events);
+    assert_eq!(
+        rollup_answer.totals.estimated_credits,
+        raw_answer.totals.estimated_credits
+    );
+    assert_eq!(rollup_answer.rows.len(), 1);
+
+    assert_eq!(
+        rollup_answer.rows[0].token_breakdown,
+        raw_answer.rows[0].token_breakdown
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn long_usage_rollup_parity_preserves_funding_tokens_and_unknowns() {
+    let Some(db) = connect_test_database("billing_usage_rollup_full_parity").await else {
+        return;
+    };
+    let owner = insert_owner(&db).await;
+    let state = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
+    rate(&db, None, 2).await;
+    let old = Utc::now() - chrono::Duration::days(60);
+
+    // The exact and unknown legacy rows deliberately share one display group.
+    // The raw path keeps their known funding while preserving a null total for
+    // the unknown legacy portion; the daily path must produce the same result.
+    let mut exact = meter(&owner, 30);
+    exact.created_at = old;
+    exact.updated_at = old;
+    exact.finalized_at = Some(old);
+    exact.service_id = Some("service-exact".into());
+    exact.service_slug = Some("exact-service".into());
+    exact.lago_metric_code = "mixed-no-rate".into();
+    exact.transaction_id = format!("{}:platform", exact.billing_request_id);
+    exact.released = true;
+    exact.lago_acked = true;
+    exact.funding = Some(UsageFunding {
+        settled: true,
+        total_charge: Some(Credits::from_micros(500)),
+        wallet_funded: Some(Credits::from_micros(300)),
+        grant_funded: Some(Credits::from_micros(100)),
+        allowance_funded: Some(Credits::from_micros(100)),
+        allowance_funded_quantity: Some(10),
+        ..Default::default()
+    });
+    exact.token_breakdown = Some(crate::models::service_billing::TokenBreakdown {
+        prompt_tokens: 20,
+        completion_tokens: 10,
+        cached_tokens: 3,
+        cache_creation_tokens: 2,
+    });
+
+    let mut unknown = meter(&owner, 7);
+    unknown.created_at = old;
+    unknown.updated_at = old;
+    unknown.finalized_at = Some(old);
+    unknown.service_id = exact.service_id.clone();
+    unknown.service_slug = exact.service_slug.clone();
+    unknown.lago_metric_code = exact.lago_metric_code.clone();
+    unknown.model = exact.model.clone();
+    unknown.transaction_id = format!("{}:platform", unknown.billing_request_id);
+    unknown.status = UsageStatus::DeadLetter;
+    unknown.lago_acked = true;
+    unknown.released = true;
+    unknown.funding = None;
+
+    // A second service and layer exercise the independent rollup dimensions,
+    // while its legacy grant and allowance fields remain rateable.
+    let mut legacy = meter(&owner, 100);
+    legacy.created_at = old;
+    legacy.updated_at = old;
+    legacy.finalized_at = Some(old);
+    legacy.service_id = Some("service-legacy".into());
+    legacy.service_slug = Some("legacy-service".into());
+    legacy.layer = BillingLayer::Resale;
+    legacy.transaction_id = format!("{}:resale", legacy.billing_request_id);
+    legacy.lago_acked = true;
+    legacy.released = true;
+    legacy.funding = Some(UsageFunding {
+        settled: true,
+        credits_per_unit_micros: 2,
+        allowance_consumptions: vec![AllowanceConsumptionAllocation {
+            operation_id: "allowance-operation".into(),
+            allowance_id: "allowance".into(),
+            period_id: "period".into(),
+            quantity: 10,
+        }],
+        grant_consumptions: vec![GrantConsumptionAllocation {
+            operation_id: "grant-operation".into(),
+            grant_id: "grant".into(),
+            service_limit_key: None,
+            amount: Credits::from_micros(50),
+        }],
+        wallet_charge_credits: Some(Credits::from_micros(130)),
+        ..Default::default()
+    });
+
+    let mut free = meter(&owner, 8);
+    free.created_at = old;
+    free.updated_at = old;
+    free.finalized_at = Some(old);
+    free.wallet_id = None;
+    free.service_id = Some("service-free".into());
+    free.service_slug = Some("free-service".into());
+    free.metric = BillingMetric::Requests;
+    free.lago_metric_code = "free_requests".into();
+    free.transaction_id = format!("{}:platform", free.billing_request_id);
+    free.released = false;
+    free.funding = None;
+
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_many([exact, unknown, legacy, free])
+        .await
+        .unwrap();
+
+    let raw_answer = billing::get_usage(
+        State(state.clone()),
+        test_auth_user(&owner),
+        Query(UsageQuery {
+            owner_id: None,
+            machine_id: None,
+            job_id: None,
+            period: Some("90d".into()),
+            bucket: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+
+    crate::services::billing::usage_rollup::ensure_indexes(&db)
+        .await
+        .unwrap();
+    while crate::services::billing::usage_rollup::fold_once(&db, Utc::now())
+        .await
+        .unwrap()
+        > 0
+    {}
+    assert!(
+        crate::services::billing::usage_rollup::state(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .daily_ready
+    );
+
+    let rows = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().all(|row| !row.rollup_pending));
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .delete_many(doc! {})
+        .await
+        .unwrap();
+
+    let rollup_answer = billing::get_usage(
+        State(state.clone()),
+        test_auth_user(&owner),
+        Query(UsageQuery {
+            owner_id: None,
+            machine_id: None,
+            job_id: None,
+            period: Some("90d".into()),
+            bucket: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+
+    let numeric = |answer: &BillingUsageResponse| {
+        let mut rows = answer
+            .rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "service_slug": row.service_slug,
+                    "layer": row.layer,
+                    "metric": row.metric.as_str(),
+                    "quantity": row.quantity,
+                    "requests": row.requests,
+                    "bytes": row.bytes,
+                    "events": row.events,
+                    "estimated_credits": row.estimated_credits,
+                    "wallet_credits": row.wallet_credits,
+                    "grant_credits": row.grant_credits,
+                    "allowance_credits": row.allowance_credits,
+                    "token_breakdown": row.token_breakdown,
+                })
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| row.to_string());
+        let totals = serde_json::json!({
+            "quantity": answer.totals.quantity,
+            "requests": answer.totals.requests,
+            "bytes": answer.totals.bytes,
+            "events": answer.totals.events,
+            "estimated_credits": answer.totals.estimated_credits,
+            "wallet_credits": answer.totals.wallet_credits,
+            "grant_credits": answer.totals.grant_credits,
+            "allowance_credits": answer.totals.allowance_credits,
+        });
+        (rows, totals)
+    };
+    assert_eq!(numeric(&raw_answer), numeric(&rollup_answer));
+    assert_eq!(raw_answer.totals.allowance_quantity, 20);
+    assert_eq!(rollup_answer.totals.allowance_quantity, 0);
+    assert!(rollup_answer.rows.iter().all(|row| !row.detail_retained));
+    assert!(
+        rollup_answer
+            .rows
+            .iter()
+            .any(|row| row.service_slug.as_deref() == Some("exact-service")
+                && row.estimated_credits.is_none()
+                && row.grant_credits == Some(Credits::from_micros(100)))
+    );
+    let daily = db.collection::<bson::Document>(crate::models::usage_rollup_daily::COLLECTION_NAME);
+    let original = daily
+        .find(doc! {})
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    for row in &original {
+        let mut legacy = row.clone();
+        let mut old_costs = bson::Document::new();
+        for field in [
+            "gross_cost",
+            "wallet_cost",
+            "grant_cost",
+            "allowance_cost",
+            "legacy_grant_cost",
+        ] {
+            let amount = Credits::from_bson(row.get(field).unwrap().clone(), 1_000_000).unwrap();
+            let old = if field == "legacy_grant_cost" {
+                "legacy_grant".into()
+            } else {
+                format!("{field}_micros")
+            };
+            old_costs.insert(&old, amount.display_micros());
+            legacy.insert(&old, amount.display_micros());
+            legacy.remove(field);
+            legacy.remove(format!("query_{field}"));
+        }
+        legacy.insert("query_costs", old_costs);
+        daily
+            .replace_one(doc! {"_id": row.get("_id").unwrap()}, legacy)
+            .await
+            .unwrap();
+    }
+    let read_daily = || {
+        billing::get_usage(
+            State(state.clone()),
+            test_auth_user(&owner),
+            Query(UsageQuery {
+                owner_id: None,
+                machine_id: None,
+                job_id: None,
+                period: Some("90d".into()),
+                bucket: None,
+            }),
+        )
+    };
+    let legacy_answer = read_daily().await.unwrap().0;
+    assert_eq!(
+        numeric(&raw_answer),
+        numeric(&legacy_answer),
+        "before the marker, legacy micros mirrors match raw history"
+    );
+    for row in original {
+        daily
+            .replace_one(doc! {"_id": row.get("_id").unwrap()}, &row)
+            .await
+            .unwrap();
+    }
+    db.collection::<bson::Document>("billing_migrations")
+        .insert_one(doc! {
+            "_id": "exact-v2-rollups", "completed_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    let normalized = read_daily().await.unwrap().0;
+    assert_eq!(
+        numeric(&raw_answer),
+        numeric(&normalized),
+        "after the marker, flat exact mirrors match raw history"
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn long_usage_active_fold_and_handover_preserve_rows() {
+    use crate::services::billing::usage_rollup;
+    use tokio::sync::Notify;
+
+    let db = connect_test_database("usage_history_active_fold")
+        .await
+        .unwrap();
+    let owner = insert_owner(&db).await;
+    let fold_at = Utc::now();
+    let app = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
+    usage_rollup::ensure_indexes(&db).await.unwrap();
+    let mut old = meter(&owner, 17);
+    old.wallet_id = None;
+    old.created_at = Utc::now() - chrono::Duration::days(60);
+    let mut first = meter(&owner, 2);
+    first.wallet_id = None;
+    first.operation = Some("first".into());
+    first.api_key_id = Some(Uuid::new_v4().to_string());
+    let mut second = first.clone();
+    second.id = Uuid::new_v4().to_string();
+    second.transaction_id = second.id.clone();
+    second.billing_request_id = second.id.clone();
+    second.operation = Some("second".into());
+    second.api_key_id = Some(Uuid::new_v4().to_string());
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_many([old.clone(), first, second])
+        .await
+        .unwrap();
+    while usage_rollup::fold_once(&db, fold_at).await.unwrap() > 0 {}
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .delete_one(doc! {"_id": &old.id})
+        .await
+        .unwrap();
+    let mut pending = old;
+    pending.id = Uuid::new_v4().to_string();
+    pending.transaction_id = pending.id.clone();
+    pending.billing_request_id = pending.id.clone();
+    pending.quantity = Some(13);
+    pending.rollup_pending = true;
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .insert_one(pending)
+        .await
+        .unwrap();
+
+    let read = || {
+        billing::get_usage(
+            State(app.clone()),
+            test_auth_user(&owner),
+            Query(UsageQuery {
+                owner_id: None,
+                machine_id: None,
+                job_id: None,
+                period: Some("90d".into()),
+                bucket: None,
+            }),
+        )
+    };
+    let baseline = read().await.unwrap().0;
+    assert_eq!(baseline.totals.quantity, 34);
+    assert_eq!(
+        baseline
+            .rows
+            .iter()
+            .filter(|row| row.detail_retained)
+            .count(),
+        3
+    );
+    assert_eq!(
+        baseline
+            .rows
+            .iter()
+            .filter(|row| row.operation.is_some())
+            .count(),
+        2
+    );
+    assert!(
+        baseline
+            .rows
+            .iter()
+            .filter(|row| !row.detail_retained)
+            .all(|row| row.operation.is_none()
+                && row.api_key_id.is_none()
+                && row.api_key_name.is_none()
+                && row.machine_usage.is_none()
+                && row.org_channel_guest.is_none()
+                && !row.lago_acked)
+    );
+
+    let claimed = Arc::new(Notify::new());
+    let finish_fold = Arc::new(Notify::new());
+    let raw_read = Arc::new(Notify::new());
+    let finish_read = Arc::new(Notify::new());
+    let worker =
+        usage_rollup::TEST_FOLD_PAUSE.scope((claimed.clone(), finish_fold.clone()), async {
+            let result = usage_rollup::fold_once(&db, fold_at).await.unwrap();
+            finish_read.notify_one();
+            result
+        });
+    let reader = async {
+        claimed.notified().await;
+        // The claim stays open for the entire endpoint call; no timing assumptions.
+        let busy = read().await.unwrap().0;
+        let sorted_rows = |rows: &[billing::BillingUsageRow]| {
+            let mut values = rows
+                .iter()
+                .map(|row| serde_json::to_value(row).unwrap())
+                .collect::<Vec<_>>();
+            values.sort_by_key(|row| row.to_string());
+            values
+        };
+        assert_eq!(sorted_rows(&busy.rows), sorted_rows(&baseline.rows));
+        assert_eq!(
+            serde_json::to_value(&busy.totals).unwrap(),
+            serde_json::to_value(&baseline.totals).unwrap()
+        );
+        let exhausted = billing::TEST_USAGE_SNAPSHOT_EXPIRED
+            .scope(true, read())
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(
+            exhausted.totals.quantity, baseline.totals.quantity,
+            "snapshot exhaustion must retain permanent history"
+        );
+        assert_eq!(sorted_rows(&exhausted.rows), sorted_rows(&baseline.rows));
+        billing::TEST_USAGE_READ_PAUSE
+            .scope(
+                std::cell::RefCell::new(Some((raw_read.clone(), finish_read.clone()))),
+                read(),
+            )
+            .await
+            .unwrap()
+            .0
+    };
+    let complete_between_tiers = async {
+        raw_read.notified().await;
+        finish_fold.notify_one();
+    };
+    let (folded, during, ()) = tokio::join!(worker, reader, complete_between_tiers);
+    assert_eq!(folded, 1);
+    assert_eq!(
+        during.totals.quantity, baseline.totals.quantity,
+        "one row counted between tier reads must appear exactly once"
+    );
+    assert_eq!(during.totals.events, baseline.totals.events);
+    let after = read().await.unwrap().0;
+    assert_eq!(after.totals.quantity, baseline.totals.quantity);
+    assert_eq!(
+        after.rows.iter().filter(|row| row.detail_retained).count(),
+        2
     );
     db.drop().await.unwrap();
 }

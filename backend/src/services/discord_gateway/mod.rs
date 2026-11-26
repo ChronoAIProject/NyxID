@@ -27,7 +27,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::HashMap, time::Duration};
 use tokio_util::sync::CancellationToken;
-use zeroize::Zeroizing;
 
 use super::coordination_service::{
     LeaseStore, LeaseToken, active_lease_filter, cluster_lease_runtime,
@@ -38,6 +37,8 @@ use crate::{
     models::channel_bot::{COLLECTION_NAME, ChannelBot},
 };
 use protocol::{Failure, Resume};
+
+pub(crate) const SOCKET_LEASE_PREFIX: &str = "discord-gateway:";
 
 const MAX_SESSIONS: usize = 32;
 const DISCOVERY_BATCH: i64 = 100;
@@ -69,13 +70,17 @@ pub(crate) struct Fence {
     pub bot: ChannelBot,
 }
 impl Fence {
-    fn bot_filter(&self) -> Document {
-        doc! {"_id": &self.bot.id, "user_id": &self.bot.user_id,
+    fn bot_filter(&self, bot: &ChannelBot) -> Option<Document> {
+        let mut filter = doc! {"_id": &self.bot.id, "user_id": &self.bot.user_id,
         "platform":"discord", "is_active":true,
         "status":{"$in":["active","pending_webhook"]},
-        "ownership_version": if self.bot.ownership_version == 0 { bson::Bson::Document(doc! {"$in":[bson::Bson::Null,0_i64]}) } else { self.bot.ownership_version.into() },
-        "bot_token_encrypted": bson::Binary { subtype:bson::spec::BinarySubtype::Generic, bytes:self.bot.bot_token_encrypted.clone() },
-        "platform_bot_id": &self.bot.platform_bot_id}
+        "bot_token_encrypted": bson::Binary { subtype:bson::spec::BinarySubtype::Generic, bytes:bot.bot_token_encrypted.clone() },
+        "platform_bot_id": &self.bot.platform_bot_id};
+        if bot.ownership_version != self.bot.ownership_version {
+            return None;
+        }
+        filter.extend(super::channel_credential_continuity::physical_filter(bot).ok()?);
+        Some(filter)
     }
     /// A write, not a snapshot read: lease replacement, owner changes, deletion
     /// and credential rotation conflict with admission in the same transaction.
@@ -84,7 +89,7 @@ impl Fence {
         db: &mongodb::Database,
         tx: &mut mongodb::ClientSession,
     ) -> Result<bool, mongodb::error::Error> {
-        if !self.touch_identity(db, tx).await? {
+        if self.touch_identity(db, tx).await?.is_none() {
             return Ok(false);
         }
         transport::fence_relay(db, &self.bot.id, tx).await
@@ -94,7 +99,7 @@ impl Fence {
         &self,
         db: &mongodb::Database,
         tx: &mut mongodb::ClientSession,
-    ) -> Result<bool, mongodb::error::Error> {
+    ) -> Result<Option<Document>, mongodb::error::Error> {
         let lease = db
             .collection::<Document>(crate::models::coordination::LEASE_COLLECTION_NAME)
             .update_one(
@@ -104,29 +109,62 @@ impl Fence {
             .session(&mut *tx)
             .await?;
         if lease.matched_count != 1 {
-            return Ok(false);
+            return Ok(None);
         }
-        let bot = db
-            .collection::<Document>(COLLECTION_NAME)
-            .update_one(
-                self.bot_filter(),
-                doc! {"$inc":{"discord_ingress_revision":1_i64}},
-            )
+        let Ok(original) = credential_digest(&self.bot) else {
+            return Ok(None);
+        };
+        let bots = db.collection::<Document>(COLLECTION_NAME);
+        let Some(mut filter) = self.bot_filter(&self.bot) else {
+            return Ok(None);
+        };
+        let touch = doc! {"$inc":{"discord_ingress_revision":1_i64}};
+        if bots
+            .update_one(filter.clone(), touch.clone())
+            .session(&mut *tx)
+            .await?
+            .matched_count
+            == 1
+        {
+            return Ok(Some(filter));
+        }
+        let Some(current) = db
+            .collection::<ChannelBot>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&self.bot.id})
+            .session(&mut *tx)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if current.credential_continuity.is_none()
+            || !credential_digest(&current).is_ok_and(|pin| pin == original)
+        {
+            return Ok(None);
+        }
+        let Some(rebound) = self.bot_filter(&current) else {
+            return Ok(None);
+        };
+        filter = rebound;
+        Ok((bots
+            .update_one(filter.clone(), touch)
             .session(tx)
-            .await?;
-        Ok(bot.matched_count == 1)
+            .await?
+            .matched_count
+            == 1)
+            .then_some(filter))
     }
     pub(crate) async fn record_inbound(&self, db: &mongodb::Database) -> AppResult<()> {
         super::transaction_service::run_db_only(db, &(db.clone(), self.clone()), |tx, (db, fence)| {
             Box::pin(async move {
-                if !fence.touch(db, tx).await? { return Err(AppError::ChannelBotInactive("Discord Gateway ownership lost".into())); }
+                let Some(filter)=fence.touch_identity(db,tx).await? else {return Err(AppError::ChannelBotInactive("Discord Gateway ownership lost".into()))};
+                if !transport::fence_relay(db,&fence.bot.id,tx).await? {return Err(AppError::ChannelBotInactive("Discord Gateway ownership lost".into()))}
                 // A verified Gateway message proves ordinary chat is configured;
                 // it need not (and does not) prove an Interactions webhook exists.
-                let mut pending = fence.bot_filter();
+                let mut pending = filter.clone();
                 pending.insert("status", "pending_webhook");
                 db.collection::<Document>(COLLECTION_NAME).update_one(pending,
                     doc! {"$set":{"status":"active","updated_at":bson::DateTime::now()}}).session(&mut *tx).await?;
-                db.collection::<Document>(COLLECTION_NAME).update_one(fence.bot_filter(),
+                db.collection::<Document>(COLLECTION_NAME).update_one(filter.clone(),
                     doc! {"$set":{"diagnostics.last_inbound_at":bson::DateTime::now(),"diagnostics.last_inbound_source":"discord_gateway"}}).session(tx).await?;
                 Ok(())
             })
@@ -155,15 +193,17 @@ struct Checkpoint {
 }
 impl Checkpoint {
     fn matches_bot(&self, bot: &ChannelBot) -> bool {
-        self.credential_digest == credential_digest(bot)
+        credential_digest(bot).is_ok_and(|pin| self.credential_digest == pin)
             && self.ownership_version == bot.ownership_version
             && self.platform_bot_id == bot.platform_bot_id
             && self.owner_id == bot.user_id
     }
 }
-fn credential_digest(bot: &ChannelBot) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(&bot.bot_token_encrypted))
+fn credential_digest(bot: &ChannelBot) -> AppResult<String> {
+    super::channel_credential_continuity::field_pin(
+        bot,
+        super::channel_credential_continuity::TOKEN,
+    )
 }
 
 /// All inputs to this URL are fixed or Discord-authenticated; no user URLs.
@@ -234,7 +274,10 @@ pub async fn run(state: AppState, shutdown: CancellationToken) {
     ));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        tokio::select! { _ = shutdown.cancelled() => break, _ = tick.tick() => {} }
+        tokio::select! { _ = shutdown.cancelled() => break, () = state.shutdown.intake_stopped() => break, _ = tick.tick() => {} }
+        let Some(_pass) = state.shutdown.background() else {
+            break;
+        };
         tasks.retain(|_, task| !task.is_finished());
         let scan = async {
             state.db.collection::<ChannelBot>(COLLECTION_NAME)
@@ -253,14 +296,18 @@ pub async fn run(state: AppState, shutdown: CancellationToken) {
         }
         for bot in bots {
             after = bot.id.clone();
-            if shutdown.is_cancelled() {
+            if shutdown.is_cancelled() || state.shutdown.is_draining() {
                 break;
             }
             if tasks.contains_key(&bot.id) || !enabled(&state.db, &bot).await.unwrap_or(false) {
                 continue;
             }
             let Ok(Some(lease)) = cluster_lease_runtime()
-                .acquire(&state.db, &format!("discord-gateway:{}", bot.id))
+                .acquire_background(
+                    &state.db,
+                    &format!("{SOCKET_LEASE_PREFIX}{}", bot.id),
+                    &state.shutdown,
+                )
                 .await
             else {
                 continue;
@@ -281,7 +328,7 @@ pub async fn run(state: AppState, shutdown: CancellationToken) {
             let cancel = shutdown.child_token();
             tasks.insert(
                 bot.id.clone(),
-                tokio::spawn(async move {
+                state.shutdown.spawn(async move {
                     run_owned(&task_state, Fence { lease, bot }, cancel).await;
                 }),
             );
@@ -331,6 +378,7 @@ async fn run_owned(state: &AppState, fence: Fence, shutdown: CancellationToken) 
     let ready = tokio::select! {
         biased;
         _ = shutdown.cancelled() => false,
+        () = state.shutdown.intake_stopped() => false,
         result = tokio::time::timeout_at(deadline, async {
             if !enabled(&state.db, &fence.bot).await? || !fence.current(&state.db).await? {
                 return Ok(false);
@@ -367,12 +415,12 @@ async fn status(
 ) -> AppResult<()> {
     super::transaction_service::run_db_only(db, &(db.clone(), fence.clone(), state.to_owned(), reason.map(str::to_owned)), |tx, (db, fence, state, reason)| {
         Box::pin(async move {
-            if !fence.touch_identity(db, tx).await? { return Err(AppError::ChannelBotInactive("Discord Gateway ownership lost".into())); }
+            let Some(filter)=fence.touch_identity(db,tx).await? else {return Err(AppError::ChannelBotInactive("Discord Gateway ownership lost".into()))};
             let mut set = doc! {"diagnostics.discord_gateway":{"state":state,"reason":reason,"updated_at":bson::DateTime::now()}};
             if let Some(reason) = reason { set.insert("diagnostics.failure_reason", reason); }
-            db.collection::<Document>(COLLECTION_NAME).update_one(fence.bot_filter(),doc! {"$set":set}).session(&mut *tx).await?;
+            db.collection::<Document>(COLLECTION_NAME).update_one(filter.clone(),doc! {"$set":set}).session(&mut *tx).await?;
             if reason.is_none() && state == "connected" {
-                let mut filter = fence.bot_filter();
+                let mut filter = filter.clone();
                 filter.insert("diagnostics.failure_reason", doc! {"$regex":"^discord_gateway_"});
                 db.collection::<Document>(COLLECTION_NAME).update_one(filter,doc! {"$set":{"diagnostics.failure_reason":bson::Bson::Null}}).session(tx).await?;
             }
@@ -384,7 +432,7 @@ async fn status(
 async fn checkpoint(db: &mongodb::Database, fence: &Fence, resume: &Resume) -> Result<(), Failure> {
     let checkpoint = Checkpoint {
         resume: resume.clone(),
-        credential_digest: credential_digest(&fence.bot),
+        credential_digest: credential_digest(&fence.bot).map_err(|_| Failure::Ingress)?,
         ownership_version: fence.bot.ownership_version,
         platform_bot_id: fence.bot.platform_bot_id.clone(),
         owner_id: fence.bot.user_id.clone(),
@@ -449,7 +497,7 @@ async fn session(state: &AppState, fence: &Fence) {
         match super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &fence.bot)
             .await
         {
-            Ok(token) => Zeroizing::new(token),
+            Ok(token) => token,
             Err(_) => {
                 let _ = status(
                     &state.db,
@@ -472,6 +520,9 @@ async fn session(state: &AppState, fence: &Fence) {
     let mut attempts = 0_u32;
     let channels = Channels::default();
     loop {
+        if state.shutdown.is_draining() {
+            return;
+        }
         let _ = status(&state.db, fence, "connecting", None).await;
         let connected_at = std::time::Instant::now();
         let gateway = if resume.session_id.is_empty() {
@@ -516,7 +567,7 @@ async fn session(state: &AppState, fence: &Fence) {
                         }
                     }
                     let adapter = super::channel_adapters::discord::DiscordAdapter::default();
-                    protocol::connection(url, &token, &fence.bot.platform_bot_id, &mut resume, |cursor, event| {
+                    protocol::connection_with_drain(url, &token, &fence.bot.platform_bot_id, &mut resume, |cursor, event| {
                         let adapter = &adapter;
                         let token = &token;
                         let channels = &channels;
@@ -543,13 +594,16 @@ async fn session(state: &AppState, fence: &Fence) {
                             }
                             checkpoint(&state.db, fence, &cursor).await
                         }
-                    }).await
+                    }, Some(&state.shutdown)).await
                 } else {
                     Failure::Protocol
                 }
             }
             Err(failure) => failure,
         };
+        if state.shutdown.is_draining() {
+            return;
+        }
         if matches!(failure, Failure::InvalidSession(false)) {
             let _ = checkpoint(&state.db, fence, &resume).await;
         }
@@ -569,6 +623,9 @@ async fn session(state: &AppState, fence: &Fence) {
         )
         .await;
         tracing::warn!(bot_id = %fence.bot.id, reason = failure.code(), "Discord Gateway reconnect scheduled");
-        tokio::time::sleep(protocol::retry_delay(attempts, failure)).await;
+        tokio::select! {
+            () = state.shutdown.intake_stopped() => return,
+            () = tokio::time::sleep(protocol::retry_delay(attempts, failure)) => {},
+        }
     }
 }

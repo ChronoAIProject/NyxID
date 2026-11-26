@@ -1312,6 +1312,8 @@ screen size, capped at 1920×1200, so keep other windows idle during measurement
 
 ### Rollout and container upgrades
 
+On first creation, `nyxid node docker start --machine` pulls the official machine image for the CLI release and verifies its digest against the release workflow attestation before running either the separation probe or the machine. This requires access to GHCR, GitHub and Sigstore trust metadata. Start and restart of an existing container reuse its installed image and work offline. Locally built images can be run explicitly with Docker.
+
 Upgrade the server and web UI before enabling new machine capabilities; legacy
 nodes remain credential/SSH nodes until explicitly enabled. Setup reads the
 server's release from `/api/v1/public/config` and pins the Docker image to that
@@ -1332,6 +1334,10 @@ and easier than accumulating old images. This is explicit owner consent; existin
 machines remain off until the owner enables it. Both server and node check that
 there are no running jobs, active turns, desktop sessions or owner control before
 an automatic upgrade. The owner receives update and outcome notifications.
+Progress advances within the exact attempt from queued through verifying,
+downloading and restarting; a delayed observation cannot move it backwards or
+reopen connected, failed or rolled-back completion. Native updates may skip
+phases. The existing idle and reconnect-watch rules still apply.
 
 The official Docker setup command includes the optional shell-free
 `nyxid-machine-updater` companion. It mounts the Docker socket and one private

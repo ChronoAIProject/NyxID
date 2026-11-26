@@ -799,6 +799,7 @@ async fn channel_media_six_day_conversion_survives_seven_day_source_deletion_and
 
 #[tokio::test]
 async fn channel_media_browser_single_read_accepts_above_initial_channel_limit_and_encrypts() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use axum::{
         body::Body,
         extract::{Path, State},
@@ -874,6 +875,7 @@ async fn channel_media_browser_single_read_accepts_above_initial_channel_limit_a
 
 #[tokio::test]
 async fn channel_media_browser_waits_for_shared_budget_before_body_read_and_cancels() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use axum::{
         body::{Body, Bytes},
         extract::{Path, State},
@@ -1397,9 +1399,30 @@ async fn channel_media_mixed_version_models_preserve_old_fields_through_services
     let now = bson::DateTime::now();
 
     // A pre-media queue item survives the real append service alongside new media work.
+    let (producer, _) = Box::pin(team::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        &row.user_id,
+        team::CreateRequest {
+            name: "legacy-specialist".into(),
+            description: "Legacy media producer".into(),
+            display_name: None,
+            persona: None,
+            voice_instructions: None,
+            targets: Default::default(),
+            account_read: false,
+            machines: None,
+            logins: None,
+            specialty: None,
+            created_by: "user",
+        },
+    ))
+    .await
+    .unwrap()
+    .unwrap();
     let old_agent = doc! {
         "id":Uuid::new_v4().to_string(), "kind":"subagent_settled", "text":"legacy queued result",
-        "agent_id":"specialist", "question_key":"old-question", "bound":true,
+        "agent_id":&producer.id, "question_key":"old-question", "bound":true,
         "report_to":"manager", "source_event_ids":[], "reply_to":[], "created_at":now,
     };
     let old_agent_expected = pre_media_projection::<agent_event::Old>(&old_agent);

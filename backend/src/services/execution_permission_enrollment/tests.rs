@@ -323,7 +323,7 @@ async fn membership_join_role_revoke_reactivate_and_disabled_person_recompute_at
         &mut session,
         &f.person,
         false,
-        false,
+        None,
         None,
         Some(true),
     )
@@ -337,7 +337,7 @@ async fn membership_join_role_revoke_reactivate_and_disabled_person_recompute_at
         &mut session,
         &f.person,
         false,
-        false,
+        None,
         None,
         Some(true),
     )
@@ -807,7 +807,13 @@ async fn org_deletion_retains_person_repair_after_membership_cascade() {
         .unwrap();
     f.membership(OrgRole::Member).await;
     assert_eq!(f.marker(&f.person).await, Some(1));
-    org_service::delete_org_user(&f.db, &f.org).await.unwrap();
+    org_service::delete_org_user(
+        &f.db,
+        &f.org,
+        &crate::services::org_service::audit::fixture_actor(),
+    )
+    .await
+    .unwrap();
     // A durable actor receipt survives the membership cascade; deletion never
     // waits for 100 per-person hint reads inside its transaction.
     assert_eq!(f.marker(&f.person).await, Some(1));

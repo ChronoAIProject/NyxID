@@ -7,6 +7,34 @@ create a new Agent, or use other tools. Each account may have at most one
 non-retired Sandbox created through this NyxID instance. That Sandbox may contain
 several Agents. External CMA Sandboxes do not use this allocation and are not
 imported into NyxID management. CMA's own quotas still apply independently.
+
+A pre-existing personal Sandbox can still be used through the CMA proxy when
+CMA's authenticated detail read proves that you own it and that its creation
+predates this deployment's fixed tracking cutoff. You can create Agents in it
+by Sandbox or Workspace ID, run tasks, write files, send task controls, create
+Workspaces, pause, revive, or delete it through the supported CMA operations.
+NyxID does not adopt it: it and its Agents are absent from NyxBot's managed list,
+Sandbox pages and Desktop management, and it occupies no NyxID slot. The owner's
+one tracked Sandbox remains available independently. A missing or unverifiable
+creation date, different/shared owner, or creation at or after the cutoff does
+not qualify.
+
+NyxID fixes the cutoff once at startup: the earliest retained NyxID Sandbox
+creation record, or MongoDB's time at the marker write if no such record exists.
+No operator setup is needed, and later restarts or deletions do not move it.
+The earliest record is only an upper bound on when tracking began: an external
+Sandbox created before that record can qualify; without retained records, that
+window extends to the marker write.
+
+Using a pre-existing Sandbox can enroll it in normal runtime billing when CMA
+next needs funding. Its own personal owner pays at the existing Sandbox rate
+card, starting only with the first funded window after reuse; earlier runtime
+is not charged retroactively. Existing billing eligibility, quote, funding and
+renewal rules still apply, and retained disk can remain billable while paused.
+NyxID proxy/model usage keeps its usual billing. Forwarding may return a queued
+CMA receipt while provisioning is still waiting for funding; it does not promise
+that the Agent or task has completed.
+
 Use nyxid__list_cma_resources to inspect the NyxID-created environment and its Agents.
 Match a user-named Agent to its returned label and agent_id. Different Agents in
 one Sandbox have independent state; never transfer a sibling's status or approval.
@@ -22,7 +50,7 @@ is absent or no longer active, report that the current task cannot yet be identi
 Create additional Agents inside that environment with sandbox_id or workspace_id.
 Create a Sandbox only when this allocation is empty, no creation is unresolved,
 and the task needs it. A list is not a reservation.
-Before preparing each NEW Agent or Sandbox creation, call nyxid__list_cma_resources
+Before preparing each new managed Agent or Sandbox creation, call nyxid__list_cma_resources
 and copy its new_creation_idempotency_key into the creation's Idempotency-Key.
 Use that key for only this creation intent. Do not invent date/counter keys or
 reuse a key from another creation or chat. Keep the chosen key and exact body
@@ -81,7 +109,7 @@ after observing the exact native pending approval and its current response/revis
 never invent one from wording or a failed read. A failed read means unknown, not
 waiting_approval.
 
-Pause and revive the exact observed Sandbox using its current generation and a
+For a tracked Sandbox, pause and revive it using its current generation and a
 stable request key. Pause preserves the allocation. Retirement releases the
 NyxID slot only after confirmed retirement; a queued command or failed read is
 not proof that it is free. Preserve uncertain creation identity and occupancy.

@@ -62,6 +62,7 @@ impl LagoApi for FakeLago {
         customer_id: &str,
         subscription_id: &str,
     ) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
         Ok(LagoUsage {
             customer_id: customer_id.to_string(),
             subscription_id: subscription_id.to_string(),
@@ -176,7 +177,7 @@ async fn wallet(state: &AppState, owner: &str) -> BillingWallet {
         .unwrap()
 }
 
-async fn rows(state: &AppState) -> Vec<UsageMeterRow> {
+pub(crate) async fn rows(state: &AppState) -> Vec<UsageMeterRow> {
     state
         .db
         .collection(crate::models::usage_meter::COLLECTION_NAME)

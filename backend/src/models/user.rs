@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "users";
+pub const PROVIDER_DISPLAY_NAME: &str = "profile_config.provider_display_name";
 
 /// Distinguishes a real person account from an organization account.
 ///
@@ -77,6 +78,10 @@ impl PlatformRole {
 /// `User`; extend by adding new preference groups as fields here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserProfileConfig {
+    /// Last name supplied by social login. Only that exact default may be refreshed.
+    /// A local name save clears this field, including when confirming the same text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_display_name: Option<String>,
     #[serde(default)]
     pub security: SecurityPreferences,
     #[serde(default)]
@@ -89,6 +94,10 @@ pub struct UserProfileConfig {
     pub services_view: Option<ServiceViewPreferences>,
     #[serde(default)]
     pub service_views: Option<ServiceViewsPreferences>,
+    /// The Duo's quick-access rail; absent means the default list
+    /// (`QUICK_ACCESS_DEFAULT`), so people who never customise keep it.
+    #[serde(default)]
+    pub quick_access: Option<QuickAccessPreferences>,
 }
 
 /// Explicit account policy for human-approved QR/manual-code sign-ins.
@@ -120,6 +129,14 @@ impl Default for SecurityPreferences {
 /// choices and DNT may narrow this account permission but never enable it.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AnalyticsConsent {
+    /// Whether the account has completed the one-time analytics prompt.
+    ///
+    /// This is separate from `enabled`: a declined account has still answered
+    /// the prompt and should not be shown the same prompt again on this
+    /// account. Legacy rows are treated as answered when they contain any of
+    /// the older consent markers.
+    #[serde(default)]
+    pub prompt_seen: bool,
     /// Policy recorded by the latest explicit choice; unknown for older rows.
     #[serde(default)]
     pub policy_version: Option<String>,
@@ -205,6 +222,121 @@ pub struct SavedServiceView {
 pub struct ServiceViewsPreferences {
     pub views: Vec<SavedServiceView>,
     pub default_id: Option<String>,
+}
+
+/// A fixed destination the mobile side menu offers, pinnable to the Duo's
+/// quick-access rail. The list is closed: requests naming anything else are
+/// rejected. Stored entries this binary does not know (written by a newer
+/// one) are skipped on read rather than failing the whole user document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickAccessDestination {
+    NewChat,
+    Notifications,
+    ScanQr,
+    TerminalLoginCode,
+    RecentChats,
+    Automations,
+    Machines,
+    Plugins,
+    Activity,
+    CreateAgent,
+    Settings,
+    Agents,
+    Crews,
+}
+
+impl QuickAccessDestination {
+    pub const ALL: [Self; 13] = [
+        Self::NewChat,
+        Self::Notifications,
+        Self::ScanQr,
+        Self::TerminalLoginCode,
+        Self::RecentChats,
+        Self::Automations,
+        Self::Machines,
+        Self::Plugins,
+        Self::Activity,
+        Self::CreateAgent,
+        Self::Settings,
+        Self::Agents,
+        Self::Crews,
+    ];
+
+    /// The wire name (the serde name).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NewChat => "new_chat",
+            Self::Notifications => "notifications",
+            Self::ScanQr => "scan_qr",
+            Self::TerminalLoginCode => "terminal_login_code",
+            Self::RecentChats => "recent_chats",
+            Self::Automations => "automations",
+            Self::Machines => "machines",
+            Self::Plugins => "plugins",
+            Self::Activity => "activity",
+            Self::CreateAgent => "create_agent",
+            Self::Settings => "settings",
+            Self::Agents => "agents",
+            Self::Crews => "crews",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|item| item.as_str() == value)
+    }
+}
+
+/// What everyone sees until they customise (and after a reset): New chat,
+/// Notifications, Scan QR, Recent chats, Settings.
+pub const QUICK_ACCESS_DEFAULT: [QuickAccessDestination; 5] = [
+    QuickAccessDestination::NewChat,
+    QuickAccessDestination::Notifications,
+    QuickAccessDestination::ScanQr,
+    QuickAccessDestination::RecentChats,
+    QuickAccessDestination::Settings,
+];
+
+/// At most this many entries in the rail.
+pub const QUICK_ACCESS_MAX_ITEMS: usize = 12;
+
+/// One quick-access entry: a fixed destination, or a pinned agent or crew
+/// (its UUID; a deleted or inaccessible one is skipped by the client).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum QuickAccessItem {
+    Destination { id: QuickAccessDestination },
+    Agent { id: String },
+    Crew { id: String },
+}
+
+/// The person's ordered quick-access list (synced to the account).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuickAccessPreferences {
+    #[serde(default, deserialize_with = "deserialize_quick_access_items")]
+    pub items: Vec<QuickAccessItem>,
+}
+
+/// Skip stored entries this binary cannot read (a newer kind or destination)
+/// instead of failing the whole user document.
+fn deserialize_quick_access_items<'de, D>(deserializer: D) -> Result<Vec<QuickAccessItem>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Stored {
+        Known(QuickAccessItem),
+        Unknown(serde::de::IgnoredAny),
+    }
+    Ok(Option::<Vec<Stored>>::deserialize(deserializer)?
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|stored| match stored {
+            Stored::Known(item) => Some(item),
+            Stored::Unknown(_) => None,
+        })
+        .collect())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

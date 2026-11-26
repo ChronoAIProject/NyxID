@@ -1,3 +1,4 @@
+import { translationTestMocks } from "../i18n/translationTestHarness";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { URL, fileURLToPath } from "node:url";
@@ -13,6 +14,7 @@ function loadCard(
   name: "HistoryCard" | "ChallengeCard",
   openedUrls: string[] = [],
   getFrontendUrl = () => "https://app.example.test",
+  dimensions = { width: 390, height: 844, fontScale: 1 },
 ) {
   const filename = fileURLToPath(new URL(`./${name}.tsx`, import.meta.url));
   const output = ts.transpileModule(readFileSync(filename, "utf8"), {
@@ -24,18 +26,23 @@ function loadCard(
     },
   }).outputText;
   const mocks: Record<string, unknown> = {
+    ...translationTestMocks,
     react: { useMemo: (create: () => unknown) => create() },
     "react/jsx-runtime": {
       jsx: (type: string, props: unknown) => ({ type, props }),
       jsxs: (type: string, props: unknown) => ({ type, props }),
     },
     "./ServiceIcon": { ServiceIcon: "ServiceIcon" },
+    // Live text-size changes re-measure card text (DynamicTypeText).
+    "./DynamicTypeText": { DynamicTypeText: "Text" },
     "./GroupedCell": { GroupedCell: "GroupedCell" },
     "./settings/SettingsList": { SettingsRow: "SettingsRow" },
+    "./workspace/workspaceFloatingInset": { useFloatingTrailingInset: () => 0 },
     "../lib/env": { getFrontendUrl },
     "lucide-react-native": { ChevronRight: "ChevronRight" },
     "react-native": {
       Linking: { openURL: async (url: string) => { openedUrls.push(url); } },
+      useWindowDimensions: () => dimensions,
       Pressable: "Pressable",
       Text: "Text",
       View: "View",
@@ -336,4 +343,22 @@ test("pending rows place Approve and Deny in one borderless split row below the 
     ["Approve", "Deny"],
   );
   assert.ok(all.every((e) => e.type !== "StatusBadge"));
+});
+
+test("approval and activity cards retain base native paragraph identity", () => {
+  for (const name of ["HistoryCard", "ChallengeCard", "GrantCard"]) {
+    const source = readFileSync(new URL(`./${name}.tsx`, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /DynamicTypeText as Text/, name);
+    assert.match(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/, name);
+    assert.doesNotMatch(source, /[^a-zA-Z]height: \d/, `${name}: no fixed row height`);
+  }
+});
+
+test("large-text history keeps its outcome inside the wide body below the summary", () => {
+  const C = loadCard("HistoryCard", [], undefined, { width: 390, height: 844, fontScale: 2 });
+  const tree = C({ item: { ...request, status: "EXPIRED" } });
+  const body = elements(tree).find(n => n.type === "View" && n.props.style?.flex === 1)!;
+  assert.ok(textContent(body).includes("Expired"));
+  const title = elements(body).find(n => n.props.children === request.title)!;
+  assert.equal(title.props.numberOfLines, undefined);
 });

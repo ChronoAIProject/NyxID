@@ -100,7 +100,7 @@ impl fmt::Debug for RotationMaterial {
 }
 
 enum RotationTransactionOutcome {
-    Created(ApiKey, Vec<ApiKeyCredential>, bool),
+    Created(ApiKey, bool),
     AlreadyCommitted(ApiKey),
 }
 
@@ -199,7 +199,7 @@ fn is_scoped_key(allow_all_services: bool, allow_all_nodes: bool) -> bool {
     !allow_all_services || !allow_all_nodes
 }
 
-fn generate_scoped_api_key() -> (String, String, String) {
+pub(super) fn generate_scoped_api_key() -> (String, String, String) {
     use rand::RngCore;
     use sha2::{Digest, Sha256};
 
@@ -683,7 +683,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         scheduled_write_enabled,
     };
 
-    key_mutations::insert_one(db, &new_key, session).await?;
+    key_mutations::insert_one_for_actor(db, &new_key, scope_actor_user_id, session).await?;
 
     Ok(CreatedApiKey {
         id,
@@ -827,7 +827,29 @@ pub(crate) async fn delete_api_key_in_session(
     user_id: &str,
     key_id: &str,
     expected_state_version: Option<i64>,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Vec<crate::models::api_key_credential::ApiKeyCredential>> {
+    delete_api_key_prepared(db, user_id, key_id, expected_state_version, session, None).await
+}
+
+pub(crate) async fn delete_api_key_audited(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    intent: &crate::models::security_effect_intent::SecurityEffectIntent,
+) -> AppResult<()> {
+    delete_api_key_prepared(db, user_id, key_id, None, None, Some(intent))
+        .await
+        .map(|_| ())
+}
+
+async fn delete_api_key_prepared(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    expected_state_version: Option<i64>,
     mut session: Option<&mut mongodb::ClientSession>,
+    intent: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
 ) -> AppResult<Vec<crate::models::api_key_credential::ApiKeyCredential>> {
     let collection = db.collection::<ApiKey>(API_KEYS);
     let read = collection
@@ -848,16 +870,42 @@ pub(crate) async fn delete_api_key_in_session(
         filter.insert("state_version", expected);
     }
 
-    let result = key_mutations::update_one(
-        db,
-        filter,
-        doc! { "$set": { "is_active": false } },
-        session.as_deref_mut(),
-    )
-    .await?;
-    if result.matched_count != 1 {
-        return Err(unmatched_api_key_write(db, user_id, key_id, expected_state_version).await?);
-    }
+    let children = if let Some(session) = session.as_deref_mut() {
+        deactivate_with_children(
+            db,
+            user_id,
+            key_id,
+            expected_state_version,
+            &filter,
+            intent,
+            session,
+        )
+        .await?
+    } else {
+        let mut transaction = db.client().start_session().await?;
+        let db = db.clone();
+        let user_id = user_id.to_owned();
+        let key_id = key_id.to_owned();
+        let intent = intent.cloned();
+        transaction
+            .start_transaction()
+            .and_run2(async move |tx| {
+                key_mutations::transaction_result(
+                    deactivate_with_children(
+                        &db,
+                        &user_id,
+                        &key_id,
+                        expected_state_version,
+                        &filter,
+                        intent.as_ref(),
+                        tx,
+                    )
+                    .await,
+                )
+            })
+            .await
+            .map_err(key_mutations::map_transaction_error)?
+    };
 
     super::assistant_agent_credential_service::invalidate_for_key(
         db,
@@ -868,28 +916,76 @@ pub(crate) async fn delete_api_key_in_session(
     .await?;
     let bindings = db.collection::<AgentServiceBinding>(AGENT_BINDINGS);
     let cleanup = bindings.delete_many(doc! {"api_key_id": key_id, "user_id": user_id});
-    match session.as_deref_mut() {
+    match session {
         Some(session) => cleanup.session(session).await?,
         None => cleanup.await?,
     };
-    let children = api_key_credential_service::revoke_children(
-        db,
-        key_id,
-        CredentialRevokedReason::ParentRevoked,
-        session.as_deref_mut(),
-    )
-    .await?;
-    if session.is_none() {
-        api_key_credential_service::audit_revocations(
-            db,
-            &children,
-            CredentialRevokedReason::ParentRevoked,
-        );
-    }
-
     tracing::info!(key_id = %key_id, user_id = %user_id, "API key deactivated");
 
     Ok(children)
+}
+
+async fn deactivate_with_children(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    expected_state_version: Option<i64>,
+    filter: &bson::Document,
+    intent: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<Vec<ApiKeyCredential>> {
+    deactivate_api_key(
+        db,
+        user_id,
+        key_id,
+        expected_state_version,
+        filter,
+        Some(&mut *session),
+        intent,
+    )
+    .await?;
+    api_key_credential_service::revoke_children_audited(
+        db,
+        key_id,
+        CredentialRevokedReason::ParentRevoked,
+        Some(session),
+    )
+    .await
+}
+
+async fn deactivate_api_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    expected_state_version: Option<i64>,
+    filter: &bson::Document,
+    mut session: Option<&mut mongodb::ClientSession>,
+    intent: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
+) -> AppResult<()> {
+    if intent.is_some() && session.is_none() {
+        return Err(AppError::Internal(
+            "Required key audit needs the source transaction".into(),
+        ));
+    }
+    let result = key_mutations::update_one(
+        db,
+        filter.clone(),
+        doc! {"$set":{"is_active":false}},
+        session.as_deref_mut(),
+    )
+    .await?;
+    if result.matched_count != 1 {
+        return Err(unmatched_api_key_write(db, user_id, key_id, expected_state_version).await?);
+    }
+    if let (Some(intent), Some(session)) = (intent, session) {
+        super::security_effect_service::enqueue_in_session(
+            db,
+            session,
+            std::slice::from_ref(intent),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn stale_api_key_conflict() -> AppError {
@@ -1020,7 +1116,6 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
         ));
     }
 
-    let audit_db = db.clone();
     let encryption_keys = encryption_keys.clone();
     let db = db.clone();
     let user_id = user_id.to_string();
@@ -1229,7 +1324,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         "rotation predecessor changed concurrently".to_string(),
                     ));
                 }
-                key_mutations::insert_one(&db, &successor, Some(&mut *session)).await?;
+                key_mutations::insert_one_for_actor(&db, &successor, actor_id.as_deref(), Some(&mut *session)).await?;
                 let assistant_managed =
                     super::assistant_agent_credential_service::adopt_rotated_key(
                         &db,
@@ -1295,6 +1390,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                             grants,
                             scopes,
                             owner,
+                            _,
                         ) | super::assistant_agent_credential_service::KeyAuthority::Shared(grants, scopes, owner)
                         | super::assistant_agent_credential_service::KeyAuthority::OrgChannelGuest(grants, scopes, owner) => {
                             successor.assistant_agent_owner_id = Some(owner.clone());
@@ -1326,10 +1422,10 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                                 .as_ref()
                                 .and(conversation.group_id.clone())
                         });
-                    if successor.assistant_group_id.is_some()
+                    if super::org_agent_service::ordinary_member_org(&conversation).is_some() || successor.assistant_group_id.is_some()
                         || super::org_channel_service::origin(&conversation).is_some()
                     {
-                        // Group, collaboration and org-channel authentication bind
+                        // Organization specialist and group authentication bind
                         // the key to its thread. Move that binding with the encrypted successor,
                         // rather than waiting for the next turn to refresh it.
                         db.collection::<bson::Document>(
@@ -1366,7 +1462,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     .await?;
                     successor.state_version += 1;
                 }
-                let children = api_key_credential_service::revoke_children(
+                api_key_credential_service::revoke_children_audited(
                     &db,
                     &old_key.id,
                     CredentialRevokedReason::ParentRotated,
@@ -1396,7 +1492,6 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
 
                 Ok(RotationTransactionOutcome::Created(
                     successor,
-                    children,
                     assistant_managed,
                 ))
             }
@@ -1410,12 +1505,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
         RotationTransactionOutcome::AlreadyCommitted(key) => {
             Ok(ApiKeyRotationOutcome::AlreadyCommitted(key))
         }
-        RotationTransactionOutcome::Created(key, children, assistant_managed) => {
-            api_key_credential_service::audit_revocations(
-                &audit_db,
-                &children,
-                CredentialRevokedReason::ParentRotated,
-            );
+        RotationTransactionOutcome::Created(key, assistant_managed) => {
             // Assistant secrets stay private even when rotated through a user route.
             let full_key = if assistant_managed {
                 String::new()
@@ -1726,6 +1816,33 @@ pub async fn validate_api_key(
     db: &mongodb::Database,
     raw_key: &str,
 ) -> AppResult<(String, ApiKey, Option<String>)> {
+    let (user_id, key, credential_id) = observe_api_key(db, raw_key).await?;
+    // Update last_used_at
+    let now = Utc::now();
+    key_mutations::update_one(
+        db,
+        doc! { "_id": &key.id },
+        doc! { "$set": { "last_used_at": bson::DateTime::from_chrono(now) } },
+        None,
+    )
+    .await?;
+
+    if let Some(id) = credential_id.as_deref() {
+        db.collection::<ApiKeyCredential>(API_KEY_CREDENTIALS)
+            .update_one(
+                doc! {"_id": id},
+                doc! {"$set": {"last_used_at": bson::DateTime::from_chrono(now)}},
+            )
+            .await?;
+    }
+    Ok((user_id, key, credential_id))
+}
+
+/// Identical credential validation without recording a use or mutating authority.
+pub(crate) async fn observe_api_key(
+    db: &mongodb::Database,
+    raw_key: &str,
+) -> AppResult<(String, ApiKey, Option<String>)> {
     let key_hash = hash_token(raw_key);
 
     let primary = db
@@ -1769,26 +1886,7 @@ pub async fn validate_api_key(
         return Err(AppError::Unauthorized("API key has expired".to_string()));
     }
 
-    // Update last_used_at
-    let user_id = key.user_id.clone();
-    let now = Utc::now();
-    key_mutations::update_one(
-        db,
-        doc! { "_id": &key.id },
-        doc! { "$set": { "last_used_at": bson::DateTime::from_chrono(now) } },
-        None,
-    )
-    .await?;
-
-    if let Some(id) = credential_id.as_deref() {
-        db.collection::<ApiKeyCredential>(API_KEY_CREDENTIALS)
-            .update_one(
-                doc! {"_id": id},
-                doc! {"$set": {"last_used_at": bson::DateTime::from_chrono(now)}},
-            )
-            .await?;
-    }
-    Ok((user_id, key, credential_id))
+    Ok((key.user_id.clone(), key, credential_id))
 }
 
 #[cfg(test)]

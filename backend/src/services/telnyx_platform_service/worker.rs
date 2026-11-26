@@ -63,7 +63,12 @@ async fn run_inner(exchange: Exchange) -> Result<ManagedResponse, ManagedExecuti
         }
     };
     let result = tokio::time::timeout(std::time::Duration::from_secs(120), async {
-        tokio::select! { value = bounded => value, value = authority => value }
+        let shutdown = crate::services::shutdown::process();
+        tokio::select! {
+            () = shutdown.stopped() => Err(AppError::ClientDisconnected),
+            value = bounded => value,
+            value = authority => value,
+        }
     })
     .await;
     // The proof lives outside both cancellation boundaries. Neither a timeout
@@ -124,11 +129,10 @@ impl Exchange {
         if let Some(pause) = self.hooks.as_ref().and_then(|h| h.admitted.as_ref()) {
             pause.wait().await;
         }
-        let client = proxy_service::no_redirect_http_client();
-        #[cfg(test)]
-        let client = self.hooks.as_ref().map(|h| &h.client).unwrap_or(client);
-        let response = proxy_service::forward_request_with_egress_guard(
-            client,
+        let tokens = crate::services::provider_token_exchange_service::TokenExchangeCache::new();
+        let responses = crate::services::cloud_response_cache::CloudResponseCache::new(0);
+        let forward = proxy_service::forward_request_with_egress_guard(
+            proxy_service::Redirects::Return,
             &self.target,
             reqwest::Method::POST,
             CHAT_PATH,
@@ -141,13 +145,22 @@ impl Exchange {
             Vec::new(),
             Vec::new(),
             None,
-            &crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
-            &crate::services::cloud_response_cache::CloudResponseCache::new(0),
+            &tokens,
+            &responses,
             Vec::new(),
             crate::services::billing::route_inventory::managed_execution_permit(self.proof),
             Some(&guard),
-        )
-        .await;
+        );
+        #[cfg(test)]
+        let response = if let Some(hooks) = &self.hooks {
+            crate::services::channel_media_service::TEST_PINNED_TRANSPORT
+                .scope(hooks.transport.clone(), forward)
+                .await
+        } else {
+            forward.await
+        };
+        #[cfg(not(test))]
+        let response = forward.await;
         let mut response = match response {
             Ok(response) => response,
             Err(ForwardRequestError::PreDispatchRejected(error)) => {
@@ -208,7 +221,7 @@ impl Pause {
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) struct TestHooks {
-    pub client: reqwest::Client,
+    pub transport: crate::services::channel_media_service::TestPinnedTransport,
     pub funded: Option<Pause>,
     pub admitted: Option<Pause>,
     pub completed: Option<Arc<tokio::sync::Notify>>,

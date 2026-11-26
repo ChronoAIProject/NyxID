@@ -76,6 +76,7 @@ impl Fixture {
 
     fn connection_target(service: DownstreamService) -> ProxyTarget {
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some("cma".into()),
             execution_request: None,
             execution_permission: None,
@@ -87,7 +88,7 @@ impl Fixture {
             auth_key_name: String::new(),
             credential: Default::default(),
             service,
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,

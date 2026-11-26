@@ -1,3 +1,4 @@
+import androidCases from "../assistant/voice/dictation-android-cases.json";
 import { composerVoiceMinHeight } from "../assistant/composerGeometry";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -10,7 +11,10 @@ function nodes(node: any): E[] {
   if (typeof node.type === "function") return nodes(node.type(node.props));
   return [node, ...[node.props.children].flat(Infinity).flatMap(nodes)];
 }
-function setup(withNativeRecognition = false) {
+function setup(
+  withNativeRecognition = false,
+  android?: (typeof androidCases)[number],
+) {
   let sheetOpen = false;
   let appState = "active";
   let time = 10000;
@@ -23,6 +27,7 @@ function setup(withNativeRecognition = false) {
   const events: any[] = [];
   const listeners = new Set<(state: string) => void>();
   const speech: any[] = [];
+  const nativeStarts: any[] = [];
   const dictation: any = {
     active: false,
     recording: false,
@@ -60,7 +65,8 @@ function setup(withNativeRecognition = false) {
         jsxs: (type: unknown, props: unknown) => ({ type, props }),
       },
       "react-native": {
-        Platform: { OS: "ios" },
+        Settings: { get: () => ["en-US"] },
+        Platform: { OS: android ? "android" : "ios" },
         ...Object.fromEntries(
           ["Pressable", "ScrollView", "TextInput", "Text", "View"].map((n) => [
             n,
@@ -151,12 +157,19 @@ function setup(withNativeRecognition = false) {
       listener(value);
   };
   if (withNativeRecognition) {
+    h.mock("../../i18n/deviceLanguages", {
+      deviceLanguages: () => android?.preferred ?? ["en-US"],
+    });
     h.mock("expo-speech-recognition", {
       ExpoSpeechRecognitionModule: {
         setAudioSessionActiveIOS: () => events.push("audio-release"),
         getPermissionsAsync: async () => ({ granted: true }),
         requestPermissionsAsync: async () => ({ granted: true }),
-        getSupportedLocales: async () => ({ locales: ["en-US"] }),
+        isRecognitionAvailable: () => true,
+        getSupportedLocales: async () => {
+          if (android?.reject) throw new Error("Unavailable");
+          return { locales: android?.locales ?? ["en-US"] };
+        },
         supportsOnDeviceRecognition: () => true,
         addListener: (event: string, listener: (value?: unknown) => void) => {
           const listeners = nativeListeners.get(event) ?? new Set();
@@ -164,7 +177,8 @@ function setup(withNativeRecognition = false) {
           nativeListeners.set(event, listeners);
           return { remove: () => listeners.delete(listener) };
         },
-        start: () => {
+        start: (options: unknown) => {
+          nativeStarts.push(options);
           events.push("native-start");
           emitNative("start");
         },
@@ -173,7 +187,8 @@ function setup(withNativeRecognition = false) {
       },
     });
     h.mock("./voice/dictationLanguage", {
-      savedDictationLanguage: async () => "en-US",
+      savedDictationLanguage: async () => (android ? android.saved : "en-US"),
+      languageLabel: (value: string) => value,
     });
     h.mock("./voice/dictationLocale", { dictationLocale: () => "en-US" });
     h.mock("./voice/voicePermission", {
@@ -219,6 +234,7 @@ function setup(withNativeRecognition = false) {
     props,
     events,
     speech,
+    nativeStarts,
     dictation,
     send,
     emitNative,
@@ -761,3 +777,13 @@ test("real crew recognition promotes live user words and removes them from both 
   );
   f.h.unmount();
 });
+
+for (const scenario of androidCases) {
+  test(`Android CrewVoiceComposer: ${scenario.name}`, async () => {
+    const x = setup(true, scenario);
+    await x.h.settle();
+    assert.equal(x.nativeStarts.length, scenario.hardError ? 0 : 1);
+    assert.equal(x.nativeStarts[0]?.lang, scenario.expected);
+    x.h.unmount();
+  });
+}

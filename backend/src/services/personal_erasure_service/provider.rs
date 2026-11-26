@@ -658,10 +658,10 @@ async fn decrypt_capability(
             )
             .await
         }
-        Some(bson::Bson::Int32(2)) if keys.allow_legacy_record_reads() => keys
-            .decrypt_with_aad(bytes, &capability_aad(id, owner))
-            .await
-            .map(Zeroizing::new),
+        Some(bson::Bson::Int32(2)) if keys.allow_legacy_record_reads() => {
+            keys.decrypt_with_aad(bytes, &capability_aad(id, owner))
+                .await
+        }
         _ => Err(AppError::Internal(
             "Unsupported preserved capability format".into(),
         )),
@@ -964,7 +964,7 @@ pub(crate) async fn schedule_disconnect(
         finish_effect(&durable, &effect, false, Some(reason)).await?;
         return Ok(false);
     }
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let _permit = permit;
         let _ = deliver_material(&durable, &effect, material).await;
     });

@@ -10,7 +10,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(dist, "release-integrity/r
 
 test("production response/header matrix and backend .js routing", async ({ request }) => {
   const asset = fs.readdirSync(path.join(dist, "assets")).find((name) => name.endsWith(".js"))!;
-  for (const [url, status] of [["/", 200], ["/login", 200], ["/docs", 200], ["/privacy", 200], ["/terms", 200],
+  for (const [url, status] of [["/", 200], ["/login", 200], ["/docs", 200], ["/privacy", 200], ["/terms", 200], ["/data-deletion", 200],
     ["/assistant", 200], ["/assistant/machines", 200], ["/assistant/automations", 200],
     ["/login/device", 200], ["/login/agent-key", 200], ["/login/code", 200], ["/settings", 200],
     ["/admin/usage", 200], ["/nyxbot-inter-latin.woff2", 200], ["/nyxbot-inter-LICENSE.txt", 200],
@@ -36,7 +36,7 @@ test("production response/header matrix and backend .js routing", async ({ reque
       expect(headers["referrer-policy"]).toBe("no-referrer");
     }
   }
-  for (const url of ["/privacy", "/terms"]) {
+  for (const url of ["/privacy", "/terms", "/data-deletion"]) {
     const initial = await request.get(url);
     const etag = initial.headers().etag;
     expect(etag).toBeDefined();
@@ -150,7 +150,7 @@ test("standalone credential page keeps its policy and packaged SRI assets", asyn
 
 test("legal pages execute the external theme asset under the same CSP", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("nyxid.theme", JSON.stringify({ state: { mode: "light" } })));
-  for (const url of ["/privacy", "/terms"]) {
+  for (const url of ["/privacy", "/terms", "/data-deletion"]) {
     await page.goto(url);
     await expect(page.locator("html")).toHaveClass(/theme-light/);
     expect(await page.locator("script:not([src])").count()).toBe(0);

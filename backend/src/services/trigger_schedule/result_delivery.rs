@@ -32,21 +32,26 @@ pub async fn versioned(db: &Database, run: &TriggerRun) -> AppResult<bool> {
 }
 
 pub async fn claim(db: &Database, run: &TriggerRun) -> AppResult<Claim> {
-    let now = Utc::now();
     let attempt = Uuid::new_v4().to_string();
     let document = db.collection::<Document>(RUNS).find_one_and_update(
         doc! {"_id":&run.id,"user_id":&run.user_id,"turn_id":&run.turn_id,"outcome":"started",
             "$or":[
                 {"result_claimed":{"$ne":true}},
-                {"result_delivery.version":1,"result_delivery.lease_until":{"$lte":date(now)},
-                 "result_delivery.retry_at":{"$lte":date(now)},"result_delivery.expires_at":{"$gt":date(now)},
-                 "result_delivery.attempts":{"$lt":MAX_ATTEMPTS}}
+                {"result_delivery.version":1,"result_delivery.attempts":{"$lt":MAX_ATTEMPTS},
+                 "$expr":{"$and":[
+                    {"$eq":[{"$type":"$result_delivery.lease_until"},"date"]},
+                    {"$eq":[{"$type":"$result_delivery.retry_at"},"date"]},
+                    {"$eq":[{"$type":"$result_delivery.expires_at"},"date"]},
+                    {"$lte":["$result_delivery.lease_until","$$NOW"]},
+                    {"$lte":["$result_delivery.retry_at","$$NOW"]},
+                    {"$gt":["$result_delivery.expires_at","$$NOW"]}
+                 ]}}
             ]},
         vec![doc! {"$set":{
             "result_claimed":true,"result_delivery.version":1,"result_delivery.claim_id":&attempt,
-            "result_delivery.lease_until":date(now+Duration::seconds(LEASE_SECONDS)),
-            "result_delivery.retry_at":date(now),
-            "result_delivery.expires_at":{"$ifNull":["$result_delivery.expires_at",date(now+Duration::minutes(30))]},
+            "result_delivery.lease_until":{"$add":["$$NOW",LEASE_SECONDS*1000]},
+            "result_delivery.retry_at":"$$NOW",
+            "result_delivery.expires_at":{"$ifNull":["$result_delivery.expires_at",{"$add":["$$NOW",30*60*1000]}]},
             "result_delivery.attempts":{"$add":[{"$ifNull":["$result_delivery.attempts",0]},1]}
         }}],
     ).return_document(ReturnDocument::After).await?;
@@ -75,6 +80,15 @@ pub async fn claim(db: &Database, run: &TriggerRun) -> AppResult<Claim> {
         .find_one(doc! {
             "_id":&run.id,"user_id":&run.user_id,"turn_id":&run.turn_id,"outcome":"started"
         })
+        .projection(
+            doc! {"result_delivery":1,"result_claimed":1,"expired":{"$and":[
+                {"$eq":[{"$type":"$result_delivery.lease_until"},"date"]},
+                {"$eq":[{"$type":"$result_delivery.expires_at"},"date"]},
+                {"$lte":["$result_delivery.lease_until","$$NOW"]},
+                {"$or":[{"$lte":["$result_delivery.expires_at","$$NOW"]},
+                    {"$gte":["$result_delivery.attempts",MAX_ATTEMPTS]}]}
+            ]}},
+        )
         .await?
     else {
         return Ok(Claim::Busy);
@@ -89,14 +103,7 @@ pub async fn claim(db: &Database, run: &TriggerRun) -> AppResult<Claim> {
     if delivery.get_i32("version") != Ok(1) {
         return Ok(Claim::Legacy);
     }
-    if delivery
-        .get_datetime("lease_until")
-        .is_ok_and(|at| at.to_chrono() <= now)
-        && (delivery
-            .get_datetime("expires_at")
-            .is_ok_and(|at| at.to_chrono() <= now)
-            || (delivery.get_i32("attempts").unwrap_or(MAX_ATTEMPTS) >= MAX_ATTEMPTS))
-    {
+    if document.get_bool("expired").unwrap_or(false) {
         return Ok(Claim::Expired);
     }
     Ok(Claim::Busy)
@@ -107,15 +114,18 @@ pub async fn finish_unrecoverable(
     run: &TriggerRun,
     frontend: &str,
 ) -> AppResult<()> {
-    let now = date(Utc::now());
     let filter = doc! {
         "_id":&run.id,"user_id":&run.user_id,"turn_id":&run.turn_id,"outcome":"started",
         "result_claimed":true,
         "$or":[
             {"result_delivery":{"$exists":false}},
-            {"result_delivery.version":1,"result_delivery.lease_until":{"$lte":now},
-                "$or":[{"result_delivery.expires_at":{"$lte":now}},
-                    {"result_delivery.attempts":{"$gte":MAX_ATTEMPTS}}]}
+            {"result_delivery.version":1,"$expr":{"$and":[
+                {"$eq":[{"$type":"$result_delivery.lease_until"},"date"]},
+                {"$eq":[{"$type":"$result_delivery.expires_at"},"date"]},
+                {"$lte":["$result_delivery.lease_until","$$NOW"]},
+                {"$or":[{"$lte":["$result_delivery.expires_at","$$NOW"]},
+                    {"$gte":["$result_delivery.attempts",MAX_ATTEMPTS]}]}
+            ]}}
         ]
     };
     let mut session = db.client().start_session().await?;
@@ -146,7 +156,7 @@ pub async fn finish_unrecoverable(
                         } else {
                             RunOutcome::Failed
                         },
-                        if accepted {
+                        FinishReason::Scheduler(if accepted {
                             None
                         } else {
                             Some(
@@ -154,7 +164,7 @@ pub async fn finish_unrecoverable(
                                     .and_then(|s| s.reason.as_deref())
                                     .unwrap_or("result_delivery_interrupted"),
                             )
-                        },
+                        }),
                         frontend,
                         session,
                     )
@@ -173,19 +183,20 @@ pub async fn finish_unrecoverable(
 }
 
 pub async fn defer(db: &Database, claim: &DeliveryClaim, retry_after: u64) -> AppResult<()> {
-    let at =
-        (Utc::now() + Duration::seconds(retry_after.clamp(1, 86400) as i64)).min(claim.expires_at);
+    let delay = retry_after.clamp(1, 86400) as i64 * 1000;
     let mut session = db.client().start_session().await?;
-    session.start_transaction().and_run((db,claim,at), |session,(db,claim,at)| Box::pin(async move {
+    session.start_transaction().and_run((db,claim,delay), |session,(db,claim,delay)| Box::pin(async move {
         let result:AppResult<()> = async {
-            let changed = db.collection::<Document>(RUNS).update_one(
+            let Some(saved) = db.collection::<Document>(RUNS).find_one_and_update(
                 claim_filter(claim),
-                doc! {"$set":{"result_delivery.retry_at":date(*at),"result_delivery.lease_until":date(Utc::now())}},
-            ).session(&mut *session).await?;
-            if changed.matched_count == 0 {return Ok(());}
+                vec![doc! {"$set":{"result_delivery.retry_at":{"$min":[{"$add":["$$NOW",*delay]},"$result_delivery.expires_at"]},
+                    "result_delivery.lease_until":"$$NOW"}}],
+            ).return_document(ReturnDocument::After).session(&mut *session).await? else {return Ok(());};
+            let at=saved.get_document("result_delivery").and_then(|d|d.get_datetime("retry_at"))
+                .map_err(|_|AppError::Internal("Result retry deadline is unavailable".into()))?;
             db.collection::<Document>(WORK).update_one(
                 doc! {"_id":&claim.run.id},
-                doc! {"$set":{"kind":"run","trigger_id":&claim.run.trigger_id,"at":date(*at),"fence":Uuid::new_v4().to_string()}},
+                doc! {"$set":{"kind":"run","trigger_id":&claim.run.trigger_id,"at":*at,"fence":Uuid::new_v4().to_string()}},
             ).upsert(true).session(session).await?;
             Ok(())
         }.await;
@@ -196,14 +207,14 @@ pub async fn defer(db: &Database, claim: &DeliveryClaim, retry_after: u64) -> Ap
 pub(super) fn claim_filter(claim: &DeliveryClaim) -> Document {
     doc! {"_id":&claim.run.id,"user_id":&claim.run.user_id,"turn_id":&claim.run.turn_id,"outcome":"started",
     "result_delivery.version":1,"result_delivery.claim_id":&claim.attempt,
-    "result_delivery.lease_until":{"$gt":date(Utc::now())}}
+    "$expr":{"$gt":["$result_delivery.lease_until","$$NOW"]}}
 }
 
 pub async fn finish(
     db: &Database,
     claim: &DeliveryClaim,
     outcome: RunOutcome,
-    reason: Option<&str>,
+    reason: FinishReason<'_>,
     frontend: &str,
 ) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
@@ -233,4 +244,101 @@ pub async fn finish(
         super::finish_record(db, &run).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    async fn fixture() -> (Database, TriggerRun) {
+        let db =
+            crate::test_utils::connect_transaction_test_database("result_preparation_lease").await;
+        let run:TriggerRun=bson::from_document(doc! {
+            "_id":"run","trigger_id":"trigger","user_id":"owner","scheduled_at":bson::DateTime::now(),
+            "deadline":bson::DateTime::from_chrono(Utc::now()+Duration::hours(1)),"outcome":"started",
+            "thread_id":"thread","turn_id":"turn","deliver_to":{"type":"chat","chat_id":"chat"},
+            "fence":"old","lease_until":bson::DateTime::now(),"expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::days(7)),
+        }).unwrap();
+        db.collection::<TriggerRun>(RUNS)
+            .insert_one(&run)
+            .await
+            .unwrap();
+        (db, run)
+    }
+    async fn now(db: &Database) -> i64 {
+        db.run_command(doc! {"hello":1})
+            .await
+            .unwrap()
+            .get_datetime("localTime")
+            .unwrap()
+            .timestamp_millis()
+    }
+    #[tokio::test]
+    async fn scheduled_text_preparation_result_claim_and_retry_use_database_time() {
+        let (db, run) = fixture().await;
+        let before = now(&db).await;
+        let Claim::Acquired(claim) = claim(&db, &run).await.unwrap() else {
+            panic!("new claim")
+        };
+        let after = now(&db).await;
+        assert!(
+            (before + LEASE_SECONDS * 1000..=after + LEASE_SECONDS * 1000)
+                .contains(&claim.lease_until.timestamp_millis())
+        );
+        assert!(
+            (before + 30 * 60 * 1000..=after + 30 * 60 * 1000)
+                .contains(&claim.expires_at.timestamp_millis())
+        );
+        let before = now(&db).await;
+        defer(&db, &claim, 5).await.unwrap();
+        let after = now(&db).await;
+        let saved = db
+            .collection::<Document>(RUNS)
+            .find_one(doc! {"_id":&run.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let retry = saved
+            .get_document("result_delivery")
+            .unwrap()
+            .get_datetime("retry_at")
+            .unwrap();
+        assert!((before + 5000..=after + 5000).contains(&retry.timestamp_millis()));
+        let work = db
+            .collection::<Document>(WORK)
+            .find_one(doc! {"_id":&run.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(work.get_datetime("at").unwrap(), retry);
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn scheduled_text_preparation_invalid_lease_is_not_reclaimed_or_expired() {
+        let (db, run) = fixture().await;
+        let Claim::Acquired(_) = claim(&db, &run).await.unwrap() else {
+            panic!("new claim")
+        };
+        for value in [
+            bson::Bson::Null,
+            bson::Bson::Int64(0),
+            bson::Bson::String("old".into()),
+        ] {
+            db.collection::<Document>(RUNS).update_one(doc! {"_id":&run.id},doc! {"$set":{
+                "result_delivery.lease_until":value,"result_delivery.retry_at":bson::DateTime::from_millis(0),
+                "result_delivery.expires_at":bson::DateTime::from_millis(0),
+            }}).await.unwrap();
+            assert!(matches!(claim(&db, &run).await.unwrap(), Claim::Busy));
+            finish_unrecoverable(&db, &run, "https://app.nyxid.test")
+                .await
+                .unwrap();
+            let saved = db
+                .collection::<Document>(RUNS)
+                .find_one(doc! {"_id":&run.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.get_str("outcome").unwrap(), "started");
+        }
+        db.drop().await.unwrap();
+    }
 }

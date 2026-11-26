@@ -8,9 +8,17 @@ use futures::TryStreamExt;
 
 const PAGE: i64 = 32;
 
-fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
+/// Bump only when the local inventory gains coverage. `INVENTORY_VERSION` is
+/// the durable domain shape and intentionally remains unchanged for old jobs.
+pub(crate) const LOCAL_INVENTORY_REVISION: u32 = 5;
+
+pub(crate) fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
     use crate::models as m;
     let mut rows: Vec<(&'static str, Document)> = vec![
+        (
+            m::client_error_report::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (
             m::assistant_cma_sandbox::COLLECTION_NAME,
             doc! {"user_id":owner},
@@ -127,6 +135,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"approved_user_id":owner},
         ),
         (
+            m::oracle_session::COLLECTION_NAME,
+            doc! {"owner_user_id":owner},
+        ),
+        (
             m::device_code::COLLECTION_NAME,
             doc! {"approved_by_user_id":owner,"approved_org_id":bson::Bson::Null},
         ),
@@ -151,6 +163,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
             doc! {"user_id":owner,"$or":[{"event_kind":{"$ne":"sms_send"}},{"billing_finalized":true}]},
         ),
         (m::channel_adapter::CLAIMS, doc! {"user_id":owner}),
+        (
+            m::channel_meta::SESSIONS,
+            doc! {"$or":[{"owner_id":owner},{"actor_id":owner}]},
+        ),
         (m::channel_email::SUBSCRIPTIONS, doc! {"user_id":owner}),
         (m::channel_email::SENDS, doc! {"user_id":owner}),
         (m::channel_email::BATCHES, doc! {"user_id":owner}),
@@ -191,6 +207,10 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         ),
         (m::session::COLLECTION_NAME, doc! {"user_id":owner}),
         (m::session::MFA_CHALLENGES, doc! {"user_id":owner}),
+        (
+            m::mobile_social::MobileSocialDelivery::COLLECTION_NAME,
+            doc! {"user_id":owner},
+        ),
         (m::refresh_token::COLLECTION_NAME, doc! {"user_id":owner}),
         (m::api_key::COLLECTION_NAME, doc! {"user_id":owner}),
         (
@@ -432,10 +452,397 @@ fn inventory(owner: &str) -> Vec<(&'static str, Document)> {
         m::assistant_agent_learning::MEMBERS_COLLECTION_NAME,
         doc! {"member_user_id":owner},
     ));
+    // Collections added after the original inventory. Keep these selectors
+    // explicit so a mixed-fleet rollout cannot silently leave personal rows.
+    rows.extend([
+        ("assistant_action_receipts", doc! {"user_id": owner}),
+        ("assistant_voice_windows", doc! {"user_id": owner}),
+        ("assistant_wire_logs", doc! {"user_id": owner}),
+        ("openclaw_channel_mappings", doc! {"nyxid_user_id": owner}),
+        ("telegram_bot_requests", doc! {"owner_user_id": owner, "active": false, "status": {"$in": ["connected", "cancelled", "expired", "suspended"]}}),
+        (
+            "telegram_bot_claims",
+            doc! {"owner_user_id": owner, "status":"redeemed", "delivered": true},
+        ),
+        (
+            "feature_flag_overrides",
+            doc! {"target_kind": "user", "target_key": owner},
+        ),
+        ("invocation_diagnostics", doc! {"actor_user_id": owner}),
+        (
+            "platform_personal_setup_selections",
+            doc! {"user_id": owner},
+        ),
+        (
+            "platform_onboarding_binding_requests",
+            doc! {"approved_user_id": owner},
+        ),
+        ("platform_onboarding_bindings", doc! {"user_id": owner}),
+        (
+            "platform_personal_decision_spacing",
+            doc! {"_id": owner},
+        ),
+        ("assistant_group_agent_access", doc! {"owner_id": owner}),
+    ]);
+    rows.extend([
+        ("platform_personal_bindings", doc! {"user_id": owner, "state": "revoked"}),
+        ("platform_personal_link_challenges", doc! {"reviewed_user_id": owner, "state": {"$nin": ["review", "awaiting_chat_confirmation"]}}),
+        ("platform_personal_link_intents", doc! {"claimant_user_id": owner, "state": {"$ne": "pending"}}),
+    ]);
+    rows.push((
+        "platform_public_probe_consents",
+        doc! {"actor_user_id": owner},
+    ));
     rows
 }
 
-async fn erase_page(
+/// Return the owner field paths used by the inventory filters. This is kept
+/// next to the filters so registry drift cannot silently change the orphan
+/// sweep or export owner selector.
+#[cfg(test)]
+pub(crate) fn inventory_owner_fields(
+    owner: &str,
+) -> std::collections::BTreeMap<&'static str, std::collections::BTreeSet<String>> {
+    fn collect(
+        value: &bson::Bson,
+        path: Option<&str>,
+        owner: &str,
+        output: &mut std::collections::BTreeSet<String>,
+    ) {
+        match value {
+            bson::Bson::String(value) if value == owner => {
+                if let Some(path) = path {
+                    output.insert(path.to_owned());
+                }
+            }
+            bson::Bson::Document(document) => {
+                for (key, value) in document {
+                    if key.starts_with('$') {
+                        collect(value, path, owner, output);
+                    } else {
+                        let next = match path {
+                            Some(path) => format!("{path}.{key}"),
+                            None => key.clone(),
+                        };
+                        collect(value, Some(&next), owner, output);
+                    }
+                }
+            }
+            bson::Bson::Array(values) => {
+                for value in values {
+                    collect(value, path, owner, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut fields = std::collections::BTreeMap::new();
+    let acl_filter = super::super::org_agent_service::member_list_filter(owner);
+    for (collection, filter) in inventory(owner)
+        .into_iter()
+        .chain([(crate::models::assistant_agent::COLLECTION_NAME, acl_filter)])
+    {
+        let mut row = std::collections::BTreeSet::new();
+        collect(&bson::Bson::Document(filter), None, owner, &mut row);
+        fields
+            .entry(collection)
+            .or_insert_with(std::collections::BTreeSet::new)
+            .extend(row);
+    }
+    fields
+}
+
+/// Redact shared records after personal ownership has been removed. These
+/// updates preserve counters and ordering/integrity fields while removing the
+/// departing person's human-readable identity.
+async fn redact_page(
+    db: &Database,
+    owner: &str,
+    collection: &str,
+    filter: Document,
+    update: Vec<Document>,
+) -> AppResult<bool> {
+    if db
+        .collection::<Document>(collection)
+        .find_one(filter.clone())
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .write_concern(WriteConcern::majority())
+        .await?;
+    let result: AppResult<bool> = async {
+        let barrier = db
+            .collection::<Document>(super::super::erasure_admission::COLLECTION)
+            .update_one(
+                doc! {"_id": owner, "erasure_accepted": true},
+                doc! {"$inc": {"cleanup_revision": 1_i64}},
+            )
+            .session(&mut tx)
+            .await?;
+        if barrier.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Personal cleanup admission is unavailable".into(),
+            ));
+        }
+        let mut cursor = db
+            .collection::<Document>(collection)
+            .find(filter.clone())
+            .projection(doc! {"_id": 1})
+            .sort(doc! {"_id": 1})
+            .limit(PAGE)
+            .session(&mut tx)
+            .await?;
+        let ids: Vec<bson::Bson> = cursor
+            .stream(&mut tx)
+            .try_collect::<Vec<Document>>()
+            .await?
+            .into_iter()
+            .filter_map(|mut row| row.remove("_id"))
+            .collect();
+        if ids.is_empty() {
+            return Ok(false);
+        }
+        let mut bounded_filter = Document::new();
+        bounded_filter.insert("$and", vec![filter, doc! {"_id": {"$in": ids}}]);
+        Ok(db
+            .collection::<Document>(collection)
+            .update_many(bounded_filter, update)
+            .session(&mut tx)
+            .await?
+            .modified_count
+            > 0)
+    }
+    .await;
+    super::super::org_membership_authority::finish(tx, result).await
+}
+
+async fn redact_invite_usages(db: &Database, owner: &str) -> AppResult<bool> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .write_concern(WriteConcern::majority())
+        .await?;
+    let result: AppResult<bool> = async {
+        let barrier = db
+            .collection::<Document>(super::super::erasure_admission::COLLECTION)
+            .update_one(
+                doc! {"_id": owner, "erasure_accepted": true},
+                doc! {"$inc": {"cleanup_revision": 1_i64}},
+            )
+            .session(&mut tx)
+            .await?;
+        if barrier.matched_count != 1 {
+            return Err(AppError::Conflict(
+                "Personal cleanup admission is unavailable".into(),
+            ));
+        }
+        let mut cursor = db
+            .collection::<Document>("invite_codes")
+            .find(doc! {"usages": {"$elemMatch": {"user_id": owner, "email": {"$exists": true}}}})
+            .projection(doc! {"_id": 1, "usages": 1})
+            .sort(doc! {"_id": 1})
+            .limit(PAGE)
+            .session(&mut tx)
+            .await?;
+        let rows: Vec<Document> = cursor.stream(&mut tx).try_collect().await?;
+        let mut changed = false;
+        for row in rows {
+            let id = row
+                .get("_id")
+                .cloned()
+                .ok_or_else(|| AppError::Internal("Invite code identity missing".into()))?;
+            let usages = row.get_array("usages").cloned().unwrap_or_default();
+            let mut changed_usage = false;
+            let filtered: Vec<bson::Bson> = usages
+                .into_iter()
+                .map(|usage| {
+                    let Some(mut usage) = usage.as_document().cloned() else {
+                        return usage;
+                    };
+                    if usage.get_str("user_id").ok() == Some(owner) && usage.contains_key("email") {
+                        usage.remove("email");
+                        changed_usage = true;
+                    }
+                    bson::Bson::Document(usage)
+                })
+                .collect();
+            if !changed_usage {
+                continue;
+            }
+            let result = db
+                .collection::<Document>("invite_codes")
+                .update_one(
+                    doc! {"_id": id, "usages.user_id": owner, "usages.email": {"$exists": true}},
+                    doc! {"$set": {"usages": filtered}},
+                )
+                .session(&mut tx)
+                .await?;
+            changed |= result.modified_count > 0;
+        }
+        Ok(changed)
+    }
+    .await;
+    super::super::org_membership_authority::finish(tx, result).await
+}
+
+async fn redact_shared(db: &Database, owner: &str) -> AppResult<bool> {
+    // Events owned by the deleted person's personal service are erased. Events
+    // owned by an organization remain, with the actor's human-readable and
+    // person-linked fields redacted.
+    if erase_page(db, owner, "service_change_events", doc! {"owner_id": owner}).await? {
+        return Ok(true);
+    }
+    for spec in super::super::personal_data_registry::ATTRIBUTIONS {
+        if redact_page(
+            db,
+            owner,
+            spec.collection,
+            super::super::personal_attribution_service::pending_filter(spec, Some(owner)),
+            super::super::personal_attribution_service::update(spec),
+        )
+        .await?
+        {
+            return Ok(true);
+        }
+    }
+    if redact_page(
+        db,
+        owner,
+        "invite_codes",
+        doc! {"created_by": owner, "note": {"$exists": true, "$ne": bson::Bson::Null}},
+        vec![doc! {"$unset": "note"}],
+    )
+    .await?
+    {
+        return Ok(true);
+    }
+    // Invite usage is embedded in an invite owned by another account. Keep
+    // used_count/max_uses and the code itself, but remove the person's usage
+    // identity (including the legacy email field).
+    redact_invite_usages(db, owner).await
+}
+
+/// Local revocation creates durable external-effect outboxes. Their completion,
+/// rather than domain ordering alone, permits deleting recovery credentials.
+pub(super) async fn settle_telegram_requests(db: &Database, owner: &str) -> AppResult<()> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .write_concern(WriteConcern::majority())
+        .await?;
+    let result: AppResult<()> = async {
+        if db.collection::<Document>(super::super::erasure_admission::COLLECTION).update_one(
+            doc! {"_id":owner,"erasure_accepted":true},doc! {"$inc":{"cleanup_revision":1_i64}},
+        ).session(&mut tx).await?.matched_count != 1 {
+            return Err(AppError::Conflict("Personal cleanup barrier is unavailable".into()));
+        }
+        let mut cursor=db.collection::<Document>("telegram_bot_requests").find(doc! {"owner_user_id":owner,"active":true})
+            .sort(doc! {"_id":1}).limit(PAGE).session(&mut tx).await?;
+        let rows:Vec<Document>=cursor.stream(&mut tx).try_collect().await?;
+        for row in rows {
+            let Some(id)=row.get("_id") else {continue;};
+            let unstarted=matches!(row.get_str("status").unwrap_or_default(),"waiting_telegram"|"waiting_bot"|"waiting_consent"|"ready");
+            let confirmed=db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).find_one(
+                doc! {"_id":id,"user_id":owner,"personal_erasure_cleanup_complete":true},
+            ).session(&mut tx).await?.is_some();
+            if unstarted || confirmed {
+                db.collection::<Document>("telegram_bot_requests").update_one(
+                    doc! {"_id":id,"owner_user_id":owner,"revision":row.get("revision").cloned().unwrap_or(bson::Bson::Null)},
+                    doc! {"$set":{"active":false,"status":"cancelled","auto_connect":false},"$inc":{"revision":1_i64,"connection_generation":1_i64}},
+                ).session(&mut tx).await?;
+            }
+        }
+        Ok(())
+    }.await;
+    super::super::org_membership_authority::finish(tx, result).await
+}
+
+pub(crate) async fn remote_cleanup_clear(
+    db: &Database,
+    owner: &str,
+    tx: &mut ClientSession,
+) -> AppResult<bool> {
+    for (collection, filter) in [
+        (
+            "platform_bot_cleanup",
+            doc! {"owner_user_id": owner, "completed": {"$ne": true}},
+        ),
+        (
+            "telegram_bot_requests",
+            doc! {"owner_user_id": owner, "active": true},
+        ),
+    ] {
+        if db
+            .collection::<Document>(collection)
+            .find_one(filter)
+            .projection(doc! {"_id": 1})
+            .session(&mut *tx)
+            .await?
+            .is_some()
+        {
+            return Ok(false);
+        }
+    }
+
+    Ok(!stop_effect_needs_local_node(db, owner, None, tx).await?)
+}
+
+/// Stop completion uses its persisted capture, not the binding. Only an active
+/// local node still provides a cancel capability that this pass would remove.
+/// Filter pending effects for this owner first; unwind and lookup keep memory
+/// bounded without collecting every effect or node id into a client-side array.
+pub(super) async fn stop_effect_needs_local_node(
+    db: &Database,
+    owner: &str,
+    node_id: Option<&str>,
+    tx: &mut ClientSession,
+) -> AppResult<bool> {
+    let mut pending = doc! {
+        "active_turn.origin.user_id": owner, "completed": {"$ne": true},
+    };
+    if let Some(id) = node_id {
+        pending.insert("machine_scopes.node_id", id);
+    }
+    let mut pipeline = vec![
+        doc! {"$match": pending},
+        doc! {"$project": {"machine_scopes.node_id": 1}},
+        doc! {"$unwind": "$machine_scopes"},
+    ];
+    if let Some(id) = node_id {
+        pipeline.push(doc! {"$match": {"machine_scopes.node_id": id}});
+    }
+    pipeline.extend([
+        doc! {"$lookup": {
+            "from": crate::models::node::COLLECTION_NAME,
+            "localField": "machine_scopes.node_id", "foreignField": "_id",
+            "pipeline": [
+                {"$match": {"user_id": owner, "is_active": true,
+                    "metadata.provisioning_source": {"$ne": "remote_machine"}}},
+                {"$project": {"_id": 1}},
+            ],
+            "as": "local_node",
+        }},
+        doc! {"$match": {"local_node.0": {"$exists": true}}},
+        doc! {"$limit": 1},
+        doc! {"$project": {"_id": 1}},
+    ]);
+    let mut cursor = db
+        .collection::<Document>("platform_personal_stop_effects")
+        .aggregate(pipeline)
+        .max_time(std::time::Duration::from_secs(10))
+        .session(&mut *tx)
+        .await?;
+    Ok(cursor.next(tx).await.transpose()?.is_some())
+}
+
+pub(super) async fn erase_page(
     db: &Database,
     owner: &str,
     collection: &str,
@@ -456,6 +863,11 @@ async fn erase_page(
         .write_concern(WriteConcern::majority())
         .await?;
     let result: AppResult<bool> = async {
+        if !remote_cleanup_clear(db, owner, &mut tx).await? {
+            return Err(AppError::Conflict(
+                "Platform cleanup still needs its recovery data".into(),
+            ));
+        }
         let barrier = db
             .collection::<Document>(super::super::erasure_admission::COLLECTION)
             .update_one(
@@ -469,10 +881,16 @@ async fn erase_page(
                 "Personal cleanup admission is unavailable".into(),
             ));
         }
+        let deleting_threads = collection == crate::models::nyxbot_channel::THREADS_COLLECTION_NAME;
+        let projection = if deleting_threads {
+            super::super::nyxbot_thread_mutation::projection()
+        } else {
+            doc! {"_id":1}
+        };
         let mut cursor = db
             .collection::<Document>(collection)
             .find(filter.clone())
-            .projection(doc! {"_id":1})
+            .projection(projection)
             .sort(doc! {"_id":1})
             .limit(PAGE)
             .session(&mut tx)
@@ -480,6 +898,10 @@ async fn erase_page(
         let rows: Vec<Document> = cursor.stream(&mut tx).try_collect().await?;
         if rows.is_empty() {
             return Ok(false);
+        }
+        if deleting_threads {
+            super::super::nyxbot_thread_mutation::delete_observed(db, &mut tx, &rows).await?;
+            return Ok(true);
         }
         let ids: Vec<bson::Bson> = rows
             .into_iter()
@@ -495,6 +917,30 @@ async fn erase_page(
                     .ok_or_else(|| AppError::Internal("Invalid service-account identity".into()))?;
                 super::super::erasure_admission::close_in_session(db, target, &mut tx).await?;
             }
+        }
+        if collection == crate::models::nyxbot_channel::COLLECTION_NAME {
+            super::super::org_channel_service::defaults::erase_in_session(
+                db,
+                doc! {"channel_id":{"$in":&ids}},
+                &mut tx,
+            )
+            .await?;
+        }
+        if collection == crate::models::channel_bot::COLLECTION_NAME {
+            // Meta control rows are keyed by bot and provider participant, so
+            // they cannot be found through the owner's user_id inventory.  A
+            // bot row is still present in this transaction; remove its
+            // participant identifiers before the parent is erased.
+            db.collection::<Document>(crate::models::coordination::EVENT_DEDUP_COLLECTION_NAME)
+                .delete_many(
+                    doc! {"namespace": "meta-inbox-inbound", "channel_bot_id": {"$in": &ids}},
+                )
+                .session(&mut tx)
+                .await?;
+            db.collection::<Document>(crate::services::channel_adapters::meta::CONTROLS)
+                .delete_many(doc! {"bot_id": {"$in": &ids}})
+                .session(&mut tx)
+                .await?;
         }
         db.collection::<Document>(collection)
             .delete_many(doc! {"$and":[filter, {"_id":{"$in":ids}}]})
@@ -542,6 +988,10 @@ async fn joined_parents(db: &Database, job: &PersonalErasureJob, target: &str) -
             ],
         ),
         (
+            m::mcp_session::MCP_SESSION_COLLECTION,
+            &[("mcp_session_notifications", "session_id")],
+        ),
+        (
             m::channel_conversation::COLLECTION_NAME,
             &[
                 (m::channel_event_log::COLLECTION_NAME, "conversation_id"),
@@ -558,11 +1008,34 @@ async fn joined_parents(db: &Database, job: &PersonalErasureJob, target: &str) -
                 ),
             ],
         ),
+        (
+            m::user_service::COLLECTION_NAME,
+            &[(m::service_change_event::HEADS_COLLECTION_NAME, "_id")],
+        ),
+        (
+            "platform_bot_installations",
+            &[("platform_delivery_tests", "installation_id")],
+        ),
+        (
+            "platform_setups",
+            &[
+                ("platform_setup_notices", "setup_id"),
+                ("platform_setup_steps", "setup_id"),
+            ],
+        ),
     ];
     for (parent, children) in specs {
+        let owner_field = crate::services::personal_data_registry::find(parent)
+            .and_then(|entry| match entry.owner {
+                crate::services::personal_data_registry::OwnerSelector::Fields(fields) => {
+                    fields.first().copied()
+                }
+                crate::services::personal_data_registry::OwnerSelector::NotPersonal => None,
+            })
+            .unwrap_or("user_id");
         if let Some(row) = db
             .collection::<Document>(parent)
-            .find_one(doc! {"user_id":target})
+            .find_one(doc! {owner_field:target})
             .projection(doc! {"_id":1})
             .sort(doc! {"_id":1})
             .await?
@@ -602,7 +1075,7 @@ async fn joined_parents(db: &Database, job: &PersonalErasureJob, target: &str) -
                 }
                 if db.collection::<Document>(m::channel_send_claim::COLLECTION_NAME).find_one(doc! {"_id":{"$regex":format!("^{}:",regex::escape(id))},"status":{"$ne":"sent"}}).await?.is_some() {return Err(AppError::Conflict("An external channel send still needs reconciliation".into()));}
             }
-            erase_page(db, &job.user_id, parent, doc! {"_id":id,"user_id":target}).await?;
+            erase_page(db, &job.user_id, parent, doc! {"_id":id,owner_field:target}).await?;
             return Ok(true);
         }
     }
@@ -701,10 +1174,49 @@ async fn retain_settled_evidence(db: &Database, job: &PersonalErasureJob) -> App
     Ok(false)
 }
 
+/// Children drained before their erased node; also pinned to the data registry.
+pub(crate) const NODE_DRAIN_COLLECTIONS: &[&str] = &[
+    crate::models::node_pending_credential::COLLECTION_NAME,
+    crate::models::node_service_binding::COLLECTION_NAME,
+    crate::models::node_credential_desired::COLLECTION_NAME,
+];
+
+pub(super) async fn remote_cleanup_pending(db: &Database, owner: &str) -> AppResult<bool> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .await?;
+    let clear = remote_cleanup_clear(db, owner, &mut tx).await?;
+    tx.abort_transaction().await?;
+    Ok(!clear)
+}
+
 /// One bounded page. The next pass starts from the first unresolved collection,
 /// avoiding offset skips when an earlier held writer resumes during cleanup.
 pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> AppResult<bool> {
     let db = super::super::transaction_service::durable_database(&state.db);
+    settle_telegram_requests(&db, &job.user_id).await?;
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(ReadConcern::snapshot())
+        .await?;
+    let clear = remote_cleanup_clear(&db, &job.user_id, &mut tx).await?;
+    tx.abort_transaction().await?;
+    if !clear {
+        return Ok(false);
+    }
+    if redact_page(
+        &db,
+        &job.user_id,
+        crate::models::assistant_agent::COLLECTION_NAME,
+        super::super::org_agent_service::member_list_filter(&job.user_id),
+        super::super::org_agent_service::prune_member_update(&job.user_id),
+    )
+    .await?
+        || redact_shared(&db, &job.user_id).await?
+    {
+        return Ok(false);
+    }
     if super::super::collaboration_group_service::cleanup::erase_person(&db, &job.user_id).await? {
         return Ok(false);
     }
@@ -842,6 +1354,57 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
                     .map_err(|_| AppError::Internal("Invalid retained node owner fence".into()))?,
             );
         }
+        #[cfg(test)]
+        if let Some(hook) = before_node_drain_test_hook(&db) {
+            hook.reached.notify_one();
+            hook.resume.notified().await;
+        }
+        // Capture can still be enqueued by lifecycle recovery after admission.
+        // Recheck immediately before external drain/disconnect as well as in
+        // every deletion transaction; the pass-start snapshot is insufficient.
+        let mut tx = db.client().start_session().await?;
+        tx.start_transaction()
+            .read_concern(ReadConcern::snapshot())
+            .write_concern(WriteConcern::majority())
+            .await?;
+        let ready: AppResult<bool> = async {
+            if stop_effect_needs_local_node(&db, &job.user_id, Some(id), &mut tx).await? {
+                return Ok(false);
+            }
+            if db
+                .collection::<Document>(super::super::erasure_admission::COLLECTION)
+                .update_one(
+                    doc! {"_id":&job.user_id,"erasure_accepted":true},
+                    doc! {"$inc":{"cleanup_revision":1_i64}},
+                )
+                .session(&mut tx)
+                .await?
+                .matched_count
+                != 1
+            {
+                return Err(AppError::Conflict(
+                    "Personal cleanup barrier is unavailable".into(),
+                ));
+            }
+            // Reconcile active nodes left by older acceptance paths only after
+            // their captured Stop no longer needs the live signing capability.
+            db.collection::<Document>(crate::models::node::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":id,"user_id":&job.user_id,"is_active":true,
+                    "metadata.provisioning_source":{"$ne":"remote_machine"}},
+                    vec![doc! {"$set":{"is_active":false,"status":"draining",
+                        "personal_erasure_drain_required":true,
+                        "personal_erasure_drain_owner":{"$ifNull":["$personal_erasure_drain_owner","$connection_owner"]}}}],
+                )
+                .session(&mut tx)
+                .await?;
+            Ok(true)
+        }
+        .await;
+        if !super::super::org_membership_authority::finish(tx, ready).await? {
+            return Ok(false);
+        }
+        node_model.is_active = false;
         if node
             .get_bool("personal_erasure_generation_retired")
             .unwrap_or(false)
@@ -853,10 +1416,7 @@ pub(super) async fn pass(state: &crate::AppState, job: &PersonalErasureJob) -> A
         } else {
             state.node_dispatch.drain_inactive(&node_model).await?;
         }
-        for collection in [
-            crate::models::node_pending_credential::COLLECTION_NAME,
-            crate::models::node_service_binding::COLLECTION_NAME,
-        ] {
+        for &collection in NODE_DRAIN_COLLECTIONS {
             if erase_page(&db, &job.user_id, collection, doc! {"node_id":id}).await? {
                 return Ok(false);
             }
@@ -895,17 +1455,25 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
         .write_concern(WriteConcern::majority())
         .await?;
     let result:AppResult<bool>=async {
+        if !remote_cleanup_clear(db,&job.user_id,&mut tx).await? {return Ok(false);}
         if db.collection::<Document>(provider::EFFECTS).find_one(doc! {"user_id":&job.user_id,"$or":[{"status":{"$ne":"complete"}},{"capability_encrypted":{"$exists":true}}]}).session(&mut tx).await?.is_some() {return Ok(false);}
-        for (collection,filter) in inventory(&job.user_id) {
+        let acl_filter = super::super::org_agent_service::member_list_filter(&job.user_id);
+        for (collection,filter) in inventory(&job.user_id).into_iter().chain([(crate::models::assistant_agent::COLLECTION_NAME, acl_filter)]) {
             if db.collection::<Document>(collection).find_one(filter).projection(doc! {"_id":1}).session(&mut tx).await?.is_some() {return Ok(false);}
+        }
+        for spec in super::super::personal_data_registry::ATTRIBUTIONS {
+            let pending=super::super::personal_attribution_service::pending_filter(spec, Some(&job.user_id));
+            if db.collection::<Document>(spec.collection).find_one(pending).projection(doc! {"_id":1}).session(&mut tx).await?.is_some() {return Ok(false);}
         }
         let barrier=db.collection::<Document>(super::super::erasure_admission::COLLECTION).update_one(doc! {"_id":&job.user_id,"erasure_accepted":true},doc! {"$inc":{"cleanup_revision":1_i64}}).session(&mut tx).await?;
         if barrier.matched_count!=1 {return Err(AppError::Conflict("Personal cleanup barrier is unavailable".into()));}
         for (collection, filter) in super::super::personal_erasure_registry::final_metadata(&job.user_id) {
-            let mut cursor = db.collection::<Document>(collection).find(filter).projection(doc! {"_id":1}).limit(PAGE).session(&mut tx).await?;
+            let mut cursor = db.collection::<Document>(collection).find(filter.clone()).projection(doc! {"_id":1}).limit(PAGE).session(&mut tx).await?;
             let rows: Vec<Document> = cursor.stream(&mut tx).try_collect().await?;
             if !rows.is_empty() {
-                db.collection::<Document>(collection).delete_many(doc! {"user_id":&job.user_id,"_id":{"$in":rows.into_iter().filter_map(|mut row| row.remove("_id")).collect::<Vec<_>>()}}).session(&mut tx).await?;
+                // Preserve the registry predicate: delivery intents use owner_id,
+                // while revocation receipts use user_id. Keep the exact page fence.
+                db.collection::<Document>(collection).delete_many(doc! {"$and":[filter, {"_id":{"$in":rows.into_iter().filter_map(|mut row| row.remove("_id")).collect::<Vec<_>>()}}]}).session(&mut tx).await?;
                 return Ok(false);
             }
         }
@@ -913,4 +1481,39 @@ pub(super) async fn source(db: &Database, job: &PersonalErasureJob) -> AppResult
         Ok(db.collection::<Document>(USERS).find_one(doc! {"_id":&job.user_id}).session(&mut tx).await?.is_none())
     }.await;
     super::super::org_membership_authority::finish(tx, result).await
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct BeforeNodeDrainHook {
+    pub reached: tokio::sync::Notify,
+    pub resume: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+pub(super) static BEFORE_NODE_DRAIN: std::sync::LazyLock<
+    dashmap::DashMap<String, std::sync::Arc<BeforeNodeDrainHook>>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(test)]
+fn before_node_drain_test_hook(db: &Database) -> Option<std::sync::Arc<BeforeNodeDrainHook>> {
+    BEFORE_NODE_DRAIN.get(db.name()).map(|entry| entry.clone())
+}
+
+#[cfg(test)]
+mod crash_inventory_tests {
+    #[test]
+    fn crash_reports_are_erased_by_owner_and_anonymous_counters_are_retained() {
+        let rows = super::inventory("owner-sentinel");
+        assert!(
+            rows.iter()
+                .any(|(name, filter)| *name == "client_error_reports"
+                    && filter.get_str("user_id") == Ok("owner-sentinel"))
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|(name, _)| *name == "client_error_report_counters")
+        );
+    }
 }

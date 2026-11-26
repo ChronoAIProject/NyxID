@@ -21,6 +21,9 @@ pub const COLLECTION_NAME: &str = "channel_bots";
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotError {
+    /// Additive thread outcome; the ordinary provider reason remains intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_reason: Option<String>,
     /// Numeric `AppError` code, kept for compatibility with earlier rows.
     #[serde(deserialize_with = "deserialize_error_code")]
     pub code: String,
@@ -80,6 +83,8 @@ pub struct ChannelBotDiagnostics {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelInboundOutcome {
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub at: DateTime<Utc>,
 }
@@ -103,6 +108,12 @@ pub enum XChannelEvent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelBot {
+    #[serde(default)]
+    pub meta_binding: Option<MetaCredentialBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_continuity: Option<CredentialContinuity>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     /// Additional Telegram manager webhook identity. Legacy default has no suffix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager_instance: Option<i64>,
@@ -192,8 +203,67 @@ pub struct ChannelBot {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialContinuity {
+    pub version: u8,
+    pub generations: std::collections::BTreeMap<String, String>,
+    pub pins: std::collections::BTreeMap<String, RetainedCredentialPin>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shared_producers: std::collections::BTreeMap<String, String>,
+    pub authentication: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedCredentialPin {
+    pub dependencies: String,
+    pub value: String,
+}
+
 fn default_credential_source() -> String {
     "user".to_string()
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MetaCredentialBinding {
+    /// Operator-controlled delivery hold. Grant repair and token rotation
+    /// must preserve it until an explicit resume operation clears it.
+    #[serde(default)]
+    pub operator_suspended: bool,
+    /// Provider grant health is independent from an operator delivery hold.
+    /// A held bot may retain `subscription = suspended` while still requiring
+    /// fresh consent before resume.
+    #[serde(default)]
+    pub grant_reconnect_required: bool,
+    #[serde(default)]
+    pub provider_revoked: bool,
+    /// A deletion request is a data-erasure instruction, not proof that Meta
+    /// has revoked or removed the asset subscription.
+    #[serde(default)]
+    pub erasure_requested: bool,
+    #[serde(default)]
+    pub grant_id: String,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub authorized_at: Option<DateTime<Utc>>,
+    /// Provider events must postdate installation of this credential. The
+    /// earlier consent-start time remains the revocation boundary.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub events_since: Option<DateTime<Utc>>,
+    pub generation: i64,
+    /// First delivery generation of this consent; operational holds keep it.
+    #[serde(default)]
+    pub grant_start_generation: i64,
+    pub token_fingerprint: String,
+    pub grant_actor_id: String,
+    pub grant_subject_id: String,
+    pub app_id: String,
+    pub exclusive_routing_verified: bool,
+    pub subscription: String,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub next_reconcile_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -358,6 +428,8 @@ mod tests {
 
     fn make_channel_bot() -> ChannelBot {
         ChannelBot {
+            meta_binding: None,
+            credential_continuity: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -376,6 +448,7 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

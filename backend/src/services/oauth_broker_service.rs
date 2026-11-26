@@ -9,7 +9,7 @@
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, Binary, doc, spec::BinarySubtype};
-use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+use mongodb::options::ReturnDocument;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -23,9 +23,16 @@ use crate::models::oauth_broker_binding::{
     COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding, generate_binding_id,
     hash_binding_id,
 };
-use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+#[cfg(test)]
+use crate::models::oauth_client::COLLECTION_NAME as OAUTH_CLIENTS;
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
-use crate::services::cae_webhook_service::{self, RevocationEvent};
+mod revocation;
+pub(crate) use revocation::revoke_user_client_in_session;
+#[cfg(test)]
+pub use revocation::{
+    revoke_binding_by_client, revoke_binding_by_user, revoke_bindings_for_user_client,
+};
+pub use revocation::{revoke_binding_by_client_as, revoke_binding_by_user_as};
 
 /// Subject-token-type URN identifying a broker binding handle in RFC 8693
 /// token exchange requests. The `params:oauth` infix mirrors the IETF URN
@@ -205,7 +212,6 @@ pub fn sender_constraint_kind(cnf: Option<&Cnf>) -> &'static str {
 struct BrokerExchangeContext<'a> {
     db: &'a mongodb::Database,
     encryption_keys: Arc<EncryptionKeys>,
-    http_client: &'a reqwest::Client,
     jwt_keys: &'a JwtKeys,
     config: &'a AppConfig,
     require_sender_constraint: bool,
@@ -616,7 +622,7 @@ pub async fn find_active_bindings_by_external_subject(
 pub async fn exchange_via_binding(
     db: &mongodb::Database,
     encryption_keys: Arc<EncryptionKeys>,
-    http_client: &reqwest::Client,
+    _http_client: &reqwest::Client,
     jwt_keys: &JwtKeys,
     config: &AppConfig,
     require_sender_constraint: bool,
@@ -630,7 +636,6 @@ pub async fn exchange_via_binding(
     let ctx = BrokerExchangeContext {
         db,
         encryption_keys,
-        http_client,
         jwt_keys,
         config,
         require_sender_constraint,
@@ -1103,328 +1108,13 @@ async fn cascade_revoke_reuse_detected(
     binding: &OauthBrokerBinding,
     binding_hash: &str,
 ) -> AppResult<()> {
-    let db = ctx.db;
-    let cascade_count = revoke_bindings_for_user_client(
-        db,
-        ctx.encryption_keys.clone(),
-        ctx.http_client,
-        &binding.client_id,
-        &binding.user_id,
-        "reuse_detected",
-    )
-    .await?;
-    crate::services::audit_service::log_async(
-        db.clone(),
-        Some(binding.user_id.clone()),
-        "oauth_broker_binding_reuse_detected".to_string(),
-        Some(serde_json::json!({
-            "client_id": binding.client_id,
-            "binding_hash": binding_hash_prefix(binding_hash),
-            "cascade_revoke_count": cascade_count,
-        })),
-        None,
-        None,
-        None,
-        None,
-    );
+    revocation::revoke_reused_bindings(ctx.db, binding, binding_hash).await?;
     tracing::warn!(
         client_id = %binding.client_id,
         binding_hash = %binding_hash_prefix(binding_hash),
         "broker binding refresh-token reuse detected; cascading revoke"
     );
     Ok(())
-}
-
-/// Cascade-revoke all bindings owned by `(client_id, user_id)`. Used by
-/// reuse detection (commit #5) and by the explicit revoke endpoint (#6).
-///
-/// Returns the number of bindings modified.
-pub async fn revoke_bindings_for_user_client(
-    db: &mongodb::Database,
-    encryption_keys: Arc<EncryptionKeys>,
-    http_client: &reqwest::Client,
-    client_id: &str,
-    user_id: &str,
-    reason: &str,
-) -> AppResult<u64> {
-    let now = Utc::now();
-    let filter = doc! {
-        "client_id": client_id,
-        "user_id": user_id,
-        "revoked": false,
-    };
-    let bindings: Vec<OauthBrokerBinding> = db
-        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
-        .find(filter.clone())
-        .await?
-        .try_collect()
-        .await?;
-
-    let result = db
-        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
-        .update_many(
-            filter,
-            doc! { "$set": {
-                "revoked": true,
-                "revoked_at": bson::DateTime::from_chrono(now),
-                "revoke_reason": reason,
-            }},
-        )
-        .await?;
-
-    if !bindings.is_empty() {
-        let refresh_jtis: Vec<String> = bindings
-            .iter()
-            .map(|binding| binding.refresh_token_jti.clone())
-            .collect();
-        db.collection::<RefreshToken>(REFRESH_TOKENS)
-            .update_many(
-                doc! {
-                    "jti": { "$in": refresh_jtis },
-                    "client_id": client_id,
-                    "user_id": user_id,
-                    "revoked": false,
-                },
-                doc! { "$set": {
-                    "revoked": true,
-                    "revoked_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await?;
-    }
-
-    let revoke_source = revoke_source_for_reason(reason);
-    for binding in bindings {
-        spawn_revocation_webhook(
-            db.clone(),
-            encryption_keys.clone(),
-            http_client.clone(),
-            RevocationWebhookDispatch {
-                binding_hash: binding.id,
-                client_id: binding.client_id,
-                revoke_source,
-                reason: Some(reason.to_string()),
-                revoked_at: now,
-            },
-        );
-    }
-
-    Ok(result.modified_count)
-}
-
-/// Revoke a binding owned by `client_id` given its raw binding_id.
-///
-/// Idempotent: missing binding, mismatched ownership, already-revoked
-/// all return Ok(()) so RFC 7009 200-always semantics hold at the
-/// handler. Marks both the binding and its underlying RefreshToken
-/// revoked.
-pub async fn revoke_binding_by_client(
-    db: &mongodb::Database,
-    encryption_keys: Arc<EncryptionKeys>,
-    http_client: &reqwest::Client,
-    client_id: &str,
-    raw_binding_id: &str,
-    reason: &str,
-) -> AppResult<bool> {
-    let binding_hash = hash_binding_id(raw_binding_id);
-    let now = Utc::now();
-    let options = FindOneAndUpdateOptions::builder()
-        .return_document(ReturnDocument::After)
-        .build();
-
-    let binding = db
-        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
-        .find_one_and_update(
-            doc! {
-                "_id": &binding_hash,
-                "client_id": client_id,
-                "revoked": false,
-            },
-            doc! { "$set": {
-                "revoked": true,
-                "revoked_at": bson::DateTime::from_chrono(now),
-                "revoke_reason": reason,
-            }},
-        )
-        .with_options(options)
-        .await?;
-
-    let Some(binding) = binding else {
-        return Ok(false);
-    };
-
-    db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .update_one(
-            doc! { "jti": &binding.refresh_token_jti, "revoked": false },
-            doc! { "$set": {
-                "revoked": true,
-                "revoked_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-
-    spawn_revocation_webhook(
-        db.clone(),
-        encryption_keys.clone(),
-        http_client.clone(),
-        RevocationWebhookDispatch {
-            binding_hash: binding.id,
-            client_id: binding.client_id,
-            revoke_source: "client",
-            reason: Some(reason.to_string()),
-            revoked_at: now,
-        },
-    );
-
-    Ok(true)
-}
-
-/// Revoke a binding owned by `user_id` given its binding_hash (stored as _id).
-///
-/// Returns Err(AppError::NotFound) when the binding does not exist or
-/// belongs to a different user. The user-UI endpoint translates this to
-/// a 404 -- that's safe because the user can only see their own bindings.
-pub async fn revoke_binding_by_user(
-    db: &mongodb::Database,
-    encryption_keys: Arc<EncryptionKeys>,
-    http_client: &reqwest::Client,
-    user_id: &str,
-    binding_hash: &str,
-    reason: &str,
-) -> AppResult<()> {
-    let now = Utc::now();
-    let options = FindOneAndUpdateOptions::builder()
-        .return_document(ReturnDocument::After)
-        .build();
-
-    let binding = db
-        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
-        .find_one_and_update(
-            doc! {
-                "_id": binding_hash,
-                "user_id": user_id,
-                "revoked": false,
-            },
-            doc! { "$set": {
-                "revoked": true,
-                "revoked_at": bson::DateTime::from_chrono(now),
-                "revoke_reason": reason,
-            }},
-        )
-        .with_options(options)
-        .await?
-        .ok_or_else(|| AppError::NotFound("binding not found".to_string()))?;
-
-    db.collection::<RefreshToken>(REFRESH_TOKENS)
-        .update_one(
-            doc! { "jti": &binding.refresh_token_jti, "revoked": false },
-            doc! { "$set": {
-                "revoked": true,
-                "revoked_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
-
-    spawn_revocation_webhook(
-        db.clone(),
-        encryption_keys.clone(),
-        http_client.clone(),
-        RevocationWebhookDispatch {
-            binding_hash: binding.id,
-            client_id: binding.client_id,
-            revoke_source: "user",
-            reason: Some(reason.to_string()),
-            revoked_at: now,
-        },
-    );
-
-    Ok(())
-}
-
-fn revoke_source_for_reason(reason: &str) -> &'static str {
-    match reason {
-        "client" | "client_revoked" => "client",
-        "user" | "user_revoked" => "user",
-        "reuse_detected" => "reuse_detected",
-        "admin" | "admin_revoked" => "admin",
-        _ => "admin",
-    }
-}
-
-struct RevocationWebhookDispatch {
-    binding_hash: String,
-    client_id: String,
-    revoke_source: &'static str,
-    reason: Option<String>,
-    revoked_at: chrono::DateTime<chrono::Utc>,
-}
-
-fn spawn_revocation_webhook(
-    db: mongodb::Database,
-    encryption_keys: Arc<EncryptionKeys>,
-    http_client: reqwest::Client,
-    dispatch: RevocationWebhookDispatch,
-) {
-    tokio::spawn(async move {
-        let binding_hash = dispatch.binding_hash;
-        let client_id = dispatch.client_id;
-        let client = match db
-            .collection::<OauthClient>(OAUTH_CLIENTS)
-            .find_one(doc! { "_id": &client_id })
-            .await
-        {
-            Ok(Some(client)) => client,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(
-                    client_id = %client_id,
-                    error = %error,
-                    "failed to load OAuth client for CAE webhook"
-                );
-                return;
-            }
-        };
-
-        if client.revocation_webhook_url.is_none() {
-            return;
-        }
-        let Some(encrypted_secret) = client.revocation_webhook_secret_encrypted.as_ref() else {
-            return;
-        };
-        let raw_secret = match encryption_keys.decrypt(encrypted_secret).await {
-            Ok(secret) => secret,
-            Err(error) => {
-                tracing::warn!(
-                    client_id = %client_id,
-                    binding_hash = %binding_hash_prefix(&binding_hash),
-                    error = %error,
-                    "failed to decrypt CAE webhook secret"
-                );
-                return;
-            }
-        };
-        let raw_secret = match String::from_utf8(raw_secret) {
-            Ok(secret) => secret,
-            Err(error) => {
-                tracing::warn!(
-                    client_id = %client_id,
-                    binding_hash = %binding_hash_prefix(&binding_hash),
-                    error = %error,
-                    "CAE webhook secret was not valid UTF-8"
-                );
-                return;
-            }
-        };
-
-        let event = RevocationEvent::new_at(
-            binding_hash,
-            client_id,
-            dispatch.revoke_source,
-            dispatch.reason,
-            dispatch.revoked_at,
-        );
-        cae_webhook_service::dispatch_revocation_event(http_client, client, raw_secret, event);
-    });
 }
 
 pub struct BindingListItem {
@@ -1520,11 +1210,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: None,
             created_at: Utc::now(),
@@ -1812,11 +1504,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
+            first_party_management: false,
             revocation_webhook_url: Some(webhook_url.to_string()),
             revocation_webhook_secret_encrypted: Some(encrypted_secret),
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
@@ -1910,7 +1604,7 @@ mod tests {
             }
         });
 
-        (format!("http://{address}/cae"), rx)
+        (format!("http://{address}/hook"), rx)
     }
 
     #[tokio::test]
@@ -2951,6 +2645,24 @@ mod tests {
         .expect("revoke binding");
         assert!(revoked);
 
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        crate::services::security_effect_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let target = url::Url::parse(&webhook_url).unwrap();
+        let _origin = crate::services::resource_adapter::register_test_origin(
+            &target.origin().ascii_serialization(),
+        );
+        let address = format!("{}:{}", target.host_str().unwrap(), target.port().unwrap())
+            .parse()
+            .unwrap();
+        crate::services::webhook_delivery_service::with_test_webhook_target(
+            address,
+            crate::services::security_effect_service::sweep(&db, &encryption_keys),
+        )
+        .await
+        .unwrap();
+
         let captured = tokio::time::timeout(std::time::Duration::from_secs(5), received)
             .await
             .expect("CAE webhook received")
@@ -3846,11 +3558,9 @@ mod tests {
             .await
             .expect("update binding to replacement");
 
-        let http_client = reqwest::Client::new();
         let ctx = BrokerExchangeContext {
             db: &db,
             encryption_keys: encryption_keys.clone(),
-            http_client: &http_client,
             jwt_keys: &jwt_keys,
             config: &config,
             require_sender_constraint: config.broker_require_sender_constraint(),
@@ -3974,11 +3684,9 @@ mod tests {
         let orphan = insert_refresh_token(&db, "jti-orphan", "client-x", "user-1", false).await;
         let jwt_keys = unused_jwt_keys();
         let config = test_app_config();
-        let http_client = reqwest::Client::new();
         let ctx = BrokerExchangeContext {
             db: &db,
             encryption_keys: encryption_keys.clone(),
-            http_client: &http_client,
             jwt_keys: &jwt_keys,
             config: &config,
             require_sender_constraint: config.broker_require_sender_constraint(),

@@ -375,6 +375,7 @@ async fn voice_key_call_binds_primary_or_exact_child_and_rechecks_revocation() {
                 .is_err()
         );
         let segment = super::transcript::Segment {
+            interrupted: false,
             fragments: Vec::new(),
             id: Uuid::new_v4().to_string(),
             speaker: super::transcript::Speaker::User,
@@ -1638,6 +1639,7 @@ async fn device_voice_cannot_inherit_enrolled_owner_permissions_or_task_root() {
                 // if the in-memory session hint is stale or incorrectly set.
                 call.execution_enrolled = true;
                 let segment = super::transcript::Segment {
+                    interrupted: false,
                     fragments: Vec::new(),
                     id: Uuid::new_v4().to_string(),
                     speaker: super::transcript::Speaker::User,
@@ -1833,4 +1835,120 @@ async fn direct_voice_tools_use_bot_authority_without_widening_the_device_key() 
         server.abort();
     })
     .await;
+}
+
+#[tokio::test]
+async fn abandoned_device_grok_start_preserves_binding_and_releases_its_slot() {
+    use crate::models::{
+        assistant_voice_session::{COLLECTION_NAME as CALLS, VoiceSession},
+        downstream_service::{COLLECTION_NAME as SERVICES, VoiceProtocol},
+    };
+    use std::time::Duration;
+    let (f, mut provider, _, raw) = setup("voice_device_cancelled_start").await;
+    provider.base_url = "https://api.x.ai/v1".into();
+    provider.inference = crate::services::inference_service::default_inference("llm-xai");
+    f.state.db.collection::<bson::Document>(SERVICES).update_one(
+        doc! {"_id":&provider.id},
+        doc! {"$set":{"base_url":&provider.base_url,"inference":bson::to_bson(&provider.inference).unwrap()}},
+    ).await.unwrap();
+    for flag in [
+        flags::VOICE_GROK_FLAG_KEY,
+        flags::VOICE_GROK_PLATFORM_FLAG_KEY,
+    ] {
+        flags::set_platform_override(
+            &f.state.db,
+            flag,
+            &flags::FlagTarget::Global,
+            true,
+            &f.owner,
+        )
+        .await
+        .unwrap();
+    }
+    let caller = auth(&f, &raw).await;
+    let binding = keys::authorize(&f.state.db, &caller, &f.row.id)
+        .await
+        .unwrap();
+    assert!(binding.is_some());
+    let expected_binding = binding.clone();
+    let request = Uuid::new_v4().to_string();
+    let request_id = request.clone();
+    let state = f.state.clone();
+    let user = f.owner.clone();
+    let conversation = f.row.id.clone();
+    let outer = tokio::spawn(async move {
+        super::runtime::start_for_client_key(
+            &state,
+            &user,
+            &conversation,
+            &request_id,
+            platform(&provider),
+            "",
+            false,
+            binding,
+        )
+        .await
+    });
+    let call = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if let Some(row) = f
+                .state
+                .db
+                .collection::<VoiceSession>(CALLS)
+                .find_one(doc! {"client_request_id":&request})
+                .await
+                .unwrap()
+            {
+                break row;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    outer.abort();
+    let _ = outer.await;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let row = session::get(&f.state.db, &f.owner, &f.row.id, &call.id)
+                .await
+                .unwrap();
+            if row.protocol == Some(VoiceProtocol::XaiRealtime) {
+                assert!(row.client_key == expected_binding);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    session::control(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        &call.id,
+        &Uuid::new_v4().to_string(),
+        0,
+        "end",
+    )
+    .await
+    .unwrap();
+    f.state
+        .db
+        .collection::<VoiceSession>(CALLS)
+        .update_one(
+            doc! {"_id":&call.id},
+            doc! {"$set":{"lease_until":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    super::runtime::recover(&f.state).await.unwrap();
+    let ended = session::get(&f.state.db, &f.owner, &f.row.id, &call.id)
+        .await
+        .unwrap();
+    assert!(!ended.live_slot);
+    assert!(ended.final_usage_confirmed);
+    assert!(ended.provider_session_id.is_none());
+    assert!(ended.client_key == expected_binding);
+    f.state.db.drop().await.unwrap();
 }

@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
 import { ApiError } from "../../lib/api/ApiError";
 import {
@@ -5,7 +6,8 @@ import {
   grantsSchema, usageSchema, walletSchema, type BillingPeriod,
 } from "./billingContracts";
 
-export type BillingRead<T> = { kind: "ready"; data: T } | { kind: "disabled" } | { kind: "unsupported" };
+export type BillingRead<T> =
+  | { kind: "ready"; data: T } | { kind: "disabled" } | { kind: "unsupported" };
 type ReadOptions = { method: "GET"; signal?: AbortSignal };
 export type BillingRequest = (path: string, options: ReadOptions) => Promise<unknown>;
 
@@ -39,7 +41,7 @@ export function createBillingApi(request: BillingRequest) {
     },
     async usage(period: BillingPeriod, signal?: AbortSignal) {
       const result = await read(`/billing/usage?period=${billingPeriodSchema.parse(period)}`, usageSchema, signal);
-      if (result.kind === "ready" && result.data.period !== period) throw new Error("The server returned a different usage period");
+      if (result.kind === "ready" && result.data.period !== period) throw localizedError("The server returned a different usage period");
       return result;
     },
     grants(ownerId?: string, signal?: AbortSignal) {

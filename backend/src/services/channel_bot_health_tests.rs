@@ -4,15 +4,19 @@ use crate::models::user::{COLLECTION_NAME as USERS, UserType};
 
 fn facts(platform: &'static str, status: &'static str) -> HealthFacts<'static> {
     HealthFacts {
+        answer_delivery: None,
+        org_guest_billing: None,
         inbound_outcome: None,
         platform,
         status,
         webhook_registered: true,
         failure_reason: None,
         outbound_reason: None,
+        thread_reason: None,
         subscription_registered: None,
         backoff_active: false,
         gateway: false,
+        gateway_not_received: None,
         discord_intake: None,
     }
 }
@@ -164,15 +168,19 @@ fn recommendation_table_covers_status_mode_and_failure_codes() {
     ];
     for (platform, status, registered, reason, backoff, expected) in rows {
         let facts = HealthFacts {
+            answer_delivery: None,
+            org_guest_billing: None,
             inbound_outcome: None,
             platform,
             status,
             webhook_registered: *registered,
             failure_reason: *reason,
             outbound_reason: None,
+            thread_reason: None,
             subscription_registered: None,
             backoff_active: *backoff,
             gateway: false,
+            gateway_not_received: None,
             discord_intake: None,
         };
         assert_eq!(recommend(&facts).action, *expected, "{facts:?}");
@@ -414,6 +422,8 @@ fn discord_intake_states_never_report_healthy_without_current_evidence() {
             Some(discord::RELAY_BLOCKED)
         );
         assert_eq!(recommend(&facts).action, "contact_admin");
+        assert!(recommend(&facts).text.contains("automatically rechecking"));
+        assert!(recommend(&facts).text.contains("90-second"));
     }
     let unloaded = HealthFacts::for_bot(&bot, Utc::now(), false);
     assert!(unloaded.discord_intake.is_none());
@@ -585,4 +595,185 @@ async fn discord_health_batch_matches_personal_org_global_and_revoked_membership
         );
     }
     db.drop().await.unwrap();
+}
+
+#[test]
+fn org_guest_billing_advice_yields_to_real_faults_for_gateway_and_relay() {
+    for gateway in [false, true] {
+        let mut healthy = facts("lark", "active");
+        healthy.gateway = gateway;
+        assert_eq!(
+            recommend(&healthy).action,
+            if gateway { "gateway" } else { "none" }
+        );
+        healthy.org_guest_billing = Some("billing_not_configured");
+        assert_eq!(recommend(&healthy).action, "enable_billing");
+        for kind in 0..10 {
+            let mut failure = healthy.clone();
+            match kind {
+                0 => failure.failure_reason = Some(codes::AUTH_REVOKED),
+                1 => failure.failure_reason = Some(codes::NATIVE_RELAY_CONFLICT),
+                2 => failure.status = "failed",
+                3 => failure.subscription_registered = Some(false),
+                4 => failure.outbound_reason = Some(codes::SCOPES_MISSING),
+                5 => failure.thread_reason = Some("thread_reply_failed"),
+                6 => failure.backoff_active = true,
+                7 => failure.failure_reason = Some("discord_gateway_invalid_token"),
+                8 => failure.failure_reason = Some(codes::NYXBOT_ORG_RESTORATION_PENDING),
+                _ => {
+                    failure.discord_intake = Some(discord::Intake {
+                        receiving_side: "relay",
+                        state: "stopped".into(),
+                        code: Some(discord::RELAY_STOPPED),
+                        block_reason: None,
+                        handed_over_at: None,
+                        last_inbound_at: None,
+                    })
+                }
+            }
+            let with_billing = recommend(&failure);
+            failure.org_guest_billing = None;
+            failure.gateway = false;
+            let without_billing = recommend(&failure);
+            assert_eq!(
+                with_billing.action, without_billing.action,
+                "{gateway} {kind}"
+            );
+            assert_eq!(with_billing.text, without_billing.text, "{gateway} {kind}");
+            assert_ne!(with_billing.action, "gateway");
+        }
+    }
+}
+
+#[tokio::test]
+async fn discord_2323_unknown_create_health_explains_gateway_proof_without_extra_reads() {
+    let db =
+        crate::test_utils::connect_transaction_test_database("discord_unknown_create_health").await;
+    let bot = discord_bot();
+    discord_flag(&db, None, "global", None, true).await;
+    crate::services::security_readiness_service::ready_test_replica(&db).await;
+    db.collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id":"unknown-create","channel_bot_id":&bot.id,"state":"review_required",
+            "last_error":"create_outcome_unconfirmed","review_reason":"auth_refused",
+            "dispatch_started_at":bson::DateTime::from_millis(0)
+        })
+        .await
+        .unwrap();
+    for new_metadata in [false, true] {
+        if new_metadata {
+            db.collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":"unknown-create"},
+                    doc! {"$set":{"last_gateway_answer":"not_found"}},
+                )
+                .await
+                .unwrap();
+        }
+        let loaded = discord::load(&db, std::slice::from_ref(&bot))
+            .await
+            .unwrap();
+        assert_eq!(
+            loaded[&bot.id].block_reason,
+            Some("create_outcome_unconfirmed")
+        );
+        let recommendation = discord::advice(&loaded[&bot.id]).unwrap();
+        assert_eq!(recommendation.action, "contact_admin");
+        assert!(
+            recommendation
+                .text
+                .contains("cannot yet confirm the record was never created")
+        );
+        assert!(recommendation.text.contains("keeps checking automatically"));
+        assert!(recommendation.text.contains("Ask a platform administrator"));
+        assert!(
+            recommendation
+                .text
+                .contains("original request can no longer complete")
+        );
+        assert!(
+            recommendation
+                .text
+                .contains("second Discord session cannot start")
+        );
+    }
+    db.collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
+        .update_one(doc! {"_id":"unknown-create"},doc! {"$set":{"gateway_channel_id":"cmaeg1.ch.known","last_error":"release_unconfirmed"}}).await.unwrap();
+    let loaded = discord::load(&db, std::slice::from_ref(&bot))
+        .await
+        .unwrap();
+    assert_eq!(loaded[&bot.id].block_reason, Some("release_unresolved"));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn discord_2323_health_identifies_actionable_review_reasons_through_transient_failures() {
+    let db = crate::test_utils::connect_transaction_test_database("discord_reason_health").await;
+    let bot = discord_bot();
+    discord_flag(&db, None, "global", None, true).await;
+    crate::services::security_readiness_service::ready_test_replica(&db).await;
+    let releases =
+        db.collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME);
+    for (reason, block, who) in [
+        ("preserved", "preserved", "administrator preserved"),
+        (
+            "gateway_destination_changed",
+            "destination_changed",
+            "platform administrator must restore or reconcile",
+        ),
+        (
+            "owner_authority_unavailable",
+            "owner_unavailable",
+            "platform administrator must restore the owner's",
+        ),
+        (
+            "gateway_authority_refused",
+            "auth_refused",
+            "gateway administrator must restore",
+        ),
+        (
+            "remote_identity_invalid",
+            "identity_unconfirmed",
+            "platform administrator must inspect",
+        ),
+        (
+            "remote_version_changed",
+            "changed_version",
+            "will not delete a replacement",
+        ),
+        (
+            "release_unconfirmed",
+            "release_unresolved",
+            "automatically rechecking",
+        ),
+    ] {
+        for transient in [false, true] {
+            releases.delete_many(doc! {}).await.unwrap();
+            releases.insert_one(doc! {"_id":"review","channel_bot_id":&bot.id,
+                "state":if reason=="preserved" {"settled"} else {"review_required"},"resolution":if reason=="preserved" {Some("preserved")} else {None},
+                "last_error":if transient {"gateway_unavailable"} else {reason},
+                "review_reason":crate::services::nyxbot_gateway_release_service::diagnostic_reason(Some(reason)),
+                "last_gateway_answer":if transient {"server_error"} else {"not_requested"},
+            }).await.unwrap();
+            let intake = discord::load(&db, std::slice::from_ref(&bot))
+                .await
+                .unwrap();
+            assert_eq!(intake[&bot.id].block_reason, Some(block), "{reason}");
+            let text = discord::advice(&intake[&bot.id]).unwrap();
+            assert!(text.text.contains(who), "{}", text.text);
+            assert_eq!(text.action, "contact_admin");
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn gateway_answer_failure_recommendations_do_not_render_as_healthy() {
+    let mut facts = facts("lark", "active");
+    facts.gateway = true;
+    facts.thread_reason = Some("thread_target_rejected");
+    assert_ne!(recommend(&facts).action, "none");
+    facts.thread_reason = None;
+    facts.outbound_reason = Some("gateway_reply_unconfirmed");
+    assert_ne!(recommend(&facts).action, "none");
 }

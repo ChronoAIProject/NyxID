@@ -330,19 +330,9 @@ pub(crate) async fn create_service_account_with_id(
         body.rate_limit_override,
         &effective_owner,
         platform_admin,
+        Some(&audit_service::AuditActor::from_auth_user(&auth_user)),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.created",
-        Some(serde_json::json!({
-            "target_sa_id": &sa.id,
-            "client_id": &sa.client_id,
-            "name": &sa.name,
-        })),
-    );
 
     emit_event(
         state.telemetry.as_deref(),
@@ -477,17 +467,9 @@ pub async fn update_service_account(
         body.is_active,
         require_admin(&state, &auth_user).await.is_ok(),
         body.expected_access.as_ref(),
+        Some(&audit_service::AuditActor::from_auth_user(&auth_user)),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.updated",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-        })),
-    );
 
     Ok(Json(sa_to_item(updated)))
 }
@@ -507,17 +489,9 @@ pub async fn delete_service_account(
         &state.db,
         &sa_id,
         require_admin(&state, &auth_user).await.is_ok(),
+        Some(&audit_service::AuditActor::from_auth_user(&auth_user)),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.deleted",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-        })),
-    );
 
     emit_event(
         state.telemetry.as_deref(),
@@ -548,18 +522,9 @@ pub async fn rotate_secret(
         &state.db,
         &sa_id,
         require_admin(&state, &auth_user).await.is_ok(),
+        Some(&audit_service::AuditActor::from_auth_user(&auth_user)),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.secret_rotated",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-            "client_id": &updated.client_id,
-        })),
-    );
 
     emit_event(
         state.telemetry.as_deref(),
@@ -593,18 +558,9 @@ pub async fn revoke_tokens(
         &state.db,
         &sa_id,
         require_admin(&state, &auth_user).await.is_ok(),
+        Some(&audit_service::AuditActor::from_auth_user(&auth_user)),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.tokens_revoked",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-            "revoked_count": revoked_count,
-        })),
-    );
 
     Ok(Json(RevokeTokensResponse {
         revoked_count,
@@ -655,16 +611,9 @@ pub async fn issue_curation_grant(
         &id,
         &auth.user_id.to_string(),
         input,
+        Some(&audit_service::AuditActor::from_auth_user(&auth)),
     )
     .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "admin.sa.curation_granted",
-        Some(
-            serde_json::json!({"target_sa_id": id, "grant_id": sa.curation_grant.as_ref().map(|g| &g.id)}),
-        ),
-    );
     Ok(Json(sa_to_item(sa)))
 }
 
@@ -674,13 +623,12 @@ pub async fn revoke_curation_grant(
     Path(id): Path<String>,
 ) -> AppResult<Json<ServiceAccountItem>> {
     require_admin(&state, &auth).await?;
-    let sa = crate::services::curation_grant_service::revoke(&state.db, &id).await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "admin.sa.curation_revoked",
-        Some(serde_json::json!({"target_sa_id": id})),
-    );
+    let sa = crate::services::curation_grant_service::revoke(
+        &state.db,
+        &id,
+        Some(&audit_service::AuditActor::from_auth_user(&auth)),
+    )
+    .await?;
     Ok(Json(sa_to_item(sa)))
 }
 

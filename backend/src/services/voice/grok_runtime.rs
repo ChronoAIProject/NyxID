@@ -23,27 +23,42 @@ pub async fn prepare(
     execution_enrolled: bool,
     client_key: Option<super::client_key::ClientKey>,
 ) -> AppResult<runtime::Started> {
-    let row = session::admit_for_client_key(
-        &state.db,
-        user,
-        conversation,
-        request,
-        preferences,
-        identity,
-        &state.replica_identity.generation_id,
-        client_key,
-    )
-    .await?;
-    let row = session::write(
-        &state.db,
-        &row,
-        doc! {"protocol":"xai_realtime","execution_enrolled":execution_enrolled && row.client_key.is_none()},
-    )
-    .await?;
-    Ok(runtime::Started {
-        session: row,
-        sdp: String::new(),
+    // Admission and protocol enrollment must finish even if the POST disappears.
+    let state = state.clone();
+    let user = user.to_owned();
+    let conversation = conversation.to_owned();
+    let request = request.to_owned();
+    runtime::deliver_start(state.clone(), Stage::Thread, async move {
+        let row = session::admit_for_client_key(
+            &state.db,
+            &user,
+            &conversation,
+            &request,
+            preferences,
+            identity,
+            &state.replica_identity.generation_id,
+            client_key,
+        )
+        .await?;
+        let updated = session::write(
+            &state.db,
+            &row,
+            doc! {"protocol":"xai_realtime","execution_enrolled":execution_enrolled && row.client_key.is_none()},
+        )
+        .await;
+        match updated {
+            Ok(row) => Ok(runtime::Started {
+                session: row,
+                sdp: String::new(),
+            }),
+            Err(error) => {
+                // No provider was contacted: setup failure has no unknown audio cost.
+                let _ = session::close(&state.db, &row, "start_failed", true).await;
+                Err(error)
+            }
+        }
     })
+    .await
 }
 
 pub async fn serve(

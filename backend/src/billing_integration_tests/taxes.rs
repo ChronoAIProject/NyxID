@@ -94,7 +94,7 @@ async fn gross_hold_debit_tax_postings_chain_and_refresh_rounding() {
         .update_one(doc! {"_id":&row.id}, doc! {"$set":{"lago_acked":true}})
         .await
         .unwrap();
-    crate::services::billing::webhook::refresh_wallet_balance(&db, &owner, "98.9".parse().unwrap())
+    crate::services::billing::webhook::refresh_test_balance(&db, &owner, "98.9".parse().unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -394,9 +394,13 @@ async fn stale_wallet_profile_fails_closed_and_forced_refresh_bypasses_backoff()
         ));
     }
     assert_eq!(lago.tax_fetches.load(Ordering::SeqCst), 1);
-    crate::services::billing::taxes::reconcile(&db, lago.as_ref(), 900)
-        .await
-        .unwrap();
+    assert!(matches!(
+        crate::services::billing::taxes::reconcile(&db, lago.as_ref(), 900).await,
+        Err(AppError::BillingRecoveryFailed {
+            failed_units: 1,
+            ..
+        })
+    ));
     assert_eq!(lago.tax_fetches.load(Ordering::SeqCst), 2);
     db.drop().await.unwrap();
 }
@@ -507,6 +511,7 @@ async fn customer_webhook_resolves_tax_owner_by_wallet_customer_identity() {
         Some(&lago),
         "customer.updated",
         &serde_json::json!({"customer":{"external_id":customer}}),
+        900,
     )
     .await
     .unwrap();

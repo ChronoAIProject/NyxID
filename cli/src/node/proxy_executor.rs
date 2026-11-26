@@ -57,6 +57,30 @@ const STREAMING_CONTENT_TYPES: &[&str] = &[
 /// Threshold above which responses are streamed rather than buffered (256 KB).
 const STREAM_SIZE_THRESHOLD: u64 = 256 * 1024;
 
+async fn verify_proxy_request(
+    request: &serde_json::Value,
+    signing_secret: Option<&str>,
+    replay_guard: &tokio::sync::Mutex<ReplayGuard>,
+) -> std::result::Result<(), &'static str> {
+    let secret = signing_secret
+        .filter(|key| key.len() == 64)
+        .ok_or("Node HTTP proxy requires a configured signing secret")?;
+    let (Some(timestamp), Some(nonce), Some(signature)) = (
+        request["timestamp"].as_str(),
+        request["nonce"].as_str().filter(|nonce| !nonce.is_empty()),
+        request["signature"].as_str(),
+    ) else {
+        return Err("Node HTTP proxy requires a signed request");
+    };
+    if !signing::verify_request_signature(request, secret, signature) {
+        return Err("HMAC signature verification failed");
+    }
+    if !replay_guard.lock().await.check(timestamp, nonce) {
+        return Err("Request rejected: replay or expired timestamp");
+    }
+    Ok(())
+}
+
 /// Execute a proxy request and return the WS response message(s).
 ///
 /// For non-streaming responses, returns a single `proxy_response` JSON string.
@@ -216,57 +240,13 @@ async fn execute_proxy_request_inner(
         .await;
         return;
     }
-    // 1. Verify HMAC signature if signing is enabled
-    if let Some(secret) = signing_secret {
-        let timestamp = request["timestamp"].as_str();
-        let nonce = request["nonce"].as_str();
-        let signature = request["signature"].as_str();
-
-        if timestamp.is_some() || nonce.is_some() || signature.is_some() {
-            let Some(signature) = signature else {
-                metrics.record_error();
-                let _ = send_ws_message(
-                    tx,
-                    proxy_error_response(request_id, "Missing HMAC signature", 403, false),
-                )
-                .await;
-                return;
-            };
-
-            if !signing::verify_request_signature(request, secret, signature) {
-                metrics.record_error();
-                let _ = send_ws_message(
-                    tx,
-                    proxy_error_response(
-                        request_id,
-                        "HMAC signature verification failed",
-                        403,
-                        false,
-                    ),
-                )
-                .await;
-                return;
-            }
-
-            // Replay protection
-            let timestamp = timestamp.unwrap_or("");
-            let nonce = nonce.unwrap_or("");
-            let mut guard = replay_guard.lock().await;
-            if !guard.check(timestamp, nonce) {
-                metrics.record_error();
-                let _ = send_ws_message(
-                    tx,
-                    proxy_error_response(
-                        request_id,
-                        "Request rejected: replay or expired timestamp",
-                        403,
-                        false,
-                    ),
-                )
-                .await;
-                return;
-            }
-        }
+    // Streaming uploads arrive with a separately verified opening and body.
+    if upload.is_none()
+        && let Err(message) = verify_proxy_request(request, signing_secret, replay_guard).await
+    {
+        metrics.record_error();
+        let _ = send_ws_message(tx, proxy_error_response(request_id, message, 403, false)).await;
+        return;
     }
 
     // 2. Look up credentials for this service
@@ -353,9 +333,9 @@ async fn execute_proxy_request_inner(
     };
 
     let normalized_path = if path.starts_with('/') {
-        path.to_string()
+        nyxid_service_adapters::SecretText::from(path)
     } else {
-        format!("/{path}")
+        nyxid_service_adapters::SecretText::concat(&["/", path])
     };
 
     if let Some(key) = cred.ifttt_key() {
@@ -386,19 +366,21 @@ async fn execute_proxy_request_inner(
             },
             None => None,
         };
-        let ifttt_headers = request["headers"]
-            .as_object()
-            .map(|headers| {
-                headers
-                    .iter()
-                    .filter_map(|(name, value)| {
-                        value
-                            .as_str()
-                            .map(|value| (name.clone(), value.to_string()))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let ifttt_headers = zeroize::Zeroizing::new(
+            request["headers"]
+                .as_object()
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .filter_map(|(name, value)| {
+                            value
+                                .as_str()
+                                .map(|value| (name.clone(), value.to_string()))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        );
         match ifttt_client
             .forward(
                 effective_base_url,
@@ -446,24 +428,12 @@ async fn execute_proxy_request_inner(
         return;
     }
 
-    // Path-prefix injection: prepend /{prefix}{credential} to the URL path
-    let final_path = if let Some((prefix, credential)) = cred.path_prefix() {
-        format!("/{prefix}{credential}{normalized_path}")
-    } else {
-        normalized_path
-    };
-
-    let mut url = format!("{}{}", effective_base_url.trim_end_matches('/'), final_path);
-    if let Some(q) = query
-        && !q.is_empty()
-    {
-        url = format!("{url}?{q}");
-    }
-
-    // Handle query_param injection by appending to URL
-    if let Some((param_name, param_value)) = cred.query_param() {
-        url = append_query_param(&url, param_name, param_value);
-    }
+    let url = credential_url(
+        effective_base_url.trim_end_matches('/'),
+        &normalized_path,
+        query,
+        cred,
+    );
 
     let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
     let destination_client;
@@ -488,7 +458,7 @@ async fn execute_proxy_request_inner(
     } else {
         http_client
     };
-    let mut req_builder = http_client.request(method.clone(), &url);
+    let mut req_builder = http_client.request(method.clone(), url.as_str());
 
     // 4. Collect forwarded headers. We accumulate them in `forwarded_headers`
     //    as well as applying them to the builder so SigV4 can sign over the
@@ -501,7 +471,7 @@ async fn execute_proxy_request_inner(
     //    keeping caller values would produce duplicate headers on the
     //    wire (Codex review BLOCKER 8).
     let is_aws_sigv4 = cred.aws_sigv4_credential().is_some();
-    let mut forwarded_headers: Vec<(String, String)> = Vec::new();
+    let mut forwarded_headers = zeroize::Zeroizing::new(Vec::new());
     if let Some(headers) = request["headers"].as_object() {
         for (name, value) in headers {
             if let Some(v) = value.as_str() {
@@ -518,7 +488,9 @@ async fn execute_proxy_request_inner(
                     }
                 }
                 req_builder = with_sensitive_header(req_builder, name, v);
-                forwarded_headers.push((name.clone(), v.to_string()));
+                if is_aws_sigv4 {
+                    forwarded_headers.push((name.clone(), v.to_string()));
+                }
             }
         }
     }
@@ -614,7 +586,46 @@ async fn execute_proxy_request_inner(
 
     // 7. Execute request
     match req_builder.send().await {
-        Ok(response) => {
+        Ok(mut response) => {
+            if nyxid_service_adapters::response_location::HEADERS
+                .iter()
+                .any(|name| response.headers().contains_key(*name))
+            {
+                let initial = reqwest::Url::parse(&url).ok();
+                let url_credential = cred
+                    .path_prefix()
+                    .or_else(|| cred.query_param())
+                    .map(|(_, v)| v);
+                for name in nyxid_service_adapters::response_location::HEADERS {
+                    let safe = response.headers().get_all(name).iter().all(|value| {
+                        let Ok(reference) = value.to_str() else {
+                            return false;
+                        };
+                        // reqwest may have followed a redirect. Forward the reference only
+                        // if it has the same meaning at both ends of that redirect chain.
+                        initial.as_ref().is_some_and(|initial| {
+                            initial.join(reference).ok().is_some_and(|destination| {
+                                let external_download = name == "location"
+                                    && response.status().is_redirection()
+                                    && destination.origin() != initial.origin()
+                                    && destination.origin() != response.url().origin();
+                                let same_service = !base_url.is_empty()
+                                    && initial.origin() == response.url().origin();
+                                (external_download || same_service)
+                                    && response.url().join(reference).ok().as_ref()
+                                        == Some(&destination)
+                            })
+                        }) && !url_credential.is_some_and(|credential| {
+                            nyxid_service_adapters::response_location::carries_credential(
+                                reference, credential,
+                            )
+                        })
+                    });
+                    if !safe {
+                        response.headers_mut().remove(name);
+                    }
+                }
+            }
             let status = response.status().as_u16();
             let is_streaming = streamed_request || should_stream_response(&response, status);
 
@@ -880,11 +891,65 @@ fn proxy_error_response_with_reason(
     payload.to_string()
 }
 
-pub fn append_query_param(url: &str, param_name: &str, param_value: &str) -> String {
-    let separator = if url.contains('?') { "&" } else { "?" };
-    let encoded_name = urlencoding::encode(param_name);
-    let encoded_value = urlencoding::encode(param_value);
-    format!("{url}{separator}{encoded_name}={encoded_value}")
+pub(super) fn credential_url(
+    base: &str,
+    normalized_path: &str,
+    query: Option<&str>,
+    credential: &super::credential_store::ServiceCredential,
+) -> nyxid_service_adapters::SecretText {
+    let (separator, prefix, secret) = credential
+        .path_prefix()
+        .map_or(("", "", ""), |(prefix, value)| ("/", prefix, value));
+    let query = query.filter(|q| !q.is_empty());
+    let url = nyxid_service_adapters::SecretText::concat(&[
+        base,
+        separator,
+        prefix,
+        secret,
+        normalized_path,
+        if query.is_some() { "?" } else { "" },
+        query.unwrap_or_default(),
+    ]);
+    match credential.query_param() {
+        Some((name, value)) => append_query_param(&url, name, value),
+        None => url,
+    }
+}
+
+pub fn append_query_param(
+    url: &str,
+    param_name: &str,
+    param_value: &str,
+) -> nyxid_service_adapters::SecretText {
+    nyxid_service_adapters::SecretText::with_query_param(url, param_name, param_value)
+}
+
+#[cfg(test)]
+pub(super) const TEST_SIGNING_SECRET: &str =
+    "3737373737373737373737373737373737373737373737373737373737373737";
+
+#[cfg(test)]
+pub(super) fn signed_test_request(request: &serde_json::Value) -> serde_json::Value {
+    signed_test_request_at(request, chrono::Utc::now())
+}
+
+#[cfg(test)]
+fn signed_test_request_at(
+    request: &serde_json::Value,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) -> serde_json::Value {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut request = request.clone();
+    request["timestamp"] = timestamp.to_rfc3339().into();
+    request["nonce"] = uuid::Uuid::new_v4().to_string().into();
+    let message = ["timestamp", "nonce", "method", "path", "query", "body"]
+        .map(|name| request[name].as_str().unwrap_or_default())
+        .join("\n");
+    let mut mac = Hmac::<Sha256>::new_from_slice(&[0x37; 32]).unwrap();
+    mac.update(message.as_bytes());
+    request["signature"] = hex::encode(mac.finalize().into_bytes()).into();
+    request
 }
 
 #[cfg(test)]
@@ -940,6 +1005,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn release_contract_proxy_requires_authentication_before_credential_lookup() {
+        use super::super::{config::NodeConfig, secret_backend::SecretBackend};
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::new("file", "node", dir.path()).unwrap();
+        let config: NodeConfig = serde_json::from_value(serde_json::json!({
+            "server":{"url":"ws://localhost"}, "node":{"id":"node","auth_token_encrypted":""}
+        }))
+        .unwrap();
+        let credentials = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
+        let request = serde_json::json!({"request_id":"test","service_slug":"unconfigured"});
+        let (tx, mut rx) = mpsc::channel(1);
+        let signed = signed_test_request(&request);
+        let mut tampered = signed.clone();
+        tampered["path"] = "/different".into();
+        let mut empty_nonce = signed.clone();
+        empty_nonce["nonce"] = "".into();
+        let expired =
+            signed_test_request_at(&request, chrono::Utc::now() - chrono::Duration::hours(1));
+        let replay = tokio::sync::Mutex::new(ReplayGuard::new());
+        let key = Some(TEST_SIGNING_SECRET);
+        let no_key = "Node HTTP proxy requires a configured signing secret";
+        let unsigned = "Node HTTP proxy requires a signed request";
+        let bad_mac = "HMAC signature verification failed";
+        let stale = "Request rejected: replay or expired timestamp";
+        for (frame, local_secret, status, message) in [
+            (&request, key, 403, unsigned),
+            (&request, None, 403, no_key),
+            (&signed, None, 403, no_key),
+            (&signed, Some("short"), 403, no_key),
+            (&empty_nonce, key, 403, unsigned),
+            (&tampered, key, 403, bad_mac),
+            (&expired, key, 403, stale),
+            (
+                &signed,
+                key,
+                502,
+                "No credentials configured for service 'unconfigured'",
+            ),
+            (&signed, key, 403, stale),
+        ] {
+            execute_proxy_request(
+                frame,
+                &credentials,
+                local_secret,
+                &replay,
+                &NodeMetrics::new(),
+                &tx,
+                false,
+                &build_http_client().unwrap(),
+            )
+            .await;
+            let NodeWsMessage::Text(frame) = rx.recv().await.unwrap() else {
+                panic!("expected response");
+            };
+            let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_eq!(frame["type"], "proxy_error");
+            assert_eq!(frame["request_id"], "test");
+            assert_eq!(frame["status"], status);
+            assert_eq!(frame["error"], message);
+            assert_eq!(frame["retryable"], status == 502);
+        }
+    }
+
+    #[tokio::test]
     async fn node_endpoint_2126_server_target_wins_over_stale_local_target() {
         use super::super::{config::NodeConfig, secret_backend::SecretBackend};
         use super::*;
@@ -982,9 +1112,9 @@ mod tests {
         let request = serde_json::json!({"request_id":uuid::Uuid::new_v4().to_string(), "service_slug":"monitor", "base_url":new.uri(), "method":"GET", "path":"/health", "headers":{}});
         let (tx, mut rx) = mpsc::channel(8);
         execute_proxy_request(
-            &request,
+            &signed_test_request(&request),
             &credentials,
-            None,
+            Some(TEST_SIGNING_SECRET),
             &tokio::sync::Mutex::new(ReplayGuard::new()),
             &NodeMetrics::new(),
             &tx,
@@ -1143,9 +1273,9 @@ mod tests {
         let metrics = NodeMetrics::new();
         let http_client = build_http_client().unwrap();
         execute_proxy_request_with_ifttt_client(
-            &request,
+            &signed_test_request(&request),
             &credentials,
-            None,
+            Some(TEST_SIGNING_SECRET),
             &guard,
             &metrics,
             &tx,
@@ -1169,9 +1299,9 @@ mod tests {
         request["path"] = "trigger/event_only".into();
         request["body"] = "".into();
         execute_proxy_request_with_ifttt_client(
-            &request,
+            &signed_test_request(&request),
             &credentials,
-            None,
+            Some(TEST_SIGNING_SECRET),
             &guard,
             &metrics,
             &tx,
@@ -1197,9 +1327,9 @@ mod tests {
             request["method"] = method.into();
             request["path"] = path.into();
             execute_proxy_request_with_ifttt_client(
-                &request,
+                &signed_test_request(&request),
                 &credentials,
-                None,
+                Some(TEST_SIGNING_SECRET),
                 &guard,
                 &metrics,
                 &tx,
@@ -1231,7 +1361,7 @@ mod tests {
         let url = append_query_param("https://example.com/api", "api key", "a=b&c d#fragment");
 
         assert_eq!(
-            url,
+            url.as_str(),
             "https://example.com/api?api%20key=a%3Db%26c%20d%23fragment"
         );
     }
@@ -1239,7 +1369,7 @@ mod tests {
     #[test]
     fn append_query_param_preserves_existing_query_string() {
         let url = append_query_param("https://example.com/api?x=1", "token", "abc");
-        assert_eq!(url, "https://example.com/api?x=1&token=abc");
+        assert_eq!(url.as_str(), "https://example.com/api?x=1&token=abc");
     }
 
     #[test]
@@ -1295,6 +1425,6 @@ mod tests {
     #[test]
     fn append_query_param_handles_empty_url() {
         let url = append_query_param("", "k", "v");
-        assert_eq!(url, "?k=v");
+        assert_eq!(url.as_str(), "?k=v");
     }
 }

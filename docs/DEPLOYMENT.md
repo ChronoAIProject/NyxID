@@ -8,6 +8,7 @@ This guide covers deploying NyxID in development, staging, and production enviro
 
 - [Prerequisites](#prerequisites)
 - [Local Development](#local-development)
+- [Releasing to production](#releasing-to-production)
 - [Building for Production](#building-for-production)
 - [Docker Deployment](#docker-deployment)
 - [Delegated Catalog v2 and Exact Authority v2 Rollout](#delegated-catalog-v2-and-exact-authority-v2-rollout)
@@ -96,6 +97,147 @@ The frontend starts on `http://localhost:3000`.
 curl http://localhost:3001/health
 # {"status":"ok","version":"0.5.0"}
 ```
+
+---
+
+## Releasing to production
+
+Feature PRs target `dev`. Pushes there trigger the staging build and deploy
+workflow for the backend and frontend. To promote the commit running on both, preview the rollup with
+`scripts/cut-release.sh --dry-run`, then run `scripts/cut-release.sh` to open
+the snapshot PR. The snapshot stays fixed while work continues on `dev`.
+
+**Main Merge Guard** accepts three sources from this repository for a PR into
+`main`. Each PR needs one approval, full **CI Pipeline**, a passing guard and
+**Create a merge commit**.
+
+| Source | What the guard checks |
+| --- | --- |
+| `dev` | The source is the integration branch. |
+| `release/YYYY-MM-DD` | The date is valid and the head is already in `dev` history. An optional numeric suffix starts at `-2`. |
+| `hotfix/<name>` | The head contains the current `main` tip and every commit it adds is absent from `dev`. The name has 1–64 ASCII characters, starts with a lowercase letter or digit, and may also contain `.`, `_` and `-`. |
+
+For an urgent production fix, branch from current `main` and open the hotfix
+PR back into `main`. If `main` advances during review, update the hotfix and
+rerun its checks. After it lands, open a PR **from `main` into `dev`** and
+choose **Create a merge commit** so the hotfix keeps its commit ancestry.
+The next rollup must use a snapshot containing that sync. Its notes follow
+the first parent of `dev` and list the sync PR once.
+
+### Automatic production deploys
+
+In GitHub, create the `production` environment with a deployment branch rule
+for `main` only. Store `NYXID_PRODUCTION_DEPLOY_CLIENT_ID` and
+`NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET` as environment secrets for the
+NyxID service account authorized to deploy the two production apps through
+the deployment proxy (OAuth scope `proxy`). The staging job reads
+`NYXID_STAGING_DEPLOY_CLIENT_ID` and `NYXID_STAGING_DEPLOY_CLIENT_SECRET`
+from the `staging` environment.
+
+Set `NYXID_DEPLOY_TARGET` separately in each GitHub environment's secrets.
+Supply a single-line JSON object with the following required fields.
+
+| Field | Meaning |
+| --- | --- |
+| `apps_url` | Full apps collection URL for the deployment project. The job appends the app name for updates and the app name followed by `/status` for readiness checks. |
+| `org_id` | Namespace scope sent with each deployment request. |
+| `backend.app`, `frontend.app` | App name in the corresponding component's JSON object. |
+| `backend.service`, `frontend.service` | Kubernetes service whose image the job updates and whose pod status it reads. |
+| `backend.version_url` | Backend health URL that reports status and the running commit. |
+| `frontend.version_url` | Frontend build-version URL that reports the running commit. |
+
+Use HTTPS URLs without credentials, query strings or fragments. App and service
+names start with an ASCII letter or digit, may also contain dots, underscores
+and hyphens, and have a 63-character limit. The namespace scope also permits
+colons after the first character and has a 128-character limit.
+
+Open **Actions → Publish Images → the main run → deploy-production** for
+progress. A push to `main` or **Run workflow** on `main` deploys once the
+CI gate and multi-architecture manifests succeed. Version tags only publish
+images. Production deploy jobs serialize. Each compares the live versions
+to the candidate before updating either app and checks the app again before
+its PATCH. A newer observed commit stops the run. A divergent or unknown
+commit fails it.
+
+The job deploys the backend first. It requires three consecutive ready
+samples, ten seconds apart, with the candidate commit and backend health
+status `ok`. It then checks both apps together as the frontend rolls out.
+For a failed or partial rollout, use **Re-run failed jobs** on that run.
+An app already serving the candidate is checked for readiness and skipped
+for update.
+
+### NyxBot deployment check
+
+The staging and production deploy jobs hold their existing deployment slot
+through a private NyxBot check. After both apps serve the candidate, the job
+signs in on the backend health URL's HTTPS origin, submits one owner invocation
+to a fixed private thread, requires a completed root turn with reply text,
+then sends one fixed message to a private test channel. The channel must
+return a platform message ID. The check has a 90-second deadline. An uncertain
+admission or unfinished turn gets one bounded cancellation request by its
+original idempotency key. The check never retries a paid turn or a send.
+
+Configure each GitHub environment separately. Use a dedicated, unprivileged
+owner with a hard-capped model budget, a private model-only specialist thread,
+and one opted-in channel route whose only recipient is a test account. Enable
+owner invocations for this owner after the fleet supports them. See
+[owner invocation rollout](chat/09-owner-cli-api.md#rollout-and-rollback).
+
+| Environment setting | Value |
+| --- | --- |
+| Secret `NYXID_CHECK_ACCOUNT` | JSON object with string fields `email`, `password`, `owner_id` (UUID returned by first-party CLI login), `conversation_id` (private specialist thread) and `channel_id` (channel conversation UUID). |
+| Secret `NYXID_CHECK_ALERT_URL` | HTTPS incoming webhook accepting a Slack-style JSON `text` field. Use an independent release on-call destination. |
+| Variable `NYXID_ROLLBACK_PAIR` | Optional compatibility approval in the form `<previous full SHA>..<candidate full SHA>`. An empty or stale value permits checks and blocks automatic restoration. |
+
+When check credentials are configured and both apps need updating, the job
+resolves both published manifests and pins each PATCH to its digest. The
+passing artifact name and JSON record the two digests actually applied. If
+registry lookup is unavailable, the usual SHA-tag rollout and check can
+proceed. Only a passing pair deployed by digest establishes a rollback target.
+
+Missing check secrets produce a visible skip. A passing check produces a JSON
+artifact retained for 90 days. Each record contains UTC time, environment,
+candidate commit, outcome, stage and rollback disposition. Failures keep the
+deploy job red, including after successful recovery. The alert includes the
+run link. Use the failed run's artifact and summary for incident history.
+
+Before arming a pair, review **every** intervening release and the environment's
+actual migrations, feature activations, workers and external writers against
+the rollback rules in `CLAUDE.md`. Examples include exact billing cutover, new
+billing allocation writers and the first owner invocation. Verify the previous
+binary supports all state the candidate or check can write. Coordinate manual
+deploys and hold incompatible activations through the deploy/check/restore
+window. Leave the variable empty for a forward-fix release or uncertain fleet
+state. Configure the pair before the deploy job starts.
+
+On failure the job requires the same predecessor SHA observed at **both** live
+version endpoints before rollout and immediately before their respective updates.
+It verifies commit ancestry, the exact compatibility approval and an unexpired passing
+check artifact from the latest run and attempt of that SHA's branch
+publish workflow. That run must have succeeded. Both live apps must still serve the failed candidate.
+Restoration uses the same deployer and the two recorded digests, updating the backend first
+and verifying both apps together when the frontend is ready. A changed live
+pair, missing proof, expired receipt, partial start or already-current start
+blocks automatic restoration. An ambiguous PATCH stops the sequence. Inspect
+the reported disposition before rerunning a failed deployment since a rerun
+can redeploy the failed candidate.
+
+### Rolling back a production release
+
+Coordinate the rollback with any active or queued Publish Images deploys.
+In the deployment platform, select the project and namespace identified by
+`apps_url` and `org_id` in the production environment's `NYXID_DEPLOY_TARGET`.
+Choose the seven-character SHA of a known-good, rollback-compatible `main`
+build. Update the backend and frontend apps and services named in the
+environment's `NYXID_DEPLOY_TARGET` in this order.
+
+1. Set the backend image to `ghcr.io/chronoaiproject/nyxid/backend:main-<sha7>`.
+   Wait for the app to report ready and for `backend.version_url` to return
+   `status: ok` and the expected 12-character commit.
+2. Set the frontend image to `ghcr.io/chronoaiproject/nyxid/frontend:main-<sha7>`.
+   Verify the same commit at `frontend.version_url`.
+
+Land the revert or fix on `main` so the next automatic deployment carries it.
 
 ---
 
@@ -404,6 +546,263 @@ groups and restarts to install the unique index.
 
 ---
 
+## Rolling deploys and graceful drain
+
+Server mode installs SIGTERM and ctrl-c receivers before configuration or database
+IO, and retains the same receivers through shutdown. Startup never cancels an
+awaited step on a signal. It checks at three safe points: after configuration,
+after the read-only database connection and transaction-capability check, and
+immediately before either listener binds. At the first two points it exits with
+status 0 without application writes or workers. After the database checkpoint,
+startup finishes through the bind checkpoint, including migrations and worker
+initialization. A pending signal there prevents both binds and the process-start
+audit, runs the existing drain for workers already started, then exits with
+status 0. A second signal is retained during startup and skips the drain wait
+once that checkpoint is reached; it never interrupts a startup step.
+
+For a startup signal, the configured drain budget starts at signal receipt.
+Remaining startup consumes that budget: with budget B and remaining startup S,
+at most max(B - S, 0) remains for drain and cleanup. This does not place a deadline
+on startup itself. If a startup operation stalls beyond B, the process reaches
+cleanup late, with no budget remaining; a platform kill can still interrupt it.
+Under the normal startup duration (less than ten seconds), the default 25-second
+budget includes the remaining startup and drain. One-shot commands install no
+server signal receivers; database command modes also start no billing or chain
+verification workers. After binding, shutdown follows the serving behavior below.
+
+SIGTERM or ctrl-c marks the process as draining. The unauthenticated `GET /ready`
+returns 503 immediately; `GET /health` keeps its existing 200 liveness response.
+Both public and internal replica listeners continue serving during the work wait,
+including ordinary requests and new turns that arrive while routing converges.
+There is no drain rejection on these request paths and `/ready` never accesses
+the database. The staging platform's readiness checks and load balancer retain
+this drain-only, empty-body contract. chrono-probe can use the same `/ready` signal;
+MongoDB availability is monitored separately (see
+[Health and readiness contract](HEALTH_READINESS.md)).
+
+The process stops taking new background queue claims, scheduled work and polls.
+Already claimed work finishes, with turn heartbeats, capacity renewal, node
+ownership renewal and security capability observations kept alive. The wait
+counts detached turns and delivery work as well as HTTP bodies and upgraded
+streams. Idle node management sockets are closed at handover; their pending
+operations keep the wait open. MCP notification subscriptions, assistant `/live`, and dedicated CMA agent/response
+event observers do not count as work. They end cleanly five seconds after
+drain starts, allowing readiness propagation before reconnecting. MCP clients
+resume the durable outbox with `Last-Event-ID`; assistant clients poll and refresh
+on `ready`/`resync` after reconnect. Dedicated CMA observers display Disconnected
+and retain the cursor for their existing Reconnect action; closing observation
+does not cancel the remote task. Generic proxy streams remain work because their
+upstream resume guarantees vary. An otherwise idle drain waits for those bodies
+to close. Turn/provider streams, downloads, managed setup results, native response
+replay delivery barriers and interactive sessions still wait for completion and
+can consume the full work-wait budget. Once work is idle, Axum finishes accepted connections while
+retaining the bound sockets. If an accepted request starts more work at that
+boundary, both listeners resume serving until that work finishes.
+
+`SHUTDOWN_DRAIN_TIMEOUT_SECS` defaults to **25 seconds**. The default fits
+Kubernetes' default 30-second termination grace period and needs no setting.
+The budget includes cleanup and the finish audit: the smaller of five seconds
+or 10% is reserved for cleanup. At the default, subscriptions end at five seconds,
+the work wait ends at 22.5 seconds, and remaining turns are interrupted with
+`turn_lost` / `shutdown`. Remaining local execution and response streams stop
+after at most another 0.5 seconds of ordinary settlement. Fenced settlement,
+release and the finish audit share the 2.5-second cleanup reserve; the process
+exits by the 25-second deadline, leaving five seconds for signal delivery,
+scheduling and process teardown before Kubernetes kills it. The asynchronous
+start audit has its own 1.25-second bound within this budget, not extra exit time.
+A blocking preStop hook must not consume the five-second margin.
+
+Work that needs longer than the budget when a deploy starts is ended and recorded
+as interrupted by shutdown. To let that work finish across a deploy, raise both
+values together: for an extended budget, the termination grace period must exceed
+the drain budget by at least 30 seconds. For example, set
+`SHUTDOWN_DRAIN_TIMEOUT_SECS=600` and use this Deployment fragment:
+
+```yaml
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 630
+      containers:
+        - name: nyxid
+          env:
+            - name: SHUTDOWN_DRAIN_TIMEOUT_SECS
+              value: "600"
+```
+
+The process exits earlier when work finishes. A second SIGTERM or ctrl-c skips
+the remaining wait and begins the same bounded cleanup. Explicit timeout values
+retain their existing behavior; `0` restores the old immediate-exit path,
+including its existing ten-second Discord cancellation allowance.
+
+At the end, runners settle remaining turns through the existing fenced path
+with stable code `turn_lost` and stage `shutdown`. Cleanup cancels remaining local
+execution, attempts settlement for this worker's remaining claims, closes node
+WebSockets with going-away code 1001, releases owned cluster leases and capacity
+slots without deleting polling checkpoints, and removes this generation's
+security observation after stopping its writer. Releases compare generations
+or exact claim tokens. One metadata-only `backend_shutdown_drain` chained audit
+and structured log describe the outcome, including the count of subscriptions
+ended by shutdown. Logs at drain start show the signal, budget and in-flight
+counts; another log records a second signal. Database failures and stuck cleanup
+have a shared deadline; they cannot extend the exit budget.
+
+The chained, metadata-only `backend_shutdown_drain_started` and
+`backend_shutdown_drain` events share the process's unique `generation`. The start
+records the budget, cleanup reserve and in-flight counts, including node operations.
+A start without a finish indicates the process was killed before the drain
+completed (a failed finish audit can also leave only a start); compare `budget_secs`
+with the platform's termination grace period. `0` emits no drain events.
+
+Start and finish records also include `open_http_at_start` and, at finish,
+`open_http_at_finish`: the largest 20 route-template/method/kind groups, their
+counts and oldest ages in whole seconds, plus `other_count` for omitted units.
+Groups also distinguish the resolved, unowned catalog `service` slug for active
+public `connection`/`internal` discovery entries regardless of creator (excluding
+internal `platform-*` and model-only rows, with empty/UUID-shaped slugs and every
+other resolved service reported as `custom`, omitted before resolution) on
+proxy/public/LLM routes and the fixed stream `content_type` family (`event-stream`,
+`json`, `other`), never private service slugs, user connection aliases or raw
+content-type headers.
+Kinds distinguish pending requests from response bodies/upgraded streams; age
+starts when that kind is registered. Raw paths, IDs, queries, headers and extension
+methods are never captured (`<unmatched>` / `OTHER` are fixed fallbacks).
+Detached/background guards have no static labels, so retain aggregate counts.
+While draining, `backend_shutdown_drain_progress` records elapsed time, counts,
+node operations and the same `open_http` summary at 10, 25, 60 and 300 seconds,
+skipping points at or beyond the budget (only 10 seconds applies by default).
+These at-most-four chained appends use
+the start audit's time bound and are cancelled before finish; they cannot keep
+work non-idle or extend cleanup. The last successful checkpoint bounds how far
+a killed drain got, though an audit failure can also explain a missing checkpoint.
+
+After both listeners bind, `backend_process_started` records the generation,
+build, bind time, and the latest other generation and heartbeat observed under
+the same instance name (if any), through the chained audit path; its background
+lookup is bounded to one second and the entire attempt to three seconds, without
+holding up serving. `previous_lookup` distinguishes `found`, `none`, and
+`unavailable`; a retained heartbeat is evidence of a prior process, not proof it
+was still alive, and gracefully retired observations are removed. Two process
+starts without an intervening drain for the earlier generation indicate an
+unobserved exit (including a crash or kill); a missing audit or a crash before
+listener binding can leave no start record, so one start alone does not prove a
+routing fault. Drain start, progress and finish records include `recent_traffic`:
+at most twelve five-second buckets with UTC boundaries and aggregate `received`
+and `responded` counts across both listeners, including probes and errors.
+`responded` counts middleware response-header completion, not body completion or
+confirmed client delivery; the newest bucket is partial and concurrent snapshots
+are approximate. Counting uses fixed process-local atomics and no request data or
+database calls; only those drain snapshots persist the rolling history.
+
+Cleanup does not clear uncertain provider-send barriers, wallet locks or
+purchased-credit expiry operations. Interrupted rotating OAuth refreshes, channel-webhook setup and Telegram setup
+retain their mutation locks; Discord identify rate windows retain their expiry. These records
+keep their existing recovery rules because releasing them could repeat an
+external effect. `billing:reconcile` uses its own cooperative stop and exact-token
+release after the current financial unit completes. If the deadline aborts that
+pass, its lease retains the default 30-second TTL; bulk shutdown release excludes
+it. Credit-schedule progress leases retain their existing 300-second expiry
+because they have no exact ownership token. Completion tasks, including detached audits, compensation and
+ledger appends, remain tracked while execution is stopped.
+
+Operators must match these settings in their platform's rollout configuration:
+
+- The default 25-second drain fits Kubernetes' default 30-second grace period.
+  For an extended drain budget, set the grace period at least 30 seconds higher;
+  allow the legacy Discord allowance when using `0`.
+- Readiness probe on `/ready`; liveness probe on `/health`.
+- Replace one replica at a time with surge capacity, allowing the successor to
+  become ready before terminating another replica.
+- Keep the draining replica's internal address reachable until it exits, because
+  peers forward node operations to the process that owns the socket.
+
+These are configuration requirements, not a description of production rollout
+tooling. That tooling is outside this repository. If the platform kills the
+process earlier, or MongoDB cannot confirm settlement within cleanup, peers use
+the unchanged stale-heartbeat recovery: 75 seconds plus the 15-second sweep
+cadence. A worker loss never automatically replays execution. A fully drained
+turn has its complete reply and needs no recovery.
+
+### Background turn rollback
+
+Enrollment in `nyxagent-reattach-v1` defaults off. An admin can enable
+`assistant:turn-handoff` for a person, an organization
+or globally in Feature Flags after every NyxID replica advertises
+`assistant:turn-handoff-v2` and every NyxAgent replica advertises
+`reattach.credential_watch`. Enrollment requires live fleet readiness, the
+watch capability and a selected profile with `inference_credential: thread`.
+
+Standalone NyxBot specialist assignments and member turns in personal web groups
+also require `assistant:turn-handoff-v3` across the serving NyxID fleet. They
+use the same feature flag. The survivor takes over the original team slot,
+publishes an assignment to its saved report thread, or settles the member reply
+and mention budget together in the group transcript. A pending group follower
+receives its ordinary `group_settled` event when the group becomes quiet.
+
+Owner-private chat turns and NyxBot event wakes require `assistant:turn-handoff-v4`
+on every serving replica. A survivor uses the admitted channel or team slot and
+the turn's saved routing. The existing event delivery worker owns the primary chat
+reply. A wake's supplemental replies carry their original destination through
+settlement. Their delivery workers skip confirmed parts and preserve uncertain
+sends for review. Personal manager chats use their admitted manager transport
+for discovery, replay and cancellation. Guest, voice, shared-agent, organization
+and collaboration lanes stay excluded.
+
+The admitting replica discovers missing metadata with the owner's existing
+private assistant credential. It allows two seconds in total before admission
+for `GET /v1/capabilities` and `GET /v1/models?include_capabilities=true`.
+The replica reuses deployment capabilities and the owner's profiles for up to
+60 seconds. Browser, mobile and automation clients can start a turn directly.
+If discovery lacks an authorized credential or times out, the turn proceeds
+in the foreground.
+
+Group `Assistant turn settled` logs by `restart_eligibility`. Count
+`watched_thread_credential` for enrolled turns. `capability_unavailable`
+indicates missing or incompatible deployment evidence, `profile_unknown`
+indicates insufficient evidence for the selected profile, and
+`platform_credential` identifies a profile using a platform key.
+`lane_ineligible` identifies a turn excluded by the lane check. `discovery_skipped`
+means the admission caller supplied no discovery snapshot. `upstream_refused_background`
+identifies a turn that fell back after an upstream refusal. The field is absent
+when the feature flag or fleet readiness gate skips negotiation.
+
+Disable every enabling override in Feature Flags **before rolling NyxAgent back**
+to a version without the credential watch. Allow 30 seconds for admission hints
+to expire and let admissions already in flight finish. Keep enrollment disabled until every NyxAgent
+replica advertises `reattach.credential_watch` again. Model discovery can
+precede a profile reload, and a different replica can admit the request.
+
+Before rolling back a fleet that has enrolled turns, disable every enabling
+override, allow 30 seconds for admission hints to expire and let admissions already in
+flight finish. Keep compatible subscribers and cancellation handlers serving.
+Run `mongosh "$NYXID_MONGODB_URI" --quiet --file scripts/mongodb/check-turn-handoff-rollback.js`
+with a URI selecting the NyxID database. Exit 0 means the majority read on the
+primary found zero outstanding conversation records and zero saved chat replies
+awaiting delivery. Exit 2 prints counts for subscribed, offered, claimed or
+stopped windows, grouped by the active lane when present, and the number of
+pending saved deliveries. Keep v4 subscribers and delivery workers running until
+both counts reach zero before rolling back to v3. Run this check before removing v3 subscribers even when rolling
+back to a v2-capable build. V2 readers decode the compatible source and skip
+version 3 in both offer discovery and the claim update. A read error requires another
+check. A stopped window clears after confirmed cancellation or after the next
+authorized admission replaces the internal credential. Deleting its marker by
+hand could let an earlier execution use the next turn's authority.
+
+Admins can read `assistant_turn_handoff` entries in the audit log. Each committed
+offer, claim and settlement records the generation of the pod that offered the
+turn. A second handoff has its own offering generation. Count transitions by
+generation in the NyxID database with the following read-only aggregation.
+
+```javascript
+db.audit_log.aggregate([
+  { $match: { event_type: "assistant_turn_handoff" } },
+  { $group: { _id: { generation: "$event_data.generation",
+                     transition: "$event_data.transition", outcome: "$event_data.outcome" },
+              count: { $sum: 1 } } },
+  { $sort: { "_id.generation": 1, "_id.transition": 1, "_id.outcome": 1 } }
+], { readConcern: { level: "majority" } })
+```
+
 ## Environment Configuration
 
 ### Required Variables
@@ -490,6 +889,18 @@ mongodb://user:pass@host1:27017,host2:27017,host3:27017/nyxid?authSource=admin&r
 ### Automatic Setup
 
 NyxID creates all required collections and indexes automatically on first startup via `db::ensure_indexes()`. No manual migration steps are needed for fresh installations.
+
+### Upgrading large databases
+
+Before rolling out this version to a large database, pre-build the 23 erasure
+and export indexes using the exact owner and export-selector commands in the
+[personal-erasure inventory](security/PERSONAL_ERASURE_INVENTORY.md).
+This is required for large collections such as `refresh_tokens`, `nyxbot_events`,
+`assistant_messages`, `trigger_deliveries`, and channel receipts. Startup awaits
+these builds before either listener binds, so a long first build can exhaust
+readiness/startup probe allowances. Pre-building lets the current replicas keep
+serving during the build; startup then reuses the compatible existing indexes.
+No existing index needs to be dropped, renamed, or rebuilt.
 
 ### Collections Created
 
@@ -585,6 +996,16 @@ Private signing-key backups remain sensitive even after the public verifier is r
 ## Reverse Proxy Configuration
 
 NyxID should run behind a reverse proxy in production for TLS termination, load balancing, and `X-Forwarded-For` header injection.
+
+### Account export transport
+
+Do not compress `POST /api/v1/users/me/export` at any ingress, reverse proxy or
+CDN. Preserve its exact `Content-Length`, disable response buffering, and propagate
+upstream body errors so interrupted exports cannot be saved as complete. The
+frontend nginx configuration has an exact export location with gzip and buffering
+disabled; apply the same rule to any additional ingress. If an intermediary does
+encode a response, clients cannot compare its wire length to decoded bytes and
+must fall back to JSON or structural validation.
 
 ### Caddy (Recommended)
 
@@ -737,6 +1158,18 @@ npm run build
 
 ## Health Checks and Monitoring
 
+For the frontend/backend endpoint matrix, finite JSON failure reasons, actual
+production/staging base URLs, chrono-probe assertions and staged rollout, see
+[Health and readiness contract](HEALTH_READINESS.md). Frontend `/health` retains
+its backend/version proxy; frontend-only probes are `/frontend/health` and
+`/frontend/ready`. The staging deployment platform and chrono-probe use backend
+`/ready` only for drain status. Both backend probes operate independently of MongoDB.
+Production Compose keeps backend `/health` and checks frontend `/frontend/ready`
+over loopback, exempt from its public rate/concurrency limits. Frontend
+orchestrators and load balancers must use `/frontend/health` for liveness and
+routing; `/frontend/ready` is for chrono-probe and local container healthchecks
+only, and must not drive replica eviction.
+
 Publish Images may reuse successful CI jobs from an identical pull-request
 merge tree on `main`; see [Main publish gate reuse](ci/MAIN_GATE_REUSE.md).
 Any uncertainty runs the complete release gate.
@@ -749,7 +1182,7 @@ curl https://auth.example.com/health
 ```
 
 Use this for:
-- Load balancer health checks
+- Liveness monitoring (load balancer readiness uses `/ready`)
 - Container orchestration liveness probes
 - Uptime monitoring (Uptime Robot, Pingdom, etc.)
 
@@ -764,8 +1197,9 @@ livenessProbe:
   periodSeconds: 10
 readinessProbe:
   httpGet:
-    path: /health
+    path: /ready
     port: 3001
+  timeoutSeconds: 3
   initialDelaySeconds: 5
   periodSeconds: 5
 ```
@@ -1634,3 +2068,84 @@ APPROVAL_EXPIRY_INTERVAL_SECS=10  # Check every 10 seconds
 - Ensure SPA fallback is configured (serve `index.html` for all routes)
 - Check browser console for CORS errors
 - Verify the API URL in the frontend build matches the backend URL
+
+
+## MongoDB pool saturation
+
+Budget `DATABASE_MAX_CONNECTIONS` per process and per MongoDB server. A starting
+recommendation for bursty assistant workloads is 50 per replica: 50 primary
+application sockets for one replica, 100 for two. Include deployment surge,
+other clients, two monitoring sockets per server per replica, and the minimum
+pools on other members. Keep the projected peak below 80% of the database's
+per-node connection limit. Confirm the Atlas tier's actual limit before choosing
+a deployment setting. A larger pool supplies headroom but cannot repair a lock
+cycle. The current configuration default remains 10.
+
+Change-stream getMore calls use pooled connections while waiting. NyxID has
+assistant live, execution-enrollment and machine-access change-stream consumers.
+The HTTP requests-per-second limit and per-owner turn limits do not bound the
+number of concurrent operations across the process.
+
+NyxID warns when a server pool stays fully occupied for at least one second and
+when a completed or failed checkout took at least one second. The warnings share
+a 30-second rate limit per server pool. They contain the configured maximum and
+elapsed milliseconds, with no command contents or account identifiers. Full
+occupancy is not proof of queued requests or deadlock; correlate it with MongoDB
+transaction/operation and resource telemetry. It is deliberately not reported as
+an exact queue length because the driver's CMAP events cannot track cancellation
+of individual waiters.
+
+Rust MongoDB driver 3.5.2 does not apply a checkout-wait deadline. Its parsed
+`waitQueueTimeoutMS` is not connected to the checkout implementation, and
+`socketTimeoutMS` is unsupported. Server-selection and connection-establishment
+timeouts do not bound checkout. Do not rely on those settings to limit a saturated
+pool's wait. A future checkout-only timeout needs driver support and a reviewed
+retryable error contract; cancelling a write after dispatch can leave an unknown
+outcome.
+
+On normal replica sets, a transaction returns its connection between commands;
+load-balanced topology pins a physical connection, and sharded transactions pin
+a mongos address. Independently, a database operation waiting on an uncommitted
+write occupies a connection. Enough such operations can prevent the writer's
+COMMIT from acquiring a connection. Keep writes in the intended session and
+avoid nested writers against a fence already held by their caller.
+
+Ordinary chained audit appends serialize through one process-wide async gate,
+before any database work. Queued callers hold no connection. They share a
+120-second queue/retry budget, allowing the default 60-second server transaction
+lifetime plus 60 seconds for cleanup and recovery; conflicts retry with capped jittered
+backoff instead of an eight-attempt limit. This is a retry budget, not a general
+MongoDB timeout: it does not cancel a dispatched command or an uncertain commit.
+Existing shorter caller deadlines still apply. An awaited audit can delay its
+request or background job; the existing error handling remains in place.
+
+Each attempt still reads the tail and inserts in a short transaction: a plain
+unique insert under the gate can strand COMMIT with pool one and can wait beyond
+the retry deadline. Transactional conflicts release the socket so the holder
+and retry clock can progress. A successful append adds one COMMIT command.
+Caller-owned in-session appends do not take the process gate. Stored audit rows,
+UUID replay checks and hash bytes do not change; mixed versions remain readable,
+but old replicas retain the ordinary-insert starvation and eight-attempt loss
+risks. Rollback restores those risks.
+
+The queue is in memory. Deadline exhaustion, shorter caller timeouts or process
+loss can still drop best-effort ordinary audits. Required security-effect
+intents retain and retry their own payloads; chain verification cannot reconstruct
+an ordinary audit entry that was never saved. Serialization has a throughput
+ceiling set by database round-trip latency; compare observed audit volume with
+measured append throughput before considering ordered batching.
+
+An ordinary audit caller still waiting for the gate after one second emits a
+warning with `queue_wait_ms` and `waiting` (queued callers only, excluding the
+holder). The warning repeats at most once per 30 seconds per process across all
+waiters, including while the holder remains blocked. Cancellation and queue
+deadlines remove waiters from the count. No audit content is logged, and the
+warning does no database work.
+
+A 5 ms majority commit alone caps the serial appender below 200 entries/second
+per replica; 10 ms caps it below 100. Tail reads, inserts, network latency and
+conflict retries lower those ceilings further. Sustained arrivals above capacity
+grow the in-memory queue; each caller has at most its remaining 120-second
+queue/retry budget (or a shorter caller deadline) before failing. Best-effort
+entries can then be lost. The warning exposes queue pressure; it does not add a
+durable queue, admission limit or batching.

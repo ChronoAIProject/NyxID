@@ -1,4 +1,4 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { createContext, useContext, type ReactNode } from "react";
 import { GripVertical } from "lucide-react";
 import { useSortable } from "@dnd-kit/sortable";
@@ -38,6 +38,7 @@ function SortableServiceRow({
   readonly blocked: boolean;
   readonly children: ReactNode;
 }) {
+  useUiTranslation();
   const {
     attributes,
     listeners,
@@ -46,7 +47,11 @@ function SortableServiceRow({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id, disabled: blocked });
+  } = useSortable({
+    id,
+    disabled: blocked,
+    attributes: { roleDescription: translateUi("sortable") },
+  });
   return (
     <DragHandleContext.Provider
       value={{ attributes, listeners, setActivatorNodeRef }}

@@ -502,16 +502,8 @@ pub async fn update_endpoint(
                 .to_string(),
         ));
     }
-    if let Some(url) = endpoint_url.as_deref()
-        && !url.is_empty()
-        && !url.starts_with("ssh://")
-    {
-        crate::services::url_validation::validate_user_endpoint_url(
-            url,
-            state.config.is_production(),
-            "endpointUrl",
-        )
-        .await?;
+    if let Some(url) = endpoint_url.as_deref() {
+        user_endpoint_service::validate_endpoint_url(url)?;
     }
 
     let fingerprint = fingerprint_canonical(&EndpointUpdateFingerprint {

@@ -238,7 +238,7 @@ pub async fn admit(
                     .session(&mut *session)
                     .await?;
                 let claim = Box::pin(engine::begin_owner_turn_in_session(
-                    &db2, session, &keys, &owner2, &start, &ids, &agent, learning, None, None,
+                    &db2, session, &keys, &owner2, &start, &ids, &agent, learning, None, None, None,
                 ))
                 .await?
                 .into_started()?;
@@ -487,6 +487,7 @@ pub async fn cancel_deleted_conversation(
 pub async fn decision_in_session(
     db: &Database,
     session: &mut ClientSession,
+    org_use_revision: i64,
     card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
 ) -> AppResult<Option<String>> {
     let Some(id) = card.invocation_id.as_deref() else {
@@ -497,8 +498,10 @@ pub async fn decision_in_session(
     }
     // The decision and continuation commit together, including specialist work.
     let text = format!(
-        "The owner {} the confirmation (acknowledgement_id {}). Continue within existing authority. Never retry a denied action. Report the result.",
-        card.status, card.id,
+        "The owner {} the confirmation (acknowledgement_id {}). Continue within existing authority. Never retry a denied action. {}",
+        card.status,
+        card.id,
+        super::assistant_acknowledgement_service::decision_narration(card.status == "allowed"),
     );
     let mut event = super::assistant_team_service::event("permission_decided", text, None)
         .bound_to(
@@ -507,6 +510,7 @@ pub async fn decision_in_session(
                 .and_then(|routing| routing.report_to()),
         )
         .for_invocation(Some(id));
+    event.org_use_revision = org_use_revision;
     event.execution_task = card.execution_task.clone();
     event.id = Uuid::new_v5(
         &Uuid::NAMESPACE_OID,

@@ -6,17 +6,45 @@
 matching nodes and services. Existing agents remain personal. Organizations MUST
 NOT have a NyxBot. No separate organization ownership field is added to agents.
 Authorization MUST use `org_service::resolve_owner_access` and live organization
-and membership state. Admin and Member may maintain organization agents; Viewer
-may inspect their profiles but may neither maintain nor use them. This agent-only
-maintenance policy does not expand Member permissions on other organization
-resources. Agent IDs are not service IDs: membership service scopes constrain
-resource grants and execution, not visibility of the agent profile.
+and membership state. An active Admin or Member with proxy rights is eligible
+for a specialist’s maintainer list, user list or both. A Viewer can inspect
+profile metadata. Service scopes still constrain resource grants and execution.
 
-Maintaining includes profile, grants, operation scopes, skills, shared memory and
-destruction. Using requires active membership with `can_proxy()`. UI, native
-tools, turn admission, queued work, and thread-key authentication MUST enforce
-these checks. Removed members, inactive organizations and Viewers MUST be refused
-on the next request. Existing scopes and skills retain their B1/B2 contracts.
+## Member access and governance
+
+Each organization specialist has two independent lists. Maintainers can change
+its profile, grants, skills, shared memory and other configuration. Users can
+chat with it and use it through supported crews, delegations, automations and
+member channels. On either list, `null` inherits all eligible members, including
+future members. An empty list grants that capability to nobody. An explicit
+list accepts up to 128 distinct eligible person IDs from the owning organization.
+Existing specialists inherit both lists until an Admin changes them.
+
+Any live Admin of the owning organization can inspect the lists using a first-party
+human session or access token. When authoring is available, that Admin can also
+replace the lists, even if both are empty or exclude the Admin. Admins can add
+themselves. Each change records the actor, organization, specialist, new revision,
+change counts and explicit self-adds in the security audit. Governance is available
+through the API and CLI. NyxBot has no tool or approval card for editing these lists.
+
+A save must supply the revision the Admin read. Concurrent saves from the same
+revision can commit one change. Saving equivalent sets, including a different
+ordering, preserves the revision and produces no audit event. A narrowing advances
+the affected capability’s internal revision. Removing one person, or changing
+inheritance to an explicit list, can therefore invalidate older work even for
+people who retain access. A new permitted turn provisions its credential automatically.
+Widening a list preserves its capability revision. Removing and re-adding a
+person cannot revive work admitted before the removal.
+
+Departure or demotion to Viewer prunes explicit selections transactionally.
+Rejoining or regaining Member status requires a fresh selection on a restricted
+list. Under inheritance, promotion restores role-based eligibility. After a
+Member → Viewer → Member transition, older work tied to the surviving membership
+may become usable again under inheritance.
+
+Genuine non-member guests use the specialist’s existing channel guest policy.
+A verified org member excluded from the user list is refused on the member
+lane. Guest exposure cannot turn that member’s request into an org-paid guest turn.
 
 ## Actor, threads and execution
 
@@ -100,16 +128,18 @@ machine and account permission requests. Decisions, including legacy cards,
 MUST recheck live maintainer authority inside the decision transaction; a personal
 NyxBot never confers organization authority of its own. Requests reuse the
 authentication snapshot when present, and granted calls add no maintainer reads.
-Admin and Member retain the existing agent-maintenance role semantics. Ordinary
+The specialist’s maintainer list applies inside the eligible Admin and Member roles. Ordinary
 action confirmations remain decided by the acting person; they do not confer
 new grants or permit personal account access for an organization agent.
 
-Agent memory is shared organization data, visible and editable by maintainers.
+Agent memory is shared organization data. Direct reads, counts, edits and
+deletions require maintenance. Users receive this memory in the model context
+and can ask the specialist about what it knows.
 Turn instructions MUST identify this shared memory and prohibit storing a
 member's private content in it. Shared memory is never populated automatically
 from another member's transcript. Viewers receive profile metadata without memory
-or private thread data. Audit contains actor person, owner organization, agent ID
-and change kind only; never prompts, memory, skills bodies or credentials.
+or private thread data. The policy-change audit records identifiers, revisions and bounded change facts.
+Prompts, memory, skill bodies and credentials stay out of that record.
 
 The Assistant agent list separates Personal and organization ownership. Detail
 shows ownership, the maintaining roles, and the caller's read-only/use state.
@@ -123,6 +153,11 @@ person-owned thread keys and could retain authority after membership removal.
 Enforcement is always enabled independently of this creation gate. Disable the
 flag before rollback, drain organization-agent turns and revoke their thread keys
 before running old binaries. Personal agents remain backward compatible.
+
+Access-list authoring has its own default-off flag,
+`assistant:org-agent-access-lists-v1`. Disabling it leaves every saved
+restriction in effect. Roll back to a release that enforces those restrictions.
+See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md#organization-specialist-access-lists).
 
 ## Organization group chats
 
@@ -188,8 +223,12 @@ Existing group routes and management tools accept the B3a organization selector
 MUST NOT post into or follow organization groups. Channel links now have a
 separate default-off `nyxbot:org-specialist-channels` contract: only live admins
 link same-org bots and specialists, verified members use their own org-member
-lanes, and explicitly enabled guests use bounded org-wallet authority. This does
-not publish the agent as a shared agent or admit guests to org groups. See
+lanes, and guests use bounded org-wallet authority. New bindings enable guests,
+including private chats, with disclosure before confirmation; missing billing
+refuses guest execution without changing that choice. Admins change bot settings;
+Members read them without private-chat/history data. Existing amount and bot-detail
+responses stay compatible; clients tolerate future absent amounts. This does not
+publish the agent as a shared agent or admit guests to org groups. See
 [the channel contract](chat/09-nyxbot-orchestrator.md#organization-specialists-on-channel-bots).
 Outside that enabled path, incompatible links retain
 `organization_agent_channel_unsupported`. Personal bots still cannot target org

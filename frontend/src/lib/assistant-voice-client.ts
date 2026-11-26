@@ -58,6 +58,7 @@ export class AssistantVoiceClient {
   private thread: string;
   private onSnapshot: (value: VoiceSnapshot) => void;
   private onError: (message: string) => void;
+  private startRequestId?: string;
   private onClosed: () => void;
   private lastPlaybackMs = 0;
   private onActivity: (activity: AudioActivity) => void;
@@ -132,6 +133,7 @@ export class AssistantVoiceClient {
     this.setStatus("microphone");
     this.preferences = preferences;
     this.preparation = preparation;
+    this.startRequestId = crypto.randomUUID();
     let step: VoiceStartStep = "microphone";
     try {
       this.audio = document.createElement("audio");
@@ -226,7 +228,7 @@ export class AssistantVoiceClient {
           method: "POST",
           signal: this.abort.signal,
           body: {
-            client_request_id: crypto.randomUUID(),
+            client_request_id: this.startRequestId,
             preferences,
             sdp_offer: "",
           },
@@ -290,7 +292,7 @@ export class AssistantVoiceClient {
         method: "POST",
         signal: this.abort.signal,
         body: {
-          client_request_id: crypto.randomUUID(),
+          client_request_id: this.startRequestId,
           preferences,
           sdp_offer: peer.localDescription?.sdp,
         },
@@ -311,12 +313,22 @@ export class AssistantVoiceClient {
       this.openControls();
     } catch (error) {
       if (!this.closed) {
-        if (error instanceof ApiError && error.status === 409) {
+        if (!this.session && step === "server") {
           try {
             const active = activeVoiceSessionSchema.parse(
               await api.get(`${this.path()}/active`),
             );
-            this.onConflict(active.session);
+            if (
+              active.session?.client_request_id &&
+              active.session.client_request_id === this.startRequestId
+            ) {
+              this.session = active.session;
+            } else if (
+              active.session ||
+              (error instanceof ApiError && error.status === 409)
+            ) {
+              this.onConflict(active.session);
+            }
           } catch {
             this.onConflict(null);
           }

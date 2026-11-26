@@ -43,6 +43,8 @@ type Pending = Pin<Box<dyn Future<Output = Completion> + Send>>;
 /// I/O before settling the ordinary turns. No detached execution or replay.
 #[derive(Default)]
 pub(super) struct Workers {
+    handles: Arc<std::sync::Mutex<super::link_handles::LinkHandles>>,
+    scope: Option<(String, String, String)>,
     contexts: HashMap<String, Arc<tokio::sync::Mutex<Executions>>>,
     pending: FuturesUnordered<Pending>,
     running: HashSet<String>,
@@ -60,6 +62,18 @@ impl Workers {
         if self.pending.len() >= 10 {
             return Err(AppError::VoiceQueueFull);
         }
+        let scope = (
+            call.id.clone(),
+            call.conversation_id.clone(),
+            call.user_id.clone(),
+        );
+        if self.scope.as_ref().is_some_and(|owned| owned != &scope) {
+            return Err(AppError::VoiceProviderUnavailable);
+        }
+        self.scope = Some(scope);
+        let mut input = input.clone();
+        let unknown =
+            input.restore_service_handles(&self.handles.lock().expect("voice link handles"))?;
         let context = self.contexts.entry(delegation.into()).or_default().clone();
         let (state, call, delegation, call_id, input) = (
             state.clone(),
@@ -78,10 +92,24 @@ impl Workers {
             Completion {
                 delegation,
                 call_id,
-                result,
+                result: result.map(|mut output| {
+                    if !unknown.is_empty() {
+                        if !output.is_object() { output = json!({"result":output}); }
+                        output["unrecognized_link_handles"] = json!(unknown);
+                        output["link_handle_notice"] = "These handles were not recognized and were passed literally to the tool; no URL was substituted.".into();
+                    }
+                    output
+                }),
             }
         }));
         Ok(())
+    }
+
+    pub(super) fn present_output(&self, state: &AppState, output: Value) -> Value {
+        self.handles
+            .lock()
+            .expect("voice link handles")
+            .present(state, output)
     }
 
     pub(super) fn pending(&self) -> bool {
@@ -141,6 +169,7 @@ impl Workers {
     pub(super) fn cancel_pending(&mut self) {
         self.pending = FuturesUnordered::new();
         self.running.clear();
+        *self.handles.lock().expect("voice link handles") = Default::default();
     }
 }
 
@@ -241,6 +270,27 @@ impl Invocation {
         }))
     }
 
+    fn restore_service_handles(
+        &mut self,
+        handles: &super::link_handles::LinkHandles,
+    ) -> AppResult<Vec<String>> {
+        let tool = self.arguments["tool_name"].as_str().unwrap_or_default();
+        // Native namespaces are excluded by default, including future tools.
+        if self.name != "nyx__call_tool"
+            || tool.starts_with("nyx__")
+            || tool.starts_with("nyxid__")
+            || !tool.contains("__")
+        {
+            return Ok(Vec::new());
+        }
+        let mut arguments: Value =
+            serde_json::from_str(self.arguments["arguments_json"].as_str().unwrap_or("{}"))
+                .map_err(|_| AppError::VoiceProviderUnavailable)?;
+        let unknown = handles.restore(&mut arguments);
+        self.arguments["arguments_json"] = arguments.to_string().into();
+        Ok(unknown)
+    }
+
     pub(super) fn can_execute(&self) -> bool {
         self.name == "nyx__call_tool"
     }
@@ -261,10 +311,8 @@ impl Execution {
             return Ok(());
         }
         let current = engine::get(&state.db, &self.row.user_id, &self.row.id).await?;
-        let chat = crate::services::assistant_acknowledgement_service::for_key(
-            &state.db,
-            &self.row.user_id,
-            Some(&self.row.credential_api_key_id),
+        let chat = crate::services::assistant_acknowledgement_service::chat_for_conversation(
+            &state.db, &self.row,
         )
         .await?
         .filter(|chat| chat.turn_live && !chat.turn_stopped)
@@ -315,8 +363,8 @@ pub(super) struct Executions {
     active: HashMap<String, Execution>,
 }
 
-fn unavailable() -> Value {
-    json!({"status":"outcome_unknown", "retry_allowed":false,
+fn unavailable(tool: &str, cause: Value) -> Value {
+    json!({"status":"outcome_unknown", "retry_allowed":false, "tool":tool, "cause":cause,
         "detail":"No verified tool result is available. The operation may have executed. Report that uncertainty. Do not repeat this operation or resubmit it as another task. A safe state query or other requested work may continue."})
 }
 
@@ -405,6 +453,7 @@ impl Executions {
             None,
             None,
             None,
+            None,
         ))
         .await?
         .into_started()?;
@@ -461,8 +510,12 @@ impl Executions {
             .as_ref()
             .ok_or(AppError::AssistantTurnRequired)?;
         validate_call(state, call).await?;
+        let tool = input.arguments["tool_name"].as_str().unwrap_or(&input.name);
+        let unavailable = |cause| unavailable(tool, cause);
         if tokio::time::Instant::now() >= execution.deadline {
-            return Ok(unavailable());
+            return Ok(unavailable(
+                json!({"stage":"voice_tool","error":"deadline_exceeded"}),
+            ));
         }
         let credential = credentials::load_for_conversation(
             &state.db,
@@ -488,29 +541,42 @@ impl Executions {
                     )
                     .send()
                     .await
-                    .map_err(|_| AppError::VoiceProviderUnavailable)?;
-                if !response.status().is_success()
-                    || response
-                        .content_length()
-                        .is_some_and(|n| n > MAX_BYTES as u64)
+                    .map_err(|error| {
+                        let reason = if error.is_timeout() {
+                            "timeout"
+                        } else if error.is_connect() {
+                            "connection_failed"
+                        } else {
+                            "request_failed"
+                        };
+                        json!({"stage":"mcp_transport", "error":reason})
+                    })?;
+                if !response.status().is_success() {
+                    return Err(
+                        json!({"stage":"mcp_transport","error":"http_error","status":response.status().as_u16()}),
+                    );
+                }
+                if response
+                    .content_length()
+                    .is_some_and(|n| n > MAX_BYTES as u64)
                 {
-                    return Err(AppError::VoiceProviderUnavailable);
+                    return Err(json!({"stage":"mcp_transport","error":"response_too_large"}));
                 }
                 let mut bytes = Vec::new();
                 while let Some(chunk) = response
                     .chunk()
                     .await
-                    .map_err(|_| AppError::VoiceProviderUnavailable)?
+                    .map_err(|_| json!({"stage":"mcp_transport","error":"response_interrupted"}))?
                 {
                     if bytes.len().saturating_add(chunk.len()) > MAX_BYTES {
-                        return Err(AppError::VoiceProviderUnavailable);
+                        return Err(json!({"stage":"mcp_transport","error":"response_too_large"}));
                     }
                     bytes.extend_from_slice(&chunk);
                 }
                 let result: Value = serde_json::from_slice(&bytes)
-                    .map_err(|_| AppError::VoiceProviderUnavailable)?;
+                    .map_err(|_| json!({"stage":"mcp_transport","error":"invalid_json"}))?;
                 if result["jsonrpc"] != "2.0" || result["id"] != call_id {
-                    return Err(AppError::VoiceProviderUnavailable);
+                    return Err(json!({"stage":"mcp_transport","error":"unexpected_envelope"}));
                 }
                 if let Some(error) = result.get("error") {
                     return Ok(
@@ -520,7 +586,7 @@ impl Executions {
                 let mut result = result
                     .get("result")
                     .cloned()
-                    .ok_or(AppError::VoiceProviderUnavailable)?;
+                    .ok_or_else(|| json!({"stage":"mcp_transport","error":"missing_result"}))?;
                 if result["isError"] == true {
                     return Ok(result);
                 }
@@ -534,7 +600,7 @@ impl Executions {
                             &state.encryption_keys,
                             &execution.row,
                         )
-                        .await?
+                        .await.map_err(|error| json!({"stage":"async_result","error":error.error_key(),"error_code":error.error_code()}))?
                     {
                         if !results.contexts.is_empty() {
                             result = json!({"isError": !results.succeeded, "content":results.contexts.iter().map(|text|
@@ -551,20 +617,23 @@ impl Executions {
             let mut renew = tokio::time::interval(Duration::from_secs(3));
             loop {
                 tokio::select! {
-                    result = &mut request => break result.unwrap_or_else(|_| unavailable()),
-                    _ = &mut limit => break unavailable(),
-                    _ = execution.permit.cancelled() => break unavailable(),
+                    result = &mut request => break result.unwrap_or_else(unavailable),
+                    _ = &mut limit => break unavailable(json!({"stage":"voice_tool","error":"deadline_exceeded"})),
+                    _ = execution.permit.cancelled() => break unavailable(json!({"stage":"voice_tool","error":"cancelled"})),
                     _ = renew.tick() => {
                         validate_call(state, call).await?;
                         if engine::stop_requested(&state.db, &call.user_id, &execution.row.id, &turn.turn_id).await?
-                            || !engine::heartbeat(&state.db, &call.user_id, &execution.row.id, &turn.turn_id).await? {
-                            break unavailable();
+                            || !engine::heartbeat(&state.db, &engine::WorkerFence::capture(&execution.row)?).await? {
+                            break unavailable(json!({"stage":"voice_tool","error":"turn_stopped"}));
                         }
                     }
                 }
             }
         };
         validate_call(state, call).await?;
+        if result["isError"] == true {
+            result["tool"] = json!(tool);
+        }
         // Optional image delivery cannot turn an already verified action into
         // a failed/unknown action or trigger replay.
         if let Err(error) = execution.append_images(state, &mut result).await {
@@ -631,13 +700,8 @@ impl Executions {
                     &turn.turn_id,
                 )
                 .await?
-                || !engine::heartbeat(
-                    &state.db,
-                    &execution.row.user_id,
-                    &execution.row.id,
-                    &turn.turn_id,
-                )
-                .await?
+                || !engine::heartbeat(&state.db, &engine::WorkerFence::capture(&execution.row)?)
+                    .await?
             {
                 expired.push(delegation.clone());
             }
@@ -663,3 +727,39 @@ impl Executions {
 #[cfg(test)]
 #[path = "tool_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod handle_allowlist_tests {
+    use super::*;
+    #[tokio::test]
+    async fn every_native_and_meta_tool_keeps_handle_arguments_literal() {
+        let (state, _, _) = super::super::tests::setup("voice_native_handle_allowlist").await;
+        let mut handles = super::super::link_handles::LinkHandles::default();
+        let presented = handles.present(&state, json!({"url":"https://external.example/document"}));
+        let handle = presented["url"].as_str().unwrap();
+        for name in crate::services::assistant_team_tools::TOOL_NAMES
+            .iter()
+            .chain(crate::services::assistant_team_tools::AGENT_TOOL_NAMES)
+            .chain(crate::services::assistant_account_tools::TOOL_NAMES)
+            .chain(NAMES)
+        {
+            let mut input = Invocation {
+                name: "nyx__call_tool".into(),
+                arguments: json!({"tool_name":name,"arguments_json":json!({"text":handle}).to_string()}),
+            };
+            let before = input.arguments.clone();
+            assert!(input.restore_service_handles(&handles).unwrap().is_empty());
+            assert_eq!(input.arguments, before, "{name}");
+        }
+        for name in ["nyx__search_tools", "nyx__list_connected_services"] {
+            let mut input = Invocation {
+                name: name.into(),
+                arguments: json!({"query":handle}),
+            };
+            let before = input.arguments.clone();
+            assert!(input.restore_service_handles(&handles).unwrap().is_empty());
+            assert_eq!(input.arguments, before);
+        }
+        state.db.drop().await.unwrap();
+    }
+}

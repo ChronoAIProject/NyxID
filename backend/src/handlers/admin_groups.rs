@@ -177,25 +177,16 @@ pub async fn create_group(
         ));
     }
 
-    let group = group_service::create_group(
+    let group = group_service::create_group_as(
         &state.db,
         &body.name,
         &body.slug,
         body.description.as_deref(),
         &body.role_ids,
         body.parent_group_id.as_deref(),
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.group.created",
-        Some(serde_json::json!({
-            "group_id": &group.id,
-            "group_slug": &group.slug,
-        })),
-    );
 
     let response = build_group_response(&state.db, group).await?;
     Ok(Json(response))
@@ -229,7 +220,7 @@ pub async fn update_group(
         .as_ref()
         .map(|p| if p.is_empty() { None } else { Some(p.as_str()) });
 
-    let group = group_service::update_group(
+    let group = group_service::update_group_as(
         &state.db,
         &group_id,
         body.name.as_deref(),
@@ -237,18 +228,9 @@ pub async fn update_group(
         body.description.as_deref(),
         body.role_ids.as_deref(),
         parent,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.group.updated",
-        Some(serde_json::json!({
-            "group_id": &group_id,
-            "group_slug": &group.slug,
-        })),
-    );
 
     let response = build_group_response(&state.db, group).await?;
     Ok(Json(response))
@@ -263,14 +245,12 @@ pub async fn delete_group(
 ) -> AppResult<Json<GroupMembershipResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    group_service::delete_group(&state.db, &group_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.group.deleted",
-        Some(serde_json::json!({ "group_id": &group_id })),
-    );
+    group_service::delete_group_as(
+        &state.db,
+        &group_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     Ok(Json(GroupMembershipResponse {
         message: "Group deleted".to_string(),
@@ -312,17 +292,13 @@ pub async fn add_member(
 ) -> AppResult<Json<GroupMembershipResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    group_service::add_member(&state.db, &group_id, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.group.member_added",
-        Some(serde_json::json!({
-            "group_id": &group_id,
-            "target_user_id": &user_id,
-        })),
-    );
+    group_service::add_member_as(
+        &state.db,
+        &group_id,
+        &user_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     Ok(Json(GroupMembershipResponse {
         message: "Member added".to_string(),
@@ -338,17 +314,13 @@ pub async fn remove_member(
 ) -> AppResult<Json<GroupMembershipResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    group_service::remove_member(&state.db, &group_id, &user_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.group.member_removed",
-        Some(serde_json::json!({
-            "group_id": &group_id,
-            "target_user_id": &user_id,
-        })),
-    );
+    group_service::remove_member_as(
+        &state.db,
+        &group_id,
+        &user_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     Ok(Json(GroupMembershipResponse {
         message: "Member removed".to_string(),

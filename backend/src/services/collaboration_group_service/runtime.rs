@@ -54,7 +54,7 @@ fn binding(row: &AssistantConversation) -> AppResult<&model::ExecutionBinding> {
     Ok(b)
 }
 
-pub(super) async fn access_in_session(
+async fn publication_access_in_session(
     db: &Database,
     row: &AssistantConversation,
     session: &mut ClientSession,
@@ -68,6 +68,16 @@ pub(super) async fn access_in_session(
     {
         return Err(missing());
     }
+    Ok(access)
+}
+
+pub(super) async fn access_in_session(
+    db: &Database,
+    row: &AssistantConversation,
+    session: &mut ClientSession,
+) -> AppResult<identity::RequestAccess> {
+    let access = publication_access_in_session(db, row, session).await?;
+    let b = binding(row)?;
     let slot = db.collection::<model::ExecutionSlot>(model::SLOTS).find_one(doc! {"_id":&b.slot_id,"group_id":&b.group_id,"agent_id":&b.agent_id,"original_requester_id":&b.original_requester_id,"conversation_id":&row.id,"revoked":false,"membership_revision":b.membership_revision}).session(&mut *session).await?.ok_or_else(missing)?;
     if slot.authority != b.authority {
         return Err(missing());
@@ -209,6 +219,11 @@ pub(crate) async fn key_authority(
             grants,
             agent.operation_scopes.clone(),
             agent.user_id.clone(),
+            if b.authority.lane == model::Lane::OrgMember {
+                b.authority.revision
+            } else {
+                0
+            },
         )
     };
     Ok(KeyAuthority::Collaboration(
@@ -381,7 +396,7 @@ pub(super) async fn begin_ready(
             start.note=Some(format!("Answer only in this group. Do not include private memory, notes, other chats or account details. {} Handoffs retain that requester. Agents: {roster}. Address people and agents only by the exact @handle shown above, never by account or agent IDs. For handoffs, copy the agent handle exactly. Recheck requested consent and action-card decisions before resuming an interrupted operation.",people::context(&participants,actor)));
             let ids = engine::OwnerTurnIds {
  artifact_budget: Default::default(),conversation_id:row.id.clone(),turn_id:turn_id.clone(),message_id:message_id.clone()};
-            let claim = engine::begin_owner_turn_in_session(db,session,keys,execution_user,&start,&ids,&raw_agent,None,None,None).await?.into_started()?;
+            let claim = engine::begin_owner_turn_in_session(db,session,keys,execution_user,&start,&ids,&raw_agent,None,None,None, None).await?.into_started()?;
             row=claim.conversation.clone();
             bind_key(db,&row,session).await?;
             let input = engine::turn_input(&row, &start);
@@ -434,21 +449,23 @@ pub(crate) async fn publish_reply(
     {
         return Ok(());
     }
-    let access = match access_in_session(db, row, session).await {
-        Ok(access) => access,
-        Err(error)
-            if error.is_forbidden()
-                || matches!(error, AppError::NotFound(_) | AppError::Conflict(_)) =>
-        {
-            return Ok(());
-        }
-        Err(error) => return Err(error),
+    use svc::assistant_wake_service::publication::settlement_result;
+    // Cancellation/slot retirement forbid new execution, not a completed
+    // reply whose original requester and audience are still authorized.
+    let Some(access) = settlement_result(publication_access_in_session(db, row, session).await)?
+    else {
+        return Ok(());
     };
-    identity::fence(db, &access, &b.agent_id, session).await?;
+    if settlement_result(identity::fence(db, &access, &b.agent_id, session).await)?.is_none() {
+        return Ok(());
+    }
     // Failed drafts, upstream diagnostics and private account/card details
     // never cross the audience boundary. Publish only the normalized turn code.
     let text = if failed {
-        let name = &access.agent(&b.agent_id).ok_or_else(missing)?.agent.name;
+        let Some(agent) = access.agent(&b.agent_id) else {
+            return Ok(());
+        };
+        let name = &agent.agent.name;
         let code = engine::TurnError::new(
             message
                 .error_code
@@ -460,10 +477,28 @@ pub(crate) async fn publish_reply(
     } else {
         message.text.clone()
     };
+    let mentioned_participant_ids = if failed {
+        Vec::new()
+    } else {
+        settlement_result(people::resolve(
+            &text,
+            &access.participants,
+            &access
+                .agents
+                .values()
+                .map(|a| a.agent.clone())
+                .collect::<Vec<_>>(),
+            false,
+        ))?
+        .map(|mentions| mentions.ids)
+        .unwrap_or_default()
+    };
     let claimed = db
         .collection::<GroupRequest>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
         .update_one(
-            doc! {"_id":&b.request_id,"collaboration.published_turn_ids":{"$ne":&turn.turn_id}},
+            doc! {"_id":&b.request_id,"group_id":&b.group_id,"actor_user_id":&b.original_requester_id,
+                "collaboration.version":model::VERSION,"collaboration.admitted_agent_ids":&b.agent_id,
+                "collaboration.published_turn_ids":{"$ne":&turn.turn_id}},
             doc! {"$addToSet":{"collaboration.published_turn_ids":&turn.turn_id}},
         )
         .session(&mut *session)
@@ -471,7 +506,7 @@ pub(crate) async fn publish_reply(
     if claimed.modified_count != 1 {
         return Ok(());
     }
-    let group = db.collection::<AssistantGroup>(GROUPS).find_one_and_update(doc! {"_id":&b.group_id,"collaboration.membership_revision":b.membership_revision},doc! {"$inc":{"message_count":1},"$set":{"updated_at":bson::DateTime::now(),"last_message_at":bson::DateTime::now()}}).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?.ok_or_else(stale)?;
+    let group = db.collection::<AssistantGroup>(GROUPS).find_one_and_update(doc! {"_id":&b.group_id,"collaboration.membership_revision":b.membership_revision},doc! {"$inc":{"message_count":1},"$set":{"updated_at":bson::DateTime::now(),"last_message_at":bson::DateTime::now()}}).return_document(mongodb::options::ReturnDocument::After).session(&mut *session).await?.ok_or_else(||AppError::DatabaseError(mongodb::error::Error::custom("Reply transaction lost its group fence")))?;
     // Only explicit chat delivery crosses the boundary; inspection-only images
     // and all tool traces remain private. Persist the public join independently
     // of the hidden thread so departure cleanup cannot break retained history.
@@ -509,36 +544,27 @@ pub(crate) async fn publish_reply(
         agent_name: None,
         text: text.clone(),
         recipient_agent_ids: vec![],
-        mentioned_participant_ids: if failed {
-            vec![]
-        } else {
-            people::resolve(
-                &text,
-                &access.participants,
-                &access
-                    .agents
-                    .values()
-                    .map(|a| a.agent.clone())
-                    .collect::<Vec<_>>(),
-                false,
-            )?
-            .ids
-        },
+        mentioned_participant_ids,
         created_at: Utc::now(),
     };
     db.collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
         .insert_one(&public)
         .session(&mut *session)
         .await?;
-    notifications::enqueue(db, &group, &public, session).await?;
-    crate::services::assistant_notification_service::record_collaboration_reply_in_session(
-        db,
-        session,
-        &b.original_requester_id,
-        &group,
-        &public,
-    )
-    .await?;
+    settlement_result(notifications::enqueue(db, &group, &public, session).await)?;
+    if !failed {
+        settlement_result(requests::handoffs_for_reply(db, b, &access, &text, session).await)?;
+    }
+    settlement_result(
+        crate::services::assistant_notification_service::record_collaboration_reply_in_session(
+            db,
+            session,
+            &b.original_requester_id,
+            &group,
+            &public,
+        )
+        .await,
+    )?;
     Ok(())
 }
 

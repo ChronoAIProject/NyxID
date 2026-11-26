@@ -7,6 +7,7 @@ import {
 } from "@/lib/assistant/direct-transport";
 import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { capture } from "@/lib/telemetry";
 vi.mock("@/lib/telemetry", async (importOriginal) => ({
@@ -95,6 +96,18 @@ beforeEach(() => {
 });
 
 describe("DirectAssistantTransport streaming", () => {
+  it("clears a pin after actual deletion and retains one when deletion fails", async () => {
+    const transport = new DirectAssistantTransport();
+    const id = await startedConversation(transport);
+    useAssistantPinsStore.getState().toggle("user-a", id);
+    await transport.deleteConversation(id);
+    expect(useAssistantPinsStore.getState().ids).not.toContain(id);
+    useAssistantPinsStore.getState().toggle("user-a", id);
+    await expect(transport.deleteConversation(id)).rejects.toThrow();
+    expect(useAssistantPinsStore.getState().ids).toContain(id);
+    useAssistantPinsStore.getState().bindAccount(null);
+  });
+
   it("seeds default models silently: no listener call, no-op identity kept", async () => {
     const transport = new DirectAssistantTransport();
     const listener = vi.fn();

@@ -1,7 +1,6 @@
 //! Sigstore's public constructor hides its TUF HTTP client. Supply our transport
 //! to tough directly, retaining TUF signatures, expiry, hashes and length checks.
 use anyhow::{Context, Result};
-use futures::TryStreamExt;
 use sigstore::trust::sigstore::SigstoreTrustRoot;
 use tough::{IntoVec, Transport, TransportError, TransportErrorKind};
 
@@ -258,13 +257,7 @@ pub(super) async fn load_github(
 struct GithubTransport(CliTransport);
 #[tough::async_trait]
 impl Transport for GithubTransport {
-    async fn fetch(
-        &self,
-        mut url: url::Url,
-    ) -> Result<
-        futures::stream::BoxStream<'static, Result<tough::Bytes, TransportError>>,
-        TransportError,
-    > {
+    async fn fetch(&self, mut url: url::Url) -> Result<tough::TransportStream, TransportError> {
         // The Git mirror stores versioned roots in root_history and current
         // metadata/targets without consistent-snapshot prefixes. tough still
         // checks every version, length, hash, expiry and signature.
@@ -314,17 +307,11 @@ struct CliTransport(reqwest::Client);
 
 #[tough::async_trait]
 impl Transport for CliTransport {
-    async fn fetch(
-        &self,
-        url: url::Url,
-    ) -> Result<
-        futures::stream::BoxStream<'static, Result<tough::Bytes, TransportError>>,
-        TransportError,
-    > {
+    async fn fetch(&self, url: url::Url) -> Result<tough::TransportStream, TransportError> {
         let mut download = Download {
             client: self.0.clone(),
             url,
-            stream: None,
+            response: None,
             next_byte: 0,
             accepts_ranges: false,
             retries: 0,
@@ -335,10 +322,10 @@ impl Transport for CliTransport {
             |mut download| async move {
                 loop {
                     match download
-                        .stream
+                        .response
                         .as_mut()
                         .expect("open download")
-                        .try_next()
+                        .chunk()
                         .await
                     {
                         Ok(Some(bytes)) => {
@@ -362,7 +349,7 @@ impl Transport for CliTransport {
 struct Download {
     client: reqwest::Client,
     url: url::Url,
-    stream: Option<futures::stream::BoxStream<'static, reqwest::Result<tough::Bytes>>>,
+    response: Option<reqwest::Response>,
     next_byte: usize,
     accepts_ranges: bool,
     retries: u32,
@@ -395,7 +382,7 @@ impl Download {
                         .get(reqwest::header::ACCEPT_RANGES)
                         .and_then(|value| value.to_str().ok())
                         .is_some_and(|value| value.contains("bytes"));
-                    self.stream = Some(Box::pin(response.bytes_stream()));
+                    self.response = Some(response);
                     return Ok(());
                 }
                 Err(error) => self.retry(error).await?,

@@ -1,3 +1,4 @@
+pub mod account_export_service;
 pub mod action_description;
 pub mod admin_assistant_analytics;
 pub mod admin_audit_service;
@@ -12,6 +13,7 @@ pub mod analytics_consent_service;
 pub mod analytics_dispatch_service;
 pub mod anonymous_endpoint_service;
 pub mod api_docs_service;
+pub(crate) mod api_key_audit_service;
 pub mod api_key_credential_service;
 pub mod api_key_mutation_service;
 pub mod api_key_scope_service;
@@ -25,14 +27,21 @@ pub mod assistant_agent_learning;
 pub mod assistant_agent_learning_review;
 pub mod assistant_cma_agent_service;
 pub mod assistant_cma_gateway;
+pub(crate) mod assistant_cma_legacy_service;
+mod assistant_cma_request_record;
+pub mod assistant_cma_reservation_recovery;
+pub mod assistant_cma_reservation_service;
 pub mod assistant_cma_sandbox_service;
+pub(crate) mod assistant_cma_slot_audit;
 pub mod assistant_direct;
 pub mod assistant_engine_policy;
 pub mod assistant_engine_worker;
 pub mod assistant_feedback_service;
 pub(crate) mod assistant_guest_model_setup;
 mod assistant_learning_publication;
+mod assistant_learning_record;
 pub mod assistant_links;
+pub mod assistant_memory_recovery;
 pub mod assistant_model_observer;
 pub mod assistant_readiness_service;
 pub mod assistant_real_work;
@@ -42,8 +51,11 @@ pub mod assistant_service;
 pub mod assistant_skill_authoring;
 pub mod assistant_start_retry;
 pub(crate) mod assistant_stream_checkpoint;
+pub mod assistant_tool_files;
 pub mod assistant_turn_observability;
+pub mod assistant_turn_restart;
 pub mod assistant_wire_log_service;
+pub(crate) mod attachment_filename;
 pub mod audit_chain_service;
 pub mod audit_service;
 pub mod auth_agent_key_login_service;
@@ -52,6 +64,7 @@ pub mod auth_service;
 pub mod billing;
 pub mod cae_webhook_service;
 pub mod call_channels;
+pub mod caller_token_approval;
 pub mod catalog_auth_scheme;
 pub(crate) mod catalog_credential_record_service;
 pub mod catalog_delegation_service;
@@ -67,11 +80,13 @@ pub mod channel_adapters;
 pub mod channel_admission_service;
 pub mod channel_billing_service;
 pub mod channel_bot_health;
+pub(crate) mod channel_bot_record;
 pub mod channel_bot_service;
 pub mod channel_bot_turn_service;
 pub mod channel_capability;
 pub mod channel_connect_link_service;
 pub mod channel_connection_webhook_service;
+mod channel_credential_continuity;
 pub mod channel_credentials;
 pub mod channel_delivery_service;
 pub mod channel_event_service;
@@ -92,8 +107,10 @@ pub mod channel_reply_notice;
 pub mod channel_reply_plan;
 pub mod channel_routing_service;
 pub mod channel_send_service;
+mod channel_signing_migration;
 pub mod channel_text;
 pub mod channel_text_delivery;
+pub mod channel_text_preparation;
 pub mod channel_thread_follow_service;
 pub mod channel_thread_service;
 pub mod channel_verification_service;
@@ -141,6 +158,7 @@ pub mod ifttt_oauth_service;
 pub mod incremental_consent_service;
 pub mod internal_auth;
 pub mod invite_code_service;
+pub(crate) mod job_health;
 pub mod key_service;
 pub mod lark_attachment_tool;
 pub mod lark_im_tool;
@@ -154,7 +172,10 @@ pub mod machine_external_source_service;
 pub mod managed_execution_service;
 pub mod mcp_approval;
 pub mod mcp_service;
+mod mcp_session_admission;
 pub mod mfa_service;
+pub mod mobile_social_service;
+pub mod node_credential_delivery;
 pub mod node_dispatch;
 #[cfg(test)]
 mod node_dispatch_tests;
@@ -172,6 +193,7 @@ pub mod oauth_app_source;
 pub(crate) mod oauth_broker_record_service;
 pub mod oauth_broker_service;
 pub mod oauth_client_service;
+mod oauth_client_webhook_record;
 pub mod oauth_consent_request_service;
 pub mod oauth_flow;
 pub mod oauth_resource_service;
@@ -202,6 +224,9 @@ pub mod ownership_transfer_service;
 #[cfg(test)]
 mod ownership_transfer_tests;
 pub mod par_service;
+pub(crate) mod personal_attribution_service;
+pub mod personal_data_registry;
+pub mod personal_erasure_orphan_sweep;
 pub mod personal_erasure_registry;
 pub mod personal_erasure_service;
 pub(crate) mod platform_binding_service;
@@ -234,10 +259,14 @@ pub mod pool_failover;
 pub mod provider_service;
 pub mod provider_token_exchange_service;
 pub mod proxy_authorization;
+pub mod proxy_destination;
+#[cfg(test)]
+mod proxy_destination_transport_tests;
 pub mod proxy_discovery_service;
 pub mod proxy_http_response;
 pub mod proxy_service;
 pub mod push_service;
+pub mod raw_attachment_tool;
 pub mod rbac_helpers;
 pub mod rci_audit_service;
 pub(crate) mod record_field_service;
@@ -246,6 +275,7 @@ pub mod resource_adapter;
 pub mod resource_request_proof;
 pub mod role_service;
 pub mod scope_catalog;
+pub mod security_effect_service;
 pub mod security_readiness_service;
 pub mod service_account_key_read_service;
 pub mod service_account_service;
@@ -263,6 +293,10 @@ pub mod social_token_exchange_service;
 pub mod sse_parser;
 pub(crate) mod ssh_ca_record_service;
 pub mod ssh_service;
+pub mod staging_qr;
+mod startup_seed_service;
+#[cfg(test)]
+mod startup_seed_tests;
 pub mod telegram_formatting;
 pub mod telegram_new_admin;
 pub mod telegram_new_api;
@@ -300,6 +334,7 @@ pub mod inference_voice;
 mod inference_voice_tests;
 pub mod options_service;
 pub mod platform_key_service;
+mod service_account_grant_audit;
 pub mod service_account_scope_service;
 
 pub mod channel_platform_catalog_service;
@@ -308,6 +343,7 @@ pub mod assistant_account_tools;
 pub mod assistant_acknowledgement_service;
 pub mod assistant_agent_credential_service;
 pub mod assistant_checking_notice;
+mod assistant_citation_markers;
 pub mod assistant_continuation;
 pub mod assistant_group_kind;
 pub mod assistant_group_service;
@@ -332,9 +368,13 @@ pub mod assistant_steering;
 pub mod assistant_task_status;
 pub mod assistant_team_service;
 pub mod assistant_team_tools;
+pub mod assistant_wake_service;
 pub mod channel_image_audience;
 pub mod channel_image_delivery;
+pub mod channel_image_preparation;
+pub(crate) mod channel_notices;
 pub mod channel_retry_ingress;
+pub(crate) mod channel_source_result;
 pub(crate) mod channel_turn_context;
 pub mod channel_turn_delivery;
 pub mod collaboration_group_service;
@@ -489,6 +529,7 @@ mod platform_provisioning_acceptance_tests;
 pub mod platform_setup_notice_service;
 
 pub mod assistant_access_policy;
+pub(crate) mod nyxbot_channel_key;
 pub(crate) mod nyxbot_channel_query_service;
 pub(crate) mod nyxbot_gateway_policy;
 pub(crate) mod nyxbot_gateway_service;
@@ -554,6 +595,8 @@ pub(crate) mod nyxbot_chat_settings_service;
 pub(crate) mod nyxbot_event_binding_service;
 pub(crate) mod nyxbot_gateway_host_move;
 pub(crate) mod nyxbot_gateway_release_service;
+pub(crate) mod nyxbot_thread_mutation;
+pub(crate) mod nyxbot_thread_reference;
 
 pub mod discord_gateway;
 pub mod domain_alias_service;
@@ -563,6 +606,7 @@ pub mod assistant_feedback_thread;
 mod shared_agent_tests;
 
 pub(crate) mod nyxbot_admission_service;
+pub(crate) mod nyxbot_event_record;
 pub(crate) mod nyxbot_gateway_source;
 pub(crate) mod nyxbot_response_recovery;
 
@@ -576,6 +620,7 @@ pub mod assistant_cma_admission;
 pub mod assistant_cma_tools;
 pub mod cma_session_origin;
 pub mod org_channel_service;
+pub(crate) mod org_thread_notice;
 
 pub mod generated_artifacts;
 pub(crate) mod invocation_diagnostic_service;
@@ -591,3 +636,31 @@ pub mod platform_model_credentials;
 
 pub mod assistant_tool_result_service;
 pub(crate) mod catalog_endpoint_service;
+pub(crate) mod channel_supplemental_delivery;
+
+pub mod shutdown;
+
+#[cfg(test)]
+pub(crate) mod durable_wake_tests;
+
+pub mod channel_turn_preparation;
+
+pub mod nyxbot_dispatch_identity;
+
+pub(crate) mod service_account_connection_audit;
+#[cfg(test)]
+mod service_account_connection_audit_tests;
+
+pub mod crash_report_service;
+
+pub mod crash_report_export;
+
+pub mod nyxbot_response_read;
+
+pub mod channel_meta_service;
+
+pub(crate) mod nyxbot_channel_connection_service;
+pub(crate) mod nyxbot_channel_setup_service;
+
+pub(crate) mod channel_meta_journal_erasure;
+pub mod channel_meta_management_service;

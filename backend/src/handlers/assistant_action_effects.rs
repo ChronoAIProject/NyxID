@@ -96,6 +96,18 @@ pub async fn rotate_key(
     Json(body): Json<RotateAssistantKeyRequest>,
 ) -> AppResult<Json<RotateAssistantKeyResponse>> {
     auth_user.ensure_write_scope()?;
+    let owner = super::api_keys::resolve_api_key_write_owner(
+        &state,
+        &auth_user.user_id.to_string(),
+        &body.key_id,
+    )
+    .await?;
+    super::assistant_nyxagent::survivor::cancel_before_revocation(
+        &state,
+        &owner,
+        mongodb::bson::doc! {"user_id":&owner,"credential_api_key_id":&body.key_id},
+    )
+    .await;
     let result = assistant_action_execution_service::rotate_key(
         &state.db,
         &state.encryption_keys,

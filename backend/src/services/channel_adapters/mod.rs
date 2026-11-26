@@ -1,6 +1,8 @@
 pub mod aurinko;
 pub mod discord;
 pub mod lark;
+pub mod meta;
+pub mod meta_managed;
 pub mod openclaw;
 pub mod slack;
 pub mod telegram;
@@ -189,6 +191,8 @@ pub fn registered_interfaces(cache: &Arc<TokenExchangeCache>) -> Vec<RegisteredI
         Box::new(x::XAdapter::default()),
         Box::new(openclaw::OpenClawAdapter),
         Box::new(aurinko::registered_adapter()),
+        Box::new(meta::MetaAdapter::new(meta::Inbox::Messenger)),
+        Box::new(meta::MetaAdapter::new(meta::Inbox::Instagram)),
     ];
     let mut entries: Vec<_> = legacy
         .into_iter()
@@ -249,7 +253,9 @@ mod tests {
                 "whatsapp",
                 "x",
                 "openclaw",
-                "aurinko"
+                "aurinko",
+                "messenger",
+                "instagram"
             ]
         );
         for adapter in &adapters[..9] {
@@ -266,6 +272,16 @@ mod tests {
         }
         assert!(adapters[9].serializes_lifecycle());
         assert!(adapters[9].persists_reply_attempt());
+        for adapter in &adapters[10..] {
+            assert!(adapter.serializes_lifecycle());
+            assert!(adapter.atomic_inbound_admission());
+            assert!(adapter.platform_webhook());
+            assert!(!adapter.outbound_capabilities().initiated_send);
+            assert_eq!(
+                adapter.media_capabilities(),
+                super::super::channel_platform::MediaCapabilities::NONE
+            );
+        }
     }
 
     #[test]
@@ -278,7 +294,7 @@ mod tests {
         };
         assert_eq!(
             message,
-            "unsupported platform: unknown. Supported: telegram, telegram-new, discord, lark, feishu, slack, whatsapp, x, aurinko"
+            "unsupported platform: unknown. Supported: telegram, telegram-new, discord, lark, feishu, slack, whatsapp, x, aurinko, messenger, instagram"
         );
         assert!(
             !resolve_adapter("openclaw", &Arc::new(TokenExchangeCache::new()))
@@ -291,7 +307,7 @@ mod tests {
     async fn outbound_capability_contract_for_every_registered_adapter() {
         use crate::services::channel_platform::{OutboundCapabilities, OutboundEdit};
         let adapters = registered_adapters(&Arc::new(TokenExchangeCache::new()));
-        assert_eq!(adapters.len(), 10);
+        assert_eq!(adapters.len(), 12);
         // Force all native network attempts to an unreachable local proxy.
         // No real platform receives the dummy credentials used by this contract.
         let http = reqwest::Client::builder()
@@ -308,6 +324,7 @@ mod tests {
             let (reply_to, thread) = match adapter.platform_id() {
                 "telegram" | "telegram-new" | "slack" => (true, true),
                 "whatsapp" | "aurinko" => (true, false),
+                "messenger" | "instagram" => (false, false),
                 "discord" | "lark" | "feishu" | "x" | "openclaw" => (false, false),
                 unexpected => panic!("Add outbound transport contracts for {unexpected}"),
             };
@@ -316,7 +333,10 @@ mod tests {
             assert_eq!(
                 capabilities,
                 OutboundCapabilities {
-                    initiated_send: !matches!(adapter.platform_id(), "openclaw" | "aurinko"),
+                    initiated_send: !matches!(
+                        adapter.platform_id(),
+                        "openclaw" | "aurinko" | "messenger" | "instagram"
+                    ),
                     reply_to,
                     thread,
                     edit: matches!(
@@ -358,7 +378,7 @@ mod media_contract {
     #[tokio::test]
     async fn all_media_declarations_have_native_implementations() {
         let adapters = registered_adapters(&Arc::new(TokenExchangeCache::new()));
-        assert_eq!(adapters.len(), 10);
+        assert_eq!(adapters.len(), 12);
         let http = reqwest::Client::builder()
             .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
             .timeout(std::time::Duration::from_millis(200))
@@ -372,7 +392,7 @@ mod media_contract {
                     inbound: &[MediaKind::Image, MediaKind::Video],
                     outbound: &[MediaKind::Image, MediaKind::Video],
                 },
-                "openclaw" | "aurinko" => MediaCapabilities::NONE,
+                "openclaw" | "aurinko" | "messenger" | "instagram" => MediaCapabilities::NONE,
                 other => panic!("Pin the media declaration for {other}"),
             };
             assert_eq!(adapter.media_capabilities(), expected);

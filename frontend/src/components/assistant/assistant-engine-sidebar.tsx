@@ -1,7 +1,8 @@
 import { readGroupInvite, clearGroupInvite } from "@/lib/collaboration-invite";
 import { GroupInviteDialog } from "./collaboration-group-controls";
 import { useConnectionDown } from "@/hooks/use-connection-down";
-import { useEffect, useMemo, useState, useSyncExternalStore, type ComponentProps } from "react";
+import { useContext, useEffect, useMemo, useState, useSyncExternalStore, type ComponentProps } from "react";
+import { AssistantMobileThreadsContext } from "./assistant-threads-context";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -39,6 +40,9 @@ export function AssistantEngineSidebar({
   readonly engine: "actor" | "direct" | "nyxagent";
 }) {
   const userId = useAuthStore((state) => state.user?.id);
+  const mobileDrawer = useContext(AssistantMobileThreadsContext);
+  const [mobileBrowse, setMobileBrowse] = useState<{ owner?: string; agent?: string; workspace: boolean }>();
+  const browse = mobileBrowse?.owner === userId ? mobileBrowse : undefined;
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const search = useRouterState({
@@ -81,10 +85,12 @@ export function AssistantEngineSidebar({
   });
   // An open group expands no agent; otherwise the open thread's agent, the
   // agent in the URL, or NyxBot.
-  const selectedAgent = openGroup
+  const selectedAgent = mobileDrawer && browse?.agent
+    ? agents.data?.agents.find((agent) => agent.id === browse.agent)
+    : openGroup
     ? undefined
     : selectedAgentOf(agents.data?.agents, openThreadAgentId, search.agent);
-  const nyx = useNyxAgentThreads({ agentId: selectedAgent?.id, enabled: nyxagentEnabled });
+  const nyx = useNyxAgentThreads({ agentId: selectedAgent?.id, enabled: nyxagentEnabled && selectedAgent?.can_use !== false });
   const actorKey = ["assistant", "actor", userId, "sidebar"];
   // The earlier engines' chats are not listed in NyxAgent mode, so they are
   // not fetched either.
@@ -147,7 +153,13 @@ export function AssistantEngineSidebar({
         threads: nyx.conversations,
         threadsLoading: Boolean(selectedAgent) && !nyx.threadsLoaded,
         // An agent lands on its latest thread (or a new one when it has none).
-        onSelectAgent: (agentId) => goTo({ agent: agentId }),
+        onSelectAgent: (agentId) => {
+          if (mobileDrawer) setMobileBrowse({ owner: userId, agent: agentId, workspace: false });
+          else goTo({ agent: agentId });
+        },
+        mobileThreadList: mobileDrawer && !browse?.workspace && Boolean(selectedAgent) &&
+          (Boolean(browse?.agent) || (onChatRoute && !home && !openGroup)),
+        onBackToWorkspace: mobileDrawer ? () => setMobileBrowse({ owner: userId, agent: selectedAgent?.id, workspace: true }) : undefined,
         onNewThread: (agentId) => goTo({ draft: true, agent: agentId }),
         onAgentDetails: setDetailsAgentId,
         onNewAgent: setCreatingAgent,

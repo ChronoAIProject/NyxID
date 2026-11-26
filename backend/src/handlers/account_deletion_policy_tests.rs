@@ -23,7 +23,7 @@ use crate::{
         remote_machine_outbox::COLLECTION_NAME as OUTBOX,
         user::{COLLECTION_NAME as USERS, User, UserType},
     },
-    services::{key_service, remote_machine_service as lifecycle},
+    services::{key_service, personal_data_registry, remote_machine_service as lifecycle},
     test_utils::{connect_transaction_test_database, test_app_state, test_user},
 };
 
@@ -83,18 +83,7 @@ impl Fixture {
             .await
             .expect("insert paused retained workspace");
         let state = test_app_state(db);
-        let human_token = crate::crypto::jwt::generate_access_token(
-            &state.jwt_keys,
-            &state.config,
-            &Uuid::parse_str(&owner).expect("owner UUID"),
-            "account:read",
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("sign first-party human token");
+        let human_token = human_token(&state, &owner);
         let (_, private) = crate::routes::build_router_with_state(state.clone());
         // /users/me intentionally rejects API keys before its extractor. This
         // fixture-only read proves the same live AuthUser authentication and
@@ -241,11 +230,13 @@ impl Fixture {
                 delegation_scopes: "account:read".into(),
                 default_service_catalog_slugs: vec![],
                 broker_capability_enabled: false,
+                first_party_management: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: None,
                 created_at: now,
@@ -451,6 +442,52 @@ impl Fixture {
     }
 }
 
+fn human_token(state: &AppState, user_id: &str) -> String {
+    crate::crypto::jwt::generate_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::parse_str(user_id).expect("user UUID"),
+        "account:read",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("sign first-party human token")
+}
+
+fn assert_retained_collections(response: &Value) {
+    let retained = response["retained"]
+        .as_array()
+        .expect("retained collection list");
+    let names: Vec<_> = retained
+        .iter()
+        .map(|entry| {
+            assert_eq!(entry.as_object().expect("retained collection").len(), 2);
+            assert!(
+                entry["reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty())
+            );
+            entry["collection"].as_str().expect("collection name")
+        })
+        .collect();
+    let expected_names: Vec<_> = personal_data_registry::ENTRIES
+        .iter()
+        .filter(|entry| matches!(entry.erasure, personal_data_registry::Erasure::Retained(_)))
+        .map(|entry| entry.collection)
+        .collect();
+    assert_eq!(names, expected_names);
+    for (collection, reason) in [
+        ("audit_log", "hash-chained audit records"),
+        ("billing_ledger", "financial and billing records"),
+        (MACHINES, "machine lifecycle records"),
+    ] {
+        assert!(retained.contains(&json!({"collection":collection,"reason":reason})));
+    }
+}
+
 #[tokio::test]
 async fn direct_account_delete_requires_current_disclosure_before_any_effect() {
     let f = Fixture::new("direct_account_policy_denial").await;
@@ -545,13 +582,68 @@ async fn direct_owner_account_delete_retains_policy_basis_while_physical_cleanup
     let f = Fixture::new("direct_account_durable_basis").await;
     let started = bson::DateTime::now();
     let response = f
-        .request(&f.human_token, false, "DELETE", DIRECT, Some(POLICY), None)
+        .request(
+            &f.human_token,
+            false,
+            "DELETE",
+            &format!("{DIRECT}?include_retained=true"),
+            Some(POLICY),
+            None,
+        )
         .await;
     assert_eq!(response.0, StatusCode::OK, "owner delete: {response:?}");
     assert_eq!(response.1["status"], "accepted");
     assert!(response.1["completed_at"].is_null());
+    assert_retained_collections(&response.1);
     f.assert_durable_owner_basis_and_idempotent_cleanup(started)
         .await;
+
+    let admin_id = Uuid::new_v4().to_string();
+    let mut admin = test_user(&admin_id, UserType::Person);
+    let roles = crate::services::role_service::get_platform_role_ids(&f.state.db)
+        .await
+        .expect("platform role IDs");
+    admin.role_ids.push(roles.admin);
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(admin)
+        .await
+        .expect("insert admin for erasure progress read");
+    let admin_token = human_token(&f.state, &admin_id);
+    let progress_path = format!("/api/v1/admin/users/{}/erasure", f.owner);
+    let legacy_progress = f
+        .request(&admin_token, false, "GET", &progress_path, None, None)
+        .await;
+    assert_eq!(
+        legacy_progress.0,
+        StatusCode::OK,
+        "legacy progress: {legacy_progress:?}"
+    );
+    assert!(legacy_progress.1["erasure"].get("retained").is_none());
+    let admin_progress = f
+        .request(
+            &admin_token,
+            false,
+            "GET",
+            &format!("{progress_path}?include_retained=true"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(
+        admin_progress.0,
+        StatusCode::OK,
+        "admin progress: {admin_progress:?}"
+    );
+    let progress = &admin_progress.1["erasure"];
+    assert_eq!(progress["job_id"], response.1["job_id"]);
+    assert!(matches!(
+        progress["status"].as_str(),
+        Some("pending" | "operator_action")
+    ));
+    assert!(progress["completed_at"].is_null());
+    assert_eq!(progress["retained"], response.1["retained"]);
     f.state.db.drop().await.expect("drop fixture");
 }
 
@@ -573,6 +665,7 @@ async fn assistant_owner_account_delete_retains_policy_basis_while_physical_clea
     assert_eq!(response.0, StatusCode::OK, "owner delete: {response:?}");
     assert_eq!(response.1["erasure"]["status"], "accepted");
     assert!(response.1["erasure"]["completed_at"].is_null());
+    assert!(response.1["erasure"].get("retained").is_none());
     let receipt = f
         .state
         .db

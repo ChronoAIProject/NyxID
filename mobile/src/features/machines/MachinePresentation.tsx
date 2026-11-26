@@ -1,10 +1,20 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { StyleSheet, Switch } from "react-native";
 import { SettingsRow } from "../../components/settings/SettingsList";
 import { useTheme } from "../../theme/ThemeContext";
 import { spacing } from "../../theme/designTokens";
 import type { MachineNode } from "./machineContracts";
 
-export const machineTabs = [{ label: "Machines" }, { label: "Saved logins" }];
+export const machineTabs = [{
+    get label() {
+      return translateApp("Machines");
+    },
+  }, {
+    get label() {
+      return translateApp("Saved logins");
+    },
+  }];
 
 /** Workspace pages keep their frame; content follows the Settings grouped-list rhythm. */
 export const machinePageContent = StyleSheet.create({
@@ -17,22 +27,22 @@ export const machinePageContent = StyleSheet.create({
 }).content;
 
 export function machineIsolationLabel(node: MachineNode) {
-  if (!node.machine?.shell) return "Commands off";
+  if (!node.machine?.shell) return translateApp("Commands off");
   return node.machine.commands_isolated === true
-    ? "Isolated"
+    ? translateApp("Isolated")
     : node.machine.commands_isolated === false
-      ? "Not isolated"
-      : "Isolation unknown";
+      ? translateApp("Not isolated")
+      : translateApp("Isolation unknown");
 }
 
 export function machineConnectivity(node: MachineNode) {
-  return node.is_connected ? "Online" : "Offline";
+  return node.is_connected ? translateApp("Online") : translateApp("Offline");
 }
 
 export function formatMachineDate(value: string | null | undefined) {
-  if (!value) return "Never";
+  if (!value) return translateApp("Never");
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString() : value;
+  return Number.isFinite(date.getTime()) ? date.toLocaleString(appLocale()) : value;
 }
 
 /** An inline switch row; switches never open a page. */
@@ -52,6 +62,7 @@ export function MachineSwitch({
   disabled?: boolean;
   onChange: (value: boolean) => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <SettingsRow

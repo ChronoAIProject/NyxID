@@ -8,13 +8,13 @@ import landingZhTW from "@/features/landing/i18n/locales/zh-TW.json";
 import onboardingEn from "@/features/nyxbot-onboarding/locales/en.json";
 import onboardingZhCN from "@/features/nyxbot-onboarding/locales/zh-CN.json";
 import onboardingZhTW from "@/features/nyxbot-onboarding/locales/zh-TW.json";
-import en from "./locales/en-overrides.json";
+import en from "./locales/app/en-overrides.json";
 import { registerCatalogLoader, waitForCatalogs } from "./catalog-loader";
 
 appI18n.addResourceBundle("en", "app", en);
 registerCatalogLoader("app", async (language) => {
-  if (language === "zh-CN") return (await import("./locales/zh-CN.json")).default;
-  if (language === "zh-TW") return (await import("./locales/zh-TW.json")).default;
+  if (language === "zh-CN") return (await import("./locales/app/zh-CN")).default;
+  if (language === "zh-TW") return (await import("./locales/app/zh-TW")).default;
   return en;
 });
 

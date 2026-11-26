@@ -36,3 +36,16 @@ pub struct UsageRollupState {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub rolled_up_through: DateTime<Utc>,
 }
+
+/// Separate progress document; old rollup writers leave it untouched.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct MeteringRetentionState {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub revision: i64,
+    pub after: Option<String>,
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub next_due_at: Option<DateTime<Utc>>,
+}

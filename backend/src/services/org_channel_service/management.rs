@@ -44,6 +44,7 @@ pub(crate) async fn patch(
     actor: &str,
     row: &NyxbotChannel,
     input: GuestSettingsPatch,
+    callback: Option<&str>,
 ) -> AppResult<()> {
     if input.enabled.is_none() && input.service_ids.is_none() && input.daily_credits.is_none() {
         return Err(AppError::ValidationError(
@@ -55,7 +56,7 @@ pub(crate) async fn patch(
         .as_ref()
         .ok_or_else(super::denied)?
         .guests;
-    update(
+    update_choice(
         db,
         actor,
         row,
@@ -65,8 +66,12 @@ pub(crate) async fn patch(
             daily_credits: input.daily_credits,
             expected_revision: Some(input.expected_revision),
         },
+        input.enabled.is_some(),
+        false,
+        callback,
     )
     .await
+    .map(|_| ())
 }
 
 pub(crate) fn service_digest(agent: &AssistantAgent, id: &str) -> String {
@@ -100,7 +105,67 @@ pub(crate) async fn load(
     Ok(row)
 }
 
-pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> AppResult<Value> {
+/// Use one owner snapshot and one agent query for the channel page.
+pub(crate) async fn manageable_agents(
+    db: &Database,
+    actor: &str,
+    channels: &[NyxbotChannel],
+) -> AppResult<std::collections::HashSet<String>> {
+    use crate::services::org_agent_service::{owners_for_page, specialist_rights};
+    use futures::TryStreamExt;
+    let owners = channels
+        .iter()
+        .filter_map(|row| row.org_specialist.as_ref().map(|b| b.org_id.as_str()))
+        .collect();
+    let owners = owners_for_page(db, actor, owners).await?;
+    if owners.is_empty() {
+        return Ok(Default::default());
+    }
+    let pairs: std::collections::HashSet<_> = channels
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row.agent_id.as_deref()?,
+                row.org_specialist.as_ref()?.org_id.as_str(),
+            ))
+        })
+        .collect();
+    let ids: Vec<_> = pairs.iter().map(|(id, _)| *id).collect();
+    let agents: Vec<AssistantAgent> = db
+        .collection(crate::models::assistant_agent::COLLECTION_NAME)
+        .find(doc! {"_id":{"$in":ids},"kind":"specialist","destroyed_at":null})
+        .await?
+        .try_collect()
+        .await?;
+    Ok(agents
+        .into_iter()
+        .filter(|agent| {
+            pairs.contains(&(agent.id.as_str(), agent.user_id.as_str()))
+                && owners.get(&agent.user_id).is_some_and(|(acl, _)| {
+                    let rights = specialist_rights(actor, agent, acl);
+                    rights.can_govern && rights.can_maintain
+                })
+        })
+        .map(|agent| agent.id)
+        .collect())
+}
+
+pub(crate) struct GuestViewInputs {
+    pub(crate) ready: bool,
+    admin: bool,
+    member_verified: bool,
+    agent: Option<AssistantAgent>,
+    services: Vec<GuestServiceSummary>,
+    reason: Option<&'static str>,
+    spent: Credits,
+    reserved: Credits,
+}
+
+pub(crate) async fn view_inputs(
+    db: &Database,
+    actor: &str,
+    row: &NyxbotChannel,
+) -> AppResult<GuestViewInputs> {
     let b = row.org_specialist.as_ref().ok_or_else(super::denied)?;
     let access = crate::services::org_agent_service::access(db, actor, &b.org_id).await?;
     let member_verified = crate::services::org_agent_service::can_use(&access)
@@ -111,54 +176,93 @@ pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> App
             .projection(doc! { "_id": 1 })
             .await?
             .is_some();
-    let admin = matches!(
-        access,
-        crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
-    );
     let agent = db
         .collection::<AssistantAgent>("assistant_agents")
         .find_one(doc! {"_id":&row.agent_id,"user_id":&b.org_id,"destroyed_at":null})
         .await?;
+    let admin = agent.as_ref().is_some_and(|a| {
+        let rights = crate::services::org_agent_service::specialist_rights(actor, a, &access);
+        rights.can_govern && rights.can_maintain
+    });
     let services = match agent.as_ref() {
         Some(agent) => guest_services(db, agent).await?,
         None => Vec::new(),
     };
     let ready = super::guest_grants_ready(db).await?;
-    let follows = ready && b.guests.follows_agent_grants;
-    let available: Vec<Value> = services
-        .iter()
-        .map(|s| json!({"id":s.id,"label":s.label}))
-        .collect();
-    let effective: Vec<_> = services
-        .iter()
-        .filter(|s| {
-            s.access != "none"
-                && agent
-                    .as_ref()
-                    .is_some_and(|a| super::guest_service_selected(a, &b.guests, ready, &s.id))
-        })
-        .collect();
+    let reason = crate::services::channel_bot_health::org_guest_billing(db, &b.org_id).await?;
     let (spent, reserved) = super::budget::today(
         db,
         b.guests.continuity_channel_id.as_deref().unwrap_or(&row.id),
     )
     .await?;
-    let reason = match super::budget::require_wallet(db, &b.org_id).await {
-        Ok(()) => None,
-        Err(AppError::BillingNotConfigured(_)) => Some("org_wallet_not_provisioned"),
-        Err(AppError::WalletSuspended) => Some("org_wallet_suspended"),
-        Err(e) => return Err(e),
-    };
-    Ok(
-        json!({"channel_id":row.id,"org_id":b.org_id,"agent_id":row.agent_id,
+    Ok(GuestViewInputs {
+        ready,
+        admin,
+        member_verified,
+        agent,
+        services,
+        reason,
+        spent,
+        reserved,
+    })
+}
+
+impl GuestViewInputs {
+    pub(crate) fn render(
+        self,
+        row: &NyxbotChannel,
+        b: &crate::models::org_channel::Binding,
+    ) -> Value {
+        let Self {
+            ready,
+            admin,
+            member_verified,
+            agent,
+            services,
+            reason,
+            spent,
+            reserved,
+        } = self;
+        let follows = ready && b.guests.follows_agent_grants;
+        let available: Vec<Value> = services
+            .iter()
+            .map(|s| json!({"id":s.id,"label":s.label}))
+            .collect();
+        let mut effective = Vec::new();
+        let mut binding_limits_guest_services = false;
+        for service in services.iter().filter(|service| service.access != "none") {
+            if agent
+                .as_ref()
+                .is_some_and(|a| super::guest_service_selected(a, &b.guests, ready, &service.id))
+            {
+                effective.push(service);
+            } else if b.guests.enabled && ready && !follows {
+                binding_limits_guest_services = true;
+            }
+        }
+        let health = reason
+            .filter(|_| b.guests.enabled)
+            .map(crate::services::channel_bot_health::guest_billing_advice);
+        let mut view = json!({"channel_id":row.id,"org_id":b.org_id,"agent_id":row.agent_id,
         "grants_ready":ready,"guest_policy_mode":if follows {"grants"} else {"legacy"},
+        "binding_limits_guest_services":binding_limits_guest_services,
         "legacy_fields_ignored":ready,"effective_guest_services":effective,"can_manage":admin,"member_verified":member_verified,"guest_enabled":b.guests.enabled,
-        "delegated_service_ids":b.guests.service_ids,"daily_credits":b.guests.daily_credits,
+        "delegated_service_ids":b.guests.service_ids,
         "guest_revision":b.guests.revision,"channel_status":row.status,
-        "default_daily_credits":default_daily_credits().to_string(),"spent_today_credits":spent,"reserved_today_credits":reserved,
+        "private_chats":row.private_chats.as_deref().unwrap_or("owner"),"health":health,
         "description":ORG_GUEST_EXPLANATION,
-        "guest_payer":"organization","available_services":available,"readiness_reason":reason}),
-    )
+        "guest_payer":"organization","available_services":available,"readiness_reason":reason});
+        view["daily_credits"] = json!(b.guests.daily_credits);
+        view["default_daily_credits"] = json!(default_daily_credits().to_string());
+        view["spent_today_credits"] = json!(spent);
+        view["reserved_today_credits"] = json!(reserved);
+        view
+    }
+}
+
+pub(crate) async fn view(db: &Database, actor: &str, row: &NyxbotChannel) -> AppResult<Value> {
+    let inputs = view_inputs(db, actor, row).await?;
+    Ok(inputs.render(row, row.org_specialist.as_ref().ok_or_else(super::denied)?))
 }
 
 pub(crate) async fn update(
@@ -166,7 +270,32 @@ pub(crate) async fn update(
     actor: &str,
     row: &NyxbotChannel,
     input: GuestSettings,
+    callback: Option<&str>,
 ) -> AppResult<()> {
+    update_choice(db, actor, row, input, true, false, callback)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) async fn enable_customer_dms(
+    db: &Database,
+    actor: &str,
+    row: &NyxbotChannel,
+    input: GuestSettings,
+    callback: Option<&str>,
+) -> AppResult<NyxbotChannel> {
+    update_choice(db, actor, row, input, true, true, callback).await
+}
+
+async fn update_choice(
+    db: &Database,
+    actor: &str,
+    row: &NyxbotChannel,
+    input: GuestSettings,
+    explicit_enabled: bool,
+    open_private_chats: bool,
+    callback: Option<&str>,
+) -> AppResult<NyxbotChannel> {
     let b = row.org_specialist.as_ref().ok_or_else(super::denied)?;
     super::require_admin(db, actor, &b.org_id).await?;
     super::enabled(db, &row.user_id).await?;
@@ -175,19 +304,43 @@ pub(crate) async fn update(
             "Reconnect this bot before changing guest access".into(),
         ));
     }
+    let migration_off = explicit_enabled && !input.enabled;
     if input
         .expected_revision
         .as_ref()
         .is_some_and(|revision| revision != &b.guests.revision)
+        && !(migration_off
+            && super::defaults::enabled_revision(
+                db,
+                row,
+                input
+                    .expected_revision
+                    .as_deref()
+                    .unwrap_or(&b.guests.revision),
+                None,
+            )
+            .await?
+            .as_deref()
+                == Some(b.guests.revision.as_str()))
     {
         return Err(settings_changed());
     }
+    let direct_meta = row.transport == "direct"
+        && crate::services::channel_adapters::meta::is_meta(&row.platform);
+    let require_grants = direct_meta && open_private_chats;
+    #[cfg(test)]
+    if require_grants {
+        crate::services::durable_wake_tests::after("org_meta_before_guest_mode").await;
+    }
     let ready = super::guest_grants_ready(db).await?;
+    if require_grants && !ready {
+        return Err(AppError::SecurityReadinessUnavailable);
+    }
     let daily_credits = input
         .daily_credits
         .or(b.guests.daily_credits)
         .unwrap_or_else(default_daily_credits);
-    if (!ready && daily_credits <= Credits::ZERO)
+    if (!ready && input.enabled && daily_credits <= Credits::ZERO)
         || input
             .service_ids
             .as_ref()
@@ -197,7 +350,7 @@ pub(crate) async fn update(
             "A positive daily guest budget and at most 100 delegated services are required".into(),
         ));
     }
-    if input.enabled {
+    if input.enabled && !b.guests.enabled {
         super::budget::require_wallet(db, &b.org_id).await?;
     }
     let agent = db
@@ -217,8 +370,18 @@ pub(crate) async fn update(
     };
     ids.sort();
     ids.dedup();
+    // Removing a service from a direct Meta inbox does not renew consent
+    // for the services the administrator kept.
+    let removes_only = direct_meta
+        && !ready
+        && input.service_ids.is_some()
+        && ids.iter().all(|id| b.guests.service_ids.contains(id))
+        && b.guests.service_ids.iter().any(|id| !ids.contains(id));
+    let author_services = !removes_only
+        && !ready
+        && (input.service_ids.is_some() || (input.enabled && (!direct_meta || !b.guests.enabled)));
     let mut authority = BTreeMap::new();
-    for id in ids.iter().filter(|_| !ready) {
+    for id in ids.iter().filter(|_| author_services) {
         let service = db
             .collection::<UserService>("user_services")
             .find_one(doc! {"_id":id,"user_id":&b.org_id,"is_active":true})
@@ -234,16 +397,41 @@ pub(crate) async fn update(
     }
     let mut policy = b.guests.clone();
     policy.enabled = input.enabled;
-    if !ready {
+    if removes_only {
+        policy.service_authority.retain(|id, _| ids.contains(id));
+        policy.service_ids = ids;
+    } else if author_services {
         policy.service_authority = authority;
         policy.service_ids = ids;
+    }
+    if !ready && (input.enabled || input.daily_credits.is_some()) {
         policy.daily_credits = Some(daily_credits);
     }
-    // Deprecated-only writes are accepted without changing or retiring authority.
-    if ready && policy == b.guests {
-        return Ok(());
+    // Deprecated-only writes record the save without changing execution authority.
+    let unchanged = ready
+        && policy == b.guests
+        && !open_private_chats
+        && !(explicit_enabled && (!policy.enabled || policy.revision.is_empty()));
+    if !unchanged {
+        policy.revision = uuid::Uuid::new_v4().to_string();
     }
-    policy.revision = uuid::Uuid::new_v4().to_string();
+    #[cfg(test)]
+    if policy.enabled {
+        crate::services::durable_wake_tests::after("org_guest_before_meta_write").await;
+    }
+    // Reductions remain available when delivery is unhealthy. Any new
+    // authority, including a changed service digest, keeps the live route gate.
+    let widening = policy.enabled
+        && (!b.guests.enabled
+            || open_private_chats
+            || (!ready
+                && (policy.daily_credits.unwrap_or_else(default_daily_credits)
+                    > b.guests.daily_credits.unwrap_or_else(default_daily_credits)
+                    || policy.service_ids.iter().any(|id| {
+                        !b.guests.service_ids.contains(id)
+                            || policy.service_authority.get(id)
+                                != b.guests.service_authority.get(id)
+                    }))));
     let context = (
         db.clone(),
         actor.to_owned(),
@@ -251,14 +439,47 @@ pub(crate) async fn update(
         policy,
         agent,
         ready,
+        unchanged,
+        migration_off,
+        author_services,
+        open_private_chats,
+        widening,
+        direct_meta,
+        callback.map(str::to_owned),
     );
-    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready)|Box::pin(async move{
+    crate::services::transaction_service::run_db_only(db,&context,|tx,(db,actor,row,policy,agent,ready,unchanged,migration_off,author_services,open_private_chats,widening,direct_meta,callback)|Box::pin(async move{
         let b=row.org_specialist.as_ref().ok_or_else(super::denied)?;
         super::fence_management(db,tx,row,actor).await?;
-        if *ready && !super::guest_grants_ready(db).await? { return Err(AppError::SecurityReadinessUnavailable); }
+        if (*ready || *direct_meta) && super::guest_grants_ready(db).await? != *ready {
+            return Err(if *ready { AppError::SecurityReadinessUnavailable } else { settings_changed() });
+        }
         let live:AssistantAgent=bson::from_document(super::live_doc(db,tx,"assistant_agents",doc!{"_id":&agent.id,"user_id":&b.org_id,"destroyed_at":null},true).await?).map_err(|_|super::denied())?;
-        if !*ready && policy.service_authority.iter().any(|(id,d)| !live.grants.service_ids.contains(id) || service_digest(&live,id)!=*d) {return Err(AppError::Conflict("Agent permissions changed; review the guest delegation again".into()));}
-        for id in policy.service_ids.iter().filter(|_| !*ready) {
+        let expands_services = *author_services && policy.service_ids.iter().any(|id| {
+            !b.guests.service_ids.contains(id) || policy.service_authority.get(id) != b.guests.service_authority.get(id)
+        });
+        // When Grants returns, a single stale digest still closes every
+        // delegated service on a frozen binding. Removing that digest may
+        // restore execution through the retained services.
+        let restores_frozen_delegation = !b.guests.follows_agent_grants && policy.enabled
+            && !super::guest_delegation_current(&live, &b.guests)
+            && super::guest_delegation_current(&live, policy);
+        if *direct_meta && !*ready && (expands_services || restores_frozen_delegation) {
+            use crate::services::security_readiness_service as readiness;
+            readiness::fence_org_guest_grants_activation(db, tx).await?;
+            #[cfg(test)]
+            crate::services::durable_wake_tests::after("meta_legacy_grants_cutover_fence").await;
+            if readiness::org_guest_grants_activated_in_session(db, tx).await? {
+                return Err(AppError::Conflict("Guest permissions have moved to Grants. Review the specialist’s guest services there before expanding access.".into()));
+            }
+        }
+
+        let newly_eligible = *direct_meta && !*ready
+            && !legacy_eligible(&b.guests,&live) && legacy_eligible(policy,&live);
+        if *widening || newly_eligible {
+            crate::services::nyxbot_channel_query_service::fence_meta_default(db,row,callback.as_deref(),tx).await?;
+        }
+        if *author_services && policy.service_authority.iter().any(|(id,d)| !live.grants.service_ids.contains(id) || service_digest(&live,id)!=*d) {return Err(AppError::Conflict("Agent permissions changed; review the guest delegation again".into()));}
+        for id in policy.service_ids.iter().filter(|_| *author_services) {
             let service:UserService=bson::from_document(super::live_doc(db,tx,"user_services",doc!{"_id":id,"user_id":&b.org_id,"is_active":true},true).await?).map_err(|_|super::denied())?;
             if service.node_id.is_some() || service.service_type!="http" {return Err(super::denied());}
         }
@@ -268,18 +489,41 @@ pub(crate) async fn update(
         } else {
             filter.insert("org_specialist.guests.revision",&b.guests.revision);
         }
+        if *migration_off
+            && let Some(revision) = super::defaults::enabled_revision(db, row, &b.guests.revision, Some(&mut *tx)).await? {
+            filter.remove("org_specialist.guests.revision");
+            filter.insert("$or",bson::bson!([{"org_specialist.guests.revision":&b.guests.revision},{"org_specialist.guests.revision":revision}]));
+        }
+        let channels = db.collection::<NyxbotChannel>("nyxbot_channels");
+        if *unchanged {
+            let current = channels.find_one(filter).session(&mut *tx).await?.ok_or_else(settings_changed)?;
+            crate::services::nyxbot_gateway_release_service::audit(db,tx,actor,super::defaults::SAVE_EVENT,json!({"channel_id":row.id})).await?;
+            return Ok(current);
+        }
         let mut fields=doc!{"org_specialist.guests":bson::to_bson(policy).map_err(|_|super::denied())?,"updated_at":bson::DateTime::now()};
         // Explicitly enabling guests opens private guest admission too. Editing
         // a budget or delegation must not broaden a saved private-chat limit.
-        if policy.enabled && !b.guests.enabled {fields.insert("private_chats","everyone");}
-        let changed=db.collection::<Document>("nyxbot_channels").update_one(filter,
-            doc!{"$set":fields}).session(&mut *tx).await?;
-        if changed.matched_count!=1 {return Err(settings_changed());}
+        if *open_private_chats || (policy.enabled && !b.guests.enabled) {fields.insert("private_chats","everyone");}
+        let committed = channels.find_one_and_update(filter, doc!{"$set":fields})
+            .return_document(mongodb::options::ReturnDocument::After)
+            .session(&mut *tx).await?.ok_or_else(settings_changed)?;
         // Every exposure revision retires its old guest lanes immediately.
         // Members keep their own keys and turns; settlement retains its holds.
         super::lifecycle::retire_in_session(db,tx,&row.id,Some(&b.org_id)).await?;
-        Ok(())
+        crate::services::nyxbot_gateway_release_service::audit(db,tx,actor,super::defaults::SAVE_EVENT,json!({"channel_id":row.id})).await?;
+        Ok(committed)
     })).await
+}
+
+/// Match the legacy execution floor, including execution-wide digest refusal.
+fn legacy_eligible(
+    policy: &crate::models::org_channel::GuestPolicy,
+    agent: &AssistantAgent,
+) -> bool {
+    policy.enabled
+        && !policy.revision.is_empty()
+        && policy.daily_credits.is_some_and(|cap| cap > Credits::ZERO)
+        && super::guest_delegation_current(agent, policy)
 }
 
 fn settings_changed() -> AppError {
@@ -320,11 +564,27 @@ pub(crate) async fn restore_in_session(
         || saved.version != 1
         || saved.org_id != binding.org_id
         || previous.bot_owner_id != row.bot_owner_id
-        || previous.agent_id != row.agent_id
         || super::super::channel_platform::canonical_platform(&previous.platform)
             != super::super::channel_platform::canonical_platform(&row.platform)
     {
         return Ok(());
+    }
+    if previous.agent_id != row.agent_id {
+        let mut policy = binding.guests.clone();
+        policy.enabled = saved.guests.enabled;
+        policy.continuity_channel_id = Some(
+            saved
+                .guests
+                .continuity_channel_id
+                .clone()
+                .unwrap_or_else(|| previous.id.clone()),
+        );
+        // Retargeting keeps the saved exposure choice but uses the new target's grants.
+        db.collection::<Document>("nyxbot_channels").update_one(
+            doc! {"_id":&row.id,"status":"pending","org_specialist.revision":&binding.revision},
+            doc! {"$set":{"org_specialist.guests":bson::to_bson(&policy).map_err(|_|super::denied())?,"private_chats":&previous.private_chats}}
+        ).session(&mut *tx).await?;
+        return audit_restoration(db, tx, row, &previous, &policy).await;
     }
     let agent: AssistantAgent = bson::from_document(super::live_doc(db, tx, "assistant_agents",
         doc! {"_id":&row.agent_id,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null}, true).await?)
@@ -357,32 +617,26 @@ pub(crate) async fn restore_in_session(
             policy.service_authority.insert(id.clone(), digest);
         }
     }
-    if !super::guest_grants_ready(db).await?
-        && !policy
-            .daily_credits
-            .is_some_and(|credits| credits > Credits::ZERO)
-    {
-        policy.enabled = false;
-    }
-    if policy.enabled {
-        match super::budget::require_wallet(db, &binding.org_id).await {
-            Ok(()) => {}
-            Err(AppError::BillingNotConfigured(_) | AppError::WalletSuspended) => {
-                policy.enabled = false
-            }
-            Err(error) => return Err(error),
-        }
-    }
     db.collection::<Document>("nyxbot_channels").update_one(
         doc! {"_id":&row.id,"status":"pending","org_specialist.revision":&binding.revision},
         doc! {"$set":{"org_specialist.guests":bson::to_bson(&policy).map_err(|_|super::denied())?,
             "private_chats":&previous.private_chats}}).session(&mut *tx).await?;
+    audit_restoration(db, tx, row, &previous, &policy).await
+}
+
+async fn audit_restoration(
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &NyxbotChannel,
+    previous: &NyxbotChannel,
+    policy: &super::GuestPolicy,
+) -> AppResult<()> {
     crate::services::nyxbot_gateway_release_service::audit(
         db,
         tx,
         &row.user_id,
-        "org_channel_guest_policy_restored",
-        json!({"channel_id":row.id,"predecessor_id":previous.id,
+        super::defaults::RESTORE_EVENT,
+        json!({"channel_id":row.id,"predecessor_id":previous.id,"guest_revision":policy.revision,
             "delegated_services":policy.service_ids.len(),"enabled":policy.enabled}),
     )
     .await

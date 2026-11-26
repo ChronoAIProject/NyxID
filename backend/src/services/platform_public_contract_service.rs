@@ -312,15 +312,14 @@ pub(crate) async fn fence_deployment(
             .await?
             .ok_or_else(denied)?;
         proxy::require_model_catalog_for_sponsor(&service, &e.binding.sponsor_owner_user_id, &op)?;
-        let endpoints: Vec<ServiceEndpoint> = db
+        let mut cursor = db
             .collection::<ServiceEndpoint>(ENDPOINTS)
             .find(doc! {"service_id":&service.id})
             .sort(doc! {"_id":1})
             .session(&mut *session)
-            .await?
-            .stream(&mut *session)
-            .try_collect()
             .await?;
+        let endpoints: Vec<ServiceEndpoint> =
+            crate::db::read_documents(&mut cursor, session).await?;
         if endpoint_set_digest(&endpoints)? != *endpoint_digest {
             return Err(denied());
         }
@@ -431,7 +430,7 @@ async fn control(
             http::HeaderValue::from_static("application/json"),
         );
         let response = proxy_service::forward_request_with_extra_outbound_headers(
-            proxy_service::no_redirect_http_client(),
+            proxy_service::Redirects::Return,
             &target.0,
             http::Method::POST,
             path,
@@ -1366,6 +1365,7 @@ pub(crate) async fn dispatch_probe(
         )
         .await?,
     );
+    super::shutdown::diagnostics::resolved_proxy(&target.0);
     proxy::strip_identity(&mut target.0);
     let metered = state.billing.open_required(&route).await?;
     let mut session = state.db.client().start_session().await?;
@@ -1457,29 +1457,15 @@ pub(crate) async fn dispatch_probe(
         billing::BillingIngress::Proxy,
     )?;
     let run = async {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(
-            "content-type",
-            http::HeaderValue::from_static("application/json"),
-        );
-        let response = proxy_service::forward_request_with_extra_outbound_headers(
-            proxy_service::no_redirect_http_client(),
+        let response = super::platform_public_proxy_service::send_model_request(
+            state,
             &target.0,
             http::Method::POST,
             path,
-            None,
-            headers,
-            proxy_service::ProxyBody::Buffered(Some(bytes::Bytes::copy_from_slice(body))),
-            vec![],
-            vec![],
-            None,
-            &state.token_exchange_cache,
-            &state.cloud_response_cache,
-            vec![],
+            body,
             permit,
         )
-        .await
-        .map_err(|e| e.into_app_error())?;
+        .await?;
         let status = response.status();
         let mut stream = response.bytes_stream();
         let mut output = Zeroizing::new(Vec::new());

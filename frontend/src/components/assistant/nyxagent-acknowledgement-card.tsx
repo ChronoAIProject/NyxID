@@ -1,5 +1,5 @@
-import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { translateUi } from "@/i18n/use-ui-translation";
+import { useCardTranslation } from "@/components/assistant/card-language";
+import type { translateUi as translate } from "@/i18n/use-ui-translation";
 import { AssistantLinkModal } from "./assistant-link-modals";
 import { useCreateAssistantConnectLink } from "@/hooks/use-connect-links";
 import { DecisionReceipt } from "./decision-receipt";
@@ -7,25 +7,26 @@ import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import { AuthoredSkillCard } from "./authored-skill-card";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { ACTION_RISK_LABEL, confirmationReason } from "@/lib/assistant/nyxbot-labels";
+import { actionRiskLabel, confirmationReason } from "@/lib/assistant/nyxbot-labels";
 import type { NyxAgentAcknowledgement, NyxAgentAccessMode } from "@/schemas/assistant-nyxagent";
 
-function title(row: NyxAgentAcknowledgement): string {
+function title(translateUi: typeof translate, row: NyxAgentAcknowledgement): string {
   // A specialist's request that NyxBot decides.
   if (row.decider === "orchestrator") {
     if (row.kind === "service") {
-      return `Allow this agent to use ${row.service_name ?? row.service_slug ?? "this service"}?`;
+      return translateUi("Allow this agent to use {{service}}?", {
+        service: row.service_name ?? row.service_slug ?? translateUi("this service"),
+      });
     }
     if (row.kind === "account") return translateUi("Allow this agent to read your NyxID account?");
     return translateUi("Confirm: {{summary}}", { summary: row.summary });
   }
   if (row.kind === "service")
-    return `Allow this chat to use ${row.service_name ?? "this service"}?`;
+    return translateUi("Allow this chat to use {{service}}?", {
+      service: row.service_name ?? translateUi("this service"),
+    });
   if (row.kind === "account") {
-    return (
-      "Allow this chat to manage your NyxID account " +
-      "(keys, channel bots, services, nodes, approval settings)?"
-    );
+    return translateUi("Allow this chat to manage your NyxID account (keys, channel bots, services, nodes, approval settings)?");
   }
   return translateUi("Confirm: {{summary}}", { summary: row.summary });
 }
@@ -43,7 +44,7 @@ export function NyxAgentAcknowledgementCard({
   readonly onRequestAgain?: () => void;
   readonly onDecision: (choice: "allow" | "deny", acceptReducedScope?: boolean) => Promise<unknown>;
 }) {
-  useUiTranslation();
+  const { t: translateUi, language } = useCardTranslation();
   const [error, setError] = useState<string>();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -61,11 +62,11 @@ export function NyxAgentAcknowledgementCard({
     acknowledgement.decider === "user" &&
     !["org_connection", "delegation"].includes(acknowledgement.confirmation?.reason ?? "");
   if (acknowledgement.authored_skill) return <AuthoredSkillCard acknowledgement={acknowledgement} confirmationsBypassed={confirmationsBypassed} deciding={deciding} onDecision={onDecision} />;
-  const label = title(acknowledgement);
+  const label = title(translateUi, acknowledgement);
   const routed = acknowledgement.decider === "orchestrator";
   if (acknowledgement.status !== "pending" || confirmationsBypassed || expired) {
     const row = expired && !confirmationsBypassed ? { ...acknowledgement, status: "expired" as const } : acknowledgement;
-    return <section className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-2`}>
+    return <section lang={language} className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-2`}>
       <DecisionReceipt acknowledgement={row}
         retired={confirmationsBypassed && acknowledgement.status === "pending"} />
       {row.status === "expired" && !confirmationsBypassed ? <>
@@ -82,12 +83,12 @@ export function NyxAgentAcknowledgementCard({
     try {
       await onDecision(choice);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : translateUi("Could not save your decision. Try again."));
+      setError(cause instanceof Error ? cause.message : "Could not save your decision. Try again.");
     }
   }
 
   return (
-    <section
+    <section lang={language}
       aria-label={label}
       className={`${STATUS_CARD_MAX_W} ml-[30px] space-y-3 rounded-xl border border-border/50 bg-card p-4`}
     >
@@ -106,10 +107,10 @@ export function NyxAgentAcknowledgementCard({
                   : "font-medium text-foreground"
             }
           >
-            {translateUi(ACTION_RISK_LABEL[acknowledgement.confirmation.risk])}
+            {actionRiskLabel(acknowledgement.confirmation.risk, translateUi)}
           </span>
           {" · "}
-          {confirmationReason(acknowledgement.confirmation)}
+          {confirmationReason(acknowledgement.confirmation, translateUi)}
         </p>
       ) : null}
       {/*
@@ -130,8 +131,8 @@ export function NyxAgentAcknowledgementCard({
           : acknowledgement.kind === "operations"
           ? translateUi("This changes the specialist's operations on every thread. Widening follows NyxBot's permission mode.")
           : routed
-          ? "NyxBot decides this specialist's request against what you asked for. " +
-            "You can decide it here instead; the agent resumes on its own."
+          ? <>{translateUi("NyxBot decides this specialist's request against what you asked for.")}{" "}
+            {translateUi("You can decide it here instead; the agent resumes on its own.")}</>
           : acknowledgement.kind === "action"
             ? translateUi("This confirmation applies once, to this action only.")
             : translateUi("This permission applies to this chat only.")}
@@ -155,7 +156,7 @@ export function NyxAgentAcknowledgementCard({
 }
 
 function ConnectOwnAction({ slug }: { readonly slug: string }) {
-  useUiTranslation();
+  const { t: translateUi } = useCardTranslation();
   const [href, setHref] = useState<string | null>(null);
   const [error, setError] = useState<string>();
   const connect = useCreateAssistantConnectLink();
@@ -166,7 +167,7 @@ function ConnectOwnAction({ slug }: { readonly slug: string }) {
         setError(cause instanceof Error ? cause.message : "Could not create connection link.");
       });
     }}>{translateUi("Connect your own")}</Button>
-    {error ? <p role="alert" className="text-14 text-destructive">{error}</p> : null}
+    {error ? <p role="alert" className="text-14 text-destructive">{translateUi(error)}</p> : null}
     <AssistantLinkModal href={href} onClose={() => setHref(null)} />
   </>;
 }

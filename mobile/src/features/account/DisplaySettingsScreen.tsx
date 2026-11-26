@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { Pressable, StyleSheet, Switch, View } from "react-native";
 import type { SheetScreenProps } from "../../app/navigationTypes";
@@ -42,7 +43,7 @@ export function DisplaySettingsScreen(
               <Pressable
                 key={value}
                 accessibilityRole="radio"
-                accessibilityLabel={`${value === "light" ? "Light" : "Dark"} appearance`}
+                accessibilityLabel={(value === "light" ? translateApp("Light appearance") : translateApp("Dark appearance"))}
                 accessibilityState={{ checked: selected, selected }}
                 onPress={() => choose(value)}
                 style={styles.tile}

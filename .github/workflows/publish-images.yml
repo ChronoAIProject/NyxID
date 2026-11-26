@@ -125,12 +125,24 @@ jobs:
     with:
       coverage: true
 
+  frontend-identity:
+    name: Compute shared frontend artifact identity
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.identity.outputs.artifact_id }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Derive one UUID for both frontend architectures
+        id: identity
+        run: echo "artifact_id=$(python3 .github/scripts/crash-artifact-id.py)" >> "$GITHUB_OUTPUT"
+
   # ---------------------------------------------------------------------------
   # Build each component for each platform on its native runner while CI runs.
   # Each image is pushed by digest only. Backend buildcache-* references may
   # update during builds; release tags wait for both the builds and the CI gate.
   # ---------------------------------------------------------------------------
   build:
+    needs: frontend-identity
     name: Build ${{ matrix.component }} (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -168,6 +180,11 @@ jobs:
             file: cli/Dockerfile.machine-updater
     steps:
       - uses: actions/checkout@v6
+
+      - name: Verify packaged PDF renderer on native architecture
+        if: matrix.component == 'backend'
+        timeout-minutes: 10
+        run: python3 scripts/check-pdf-renderer.py --platform '${{ matrix.platform }}'
 
       - name: Prepare backend image memory reserve
         if: matrix.component == 'backend'
@@ -211,17 +228,21 @@ jobs:
       - name: Build and push by digest
         id: build
         uses: docker/build-push-action@v7
+        env:
+          CRASH_ARTIFACTS_SENTRY: ${{ matrix.component == 'frontend' && matrix.platform == 'linux/amd64' && secrets.CRASH_ARTIFACTS_SENTRY || '' }}
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          secret-envs: ${{ matrix.component == 'frontend' && matrix.platform == 'linux/amd64' && secrets.CRASH_ARTIFACTS_SENTRY != '' && 'crash_artifacts_sentry=CRASH_ARTIFACTS_SENTRY' || '' }}
           # Build-args: git hash for backend/node-agent surface tagging
           # (stamped on /health). Telemetry config is fetched at runtime
           # from the backend's /api/v1/public/config endpoint, so no
           # build-args for telemetry are needed here.
           build-args: |
             NYXID_GIT_HASH=${{ steps.git.outputs.hash }}
+            CRASH_ARTIFACT_ID=${{ needs.frontend-identity.outputs.artifact_id }}
             ${{ matrix.cargo_build_args }}
           outputs: type=image,name=${{ steps.repo.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           # Image layer caches exceed the shared 10 GB Actions cache budget and
@@ -371,6 +392,60 @@ jobs:
         run: |
           docker buildx imagetools inspect \
             ${{ steps.repo.outputs.image }}:${{ steps.meta.outputs.version }}
+
+  deploy-production:
+    needs: merge
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    environment:
+      name: production
+      url: https://nyxid.ai
+    concurrency:
+      group: deploy-nyxid-production
+      queue: max
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Roll out backend and frontend
+        id: rollout
+        env:
+          NYXID_PIN_CHECK_IMAGES: ${{ secrets.NYXID_CHECK_ACCOUNT != '' && secrets.NYXID_CHECK_ALERT_URL != '' }}
+          NYXID_DEPLOY_TARGET: ${{ secrets.NYXID_DEPLOY_TARGET }}
+          NYXID_PRODUCTION_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_PRODUCTION_DEPLOY_CLIENT_ID }}
+          NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET }}
+        run: python3 .github/scripts/deploy_images.py production
+
+      - name: Check NyxBot and restore a compatible release on failure
+        if: steps.rollout.outputs.deployed == 'true'
+        id: nyxbot
+        env:
+          NYXID_DEPLOY_TARGET: ${{ secrets.NYXID_DEPLOY_TARGET }}
+          NYXID_PRODUCTION_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_PRODUCTION_DEPLOY_CLIENT_ID }}
+          NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_PRODUCTION_DEPLOY_CLIENT_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+          BACKEND_DEPLOY_DIGEST: ${{ steps.rollout.outputs.backend_digest }}
+          FRONTEND_DEPLOY_DIGEST: ${{ steps.rollout.outputs.frontend_digest }}
+          PREVIOUS_COMMIT: ${{ steps.rollout.outputs.previous }}
+          NYXID_CHECK_ACCOUNT: ${{ secrets.NYXID_CHECK_ACCOUNT }}
+          NYXID_CHECK_ALERT_URL: ${{ secrets.NYXID_CHECK_ALERT_URL }}
+          NYXID_ROLLBACK_PAIR: ${{ vars.NYXID_ROLLBACK_PAIR }}
+        run: python3 .github/scripts/post_deploy_check.py production
+
+      - name: Archive deployment check result
+        if: ${{ !cancelled() && steps.nyxbot.outputs.outcome != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: nyxbot-production-${{ steps.nyxbot.outputs.outcome }}-${{ github.run_attempt }}${{ steps.nyxbot.outputs.image_suffix }}
+          path: ${{ runner.temp }}/nyxbot-deploy.json
+          retention-days: 90
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Flip new packages to public visibility. Idempotent: a no-op once public.

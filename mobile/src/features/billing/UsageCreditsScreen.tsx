@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AppState } from "react-native";
 import { useIsFocused } from "@react-navigation/native";
@@ -18,26 +20,31 @@ import type { BillingRead } from "./billingTransport";
 import { BillingHistoryRow, BillingServiceCard, BillingWalletCard } from "./BillingPresentation";
 
 // ownerId is retained for route compatibility; this screen reads personal billing only.
-export type UsageCreditsRouteParams = { period?: BillingPeriod; ownerId?: string };
-export type UsageCreditsScreenProps = { route?: { params?: UsageCreditsRouteParams } };
+export type UsageCreditsRouteParams = { period?: BillingPeriod; ownerId?: string;
+};
+export type UsageCreditsScreenProps = { route?: { params?: UsageCreditsRouteParams };
+};
 const periods = ["24h", "7d", "30d"] as const;
 
 function message(error: unknown) {
-  if (error instanceof z.ZodError) return "This server returned unsupported billing data. Please try again later.";
-  if (error instanceof ApiError && error.statusCode === 403) return "You do not have access to these billing details.";
-  return "Could not load billing details. Please try again.";
+  if (error instanceof z.ZodError) return translateApp(
+      "This server returned unsupported billing data. Please try again later.",
+    );
+  if (error instanceof ApiError && error.statusCode === 403) return translateApp("You do not have access to these billing details.");
+  return translateApp("Could not load billing details. Please try again.");
 }
 
 type ReadQuery = Pick<UseQueryResult<BillingRead<unknown>>, "data" | "isError" | "error">;
 function unavailable(queries: ReadQuery[]) {
   const failed = queries.find((query) => query.isError);
   if (failed) return message(failed.error);
-  if (queries.some((query) => query.data?.kind === "unsupported")) return "Billing isn't available on this server.";
-  if (queries.some((query) => query.data?.kind === "disabled")) return "Billing isn't enabled for this account.";
+  if (queries.some((query) => query.data?.kind === "unsupported")) return translateApp("Billing isn't available on this server.");
+  if (queries.some((query) => query.data?.kind === "disabled")) return translateApp("Billing isn't enabled for this account.");
   return undefined;
 }
 
 export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
+  useAppLanguage();
   const [period, setPeriod] = useState<BillingPeriod>(() => billingPeriodSchema.catch("30d").parse(route?.params?.period));
   const [history, setHistory] = useState({ epoch: getAuthEpoch(), expanded: false });
   const [foreground, setForeground] = useState(AppState.currentState === "active");
@@ -73,7 +80,7 @@ export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
   const fetching = wallet.isFetching || grants.isFetching || allowances.isFetching || (expanded && usage.isFetching);
   async function refresh() {
     if (fetching || !focused || !foreground || !isAuthenticated) return;
-    if (!isConnected && !await recheckConnection()) return;
+    if (!isConnected && !(await recheckConnection())) return;
     if (!canRefresh.current || getAuthEpoch() !== epoch) return;
     await Promise.allSettled([wallet.refetch(), grants.refetch(), allowances.refetch(), ...(historyOpen.current && hasWallet && !issue ? [usage.refetch()] : [])]);
   }
@@ -84,33 +91,85 @@ export function UsageCreditsScreen({ route }: UsageCreditsScreenProps = {}) {
     historyOpen.current = !expanded;
     setHistory({ epoch, expanded: !expanded });
   }
-  if (!isAuthenticated) return <WorkspacePage title="Usage & credits" showHeading={false}><Label>Sign in to review your usage and credits.</Label></WorkspacePage>;
+  if (!isAuthenticated) return (
+      <WorkspacePage title={translateApp("Usage & credits")}
+        showHeading={false}><Label>
+          {translateApp("Sign in to review your usage and credits.")}
+        </Label></WorkspacePage>
+    );
   const loaded = wallet.data?.kind === "ready" && wallet.data.data && grants.data?.kind === "ready" && allowances.data?.kind === "ready"
     ? { wallet: wallet.data.data, grants: grants.data.data.grants, allowances: allowances.data.data.allowances } : undefined;
   const historyIssue = expanded ? unavailable([usage]) : undefined;
-  return <SettingsPage refreshing={pull.refreshing} onRefresh={pull.onRefresh}>
-    {issue ? <>
+  return (
+    <SettingsPage refreshing={pull.refreshing} onRefresh={pull.onRefresh}>
+    {issue ? (
+        <>
       <Notice tone="error" message={issue} />
-      <ActionButton label="Retry" variant="secondary" disabled={fetching} onPress={() => void refresh()} />
-    </> : absent ? <Label muted>No billing account yet.</Label> : !loaded ? <>
-      {isConnected ? <SkeletonRows rows={3} icon={false} detail={false} title accessibilityLabel="Loading balance" /> : <Label muted>Offline. Connect to load your balance.</Label>}
-      {!isConnected && <ActionButton label="Retry" variant="secondary" onPress={() => void refresh()} />}
-    </> : <>
-      {!isConnected && <Notice message="Offline. Showing your saved balance." />}
+      <ActionButton label={translateApp("Retry")}
+            variant="secondary" disabled={fetching} onPress={() => void refresh()} />
+    </>
+      ) : absent ? (
+        <Label muted>{translateApp("No billing account yet.")}</Label>
+      ) : !loaded ? (
+        <>
+      {isConnected ? (
+            <SkeletonRows rows={3} icon={false} detail={false} title accessibilityLabel={translateApp("Loading balance")}
+            />
+          ) : (
+            <Label muted>
+              {translateApp("Offline. Connect to load your balance.")}
+            </Label>
+          )}
+      {!isConnected && (
+            <ActionButton label={translateApp("Retry")}
+              variant="secondary" onPress={() => void refresh()} />
+          )}
+    </>
+      ) : (
+        <>
+      {!isConnected && (
+            <Notice message={translateApp("Offline. Showing your saved balance.")}
+            />
+          )}
       <BillingWalletCard {...loaded} now={Date.now()} />
       <BillingHistoryRow expanded={expanded} onPress={toggleHistory} />
-      {expanded && <>
-        <SegmentControl segments={[{ label: "24 hours" }, { label: "7 days" }, { label: "30 days" }]} activeIndex={periods.indexOf(period)} onPress={(index) => setPeriod(periods[index] ?? "30d")} />
-        {historyIssue ? <>
+      {expanded && (
+            <>
+        <SegmentControl segments={[{ label: translateApp("24 hours") }, { label: translateApp("7 days") }, { label: translateApp("30 days") }]} activeIndex={periods.indexOf(period)} onPress={(index) => setPeriod(periods[index] ?? "30d")} />
+        {historyIssue ? (
+                <>
           <Notice tone="error" message={historyIssue} />
-          <ActionButton label="Retry" variant="secondary" disabled={fetching} onPress={() => void refresh()} />
-        </> : usage.data?.kind === "ready" ? <SettingsGroup title="Usage by service" inset={false}
-          footer={usage.data.data.billing.rates_are_approximate ? "Usage costs are estimates." : undefined}>
-          {services.length === 0 && <SettingsRow label="No usage recorded for this period" />}
-          {services.slice(0, serviceLimit).map((service) => <BillingServiceCard key={`${period}:${service.key}`} service={service} />)}
-          {services.length > serviceLimit && <SettingsRow tone="action" label="Show More Services" onPress={() => setServiceLimit((limit) => limit + 10)} />}
-        </SettingsGroup> : isConnected ? <SkeletonRows rows={3} icon={false} title accessibilityLabel="Loading usage" /> : <Label muted>Offline. Connect to load usage.</Label>}
-      </>}
-    </>}
-  </SettingsPage>;
+          <ActionButton label={translateApp("Retry")}
+                    variant="secondary" disabled={fetching} onPress={() => void refresh()} />
+        </>
+              ) : usage.data?.kind === "ready" ? (
+                <SettingsGroup title={translateApp("Usage by service")}
+                  inset={false}
+          footer={usage.data.data.billing.rates_are_approximate ? translateApp("Usage costs are estimates.")
+                      : undefined}>
+          {services.length === 0 && (
+                    <SettingsRow label={translateApp("No usage recorded for this period")}
+                    />
+                  )}
+          {services.slice(0, serviceLimit).map((service) => (
+                    <BillingServiceCard key={`${period}:${service.key}`} service={service} />))}
+          {services.length > serviceLimit && (
+                    <SettingsRow tone="action" label={translateApp("Show More Services")}
+                      onPress={() => setServiceLimit((limit) => limit + 10)} />
+                  )}
+        </SettingsGroup>
+              ) : isConnected ? (
+                <SkeletonRows rows={3} icon={false} title accessibilityLabel={translateApp("Loading usage")}
+                />
+              ) : (
+                <Label muted>
+                  {translateApp("Offline. Connect to load usage.")}
+                </Label>
+              )}
+      </>
+          )}
+    </>
+      )}
+  </SettingsPage>
+  );
 }

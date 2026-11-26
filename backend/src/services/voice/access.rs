@@ -109,11 +109,10 @@ pub(crate) async fn connection(db: &Database, auth: &AuthUser, id: &str) -> AppR
         })
         .await?
         .ok_or_else(|| AppError::ApiKeyScopeForbidden("Voice connection is unavailable".into()))?;
-    if db.collection::<DownstreamService>(CATALOG).find_one(doc! {
+    let catalog = db.collection::<DownstreamService>(CATALOG).find_one(doc! {
         "_id":service.catalog_service_id.as_deref().unwrap_or_default(),"slug":SERVICE_SLUG,"is_active":true,
-    }).await?.is_none() {
-        return Err(AppError::ApiKeyScopeForbidden("NyxBot Voice is unavailable".into()));
-    }
+    }).await?.ok_or_else(|| AppError::ApiKeyScopeForbidden("NyxBot Voice is unavailable".into()))?;
+    crate::services::shutdown::diagnostics::resolved_catalog(&catalog);
     Ok(service)
 }
 /// Route and authority checks shared by ingress and ongoing call revalidation.

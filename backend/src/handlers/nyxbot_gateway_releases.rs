@@ -26,6 +26,7 @@ pub struct ListQuery {
 pub struct ReleaseResponse {
     id: String,
     channel_id: String,
+    channel_bot_id: String,
     owner_user_id: String,
     gateway_service_id: String,
     record_id: Option<String>,
@@ -36,6 +37,7 @@ pub struct ReleaseResponse {
     observed_version: Option<i64>,
     last_error: Option<String>,
     resolution: Option<String>,
+    dispatch_started_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -44,6 +46,7 @@ impl From<NyxbotGatewayRelease> for ReleaseResponse {
         Self {
             id: row.id,
             channel_id: row.channel_id,
+            channel_bot_id: row.channel_bot_id,
             owner_user_id: row.owner_user_id,
             gateway_service_id: row.gateway_service_id,
             record_id: row.record_id,
@@ -54,6 +57,7 @@ impl From<NyxbotGatewayRelease> for ReleaseResponse {
             observed_version: row.observed_version,
             last_error: row.last_error,
             resolution: row.resolution,
+            dispatch_started_at: row.dispatch_started_at,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }

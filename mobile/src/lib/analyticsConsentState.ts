@@ -1,5 +1,5 @@
 /** Local restrictions only; server permission is never cached here. */
-export type DeviceChoice = { enabled: boolean; asked: boolean };
+export type DeviceChoice = { enabled: boolean; asked: boolean; policy?:1|2 };
 export type ConsentSnapshot = DeviceChoice & { accountId: string | null; revision: number; isHydrated: boolean; persistenceError: boolean };
 const OFF: DeviceChoice = { enabled: false, asked: false };
 export function createAnalyticsConsentState() {
@@ -27,15 +27,15 @@ export function createAnalyticsConsentState() {
           choices = { ...Object.fromEntries(Object.entries(parsed.choices).filter(([, value]) => {
             const v = value as Partial<DeviceChoice> | null;
             return v && typeof v.enabled === 'boolean' && typeof v.asked === 'boolean';
-          })) as Record<string, DeviceChoice>, ...choices };
+          }).map(([key, value]) => [key, { ...(value as DeviceChoice), policy: (value as DeviceChoice).policy === 2 ? 2 : 1 }])) as Record<string, DeviceChoice>, ...choices };
         }
       } catch { /* Corrupt storage defaults off. */ }
       update({ isHydrated: true, ...(state.accountId ? choices[state.accountId] ?? OFF : OFF) });
     },
-    setConsent(enabled: boolean) {
+    setConsent(enabled: boolean, policy:1|2 = 1) {
       if (!state.accountId) return;
       versions[state.accountId] = (versions[state.accountId] ?? 0) + 1;
-      const choice = { enabled, asked: true };
+      const choice = { enabled, asked: true, policy };
       choices = { ...choices, [state.accountId]: choice };
       update(choice);
     },

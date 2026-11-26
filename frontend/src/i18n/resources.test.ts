@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { appI18n, translate } from ".";
-import en from "./locales/en.json";
-import zhCN from "./locales/zh-CN.json";
-import zhTW from "./locales/zh-TW.json";
+import en from "./locales/app/en-full";
+import zhCN from "./locales/app/zh-CN";
+import zhTW from "./locales/app/zh-TW";
 import onboardingEn from "@/features/nyxbot-onboarding/locales/en.json";
 import onboardingZhCN from "@/features/nyxbot-onboarding/locales/zh-CN.json";
 import onboardingZhTW from "@/features/nyxbot-onboarding/locales/zh-TW.json";

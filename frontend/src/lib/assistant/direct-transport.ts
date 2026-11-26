@@ -12,6 +12,7 @@ import {
   parseJsonErrorResponse,
 } from "@/lib/assistant/direct-http-error";
 import { useAuthStore } from "@/stores/auth-store";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import {
   currentCreditsActor,
   isInsufficientCreditsCode,
@@ -612,6 +613,7 @@ export class DirectAssistantTransport {
     if (!this.conversations.delete(conversationId)) {
       throw new AssistantConversationNotFoundError();
     }
+    if (this.ownerUserId) useAssistantPinsStore.getState().remove(this.ownerUserId, conversationId);
     this.notifyStateListeners();
   }
 

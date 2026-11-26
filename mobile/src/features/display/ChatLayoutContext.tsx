@@ -6,7 +6,14 @@ import {
   useRef,
   useState,
 } from "react";
-import { Keyboard, useWindowDimensions } from "react-native";
+import {
+  AppState,
+  Dimensions,
+  Keyboard,
+  Platform,
+  useWindowDimensions,
+} from "react-native";
+import { observeKeyboardFrames } from "../../components/workspace/keyboardFrameEvents";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   composerHeightLimit,
@@ -89,18 +96,21 @@ export function useComposerHeight() {
   const { layout } = useChatLayout();
   const { height } = useWindowDimensions();
   const [keyboardTop, setKeyboardTop] = useState<number | null>(null);
-  useEffect(() => {
-    const show = Keyboard.addListener("keyboardDidShow", (event) =>
-      setKeyboardTop(event.endCoordinates.screenY),
-    );
-    const hide = Keyboard.addListener("keyboardDidHide", () =>
-      setKeyboardTop(null),
-    );
-    return () => {
-      show.remove();
-      hide.remove();
-    };
-  }, []);
+  useEffect(
+    () =>
+      observeKeyboardFrames({
+        platform: Platform.OS,
+        keyboard: Keyboard,
+        appState: AppState,
+        dimensions: Dimensions,
+        windowHeight: () => Dimensions.get("window").height,
+        afterLayout: requestAnimationFrame,
+        cancelLayout: cancelAnimationFrame,
+        onFrame: (frame) =>
+          setKeyboardTop(frame && frame.height > 0 ? frame.screenY : null),
+      }),
+    [],
+  );
   return composerHeightLimit(
     layout.composerMaxHeight,
     Math.min(height, keyboardTop ?? height),

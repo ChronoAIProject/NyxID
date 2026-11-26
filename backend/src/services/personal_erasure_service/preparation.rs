@@ -198,12 +198,29 @@ async fn advance_page(
     }).await
 }
 pub(super) async fn process_one(db: &Database, keys: &EncryptionKeys) -> AppResult<bool> {
+    let Some(_work) = crate::services::shutdown::process().background() else {
+        return Ok(false);
+    };
     let durable = super::super::transaction_service::durable_database(db);
     let db = &durable;
     let Some(job)=db.collection::<Document>(PREPARATIONS).find_one_and_update(
         doc! {"status":"preparing","version":VERSION,"$expr":{"$lte":[{"$ifNull":["$lease_expires_at",bson::DateTime::from_millis(0)]},"$$NOW"]}},
         vec![doc! {"$set":{"lease_token":uuid::Uuid::new_v4().to_string(),"lease_expires_at":{"$dateAdd":{"startDate":"$$NOW","unit":"second","amount":120}},"updated_at":"$$NOW"}}])
         .sort(doc! {"updated_at":1,"_id":1}).return_document(mongodb::options::ReturnDocument::After).await? else {return Ok(false);};
+    let release = crate::services::shutdown::process().register_release(crate::services::shutdown::Release {
+        safe_after_stop: true,
+        db: db.clone(), collection: PREPARATIONS,
+        filter: doc! {"_id": job.get("_id").cloned(), "generation": job.get("generation").cloned(), "lease_token": job.get("lease_token").cloned()},
+        update: doc! {"$unset": {"lease_token": "", "lease_expires_at": ""}},
+    });
+    let result = process_claimed(db, keys, job).await;
+    if result.is_ok() {
+        release.completed();
+    }
+    result
+}
+
+async fn process_claimed(db: &Database, keys: &EncryptionKeys, job: Document) -> AppResult<bool> {
     let user = job
         .get_str("_id")
         .map_err(|_| AppError::Internal("Invalid preparation identity".into()))?;

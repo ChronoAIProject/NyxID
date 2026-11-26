@@ -404,7 +404,7 @@ pub(crate) fn execute<'a>(
             || target.base_url.trim_end_matches('/') != "https://api.telnyx.com/v2"
             || target.auth_method != "bearer"
             || target.credential.is_empty()
-            || !target.catalog_default_headers.is_empty()
+            || !target.catalog_default_headers.configured().is_empty()
             || !target.user_service_default_headers.is_empty()
         {
             return Err(invalid(
@@ -460,22 +460,23 @@ pub(crate) fn execute<'a>(
                 None,
             );
         }
-        let worker = tokio::spawn(worker::run(worker::Exchange {
-            db: db.clone(),
-            billing,
-            target,
-            contract: c,
-            body,
-            handle,
-            proof: ManagedEgressProof {
-                catalog: catalog_digest,
-                request: request_digest,
-            },
-            lease,
-            guard,
-            #[cfg(test)]
-            hooks: worker::TEST_HOOKS.try_with(Clone::clone).ok(),
-        }));
+        let worker =
+            crate::services::shutdown::process().spawn_cleanup(worker::run(worker::Exchange {
+                db: db.clone(),
+                billing,
+                target,
+                contract: c,
+                body,
+                handle,
+                proof: ManagedEgressProof {
+                    catalog: catalog_digest,
+                    request: request_digest,
+                },
+                lease,
+                guard,
+                #[cfg(test)]
+                hooks: worker::TEST_HOOKS.try_with(Clone::clone).ok(),
+            }));
         worker.await.map_err(|_| {
             ManagedExecutionError::OutcomeUnknown(AppError::ManagedExecutionPending(execution_id))
         })?
@@ -703,6 +704,7 @@ mod tests {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.billing = Some(fixture_billing());
         let target = ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some(service.slug.clone()),
             execution_request: None,
             execution_permission: None,
@@ -714,14 +716,14 @@ mod tests {
             auth_key_name: String::new(),
             credential: "test-only".to_owned().into(),
             service,
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
         };
         let permit = super::super::billing::route_inventory::internal_node_dispatch_permit();
         let result = super::super::proxy_service::forward_request_with_extra_outbound_headers(
-            &reqwest::Client::new(),
+            super::super::proxy_service::Redirects::Return,
             &target,
             reqwest::Method::POST,
             CHAT_PATH,

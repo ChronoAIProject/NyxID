@@ -592,47 +592,54 @@ async fn handle_pending_credentials_available(
         return;
     }
 
-    let (mut config, backend) = match (
-        NodeConfig::load(config_path),
-        SecretBackend::from_storage_backend_str(storage_backend, config_dir),
-    ) {
-        (Ok(config), Ok(backend)) => (config, backend),
-        (Err(error), _) | (_, Err(error)) => {
-            tracing::warn!(%error, "Failed to load node config for pending credential pubkey");
+    let outbound = {
+        let Ok(_store_guard) = super::config::credential_store_lock() else {
             return;
-        }
-    };
+        };
+        let (mut config, backend) = match (
+            NodeConfig::load(config_path),
+            SecretBackend::from_storage_backend_str(storage_backend, config_dir),
+        ) {
+            (Ok(config), Ok(backend)) => (config, backend),
+            (Err(error), _) | (_, Err(error)) => {
+                tracing::warn!(%error, "Failed to load node config for pending credential pubkey");
+                return;
+            }
+        };
 
-    let mut config_changed = false;
-    let mut outbound = Vec::new();
-    for metadata in crypto_pending {
-        match remote_crypto::prepare_pubkey(&mut config, &backend, &metadata) {
-            Ok(message) => {
-                if let Some(log) = pending_pubkey_log_metadata(&metadata, &message) {
-                    tracing::info!(
-                        pending_credential_id = %log.pending_id,
-                        service_slug = %log.service_slug,
-                        rci_pubkey_fingerprint = %log.rci_pubkey_fingerprint,
-                        "Prepared pending credential RCI pubkey"
+        let mut config_changed = false;
+        let mut outbound = Vec::new();
+        for metadata in crypto_pending {
+            match remote_crypto::prepare_pubkey(&mut config, &backend, &metadata) {
+                Ok(message) => {
+                    if let Some(log) = pending_pubkey_log_metadata(&metadata, &message) {
+                        tracing::info!(
+                            pending_credential_id = %log.pending_id,
+                            service_slug = %log.service_slug,
+                            rci_pubkey_fingerprint = %log.rci_pubkey_fingerprint,
+                            "Prepared pending credential RCI pubkey"
+                        );
+                    }
+                    config_changed = true;
+                    outbound.push(message);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        pending_credential_id = %metadata.pending_id,
+                        %error,
+                        "Failed to prepare pending credential pubkey"
                     );
                 }
-                config_changed = true;
-                outbound.push(message);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    pending_credential_id = %metadata.pending_id,
-                    %error,
-                    "Failed to prepare pending credential pubkey"
-                );
             }
         }
-    }
 
-    if config_changed && let Err(error) = config.save(config_path) {
-        tracing::warn!(%error, "Failed to save pending credential pubkey metadata");
-        return;
-    }
+        if config_changed && let Err(error) = config.save(config_path) {
+            tracing::warn!(%error, "Failed to save pending credential pubkey metadata");
+            return;
+        }
+
+        outbound
+    };
 
     for message in outbound {
         if !send_ws_message(tx, message.to_ws_json().to_string()).await {
@@ -708,6 +715,7 @@ fn pending_credential_ciphertext_outbound(
     config_dir: &std::path::Path,
     storage_backend: &str,
 ) -> Option<rci_crypto::RemoteCredentialCryptoOutbound> {
+    let _store_guard = super::config::credential_store_lock().ok()?;
     match serde_json::from_value::<rci_crypto::PendingCredentialCiphertext>(parsed.clone()) {
         Ok(message) => match (
             NodeConfig::load(config_path),
@@ -748,6 +756,9 @@ fn handle_pending_credential_cleanup_frame(
     config_dir: &std::path::Path,
     storage_backend: &str,
 ) -> bool {
+    let Ok(_store_guard) = super::config::credential_store_lock() else {
+        return false;
+    };
     let Some(pending_id) = parsed["pending_id"].as_str() else {
         return false;
     };
@@ -814,6 +825,63 @@ pub(super) fn node_agent_api_base_url_from_ws_url(ws_url: &str) -> String {
         .to_string()
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RetirementProof {
+    connection_id: String,
+    secret: Zeroizing<String>,
+}
+
+#[derive(Default, serde::Serialize)]
+struct RetiredSockets {
+    predecessor: Option<RetirementProof>,
+    candidate: Option<RetirementProof>,
+}
+
+impl RetiredSockets {
+    fn offer(&mut self, mut value: serde_json::Value) -> Result<String> {
+        let id = value["connection_id"]
+            .as_str()
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .ok_or_else(|| Error::AuthFailed("Invalid retirement offer".into()))?
+            .to_owned();
+        let serde_json::Value::String(secret) = value["secret"].take() else {
+            return Err(Error::AuthFailed("Invalid retirement offer".into()));
+        };
+        let secret = Zeroizing::new(secret);
+        if secret.len() != 64 || !secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(Error::AuthFailed("Invalid retirement offer".into()));
+        }
+        // The offering server fenced every earlier in-progress handshake in
+        // MongoDB. Only its observed predecessor or this candidate can win.
+        let previous = value["predecessor_id"].as_str();
+        self.predecessor = [self.predecessor.take(), self.candidate.take()]
+            .into_iter()
+            .flatten()
+            .find(|proof| Some(proof.connection_id.as_str()) == previous);
+        self.candidate = Some(RetirementProof {
+            connection_id: id.clone(),
+            secret,
+        });
+        Ok(id)
+    }
+
+    fn authenticated(&mut self, reply: &serde_json::Value) -> Result<()> {
+        if reply["capabilities"]["retirement_v1"] == true {
+            let candidate = self
+                .candidate
+                .take()
+                .filter(|proof| {
+                    Some(proof.connection_id.as_str()) == reply["connection_id"].as_str()
+                })
+                .ok_or_else(|| Error::AuthFailed("Retirement offer was not acknowledged".into()))?;
+            self.predecessor = Some(candidate);
+        } else {
+            *self = Self::default();
+        }
+        Ok(())
+    }
+}
+
 /// Main connection loop with exponential backoff reconnection.
 #[allow(clippy::too_many_arguments)]
 async fn run_connection_loop(
@@ -829,6 +897,7 @@ async fn run_connection_loop(
     shutdown: watch::Receiver<bool>,
 ) {
     let mut backoff = ReconnectBackoff::new();
+    let mut retired = RetiredSockets::default();
     let proxy_uploads = Arc::new(super::proxy_upload::Uploads::default());
     // Replay protection spans WebSocket reconnects. A request can be delivered
     // again while the caller is recovering a lost response; the machine
@@ -873,6 +942,7 @@ async fn run_connection_loop(
             &mut machine,
             proxy_uploads.clone(),
             replay_guard.clone(),
+            &mut retired,
         )
         .await;
         proxy_uploads.disconnect().await;
@@ -918,6 +988,7 @@ async fn connect_and_serve(
     machine_state: &mut Option<Arc<super::machine::Runtime>>,
     proxy_uploads: Arc<super::proxy_upload::Uploads>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
+    retired: &mut RetiredSockets,
 ) -> Result<Option<Duration>> {
     // 1. Connect
     let ws_config = node_control_ws_config(config.server.proxy_max_body_size);
@@ -940,20 +1011,30 @@ async fn connect_and_serve(
 
     let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
-    // 2. Authenticate
-    let mut auth_msg = serde_json::json!({
-        "type": "auth",
-        "node_id": config.node.id,
-        "token": auth_token,
-    });
+    #[derive(serde::Serialize)]
+    struct Auth<'a> {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        node_id: &'a str,
+        token: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        managed_runtime: Option<&'a nyxid_machine::managed::Binding>,
+        retirement_v1: &'a RetiredSockets,
+    }
     if let Some(binding) = &config.managed_runtime {
         binding
             .validate()
             .map_err(|reason| Error::Config(reason.into()))?;
-        auth_msg["managed_runtime"] = serde_json::to_value(binding)?;
     }
+    let auth_msg = serde_json::to_string(&Auth {
+        kind: "auth",
+        node_id: &config.node.id,
+        token: auth_token,
+        managed_runtime: config.managed_runtime.as_ref(),
+        retirement_v1: retired,
+    })?;
     tokio::select! {
-        result = ws_sink.send(Message::Text(auth_msg.to_string().into())) => {
+        result = ws_sink.send(Message::Text(auth_msg.into())) => {
             result.map_err(|e| Error::WebSocket(format!("Failed to send auth: {e}")))?;
         }
         _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
@@ -982,6 +1063,12 @@ async fn connect_and_serve(
                     continue;
                 };
                 match value["type"].as_str() {
+                    Some("retirement_offer_v1") => {
+                        let id = retired.offer(value)?;
+                        let confirm = serde_json::json!({ "type":"retirement_confirm_v1", "connection_id":id });
+                        ws_sink.send(Message::Text(confirm.to_string().into())).await
+                            .map_err(|_| Error::WebSocket("Retirement confirmation failed".into()))?;
+                    }
                     Some("auth_ok" | "auth_error") => return Ok(value),
                     _ => tracing::debug!("Ignoring non-auth control frame during node authentication"),
                 }
@@ -994,6 +1081,7 @@ async fn connect_and_serve(
         .unwrap_or(false);
     let (use_binary_proxy_chunks, server_heartbeat_interval_secs) = match parsed["type"].as_str() {
         Some("auth_ok") => {
+            retired.authenticated(&parsed)?;
             if let Some(binding) = &config.managed_runtime {
                 let accepted = parsed.get("managed_runtime").cloned().and_then(|value| {
                     serde_json::from_value::<nyxid_machine::managed::Binding>(value).ok()
@@ -1215,6 +1303,7 @@ async fn connect_and_serve(
     let serving_started = tokio::time::Instant::now();
 
     // 5. Reader loop: process incoming messages from the server
+    let mut writer_finished = false;
     let shutting_down = loop {
         // Wrap ws_stream.next() with an idle timeout when the server
         // advertised its heartbeat interval. If it did not (older backend),
@@ -1226,7 +1315,7 @@ async fn connect_and_serve(
                 match tokio::select! {
                     result = tokio::time::timeout(Duration::from_secs(secs), ws_stream.next()) => result,
                     _ = wait_for_shutdown(&mut shutdown) => break true,
-                    _ = &mut writer_task => break false,
+                    _ = &mut writer_task => { writer_finished = true; break false; },
                 } {
                     Ok(msg) => msg,
                     Err(_) => {
@@ -1246,7 +1335,7 @@ async fn connect_and_serve(
             None => tokio::select! {
                 msg = ws_stream.next() => msg,
                 _ = wait_for_shutdown(&mut shutdown) => break true,
-                _ = &mut writer_task => break false,
+                _ = &mut writer_task => { writer_finished = true; break false; },
             },
         };
         let Some(msg) = read_result else {
@@ -1267,7 +1356,7 @@ async fn connect_and_serve(
                 }
                 continue;
             }
-            Ok(Message::Text(t)) => t.to_string(),
+            Ok(Message::Text(t)) => t,
             Ok(Message::Close(frame)) => {
                 tracing::info!(?frame, "Server closed node WebSocket");
                 break false;
@@ -1280,13 +1369,14 @@ async fn connect_and_serve(
             }
         };
 
-        let parsed: serde_json::Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "Invalid message from server");
-                continue;
-            }
-        };
+        let parsed =
+            match serde_json::from_str::<nyxid_service_adapters::secret_json::WireJson>(&text) {
+                Ok(v) => v.0,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Invalid message from server");
+                    continue;
+                }
+            };
 
         match parsed["type"].as_str() {
             Some("heartbeat_ping") => {
@@ -1376,19 +1466,24 @@ async fn connect_and_serve(
                 let request_id = parsed["request_id"].as_str().unwrap_or_default().to_owned();
                 let verified = if let Some(secret) = signing_secret.as_ref() {
                     proxy_uploads
-                        .begin(parsed, &config.node.id, secret.as_str())
+                        .begin(&parsed, &config.node.id, secret.as_str())
                         .await
                 } else {
                     Err(anyhow::anyhow!("upload signature missing"))
                 };
                 match verified {
-                    Ok((metadata, upload)) => {
+                    Ok((mut metadata, upload)) => {
                         if upload.operation() != nyxid_machine::Operation::ProxyUpload {
                             let machine = machine.clone();
                             let tx = tx.clone();
                             tokio::spawn(async move {
-                                super::machine::transfer::execute(machine, metadata, upload, tx)
-                                    .await;
+                                super::machine::transfer::execute(
+                                    machine,
+                                    std::mem::take(&mut metadata.0),
+                                    upload,
+                                    tx,
+                                )
+                                .await;
                             });
                             continue;
                         }
@@ -1710,7 +1805,11 @@ async fn connect_and_serve(
     if let Some(task) = usage_task {
         task.abort();
     }
-    writer_task.abort();
+    if !writer_finished {
+        writer_task.abort();
+        let _ = writer_task.await;
+    }
+    drop(ws_stream);
     Ok(Some(served_for))
 }
 
@@ -3604,19 +3703,184 @@ async fn send_web_terminal_closed_with_code(
 // Credential update handlers (server push)
 // ---------------------------------------------------------------------------
 
-/// Process a credential update synchronously. Returns an optional JSON ack
-/// message to send over the WebSocket (avoids holding `&SecretBackend` across
-/// an .await, since `SecretBackend` is not `Send`/`Sync`).
+/// The socket reader applies frames serially. Persist the high-water mark in
+/// the same atomic config save as file material. Keychain writes first persist an
+/// admission fence; only the final config save publishes a receipt.
+fn process_ordered_credential(
+    parsed: &serde_json::Value,
+    sender: &Arc<SharedCredentialsSender>,
+    path: &std::path::Path,
+    backend: &SecretBackend,
+    remove: bool,
+) -> String {
+    let slug = parsed["service_slug"].as_str().unwrap_or_default();
+    let request = parsed["request_id"].as_str();
+    let mut held = None;
+    let result = (|| -> Result<()> {
+        let required = |field: &str| -> Result<&str> {
+            parsed[field].as_str().ok_or_else(|| {
+                super::error::Error::Validation(
+                    "Credential frame is missing a required field".into(),
+                )
+            })
+        };
+        let id = required("credential_id")?;
+        let generation = parsed["credential_generation"]
+            .as_i64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| {
+                super::error::Error::Validation("Invalid credential generation".into())
+            })?;
+        if slug.is_empty() || uuid::Uuid::parse_str(id).is_err() {
+            return Err(super::error::Error::Validation(
+                "Invalid credential delivery identity".into(),
+            ));
+        }
+        let mut config = NodeConfig::load(path)?;
+        let previous = config
+            .credential_generations
+            .0
+            .get(slug)
+            .and_then(|slots| slots.get(id))
+            .copied()
+            .unwrap_or(0);
+        held = Some(previous);
+        let fence = config
+            .credential_generation_fences
+            .0
+            .get(slug)
+            .and_then(|slots| slots.get(id))
+            .copied()
+            .unwrap_or(0);
+        if generation < fence {
+            return Err(super::error::Error::Validation(
+                "A newer credential write awaits completion".into(),
+            ));
+        }
+        if generation < previous {
+            return Ok(());
+        }
+        if matches!(backend, SecretBackend::Keychain(_)) {
+            config
+                .credential_generation_fences
+                .0
+                .entry(slug.to_owned())
+                .or_default()
+                .insert(id.to_owned(), generation);
+            config.save(path)?;
+        }
+        let target = parsed["target_url"].as_str();
+        if remove {
+            if config.credentials.contains_key(slug) {
+                config.remove_credential_via(slug, backend)?;
+            }
+        } else {
+            match parsed["injection_method"].as_str().unwrap_or("header") {
+                "header" => config.add_header_credential_via(
+                    slug,
+                    parsed["header_name"].as_str().unwrap_or("Authorization"),
+                    required("header_value")?,
+                    target,
+                    backend,
+                )?,
+                "query_param" => config.add_query_param_credential_via(
+                    slug,
+                    required("param_name")?,
+                    required("param_value")?,
+                    target,
+                    backend,
+                )?,
+                "path_prefix" => config.add_path_prefix_credential_via(
+                    slug,
+                    parsed["header_name"].as_str().unwrap_or("bot"),
+                    required("header_value")?,
+                    target,
+                    backend,
+                )?,
+                "ifttt_webhook" => config.add_ifttt_credential_via(
+                    slug,
+                    required("header_value")?,
+                    target,
+                    backend,
+                )?,
+                "aws_sigv4" => config.add_aws_sigv4_credential_via(
+                    slug,
+                    required("header_value")?,
+                    target,
+                    backend,
+                )?,
+                "none" => config.set_no_auth_via(slug, target, backend)?,
+                _ => {
+                    return Err(super::error::Error::Validation(
+                        "Unknown credential injection method".into(),
+                    ));
+                }
+            }
+        }
+        config
+            .credential_generations
+            .0
+            .entry(slug.to_owned())
+            .or_default()
+            .insert(id.to_owned(), generation);
+        config.credential_generation_fences.0.remove(slug);
+        let store = CredentialStore::from_config_with_backend(&config, backend)?;
+        config.save(path)?;
+        sender.update(store);
+        held = Some(generation);
+        Ok(())
+    })();
+    // Do not reflect filesystem, provider, or secret-backend errors over the wire.
+    let mut ack = serde_json::json!({"type": "credential_update_ack", "service_slug": slug,
+        "status": if result.is_ok() { "ok" } else { "error" }});
+    if let Some(request) = request {
+        ack["request_id"] = request.into();
+    }
+    if let Some(id) = parsed["credential_id"].as_str() {
+        ack["credential_id"] = id.into();
+    }
+    if let Some(generation) = held {
+        ack["credential_generation"] = generation.into();
+    }
+    if result.is_err() {
+        ack["error"] = "Credential persistence failed".into();
+    }
+    ack.to_string()
+}
+
 fn process_credential_update(
     parsed: &serde_json::Value,
     credential_sender: &Arc<SharedCredentialsSender>,
     config_path: &std::path::Path,
     backend: &SecretBackend,
 ) -> Option<String> {
+    let _store_guard = super::config::credential_store_lock().ok()?;
+    backend.refresh().ok()?;
     // Echo back `request_id` so strict-push callers on the backend can
     // correlate the `credential_update_ack` to their pending waiter.
     // Omitted/None preserves backward compatibility with older servers
     // that don't attach a request id.
+    if parsed["injection_method"] != "target_url"
+        && (parsed.get("credential_generation").is_some() || parsed.get("credential_id").is_some())
+    {
+        return Some(process_ordered_credential(
+            parsed,
+            credential_sender,
+            config_path,
+            backend,
+            false,
+        ));
+    }
+    process_legacy_credential_update(parsed, credential_sender, config_path, backend)
+}
+
+// Kept as the legacy frame reader: unknown JSON fields are ignored.
+fn process_legacy_credential_update(
+    parsed: &serde_json::Value,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    backend: &SecretBackend,
+) -> Option<String> {
     let request_id = parsed["request_id"].as_str();
     let service_slug = match parsed["service_slug"].as_str() {
         Some(s) if !s.is_empty() => s,
@@ -3842,6 +4106,27 @@ fn process_credential_update(
 }
 
 fn process_credential_remove(
+    parsed: &serde_json::Value,
+    credential_sender: &Arc<SharedCredentialsSender>,
+    config_path: &std::path::Path,
+    backend: &SecretBackend,
+) -> Option<String> {
+    let _store_guard = super::config::credential_store_lock().ok()?;
+    backend.refresh().ok()?;
+    if parsed.get("credential_generation").is_some() || parsed.get("credential_id").is_some() {
+        return Some(process_ordered_credential(
+            parsed,
+            credential_sender,
+            config_path,
+            backend,
+            true,
+        ));
+    }
+    process_legacy_credential_remove(parsed, credential_sender, config_path, backend)
+}
+
+// Kept as the legacy frame reader: unknown JSON fields are ignored.
+fn process_legacy_credential_remove(
     parsed: &serde_json::Value,
     credential_sender: &Arc<SharedCredentialsSender>,
     config_path: &std::path::Path,
@@ -4180,36 +4465,17 @@ async fn handle_ws_proxy_open(
         return;
     };
 
-    let normalized_path = if path.is_empty() {
-        String::new()
-    } else if path.starts_with('/') {
-        path.to_string()
+    let normalized_path = if path.is_empty() || path.starts_with('/') {
+        nyxid_service_adapters::SecretText::from(path)
     } else {
-        format!("/{path}")
+        nyxid_service_adapters::SecretText::concat(&["/", path])
     };
 
-    // Path-prefix injection: prepend /{prefix}{credential} to the URL path
-    let final_path = if let Some((prefix, credential)) = cred.path_prefix() {
-        format!("/{prefix}{credential}{normalized_path}")
-    } else {
-        normalized_path
-    };
-
-    let mut url = format!("{ws_base}{final_path}");
-    if let Some(q) = query
-        && !q.is_empty()
-    {
-        url = format!("{url}?{q}");
-    }
-
-    // Append query-param credential.
-    if let Some((param_name, param_value)) = cred.query_param() {
-        url = proxy_executor::append_query_param(&url, param_name, param_value);
-    }
+    let url = proxy_executor::credential_url(&ws_base, &normalized_path, query, cred);
 
     // Build WS connect request with header injection.
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-    let mut ws_request = match url.into_client_request() {
+    let mut ws_request = match url.as_str().into_client_request() {
         Ok(r) => r,
         Err(_) => {
             let _ = send_ws_proxy_error(&tx, &session_id, "Downstream WS request invalid").await;
@@ -4392,26 +4658,25 @@ where
     }
 }
 
-fn injection_frame_to_control(frame: ws_frame_injector::WsFrame) -> WsProxyControl {
+fn injection_frame_to_message(frame: ws_frame_injector::WsFrame) -> Message {
+    let bytes = tokio_tungstenite::tungstenite::Bytes::from_owner(frame.payload);
     match frame.kind {
-        WsFrameKind::Text => {
-            let text = String::from_utf8(frame.payload).unwrap_or_default();
-            WsProxyControl::Text(text)
-        }
-        WsFrameKind::Binary => WsProxyControl::Binary(frame.payload),
+        WsFrameKind::Text => Message::Text(bytes.try_into().unwrap_or_default()),
+        WsFrameKind::Binary => Message::Binary(bytes),
     }
 }
 
 async fn send_ws_frame_injected(
     tx: &mpsc::Sender<NodeWsMessage>,
     session_id: &str,
-    action: &ws_frame_injector::InjectionAction,
+    trigger_kind: &'static str,
+    frame_index: usize,
 ) -> bool {
     let json = serde_json::json!({
         "type": "ws_frame_injected",
         "request_id": session_id,
-        "trigger_kind": action.trigger_kind,
-        "frame_index": action.frame_index_in,
+        "trigger_kind": trigger_kind,
+        "frame_index": frame_index,
     });
     send_ws_message(tx, json.to_string()).await
 }
@@ -4488,7 +4753,7 @@ async fn run_ws_proxy_session_with_limits<S>(
                             let frame = IncomingFrame {
                                 direction: WsFrameDirection::Downstream,
                                 kind: WsFrameKind::Text,
-                                payload: t.to_string().into_bytes(),
+                                payload: t.as_bytes(),
                             };
                             if let Some(action) = ws_frame_injector::evaluate(
                                 &ws_frame_injections,
@@ -4496,11 +4761,11 @@ async fn run_ws_proxy_session_with_limits<S>(
                                 &frame,
                                 credential,
                             ) {
-                                let control = injection_frame_to_control(action.send_frame.clone());
-                                if !send_ws_proxy_control_to_downstream(&mut downstream_sink, control).await {
+                                let reply = injection_frame_to_message(action.send_frame);
+                                if downstream_sink.send(reply).await.is_err() {
                                     break;
                                 }
-                                if !send_ws_frame_injected(&tx, &session_id, &action).await {
+                                if !send_ws_frame_injected(&tx, &session_id, action.trigger_kind, action.frame_index_in).await {
                                     break;
                                 }
                                 if !action.forward_original {
@@ -4523,7 +4788,7 @@ async fn run_ws_proxy_session_with_limits<S>(
                             let frame = IncomingFrame {
                                 direction: WsFrameDirection::Downstream,
                                 kind: WsFrameKind::Binary,
-                                payload: b.to_vec(),
+                                payload: b.as_ref(),
                             };
                             if let Some(action) = ws_frame_injector::evaluate(
                                 &ws_frame_injections,
@@ -4531,11 +4796,11 @@ async fn run_ws_proxy_session_with_limits<S>(
                                 &frame,
                                 credential,
                             ) {
-                                let control = injection_frame_to_control(action.send_frame.clone());
-                                if !send_ws_proxy_control_to_downstream(&mut downstream_sink, control).await {
+                                let reply = injection_frame_to_message(action.send_frame);
+                                if downstream_sink.send(reply).await.is_err() {
                                     break;
                                 }
-                                if !send_ws_frame_injected(&tx, &session_id, &action).await {
+                                if !send_ws_frame_injected(&tx, &session_id, action.trigger_kind, action.frame_index_in).await {
                                     break;
                                 }
                                 if !action.forward_original {
@@ -4963,6 +5228,7 @@ mod tests {
                     &mut machine,
                     Arc::new(super::super::proxy_upload::Uploads::default()),
                     replay_guard(),
+                    &mut RetiredSockets::default(),
                 ),
             )
             .await
@@ -5336,9 +5602,9 @@ mod tests {
                 run_http_proxy_until_cancel(
                     &mut cancellation.receiver,
                     proxy_executor::execute_proxy_request(
-                        &request,
+                        &proxy_executor::signed_test_request(&request),
                         &credentials,
-                        None,
+                        Some(proxy_executor::TEST_SIGNING_SECRET),
                         &tokio::sync::Mutex::new(ReplayGuard::new()),
                         &NodeMetrics::new(),
                         &tx,
@@ -5445,7 +5711,7 @@ mod tests {
             opening.signature = nyxid_machine::signing::sign(&opening, &[17; 32]);
             let (metadata, upload) = uploads
                 .begin(
-                    serde_json::to_value(&opening).unwrap(),
+                    &serde_json::to_value(&opening).unwrap(),
                     &config.node.id,
                     &"11".repeat(32),
                 )
@@ -5559,9 +5825,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
 
         proxy_executor::execute_proxy_request(
-            &request,
+            &proxy_executor::signed_test_request(&request),
             &credentials,
-            None,
+            Some(proxy_executor::TEST_SIGNING_SECRET),
             &replay_guard,
             &metrics,
             &tx,
@@ -5645,9 +5911,9 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
 
         proxy_executor::execute_proxy_request(
-            &request,
+            &proxy_executor::signed_test_request(&request),
             &credentials,
-            None,
+            Some(proxy_executor::TEST_SIGNING_SECRET),
             &replay_guard,
             &metrics,
             &tx,
@@ -5678,6 +5944,63 @@ mod tests {
         assert_eq!(metrics.snapshot().success_count, 1);
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn node_frame_credentials_apply_only_to_downstream_replies() {
+        let (socket, mut peer) = duplex_websocket_pair().await;
+        let (control_tx, control_rx) = mpsc::channel(4);
+        let (tx, mut rx) = mpsc::channel(4);
+        let rules = serde_json::from_value(serde_json::json!([{
+            "trigger": {"json_field_equals": {"path": "$.type", "value": "auth_required"}},
+            "template": "${credential}",
+            "direction": "upstream"
+        }, {
+            "trigger": {"json_field_equals": {"path": "$.type", "value": "auth_required"}},
+            "template": "${credential}",
+            "direction": "downstream"
+        }]))
+        .unwrap();
+        let session = tokio::spawn(run_ws_proxy_session_with_limits(
+            "node-frame-test".into(),
+            socket,
+            control_rx,
+            tx,
+            Default::default(),
+            rules,
+            Some("fixture-node-credential".to_owned().into()),
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        ));
+        let challenge = r#"{"type":"auth_required"}"#;
+        control_tx
+            .send(WsProxyControl::Text(challenge.into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            peer.next().await.unwrap().unwrap().into_text().unwrap(),
+            challenge
+        );
+        peer.send(Message::Text(challenge.into())).await.unwrap();
+        assert_eq!(
+            peer.next().await.unwrap().unwrap().into_text().unwrap(),
+            "fixture-node-credential"
+        );
+        let receipt: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(
+            receipt,
+            serde_json::json!({
+                "type": "ws_frame_injected", "request_id": "node-frame-test",
+                "trigger_kind": "json_field_equals", "frame_index": 0
+            })
+        );
+        peer.send(Message::Text("ready".into())).await.unwrap();
+        let reply: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(reply["data"], "ready");
+        drop(control_tx);
+        session.await.unwrap();
     }
 
     #[tokio::test]
@@ -5746,6 +6069,37 @@ mod tests {
 
         relay.await.expect("relay task completes");
         drop(control_tx);
+    }
+
+    #[test]
+    fn interrupted_retirement_handshakes_keep_only_possible_owners() {
+        let mut proofs = RetiredSockets::default();
+        let a = uuid::Uuid::new_v4().to_string();
+        let b = uuid::Uuid::new_v4().to_string();
+        let c = uuid::Uuid::new_v4().to_string();
+        let offer = |id: &str, previous: Option<&str>| {
+            serde_json::json!({
+                "connection_id":id, "secret":"a".repeat(64), "predecessor_id":previous
+            })
+        };
+        proofs.offer(offer(&a, None)).unwrap();
+        proofs
+            .authenticated(
+                &serde_json::json!({"capabilities":{"retirement_v1":true},"connection_id":a}),
+            )
+            .unwrap();
+        proofs.offer(offer(&b, Some(&a))).unwrap();
+        assert_eq!(proofs.predecessor.as_ref().unwrap().connection_id, a);
+        assert_eq!(proofs.candidate.as_ref().unwrap().connection_id, b);
+        // The B CAS won, but its auth_ok was lost.
+        proofs.offer(offer(&c, Some(&b))).unwrap();
+        assert_eq!(proofs.predecessor.as_ref().unwrap().connection_id, b);
+        assert_eq!(proofs.candidate.as_ref().unwrap().connection_id, c);
+        // Legacy auth_ok, including a timed-out offer.
+        proofs
+            .authenticated(&serde_json::json!({"type":"auth_ok"}))
+            .unwrap();
+        assert!(proofs.predecessor.is_none() && proofs.candidate.is_none());
     }
 
     #[test]
@@ -6104,6 +6458,454 @@ mod tests {
                 assert_eq!(value.as_str(), "Bearer sk-rci");
             }
             _ => panic!("expected header credential"),
+        }
+    }
+
+    #[test]
+    fn node_credential_order_2472_removal_tombstone_survives_restart_and_fences_delayed_frames() {
+        for keychain in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let backend = if keychain {
+                SecretBackend::new_mock_keychain("ordering-test")
+            } else {
+                SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap())
+            };
+            let config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+            config.save(&path).unwrap();
+            let (sender, live) = SharedCredentials::new(
+                CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+            );
+            let sender = Arc::new(sender);
+            let value = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+            let slot = uuid::Uuid::new_v4().to_string();
+            let update = |generation| {
+                serde_json::json!({"service_slug":"ordering-fixture", "credential_id":slot,
+                "credential_generation":generation,"injection_method":"header","header_value":value.as_str()})
+            };
+            let remove = |generation| serde_json::json!({"service_slug":"ordering-fixture", "credential_id":slot,"credential_generation":generation});
+            process_credential_update(&update(1), &sender, &path, &backend).unwrap();
+            process_credential_remove(&remove(2), &sender, &path, &backend).unwrap();
+            assert!(live.snapshot().get("ordering-fixture").is_none());
+            let config = NodeConfig::load(&path).unwrap();
+            let (sender, live) = SharedCredentials::new(
+                CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+            );
+            let sender = Arc::new(sender);
+            process_credential_update(&update(1), &sender, &path, &backend).unwrap();
+            assert!(live.snapshot().get("ordering-fixture").is_none());
+            process_credential_update(&update(3), &sender, &path, &backend).unwrap();
+            process_credential_remove(&remove(2), &sender, &path, &backend).unwrap();
+            assert!(live.snapshot().get("ordering-fixture").is_some());
+            process_credential_update(&update(3), &sender, &path, &backend).unwrap();
+            assert_eq!(
+                NodeConfig::load(&path).unwrap().credential_generations.0["ordering-fixture"]
+                    [&slot],
+                3
+            );
+        }
+    }
+
+    #[test]
+    fn node_credential_order_2472_old_server_frames_still_apply_without_resetting_high_water_mark()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+        config.save(&path).unwrap();
+        let (sender, live) = SharedCredentials::new(
+            CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+        );
+        let sender = Arc::new(sender);
+        let first = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+        let legacy = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+        let slot = uuid::Uuid::new_v4().to_string();
+        let versioned = serde_json::json!({"service_slug":"ordering-fixture", "credential_id":slot,
+            "credential_generation":2,"injection_method":"header","header_value":first.as_str()});
+        process_credential_update(&versioned, &sender, &path, &backend).unwrap();
+        let old = serde_json::json!({"service_slug":"ordering-fixture", "injection_method":"header","header_value":legacy.as_str()});
+        process_credential_update(&old, &sender, &path, &backend).unwrap();
+        assert!(
+            live.snapshot()
+                .get("ordering-fixture")
+                .unwrap()
+                .header()
+                .unwrap()
+                .1
+                == legacy.as_str()
+        );
+        assert_eq!(
+            NodeConfig::load(&path).unwrap().credential_generations.0["ordering-fixture"][&slot],
+            2
+        );
+        process_credential_remove(
+            &serde_json::json!({"service_slug":"ordering-fixture"}),
+            &sender,
+            &path,
+            &backend,
+        )
+        .unwrap();
+        assert!(live.snapshot().get("ordering-fixture").is_none());
+    }
+
+    #[test]
+    fn credential_update_wire_reader_guards_fields_through_store_and_receipt() {
+        use nyxid_service_adapters::secret_json::WireJson;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+        config.save(&path).unwrap();
+        let (sender, live) = SharedCredentials::new(
+            CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+        );
+        let raw = r#"{"type":"credential_update","request_id":"receipt","service_slug":"fixture","injection_method":"query_param","param_name":"token","param_value":"dummy-node-value"}"#;
+        let frame = serde_json::from_str::<WireJson>(raw).unwrap().0;
+        assert_eq!(format!("{frame:#?}"), "SecretJson([REDACTED])");
+        let ack = process_credential_update(&frame, &Arc::new(sender), &path, &backend).unwrap();
+        assert!(!ack.contains("dummy-node-value"));
+        let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+        assert_eq!(ack["status"], "ok");
+        assert_eq!(ack["request_id"], "receipt");
+        assert_eq!(
+            live.snapshot().get("fixture").unwrap().query_param(),
+            Some(("token", "dummy-node-value"))
+        );
+        let error = serde_json::from_str::<WireJson>(&raw[..raw.len() - 1]).unwrap_err();
+        assert!(!format!("{error} {error:?}").contains("dummy-node-value"));
+    }
+
+    #[test]
+    fn node_credential_order_2472_old_node_reader_tolerates_additive_fields_and_echoes_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+        config.save(&path).unwrap();
+        let (sender, live) = SharedCredentials::new(
+            CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+        );
+        let sender = Arc::new(sender);
+        let value = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+        let frame = serde_json::json!({"service_slug":"ordering-fixture", "credential_id":uuid::Uuid::new_v4().to_string(),
+            "credential_generation":2,"request_id":"receipt", "injection_method":"header","header_value":value.as_str()});
+        let ack: serde_json::Value = serde_json::from_str(
+            &process_legacy_credential_update(&frame, &sender, &path, &backend).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ack["request_id"], "receipt");
+        assert_eq!(ack["status"], "ok");
+        assert!(
+            live.snapshot()
+                .get("ordering-fixture")
+                .unwrap()
+                .header()
+                .unwrap()
+                .1
+                == value.as_str()
+        );
+        assert!(
+            NodeConfig::load(&path)
+                .unwrap()
+                .credential_generations
+                .0
+                .is_empty()
+        );
+        let ack: serde_json::Value = serde_json::from_str(
+            &process_legacy_credential_remove(&frame, &sender, &path, &backend).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ack["request_id"], "receipt");
+        assert!(live.snapshot().get("ordering-fixture").is_none());
+    }
+
+    #[test]
+    fn node_credential_order_2472_keychain_interrupted_write_fences_stale_frames_until_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let backend = SecretBackend::new_mock_keychain("ordering-test");
+        let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+        let first = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+        let second = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+        let slot = uuid::Uuid::new_v4().to_string();
+        let slug = "ordering-fixture";
+        config
+            .add_header_credential_via(slug, "Authorization", &first, None, &backend)
+            .unwrap();
+        config
+            .credential_generations
+            .0
+            .entry(slug.into())
+            .or_default()
+            .insert(slot.clone(), 1);
+        // A process died after admitting generation 2, either before or after its keychain write.
+        config
+            .credential_generation_fences
+            .0
+            .entry(slug.into())
+            .or_default()
+            .insert(slot.clone(), 2);
+        config.save(&path).unwrap();
+        for changed in [false, true] {
+            if changed {
+                backend.store_credential_value(slug, &second).unwrap();
+            }
+            let (sender, live) = SharedCredentials::new(
+                CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+            );
+            let sender = Arc::new(sender);
+            let frame = |generation, value: &str| {
+                serde_json::json!({"service_slug":slug, "credential_id":slot,
+                "credential_generation":generation,"injection_method":"header","header_value":value})
+            };
+            let ack: serde_json::Value = serde_json::from_str(
+                &process_credential_update(&frame(1, &first), &sender, &path, &backend).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(ack["credential_generation"], 1);
+            assert!(live.snapshot().get(slug).is_none());
+        }
+        let (sender, live) = SharedCredentials::new(
+            CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+        );
+        let ack: serde_json::Value = serde_json::from_str(&process_credential_update(&serde_json::json!({
+            "service_slug":slug,"credential_id":slot,"credential_generation":2,"header_value":second.as_str()
+        }), &Arc::new(sender), &path, &backend).unwrap()).unwrap();
+        assert_eq!(ack["credential_generation"], 2);
+        assert!(live.snapshot().get(slug).unwrap().header().unwrap().1 == second.as_str());
+        let saved = NodeConfig::load(&path).unwrap();
+        assert_eq!(saved.credential_generations.0[slug][&slot], 2);
+        assert!(saved.credential_generation_fences.0.is_empty());
+    }
+
+    #[test]
+    fn node_credential_order_2472_keychain_interrupted_removal_can_restart_and_accept_legacy_repair()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let backend = SecretBackend::new_mock_keychain("ordering-test");
+        let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+        let value = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+        let slot = uuid::Uuid::new_v4().to_string();
+        let slug = "ordering-fixture";
+        config
+            .add_header_credential_via(slug, "Authorization", &value, None, &backend)
+            .unwrap();
+        config
+            .credential_generations
+            .0
+            .entry(slug.into())
+            .or_default()
+            .insert(slot.clone(), 1);
+        config
+            .credential_generation_fences
+            .0
+            .entry(slug.into())
+            .or_default()
+            .insert(slot.clone(), 2);
+        config.save(&path).unwrap();
+        backend.delete_credential(slug).unwrap();
+        let (sender, live) = SharedCredentials::new(
+            CredentialStore::from_config_with_backend(&NodeConfig::load(&path).unwrap(), &backend)
+                .unwrap(),
+        );
+        assert!(live.snapshot().get(slug).is_none());
+        let sender = Arc::new(sender);
+        let ack: serde_json::Value = serde_json::from_str(
+            &process_credential_update(
+                &serde_json::json!({
+                    "service_slug":slug,"header_value":value.as_str()
+                }),
+                &sender,
+                &path,
+                &backend,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ack["status"], "ok");
+        assert!(live.snapshot().get(slug).unwrap().header().unwrap().1 == value.as_str());
+        let saved = NodeConfig::load(&path).unwrap();
+        assert_eq!(saved.credential_generations.0[slug][&slot], 1);
+        assert!(saved.credential_generation_fences.0.is_empty());
+    }
+
+    #[test]
+    fn node_credential_order_2472_failed_persistence_does_not_ack_or_advance_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let backend = SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap());
+        let config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+        config.save(&path).unwrap();
+        let (sender, live) = SharedCredentials::new(
+            CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+        );
+        let sender = Arc::new(sender);
+        let value = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+        let slot = uuid::Uuid::new_v4().to_string();
+        let frame = serde_json::json!({"service_slug":"ordering-fixture", "credential_id":slot,
+            "credential_generation":1,"injection_method":"header","header_value":value.as_str()});
+        std::fs::create_dir(dir.path().join(".config.toml.tmp")).unwrap();
+        let ack: serde_json::Value = serde_json::from_str(
+            &process_credential_update(&frame, &sender, &path, &backend).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(ack["status"], "error");
+        assert_eq!(ack["credential_generation"], 0);
+        assert!(
+            NodeConfig::load(&path)
+                .unwrap()
+                .credential_generations
+                .0
+                .is_empty()
+        );
+        assert!(live.snapshot().get("ordering-fixture").is_none());
+    }
+
+    #[test]
+    fn node_credential_order_2472_local_refresh_cannot_restore_a_stale_config_or_superseded_material()
+     {
+        for keychain in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let backend = if keychain {
+                SecretBackend::new_mock_keychain("ordering-test")
+            } else {
+                SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap())
+            };
+            let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+            let initial = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+            let pushed = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+            let refreshed = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+            let local_slug = "local-refresh-fixture";
+            config
+                .add_header_credential_via(local_slug, "Authorization", &initial, None, &backend)
+                .unwrap();
+            config
+                .credentials
+                .get_mut(local_slug)
+                .unwrap()
+                .oauth_managed = true;
+            config.save(&path).unwrap();
+            let observed = config.clone(); // Snapshot held while the provider request runs.
+            let (sender, _) = SharedCredentials::new(
+                CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+            );
+            let sender = Arc::new(sender);
+            let slot = uuid::Uuid::new_v4().to_string();
+            let frame = |slug, generation, value: &str| {
+                serde_json::json!({
+                    "service_slug":slug,"credential_id":slot,"credential_generation":generation,
+                    "injection_method":"header","header_value":value
+                })
+            };
+            process_credential_update(
+                &frame("ordering-fixture", 2, &pushed),
+                &sender,
+                &path,
+                &backend,
+            )
+            .unwrap();
+            let token = || super::super::oauth::TokenResponse {
+                access_token: refreshed.to_string(),
+                token_type: Some("Bearer".into()),
+                expires_in: Some(3600),
+                refresh_token: None,
+                scope: None,
+            };
+            assert!(
+                super::super::agent::apply_local_oauth_refresh(
+                    &path,
+                    &backend,
+                    &observed,
+                    local_slug,
+                    token()
+                )
+                .unwrap()
+            );
+            let current = NodeConfig::load(&path).unwrap();
+            assert_eq!(
+                current.credential_generations.0["ordering-fixture"][&slot],
+                2
+            );
+            let store = CredentialStore::from_config_with_backend(&current, &backend).unwrap();
+            assert!(store.get("ordering-fixture").unwrap().header().unwrap().1 == pushed.as_str());
+            assert!(
+                store
+                    .get(local_slug)
+                    .unwrap()
+                    .header()
+                    .unwrap()
+                    .1
+                    .ends_with(refreshed.as_str())
+            );
+            // The same slot is promoted to a server-held credential while another local refresh waits.
+            process_credential_update(&frame(local_slug, 2, &pushed), &sender, &path, &backend)
+                .unwrap();
+            assert!(
+                !super::super::agent::apply_local_oauth_refresh(
+                    &path,
+                    &backend,
+                    &current,
+                    local_slug,
+                    token()
+                )
+                .unwrap()
+            );
+            process_credential_update(&frame(local_slug, 1, &initial), &sender, &path, &backend)
+                .unwrap();
+            let saved = NodeConfig::load(&path).unwrap();
+            let store = CredentialStore::from_config_with_backend(&saved, &backend).unwrap();
+            assert_eq!(saved.credential_generations.0[local_slug][&slot], 2);
+            assert!(store.get(local_slug).unwrap().header().unwrap().1 == pushed.as_str());
+        }
+    }
+
+    #[test]
+    fn node_credential_order_2472_delayed_first_replacement_cannot_overwrite_second() {
+        for keychain in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            let backend = if keychain {
+                SecretBackend::new_mock_keychain("ordering-test")
+            } else {
+                SecretBackend::File(LocalEncryption::load_or_generate(dir.path()).unwrap())
+            };
+            let config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".into());
+            config.save(&path).unwrap();
+            let (sender, live) = SharedCredentials::new(
+                CredentialStore::from_config_with_backend(&config, &backend).unwrap(),
+            );
+            let sender = Arc::new(sender);
+            let first = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+            let second = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+            let slot = uuid::Uuid::new_v4().to_string();
+            let frame = |generation, value: &str| {
+                serde_json::json!({
+                    "type": "credential_update", "service_slug": "ordering-fixture",
+                    "credential_id": slot, "credential_generation": generation,
+                    "injection_method": "header", "header_name": "Authorization",
+                    "header_value": value,
+                })
+            };
+            let held = frame(1, &first);
+            let current = frame(2, &second);
+            process_credential_update(&current, &sender, &path, &backend).unwrap();
+            let ack = process_credential_update(&held, &sender, &path, &backend).unwrap();
+            let snapshot = live.snapshot();
+            assert!(
+                snapshot
+                    .get("ordering-fixture")
+                    .unwrap()
+                    .header()
+                    .unwrap()
+                    .1
+                    == second.as_str(),
+                "a delayed first replacement overwrote the second replacement"
+            );
+            let ack: serde_json::Value = serde_json::from_str(&ack).unwrap();
+            assert_eq!(ack["credential_generation"], 2);
         }
     }
 

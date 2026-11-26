@@ -51,7 +51,7 @@ pub async fn updater_image(auth: AuthUser) -> AppResult<Json<Value>> {
     super::login_client_context::require_first_party_human(&auth)?;
     // Return a useful pending state promptly; verification continues once in
     // the shared cache, rather than restarting after a browser request timeout.
-    let resolution = tokio::spawn(verified_updater_image());
+    let resolution = crate::services::shutdown::process().spawn(verified_updater_image());
     let image = tokio::time::timeout(std::time::Duration::from_millis(75), resolution)
         .await
         .ok()
@@ -491,10 +491,12 @@ pub async fn tool(
 }
 
 pub fn spawn(state: AppState) {
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
-            timer.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut timer).await else {
+                break;
+            };
             if sweep(&state).await.is_err() {
                 tracing::warn!("Machine update reconciliation deferred");
             }
@@ -504,6 +506,9 @@ pub fn spawn(state: AppState) {
 async fn sweep(state: &AppState) -> AppResult<()> {
     let mut rows=state.db.collection::<MachineUpdate>(COLLECTION_NAME).find(doc!{"$or":[{"automatic":true},{"notify_pending":true},{"phase":{"$in":["manual_step","queued","verifying","downloading","restarting"]}}]}).await?;
     while let Some(row) = rows.try_next().await? {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         let Some(node) = updates::node_for_record(&state.db, &row).await? else {
             updates::finish(&state.db, &row, "failed", Some("machine_unavailable")).await?;
             state

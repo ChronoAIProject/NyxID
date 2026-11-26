@@ -1,3 +1,5 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { useCallback, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -20,16 +22,33 @@ const COPY: Record<
   ProfileField,
   { title: string; placeholder: string; footer: string }
 > = {
-  display_name: {
-    title: "Display name",
-    placeholder: "Your name",
-    footer: "Shown to people you share agents and groups with.",
+  get display_name() {
+    return {
+      get title() {
+        return translateApp("Display name");
+      },
+      get placeholder() {
+        return translateApp("Your name");
+      },
+      get footer() {
+        return translateApp(
+          "Shown to people you share agents and groups with.",
+        );
+      },
+    };
   },
-  avatar_url: {
-    title: "Avatar",
+  get avatar_url() {
+    return {
+      get title() {
+        return translateApp("Avatar");
+      },
     placeholder: "https://example.com/avatar.png",
-    footer:
-      "An https link to a square image. Your initial is shown until you add one.",
+      get footer() {
+        return translateApp(
+          "An https link to a square image. Your initial is shown until you add one.",
+        );
+      },
+    };
   },
 };
 
@@ -54,20 +73,24 @@ export function ProfileFieldEditScreen({
   const saved = profile.data?.[field] ?? "";
   const [value, setValue] = useState<string>();
   const draft = value ?? saved;
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const save = useMutation({
     mutationFn: accountApi.updateProfile,
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ["account", "profile"] });
       navigation.goBack();
     },
-    onError: (cause) => setError(resolveErrorMessage(cause)),
+    onError: (cause) => setError(() => (resolveErrorMessage(cause))),
   });
   const changed = !!profile.data && draft.trim() !== saved;
   const submit = useCallback(() => {
     const parsed = updateProfileSchema.safeParse({ [field]: draft });
     if (!parsed.success) {
-      setError(parsed.error.issues[0]?.message ?? "Check this value.");
+      setError(() => {
+        const validation = updateProfileSchema.safeParse({ [field]: draft });
+        return (!validation.success && validation.error.issues[0]?.message) || translateApp("Check this value.");
+      },
+      );
       return;
     }
     setError(undefined);
@@ -83,7 +106,7 @@ export function ProfileFieldEditScreen({
       {!isConnected ? (
         <Notice message={t("You're offline. Connect to save changes.")} />
       ) : null}
-      {error ? <Notice tone="error" message={error} /> : null}
+      {error ? <Notice tone="error" message={t(error)} /> : null}
       <SettingsGroup inset={false} footer={t(copy.footer)}>
         <SettingsTextField
           accessibilityLabel={t(copy.title)}

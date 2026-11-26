@@ -593,12 +593,12 @@ const ALLOWLIST: &[Verifier] = &[
     // Refresh and token exchange.
     v(
         "services/token_service.rs",
-        "refresh_tokens",
+        "refresh_tokens_for_client",
         "verify_token",
         1,
         "refresh JWT at /auth/refresh and /oauth/token refresh_token grant",
         "token_type refresh; stored row by jti (revoked/expired, reuse detection); live \
-         session; active OAuth client (deactivated -> revoke); live consent grant and \
+         session or authenticated issuing OAuth client; live consent grant and \
          protected consent reference; service allowlist narrowed to current consent",
     ),
     v(
@@ -642,12 +642,20 @@ const ALLOWLIST: &[Verifier] = &[
     // Relay and callback receivers.
     v(
         "handlers/channel_relay.rs",
-        "resolve_reply_token_message_context",
+        "resolve_reply_token_message_context_classified",
         "validate_relay_reply_token",
         1,
-        "relay reply token at POST /channel-relay/reply",
-        "active inbound message, conversation, live agent API key and active bot; bot \
-         scope; JTI consumed once in reply_token_uses",
+        "per-inbound relay reply capability at reply, thread-reply and attachment reads",
+        "RS256 kid selection, issuer, reply audience/type and bounded lifetime; inbound \
+         message, conversation and platform binding; active unexpired ordinary API key \
+         and active bot with owner/platform scope. Durable adapters also check current \
+         key assignment. Carried claims bind thread dispatch and recheck expiry before \
+         unique JTI insert; \
+         ordinary non-durable replies consume here, attachment reads do not consume. \
+         Failed preflight Health requires the same verified message/key/platform binding. \
+         No OAuth consent authority: this is a callback capability. Unknown signing kid \
+         refuses 401; local key selection has no network outage; live-key database errors \
+         propagate as database errors, without dispatch or Health writes",
     ),
     v(
         "handlers/channel_relay.rs",
@@ -684,6 +692,24 @@ const ALLOWLIST: &[Verifier] = &[
         1,
         "NyxID public-authority assertion (typ nyxid-public+jwt)",
         "see verify_assertion decoding_key entry",
+    ),
+    // Production-to-staging sign-in decisions are operation assertions, not access tokens.
+    v(
+        "services/staging_qr.rs",
+        "verify",
+        "jsonwebtoken::decode",
+        1,
+        "production staging-device assertion (typ nyxid-staging-device+jwt)",
+        "RS256 with the mounted production public key (one pinned key, no kid selection \
+         or fallback); exact issuer and staging receiver audience, typ, zero leeway, \
+         20s lifetime and bounded iat. Production requires a live first-party human \
+         session, personal feature entitlement, active verified person and MFA before \
+         signing approval. Staging matches the verified email and exact request/account \
+         binding; approve_bound fences current account/MFA state with the pending, \
+         unexpired one-time claim. Denial binds the same request. No OAuth consent or \
+         access-token authority; production bearer tokens fail typ/claim validation. \
+         Key rotation requires replacing the pinned PEM and restarting staging; \
+         unavailable database/transport authority fails without issuing a session",
     ),
     // Non-NyxID keys (recorded so a new JWT verifier anywhere is reviewed).
     v(

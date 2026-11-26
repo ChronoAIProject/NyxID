@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import type { RequestOptions } from "./authenticatedTransport";
 import {
@@ -31,16 +33,18 @@ const groupPath = (id: string) => `${ROOT}/groups/${groupIdSchema.parse(id)}`;
 const revision = z.number().int().nonnegative();
 const notesUpdate = z.object({
   expected_revision: revision,
-  notes: z
+  get notes() {
+    return z
     .array(
       z
         .string()
         .refine(
-          (value) => [...value].length <= 500,
-          "A note has at most 500 characters.",
-        ),
+          (value) => [...value].length <= 500, {
+          error: () => translateApp("A note has at most 500 characters."),
+        }),
     )
-    .max(50),
+    .max(50);
+  },
 });
 
 /** Exact human REST contracts; no fallback to legacy acknowledgements for consent. */
@@ -73,7 +77,7 @@ export function createCollaborationApi(request: Request) {
           }),
         );
       if (result.group && result.group.id !== id)
-        throw new Error("Group response mismatch. Reload before continuing.");
+        throw localizedError("Group response mismatch. Reload before continuing.");
       return result;
     },
     async preview(token: string, signal?: AbortSignal) {
@@ -104,7 +108,7 @@ export function createCollaborationApi(request: Request) {
       const allowed =
         kind === "consent" ? ["once", "always", "skip"] : ["allow", "deny"];
       if (!allowed.includes(decision))
-        throw new Error("Invalid decision for this card.");
+        throw localizedError("Invalid decision for this card.");
       const target =
         kind === "approval"
           ? `/approvals/requests/${encodeURIComponent(id)}/decide`
@@ -254,9 +258,7 @@ export function inviteToken(input: string) {
     .regex(/^[a-fA-F0-9]+$/)
     .safeParse(token);
   if (!parsed.success)
-    throw new Error(
-      "Paste the full invitation link or a 64-character invitation code.",
-    );
+    throw localizedError("Paste the full invitation link or a 64-character invitation code.");
   // NyxID issues lowercase codes and hashes them byte-for-byte.
   return parsed.data.toLowerCase();
 }

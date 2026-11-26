@@ -50,29 +50,46 @@ pub struct NyxbotGatewayRelease {
     pub expected_version: Option<i64>,
     pub state: ReleaseState,
     pub reason: ReleaseReason,
-    #[serde(with = "crate::models::bson_datetime::optional")]
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub dispatch_started_at: Option<DateTime<Utc>>,
-    #[serde(with = "crate::models::bson_datetime::optional")]
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub provisional_expires_at: Option<DateTime<Utc>>,
-    #[serde(with = "crate::models::bson_datetime::optional")]
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub due_at: Option<DateTime<Utc>>,
-    #[serde(with = "crate::models::bson_datetime::optional")]
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub next_attempt_at: Option<DateTime<Utc>>,
     pub attempt_count: i64,
     pub claim_id: Option<String>,
-    #[serde(with = "crate::models::bson_datetime::optional")]
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub lease_until: Option<DateTime<Utc>>,
     pub revision: i64,
     pub last_error: Option<String>,
+    /// Original closed review reason; observations never replace it.
+    #[serde(default)]
+    pub review_reason: Option<String>,
+    #[serde(default)]
+    pub last_gateway_answer: Option<String>,
+    #[serde(default)]
+    pub failure_audit: Option<ReleaseFailureAudit>,
     pub observed_version: Option<i64>,
     pub resolution: Option<String>,
     pub reviewed_by: Option<String>,
-    #[serde(with = "crate::models::bson_datetime::optional")]
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub settled_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+/// Diagnostic suppression only; never execution or deletion authority.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReleaseFailureAudit {
+    pub state: ReleaseState,
+    pub code: String,
+    pub gateway_answer: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub at: DateTime<Utc>,
 }
 
 impl std::fmt::Debug for NyxbotGatewayRelease {
@@ -92,10 +109,10 @@ pub struct ReleaseReconcileCursor {
     pub id: String,
     pub last_id: Option<String>,
     pub claim_id: Option<String>,
-    #[serde(with = "crate::models::bson_datetime::optional")]
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub lease_until: Option<DateTime<Utc>>,
-    #[serde(with = "crate::models::bson_datetime::optional")]
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub pass_started_at: Option<DateTime<Utc>>,
-    #[serde(with = "crate::models::bson_datetime::optional")]
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub pass_completed_at: Option<DateTime<Utc>>,
 }

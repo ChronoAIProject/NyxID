@@ -88,14 +88,9 @@ pub async fn create(
         &input.user_service_id,
         input.expires_at,
         input.policy,
+        Some(&audit_service::AuditActor::from_auth_user(&auth)),
     )
     .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "permission_key_created",
-        Some(json!({"permission_key_id": binding.id, "user_service_id": binding.user_service_id})),
-    );
     let mut response = (
         StatusCode::CREATED,
         Json(CreatedResponse {
@@ -145,16 +140,9 @@ pub async fn pause(
         &id,
         input.revision,
         input.paused,
+        Some(&audit_service::AuditActor::from_auth_user(&auth)),
     )
     .await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "permission_key_pause_changed",
-        Some(
-            json!({"permission_key_id": id, "paused": input.paused, "revision": binding.revision}),
-        ),
-    );
     Ok(Json(binding.into()))
 }
 
@@ -165,13 +153,15 @@ pub async fn revoke(
 ) -> AppResult<StatusCode> {
     super::login_client_context::require_first_party_human(&auth)?;
     policies::get(&state.db, &auth.user_id.to_string(), &id).await?;
-    key_service::delete_api_key(&state.db, &auth.user_id.to_string(), &id).await?;
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth,
-        "permission_key_revoked",
-        Some(json!({"permission_key_id": id})),
-    );
+    let actor = audit_service::AuditActor::from_auth_user(&auth);
+    let intent = crate::services::api_key_audit_service::permission_revoked(&actor, &id)?;
+    super::assistant_nyxagent::survivor::cancel_before_revocation(
+        &state,
+        &actor.user_id,
+        mongodb::bson::doc! {"user_id":&actor.user_id,"credential_api_key_id":&id},
+    )
+    .await;
+    key_service::delete_api_key_audited(&state.db, &actor.user_id, &id, &intent).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

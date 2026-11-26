@@ -187,6 +187,23 @@ An explicit `set-url --service <slug> --url ""` is allowed. Clearing a node-mana
 
 Auth method, auth key name and node changes remain rejected without supplying a new credential to promote it to server-held storage. Do not supply `credential` when the intent is to keep the secret node-local.
 
+### Credential rotation delivery
+
+Upgrade the CLI on credential nodes to get generation checks for server-pushed
+credential updates and removals. Older agents keep working and receive retries,
+but only upgraded agents reject delayed older updates. Saved configurations
+upgrade additively; no manual migration is needed. The backend retries
+unacknowledged current credentials after reconnect and in its background
+reconciliation pass. A temporary disconnection no longer requires another
+rotation to trigger delivery. Offline retries back off to ten minutes, and a
+reconnect wakes pending delivery immediately. Very old agents without correlated
+receipts receive one successful queue send per change or reconnect; it is
+recorded as unconfirmed and is not sent again on a timer. Removal on those
+agents waits for an upgrade or manual cleanup. Disabled services and inactive
+credentials wait for a source change before retrying. Locally managed
+credentials and encrypted pending-credential enrollment retain their existing
+behavior.
+
 ### List Credentials
 
 ```bash
@@ -450,7 +467,7 @@ On Unix systems, the config file is written atomically (write to temp file with 
 
 ## HMAC Request Signing
 
-When HMAC signing is enabled on the NyxID server (default: enabled), proxy requests sent to the agent include an HMAC-SHA256 signature. The agent verifies this signature to ensure request integrity and authenticity.
+The agent requires an HMAC-SHA256 signature on every HTTP proxy request. Enable `NODE_HMAC_SIGNING_ENABLED=true` (the default) on every server replica before upgrading agents. A server configured with `false` can still connect to the agent. Its unsigned HTTP requests receive a non-retryable 403.
 
 ### How It Works
 

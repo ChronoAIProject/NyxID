@@ -17,8 +17,14 @@ pub(crate) async fn ensure_indexes(db: &mongodb::Database) -> crate::errors::App
 
 /// Delete: personal owner is the exact user_id. Final-source cleanup is the
 /// only phase allowed to remove dedup receipts; source absence is not evidence.
-pub(crate) fn final_metadata(owner: &str) -> [(&'static str, Document); 1] {
-    [(REVOCATION_RECEIPTS, doc! {"user_id":owner})]
+pub(crate) fn final_metadata(owner: &str) -> [(&'static str, Document); 2] {
+    [
+        (REVOCATION_RECEIPTS, doc! {"user_id":owner}),
+        (
+            crate::models::node_credential_desired::COLLECTION_NAME,
+            doc! {"owner_id":owner},
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -29,7 +35,13 @@ mod tests {
     fn revocation_receipts_have_an_exact_owner_and_final_cleanup_phase() {
         assert_eq!(
             final_metadata("person"),
-            [(REVOCATION_RECEIPTS, doc! {"user_id":"person"})]
+            [
+                (REVOCATION_RECEIPTS, doc! {"user_id":"person"}),
+                (
+                    crate::models::node_credential_desired::COLLECTION_NAME,
+                    doc! {"owner_id":"person"}
+                )
+            ]
         );
     }
 }

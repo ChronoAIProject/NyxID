@@ -1,3 +1,8 @@
+import { localizedError } from "../../i18n/localizedError";
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { channelDetail } from "./channelPresentation";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
+import { isAgentAccessRefusal } from "./agentAccess";
 import { OrgGuestChannel, OrgGuestGrantsAdoption } from "./OrgGuestControls";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import {
@@ -42,6 +47,7 @@ import {
 } from "./AgentCollaborationPanel";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useWorkspaceBack } from "../../app/WorkspaceHeader";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { fonts } from "../../theme/designTokens";
 import { WorkspaceSelectionSheet } from "../../components/workspace/WorkspaceSelectionField";
 import {
@@ -77,10 +83,10 @@ import {
 const ROOT = ["workspace", "agents"] as const;
 const errorMessage = (cause: unknown) =>
   cause instanceof ZodError
-    ? (cause.issues[0]?.message ?? "Check the form fields.")
+    ? (cause.issues[0]?.message ?? translateApp("Check the form fields."))
     : cause instanceof Error
       ? cause.message
-      : "Could not complete this action. Try again.";
+      : translateApp("Could not complete this action. Try again.");
 type OpenChat = (context: {
   agentId: string;
   conversationId?: string;
@@ -99,6 +105,7 @@ export function AgentsScreen({
   initialCreate = false,
   onCreate,
   onCreated,
+  onSelectionKept,
 }: {
   agentId?: string;
   onOpenChat?: OpenChat;
@@ -112,7 +119,9 @@ export function AgentsScreen({
   initialCreate?: boolean;
   onCreate?: () => void;
   onCreated?: (agentId: string) => void;
+  onSelectionKept?: (agentId: string) => void;
 } = {}) {
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const queryClient = useQueryClient();
   const focused = useIsFocused();
@@ -123,6 +132,9 @@ export function AgentsScreen({
   const [selectedId, setSelectedId] = useState<string | undefined>(agentId);
   const [creating, setCreating] = useState(initialCreate);
   const [creationDirty, setCreationDirty] = useState(false);
+  const [memoryDraft, setMemoryDraft] = useState({ agentId, text: "" });
+  const memoryDirty =
+    memoryDraft.agentId === selectedId && !!memoryDraft.text.trim();
   const [createdId, setCreatedId] = useState<string>();
   const [search, setSearch] = useState("");
   const [includeDestroyed, setIncludeDestroyed] = useState(false);
@@ -130,8 +142,8 @@ export function AgentsScreen({
   const [pullRefreshing, setPullRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [closeRequested, setCloseRequested] = useState(false);
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
+  const [notice, setNotice] = useLocalizedState<string>();
   const [editorVersion, setEditorVersion] = useState(0);
   const [grantsVersion, setGrantsVersion] = useState(0);
   const lock = useRef(false);
@@ -191,9 +203,49 @@ export function AgentsScreen({
     }
   }, [list.refetch]);
 
+  const agentSwitch = useRef(0);
+  const requestedAgent = useRef(agentId);
+  const deferredAgent = useRef<{ id: string | undefined } | null>(null);
   useEffect(() => {
-    setSelectedId(agentId);
-  }, [agentId]);
+    const revision = ++agentSwitch.current;
+    if (requestedAgent.current !== agentId) {
+      requestedAgent.current = agentId;
+      deferredAgent.current = { id: agentId };
+    }
+    if (busy || !deferredAgent.current) return;
+    const target = deferredAgent.current.id;
+    deferredAgent.current = null;
+    if (target === selectedId) return;
+    if (memoryDirty) {
+      Alert.alert(
+        t("Discard memory draft?"),
+        t("Your unsaved memory draft will be lost."),
+        [
+          {
+            text: t("Keep editing"),
+            style: "cancel",
+            onPress: () => {
+              if (agentSwitch.current === revision && selectedId)
+                onSelectionKept?.(selectedId);
+            },
+          },
+          {
+            text: t("Discard"),
+            style: "destructive",
+            onPress: () => {
+              if (agentSwitch.current === revision) setSelectedId(target);
+            },
+          },
+        ],
+      );
+    } else setSelectedId(target);
+    return () => {
+      agentSwitch.current++;
+    };
+  }, [agentId, busy]);
+  useEffect(() => {
+    setMemoryDraft({ agentId: selectedId, text: "" });
+  }, [selectedId]);
   useEffect(() => {
     if (!focused) return;
     const subscription = AppState.addEventListener("change", (state) => {
@@ -203,6 +255,7 @@ export function AgentsScreen({
     return () => subscription.remove();
   }, [focused, reload]);
   function leave() {
+    setMemoryDraft({ agentId: selectedId, text: "" });
     if (onClose) {
       setCreationDirty(false);
       setCloseRequested(true);
@@ -214,30 +267,46 @@ export function AgentsScreen({
     setError(undefined);
   }
   function back() {
-    if (creating && creationDirty) {
-      Alert.alert("Discard new agent?", "Your agent has not been created.", [
-        { text: "Keep editing", style: "cancel" },
-        { text: "Discard", style: "destructive", onPress: leave },
+    if (memoryDirty) {
+      Alert.alert(
+        t("Discard memory draft?"),
+        t("Your unsaved memory draft will be lost."),
+        [
+          { text: t("Keep editing"), style: "cancel" },
+          { text: t("Discard"), style: "destructive", onPress: leave },
+        ],
+      );
+    } else if (creating && creationDirty) {
+      Alert.alert(
+        translateApp("Discard new agent?"),
+        translateApp("Your agent has not been created."), [
+        { text: translateApp("Keep editing"), style: "cancel" },
+        { text: translateApp("Discard"), style: "destructive", onPress: leave },
       ]);
     } else leave();
   }
   useWorkspaceBack({
     active: onClose
-      ? busy || (creating && creationDirty && !closeRequested)
+      ? busy || ((memoryDirty || (creating && creationDirty)) && !closeRequested)
       : Boolean(selectedId) || creating,
     defaultRole: onClose ? "back" : "menu",
     disabled: busy,
-    label: onClose ? "Back" : "Back to agents",
+    label: onClose ? translateApp("Back") : translateApp("Back to agents"),
     onBack: () => {
       if (!lock.current) back();
     },
     discardOnClose:
-      creating && creationDirty && !closeRequested
+      memoryDirty && !closeRequested
         ? {
-            title: "Discard new agent?",
-            message: "Your agent has not been created.",
+            title: t("Discard memory draft?"),
+            message: t("Your unsaved memory draft will be lost."),
           }
-        : undefined,
+        : creating && creationDirty && !closeRequested
+          ? {
+              title: translateApp("Discard new agent?"),
+              message: translateApp("Your agent has not been created."),
+            }
+          : undefined,
   });
   useEffect(() => {
     if (busy || !closeRequested) return;
@@ -253,7 +322,7 @@ export function AgentsScreen({
 
   async function run(
     action: () => Promise<void>,
-    success?: string,
+    success?: () => string,
     refreshForm?: "grants",
   ): Promise<boolean> {
     if (lock.current) return false;
@@ -268,7 +337,8 @@ export function AgentsScreen({
       if (success) setNotice(success);
       return true;
     } catch (cause) {
-      setError(errorMessage(cause));
+      if (isAgentAccessRefusal(cause)) await reload();
+      setError(() => (errorMessage(cause)));
       return false;
     } finally {
       lock.current = false;
@@ -296,28 +366,31 @@ export function AgentsScreen({
       if (!Object.keys(patch).length) return;
       const latest = (await agentsApi.detail(agent.id)).agent;
       if (latest.can_maintain !== true || latest.status === "destroyed")
-        throw new Error(
-          "This agent can no longer be changed. Reload to review its current state.",
-        );
+        throw localizedError("This agent can no longer be changed. Reload to review its current state.");
       if (profileHasConflict(agent, latest, patch))
-        throw new Error(
-          "This profile changed elsewhere. Reload the agent and review those changes before saving.",
-        );
+        throw localizedError("This profile changed elsewhere. Reload the agent and review those changes before saving.");
       await agentsApi.update(agent.id, patch);
-    }, "Confirmation mode saved.");
+    }, () => (translateApp("Confirmation mode saved.")));
   }
   function confirmLifecycle(agent: AssistantAgent, destroy: boolean) {
     Alert.alert(
       destroy
-        ? `Destroy “${agent.display_name ?? agent.name}”?`
-        : "Permanently delete this agent and all conversation history?",
+        ? translateApp("Destroy “{{name}}”?", {
+            name: agent.display_name ?? agent.name,
+          })
+        : translateApp(
+            "Permanently delete this agent and all conversation history?",
+          ),
       destroy
-        ? "Stops its running threads and disconnects channel bots. Conversation history remains available."
-        : "This cannot be undone.",
+        ? translateApp(
+            "Stops its running threads and disconnects channel bots. Conversation history remains available.",
+          )
+        : translateApp("This cannot be undone."),
       [
-        { text: "Cancel", style: "cancel" },
+        { text: translateApp("Cancel"), style: "cancel" },
         {
-          text: destroy ? "Destroy" : "Delete permanently",
+          text: destroy ? translateApp("Destroy")
+            : translateApp("Delete permanently"),
           style: "destructive",
           onPress: () =>
             void run(
@@ -328,7 +401,8 @@ export function AgentsScreen({
                   back();
                 }
               },
-              destroy ? "Agent destroyed." : "Agent deleted.",
+              () => (destroy ? translateApp("Agent destroyed.")
+                : translateApp("Agent deleted.")),
             ),
         },
       ],
@@ -339,25 +413,35 @@ export function AgentsScreen({
     return (
       <WorkspacePage
         showHeading={false}
-        title="New agent"
-        subtitle="Create a personal specialist"
+        title={translateApp("New agent")}
+        subtitle={translateApp("Create a personal specialist")}
       >
         {error && <Notice message={error} tone="error" />}
         {!isConnected && (
-          <Notice message="You're offline. Reconnect to create your agent. Your draft is kept." />
+          <Notice message={translateApp(
+              "You're offline. Reconnect to create your agent. Your draft is kept.",
+            )}
+          />
         )}
         {creationAtLimit && (
-          <Notice message="You've reached your personal agent limit. Destroy an unused specialist before creating another." />
+          <Notice message={translateApp(
+              "You've reached your personal agent limit. Destroy an unused specialist before creating another.",
+            )}
+          />
         )}
         {list.isError && (
           <Notice
             tone="error"
-            message="Agent limits could not be checked. Go back and refresh your agents before creating another."
+            message={translateApp(
+              "Agent limits could not be checked. Go back and refresh your agents before creating another.",
+            )}
           />
         )}
         {connections.isError && (
           <Notice
-            message="Connections could not be loaded. You can create the agent without service access and grant it later."
+            message={translateApp(
+              "Connections could not be loaded. You can create the agent without service access and grant it later.",
+            )}
             tone="error"
           />
         )}
@@ -392,14 +476,14 @@ export function AgentsScreen({
               setSelectedId(created.id);
               setCreatedId(created.id);
               setEditorVersion((value) => value + 1);
-            }, "Agent created.");
+            }, () => (translateApp("Agent created.")));
           }}
         />
       </WorkspacePage>
     );
 
   if (selectedId) {
-    const agent = detail.data?.agent;
+    const agent = isAgentAccessRefusal(detail.error) ? undefined : detail.data?.agent;
     const maintain = agent?.can_maintain === true;
     const alive = agent && agent.status !== "destroyed";
     const profileEditable = !!agent && maintain && !!alive && !busy;
@@ -407,12 +491,15 @@ export function AgentsScreen({
       agent && profileEditable && onEditProfile
         ? () => onEditProfile(agent.id, field)
         : undefined;
-    const name = agent ? agent.display_name || agent.name : "Agent";
+    const name = agent ? agent.display_name || agent.name : translateApp("Agent");
     const subtitle = agent?.share_role
-      ? `${agent.owner_name ?? "Shared agent"} · shared ${agent.share_role}`
+      ? translateApp("{{owner}} · shared {{access}}", {
+          owner: agent.owner_name ?? "Shared agent",
+          access: agent.share_role,
+        })
       : agent?.owner_kind === "org"
-        ? `${agent.owner_name ?? "Organization"} · ${agent.org_role ?? "member"}`
-        : "Personal agent";
+        ? translateApp("{{name}} · {{role}}", { name: agent.owner_name ?? translateApp("Organization"), role: agent.org_role ?? "member"})
+        : translateApp("Personal agent");
     const confirmationMode = agent?.access_mode_override ?? null;
     const memory = detail.data?.memory ?? [];
     const threads = detail.data?.threads ?? [];
@@ -438,7 +525,8 @@ export function AgentsScreen({
         {notice && <Notice message={notice} tone="success" />}
         {error && <Notice message={error} tone="error" />}
         {detail.isPending && (
-          <SkeletonRows rows={4} title accessibilityLabel="Loading agent" />
+          <SkeletonRows rows={4} title accessibilityLabel={translateApp("Loading agent")}
+          />
         )}
         {detail.isError && (
           <>
@@ -446,7 +534,7 @@ export function AgentsScreen({
             <SettingsGroup inset={false}>
               <SettingsRow
                 tone="action"
-                label="Retry"
+                label={translateApp("Retry")}
                 onPress={() => void detail.refetch()}
               />
             </SettingsGroup>
@@ -461,30 +549,48 @@ export function AgentsScreen({
             />
             {agent.pending_acknowledgements > 0 && (
               <Notice
-                message={`${agent.pending_acknowledgements} requests waiting for a decision.`}
+                message={translateApp(
+                  "{{name}} requests waiting for a decision.",
+                  { name: agent.pending_acknowledgements },
+                )}
               />
             )}
             {agent.share_role && (
               <Notice
                 message={
                   agent.share_role === "manager"
-                    ? "Shared Manager access can edit this agent's profile and published team memory. Its owner controls permissions and lifecycle."
-                    : "Shared User access can use this agent. Its owner controls permissions and lifecycle."
+                    ? translateApp(
+                        "Shared Manager access can edit this agent's profile and published team memory. Its owner controls permissions and lifecycle.",
+                      )
+                    : translateApp(
+                        "Shared User access can use this agent. Its owner controls permissions and lifecycle.",
+                      )
                 }
               />
             )}
-            {!maintain && !agent.share_role && (
-              <Notice message="Your current role can view this agent. A maintainer can change its profile and permissions." />
+            {agent.owner_kind === "org" && agent.can_use !== undefined && agent.can_maintain !== undefined && (!agent.can_use || !maintain) ? (
+              <Notice message={agent.can_use
+                ? translateApp("You can chat with this specialist. Its settings are read-only.")
+                : maintain ? translateApp("You can maintain this specialist. Chat access is restricted.")
+                  : translateApp("You can view this specialist's profile.")} />
+            ) : !maintain && !agent.share_role && (
+              <Notice message={translateApp(
+                  "Your current role can view this agent. A maintainer can change its profile and permissions.",
+                )}
+              />
             )}
             {!alive && (
-              <Notice message="This agent is destroyed. Its threads are read only until you delete it permanently." />
+              <Notice message={translateApp(
+                  "This agent is destroyed. Its threads are read only until you delete it permanently.",
+                )}
+              />
             )}
             {destinations && (
               <SettingsGroup inset={false}>
                 {alive && agent.can_use === true && onOpenChat && (
                   <SettingsRow
                     tone="action"
-                    label="Chat with agent"
+                    label={translateApp("Chat with agent")}
                     onPress={() =>
                       onOpenChat({ agentId: agent.id, openLatest: true })
                     }
@@ -492,16 +598,16 @@ export function AgentsScreen({
                 )}
                 {alive && maintain && !agent.share_role && onOpenSkills && (
                   <SettingsRow
-                    label="Skills"
-                    accessibilityLabel="Agent skills"
+                    label={translateApp("Skills")}
+                    accessibilityLabel={translateApp("Agent skills")}
                     disabled={busy}
                     onPress={() => onOpenSkills(agent.id)}
                   />
                 )}
                 {alive && maintain && !agent.share_role && onOpenMachines && (
                   <SettingsRow
-                    label="Machine access"
-                    accessibilityLabel="Agent machine access"
+                    label={translateApp("Machine access")}
+                    accessibilityLabel={translateApp("Agent machine access")}
                     disabled={busy}
                     onPress={() => onOpenMachines(agent.id)}
                   />
@@ -511,8 +617,8 @@ export function AgentsScreen({
                   agent.owner_kind !== "org" &&
                   onOpenAutomations && (
                     <SettingsRow
-                      label="Automations"
-                      accessibilityLabel="Agent automations"
+                      label={translateApp("Automations")}
+                      accessibilityLabel={translateApp("Agent automations")}
                       disabled={busy}
                       onPress={() => onOpenAutomations(agent.id)}
                     />
@@ -522,23 +628,27 @@ export function AgentsScreen({
             {!agent.share_role && (
               <SettingsGroup
                 inset={false}
-                title="Profile"
+                title={translateApp("Profile")}
                 footer={
                   confirmationMode === "autopilot"
-                    ? "Autopilot may act without asking. Server policy and granted permissions still apply."
-                    : "Confirmation mode controls when this agent asks before acting."
+                    ? translateApp(
+                        "Autopilot may act without asking. Server policy and granted permissions still apply.",
+                      )
+                    : translateApp(
+                        "Confirmation mode controls when this agent asks before acting.",
+                      )
                 }
               >
                 <SettingsRow
-                  label="Handle"
+                  label={translateApp("Handle")}
                   value={`@${agent.name}`}
                   onPress={
                     agent.kind === "nyxbot" ? undefined : editProfile("name")
                   }
                 />
                 <SettingsRow
-                  label="Display name"
-                  value={agent.display_name || "None"}
+                  label={translateApp("Display name")}
+                  value={agent.display_name || translateApp("None")}
                   onPress={editProfile("display_name")}
                 />
                 <SettingsRow
@@ -550,13 +660,13 @@ export function AgentsScreen({
                   onPress={editProfile("description")}
                 />
                 <SettingsRow
-                  label="Personality and tone"
+                  label={translateApp("Personality and tone")}
                   value={profilePreview(agent.persona)}
                   onPress={editProfile("persona")}
                 />
                 {profileEditable ? (
                   <SettingsMenuRow
-                    label="Confirmation mode"
+                    label={translateApp("Confirmation mode")}
                     value={confirmationMode ?? "workspace"}
                     options={CONFIRMATION_MODES.map((mode) => ({
                       value: (mode ?? "workspace") as ConfirmationChoice,
@@ -571,7 +681,7 @@ export function AgentsScreen({
                   />
                 ) : (
                   <SettingsRow
-                    label="Confirmation mode"
+                    label={translateApp("Confirmation mode")}
                     value={CONFIRMATION_MODE_LABEL[confirmationMode ?? "workspace"]}
                   />
                 )}
@@ -594,19 +704,15 @@ export function AgentsScreen({
                         latest.can_maintain !== true ||
                         latest.status === "destroyed"
                       )
-                        throw new Error(
-                          "This agent can no longer be changed. Reload to review its current state.",
-                        );
+                        throw localizedError("This agent can no longer be changed. Reload to review its current state.");
                       if (grantSignature(latest) !== grantSignature(baseline))
-                        throw new Error(
-                          "The agent's permissions changed elsewhere. Reload and review them before saving.",
-                        );
+                        throw localizedError("The agent's permissions changed elsewhere. Reload and review them before saving.");
                       await agentsApi.grants(
                         agent.id,
                         changedGrants(baseline, services, accountRead, guests),
                       );
                     },
-                    "Permissions saved.",
+                    () => (translateApp("Permissions saved.")),
                     "grants",
                   )
                 }
@@ -623,19 +729,23 @@ export function AgentsScreen({
               key={`${getAuthEpoch()}:${agent.id}:operations:${editorVersion}`}
               agent={agent}
               onOpenChat={
-                onOpenChat
+                onOpenChat && agent.can_use !== false
                   ? () => onOpenChat({ agentId: agent.id, openLatest: true })
                   : undefined
               }
             />
-            {!agent.share_role && (
+            {!agent.share_role && !(agent.owner_kind === "org" && agent.can_maintain === false) && (
               <SettingsGroup
                 inset={false}
-                title="Memory"
+                title={translateApp("Memory")}
                 footer={
                   maintain && alive && memory.length
-                    ? "Notes this agent remembers across conversations. Tap a memory to forget it."
-                    : "Notes this agent remembers across conversations."
+                    ? translateApp(
+                        "Notes this agent remembers across conversations. Tap a memory to forget it.",
+                      )
+                    : translateApp(
+                        "Notes this agent remembers across conversations.",
+                      )
                 }
               >
                 {memory.map((note) => (
@@ -645,23 +755,24 @@ export function AgentsScreen({
                     chevron={false}
                     disabled={busy && maintain && !!alive}
                     accessibilityHint={
-                      maintain && alive ? "Asks to forget this memory" : undefined
+                      maintain && alive ? translateApp("Asks to forget this memory")
+                        : undefined
                     }
                     onPress={
                       maintain && alive
                         ? () =>
                             Alert.alert(
-                              "Forget this memory?",
+                              translateApp("Forget this memory?"),
                               note.text,
                               [
-                                { text: "Keep memory", style: "cancel" },
+                                { text: translateApp("Keep memory"), style: "cancel" },
                                 {
-                                  text: "Forget",
+                                  text: translateApp("Forget"),
                                   style: "destructive",
                                   onPress: () =>
                                     void run(async () => {
                                       await agentsApi.forget(agent.id, note.id);
-                                    }, "Memory forgotten."),
+                                    }, () => (translateApp("Memory forgotten."))),
                                 },
                               ],
                             )
@@ -669,36 +780,47 @@ export function AgentsScreen({
                     }
                   />
                 ))}
-                {!memory.length && <SettingsRow label="No memories yet" disabled />}
+                {!memory.length && (
+                  <SettingsRow label={translateApp("No memories yet")}
+                    disabled />
+                )}
               </SettingsGroup>
             )}
             {!agent.share_role && maintain && alive && (
               <RememberForm
+                key={agent.id}
+                text={memoryDraft.agentId === agent.id ? memoryDraft.text : ""}
+                onChangeText={(text) =>
+                  setMemoryDraft({ agentId: agent.id, text })
+                }
                 busy={busy}
                 onRemember={(text) =>
                   run(async () => {
                     await agentsApi.remember(agent.id, text);
-                  }, "Memory saved.")
+                  }, () => (translateApp("Memory saved.")))
                 }
               />
             )}
             {!!agent.channels.length && (
-              <SettingsGroup inset={false} title="Connected channels">
-                {agent.channels.map((channel) => agent.owner_kind === "org" ? (
+              <SettingsGroup inset={false} title={translateApp("Connected channels")}>
+                {agent.channels.map((channel) => {
+                  const detail = channelDetail(channel);
+                  return agent.owner_kind === "org" ? (
                   <OrgGuestChannel key={`${getAuthEpoch()}:${channel.id}`} agent={agent} channel={channel} />
                 ) : (
                   <SettingsRow
                     key={channel.id}
                     label={channel.bot_label}
-                    detail={channel.platform}
+                    detail={detail.kind === "message" ? t(detail.value) : detail.value}
                     value={channel.status}
                   />
-                ))}
+                ); })}
               </SettingsGroup>
             )}
-            <SettingsGroup inset={false} title="Recent threads">
+            {agent.can_use !== false && <SettingsGroup inset={false} title={translateApp("Recent threads")}>
               {!threads.length && (
-                <SettingsRow label="No conversations yet" disabled />
+                <SettingsRow label={translateApp("No conversations yet")}
+                  disabled />
               )}
               {threads.map((thread) => (
                 <SettingsRow
@@ -706,8 +828,10 @@ export function AgentsScreen({
                   label={thread.title}
                   detail={
                     thread.running
-                      ? "Running"
-                      : new Date(thread.last_message_at).toLocaleString()
+                      ? translateApp("Running")
+                      : new Date(thread.last_message_at).toLocaleString(
+                          appLocale(),
+                        )
                   }
                   chevron
                   disabled={!onOpenChat || agent.can_use !== true}
@@ -719,20 +843,26 @@ export function AgentsScreen({
                   }
                 />
               ))}
-            </SettingsGroup>
+            </SettingsGroup>}
             {maintain && !agent.share_role && agent.kind === "specialist" && (
               <SettingsGroup
                 inset={false}
                 footer={
                   alive
-                    ? "Stops its running threads and disconnects channel bots. Conversation history remains available."
-                    : "Deletes this destroyed agent and all its threads. This cannot be undone."
+                    ? translateApp(
+                        "Stops its running threads and disconnects channel bots. Conversation history remains available.",
+                      )
+                    : translateApp(
+                        "Deletes this destroyed agent and all its threads. This cannot be undone.",
+                      )
                 }
               >
                 <SettingsRow
                   centered
                   destructive
-                  label={alive ? "Destroy Agent" : "Delete Permanently"}
+                  label={alive ? translateApp("Destroy Agent")
+                      : translateApp("Delete Permanently")
+                  }
                   disabled={busy}
                   onPress={() => confirmLifecycle(agent, !!alive)}
                 />
@@ -763,8 +893,8 @@ export function AgentsScreen({
   return (
     <WorkspacePage
       showHeading={false}
-      title="Your agents"
-      subtitle="Personal & shared agents"
+      title={translateApp("Your agents")}
+      subtitle={translateApp("Personal & shared agents")}
       refreshing={pullRefreshing}
       onRefresh={refreshList}
     >
@@ -772,7 +902,10 @@ export function AgentsScreen({
       {notice && <Notice message={notice} tone="success" />}
       {error && <Notice message={error} tone="error" />}
       {atLimit && (
-        <Notice message="Your current agent limit is reached. Destroy an unused specialist or update your workspace limit in Settings." />
+        <Notice message={translateApp(
+            "Your current agent limit is reached. Destroy an unused specialist or update your workspace limit in Settings.",
+          )}
+        />
       )}
       <View style={styles.searchToolbar}>
         <View
@@ -783,10 +916,10 @@ export function AgentsScreen({
         >
           <Search size={18} color={colors.textMuted} accessible={false} />
           <TextInput
-            accessibilityLabel="Search agents"
+            accessibilityLabel={translateApp("Search agents")}
             value={search}
             onChangeText={setSearch}
-            placeholder="Search agents…"
+            placeholder={translateApp("Search agents…")}
             placeholderTextColor={colors.textMuted}
             selectionColor={colors.primary}
             autoCapitalize="none"
@@ -798,7 +931,7 @@ export function AgentsScreen({
           {search.length > 0 && (
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Clear agent search"
+              accessibilityLabel={translateApp("Clear agent search")}
               onPress={() => setSearch("")}
               style={styles.clearSearch}
             >
@@ -808,11 +941,11 @@ export function AgentsScreen({
         </View>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Filter agents"
+          accessibilityLabel={translateApp("Filter agents")}
           accessibilityHint={
             includeDestroyed
-              ? "Including destroyed agents. Open filters."
-              : "Open status filters."
+              ? translateApp("Including destroyed agents. Open filters.")
+              : translateApp("Open status filters.")
           }
           accessibilityState={{
             expanded: showFilters,
@@ -849,36 +982,43 @@ export function AgentsScreen({
       </View>
       {showFilters && (
         <WorkspaceSelectionSheet
-          label="Agent filters"
-          title="Filter agents"
+          label={translateApp("Agent filters")}
+          title={translateApp("Filter agents")}
           options={[
             {
               value: "destroyed",
-              label: "Include destroyed agents",
-              description: "Show destroyed agents alongside active agents.",
+              label: translateApp("Include destroyed agents"),
+              description: translateApp(
+                "Show destroyed agents alongside active agents.",
+              ),
             },
           ]}
           value={includeDestroyed ? ["destroyed"] : []}
           multiple
-          confirmLabel="Apply filters"
+          confirmLabel={translateApp("Apply filters")}
           onChange={(selected) =>
             setIncludeDestroyed(selected.includes("destroyed"))
           }
           onClose={() => setShowFilters(false)}
         />
       )}
-      {list.isPending && <SkeletonCards accessibilityLabel="Loading agents" />}
+      {list.isPending && (
+        <SkeletonCards accessibilityLabel={translateApp("Loading agents")} />
+      )}
       {list.isError && (
         <>
           <Notice message={errorMessage(list.error)} tone="error" />
-          <ActionButton label="Retry" onPress={() => void list.refetch()} />
+          <ActionButton label={translateApp("Retry")}
+            onPress={() => void list.refetch()} />
         </>
       )}
       {filtered.map((agent) => (
         <Pressable
           key={agent.id}
           accessibilityRole="button"
-          accessibilityLabel={`Manage ${agent.display_name ?? agent.name}`}
+          accessibilityLabel={translateApp("Manage {{slug}}", {
+            slug: agent.display_name ?? agent.name,
+          })}
           onPress={() => {
             Keyboard.dismiss();
             setSelectedId(agent.id);
@@ -895,35 +1035,31 @@ export function AgentsScreen({
                   {agent.display_name ?? agent.name}
                 </Text>
                 <Label muted numberOfLines={2}>
-                  {agent.description || "Your personal agent"}
+                  {agent.description || translateApp("Your personal agent")}
                 </Label>
               </View>
               <ChevronRight size={18} color={colors.textMuted} />
             </View>
             <Label muted style={{ fontSize: 11 }}>
-              {agent.status === "running"
-                ? "● Working"
-                : agent.status === "destroyed"
-                  ? "Destroyed"
-                  : "● Ready"}
-              {agent.owner_kind === "org"
-                ? ` · ${agent.owner_name ?? "Organization"}`
-                : " · Personal"}
-              {agent.pending_acknowledgements
-                ? ` · ${agent.pending_acknowledgements} pending`
-                : ""}
+              {(agent.status === "running"
+                ? (agent.owner_kind === "org" ? (agent.pending_acknowledgements ? translateApp("● Working · {{name}} · {{pendingAcknowledgements}} pending", { name: agent.owner_name ?? translateApp("Organization"), pendingAcknowledgements: agent.pending_acknowledgements }) : translateApp("● Working · {{name}}", { name: agent.owner_name ?? translateApp("Organization") })) : (agent.pending_acknowledgements ? translateApp("● Working · Personal · {{pendingAcknowledgements}} pending", { pendingAcknowledgements: agent.pending_acknowledgements }) : translateApp("● Working · Personal"))) : (agent.status === "destroyed"
+                  ? (agent.owner_kind === "org"
+                ? (agent.pending_acknowledgements ? translateApp("Destroyed · {{name}} · {{pendingAcknowledgements}} pending", { name: agent.owner_name ?? translateApp("Organization"), pendingAcknowledgements: agent.pending_acknowledgements }) : translateApp("Destroyed · {{name}}", { name: agent.owner_name ?? translateApp("Organization") })) : (agent.pending_acknowledgements
+                ? translateApp("Destroyed · Personal · {{pendingAcknowledgements}} pending", { pendingAcknowledgements: agent.pending_acknowledgements }) : translateApp("Destroyed · Personal"))) : (agent.owner_kind === "org" ? (agent.pending_acknowledgements ? translateApp("● Ready · {{name}} · {{pendingAcknowledgements}} pending", { name: agent.owner_name ?? translateApp("Organization"), pendingAcknowledgements: agent.pending_acknowledgements }) : translateApp("● Ready · {{name}}", { name: agent.owner_name ?? translateApp("Organization") })) : (agent.pending_acknowledgements ? translateApp("● Ready · Personal · {{pendingAcknowledgements}} pending", { pendingAcknowledgements: agent.pending_acknowledgements }) : translateApp("● Ready · Personal")))))}
             </Label>
           </Card>
         </Pressable>
       ))}
       {!list.isPending && !list.isError && !filtered.length && (
         <Card>
-          <Label>No matching agents</Label>
-          <Label muted>Change your search or create a new specialist.</Label>
+          <Label>{translateApp("No matching agents")}</Label>
+          <Label muted>
+            {translateApp("Change your search or create a new specialist.")}
+          </Label>
         </Card>
       )}
       <ActionButton
-        label="Create an agent"
+        label={translateApp("Create an agent")}
         disabled={
           !isConnected ||
           !foreground ||
@@ -942,8 +1078,7 @@ export function AgentsScreen({
       />
       {list.data && (
         <Label muted style={{ fontSize: 11 }}>
-          {live} / {list.data.limits.max_live_subagents} personal specialists
-        </Label>
+          {translateApp("{{live}} / {{maxLiveSubagents}} personal specialists", { live: live, maxLiveSubagents: list.data.limits.max_live_subagents})}</Label>
       )}
     </WorkspacePage>
   );
@@ -960,43 +1095,44 @@ function ProfileFields({
   disabled: boolean;
   nyxbot?: boolean;
 }) {
+  useAppLanguage();
   return (
     <>
       <Field
-        label="Handle"
+        label={translateApp("Handle")}
         value={value.name}
         onChangeText={(name) => onChange({ name: name.toLowerCase() })}
         editable={!disabled && !nyxbot}
         autoCapitalize="none"
         autoCorrect={false}
         maxLength={32}
-        placeholder="researcher"
+        placeholder={translateApp("researcher")}
       />
       <Field
-        label="Display name"
+        label={translateApp("Display name")}
         value={value.display_name}
         onChangeText={(display_name) => onChange({ display_name })}
         editable={!disabled}
         maxLength={40}
-        placeholder="Optional friendly name"
+        placeholder={translateApp("Optional friendly name")}
       />
       <Field
-        label={nyxbot ? "Notes" : "Purpose"}
+        label={nyxbot ? translateApp("Notes") : translateApp("Purpose")}
         value={value.description}
         onChangeText={(description) => onChange({ description })}
         editable={!disabled}
         multiline
         maxLength={2048}
-        placeholder="What should this agent do?"
+        placeholder={translateApp("What should this agent do?")}
       />
       <Field
-        label="Personality and tone"
+        label={translateApp("Personality and tone")}
         value={value.persona}
         onChangeText={(persona) => onChange({ persona })}
         editable={!disabled}
         multiline
         maxLength={2000}
-        placeholder="Warm, concise, explains its decisions"
+        placeholder={translateApp("Warm, concise, explains its decisions")}
       />
     </>
   );
@@ -1019,6 +1155,7 @@ function CreateAgentForm({
   available: boolean;
   onDirtyChange: (dirty: boolean) => void;
 }) {
+  useAppLanguage();
   const [value, setValue] = useState<AgentCreate>({
     name: "",
     display_name: "",
@@ -1048,12 +1185,13 @@ function CreateAgentForm({
           disabled={busy}
         />
         <Label muted>
-          A specialist uses only the services you grant. Personality changes its
-          tone, not its authority.
+          {translateApp(
+            "A specialist uses only the services you grant. Personality changes its tone, not its authority.",
+          )}
         </Label>
       </Card>
       <AgentPermissionsField
-        title="Starting permissions"
+        title={translateApp("Starting permissions")}
         options={grantOptions(connections)}
         value={{
           services: value.services,
@@ -1075,7 +1213,7 @@ function CreateAgentForm({
         }}
       />
       <ActionButton
-        label="Create agent"
+        label={translateApp("Create agent")}
         loading={busy}
         disabled={!available || !value.name.trim() || !value.description.trim()}
         onPress={() => onCreate(value)}
@@ -1106,6 +1244,7 @@ function AgentGrantsForm({
     guests: AgentPermissions["guest_access"],
   ) => Promise<boolean>;
 }) {
+  useAppLanguage();
   const baseline = useRef(agent).current;
   return (
     <AgentPermissionsField
@@ -1142,31 +1281,35 @@ function AgentGrantsForm({
 function RememberForm({
   busy,
   onRemember,
+  text,
+  onChangeText,
 }: {
   busy: boolean;
+  text: string;
+  onChangeText: (text: string) => void;
   onRemember: (text: string) => Promise<boolean>;
 }) {
-  const [text, setText] = useState("");
+  useAppLanguage();
   return (
-    <SettingsGroup inset={false} title="Add a memory">
+    <SettingsGroup inset={false} title={translateApp("Add a memory")}>
       <SettingsTextField
-        accessibilityLabel="Add a memory"
+        accessibilityLabel={translateApp("Add a memory")}
         value={text}
-        onChangeText={setText}
+        onChangeText={onChangeText}
         multiline
         clearButtonMode="never"
         editable={!busy}
         maxLength={2000}
-        placeholder="Something this agent should remember"
+        placeholder={translateApp("Something this agent should remember")}
         style={styles.memoryField}
       />
       <SettingsRow
         tone="action"
-        label="Remember"
+        label={translateApp("Remember")}
         disabled={busy || !text.trim()}
         onPress={() => {
           void onRemember(text.trim()).then((saved) => {
-            if (saved) setText("");
+            if (saved) onChangeText("");
           });
         }}
       />
@@ -1181,17 +1324,25 @@ const CONFIRMATION_MODES = [
   "autopilot",
 ] as const;
 const CONFIRMATION_MODE_LABEL = {
-  workspace: "Follow workspace",
-  nyxmode: "NyxMode · sensitive actions",
-  ask_every_time: "Ask · every change",
-  autopilot: "Autopilot",
+  get workspace() {
+    return translateApp("Follow workspace");
+  },
+  get nyxmode() {
+    return translateApp("NyxMode · sensitive actions");
+  },
+  get ask_every_time() {
+    return translateApp("Ask · every change");
+  },
+  get autopilot() {
+    return translateApp("Autopilot");
+  },
 } as const;
 type ConfirmationChoice = keyof typeof CONFIRMATION_MODE_LABEL;
 
 /** One line of a long profile value, as a row's value. */
 function profilePreview(text: string | null | undefined, limit = 40) {
   const line = (text ?? "").replace(/\s+/g, " ").trim();
-  if (!line) return "None";
+  if (!line) return translateApp("None");
   return line.length > limit ? `${line.slice(0, limit - 1).trimEnd()}…` : line;
 }
 
@@ -1205,6 +1356,7 @@ function AgentIdentityHeader({
   title: string;
   subtitle: string;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View style={styles.identity}>
@@ -1215,11 +1367,7 @@ function AgentIdentityHeader({
       >
         {title}
       </Text>
-      <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>
-        @{agent.name} · {agent.status} ·{" "}
-        {agent.kind === "nyxbot" ? "Your orchestrator" : "Specialist"} ·{" "}
-        {agent.memory_count} memories
-      </Text>
+      <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>{agent.owner_kind === "org" && agent.can_maintain === false ? translateApp("@{{agent}} · {{status}}", { agent: agent.name, status: agent.status }) : (agent.kind === "nyxbot" ? translateApp("@{{agent}} · {{status}} · Your orchestrator · {{memoryCount}} memories", { agent: agent.name, status: agent.status, memoryCount: agent.memory_count}) : translateApp("@{{agent}} · {{status}} · Specialist · {{memoryCount}} memories", { agent: agent.name, status: agent.status, memoryCount: agent.memory_count }))}</Text>
       <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>
         {subtitle}
       </Text>

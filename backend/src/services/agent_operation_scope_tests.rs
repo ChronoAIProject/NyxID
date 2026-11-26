@@ -582,6 +582,27 @@ fn input_limits_check_path_query_and_body_on_the_final_request() {
         check("POST", "/notes", None, b"").is_err(),
         "streamed bodies refuse"
     );
+    for mime in [
+        "multipart/form-data; boundary=test",
+        "application/octet-stream",
+    ] {
+        let error = check_inputs(
+            &scopes,
+            "service",
+            None,
+            Some("write"),
+            "POST",
+            &CanonicalPath::from_mcp_literal("/notes").unwrap(),
+            None,
+            br#"{"text":"hi"}"#,
+            Some(mime),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "API key scope forbidden: Operation scope input limit: request denied: body requires application/json"
+        );
+    }
     // Unscoped services are unaffected.
     assert!(
         check_inputs(
@@ -942,6 +963,8 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
     };
     let guest = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            key_version: 0,
+            voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
@@ -994,6 +1017,8 @@ async fn unscoped_services_keep_guest_and_webhook_limits_on_raw_routes() {
 
     let webhook = as_chat(
         crate::services::assistant_acknowledgement_service::ChatAuthority {
+            key_version: 0,
+            voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,

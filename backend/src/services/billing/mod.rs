@@ -2,8 +2,12 @@ pub mod allowances;
 pub mod amounts;
 pub mod bill;
 pub mod config;
+#[cfg(test)]
+mod diagnostic_tests;
+mod diagnostic_text;
 pub mod funding;
 pub mod grants;
+mod hold_conservation;
 pub mod lago_client;
 pub mod ledger;
 pub mod machine_runtime;
@@ -14,10 +18,15 @@ pub mod model_tariffs;
 pub mod model_usage;
 pub mod owner_resolver;
 pub mod periods;
+mod plan_sync;
 pub mod pool_attempt;
 pub mod pricing;
 pub mod provisioning;
+pub(crate) mod rate_cache;
+pub(crate) mod realtime_usage;
 pub mod reconcile;
+mod reconcile_status;
+pub(crate) mod recovery_batch;
 pub mod reservation;
 pub mod route_context;
 pub mod route_inventory;
@@ -26,9 +35,13 @@ pub mod sandbox_runtime;
 mod sandbox_runtime_math;
 pub mod sandbox_settings;
 pub mod schedules;
+pub(crate) mod stuck_requests;
 mod targets;
 pub mod taxes;
 pub mod topup_expiry;
+pub(crate) mod usage_checkpoint;
+pub(crate) mod usage_comparison;
+pub(crate) mod usage_delivery;
 pub mod usage_rollup;
 pub mod webhook;
 
@@ -43,6 +56,7 @@ use futures::TryStreamExt;
 use lago_client::{LagoApi, LagoClient};
 use mongodb::bson::{Document, doc};
 
+pub use crate::models::startup_diagnostic::DiagnosticSeverity;
 pub use meter::MeteredProxyContext;
 pub use owner_resolver::BillingOwnerResolver;
 pub use route_context::{BillingRouteContext, NodeIntent};
@@ -51,6 +65,8 @@ pub use route_inventory::BillingIngress;
 #[derive(Clone, Debug)]
 pub struct BillingStartupDiagnostic {
     pub code: String,
+    pub severity: DiagnosticSeverity,
+    pub technical_details: Option<String>,
     pub summary: String,
     pub detail: String,
     pub remediation: String,
@@ -93,6 +109,8 @@ pub async fn startup_diagnostics(
             format!("{count} failed documents; first keys: {}", keys.join(", "))
         };
         items.push(BillingStartupDiagnostic {
+            severity: DiagnosticSeverity::Action,
+            technical_details: None,
             code: "billing_exact_cutover".into(),
             summary: "Billing cutover is pending".into(),
             detail,
@@ -113,6 +131,8 @@ pub async fn startup_diagnostics(
         .await?;
     if let Some(marker) = rollup {
         items.push(BillingStartupDiagnostic {
+            severity: DiagnosticSeverity::Info,
+            technical_details: None,
             code: "billing_rollup_normalization".into(),
             summary: "Billing analytics normalization is in progress".into(),
             detail: marker
@@ -125,6 +145,32 @@ pub async fn startup_diagnostics(
                 .map(|value| value.to_chrono())
                 .unwrap_or_else(|_| Utc::now()),
         });
+    }
+    let mut repairs = db
+        .collection::<Document>(crate::models::billing_plan_sync::CHARGE_COLLECTION)
+        .find(doc! {"repair_failed_at":{"$type":"date"}})
+        .await?;
+    while let Some(repair) = repairs.try_next().await? {
+        if let (Ok(id), Ok(plan), Ok(metric), Ok(detected)) = (
+            repair.get_str("_id"),
+            repair.get_str("plan_code"),
+            repair.get_str("metric_code"),
+            repair.get_datetime("repair_failed_at"),
+        ) {
+            let reason = match repair.get_str("repair_reason") {
+                Ok("cache_write_failed") => "cache_write_failed",
+                _ => "provider_repair_unverified",
+            };
+            items.push(BillingStartupDiagnostic {
+                severity: DiagnosticSeverity::Action,
+                technical_details: None,
+                code: format!("billing_plan_repair:{id}"),
+                summary: "A managed Lago plan charge could not be repaired".into(),
+                detail: format!("Plan {plan}; metric {metric}; reason {reason}"),
+                remediation: "Check the managed charge and database; automatic retries back off to one day. An explicit price sync resets the retry delay".into(),
+                detected_at: detected.to_chrono(),
+            });
+        }
     }
     let mut rates = db
         .collection::<Document>("billing_rate_diagnostics")
@@ -142,6 +188,8 @@ pub async fn startup_diagnostics(
             })
             .unwrap_or_default();
         items.push(BillingStartupDiagnostic {
+            severity: DiagnosticSeverity::Action,
+            technical_details: None,
             code: "billing_invalid_rates".into(),
             summary: "Some Lago metrics cannot be billed".into(),
             detail: format!("Rejected metrics: {rejected}"),
@@ -161,6 +209,8 @@ pub async fn startup_diagnostics(
         .await?
     {
         items.push(BillingStartupDiagnostic {
+            severity: DiagnosticSeverity::Action,
+            technical_details: None,
             code:"billing_pool_recovery".into(),
             summary:"Pool recovery has observed errors".into(),
             detail:format!("{} recovery failures; recent requests: {}", diagnostic.failures,
@@ -169,6 +219,11 @@ pub async fn startup_diagnostics(
             detected_at:diagnostic.updated_at,
         });
     }
+    items.extend(reconcile_status::diagnostics(db).await);
+    items.extend(usage_comparison::diagnostics(db).await?);
+    items.extend(topup_expiry::unresolved_diagnostics(db).await?);
+    items.extend(hold_conservation::diagnostics(db).await?);
+    items.extend(stuck_requests::diagnostics(db).await?);
     Ok(items)
 }
 
@@ -392,8 +447,11 @@ impl BillingService {
             &self.db,
             lago,
             owner_id,
-            &self.config.lago_plan_code,
-            cap,
+            provisioning::WalletProvisioningOptions {
+                plan_code: &self.config.lago_plan_code,
+                default_overdraft_cap_credits: cap,
+                tax_cache_ttl_secs: self.config.billing_rate_cache_ttl_secs,
+            },
         )
         .await
     }
@@ -417,12 +475,7 @@ impl BillingService {
         let subscription = lago
             .ensure_subscription(&wallet.lago_customer_id, &self.config.lago_plan_code)
             .await?;
-        self.db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
-            .update_one(bson::doc! {"_id":&wallet.id,"owner_id":&wallet.owner_id,
-                "lago_customer_id":&wallet.lago_customer_id,
-                "$or":[{"lago_subscription_id":null},{"lago_subscription_id":""}]},
-                bson::doc! {"$set":{"lago_subscription_id":subscription,"updated_at":bson::DateTime::now()}})
-            .await?;
+        taxes::repair_subscription(&self.db, wallet, &subscription).await?;
         self.get_wallet(&wallet.owner_id).await?.ok_or_else(|| {
             crate::errors::AppError::BillingNotConfigured("Billing wallet no longer exists".into())
         })
@@ -444,8 +497,11 @@ impl BillingService {
             &self.db,
             lago,
             owner_id,
-            &self.config.lago_plan_code,
-            cap,
+            provisioning::WalletProvisioningOptions {
+                plan_code: &self.config.lago_plan_code,
+                default_overdraft_cap_credits: cap,
+                tax_cache_ttl_secs: self.config.billing_rate_cache_ttl_secs,
+            },
             amount_credits,
             idempotency_key,
         )
@@ -464,8 +520,11 @@ impl BillingService {
         provisioning::backfill_existing_owner_wallets(
             &self.db,
             lago,
-            &self.config.lago_plan_code,
-            cap,
+            provisioning::WalletProvisioningOptions {
+                plan_code: &self.config.lago_plan_code,
+                default_overdraft_cap_credits: cap,
+                tax_cache_ttl_secs: self.config.billing_rate_cache_ttl_secs,
+            },
         )
         .await
     }
@@ -652,8 +711,10 @@ impl BillingService {
         // not acquire a second wallet/grant/allowance reservation. The unique
         // transaction-id index remains the concurrent-race backstop in
         // `meter::open`.
-        if self.config.billing_enabled && meter::has_complete_meter(&self.db, &ctx).await? {
-            return Ok(MeteredProxyContext::from_route(&ctx));
+        if self.config.billing_enabled
+            && let Some(funded) = meter::complete_meter_funding(&self.db, &ctx).await?
+        {
+            return Ok(MeteredProxyContext::from_route(&ctx).with_funding(funded));
         }
 
         let reservation = if self.config.billing_enabled {
@@ -665,8 +726,10 @@ impl BillingService {
                 self.config.billing_rate_cache_ttl_secs,
             )
             .await;
-            if result.is_err() && meter::has_complete_meter(&self.db, &ctx).await? {
-                return Ok(MeteredProxyContext::from_route(&ctx));
+            if result.is_err()
+                && let Some(funded) = meter::complete_meter_funding(&self.db, &ctx).await?
+            {
+                return Ok(MeteredProxyContext::from_route(&ctx).with_funding(funded));
             }
             result?
         } else {
@@ -689,7 +752,7 @@ impl BillingService {
         if reservation.is_some() {
             // All funded admission holds and meter rows committed together.
             // Recovery owns their durable usage intent after this handoff.
-            return Ok(MeteredProxyContext::from_route(&ctx));
+            return Ok(MeteredProxyContext::from_route(&ctx).with_funding(true));
         }
         meter::open(&self.db, &ctx, None).await
     }
@@ -721,6 +784,46 @@ impl BillingService {
             })
             .await?;
         Ok(wallet.is_some())
+    }
+
+    pub(crate) fn stream_checkpoints(
+        &self,
+        metered: &MeteredProxyContext,
+        eligible: bool,
+    ) -> usage_checkpoint::StreamCheckpoints {
+        usage_checkpoint::StreamCheckpoints::new(
+            &self.db,
+            metered,
+            eligible && self.config.billing_enabled && self.lago.is_some(),
+            self.config.billing_reservation_abandon_secs,
+        )
+    }
+
+    pub(crate) async fn mark_realtime_forwarded(
+        &self,
+        metered: &MeteredProxyContext,
+        eligible: bool,
+        use_reported_usage: bool,
+    ) -> AppResult<Option<realtime_usage::Session>> {
+        if eligible
+            && self.config.billing_enabled
+            && self.lago.is_some()
+            && metered.funded
+            && metered
+                .route
+                .as_ref()
+                .is_some_and(|route| route.model_tariff.is_none())
+        {
+            let session = realtime_usage::start(&self.db, metered, use_reported_usage).await?;
+            #[cfg(test)]
+            if let Some(gate) = &self.before_send_gate {
+                gate.wait().await?;
+            }
+            Ok(Some(session))
+        } else {
+            self.mark_forwarded(metered).await?;
+            Ok(None)
+        }
     }
 
     pub async fn mark_forwarded(&self, metered: &MeteredProxyContext) -> AppResult<()> {
@@ -763,7 +866,7 @@ impl BillingService {
         let db = self.db.clone();
         #[cfg(test)]
         let gate = self.settlement_gate.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn_cleanup(async move {
             #[cfg(test)]
             if let Some(gate) = gate
                 && gate.wait().await.is_err()
@@ -1390,7 +1493,10 @@ mod tests {
                 .sync_status,
             PricingSyncStatus::Failed
         );
+        // Advance the fixture to the next pass after the uncertain plan lease expires.
+        crate::services::billing::plan_writers_tests::expire_plan_lease(&db, "standard").await;
         lago.fail_price_sync.store(false, Ordering::SeqCst);
+        defer_plan_repair(&db).await;
         assert_eq!(
             pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
                 .await
@@ -1499,6 +1605,7 @@ mod tests {
             .replace_one(doc! {"_id": &catalog.id}, &catalog)
             .await
             .unwrap();
+        defer_plan_repair(&db).await;
         assert_eq!(
             pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
                 .await
@@ -1526,6 +1633,7 @@ mod tests {
                 .await
                 .unwrap()
         );
+        defer_plan_repair(&db).await;
         assert_eq!(
             pricing::retry_pending_service_prices(&db, lago.as_ref(), "standard")
                 .await
@@ -2129,6 +2237,7 @@ mod tests {
                 .upsert(true)
                 .await
                 .unwrap();
+            defer_plan_repair(db).await;
             assert_eq!(
                 pricing::retry_pending_service_prices(db, lago, "standard")
                     .await
@@ -2198,8 +2307,17 @@ mod tests {
             .expect("insert platform rate");
     }
 
+    // These lifecycle fixtures exercise the service writer. Keep the independent
+    // plan audit in its ordinary per-code backoff; the service retry remains due.
+    async fn defer_plan_repair(db: &mongodb::Database) {
+        db.collection::<mongodb::bson::Document>(crate::models::billing_plan_sync::CHARGE_COLLECTION)
+            .update_many(doc! {"plan_code":"standard"}, doc! {"$set":{"repair_next_at":mongodb::bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(1))}})
+            .await.unwrap();
+    }
+
     #[derive(Default)]
     struct FakeLago {
+        charges: std::sync::Mutex<std::collections::BTreeMap<(String, String), String>>,
         prices: std::sync::Mutex<Vec<crate::services::billing::lago_client::ServicePriceSync>>,
         wallet_creates: AtomicUsize,
         fail_price_sync: std::sync::atomic::AtomicBool,
@@ -2227,15 +2345,28 @@ mod tests {
                     "test unavailable".into(),
                 ));
             }
+            self.charges.lock().unwrap().insert(
+                (_plan.into(), _input.metric_code.clone()),
+                _input.credits_per_unit.clone(),
+            );
             self.prices.lock().unwrap().push(_input.clone());
             self.price_syncs.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
         async fn remove_standard_charge(&self, _plan: &str, _metric: &str) -> AppResult<()> {
+            self.charges
+                .lock()
+                .unwrap()
+                .remove(&(_plan.into(), _metric.into()));
             self.price_removals.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
+        async fn plan_charges(&self, plan: &str) -> AppResult<Vec<serde_json::Value>> {
+            Ok(self.charges.lock().unwrap().iter().filter(|((p, _), _)| p == plan).map(|((_, code), amount)| serde_json::json!({
+            "billable_metric_code": code, "charge_model":"standard", "properties":{"amount":amount}
+        })).collect())
+        }
         async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
             Ok(owner.external_customer_id.clone())
         }
@@ -2279,6 +2410,7 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> AppResult<LagoUsage> {
+            crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
             Ok(LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),
@@ -2418,6 +2550,9 @@ mod tests {
         let now = Utc::now();
         db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
+                tax_generation: 0,
+                tax_guard_token: None,
                 id: format!("wallet-{owner_id}"),
                 owner_id: owner_id.to_string(),
                 lago_customer_id: owner_id.to_string(),
@@ -2466,3 +2601,6 @@ pub mod summaries;
 
 #[cfg(test)]
 mod allocation_policy_tests;
+
+#[cfg(test)]
+mod plan_writers_tests;

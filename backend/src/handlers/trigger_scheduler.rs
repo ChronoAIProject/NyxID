@@ -16,50 +16,82 @@ use crate::{
 use chrono::{Duration, Utc};
 use mongodb::bson::{Document, doc};
 
-pub fn spawn(state: AppState) {
-    tokio::spawn(async move {
+pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
-            if let Err(error) = tick(&state).await {
+            let job = &state.jobs.schedules;
+            let Some(_work) = job.tick(&state.shutdown, &mut interval).await else {
+                break;
+            };
+            let result = job.observe(tick(&state)).await;
+            if let Err(error) = result {
                 tracing::warn!(code = error.error_code(), "Trigger scheduler tick deferred");
             }
         }
-    });
+    })
 }
 
 pub(crate) async fn tick(state: &AppState) -> AppResult<usize> {
+    let Some(_pass) = state.shutdown.background() else {
+        return Ok(0);
+    };
     let due = schedules::due(&state.db, Utc::now()).await?;
     let count = due.len();
+    crate::services::job_health::checkpoint(true);
     // Bounded concurrency lets a slow recipient use its own lease without
     // delaying another owner's scheduled turn.
     use futures::{StreamExt, stream};
     stream::iter(due)
         .for_each_concurrent(16, |candidate| async move {
+            let Some(_claim) = state.shutdown.background() else {
+                return;
+            };
             let result: AppResult<()> = async {
-                if let Some(job) = schedules::claim(
+                if let Some(job) = schedules::claim_for_replica(
                     &state.db,
                     candidate.get_str("_id").unwrap_or_default(),
                     Utc::now(),
+                    &state.replica_identity.generation_id,
                 )
                 .await?
                 {
+                    let release = schedules::retain_shutdown_release(
+                        &state.db,
+                        &job,
+                        &state.replica_identity.generation_id,
+                        &state.shutdown,
+                    );
                     if job.get_str("kind").ok() == Some("schedule") {
                         if let Some(run) =
                             schedules::claim_occurrence(&state.db, &job, Utc::now()).await?
-                            && let Some(run_job) =
-                                schedules::claim(&state.db, &run.id, Utc::now()).await?
+                            && let Some(run_job) = schedules::claim_for_replica(
+                                &state.db,
+                                &run.id,
+                                Utc::now(),
+                                &state.replica_identity.generation_id,
+                            )
+                            .await?
                         {
+                            let run_release = schedules::retain_shutdown_release(
+                                &state.db,
+                                &run_job,
+                                &state.replica_identity.generation_id,
+                                &state.shutdown,
+                            );
                             Box::pin(run_job_once(state, &run_job)).await?;
+                            run_release.completed();
                         }
                     } else {
                         Box::pin(run_job_once(state, &job)).await?;
                     }
+                    release.completed();
                 }
                 Ok(())
             }
             .await;
+            crate::services::job_health::checkpoint(result.is_ok());
             if let Err(error) = result {
                 tracing::warn!(
                     code = error.error_code(),
@@ -160,8 +192,9 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             };
             if row.active_turn.as_ref().is_some_and(|active| {
                 active.turn_id == *turn
-                    && active.started_at + Duration::seconds(engine::ACTIVE_TURN_TTL_SECS)
-                        > Utc::now()
+                    && (active.restart_admission.is_some()
+                        || active.started_at + Duration::seconds(engine::ACTIVE_TURN_TTL_SECS)
+                            > Utc::now())
             }) {
                 return schedules::reschedule(&state.db, job, Some(recheck_at(&run, job))).await;
             }
@@ -190,7 +223,10 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
     if run.outcome != RunOutcome::Pending && !continuation {
         return schedules::reschedule(&state.db, job, None).await;
     }
-    if matches!(run.reason.as_deref(), Some("overlap_skip" | "queue_full")) {
+    if matches!(
+        run.reason.as_deref(),
+        Some("overlap_skip" | "queue_full" | "target_unavailable")
+    ) {
         return schedules::finish_claimed(
             &state.db,
             job,
@@ -287,7 +323,10 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
             return schedules::reschedule(&state.db, job, expiry).await;
         }
         Some(format!(
-            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions. Then tell the user in one or two plain sentences what you did and the result.\n{}",
+            "Continue the automation after these confirmation decisions. Retry only allowed actions using their acknowledgement_id; do not retry denied or expired actions. {}\n{}",
+            crate::services::assistant_acknowledgement_service::decision_narration(
+                cards.iter().any(|card| card.status == "allowed")
+            ),
             crate::services::assistant_acknowledgement_service::decisions_note(&cards)
         ))
     } else {
@@ -358,7 +397,36 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         return deliver_existing(state, job, &run, &trigger).await;
     };
     let agent = match team::agent(&state.db, &run.user_id, agent_id).await {
-        Ok(agent) if agent.destroyed_at.is_none() => agent,
+        Ok(agent) if agent.org_use_revision != run.org_use_revision => {
+            return schedules::finish_claimed(
+                &state.db,
+                job,
+                id,
+                RunOutcome::Skipped,
+                Some("target_unavailable"),
+                &state.config.frontend_url,
+            )
+            .await;
+        }
+        Ok(agent) if agent.destroyed_at.is_none() => {
+            match crate::services::org_agent_service::require_use(&state.db, &run.user_id, &agent)
+                .await
+            {
+                Ok(()) => agent,
+                Err(e) if e.is_forbidden() || matches!(e, AppError::NotFound(_)) => {
+                    return schedules::finish_claimed(
+                        &state.db,
+                        job,
+                        id,
+                        RunOutcome::Skipped,
+                        Some("target_unavailable"),
+                        &state.config.frontend_url,
+                    )
+                    .await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
         Ok(_) | Err(AppError::NotFound(_)) => {
             schedules::pause_target(&state.db, &trigger, "target_unavailable").await?;
             return schedules::finish_claimed(
@@ -400,23 +468,13 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         )
         .await;
     }
-    let running = state
-        .db
-        .collection::<TriggerRun>(RUNS)
-        .count_documents(doc! {
-            "trigger_id": &trigger.id,
-            "_id": { "$ne": &run.id },
-            "outcome": { "$in": [RunOutcome::Started.as_str(), RunOutcome::Waiting.as_str()] },
-        })
-        .await?;
-    if running > 0 {
+    if let Some(blocking_run_id) = schedules::find_running_blocker(&state.db, &run, None).await? {
         if trigger.overlap == OverlapPolicy::Skip {
-            return schedules::finish_claimed(
+            return schedules::finish_overlap_skip(
                 &state.db,
                 job,
                 id,
-                RunOutcome::Skipped,
-                Some("overlap"),
+                &blocking_run_id,
                 &state.config.frontend_url,
             )
             .await;
@@ -424,7 +482,11 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         let oldest = state
             .db
             .collection::<TriggerRun>(RUNS)
-            .find_one(doc! { "trigger_id": &trigger.id, "outcome": RunOutcome::Pending.as_str() })
+            .find_one(doc! {
+                "trigger_id": &trigger.id,
+                "user_id": &run.user_id,
+                "outcome": RunOutcome::Pending.as_str(),
+            })
             .sort(doc! { "scheduled_at": 1, "_id": 1 })
             .await?;
         if oldest.is_some_and(|other| other.id != run.id) {
@@ -492,6 +554,7 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         execution_enrollment: false,
         execution_parent: None,
         channel_context: None,
+        capacity: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -567,13 +630,12 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         Ok(super::assistant_team::Started::Busy) => defer(state, job, &run, "target_busy").await,
         Ok(super::assistant_team::Started::PoolFull) => defer(state, job, &run, "pool_full").await,
         Err(AppError::TriggerRateLimited) => defer(state, job, &run, "budget_exhausted").await,
-        Err(AppError::Conflict(reason)) if reason == "trigger_overlap_skip" => {
-            schedules::finish_claimed(
+        Err(AppError::TriggerOverlapSkip { blocking_run_id }) => {
+            schedules::finish_overlap_skip(
                 &state.db,
                 job,
                 id,
-                RunOutcome::Skipped,
-                Some("overlap"),
+                &blocking_run_id,
                 &state.config.frontend_url,
             )
             .await
@@ -736,6 +798,7 @@ async fn deliver_existing(
                     &claim,
                     "",
                     &admission_run.id,
+                    0,
                     session,
                 )
                 .await,
@@ -746,6 +809,16 @@ async fn deliver_existing(
     if let Err(error) = admitted {
         return match error {
             AppError::TriggerRateLimited => defer(state, job, run, "budget_exhausted").await,
+            AppError::TriggerOverlapSkip { blocking_run_id } => {
+                schedules::finish_overlap_skip(
+                    &state.db,
+                    job,
+                    &run.id,
+                    &blocking_run_id,
+                    &state.config.frontend_url,
+                )
+                .await
+            }
             AppError::Conflict(_) => defer(state, job, run, "overlap").await,
             other => Err(other),
         };
@@ -821,6 +894,43 @@ pub(super) async fn settle_result(
     error: Option<&str>,
 ) -> AppResult<()> {
     use futures::TryStreamExt;
+    if let Some(org) = row.agent_owner_id.as_deref().filter(|o| *o != row.user_id)
+        && !row.shared_agent_thread
+        && row.collaboration.is_none()
+    {
+        let allowed = match team::agent(
+            &state.db,
+            &row.user_id,
+            row.agent_id
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?,
+        )
+        .await
+        {
+            Ok(agent) => {
+                agent.user_id == org
+                    && agent.org_use_revision == run.org_use_revision
+                    && crate::services::org_agent_service::specialist_rights(
+                        &row.user_id,
+                        &agent,
+                        &crate::services::org_agent_service::access(&state.db, &row.user_id, org)
+                            .await?,
+                    )
+                    .can_use
+            }
+            Err(AppError::NotFound(_)) => false,
+            Err(error) => return Err(error),
+        };
+        if !allowed {
+            return schedules::finish_thread_result(
+                &state.db,
+                run,
+                Some("target_unavailable"),
+                &state.config.frontend_url,
+            )
+            .await;
+        }
+    }
     if error.is_none() {
         let cards: Vec<crate::models::assistant_acknowledgement::AssistantAcknowledgement> = state
             .db
@@ -940,87 +1050,15 @@ pub(super) async fn settle_result(
         }
     }
     schedules::terminal_result(&state.db, run, error, &state.config.frontend_url).await?;
-    if matches!(run.deliver_to, DeliverTo::Chat { .. }) {
-        return settle_chat_result(state, row, run, text, error).await;
-    }
-    if matches!(run.deliver_to, DeliverTo::Notification) {
-        return settle_notification_result(state, row, run, text, error).await;
-    }
-    // One settlement owns the outbound attempt. Recovery never duplicates an
-    // ambiguous network send; the thread remains the durable final result.
-    if run.result_claimed {
-        return schedules::finish(
-            &state.db,
-            &run.id,
-            RunOutcome::Failed,
-            Some("result_delivery_interrupted"),
-            &state.config.frontend_url,
-        )
-        .await;
-    }
-    let Some(run) = state
-        .db
-        .collection::<TriggerRun>(RUNS)
-        .find_one_and_update(
-            doc! {
-                "_id": &run.id,
-                "outcome": RunOutcome::Started.as_str(),
-                "turn_id": &run.turn_id,
-                "result_claimed": { "$ne": true },
-            },
-            doc! { "$set": {"result_claimed":true} },
-        )
-        .return_document(mongodb::options::ReturnDocument::After)
-        .await?
-    else {
-        return Ok(());
-    };
-    let failure_text = error.map(|code| {
-        if code == "capacity_exceeded" {
-            crate::services::assistant_turn_observability::capacity_message(run.capacity_wait_ms)
-        } else {
-            engine::TurnError::new(code).message
+    match run.deliver_to {
+        DeliverTo::Chat { .. } => settle_chat_result(state, row, run, text, error).await,
+        DeliverTo::Notification => settle_notification_result(state, row, run, text, error).await,
+        // The saved reply is the delivery for Thread, including legacy rows
+        // whose former finalizer claimed the result before stopping.
+        DeliverTo::Thread => {
+            schedules::finish_thread_result(&state.db, run, error, &state.config.frontend_url).await
         }
-    });
-    let final_text = failure_text.as_deref().unwrap_or(text);
-    let outcome = match &run.deliver_to {
-        DeliverTo::Thread => Ok(()),
-        DeliverTo::Notification => unreachable!("notification uses leased settlement"),
-        DeliverTo::Chat { chat_id } => {
-            let agent_id = run.agent_id.as_deref().filter(|_| row.is_subagent());
-            if error.is_none() {
-                Box::pin(super::nyxbot::chats::post_automation_images(
-                    state, &run, chat_id, agent_id, &row.id, final_text,
-                ))
-                .await
-                .map(|_| ())
-            } else {
-                Box::pin(super::nyxbot::chats::post_automation(
-                    state,
-                    &run.user_id,
-                    chat_id,
-                    final_text,
-                    agent_id,
-                    &row.id,
-                    &run.id,
-                ))
-                .await
-                .map(|_| ())
-            }
-        }
-    };
-    schedules::finish(
-        &state.db,
-        &run.id,
-        if error.is_some() || outcome.is_err() {
-            RunOutcome::Failed
-        } else {
-            RunOutcome::Completed
-        },
-        error.or(outcome.err().map(|_| "result_delivery_failed")),
-        &state.config.frontend_url,
-    )
-    .await
+    }
 }
 
 async fn settle_notification_result(
@@ -1103,7 +1141,7 @@ async fn settle_notification_result(
                         - Utc::now())
                     .num_seconds()
                     .max(0) as u64;
-                    let result = tokio::time::timeout(
+                    let result = crate::services::job_health::bounded_wait(
                         std::time::Duration::from_secs(seconds.min(delivery::ATTEMPT_SECONDS)),
                         push::send(
                             &state.db,
@@ -1180,7 +1218,7 @@ async fn settle_notification_result(
         } else {
             RunOutcome::Failed
         },
-        error.or(status.reason.as_deref()),
+        schedules::FinishReason::from_result(error, status.reason.as_deref()),
         &state.config.frontend_url,
     )
     .await
@@ -1217,30 +1255,35 @@ async fn settle_chat_result(
     });
     let text = failure.as_deref().unwrap_or(text);
     let agent = run.agent_id.as_deref().filter(|_| row.is_subagent());
-    let seconds = (claim.expires_at - Utc::now()).num_seconds().max(0) as u64;
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(seconds.min(delivery::ATTEMPT_SECONDS)),
-        async {
-            if error.is_none() {
-                Box::pin(super::nyxbot::chats::post_automation_images(
-                    state, run, chat_id, agent, &row.id, text,
-                ))
-                .await
-                .map(|_| ())
-            } else {
-                Box::pin(super::nyxbot::chats::post_automation(
-                    state,
-                    &run.user_id,
-                    chat_id,
-                    text,
-                    agent,
-                    &row.id,
-                    &run.id,
-                ))
-                .await
-                .map(|_| ())
-            }
-        },
+    let result = crate::services::job_health::bounded_wait(
+        std::time::Duration::from_secs(delivery::ATTEMPT_SECONDS),
+        crate::services::channel_text_preparation::with_parent(
+            crate::services::channel_text_preparation::Parent::Scheduled {
+                id: run.id.clone(),
+                claim: claim.attempt.clone(),
+            },
+            async {
+                if error.is_none() {
+                    Box::pin(super::nyxbot::chats::post_automation_images(
+                        state, run, chat_id, agent, &row.id, text,
+                    ))
+                    .await
+                    .map(|_| ())
+                } else {
+                    Box::pin(super::nyxbot::chats::post_automation(
+                        state,
+                        &run.user_id,
+                        chat_id,
+                        text,
+                        agent,
+                        &row.id,
+                        &run.id,
+                    ))
+                    .await
+                    .map(|_| ())
+                }
+            },
+        ),
     )
     .await;
     match result {
@@ -1253,7 +1296,7 @@ async fn settle_chat_result(
                 } else {
                     RunOutcome::Completed
                 },
-                error,
+                schedules::FinishReason::from_result(error, None),
                 &state.config.frontend_url,
             )
             .await
@@ -1269,7 +1312,7 @@ async fn settle_chat_result(
                 &state.db,
                 &claim,
                 RunOutcome::Failed,
-                Some("result_delivery_failed"),
+                schedules::FinishReason::Scheduler(Some("result_delivery_failed")),
                 &state.config.frontend_url,
             )
             .await
@@ -1386,6 +1429,7 @@ pub(crate) async fn webhook(
                     .db
                     .collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
                         execution_task: None,
                         delegated_images: Default::default(),
@@ -1480,6 +1524,14 @@ pub(crate) async fn cancel_transports(
 ) -> AppResult<()> {
     for row in targets {
         if let Some(turn) = &row.active_turn {
+            if turn.stop_requested && turn.restart_admission.is_some() {
+                engine::force_stop(&state.db, &row.user_id, &row.id, &turn.turn_id).await?;
+                let state = state.clone();
+                let stopped = row.clone();
+                state.shutdown.clone().spawn(async move {
+                    super::assistant_nyxagent::survivor::cancel(&state, &stopped).await;
+                });
+            }
             crate::services::machine_service::cancel_turn(state, &row.user_id, &row.id, turn)
                 .await?;
         }

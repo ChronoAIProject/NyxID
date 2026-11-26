@@ -121,6 +121,18 @@ This behavior is reflected in:
 
 ## Catalog Endpoint Discovery
 
+Remote spec sync binds its endpoint transaction to the service's captured
+`openapi_spec_url` and `updated_at`. If the parent changes during a fetch, the
+same call reloads it and retries at most twice, using the existing 60-second
+fetch cache. It stops if the URL is gone, the service is inactive or otherwise
+ineligible, or a legacy service now has endpoint rows. Three consecutive parent
+changes leave no stale writes and log a warning; a later create/update trigger
+or process startup can try again. Legacy zero-row discovery also checks rows
+inside the commit transaction, preserving concurrent curation. Embedded startup
+overlays use ordinary additive reconciliation: they are compiled into the binary
+and are not invalidated by unrelated parent timestamps. Hosted overlays and Tool
+sync remain additive by name; unrelated administrator operations are retained.
+
 `GET /api/v1/catalog`, `/catalog/{slug}`, and `/catalog/{slug}/endpoints` under `/api/v1` accept general and scoped agent API keys via `X-API-Key` or Bearer without proxy scope. Scheduled-invocation keys, service accounts, and relay tokens are rejected; delegated access retains the exact `account:read` GET exception. Catalog metadata uses template values and live platform grants, without instance connection flags or overrides. Private instance-backed access and mounted-spec fallback obey the effective key allowlist and Member/Admin org scopes. Discovery performs no auto-provisioning or pending-OAuth reconciliation. MCP `nyx__discover_services` gives unrestricted API keys the same discovery result as the owner's session; credential-free auto-connected templates remain suppressed for all callers. For restricted keys, instance-based suppression uses only visible instances. MCP discovery applies the same visibility rule as `GET /api/v1/catalog` for every caller: public and legacy rows, rows the actor created, and platform-key-enabled rows subject to live availability.
 
 The catalog API exposes parsed OpenAPI endpoint metadata for any service that has an `openapi_spec_url`:
@@ -158,6 +170,27 @@ The `/endpoints` response includes structured endpoint data:
 
 The parsed endpoint view applies declarative MCP projections: `x-nyxid-mcp-enum` on a path/query parameter narrows its declared enum, and `x-nyxid-mcp-media` on requestBody selects a declared media type. The complete hosted HTTP OpenAPI document retains all declared choices. Google upload tools therefore advertise media/base64 only while the HTTP spec also documents multipart/related.
 
+Published stored catalog Binary operations have a chat-only rendered schema
+for every eligible non-guest owner's live chat key, without a feature-flag read.
+`tools/list` and tool search preserve the original base64 body property and add a
+UUID `attachment_id`, requiring exactly one via `oneOf` and dispatch validation.
+Use body for model-authored content and attachment_id for existing uploaded or
+downloaded files; declared parameters remain unchanged. Lookup errors log a warning
+and preserve unchanged schemas, and ineligible callers or listings without
+candidates perform no attachment-schema reads. Both system overlays and
+Catalog-Manager-created rows qualify; instance-mounted specs, generic proxy,
+node routes and async operations do not. This does not set `attachment_input`
+or change the stored schema, contract digest, `/mcp/config`, exact descriptors
+or ordinary MCP discovery. Direct and meta dispatch inject authorized bytes
+server-side, bind owner confirmation to the file and request, and revalidate at
+HTTP egress. See [Assistant uploads](chat/10-uploads.md#raw-file-uploads-from-attachments)
+for fences, content types and rollout. During rolling deployment, handle calls
+reaching an old replica receive its existing base64-body-required error until it
+is upgraded; body-only calls work on both versions. Lark managed writes keep their
+separate `assistant:attachment-writes` gate. Confirmed binary files captured within the
+byte and memory limits return compact file handles in owner turns without a flag.
+Textual candidates and unavailable capture preserve the legacy response reader.
+
 The Lark/Feishu `bitable_media_upload` operation has a separate live-chat
 capability. It appears in MCP `tools/list`, search and `nyx__call_tool` only for
 owner chat keys with `assistant:attachment-writes` enabled (default off). Both
@@ -169,15 +202,32 @@ sanitized attachment label, and supplies the mandatory JSON-string `extra` with
 match. Success requires HTTP 2xx, `code: 0` and a nonempty `data.file_token`;
 the upload does not create a Base record.
 
+Original safe filenames, including meaningful extensionless names and a newly
+supplied literal `attachment`, are preserved. New human/Lark uploads retain
+optional filename provenance; absent provenance keeps legacy rows compatible.
+Missing names and ambiguous legacy generic `attachment` labels receive a canonical suffix
+from the stored content type: PNG/JPEG/GIF/WebP, PDF, DOCX, plain text, Markdown,
+CSV, JSON and explicitly recognized audio/video types. Opaque or unknown types
+keep a generic name. Filename bounds retain the original suffix when truncating
+a named original, including browser uploads before retention. Explicit `file_name` overrides are preserved exactly. Direct
+uploads and managed record-with-attachments operations share this default policy;
+the file bytes and content identity do not change. See issue #2453.
+
 Attachment access is granted only by the compiled overlay's trusted projection
 on matching stored SYSTEM catalog operations for `api-lark`, `api-lark-bot`,
 `api-feishu` and `api-feishu-bot`. Custom services, edited contracts and mounted
 specifications, including a mounted copy of the hosted overlay, cannot grant
 this capability. User uploads retain their live conversation/key/retention checks;
 tool images retain their producing-live-turn fence. Consent binds the exact
-canonical multipart bytes and boundary content type. Body-constrained operation
-scopes still require JSON and therefore refuse this multipart upload: they cannot
-constrain its Base through `parent_node`. The upload is excluded from
+canonical multipart bytes and boundary content type. When admission to this live-chat
+operation requires a body limit, NyxID checks the caller's JSON arguments before
+attachment lookup. Uploads authorized without a body limit retain the original
+multipart encoding and confirmation identity. To pin
+the destination Base, require an exact `parent_node` and declare
+`attachment_id` and `parent_type` in the same closed object. NyxID uses those
+arguments to resolve the file and write the multipart fields. During a rolling
+upgrade, older replicas still return `body requires application/json` for a
+body-limited upload. The upload is excluded from
 `/mcp/config`, exact-operation views and descriptors, and refuses non-chat,
 feature-off, exact, durable and async execution before provider effects. Existing
 `bitable_record_create` discovery and JSON execution remain unchanged.
@@ -941,7 +991,7 @@ for bounds, owner checks, failures, and readiness-gated personal intent locks.
 
 ### Attachment eligibility and legacy publication (#2327)
 
-Chat discovery and preparation use the same live attachment eligibility gate.
+Lark attachment discovery and preparation use the same live eligibility gate.
 It checks the non-guest owner turn, bound active/unexpired conversation key,
 `assistant:attachment-writes`, exact catalog/connection identity, instance-spec
 absence and current compiled operation contracts. Managed Base creation also

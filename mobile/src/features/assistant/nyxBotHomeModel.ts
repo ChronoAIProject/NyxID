@@ -1,11 +1,19 @@
+import { translateApp } from "../../i18n/appTranslation";
 import type { AssistantAgent } from "../agents/agentContracts";
 
 export const AWAY_PREVIEW = 6;
 
-export function greetingFor(date: Date) {
+/** One complete phrase per time of day, with the first name when known. */
+export function greetingFor(date: Date, name?: string) {
   const hour = date.getHours();
-  if (hour < 5 || hour >= 18) return "Good evening";
-  return hour < 12 ? "Good morning" : "Good afternoon";
+  const part = hour < 5 || hour >= 18 ? "evening" : hour < 12 ? "morning" : "afternoon";
+  if (name) {
+    if (part === "evening") return translateApp("Good evening, {{name}}", { name });
+    if (part === "morning") return translateApp("Good morning, {{name}}", { name });
+    return translateApp("Good afternoon, {{name}}", { name });
+  }
+  if (part === "evening") return translateApp("Good evening");
+  return part === "morning" ? translateApp("Good morning") : translateApp("Good afternoon");
 }
 
 export function showNyxBotHome(scope: {
@@ -75,7 +83,7 @@ export function awayItems(agents: readonly AssistantAgent[]): AwayItem[] {
             ? flat.length > 160
               ? `${flat.slice(0, 159)}…`
               : flat
-            : "Working on a task.",
+            : translateApp("Working on a task."),
         at:
           agent.status === "running"
             ? agent.last_active_at
@@ -97,7 +105,7 @@ export function agentOwnerSections(agents: readonly AssistantAgent[]) {
       agent.owner_kind === "org" ? (agent.owner_id ?? "org") : "personal";
     const section = sections.get(id) ?? {
       id,
-      label: id === "personal" ? "Personal" : (agent.owner_name ?? id),
+      label: id === "personal" ? translateApp("Personal") : (agent.owner_name ?? id),
       agents: [],
     };
     section.agents.push(agent);

@@ -50,10 +50,15 @@ export async function exchangeAuthorizationCode(fetchImpl, config, input) {
     return (await tokenRequest(fetchImpl, config, body));
 }
 export async function refreshAccessToken(fetchImpl, config, refreshToken) {
+    requireOAuthClient(config);
     const body = new URLSearchParams({
         grant_type: "refresh_token",
+        client_id: config.clientId,
         refresh_token: refreshToken,
     });
+    if (config.clientSecret) {
+        body.set("client_secret", config.clientSecret);
+    }
     return (await tokenRequest(fetchImpl, config, body));
 }
 export async function exchangeDelegatedToken(fetchImpl, config, accessToken) {

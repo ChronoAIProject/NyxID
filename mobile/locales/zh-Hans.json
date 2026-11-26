@@ -1,0 +1,9 @@
+{
+  "NSCameraUsageDescription": "允许 NyxID 扫描登录批准二维码，并拍摄照片以添加到聊天中。",
+  "NSFaceIDUsageDescription": "允许 NyxID 使用面容 ID 进行身份验证。",
+  "NSLocalNetworkUsageDescription": "Expo 开发启动器使用本地网络来查找并连接此电脑上的开发服务器。",
+  "NSMicrophoneUsageDescription": "允许 NyxID 使用麦克风进行听写和语音对话。",
+  "NSPhotoLibraryAddUsageDescription": "允许 NyxID 将您在聊天中选择的图片保存到照片图库。",
+  "NSPhotoLibraryUsageDescription": "允许 NyxID 将您从照片图库中选择的照片添加到聊天中。",
+  "NSSpeechRecognitionUsageDescription": "允许 NyxID 将语音转换为消息文本。设备支持时，识别会在 iPhone 上进行。"
+}

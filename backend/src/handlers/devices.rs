@@ -439,7 +439,7 @@ fn log_device_audit_for_user(
     let db = state.db.clone();
     let audit_chain_hmac_key = state.audit_chain_hmac_key.clone();
 
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_cleanup(async move {
         let event_type = entry.event_type.clone();
         let user_id = entry.user_id.clone();
         let result = crate::services::audit_chain_service::append_chained_entry(
@@ -508,7 +508,7 @@ fn spawn_bind_success_notification(
     let fcm_auth = state.fcm_auth.clone();
     let apns_auth = state.apns_auth.clone();
 
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         if let Err(error) = notification_service::send_device_notification(
             &db,
             &config,

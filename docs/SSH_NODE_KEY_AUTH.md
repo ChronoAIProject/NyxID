@@ -150,6 +150,15 @@ nyxid node ssh-credentials show --service routeros --principal nyxid-admin
 
 ## Node WebSocket Frames
 
+PTY permission is granted only to terminal sessions (Web and mobile terminal),
+with exactly the OpenSSH `permit-pty` extension. Certificates issued through
+`POST /ssh/{id}/certificate` (`nyxid ssh proxy` / `issue-cert`) and for exec carry
+no extensions, as before; interactive `ssh` via `nyxid ssh proxy` remains PTY-less.
+NyxID issues no agent-forwarding, port/TCP-forwarding, X11-forwarding, or user-rc
+extension. A target configured with `PermitTTY no` or a `no-pty` principal option
+still refuses a PTY. Previously issued certificates are short-lived for the
+service TTL and simply expire; no revocation or target change is needed for them.
+
 Node-key command execution uses:
 
 - `ssh_node_exec_open` from NyxID to node with `request_id`, `service_slug`, `principal`, `command`, and `timeout_secs`.
@@ -158,6 +167,14 @@ Node-key command execution uses:
 - `ssh_node_exec_error` from node to NyxID for missing keys, host-key mismatch, or SSH channel errors.
 
 The browser terminal reuses `web_terminal_open` with `auth_mode: "node_key"` and the same `web_terminal_data`, `web_terminal_resize`, and `web_terminal_closed` stream frames as cert-mode terminals.
+
+Interactive browser and mobile terminals stay open while idle. Their downstream
+SSH sessions send a keepalive every 15 seconds, allow at most three unanswered
+keepalives, and detect a dead peer within about 60 seconds. They have no inactivity
+timeout. Exec, connection tests and other noninteractive paths retain their
+existing timeouts without keepalives. Upgrade `nyxid node` to receive this fix;
+older nodes still close idle terminals after 30 seconds. This rollout requires
+no server or API change.
 
 ### NyxBot execution
 

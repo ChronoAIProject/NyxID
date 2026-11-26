@@ -47,6 +47,7 @@ impl LagoApi for EntitledLago {
             .collect())
     }
     async fn current_usage(&self, customer: &str, subscription: &str) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription)?;
         Ok(LagoUsage {
             customer_id: customer.into(),
             subscription_id: subscription.into(),
@@ -661,18 +662,17 @@ async fn pool_proxy_paused_consumer_renews_lease_and_lease_loss_closes_provider(
         .expect("stream headers and first frame");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["x-nyxid-pool-attempts"], "1");
-    tokio::time::timeout(std::time::Duration::from_secs(5), filled_rx)
+    filled_rx
         .await
-        .unwrap()
-        .unwrap();
+        .expect("provider filled the unpolled stream");
     let rows = db.collection::<UsageMeterRow>("usage_meter");
     let initial = rows.find_one(doc! {}).await.unwrap().unwrap();
     assert!(!initial.released);
     let initial_lease = initial.pool_attempt.as_ref().unwrap().lease_until;
-    // The heartbeat renews every 10 s. Observe two full intervals plus margin,
-    // because a loaded CI runner can delay one tick past a single interval
-    // without the renewal ever stopping. The renewal itself is still required.
-    tokio::time::timeout(std::time::Duration::from_secs(25), async {
+    // Advance only the heartbeat. The paused consumer and its idle timer stay
+    // in place through the renewal, recovery, and provider disconnect.
+    crate::test_utils::with_manual_clock(async {
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
         loop {
             let current = rows
                 .find_one(doc! { "_id": &initial.id })
@@ -683,32 +683,28 @@ async fn pool_proxy_paused_consumer_renews_lease_and_lease_loss_closes_provider(
             if current.pool_attempt.as_ref().unwrap().lease_until > initial_lease {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
-    })
-    .await
-    .expect("lease renewal must continue while the response body is unpolled");
 
-    rows.update_one(
-        doc! { "_id": &initial.id },
-        doc! { "$set": { "pool_attempt.lease_until": mongodb::bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::seconds(1)) } },
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        crate::services::billing::pool_attempt::recover_expired(db, chrono::Utc::now())
-            .await
-            .unwrap(),
-        1
-    );
-    let closed = tokio::time::timeout(std::time::Duration::from_secs(14), provider)
+        rows.update_one(
+            doc! { "_id": &initial.id },
+            doc! { "$set": { "pool_attempt.lease_until": mongodb::bson::DateTime::from_chrono(chrono::Utc::now() - chrono::Duration::seconds(1)) } },
+        )
         .await
-        .expect("lost billing lease must cancel the provider while the consumer is paused")
         .unwrap();
-    assert!(
-        matches!(closed, Ok(0)) || closed.is_err(),
-        "provider connection must terminate"
-    );
+        assert_eq!(
+            crate::services::billing::pool_attempt::recover_expired(db, chrono::Utc::now())
+                .await
+                .unwrap(),
+            1
+        );
+        tokio::time::advance(std::time::Duration::from_secs(10)).await;
+        let closed = provider.await.expect("provider task panicked");
+        assert!(
+            matches!(closed, Ok(0)) || closed.is_err(),
+            "provider connection must terminate"
+        );
+    }).await;
     assert!(fixture.second.received_requests().await.unwrap().is_empty());
     assert!(fixture.first.received_requests().await.unwrap().is_empty());
     let released = rows

@@ -30,7 +30,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
   process.env.EXPO_PUBLIC_DEV_MODE = appEnv === "dev" ? "true" : "false";
 
   const { associatedDomains, androidIntentFilters } = buildNativeLinks({
-    apiBaseUrls: [r.apiBaseUrl, r.newApiBaseUrl],
+    associatedUrls: r.associatedUrls,
+    androidHttpsAppLinks: r.androidHttpsAppLinks,
     universalLinkHost: r.universalLinkHost,
     universalLinkPathPrefix: r.universalLinkPathPrefix,
     scheme: ident.scheme,
@@ -45,6 +46,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
     orientation: "portrait",
     icon: "./assets/icon.png",
     userInterfaceStyle: "automatic",
+    locales: {
+      "zh-Hans": "./locales/zh-Hans.json",
+      "zh-Hant": "./locales/zh-Hant.json",
+    },
     assetBundlePatterns: ["**/*"],
     ios: {
       supportsTablet: true,
@@ -53,6 +58,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       buildNumber: r.iosBuildNumber,
       associatedDomains,
       infoPlist: {
+        UIBackgroundModes: ["audio", "fetch", "remote-notification"],
         ITSAppUsesNonExemptEncryption: false,
         UISupportedInterfaceOrientations: [
           "UIInterfaceOrientationPortrait",
@@ -72,6 +78,8 @@ export default ({ config }: ConfigContext): ExpoConfig => {
           "Allow NyxID to scan login approval QR codes and take photos to attach in chats.",
         NSMicrophoneUsageDescription:
           "Allow NyxID to use your microphone for dictation and voice conversations.",
+        NSPhotoLibraryAddUsageDescription:
+          "Allow NyxID to save images you choose from chats to your photo library.",
       },
     },
     android: {
@@ -97,7 +105,10 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       intentFilters: androidIntentFilters,
     },
     plugins: [
+      "./plugins/withFontScaleChanges",
       "./plugins/withVoiceAudio",
+      "./plugins/withSceneLifecycle",
+      "./plugins/withWatchCompanion",
       [
         "./plugins/withAndroidGoogleServicesValidation",
         {
@@ -161,6 +172,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
     ],
     extra: {
+      crashArtifactId: process.env.NYXID_CRASH_ARTIFACT_ID,
       APP_ENV: appEnv,
       TELEMETRY_DSN: r.telemetryDsn,
       TELEMETRY_HOST: r.telemetryHost,

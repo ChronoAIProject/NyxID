@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
 import type { RequestOptions } from "./authenticatedTransport";
 import {
@@ -36,7 +37,7 @@ const approvedResponse = z.object({
 export function createGroupsApi(request: JsonRequest) {
   const sameGroup = <T extends { id: string }>(id: string, group: T): T => {
     if (group.id !== id)
-      throw new Error("The server returned a different crew. Please reload.");
+      throw localizedError("The server returned a different crew. Please reload.");
     return group;
   };
   async function organizations(signal?: AbortSignal) {
@@ -121,7 +122,7 @@ export function createGroupsApi(request: JsonRequest) {
       const action = groupPendingActionSchema.parse(input);
       z.enum(["allow", "deny"]).parse(decision);
       if (action.authored_skill)
-        throw new Error("Review this draft in its conversation.");
+        throw localizedError("Review this draft in its conversation.");
       if (action.approval_request_id) {
         const result = approvedResponse.parse(
           await request(
@@ -130,11 +131,11 @@ export function createGroupsApi(request: JsonRequest) {
           ),
         );
         if (result.id !== action.approval_request_id)
-          throw new Error("Approval request mismatch.");
+          throw localizedError("Approval request mismatch.");
         return result;
       }
       if (!action.acknowledgement_id)
-        throw new Error("This action has no decision reference.");
+        throw localizedError("This action has no decision reference.");
       const conversation = conversationIdSchema.parse(action.conversation_id);
       const result = acknowledgementSchema.parse(
         await request(
@@ -143,7 +144,7 @@ export function createGroupsApi(request: JsonRequest) {
         ),
       );
       if (result.id !== action.acknowledgement_id)
-        throw new Error("Assistant acknowledgement mismatch.");
+        throw localizedError("Assistant acknowledgement mismatch.");
       return result;
     },
   };

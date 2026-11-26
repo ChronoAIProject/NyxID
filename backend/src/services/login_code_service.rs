@@ -306,13 +306,12 @@ pub async fn redeem(
             .as_ref()
             .ok_or(AppError::LoginCodeInvalid)?;
         Some(
-            agent::prepare_credential_delivery(
+            super::auth_device_service::prepare_grant(
                 db,
                 encryption,
-                Some(&grant.credential_id),
-                Some(&row.user_id),
-                grant.delivery_credential_encrypted.as_deref(),
-                grant.key_was_created,
+                DEVICE_CODES,
+                &request,
+                grant,
             )
             .await?,
         )
@@ -353,12 +352,21 @@ pub async fn redeem(
                     session_id: tokens.session_id.clone(), access_expires_in: tokens.access_expires_in, resource_uris: tokens.resource_uris.clone()}),
                     Some(tokens.session_id.clone()), None)
             } else if let Some(handoff) = &handoff {
+                agent::fence_delivery_owners(db, &row.user_id, &handoff.api_key.owner_id, session).await?;
                 let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(doc! {
                     "_id": row.device_request_id.as_deref(), "approved_user_id": &row.user_id,
                     "mfa_policy_revision": &row.mfa_policy_revision, "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
-                }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-                    "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
-                    "$unset": {"agent_key_grant.delivery_credential_encrypted": ""}}).session(&mut *session).await?;
+                }, doc! {
+                    "$set": {
+                        "status": "delivered",
+                        "delivered_at": bson::DateTime::from_chrono(now),
+                        "purge_at": bson::DateTime::from_chrono(now + Duration::days(1)),
+                    },
+                    "$unset": {
+                        "agent_key_grant.delivery_credential_encrypted": "",
+                        "delivery_context_version": "",
+                    },
+                }).session(&mut *session).await?;
                 if claimed.modified_count == 0 {
                     return Err(handoff_claim_error(db, row.device_request_id.as_deref().ok_or(AppError::LoginCodeInvalid)?).await);
                 }
@@ -387,6 +395,9 @@ pub async fn redeem(
         return Err(AppError::LoginCodeInvalid);
     }
     let result = result?;
+    if matches!(&result, Delivery::Account(_)) {
+        super::billing::schedules::eligibility::after_human_login(db, &row.user_id).await;
+    }
     audit_service::log_async(
         db.clone(),
         Some(row.user_id),
@@ -457,6 +468,7 @@ pub async fn browser_handoff(
         let db = &db_owned; let row = &row_owned;
         let result: AppResult<()> = async {
             app_policy::fence(db, &row.user_id, row.mfa_policy_revision.as_deref(), session).await?;
+            super::erasure_admission::fence_in_session(db, &row.user_id, session).await?;
             let claimed = db.collection::<AuthDeviceCode>(DEVICE_CODES).update_one(doc! {"_id": &request.id,
                 "status": "approved", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
                 doc! {"$set": {"expires_at": bson::DateTime::from_chrono(expires_at)}, "$inc": {"handoff_version": 1}}).session(&mut *session).await?;

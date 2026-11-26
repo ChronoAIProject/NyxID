@@ -271,6 +271,7 @@ function imageHarness(captionColor?: string, imageInputReason?: string) {
         Pressable: "Pressable",
         Image: "Image",
         Modal: "Modal",
+        useWindowDimensions: () => ({ width: 390, fontScale: 1 }),
         ActivityIndicator: "Spinner",
         StyleSheet: { create: (x: any) => x },
         AppState: {
@@ -285,8 +286,15 @@ function imageHarness(captionColor?: string, imageInputReason?: string) {
       "./AssistantImagePreview": { AssistantImagePreview: "ImagePreview" },
       "expo-file-system": { Directory: Dir, File, Paths: { cache: "cache" } },
       "expo-sharing": {},
+      "./saveAttachmentImage": {},
+      "./attachmentCache": {
+        ownAttachmentCache: () => () => {},
+        sweepAttachmentCaches() {},
+      },
       "lucide-react-native": {
         Download: "Download",
+        ExternalLink: "ExternalLink",
+        RotateCcw: "RotateCcw",
         FileText: "File",
         ImageIcon: "ImageIcon",
         X: "X",

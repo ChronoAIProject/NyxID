@@ -126,9 +126,7 @@ for (const selection of ["existing", "new"] as const) {
       await page
         .getByRole("button", { name: "Create new Agent Key", exact: true })
         .click();
-      await page.getByText("Customize", { exact: true }).click();
       await page.getByLabel("Name", { exact: true }).fill("CLI Agent");
-      await page.getByText("Customize", { exact: true }).click();
     }
     const review = page.getByRole("region", { name: "Authorize access" });
     await expect(review).toBeVisible();

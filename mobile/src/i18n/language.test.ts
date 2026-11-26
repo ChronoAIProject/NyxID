@@ -12,8 +12,8 @@ import {
   deferred,
   hookHarness,
 } from "../features/assistant/assistantHookTestHarness";
-import cn from "./locales/zh-CN.json";
-import tw from "./locales/zh-TW.json";
+import cn from "./locales/zh-CN";
+import tw from "./locales/zh-TW";
 
 test("native language negotiation matches main, including script priority over region", () => {
   for (const [tag, expected] of Object.entries({
@@ -65,9 +65,8 @@ function setup(
       jsx: (type: unknown, props: Element["props"]) => ({ type, props }),
     },
     "react-native": {
-      NativeModules: {
-        SettingsManager: { settings: { AppleLanguages: locales } },
-      },
+      Platform: { OS: "ios" },
+      Settings: { get: () => locales },
     },
     "@react-native-async-storage/async-storage": {
       getItem: (key: string) => {

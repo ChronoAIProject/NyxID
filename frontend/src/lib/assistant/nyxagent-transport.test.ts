@@ -1,4 +1,5 @@
 import retryHistory from "./__fixtures__/retry-duplicate-history.json";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { fireEvent } from "@testing-library/react";
 import { HISTORY_UNAVAILABLE } from "@/schemas/assistant-history-compat";
 import { createElement } from "react";
@@ -190,6 +191,53 @@ afterEach(() => {
 });
 
 describe("NyxAgent server-backed transport", () => {
+  it("shows one restart notice after reconnecting to a running or settled reply", async () => {
+    const page = history();
+    const answer = page.messages.pop()!;
+    page.conversation.active_turn = {
+      turn_id: answer.turn_id, started_at: start, activities: [], attachments: [], continued_after_restart: true,
+    };
+    globalThis.__nyxidAssistantHttpMock = () => json(page);
+    for (const settled of [false, false, true]) {
+      if (settled) {
+        page.conversation.active_turn = null;
+        page.messages.push({ ...answer, continued_after_restart: true });
+      }
+      const transport = new NyxAgentTransport();
+      await transport.history(id);
+      const session = transport.session(id);
+      const view = render(createElement(ChatMessageList, { session, bottomInset: 0 }));
+      expect(screen.getAllByText("Continued after a restart.")).toHaveLength(1);
+      view.unmount();
+    }
+  });
+
+  it("renders a shielded voice link publication as a completed message without pending UI", async () => {
+    const page = history();
+    const link = "https://nyxid.ai/connect/bot/nyx_bcl_example";
+    page.messages = [nyxAgentMessageSchema.parse({
+      id: "published-link", seq: 3, turn_id: "hidden-turn", role: "assistant",
+      text: `<${link}>`, status: "completed", execution_pending: true, via: "voice",
+      error_code: null, created_at: start, activities: [], attachments: [],
+    })];
+    globalThis.__nyxidAssistantHttpMock = () => json(page);
+    const transport = new NyxAgentTransport();
+    await transport.history(id);
+    const session = transport.session(id);
+    expect(transport.isRunning(id)).toBe(false);
+    expect(session.messages).toHaveLength(1);
+    expect(session.messages[0]).toMatchObject({
+      id: "published-link", status: "complete", content: `<${link}>`,
+    });
+    expect(session.messages[0]?.queued).toBeFalsy();
+    const { container } = render(createElement(ChatMessageList, { session, bottomInset: 0 }));
+    expect(screen.getByRole("link", { name: link })).toHaveAttribute("href", link);
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeVisible();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(container.querySelector(".animate-spin")).toBeNull();
+    expect(container).not.toHaveTextContent(/Queued|Waiting for|Working|Thinking/);
+  });
+
   it("keeps CMA status independent of the completed reply, refreshes it, and restores it after reload", async () => {
     const page = history();
     page.cma_operations = [{
@@ -691,6 +739,12 @@ describe("NyxAgent server-backed transport", () => {
     });
     expect(completed.messages[0]).toBe(settled);
     expect(completed.messages[1]!.blocks[0]!.text).toBe("Answer!");
+    const reset = applyDirectTurnEvent(completed, {
+      event: "block.completed", cursor: 6, block_id: "b", block: { type: "text", block_id: "b", text: "" },
+    });
+    expect(reset.messages[1]!.blocks[0]!.text).toBe("");
+    const retry = applyDirectTurnEvent(reset, { event: "block.delta", cursor: 7, block_id: "b", text: "Retry" });
+    expect(retry.messages[1]!.blocks[0]!.text).toBe("Retry");
   });
 
   it("marks messages the user wrote in a chat app with its platform", async () => {
@@ -827,6 +881,8 @@ describe("NyxAgent server-backed transport", () => {
   });
 
   it("renames and deletes through HTTP and evicts deleted transcript state", async () => {
+    useAssistantPinsStore.getState().bindAccount("owner");
+    useAssistantPinsStore.getState().toggle("owner", id);
     globalThis.__nyxidAssistantHttpMock = ({ init }) => {
       if (init.method === "DELETE") return new Response(null, { status: 204 });
       if (init.method === "PATCH")
@@ -838,8 +894,18 @@ describe("NyxAgent server-backed transport", () => {
     await transport.rename(id, "Renamed");
     expect(transport.session(id).title).toBe("Renamed");
     await transport.delete(id);
+    expect(useAssistantPinsStore.getState().ids).not.toContain(id);
     expect(transport.getHistory(id)).toBeUndefined();
     expect(transport.getConversations()).toEqual([]);
+  });
+
+  it("retains the conversation pin when its DELETE fails", async () => {
+    useAssistantPinsStore.getState().bindAccount("owner");
+    useAssistantPinsStore.getState().toggle("owner", id);
+    globalThis.__nyxidAssistantHttpMock = () => new Response(null, { status: 503 });
+    await expect(new NyxAgentTransport().delete(id)).rejects.toThrow();
+    expect(useAssistantPinsStore.getState().ids).toContain(id);
+    useAssistantPinsStore.getState().bindAccount(null);
   });
 
   it("rejects malformed SSE and never automatically retries a submitted message", async () => {
@@ -1732,6 +1798,26 @@ it("does not restore an active turn from a history request older than settlement
   expect(transport.session(id).messages.at(-1)?.content).toBe("Answer 界");
 });
 
+it("restores committed memory recovery evidence from settled history", async () => {
+  const recovery = { failed_activity_id: "20b44753-5c6e-4f19-8931-64c775d64cd4", part: 1, total: 2, committed: true };
+  const activity = { id: "saved-part", label: "nyxid__remember", status: "completed", started_at: start, ended_at: reset };
+  globalThis.__nyxidAssistantHttpMock = () => {
+    const page = history();
+    return json({ ...page, messages: [page.messages[0], { ...page.messages[1], activities: [
+      { ...activity, memory_recovery: recovery },
+      { ...activity, id: "legacy" },
+      { ...activity, id: "future", memory_recovery: { ...recovery, committed: "future" } },
+    ] }] });
+  };
+  const transport = new NyxAgentTransport();
+  await transport.history(id);
+  const tools = transport.session(id).messages.at(-1)?.toolCalls;
+  expect(tools).toHaveLength(3);
+  expect(tools?.[0]?.memoryRecovery).toEqual(recovery);
+  expect(tools?.[1]?.memoryRecovery).toBeUndefined();
+  expect(tools?.[2]?.memoryRecovery).toBeUndefined();
+});
+
 it.each([null, undefined])("parses backend failures with status %s through active polling, settlement and reload", async (status) => {
   let active = true;
   const attachment = { id: "upload", origin: "user_upload", content_type: "text/plain", size: 5, label: "source.txt", pages: null, image_input: null, expired: false };
@@ -2178,6 +2264,7 @@ it.each([
   ["model_org_approval_required", "organization requires approval"],
   ["plan_entitlement_required", "Check your plan"],
   ["model_interrupted", "Some actions may already have completed"],
+  ["credential_revoked", "Review completed actions before retrying"],
   ["model_unavailable", "Choose another model"],
 ])("provides specific remedy copy for %s", (code, copy) => expect(storedError(code)).toContain(copy));
 

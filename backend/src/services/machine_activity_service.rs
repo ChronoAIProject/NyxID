@@ -5,7 +5,9 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_attachment::{AssistantAttachment, COLLECTION_NAME as ATTACHMENTS},
-        assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
+        assistant_conversation::{
+            AssistantConversation, COLLECTION_NAME as CONVERSATIONS, TurnActivity,
+        },
         machine_receipt::MachineReceipt,
     },
     services::assistant_acknowledgement_service::ChatAuthority,
@@ -308,6 +310,7 @@ pub async fn store_preview(
         turn_id: chat.turn_id.clone().unwrap_or_default(),
         content_type: "text/plain".into(),
         size: text.len() as i64,
+        chunks: 0,
         data_encrypted: Vec::new(),
         created_at: Utc::now(),
     };
@@ -769,9 +772,18 @@ pub async fn publish_group(
     }
     let row=db.collection::<crate::models::assistant_message::AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
         .find_one(doc!{"conversation_id":&thread.id,"user_id":&thread.user_id,"turn_id":&turn.turn_id,"role":"assistant"}).await?;
-    let mut activities = row
+    let activities = row
         .map(|m| m.activities)
         .unwrap_or_else(|| turn.activities.clone());
+    let activities = group_activities(activities);
+    db.collection::<bson::Document>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
+        .update_one(doc!{"_id":&message.id,"group_id":&message.group_id,"user_id":&message.user_id,"agent_id":&thread.agent_id},
+        doc!{"$set":{"activities":bson::to_bson(&activities).map_err(|_|AppError::Internal("Machine receipt encoding failed".into()))?}}).await?;
+    Ok(())
+}
+
+/// The same public projection is used by callback and transactional publication.
+pub(crate) fn group_activities(mut activities: Vec<TurnActivity>) -> Vec<TurnActivity> {
     activities.retain(|a| a.machine.is_some());
     activities.truncate(super::assistant_nyxagent::MAX_TURN_ACTIVITIES as usize);
     for activity in &mut activities {
@@ -781,10 +793,7 @@ pub async fn publish_group(
             receipt.preview_enabled = false;
         }
     }
-    db.collection::<bson::Document>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
-        .update_one(doc!{"_id":&message.id,"group_id":&message.group_id,"user_id":&message.user_id,"agent_id":&thread.agent_id},
-        doc!{"$set":{"activities":bson::to_bson(&activities).map_err(|_|AppError::Internal("Machine receipt encoding failed".into()))?}}).await?;
-    Ok(())
+    activities
 }
 
 #[cfg(test)]

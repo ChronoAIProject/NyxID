@@ -17,7 +17,7 @@ use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient}
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, consent_service, oauth_broker_service};
+use crate::services::{audit_service, consent_service};
 
 // --- Response types ---
 
@@ -128,28 +128,12 @@ pub async fn revoke_my_consent(
     auth_user: AuthUser,
     Path(client_id): Path<String>,
 ) -> AppResult<Json<ConsentRevokeResponse>> {
-    let user_id = auth_user.user_id.to_string();
-    let result = consent_service::revoke_consent(&state.db, &user_id, &client_id).await?;
-    let revoked_broker_bindings = oauth_broker_service::revoke_bindings_for_user_client(
+    consent_service::revoke_consent_as(
         &state.db,
-        state.encryption_keys.clone(),
-        &state.http_client,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
         &client_id,
-        &user_id,
-        "user_revoked",
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "oauth_consent_revoked",
-        Some(serde_json::json!({
-            "client_id": client_id,
-            "revoked_refresh_tokens": result.revoked_refresh_tokens,
-            "revoked_broker_bindings": revoked_broker_bindings,
-        })),
-    );
 
     Ok(Json(ConsentRevokeResponse {
         message: "Consent revoked".to_string(),
@@ -346,6 +330,7 @@ mod tests {
         let mut consent = Consent {
             revision: None,
             write_version: None,
+            reviewed_redirect_hash: None,
             issuance_fence: None,
             id: "consent-1".to_string(),
             user_id: "user-1".to_string(),

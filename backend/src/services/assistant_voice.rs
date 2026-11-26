@@ -104,6 +104,15 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             IndexModel::builder()
                 .keys(doc! {"settled":1,"deadline":1})
                 .build(),
+            IndexModel::builder()
+                .keys(doc! {"reconcile_failed_at":1,"deadline":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("voice_window_reconcile_order".to_owned())
+                        .partial_filter_expression(doc! {"settled":false})
+                        .build(),
+                )
+                .build(),
         ])
         .await?;
     Ok(())
@@ -250,6 +259,7 @@ pub(crate) async fn enqueue_in_session(
     } else {
         db.collection::<AssistantMessage>(MESSAGES)
             .insert_one(AssistantMessage {
+                supplemental_result_claims: Vec::new(),
                 automation_work: None,
                 execution_task: None,
                 delegated_images: Default::default(),
@@ -329,10 +339,12 @@ pub(crate) fn settled_result(
 /// The hidden assistant message remains the execution record; this bounded copy
 /// is the result link used by the call timeline and receipt.
 pub(crate) async fn publish_result(
-    db: &Database,
+    state: &crate::AppState,
     request: &VoiceRequest,
     source: &AssistantMessage,
 ) -> AppResult<Option<String>> {
+    let db = &state.db;
+    let origins = super::voice::links::frontend_origins(&state.config);
     if request.result_message_id.is_some() {
         return Ok(request.result_message_id.clone());
     }
@@ -346,6 +358,7 @@ pub(crate) async fn publish_result(
             let db = db.clone();
             let request_id = request_id.clone();
             let source = source.clone();
+            let origins = origins.clone();
             let result: AppResult<Option<String>> = Box::pin(async {
                 let requests = db.collection::<VoiceRequest>(REQUESTS);
                 let current = requests
@@ -377,7 +390,12 @@ pub(crate) async fn publish_result(
                         source
                     }
                 } else { source };
-                let source = settled_result(&current, source);
+                let mut source = settled_result(&current, source);
+                if let Some(hidden) = current.task_conversation_id.as_deref() {
+                    let count = super::voice::links::published_count(&db, &current.user_id, &current.conversation_id, hidden, &current.turn_id).await?;
+                    source.turn_metadata.get_or_insert_with(Default::default).links_in_chat = Some(count);
+                    source.text = super::voice::links::redact_task_reply(&source.text, &origins);
+                }
                 // Timing survives audio closure and fast turns that settle
                 // between coordinator ticks. IDs and timestamps only.
                 if let Some(call) = db.collection::<bson::Document>(crate::models::assistant_voice_session::COLLECTION_NAME)
@@ -428,6 +446,7 @@ pub(crate) async fn publish_result(
                 let text = source.text.clone();
                 db.collection::<AssistantMessage>(MESSAGES)
                     .insert_one(AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
                         execution_task: None,
                         delegated_images: Default::default(),
@@ -470,7 +489,7 @@ pub(crate) async fn publish_result(
                     .session(&mut *session)
                     .await?;
                 db.collection::<AssistantMessage>(MESSAGES).update_one(
-                    doc! {"_id": &current.message_id, "user_id": &source.user_id},
+                    doc! {"_id": &current.message_id, "user_id": &source.user_id, "role":"user", "via":"voice"},
                     doc! {"$set": {"execution_pending": false}},
                 ).session(&mut *session).await?;
                 requests
@@ -681,6 +700,7 @@ pub(crate) async fn result_message(
         return Ok(None);
     }
     Ok(Some(AssistantMessage {
+        supplemental_result_claims: Vec::new(),
         automation_work: None,
         execution_task: None,
         delegated_images: Default::default(),
@@ -734,7 +754,8 @@ pub(crate) async fn result_message(
 /// Publish settled hidden-task results even when the call ended before the
 /// result arrived. The active runtime performs the same idempotent operation;
 /// this bounded sweep is the restart/call-close safety net.
-pub(crate) async fn publish_completed_results(db: &Database) -> AppResult<()> {
+pub(crate) async fn publish_completed_results(state: &crate::AppState) -> AppResult<()> {
+    let db = &state.db;
     let recent_cutoff = Utc::now() - Duration::hours(24);
     let requests: Vec<VoiceRequest> = db
         .collection::<VoiceRequest>(REQUESTS)
@@ -751,7 +772,7 @@ pub(crate) async fn publish_completed_results(db: &Database) -> AppResult<()> {
     for request in requests {
         let message = result_message(db, &request).await?;
         if let Some(message) = message
-            && publish_result(db, &request, &message).await.is_err()
+            && publish_result(state, &request, &message).await.is_err()
         {
             tracing::warn!(request_id = %request.id, "Voice result publication deferred");
         }
@@ -900,7 +921,7 @@ async fn settle_lost_in_session(
         .await?;
     db.collection::<AssistantMessage>(MESSAGES)
         .update_one(
-            doc! {"_id": &row.message_id, "user_id": &row.user_id},
+            doc! {"_id": &row.message_id, "user_id": &row.user_id, "role":"user", "via":"voice"},
             doc! {"$set": {"execution_pending": false}},
         )
         .session(&mut *session)
@@ -923,6 +944,7 @@ async fn settle_lost_in_session(
     };
     db.collection::<AssistantMessage>(MESSAGES)
         .insert_one(AssistantMessage {
+            supplemental_result_claims: Vec::new(),
             automation_work: None,
             execution_task: None,
             delegated_images: Default::default(),
@@ -1032,7 +1054,7 @@ pub async fn recover(db: &Database) -> AppResult<()> {
                             db.collection::<AssistantMessage>(MESSAGES)
                                 .update_one(
                                     doc! {"_id":&row.message_id,"user_id":&row.user_id,
-                                    "conversation_id":&row.conversation_id},
+                                    "conversation_id":&row.conversation_id,"role":"user","via":"voice"},
                                     doc! {"$set":{"execution_pending":true}},
                                 )
                                 .session(&mut *session)
@@ -1145,8 +1167,10 @@ pub(crate) async fn continuation(
         return Err(AppError::Conflict("Voice task was stopped".into()));
     }
     let text = format!(
-        "The owner decided the confirmation: {} (acknowledgement_id {}). Continue within the existing authority; do not retry a denied action. Then tell the user in one or two plain sentences what you did and the result.",
-        card.status, card.id
+        "The owner decided the confirmation: {} (acknowledgement_id {}). Continue within the existing authority; do not retry a denied action. {}",
+        card.status,
+        card.id,
+        super::assistant_acknowledgement_service::decision_narration(card.status == "allowed")
     );
     let now = Utc::now();
     let request = enqueue_in_session(

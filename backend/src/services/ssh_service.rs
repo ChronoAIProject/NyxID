@@ -163,15 +163,40 @@ pub fn target_base_url(host: &str, port: u16) -> String {
     format!("ssh://{}:{port}", host.trim())
 }
 
-/// Validate an SSH target hostname and port.
-///
-/// Unlike HTTP base_url validation, SSH targets are always allowed to use
-/// private/internal IPs. SSH services are admin-configured infrastructure
-/// (not user-supplied URLs), so SSRF is not a concern. The NyxID server or
-/// node agent connects to these hosts on behalf of authenticated users.
+/// Validate the configured host without resolving names on behalf of a node.
 pub async fn validate_resolved_ssh_target(host: &str, port: u16) -> AppResult<()> {
     validate_ssh_target_syntax(host, port)?;
     Ok(())
+}
+
+pub(crate) async fn resolve_direct_ssh_target(
+    host: &str,
+    port: u16,
+) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use super::url_validation::{AddressClass, address_class, is_cloud_metadata_host};
+    use std::io::{Error, ErrorKind};
+    let refused = || {
+        Error::new(
+            ErrorKind::PermissionDenied,
+            "SSH destination is not permitted",
+        )
+    };
+    if is_cloud_metadata_host(host) {
+        return Err(refused());
+    }
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    let addresses: Vec<_> = tokio::net::lookup_host((host, port)).await?.collect();
+    if addresses.is_empty()
+        || addresses
+            .iter()
+            .any(|peer| address_class(peer.ip()) == AddressClass::Reserved)
+    {
+        return Err(refused());
+    }
+    Ok(addresses)
 }
 
 /// Validate SSH target syntax only (non-empty host, valid port, blocked
@@ -331,6 +356,15 @@ async fn generate_service_ca(
     ))
 }
 
+/// Sole signer for NyxID SSH user certificates. Callers are the
+/// `POST /ssh/{id}/certificate` route used by `nyxid ssh proxy` and
+/// `nyxid ssh issue-cert` (including the HTTP flow in
+/// `backend/src/ssh_cli.rs`), `ssh_web_terminal::generate_ephemeral_credentials`
+/// for browser and mobile terminals, cert-mode SSH exec, and MCP exec.
+/// Only Web/mobile terminal callers enable `permit_pty`, adding exactly the
+/// `permit-pty` extension. Certificate API and exec callers pass false and issue
+/// no extensions. No agent, port/TCP, X11-forwarding, or user-rc permissions.
+#[allow(clippy::too_many_arguments)]
 pub async fn issue_certificate(
     encryption_keys: &EncryptionKeys,
     ssh_service: &SshServiceConfig,
@@ -339,6 +373,7 @@ pub async fn issue_certificate(
     user_email: &str,
     public_key_openssh: &str,
     principal: &str,
+    permit_pty: bool,
 ) -> AppResult<IssuedSshCertificate> {
     if !ssh_service.certificate_auth_enabled {
         return Err(AppError::BadRequest(
@@ -399,6 +434,11 @@ pub async fn issue_certificate(
     cert_builder
         .valid_principal(principal)
         .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate principal: {e}")))?;
+    if permit_pty {
+        cert_builder.extension("permit-pty", "").map_err(|e| {
+            AppError::Internal(format!("Failed to set SSH certificate extension: {e}"))
+        })?;
+    }
     cert_builder
         .comment(format!("NyxID SSH certificate for {user_email}"))
         .map_err(|e| AppError::Internal(format!("Failed to set SSH certificate comment: {e}")))?;
@@ -561,6 +601,25 @@ mod tests {
         assert_eq!(org_payer.owner_id, org_owner_id);
     }
 
+    #[tokio::test]
+    async fn direct_ssh_resolution_checks_address_class() {
+        for ip in [
+            "169.254.20.1",
+            "[fe80::1]",
+            "100.100.100.200",
+            "[fd00:ec2::254]",
+        ] {
+            let err = super::resolve_direct_ssh_target(ip, 22).await.unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        }
+        assert_eq!(
+            super::resolve_direct_ssh_target("10.20.30.40", 22)
+                .await
+                .unwrap(),
+            vec!["10.20.30.40:22".parse::<std::net::SocketAddr>().unwrap()]
+        );
+    }
+
     #[test]
     fn validates_ssh_target_syntax() {
         assert!(validate_ssh_target_syntax("ssh.internal.example", 22).is_ok());
@@ -667,17 +726,74 @@ mod tests {
             "operator@example.com",
             &public_key,
             "ubuntu",
+            true,
         )
         .await
         .expect("certificate");
 
-        assert!(
-            issued
-                .certificate
-                .starts_with("ssh-ed25519-cert-v01@openssh.com")
-        );
-        assert!(issued.ca_public_key.starts_with("ssh-ed25519 "));
-        assert!(issued.valid_before > issued.valid_after);
+        let issued_without_pty = issue_certificate(
+            &encryption_keys,
+            &ssh_service,
+            "service-1",
+            "user-1",
+            "operator@example.com",
+            &public_key,
+            "ubuntu",
+            false,
+        )
+        .await
+        .expect("certificate");
+
+        for (issued, permit_pty) in [(&issued, true), (&issued_without_pty, false)] {
+            assert!(
+                issued
+                    .certificate
+                    .starts_with("ssh-ed25519-cert-v01@openssh.com")
+            );
+            assert!(issued.ca_public_key.starts_with("ssh-ed25519 "));
+            assert!(issued.valid_before > issued.valid_after);
+            let certificate = ssh_key::Certificate::from_openssh(&issued.certificate)
+                .expect("parse issued certificate");
+            if permit_pty {
+                assert_eq!(
+                    certificate.extensions().0,
+                    std::collections::BTreeMap::from([(String::from("permit-pty"), String::new())])
+                );
+            } else {
+                assert!(certificate.extensions().0.is_empty());
+            }
+            assert!(certificate.critical_options().0.is_empty());
+            assert_eq!(certificate.valid_principals(), &[String::from("ubuntu")]);
+            assert_eq!(certificate.key_id(), issued.key_id);
+            assert_eq!(certificate.key_id(), "nyxid:service-1:user-1:ubuntu");
+            assert_eq!(
+                certificate.cert_type(),
+                ssh_key::certificate::CertType::User
+            );
+            assert_ne!(certificate.serial(), 0);
+            assert_eq!(
+                certificate.valid_after(),
+                issued.valid_after.timestamp() as u64
+            );
+            assert_eq!(
+                certificate.valid_before(),
+                issued.valid_before.timestamp() as u64
+            );
+            assert_eq!(
+                certificate.valid_before() - certificate.valid_after(),
+                30 * 60
+            );
+        }
+        let terminal = ssh_key::Certificate::from_openssh(&issued.certificate).unwrap();
+        let nonterminal =
+            ssh_key::Certificate::from_openssh(&issued_without_pty.certificate).unwrap();
+        assert_eq!(terminal.valid_principals(), nonterminal.valid_principals());
+        assert_eq!(terminal.key_id(), nonterminal.key_id());
+        assert_eq!(terminal.cert_type(), nonterminal.cert_type());
+        assert_eq!(terminal.public_key(), nonterminal.public_key());
+        assert_eq!(terminal.signature_key(), nonterminal.signature_key());
+        // Each issuance retains a fresh random serial/nonce and the current
+        // validity window; changing PTY policy does not change those contracts.
     }
 
     #[test]

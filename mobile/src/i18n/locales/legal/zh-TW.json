@@ -1,0 +1,11 @@
+{
+  "Effective date: {{time}}": "生效日期： {{time}}",
+  "Failed to load": "載入失敗",
+  "HTTP {{code}}": "HTTP {{code}}",
+  "Legal document URL is not configured (LEGAL_BASE_URL).": "未配置法律文件 URL (LEGAL_BASE_URL)。",
+  "Try again, or open the link outside NyxID.": "請重試，或在 NyxID 之外開啟此連結。",
+  "Unable to load {{title}}": "無法載入{{title}}",
+  "Unable to open link": "無法開啟連結",
+  "Unsupported legal document link": "法律文件連結不受支持",
+  "You can view the latest version at: {{url}}": "您可以在以下位置查看最新版本：{{url}}"
+}

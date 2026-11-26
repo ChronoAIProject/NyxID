@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { agentSchema } from "../agents/agentContracts";
+import { transcriptColumnStyle } from "../display/chatLayout";
 import { groupSchema } from "../groups/groupContracts";
 import { formatRelativeTimeFromMs } from "../../lib/time";
 import { livePollInterval } from "../../lib/api/assistantLiveTransport";
@@ -27,7 +28,7 @@ const request = (id: string) => ({
   summary: `Approve ${id}`,
 });
 
-function setup() {
+function setup(widePanel = false, panel = false, cornerWindow = false, width = 393, fontScale = 1) {
   const state = {
     agents: [
       agent("nyxbot", { kind: "nyxbot" }),
@@ -55,7 +56,7 @@ function setup() {
         id: `nyxg-${"b".repeat(32)}`,
         name: "Launch crew",
         lead_agent_id: "nyxbot",
-        members: [],
+        members: [{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }],
         created_at: "2026-10-28T00:00:00Z",
         working_agent_ids: ["waiting"],
       }),
@@ -78,6 +79,9 @@ function setup() {
   const calls: unknown[][] = [];
   const queries = new Map<string, Record<string, any>>();
   const harness = hookHarness<Element>({
+    "../../components/workspace/WorkspaceLayoutContext": {
+      WorkspaceCornerSensorContext: { value: cornerWindow },
+    },
     "../../components/AgentAvatar": {
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
@@ -92,6 +96,7 @@ function setup() {
       ScrollView: "ScrollView",
       View: "View",
       StyleSheet: { create: (value: unknown) => value, hairlineWidth: 1 },
+      useWindowDimensions: () => ({ width, height: 800, fontScale }),
     },
     "lucide-react-native": {
       Bot: "Bot",
@@ -177,10 +182,18 @@ function setup() {
     "./assistantAgentContext": { chatAgentLabel },
     "./nyxBotHomeModel": model,
   });
-  const Home = harness.load(
+  const module = harness.load(
     fileURLToPath(new URL("./NyxBotHome.tsx", import.meta.url)),
-  ).NyxBotHome as (props: unknown) => Element;
+  );
+  const Home = (panel ? module.NyxBotHomePanel : module.NyxBotHome) as (
+    props: unknown,
+  ) => Element;
   const props = {
+    widePanel,
+    scrollProps: {
+      contentContainerStyle: transcriptColumnStyle(),
+      onLayout: (event: unknown) => calls.push(["scroll-layout", event]),
+    },
     onChat: (...args: unknown[]) => calls.push(["chat", ...args]),
     onOpenCrew: (id: string) => calls.push(["crew", id]),
     onNewAgent: () => calls.push(["new-agent"]),
@@ -271,6 +284,21 @@ test("home renders real requests, completed replies, owner sections and crews wi
     ["new-agent"],
     ["new-crew"],
   ]);
+  h.harness.unmount();
+});
+
+test("narrow Home rows wrap the agent name and summary and keep timestamp in the body", () => {
+  const h = setup(false, false, false, 274);
+  const row = h.all().find((node) => node.props.accessibilityLabel === "Open finished's latest work")!;
+  const children = row.props.children;
+  const body = children[1];
+  const flatten = (style: any) => Object.assign({}, ...[style].flat(Infinity).filter(Boolean));
+  assert.equal(flatten(body.props.children[0].props.style).flexDirection, "column");
+  const name = h.all().find((node) => node.type === "Label" && node.props.children === "finished")!;
+  assert.equal(name.props.numberOfLines, undefined);
+  const summary = h.all().find((node) => node.type === "Label" && node.props.children === "The review is ready.")!;
+  assert.equal(summary.props.numberOfLines, undefined);
+  assert.equal(children[2], null, "timestamp no longer consumes the row's body width");
   h.harness.unmount();
 });
 
@@ -387,14 +415,132 @@ test("onboarding is disabled on mobile: no request, intro, replay, retry or sugg
   f.onboarding.data = {
     show_intro: true,
     suggestions_hidden: false,
-    recommendations: [{ id: "step", title: "Step", description: "", prompt: "Do it", icon: "star" }],
+    recommendations: [
+      {
+        id: "step",
+        title: "Step",
+        description: "",
+        prompt: "Do it",
+        icon: "star",
+      },
+    ],
   };
   f.harness.render();
   f.harness.flush();
-  assert.equal(f.calls.some((call) => call[0] === "onboarding-query"), false);
+  assert.equal(
+    f.calls.some((call) => call[0] === "onboarding-query"),
+    false,
+  );
   for (const label of ["Retry intro", "Replay intro", "Hide"])
-    assert.equal(f.all().some((n) => n.props.label === label), false, label);
-  assert.equal(f.all().some((n) => n.type === "FirstRunIntro" || n.type === "NextStepList"), false);
+    assert.equal(
+      f.all().some((n) => n.props.label === label),
+      false,
+      label,
+    );
+  assert.equal(
+    f
+      .all()
+      .some((n) => n.type === "FirstRunIntro" || n.type === "NextStepList"),
+    false,
+  );
   assert.equal(f.text().includes("Suggested for you"), false);
   f.harness.unmount();
+});
+
+test("wide home moves updates and agents into its opt-in panel without duplicate groups", () => {
+  const inline = setup();
+  assert.match(inline.text(), /While you were away/);
+  assert.match(inline.text(), /Your agents/);
+  const scroll = inline.all().find((node) => node.type === "ScrollView");
+  assert.ok(scroll);
+  assert.deepEqual(JSON.parse(JSON.stringify(scroll.props.style[0])), {
+    flex: 1,
+    minHeight: 0,
+  });
+  inline.harness.unmount();
+  const wide = setup(true);
+  assert.doesNotMatch(
+    wide.text(),
+    /While you were away|Your agents|Approve decision-1/,
+  );
+  wide.harness.unmount();
+  const panel = setup(true, true);
+  assert.equal(panel.text().split("While you were away").length - 1, 1);
+  assert.equal(panel.text().split("Your agents").length - 1, 1);
+  assert.match(panel.text(), /Pending approvals/);
+  assert.match(panel.text(), /Approve decision-1/);
+  panel.harness.unmount();
+});
+
+test("the Duo Home greeting is a capped large title: it never breaks a word at the largest text size", () => {
+  const x = setup(false, false, true);
+  const greeting = x
+    .all()
+    .find(
+      (n: any) => n.type === "Label" && n.props.accessibilityRole === "header",
+    )!;
+  assert.ok(greeting, "greeting header");
+  // The same cap as the header bar and every page's large title.
+  assert.equal(greeting.props.maxFontSizeMultiplier, 1.25);
+  assert.equal(greeting.props.numberOfLines, 2);
+  assert.equal(greeting.props.ellipsizeMode, "tail");
+  x.harness.unmount();
+});
+
+test("P9 ordinary Home greeting retains base uncapped scaling and wrapping", () => {
+  const x = setup();
+  const greeting = x
+    .all()
+    .find(
+      (n: any) => n.type === "Label" && n.props.accessibilityRole === "header",
+    )!;
+  assert.equal(greeting.props.maxFontSizeMultiplier, undefined);
+  assert.equal(greeting.props.numberOfLines, undefined);
+  x.harness.unmount();
+});
+
+function checkCardRows(home: ReturnType<typeof setup>, compact: boolean, panel: boolean) {
+  const labels = ["Open finished's latest work", "Chat with finished"];
+  if (!panel) labels.push("Open crew Launch crew");
+  for (const label of labels) {
+    const row = home.button(label);
+    assert.equal(row.accessibilityRole, "button");
+    const [title, detail] = row.children[1].props.children;
+    assert.equal(title.props.children[0].props.numberOfLines, compact ? undefined : 1, label);
+    assert.equal(detail.props.numberOfLines, compact ? undefined : 2, label);
+  }
+  const update = home.button("Open finished's latest work");
+  assert.equal(update.children[2] === null, compact, "timestamp uses the stacked body");
+}
+
+test("main Home measures the card host inside transcript padding and forwards viewport layout", () => {
+  const home = setup(false, false, false, 375);
+  const layout = (width: number) => ({ nativeEvent: { layout: { width, height: 800 } } });
+  const scroll = home.all().find((node) => node.type === "ScrollView")!;
+  const inner = () => home.all().find((node) => node.type === "View" && node.props.onLayout)!;
+  assert.equal(scroll.props.contentContainerStyle[1].paddingHorizontal, 12);
+  const firstViewport = layout(375);
+  scroll.props.onLayout(firstViewport);
+  assert.deepEqual(home.calls, [["scroll-layout", firstViewport]]);
+  inner().props.onLayout(layout(351));
+  checkCardRows(home, true, false);
+  scroll.props.onLayout(layout(393));
+  inner().props.onLayout(layout(369));
+  checkCardRows(home, false, false);
+  home.harness.unmount();
+});
+
+test("the companion starts compact in a wide window and large text stacks the main cards", () => {
+  const companion = setup(true, true, false, 1200);
+  checkCardRows(companion, true, true);
+  const companionContent = companion.all().find((node) => node.type === "View" && node.props.onLayout)!;
+  companionContent.props.onLayout({ nativeEvent: { layout: { width: 248 } } });
+  checkCardRows(companion, true, true);
+  companion.harness.unmount();
+
+  const largeText = setup(false, false, false, 393, 1.5);
+  const largeTextContent = largeText.all().find((node) => node.type === "View" && node.props.onLayout)!;
+  largeTextContent.props.onLayout({ nativeEvent: { layout: { width: 369 } } });
+  checkCardRows(largeText, true, false);
+  largeText.harness.unmount();
 });

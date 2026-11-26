@@ -12,10 +12,12 @@ use crate::{
     },
 };
 use bson::{Document, doc};
+use futures::TryStreamExt;
 use mongodb::{
-    ClientSession, Database,
+    ClientSession, Database, IndexModel,
     options::{IndexOptions, ReadConcern, WriteConcern},
 };
+use std::collections::BTreeMap;
 
 pub(super) const INVENTORY_VERSION: u32 = 1;
 const DOMAINS: &[&str] = &[
@@ -32,7 +34,7 @@ const DOMAINS: &[&str] = &[
     "vendor",
 ];
 
-pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
+async fn ensure_erasure_indexes_without_owner_gaps(db: &Database) -> AppResult<()> {
     let durable = super::transaction_service::durable_database(db);
     let db = &durable;
     db.collection::<Document>(JOBS)
@@ -60,6 +62,94 @@ pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
     preparation::ensure_indexes(db).await?;
     issuance::ensure_indexes(db).await?;
     Ok(())
+}
+
+/// Add only the audited owner indexes absent from the existing startup index
+/// set. The erasure service owns these predicates; the registry supplies the
+/// reviewed collection/field manifest. The first-key check preserves every
+/// pre-existing definition and avoids MongoDB name conflicts.
+async fn ensure_owner_index_gaps(db: &Database) -> AppResult<()> {
+    let mut fields_by_collection = BTreeMap::<&str, Vec<&str>>::new();
+    for &(collection, field) in super::personal_data_registry::OWNER_INDEX_GAPS {
+        fields_by_collection
+            .entry(collection)
+            .or_default()
+            .push(field);
+    }
+    for (collection, fields) in fields_by_collection {
+        let indexes: Vec<IndexModel> =
+            match db.collection::<Document>(collection).list_indexes().await {
+                Ok(cursor) => cursor.try_collect().await?,
+                Err(error)
+                    if matches!(
+                        error.kind.as_ref(),
+                        mongodb::error::ErrorKind::Command(command) if command.code == 26
+                    ) =>
+                {
+                    Vec::new()
+                }
+                Err(error) => return Err(error.into()),
+            };
+        for field in fields {
+            if indexes
+                .iter()
+                .any(|index| index.keys.keys().next().is_some_and(|first| first == field))
+            {
+                continue;
+            }
+            let name = format!(
+                "personal_erasure_owner_{}_{}",
+                collection.replace('.', "_"),
+                field.replace('.', "_")
+            );
+            let mut keys = Document::new();
+            keys.insert(field, 1_i32);
+            db.collection::<Document>(collection)
+                .create_index(
+                    IndexModel::builder()
+                        .keys(keys)
+                        .options(IndexOptions::builder().name(name).build())
+                        .build(),
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn ensure_indexes(db: &Database) -> AppResult<()> {
+    ensure_erasure_indexes_without_owner_gaps(db).await?;
+    ensure_owner_index_gaps(db).await
+}
+
+/// Run the late startup index groups in the same order as the server.
+///
+/// The base database indexes are created by `db::create_connection` first;
+/// these groups own only their feature-specific indexes and must remain
+/// idempotent when an older replica restarts during a rolling deployment.
+pub async fn ensure_startup_indexes(db: &Database) -> AppResult<()> {
+    super::security_readiness_service::ensure_indexes(db).await?;
+    ensure_indexes(db).await?;
+    super::assistant_nyxagent::ensure_account_export_indexes(db).await?;
+    super::assistant_upload_retention::ensure_account_export_indexes(db).await?;
+    super::platform_provisioning_service::ensure_account_export_indexes(db).await?;
+    super::collaboration_group_service::ensure_account_export_indexes(db).await?;
+    super::org_channel_service::ensure_account_export_indexes(db).await?;
+    Ok(())
+}
+
+/// Checked-in upgrade fixture: origin/main's startup index sequence before
+/// the privacy registry's owner-index additions, refreshed whenever the base
+/// changes. Keeping this exact call path in
+/// the test binary lets the existing-deployment and mixed-fleet tests replay
+/// the old index set without dropping or renaming any definition.
+/// `db::ensure_indexes` is unchanged from that base, including its
+/// node-credential delivery and usage-checkpoint recovery indexes; the caller
+/// runs it before this fixture.
+#[cfg(test)]
+pub(crate) async fn ensure_origin_main_indexes_for_test(db: &Database) -> AppResult<()> {
+    super::security_readiness_service::ensure_indexes(db).await?;
+    ensure_erasure_indexes_without_owner_gaps(db).await
 }
 
 pub async fn status(db: &Database, user_id: &str) -> AppResult<Option<PersonalErasureJob>> {
@@ -254,13 +344,14 @@ async fn accept_claimed(
             return Err(AppError::Conflict("Reconcile the interrupted skill publication or wait for its active attempt before deleting your account; your account and provider credentials remain available for recovery".into()));
         }
         super::oracle_pool_service::accept_personal_erasure_in_session(db,&mut tx,user,actor).await?;
-        super::admin_user_service::apply_user_security_state_in_session(db,&mut tx,user,false,true,owner_policy,Some(live.is_active)).await?;
+        super::admin_user_service::apply_user_security_state_in_session(db,&mut tx,user,false,Some(actor),owner_policy,Some(live.is_active)).await?;
         super::session_authority::revoke_all_in_transaction(db,user,&mut tx).await?;
         db.collection::<Document>(USERS).update_one(doc! {"_id":user},doc! {"$set":{"channel_adapter_admission_closed":true},"$inc":{"channel_adapter_admission_fence":1_i64}}).session(&mut tx).await?;
         super::telemetry_erasure_service::enqueue_in_session(db,user,&mut tx).await?;
         let now=chrono::Utc::now();
         let job=PersonalErasureJob {id:uuid::Uuid::new_v4().to_string(),user_id:user.to_owned(),requested_by:actor.to_owned(),owner_deletion_policy:owner_policy.map(str::to_owned),status:ErasureStatus::Accepted,inventory_version:INVENTORY_VERSION,
-            domains:DOMAINS.iter().map(|domain|DomainCheckpoint { retry_generation:0,last_retry_key_hash:None,last_retry_request_digest:None,consecutive_failures: 0,domain:(*domain).to_owned(),status:DomainStatus::Pending,reason:None,cursor:None,completed_at:None}).collect(),lease_token:None,lease_expires_at:None,retry_at:None,accepted_at:now,updated_at:now,completed_at:None};
+            local_inventory_revision: 0,
+            domains:DOMAINS.iter().map(|domain|DomainCheckpoint { retry_generation:0,last_retry_key_hash:None,last_retry_request_digest:None,consecutive_failures: 0,remote_wait_started_at:None,domain:(*domain).to_owned(),status:DomainStatus::Pending,reason:None,cursor:None,completed_at:None}).collect(),lease_token:None,lease_expires_at:None,retry_at:None,accepted_at:now,updated_at:now,completed_at:None};
         db.collection::<PersonalErasureJob>(JOBS).insert_one(&job).session(&mut tx).await?;
         let key=super::audit_service::audit_chain_hmac_key().ok_or_else(||AppError::Internal("Audit chain key is not initialized".into()))?;
         super::audit_service::log_actor_event_in_session(db,&mut tx,key,&super::audit_service::AuditActor{user_id:actor.to_owned(),ip_address:None,user_agent:None,api_key_id:None,api_key_name:None},"user.account.deletion_accepted",serde_json::json!({"target_user_id":user,"owner_machine_data_authorized":owner_policy.is_some(),"inventory_version":INVENTORY_VERSION})).await?;
@@ -283,7 +374,7 @@ async fn accept_claimed(
 mod channel;
 pub(crate) mod issuance;
 mod learning;
-mod local;
+pub(crate) mod local;
 mod machine;
 pub(crate) mod nodes;
 mod preparation;
@@ -678,3 +769,5 @@ mod independent_credential_tests {
 
 #[cfg(test)]
 mod integration_tests;
+
+pub(crate) use channel::erase_provider_inbox;

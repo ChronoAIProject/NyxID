@@ -1,3 +1,6 @@
+use super::recovery_batch::{self, Failures};
+mod dead_letters;
+
 use crate::models::credits::Credits;
 use std::collections::BTreeSet;
 
@@ -191,6 +194,7 @@ pub async fn try_reserve_prepaid(
         .map_err(Into::into)
 }
 
+#[cfg(test)]
 pub async fn release_wallet_hold(
     db: &mongodb::Database,
     owner_id: &str,
@@ -275,7 +279,17 @@ pub async fn apply_settlement_for_row(
                 .await?;
                 return Ok(false);
             }
+            #[cfg(test)]
+            crate::billing_integration_tests::hold_release::point(
+                crate::billing_integration_tests::hold_release::Phase::WalletLocked,
+            )
+            .await;
             apply_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &lock).await?;
+            #[cfg(test)]
+            crate::billing_integration_tests::hold_release::point(
+                crate::billing_integration_tests::hold_release::Phase::WalletApplied,
+            )
+            .await;
         }
     }
 
@@ -315,6 +329,11 @@ pub async fn apply_settlement_for_row(
         }
     }
     if let Some(wallet_id) = row.wallet_id.as_deref() {
+        #[cfg(test)]
+        crate::billing_integration_tests::hold_release::point(
+            crate::billing_integration_tests::hold_release::Phase::WalletReleased,
+        )
+        .await;
         clear_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &row.id).await?;
     }
     Ok(update.modified_count > 0)
@@ -381,9 +400,9 @@ async fn ensure_wallet_settlement_lock(
         complete_wallet_settlement_lock(db, wallet_id, owner_id, &active).await?;
     }
 
-    Err(AppError::Internal(format!(
+    Err(super::recovery_batch::waiting(AppError::Internal(format!(
         "billing wallet settlement lock busy for wallet {wallet_id}"
-    )))
+    ))))
 }
 
 /// Finish only the admission owner's durable wallet operation. Call outside
@@ -634,6 +653,9 @@ pub async fn claim_released_and_settle(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<bool> {
+    if super::stuck_requests::holdless::marked(row) {
+        return super::stuck_requests::holdless::release(db, row).await;
+    }
     if row.wallet_id.is_some() {
         super::exact_migration::require_ready(db).await?;
     }
@@ -808,7 +830,7 @@ pub async fn abandon_stale_unforwarded(
     cutoff: chrono::DateTime<Utc>,
 ) -> AppResult<u64> {
     let mut cursor = db
-        .collection::<UsageMeterRow>(USAGE_METER)
+        .collection::<Document>(USAGE_METER)
         .find(doc! {
             "status": "reserved",
             "forwarded": false,
@@ -824,12 +846,23 @@ pub async fn abandon_stale_unforwarded(
     }
 
     let mut released_count = 0;
-    for row in rows {
-        if release_one_unforwarded_row(db, &row, UsageStatus::Abandoned, None).await? {
-            released_count += 1;
+    let mut failures = Failures::default();
+    for raw in rows {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
+        let result: AppResult<bool> = recovery_batch::work(async {
+            let row = recovery_batch::decode(&raw)?;
+            release_one_unforwarded_row(db, &row, UsageStatus::Abandoned, None).await
+        })
+        .await;
+        match result {
+            Ok(true) => released_count += 1,
+            Ok(false) => {}
+            Err(error) => failures.note(error),
         }
     }
-    Ok(released_count)
+    failures.finish(released_count)
 }
 
 pub async fn recover_retryable_settlements(
@@ -842,47 +875,64 @@ pub(crate) async fn recover_retryable_settlements_at(
     db: &mongodb::Database,
     now: chrono::DateTime<Utc>,
 ) -> AppResult<SettlementRecoveryStats> {
-    super::meter::recover_pending_resale_intents(db).await?;
+    let mut failures = Failures::default();
+    failures.absorb(super::realtime_usage::recover_stale(db).await)?;
+    failures.absorb(super::usage_checkpoint::recover_stale(db, now).await)?;
+    failures.absorb(super::meter::recover_pending_resale_intents(db).await)?;
 
     let due = settlement_due_filter(now);
     let mut query = due.clone();
     query.insert("released", false);
     query.insert("quantity", doc! { "$ne": Bson::Null });
-    let rows: Vec<UsageMeterRow> = db
-        .collection::<UsageMeterRow>(USAGE_METER)
+    let rows: Vec<Document> = db
+        .collection::<Document>(USAGE_METER)
         .find(query)
-        .sort(doc! {
-            "settlement_next_retry_at": 1,
-            "finalized_at": 1,
-        })
-        .limit(RECOVERY_BATCH_SIZE)
+        .sort(doc! {"settlement_next_retry_at":1,"finalized_at":1})
+        .limit(recovery_batch::limit(RECOVERY_BATCH_SIZE))
         .await?
         .try_collect()
         .await?;
 
-    let mut stats = SettlementRecoveryStats::default();
-    for row in rows {
-        if row.settlement_attempts >= MAX_SETTLEMENT_ATTEMPTS {
-            if mark_exhausted_settlement_dead_letter(db, &row, now).await? {
-                stats.dead_lettered += 1;
-            }
-            continue;
+    let mut stats = failures
+        .absorb(dead_letters::recover_dead_letters(db).await)?
+        .unwrap_or_default();
+    for raw in rows {
+        if !super::reconcile::continue_reconcile() {
+            break;
         }
+        let result: AppResult<()> = recovery_batch::work(async {
+            let row: UsageMeterRow = recovery_batch::decode(&raw)?;
+            if row.settlement_attempts >= MAX_SETTLEMENT_ATTEMPTS {
+                if mark_exhausted_settlement_dead_letter(db, &row, now).await? {
+                    stats.dead_lettered += 1;
+                }
+                return Ok(());
+            }
 
-        let Some(claimed) = claim_due_settlement(db, &row, now, due.clone()).await? else {
-            continue;
-        };
-        match claim_released_and_settle(db, &claimed).await {
-            Ok(true) => stats.recovered += 1,
-            Ok(false) => {}
-            Err(_error) => match record_settlement_failure(db, &claimed, now).await? {
-                SettlementFailureDisposition::RetryScheduled(_) => stats.retried += 1,
-                SettlementFailureDisposition::DeadLettered(_) => stats.dead_lettered += 1,
-                SettlementFailureDisposition::Unchanged => {}
-            },
+            let Some(claimed) = claim_due_settlement(db, &row, now, due.clone()).await? else {
+                return Ok(());
+            };
+            match claim_released_and_settle(db, &claimed).await {
+                Ok(true) => stats.recovered += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    match record_settlement_failure(db, &claimed, now).await? {
+                        SettlementFailureDisposition::RetryScheduled(_) => stats.retried += 1,
+                        SettlementFailureDisposition::DeadLettered(_) => stats.dead_lettered += 1,
+                        SettlementFailureDisposition::Unchanged => {}
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(())
+        })
+        .await;
+        if let Err(error) = result {
+            failures.note(error);
         }
     }
-    Ok(stats)
+    failures.absorb(super::stuck_requests::recover(db).await)?;
+    failures.finish(stats)
 }
 
 fn settlement_due_filter(now: chrono::DateTime<Utc>) -> Document {
@@ -1142,32 +1192,92 @@ async fn release_one_unforwarded_row(
         set_doc.insert("last_error", reason);
     }
 
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::BeforeTransaction,
+    )
+    .await;
+    // The released marker is also the wallet hold's receipt. Commit both or
+    // neither so an interrupted release remains discoverable by abandonment.
+    let context = (db.clone(), row.id.clone(), set_doc);
+    let claimed = crate::services::transaction_service::run_db_only(
+        db,
+        &context,
+        |session, (db, row_id, set_doc)| {
+            Box::pin(release_wallet_in_session(db, session, row_id, set_doc))
+        },
+    )
+    .await?;
+    let Some(claimed) = claimed else {
+        return Ok(false);
+    };
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::AfterCommit,
+    )
+    .await;
+    // Benefit operations retain their own durable locks/history. A crash here
+    // is picked up by funding::recover_terminal_releases.
+    super::funding::release_usage_reservations(db, &claimed).await?;
+    Ok(true)
+}
+
+async fn release_wallet_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    row_id: &str,
+    set_doc: &Document,
+) -> AppResult<Option<UsageMeterRow>> {
     let claimed = db
         .collection::<UsageMeterRow>(USAGE_METER)
         .find_one_and_update(
             doc! {
-                "_id": &row.id,
+                "_id": row_id,
                 "forwarded": false,
                 "status": "reserved",
                 "released": false,
                 "metric": { "$nin": BillingMetric::ALL.into_iter().filter(|metric| metric.is_runtime_allocation()).map(BillingMetric::as_str).collect::<Vec<_>>() },
             },
-            doc! { "$set": set_doc },
+            doc! { "$set": set_doc.clone() },
         )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::Before)
-                .build(),
-        )
+        .return_document(ReturnDocument::Before)
+        .session(&mut *session)
         .await?;
-
     let Some(claimed) = claimed else {
-        return Ok(false);
+        return Ok(None);
     };
-
-    release_wallet_hold(db, &claimed.billing_owner_id, claimed.reserved_credits).await?;
-    super::funding::release_usage_reservations(db, &claimed).await?;
-    Ok(true)
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::AfterMeter,
+    )
+    .await;
+    if claimed.reserved_credits > Credits::ZERO {
+        let released = db
+            .collection::<BillingWallet>(BILLING_WALLET)
+            .update_one(
+                doc! {
+                    "owner_id": &claimed.billing_owner_id,
+                    "$expr": { "$gte": ["$reserved_credits", claimed.reserved_credits] },
+                },
+                doc! {
+                    "$inc": { "reserved_credits": -claimed.reserved_credits },
+                    "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+                },
+            )
+            .session(&mut *session)
+            .await?;
+        if released.matched_count != 1 {
+            return Err(AppError::Internal(
+                "Billing reservation wallet release failed".into(),
+            ));
+        }
+    }
+    #[cfg(test)]
+    crate::billing_integration_tests::hold_release::point(
+        crate::billing_integration_tests::hold_release::Phase::AfterWallet,
+    )
+    .await;
+    Ok(Some(claimed))
 }
 
 pub(super) async fn suspend_wallet(db: &mongodb::Database, owner_id: &str) -> AppResult<()> {
@@ -1283,6 +1393,7 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> crate::errors::AppResult<LagoUsage> {
+            crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
             Ok(LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),
@@ -1305,6 +1416,9 @@ mod tests {
     fn wallet(owner_id: &str, balance_credits: i64) -> BillingWallet {
         let now = Utc::now();
         BillingWallet {
+            snapshot_generation: 0,
+            tax_generation: 0,
+            tax_guard_token: None,
             id: Uuid::new_v4().to_string(),
             owner_id: owner_id.to_string(),
             lago_customer_id: owner_id.to_string(),

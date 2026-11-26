@@ -12,6 +12,9 @@ pub enum MessageAuthor {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    /// Irreversible supplemental result attempts, scoped to this settled reply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supplemental_result_claims: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automation_work: Option<super::trigger_run::AutomationWork>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -143,6 +146,8 @@ pub struct VoiceTranscript {
     pub end_ms: i64,
     pub sealed: bool,
     pub complete: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
     pub delivery: String,
     #[serde(default)]
     pub request_id: Option<String>,
@@ -166,6 +171,16 @@ pub struct Steering {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TurnMetadata {
+    /// One entry per represented channel source, keyed by its accepted event ID.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub channel_text_completeness:
+        std::collections::BTreeMap<String, super::channel_message::TextCompleteness>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continued_after_restart: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_link_publication: Option<VoiceLinkPublication>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub links_in_chat: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_recovery_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,7 +190,7 @@ pub struct TurnMetadata {
     pub work: Option<WorkEvidence>,
     #[serde(default)]
     pub timing: Option<TurnTiming>,
-    /// Closed metadata from a failed model callback, or the upstream code alone.
+    /// Metadata-only explanation of a failed turn. Legacy failures can omit it.
     #[serde(default)]
     pub failure_reason: Option<Box<TurnFailureReason>>,
     #[serde(default)]
@@ -185,7 +200,16 @@ pub struct TurnMetadata {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VoiceLinkPublication {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub links_in_chat: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TurnFailureReason {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_setup_step: Option<GuestSetupStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_route: Option<Box<super::assistant_conversation::ModelRouteDiagnostic>>,
     pub source: String,
@@ -193,6 +217,36 @@ pub struct TurnFailureReason {
     pub code: String,
     pub http_status: Option<u16>,
     pub nyxid_error_code: Option<u32>,
+}
+
+impl TurnFailureReason {
+    pub fn new(source: &'static str, stage: &str, code: &str, http_status: Option<u16>) -> Self {
+        Self {
+            source: source.into(),
+            stage: stage.into(),
+            code: code.into(),
+            http_status,
+            nyxid_error_code: None,
+            model_route: None,
+            guest_setup_step: None,
+        }
+    }
+}
+
+/// Bounded internal setup location; never an upstream error or payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestSetupStep {
+    Capacity,
+    OrgAccess,
+    AgentAccess,
+    TurnAdmission,
+    CredentialLoad,
+    ModelExecution,
+    RouteValidation,
+    LeaseExpired,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

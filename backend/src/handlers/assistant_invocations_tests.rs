@@ -1053,6 +1053,7 @@ async fn invocation_watch_settlement_is_atomic_and_cancel_fences_late_producers(
     let (state, owner, admission) = admitted("invocation_watch_settlement").await;
     let claim = admission.claim.unwrap();
     let watch = NyxbotWatch {
+        wake_claim: None,
         source_connect_link_id: None,
         source_turn_id: None,
         id: Uuid::new_v4().to_string(),

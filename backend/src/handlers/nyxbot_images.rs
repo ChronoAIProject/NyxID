@@ -5,7 +5,7 @@ use crate::{
     AppState,
     errors::{AppError, AppResult},
     models::{
-        assistant_conversation::{ChannelOrigin, TurnAttachment},
+        assistant_conversation::TurnAttachment,
         nyxbot_channel::{NyxbotChannel, NyxbotThread},
         nyxbot_image_delivery::{ImageDeliveryState, NyxbotImageDelivery},
     },
@@ -32,12 +32,9 @@ impl std::fmt::Debug for ImageSendPlan {
     }
 }
 
-pub enum ImageAnchor {
-    Inbound { message_id: String },
-    Thread { origin: ChannelOrigin },
-    Initiated { chat_id: String },
-    NoAnchor,
-}
+pub use crate::models::image_preparation::ImageAnchor;
+#[path = "nyxbot_image_recovery.rs"]
+pub(crate) mod recovery;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageOutcome {
@@ -74,6 +71,7 @@ pub struct ImageAudience {
 }
 
 pub struct ImageSendContext<'a> {
+    pub source: crate::models::image_preparation::Source,
     pub owner: &'a str,
     pub conversation_id: &'a str,
     pub turn_id: &'a str,
@@ -202,9 +200,17 @@ pub fn image_result(report: &ImageReport) -> serde_json::Value {
 }
 
 async fn audience_key(state: &AppState, ctx: &ImageSendContext<'_>) -> AppResult<String> {
+    audience_key_with(state, ctx, None).await
+}
+
+async fn audience_key_with(
+    state: &AppState,
+    ctx: &ImageSendContext<'_>,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+) -> AppResult<String> {
     match &ctx.anchor {
         ImageAnchor::Inbound { message_id } => {
-            let auth = super::route_key_auth(state, ctx.channel).await?;
+            let auth = super::route_key_auth_with(state, ctx.channel, checked).await?;
             let body = crate::handlers::channel_relay::AsyncReplyRequest {
                 message_id: message_id.clone(),
                 thread_reply: false,
@@ -315,6 +321,7 @@ pub(super) async fn send_turn_images_with_stop(
         return Err(AppError::ChannelMediaUnsupported);
     }
     let key = audience_key(state, &ctx).await?;
+    let route = recovery::route(&ctx);
     let started = Instant::now();
     let budget = ctx.deadline.map_or(Duration::from_secs(120), |deadline| {
         deadline
@@ -364,7 +371,7 @@ pub(super) async fn send_turn_images_with_stop(
             });
             continue;
         }
-        let (id, attempt) = match claims::claim_for_turn(
+        let (id, attempt) = match claims::prepare_for_turn(
             &state.db,
             ctx.owner,
             source_conversation,
@@ -372,6 +379,7 @@ pub(super) async fn send_turn_images_with_stop(
             &ctx.channel.id,
             &attachment.id,
             &key,
+            &route,
         )
         .await
         .unwrap_or(claims::ImageClaim::Unknown)
@@ -397,6 +405,11 @@ pub(super) async fn send_turn_images_with_stop(
             }
         };
         report.claimed += 1;
+        #[cfg(test)]
+        {
+            crate::services::durable_wake_tests::after("image_preparation_claimed").await;
+            if index == 1 {crate::services::durable_wake_tests::after("image_second_preparation_claimed").await;}
+        }
         let source_exists = claims::source_exists(
             &state.db,
             ctx.owner,
@@ -406,7 +419,7 @@ pub(super) async fn send_turn_images_with_stop(
         )
         .await;
         if matches!(source_exists, Ok(false)) {
-            let _ = claims::remove(&state.db, &id).await;
+            let _ = claims::remove(&state.db, &id, &attempt).await;
             report.record(ImageOutcome::Failed("unavailable"));
             report.outcomes.push(ImageItemResult {
                 attachment_id: attachment.id,
@@ -473,7 +486,10 @@ pub(super) async fn send_turn_images_with_stop(
                         Duration::from_secs(35).min(end.saturating_duration_since(Instant::now())),
                         crate::services::channel_platform::track_provider_attempt(
                             progress.clone(),
-                            send_one(state, &ctx, materialized),
+                            crate::services::channel_image_preparation::with_effect(
+                                recovery::guard(state,ctx.owner,&route,&key,&id,&attempt,delegated),
+                                send_one(state, &ctx, materialized),
+                            ),
                         ),
                     )
                     .await
@@ -515,7 +531,15 @@ pub(super) async fn send_turn_images_with_stop(
             ImageOutcome::Sent | ImageOutcome::Failed("unsupported" | "no_anchor" | "unavailable")
         );
         let completion = if !permanent && !progress.load(std::sync::atomic::Ordering::Relaxed) {
-            claims::release(&state.db, &id, &attempt).await
+            let completion = claims::release(&state.db, &id, &attempt).await;
+            if matches!(completion, Ok(claims::ImageCompletion::Recorded))
+                && matches!(outcome, ImageOutcome::Skipped("after_unknown" | "cancelled" | "billing") | ImageOutcome::Failed("billing" | "bot_inactive" | "refused" | "invalid"))
+            {
+                // A later explicit authorized request can use this unsent slot,
+                // but recovery must preserve the current batch's stop decision.
+                let _ = crate::services::channel_image_preparation::park(&state.db, &id, &attempt).await;
+            }
+            completion
         } else {
             claims::finish(&state.db, &id, &attempt, durable_state, item_code).await
         };

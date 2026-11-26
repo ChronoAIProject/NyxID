@@ -29,6 +29,8 @@ async fn followup_dms_keep_reaching_agent_across_poll_sweeps() {
         ),
     ] {
         let (state, _, server, owner, key) = fixture().await;
+        let _delivery_origin =
+            crate::services::resource_adapter::register_test_origin(&server.uri());
         let bot = insert_bot(&state, &owner, &key).await;
         route_agent(&state, &server, &bot).await;
         let next_id = std::sync::atomic::AtomicU64::new(101);
@@ -116,6 +118,7 @@ async fn followup_dms_keep_reaching_agent_across_poll_sweeps() {
 #[tokio::test]
 async fn reconnect_relays_dms_received_while_failed_once() {
     let (state, adapter, server, owner, key) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     let bot = insert_bot(&state, &owner, &key).await;
     route_agent(&state, &server, &bot).await;
     let (notices, mut received) = tokio::sync::mpsc::unbounded_channel();
@@ -316,6 +319,7 @@ async fn reconnect_initializes_only_missing_cursors() {
 #[tokio::test]
 async fn oversized_backlog_advances_with_notice_and_does_not_fail() {
     let (state, adapter, server, owner, key) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     let bot = insert_bot(&state, &owner, &key).await;
     route_agent(&state, &server, &bot).await;
     for page in 0..10_u64 {

@@ -9,9 +9,9 @@ use axum::{
 };
 use url::Url;
 
-use crate::AppState;
 use crate::errors::AppError;
-use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, SESSION_COOKIE_NAME};
+use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthMethod, SESSION_COOKIE_NAME};
+use crate::{AppState, config::AppConfig};
 
 fn is_unsafe_method(method: &Method) -> bool {
     !matches!(
@@ -77,6 +77,64 @@ fn allowed_origins(
         .collect()
 }
 
+fn trusted_browser_origins(config: &AppConfig) -> BTreeSet<String> {
+    let mut allowed = allowed_origins(
+        &config.frontend_url,
+        &config.base_url,
+        &config.csrf_trusted_origins,
+    );
+    allowed.extend(
+        config
+            .domain_aliases
+            .frontend_urls
+            .iter()
+            .chain(&config.domain_aliases.base_urls)
+            .cloned(),
+    );
+    allowed
+}
+
+pub(crate) fn check_proxy_navigation(
+    config: &AppConfig,
+    auth_method: &AuthMethod,
+    request: &Request<Body>,
+) -> Result<(), AppError> {
+    if *auth_method != AuthMethod::Session
+        || !matches!(*request.method(), Method::GET | Method::HEAD)
+    {
+        return Ok(());
+    }
+
+    let headers = request.headers();
+    let trusted = if headers.contains_key(header::ORIGIN) || headers.contains_key(header::REFERER) {
+        // An explicitly configured frontend can be on a different site from the API.
+        let allowed = trusted_browser_origins(config);
+        [header::ORIGIN, header::REFERER].iter().all(|name| {
+            headers.get_all(name).iter().all(|value| {
+                let Ok(url) = Url::parse(value.to_str().unwrap_or_default()) else {
+                    return false;
+                };
+                matches!(url.scheme(), "http" | "https")
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && (*name != header::ORIGIN
+                        || (url.path() == "/" && url.query().is_none() && url.fragment().is_none()))
+                    && allowed.contains(&url.origin().ascii_serialization())
+            })
+        })
+    } else {
+        headers
+            .get_all("sec-fetch-site")
+            .iter()
+            .all(|value| matches!(value.as_bytes(), b"none" | b"same-site" | b"same-origin"))
+    };
+    if trusted {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden("Cross-site request blocked".into()))
+    }
+}
+
 pub async fn browser_csrf_middleware(
     State(state): State<AppState>,
     request: Request<Body>,
@@ -101,7 +159,7 @@ pub async fn browser_csrf_middleware(
 
     let Some(request_origin) = extract_request_origin(request.headers()) else {
         tracing::warn!(
-            path = %request.uri().path(),
+            path = %crate::mw::request_trace::route_label(request.extensions()),
             "Blocked unsafe browser request without Origin or Referer"
         );
         return Err(AppError::Forbidden(
@@ -109,26 +167,13 @@ pub async fn browser_csrf_middleware(
         ));
     };
 
-    let mut allowed = allowed_origins(
-        &state.config.frontend_url,
-        &state.config.base_url,
-        &state.config.csrf_trusted_origins,
-    );
-    allowed.extend(
-        state
-            .config
-            .domain_aliases
-            .frontend_urls
-            .iter()
-            .chain(&state.config.domain_aliases.base_urls)
-            .cloned(),
-    );
+    let allowed = trusted_browser_origins(&state.config);
     if allowed.contains(&request_origin) {
         return Ok(next.run(request).await);
     }
 
     tracing::warn!(
-        path = %request.uri().path(),
+        path = %crate::mw::request_trace::route_label(request.extensions()),
         origin = %request_origin,
         allowed_origins = ?allowed,
         "Blocked unsafe browser request with disallowed origin"

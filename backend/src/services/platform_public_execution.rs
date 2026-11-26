@@ -30,6 +30,7 @@ pub(crate) async fn execute(
             relative_path: "v1/responses".into(),
             body: Some(request.clone()),
             idempotency_key: context.turn.turn_id.clone(),
+            destination: None,
             billing_policy: Some(
                 super::billing::route_inventory::BillingRoutePolicy::Metered(
                     super::billing::BillingIngress::Proxy,
@@ -72,7 +73,7 @@ pub(crate) async fn execute(
                 return Err(policy::unavailable());
             }
             decoder.push(&chunk).map_err(|_| policy::unavailable())?;
-            if decoder.text.len() > context.limits.max_output_bytes as usize {
+            if decoder.text_len() > context.limits.max_output_bytes as usize {
                 return Err(policy::unavailable());
             }
             if let Some(created) = decoder.created.take() {

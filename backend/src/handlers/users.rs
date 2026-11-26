@@ -1,4 +1,10 @@
-use axum::{Json, extract::State, http::HeaderMap};
+use axum::{
+    Json,
+    body::Body,
+    extract::{Query, State},
+    http::{HeaderMap, header},
+    response::Response,
+};
 use chrono::Utc;
 use mongodb::bson::{self, doc};
 use serde::{Deserialize, Serialize};
@@ -6,11 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::user::{
-    COLLECTION_NAME as USERS, ServiceViewPreferences, ServiceViewSource, ServiceViewState,
-    ServiceViewType, User,
+    COLLECTION_NAME as USERS, PROVIDER_DISPLAY_NAME, ServiceViewPreferences, ServiceViewSource,
+    ServiceViewState, ServiceViewType, User,
 };
 use crate::mw::auth::AuthUser;
-use crate::services::{admin_user_service, role_service};
+use crate::services::{admin_user_service, personal_data_registry, role_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
@@ -25,10 +31,17 @@ pub struct OnboardingStateResponse {
 /// User-scoped config / preferences surfaced on `GET /users/me`.
 #[derive(Debug, Serialize)]
 pub struct ProfileConfigResponse {
+    pub analytics: AnalyticsPreferencesResponse,
     pub security: SecurityPreferencesResponse,
     pub services_view: Option<ServiceViewResponse>,
     pub service_views: Option<ServiceViewsResponse>,
     pub onboarding: OnboardingStateResponse,
+}
+
+/// Prompt acknowledgement only; event admission still reads live consent.
+#[derive(Debug, Default, Serialize)]
+pub struct AnalyticsPreferencesResponse {
+    pub prompt_seen: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +91,270 @@ pub async fn save_security_preferences(
     )
     .await?;
     Ok(Json(policy.into()))
+}
+
+/// Refund work that never reaches response EOF, including a cancelled build.
+struct ExportReservationGuard {
+    limiter: crate::mw::rate_limit::SharedPerKeyRateLimiter,
+    reservation: Option<crate::mw::rate_limit::RateReservation>,
+    shutdown: crate::services::shutdown::Runtime,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl ExportReservationGuard {
+    async fn refund(&mut self) -> AppResult<()> {
+        if let Some(reservation) = self.reservation.take() {
+            // The tracked task owns the token even if this waiting request is cancelled.
+            let limiter = self.limiter.clone();
+            self.shutdown
+                .spawn_cleanup(async move { limiter.refund(reservation).await })
+                .await
+                .map_err(|_| AppError::Internal("Export refund task failed".into()))??;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ExportReservationGuard {
+    fn drop(&mut self) {
+        if let Some(reservation) = self.reservation.take() {
+            let limiter = self.limiter.clone();
+            self.shutdown.spawn_cleanup(async move {
+                if limiter.refund(reservation).await.is_err() {
+                    tracing::warn!("Account export slot refund failed");
+                }
+            });
+        }
+    }
+}
+
+const EXPORT_BODY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+const EXPORT_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Both the unpolled remainder and its admission guard are timer-owned. The
+/// stream retains only this shared state, so expiry can free it without a poll.
+struct ExportDeliveryState {
+    bytes: axum::body::Bytes,
+    reservation: Option<ExportReservationGuard>,
+    expired: bool,
+}
+
+impl ExportDeliveryState {
+    fn finish(&mut self, delivered: bool) {
+        self.bytes = axum::body::Bytes::new();
+        if let Some(mut guard) = self.reservation.take() {
+            if delivered {
+                guard.reservation.take();
+            }
+            drop(guard);
+        }
+    }
+}
+
+struct ExportDeliveryGuard {
+    state: std::sync::Arc<std::sync::Mutex<ExportDeliveryState>>,
+    cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    deadline: tokio::time::Instant,
+}
+
+impl Drop for ExportDeliveryGuard {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish(false);
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
+fn export_body_with_deadline(
+    bytes: axum::body::Bytes,
+    guard: ExportReservationGuard,
+    duration: std::time::Duration,
+) -> Body {
+    let deadline = tokio::time::Instant::now() + duration;
+    let shutdown = guard.shutdown.clone();
+    let state = std::sync::Arc::new(std::sync::Mutex::new(ExportDeliveryState {
+        bytes,
+        reservation: Some(guard),
+        expired: false,
+    }));
+    let timed_state = state.clone();
+    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+    shutdown.spawn_cleanup(async move {
+        tokio::select! {
+            _ = cancelled => {}
+            _ = tokio::time::sleep_until(deadline) => {
+                let mut state = timed_state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.reservation.is_some() {
+                    state.expired = true;
+                    // Drop the remaining buffer and refund only the delivery slot.
+                    state.finish(false);
+                }
+            }
+        }
+    });
+    let delivery = ExportDeliveryGuard {
+        state,
+        cancel: Some(cancel),
+        deadline,
+    };
+    Body::from_stream(futures::stream::unfold(
+        Some(delivery),
+        |delivery| async move {
+            let mut delivery = delivery?;
+            let (chunk, complete) = {
+                let mut state = delivery
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.reservation.is_none() && !state.expired {
+                    return None;
+                }
+                if state.expired || tokio::time::Instant::now() >= delivery.deadline {
+                    state.finish(false);
+                    // A truncated export must abort transport, never report clean EOF.
+                    return Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "Account export delivery deadline exceeded",
+                        )),
+                        None,
+                    ));
+                }
+                if state.bytes.is_empty() {
+                    state.finish(true);
+                    return None;
+                }
+                let size = state.bytes.len().min(EXPORT_CHUNK_BYTES);
+                let chunk = state.bytes.split_to(size);
+                let complete = state.bytes.is_empty();
+                if complete {
+                    // Hyper can stop polling at Content-Length without asking
+                    // for EOF. Charge when the final slice is handed off.
+                    state.finish(true);
+                }
+                (chunk, complete)
+            };
+            if complete && let Some(cancel) = delivery.cancel.take() {
+                let _ = cancel.send(());
+            }
+            Some((Ok(chunk), Some(delivery)))
+        },
+    ))
+}
+
+/// POST /api/v1/users/me/export
+pub async fn export_me(State(state): State<AppState>, auth_user: AuthUser) -> AppResult<Response> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let account_id = auth_user.user_id.to_string();
+    let permit = state
+        .account_export_semaphore
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::RateLimitedWithRetry { retry_after: 1 })?;
+    // Refunded attempts still consume this separate durable hourly budget.
+    let attempts = crate::mw::rate_limit::create_per_key_rate_limiter(
+        state.db.clone(),
+        "account_export_attempts",
+        12,
+        3600,
+    );
+    let (attempt, retry_after) = attempts.reserve(&account_id).await?;
+    if attempt.is_none() {
+        return Err(AppError::RateLimitedWithRetry { retry_after });
+    }
+    let (reservation, retry_after) = state.account_export_limiter.reserve(&account_id).await?;
+    let Some(reservation) = reservation else {
+        return Err(AppError::RateLimitedWithRetry { retry_after });
+    };
+    let admitted_at = tokio::time::Instant::now();
+    let mut guard = ExportReservationGuard {
+        limiter: state.account_export_limiter.clone(),
+        reservation: Some(reservation),
+        shutdown: state.shutdown.clone(),
+        _permit: permit,
+    };
+    let result = export_reserved(&state, &auth_user, &account_id, admitted_at).await;
+    match result {
+        Ok((response, mostly_unavailable)) => {
+            if mostly_unavailable {
+                guard.refund().await?;
+            }
+            let (parts, body) = response.into_parts();
+            Ok(Response::from_parts(
+                parts,
+                export_body_with_deadline(body, guard, EXPORT_BODY_DEADLINE),
+            ))
+        }
+        Err(error) => {
+            if error.status_code().is_server_error() {
+                guard.refund().await?;
+            } else {
+                guard.reservation.take();
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn export_reserved(
+    state: &AppState,
+    auth_user: &AuthUser,
+    account_id: &str,
+    admitted_at: tokio::time::Instant,
+) -> AppResult<(Response<axum::body::Bytes>, bool)> {
+    let export =
+        crate::services::account_export_service::build_admitted(&state.db, account_id, admitted_at)
+            .await?;
+    let subsection_count: usize = export.sections.values().map(|section| section.len()).sum();
+    let mostly_unavailable = export.unavailable_sections.len() * 2 > subsection_count;
+    let counts: Vec<serde_json::Value> = export
+        .sections
+        .iter()
+        .flat_map(|(name, subsections)| {
+            subsections.iter().map(move |(subsection, value)| {
+                serde_json::json!({"section": name, "subsection": subsection, "count": value.items.len(), "total_count": value.total_count, "total_count_exact": value.total_count_exact})
+            })
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&export)
+        .map_err(|_| AppError::Internal("Account export encoding failed".into()))?;
+    let actor = crate::services::audit_service::AuditActor {
+        user_id: account_id.to_owned(),
+        ip_address: auth_user.ip_address.clone(),
+        user_agent: auth_user.user_agent.clone(),
+        api_key_id: None,
+        api_key_name: None,
+    };
+    crate::services::audit_service::log_actor_event(
+        state.db.clone(),
+        &actor,
+        "user.data_exported",
+        Some(serde_json::json!({"format": crate::services::account_export_service::FORMAT, "version": crate::services::account_export_service::VERSION, "sections": counts, "truncated_sections": export.truncated_sections, "unavailable_sections": export.unavailable_sections, "byte_size": bytes.len()})),
+    )
+    .await
+    .map_err(|_| AppError::Internal("Account export audit append failed".into()))?;
+    let filename = format!(
+        "nyxid-account-export-{}.json",
+        Utc::now().format("%Y-%m-%d")
+    );
+    Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CONTENT_LENGTH, bytes.len())
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .body(axum::body::Bytes::from(bytes))
+        .map(|response| (response, mostly_unavailable))
+        .map_err(|_| AppError::Internal("Account export response failed".into()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -230,6 +507,125 @@ pub async fn save_service_views(
     ))
 }
 
+// --- Quick access (the Duo's rail, synced to the account) ---
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickAccessItemRequest {
+    /// `destination`, `agent` or `crew` (`group` is accepted for crews).
+    pub kind: String,
+    /// A destination's name, an agent's UUID or a crew's `nyxg-` id.
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveQuickAccessRequest {
+    pub items: Vec<QuickAccessItemRequest>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct QuickAccessItemResponse {
+    pub kind: &'static str,
+    pub id: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QuickAccessResponse {
+    pub items: Vec<QuickAccessItemResponse>,
+    /// False while the person still has the default list.
+    pub customized: bool,
+    /// Unknown stored entries were omitted; replacement needs a newer client/server.
+    pub has_unsupported_entries: bool,
+}
+
+impl From<crate::models::user::QuickAccessItem> for QuickAccessItemResponse {
+    fn from(item: crate::models::user::QuickAccessItem) -> Self {
+        use crate::models::user::QuickAccessItem;
+        match item {
+            QuickAccessItem::Destination { id } => Self {
+                kind: "destination",
+                id: id.as_str().to_string(),
+            },
+            QuickAccessItem::Agent { id } => Self { kind: "agent", id },
+            QuickAccessItem::Crew { id } => Self { kind: "crew", id },
+        }
+    }
+}
+
+fn quick_access_response(
+    saved: Option<crate::models::user::QuickAccessPreferences>,
+) -> QuickAccessResponse {
+    let customized = saved.is_some();
+    let items = saved.map_or_else(
+        crate::services::user_preferences_service::default_quick_access,
+        |preferences| preferences.items,
+    );
+    QuickAccessResponse {
+        items: items.into_iter().map(Into::into).collect(),
+        customized,
+        has_unsupported_entries: false,
+    }
+}
+
+/// GET /api/v1/users/me/quick-access
+pub async fn get_quick_access(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<QuickAccessResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let (saved, has_unsupported_entries) =
+        crate::services::user_preferences_service::read_quick_access_with_compatibility(
+            &state.db,
+            &auth_user.user_id.to_string(),
+        )
+        .await?;
+    let mut response = quick_access_response(saved);
+    response.has_unsupported_entries = has_unsupported_entries;
+    Ok(Json(response))
+}
+
+/// PUT /api/v1/users/me/quick-access
+pub async fn save_quick_access(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<SaveQuickAccessRequest>,
+) -> AppResult<Json<QuickAccessResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let entries: Vec<_> = body
+        .items
+        .iter()
+        .map(
+            |item| crate::services::user_preferences_service::QuickAccessEntry {
+                kind: &item.kind,
+                id: &item.id,
+            },
+        )
+        .collect();
+    let items = crate::services::user_preferences_service::parse_quick_access(&entries)?;
+    let saved = crate::services::user_preferences_service::save_quick_access(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        items,
+    )
+    .await?;
+    Ok(Json(quick_access_response(Some(saved))))
+}
+
+/// DELETE /api/v1/users/me/quick-access: back to the default list.
+pub async fn reset_quick_access(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<QuickAccessResponse>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    crate::services::user_preferences_service::reset_quick_access(
+        &state.db,
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    Ok(Json(quick_access_response(None)))
+}
+
 #[derive(Debug, Serialize)]
 pub struct UserCapabilitiesResponse {
     pub billing_available: bool,
@@ -334,8 +730,16 @@ pub struct DeleteAccountResponse {
     pub accepted_at: String,
     pub completed_at: Option<String>,
     pub domains: Vec<ErasureDomainResponse>,
+    /// Registry policy for retained collections, independent of this job's progress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retained: Option<Vec<ErasureRetainedCollectionResponse>>,
     pub effects: Vec<super::admin::ErasureEffectResponse>,
     pub next_effect_after: Option<String>,
+}
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ErasureRetainedCollectionResponse {
+    pub collection: &'static str,
+    pub reason: &'static str,
 }
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ErasureDomainResponse {
@@ -345,21 +749,43 @@ pub struct ErasureDomainResponse {
     pub reason: Option<String>,
     pub completed_at: Option<String>,
 }
+#[derive(Default, Deserialize)]
+pub struct ErasureResponseQuery {
+    #[serde(default)]
+    pub include_retained: bool,
+}
+
 impl DeleteAccountResponse {
     pub(crate) async fn from_job(
         db: &mongodb::Database,
         job: crate::models::personal_erasure::PersonalErasureJob,
+        include_retained: bool,
     ) -> AppResult<Self> {
         let effects =
             crate::services::personal_erasure_service::issuance::outcomes(db, &job.user_id, None)
                 .await?;
         let next_effect_after = (effects.len() == 64).then(|| effects.last().unwrap().id.clone());
+        let retained = include_retained.then(|| {
+            personal_data_registry::entries()
+                .iter()
+                .filter_map(|entry| match entry.erasure {
+                    personal_data_registry::Erasure::Retained(category) => {
+                        Some(ErasureRetainedCollectionResponse {
+                            collection: entry.collection,
+                            reason: category.disclosure_phrase(),
+                        })
+                    }
+                    _ => None,
+                })
+                .collect()
+        });
         Ok(Self {
             effects: effects
                 .into_iter()
                 .map(super::admin::ErasureEffectResponse::from)
                 .collect(),
             next_effect_after,
+            retained,
             job_id: job.id,
             status: job.status,
             accepted_at: job.accepted_at.to_rfc3339(),
@@ -434,6 +860,11 @@ pub async fn get_me(
         updated_at: user_model.updated_at.to_rfc3339(),
         last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
         profile_config: ProfileConfigResponse {
+            analytics: AnalyticsPreferencesResponse {
+                prompt_seen: crate::services::analytics_consent_service::prompt_seen(
+                    &user_model.profile_config.analytics,
+                ),
+            },
             security: user_model.profile_config.security.into(),
             services_view: user_model.profile_config.services_view.map(Into::into),
             service_views: user_model.profile_config.service_views.map(Into::into),
@@ -552,6 +983,7 @@ pub async fn update_me(
             ));
         }
         set_doc.insert("display_name", name);
+        set_doc.insert(PROVIDER_DISPLAY_NAME, bson::Bson::Null);
     }
 
     if let Some(ref url) = body.avatar_url {
@@ -603,6 +1035,7 @@ pub async fn delete_me(
     auth_user: AuthUser,
     tele: TelemetryContext,
     headers: HeaderMap,
+    Query(query): Query<ErasureResponseQuery>,
 ) -> AppResult<Json<DeleteAccountResponse>> {
     super::login_client_context::require_first_party_human(&auth_user)?;
     let deletion_policy = headers
@@ -611,6 +1044,12 @@ pub async fn delete_me(
         .unwrap_or("");
     admin_user_service::validate_account_deletion_policy(deletion_policy)?;
     let user_id = auth_user.user_id.to_string();
+    super::assistant_nyxagent::survivor::cancel_before_revocation(
+        &state,
+        &user_id,
+        mongodb::bson::doc! {"user_id":&user_id},
+    )
+    .await;
 
     let job = crate::services::personal_erasure_service::accept(
         &state.db,
@@ -622,7 +1061,9 @@ pub async fn delete_me(
     // Acceptance closes authority immediately. Remote/local work continues
     // durably; analytics must not describe this transition as completed.
     let _ = tele;
-    Ok(Json(DeleteAccountResponse::from_job(&state.db, job).await?))
+    Ok(Json(
+        DeleteAccountResponse::from_job(&state.db, job, query.include_retained).await?,
+    ))
 }
 
 #[cfg(test)]
@@ -1219,6 +1660,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: Some("2025-06-01T12:00:00+00:00".to_string()),
             profile_config: ProfileConfigResponse {
+                analytics: AnalyticsPreferencesResponse::default(),
                 security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
@@ -1280,6 +1722,7 @@ mod tests {
             updated_at: "2025-06-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                analytics: AnalyticsPreferencesResponse::default(),
                 security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
@@ -1332,6 +1775,7 @@ mod tests {
             updated_at: "2026-01-01T00:00:01Z".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                analytics: AnalyticsPreferencesResponse::default(),
                 security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
@@ -1385,6 +1829,7 @@ mod tests {
     #[test]
     fn profile_config_response_serialization() {
         let resp = ProfileConfigResponse {
+            analytics: AnalyticsPreferencesResponse::default(),
             security: SecurityPreferencesResponse::default(),
             services_view: None,
             service_views: None,
@@ -1394,6 +1839,7 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json["onboarding"].is_object());
+        assert_eq!(json["analytics"]["prompt_seen"], false);
         assert_eq!(
             json["onboarding"]["ai_services_completed_at"],
             "2025-01-01T00:00:00+00:00"
@@ -1445,6 +1891,7 @@ mod tests {
             accepted_at: "2025-06-15T14:00:00+00:00".to_string(),
             completed_at: None,
             domains: vec![],
+            retained: None,
             effects: vec![],
             next_effect_after: None,
         };
@@ -1453,6 +1900,7 @@ mod tests {
         assert_eq!(json["status"], "accepted");
         assert!(json["completed_at"].is_null());
         assert_eq!(json["accepted_at"], "2025-06-15T14:00:00+00:00");
+        assert!(json.get("retained").is_none());
     }
 
     // --- Deserialization tests: UpdateProfileRequest ---
@@ -1531,6 +1979,7 @@ mod tests {
             updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
+                analytics: AnalyticsPreferencesResponse::default(),
                 security: SecurityPreferencesResponse::default(),
                 services_view: None,
                 service_views: None,
@@ -1587,23 +2036,32 @@ mod account_deletion_policy_tests;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnalyticsConsentRequest {
+    #[serde(default)]
+    pub policy_version: Option<String>,
     pub account_id: String,
     pub enabled: bool,
 }
 
 #[derive(serde::Serialize)]
 pub struct AnalyticsConsentResponse {
+    pub current_policy_version: String,
+    pub diagnostics_offered: bool,
+    pub diagnostics_available: bool,
+    pub diagnostics_status: crate::services::crash_report_service::DiagnosticsStatus,
     pub account_id: String,
+    pub prompt_seen: bool,
     pub policy_version: Option<String>,
     pub revision: String,
     pub enabled: bool,
     pub changed_at: Option<String>,
 }
 
-fn analytics_consent_response(
+async fn analytics_consent_response(
+    db: &mongodb::Database,
     account_id: &str,
     value: crate::models::user::AnalyticsConsent,
 ) -> (HeaderMap, Json<AnalyticsConsentResponse>) {
+    let status = crate::services::crash_report_service::policy_status(db, account_id, &value).await;
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::CACHE_CONTROL,
@@ -1612,7 +2070,13 @@ fn analytics_consent_response(
     (
         headers,
         Json(AnalyticsConsentResponse {
+            current_policy_version: if status.offered() { "2" } else { "1" }.into(),
+            diagnostics_offered: status.offered(),
+            diagnostics_available: status
+                == crate::services::crash_report_service::DiagnosticsStatus::Available,
+            diagnostics_status: status,
             account_id: account_id.to_owned(),
+            prompt_seen: crate::services::analytics_consent_service::prompt_seen(&value),
             policy_version: value.policy_version,
             revision: value.revision,
             enabled: value.enabled,
@@ -1628,9 +2092,11 @@ pub async fn get_analytics_consent(
     super::login_client_context::require_first_party_human(&auth_user)?;
     let actor = auth_user.user_id.to_string();
     Ok(analytics_consent_response(
+        &state.db,
         &actor,
         crate::services::analytics_consent_service::read(&state.db, &actor).await?,
-    ))
+    )
+    .await)
 }
 
 pub async fn set_analytics_consent(
@@ -1645,10 +2111,186 @@ pub async fn set_analytics_consent(
             "Account changed; reload before changing analytics permission".into(),
         ));
     }
-    Ok(analytics_consent_response(
-        &actor,
-        crate::services::analytics_consent_service::set(&state.db, &actor, body.enabled).await?,
-    ))
+    use crate::services::analytics_consent_service::{self as consent, PolicyVersion};
+    let value = match PolicyVersion::parse(body.policy_version.as_deref())? {
+        PolicyVersion::V1 => consent::set(&state.db, &actor, body.enabled).await?,
+        policy => consent::set_acknowledging(&state.db, &actor, body.enabled, policy).await?,
+    };
+    Ok(analytics_consent_response(&state.db, &actor, value).await)
+}
+
+#[cfg(test)]
+mod quick_access_tests {
+    use super::*;
+    use crate::{models::user::UserType, test_utils::*};
+
+    fn item(kind: &str, id: &str) -> QuickAccessItemRequest {
+        QuickAccessItemRequest {
+            kind: kind.into(),
+            id: id.into(),
+        }
+    }
+
+    fn pairs(response: &QuickAccessResponse) -> Vec<(&'static str, String)> {
+        response
+            .items
+            .iter()
+            .map(|item| (item.kind, item.id.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn quick_access_defaults_saves_validates_resets_and_is_human_only() {
+        let db = connect_test_database("quick_access")
+            .await
+            .expect("MongoDB required");
+        let person = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        for id in [&person, &other] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(id, UserType::Person))
+                .await
+                .unwrap();
+        }
+        let state = test_app_state(db.clone());
+        let default = vec![
+            ("destination", "new_chat".to_string()),
+            ("destination", "notifications".to_string()),
+            ("destination", "scan_qr".to_string()),
+            ("destination", "recent_chats".to_string()),
+            ("destination", "settings".to_string()),
+        ];
+        // Never customised: the default list, marked as such.
+        let Json(fresh) = get_quick_access(State(state.clone()), test_auth_user(&person))
+            .await
+            .unwrap();
+        assert!(!fresh.customized);
+        assert_eq!(pairs(&fresh), default);
+
+        // Saved in order; ids canonical; `group` reads back as `crew`.
+        let agent = uuid::Uuid::new_v4().to_string();
+        let crew = format!("nyxg-{}", uuid::Uuid::new_v4().simple());
+        let Json(saved) = save_quick_access(
+            State(state.clone()),
+            test_auth_user(&person),
+            Json(SaveQuickAccessRequest {
+                items: vec![
+                    item("agent", &agent.to_ascii_uppercase()),
+                    item("destination", "automations"),
+                    item("group", &crew),
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+        let expected = vec![
+            ("agent", agent.clone()),
+            ("destination", "automations".to_string()),
+            ("crew", crew.clone()),
+        ];
+        assert!(saved.customized);
+        assert_eq!(pairs(&saved), expected);
+        let Json(read) = get_quick_access(State(state.clone()), test_auth_user(&person))
+            .await
+            .unwrap();
+        assert!(read.customized);
+        assert_eq!(pairs(&read), expected);
+        // Another account is untouched.
+        let Json(theirs) = get_quick_access(State(state.clone()), test_auth_user(&other))
+            .await
+            .unwrap();
+        assert_eq!(pairs(&theirs), default);
+
+        // Unknown, duplicate, malformed and oversized lists are 400s that
+        // leave the saved list as it was.
+        let thirteen: Vec<_> = (0..13)
+            .map(|_| item("agent", &uuid::Uuid::new_v4().to_string()))
+            .collect();
+        for items in [
+            vec![item("destination", "billing")],
+            vec![item("pin", "notifications")],
+            vec![item("crew", "nope")],
+            vec![item("crew", &agent)],
+            vec![
+                item("destination", "plugins"),
+                item("destination", "plugins"),
+            ],
+            thirteen,
+        ] {
+            let error = save_quick_access(
+                State(state.clone()),
+                test_auth_user(&person),
+                Json(SaveQuickAccessRequest { items }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        }
+        let Json(unchanged) = get_quick_access(State(state.clone()), test_auth_user(&person))
+            .await
+            .unwrap();
+        assert_eq!(pairs(&unchanged), expected);
+
+        // API keys and delegated callers can neither read nor change it.
+        let mut agent_key = test_auth_user(&person);
+        agent_key.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        agent_key.api_key_id = Some(uuid::Uuid::new_v4().to_string());
+        assert!(
+            get_quick_access(State(state.clone()), agent_key.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            save_quick_access(
+                State(state.clone()),
+                agent_key.clone(),
+                Json(SaveQuickAccessRequest { items: vec![] }),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            reset_quick_access(State(state.clone()), agent_key)
+                .await
+                .is_err()
+        );
+        let mut delegated = test_auth_user(&person);
+        delegated.auth_method = crate::mw::auth::AuthMethod::Delegated;
+        assert!(
+            get_quick_access(State(state.clone()), delegated)
+                .await
+                .is_err()
+        );
+        let Json(still) = get_quick_access(State(state.clone()), test_auth_user(&person))
+            .await
+            .unwrap();
+        assert_eq!(pairs(&still), expected);
+
+        // An empty list is a deliberate choice, distinct from the default.
+        let Json(empty) = save_quick_access(
+            State(state.clone()),
+            test_auth_user(&person),
+            Json(SaveQuickAccessRequest { items: vec![] }),
+        )
+        .await
+        .unwrap();
+        assert!(empty.customized);
+        assert!(empty.items.is_empty());
+
+        // Reset returns to the default (and follows future default changes).
+        let Json(reset) = reset_quick_access(State(state.clone()), test_auth_user(&person))
+            .await
+            .unwrap();
+        assert!(!reset.customized);
+        assert_eq!(pairs(&reset), default);
+        let stored = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &person })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.profile_config.quick_access, None);
+    }
 }
 
 #[cfg(test)]
@@ -1678,6 +2320,7 @@ mod analytics_tests {
                 State(state.clone()),
                 test_auth_user(&second),
                 Json(AnalyticsConsentRequest {
+                    policy_version: None,
                     account_id: first.clone(),
                     enabled: true
                 })
@@ -1695,6 +2338,7 @@ mod analytics_tests {
                 State(state.clone()),
                 agent,
                 Json(AnalyticsConsentRequest {
+                    policy_version: None,
                     account_id: first.clone(),
                     enabled: true
                 })
@@ -1707,6 +2351,7 @@ mod analytics_tests {
             State(state),
             test_auth_user(&first),
             Json(AnalyticsConsentRequest {
+                policy_version: None,
                 account_id: first.clone(),
                 enabled: true,
             }),
@@ -1714,6 +2359,7 @@ mod analytics_tests {
         .await
         .unwrap();
         assert!(saved.enabled);
+        assert!(saved.prompt_seen);
         assert_eq!(saved.account_id, first);
         assert_eq!(
             saved.policy_version.as_deref(),
@@ -1862,5 +2508,899 @@ mod analytics_ingress_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+}
+
+#[cfg(test)]
+mod export_http_tests {
+    use super::*;
+    use crate::{
+        crypto::{jwt, token::hash_token},
+        models::user::{User, UserType},
+        services::service_account_service,
+        test_utils::{connect_transaction_test_database, test_app_state, test_user},
+    };
+    use axum::{
+        Router,
+        body::to_bytes,
+        http::{Request, StatusCode},
+    };
+    use mongodb::bson::{Document, doc};
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    struct Fixture {
+        state: AppState,
+        app: Router,
+        owner: String,
+        human_token: String,
+    }
+
+    impl Fixture {
+        async fn new(label: &str) -> Self {
+            let db = connect_transaction_test_database(label).await;
+            crate::test_utils::init_test_audit_chain_hmac_key();
+            let owner = Uuid::new_v4().to_string();
+            db.collection::<User>(crate::models::user::COLLECTION_NAME)
+                .insert_one(test_user(&owner, UserType::Person))
+                .await
+                .unwrap();
+            let state = test_app_state(db);
+            let human_token = jwt::generate_access_token(
+                &state.jwt_keys,
+                &state.config,
+                &Uuid::parse_str(&owner).unwrap(),
+                "openid account:read",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let (public, private) = crate::routes::build_router_with_state(state.clone());
+            Self {
+                state: state.clone(),
+                app: public.merge(private).with_state(state),
+                owner,
+                human_token,
+            }
+        }
+
+        async fn request(&self, headers: &[(&str, String)]) -> (StatusCode, HeaderMap, Vec<u8>) {
+            let mut request = Request::post("/api/v1/users/me/export");
+            for (name, value) in headers {
+                request = request.header(*name, value);
+            }
+            let response = self
+                .app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body = to_bytes(response.into_body(), 64 * 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec();
+            (status, headers, body)
+        }
+    }
+
+    fn bearer(token: &str) -> (&'static str, String) {
+        ("authorization", format!("Bearer {token}"))
+    }
+
+    #[tokio::test]
+    async fn export_disconnect_refunds_but_twelve_attempts_bound_repeated_disconnects() {
+        let fixture = Fixture::new("export_disconnect").await;
+        let attempts = crate::mw::rate_limit::create_per_key_rate_limiter(
+            fixture.state.db.clone(),
+            "account_export_attempts",
+            12,
+            3600,
+        );
+        // Exercise real response-body cancellation once, then cancellation at
+        // the reserved-build boundary without repeating expensive source reads.
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/users/me/export")
+                    .header("authorization", format!("Bearer {}", fixture.human_token))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        drop(response);
+        fixture.state.shutdown.idle().await;
+        for _ in 1..12 {
+            assert!(attempts.reserve(&fixture.owner).await.unwrap().0.is_some());
+            let reservation = fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .unwrap();
+            let permit = fixture
+                .state
+                .account_export_semaphore
+                .clone()
+                .try_acquire_owned()
+                .unwrap();
+            drop(ExportReservationGuard {
+                limiter: fixture.state.account_export_limiter.clone(),
+                reservation: Some(reservation),
+                shutdown: fixture.state.shutdown.clone(),
+                _permit: permit,
+            });
+            fixture.state.shutdown.idle().await;
+        }
+        assert!(attempts.reserve(&fixture.owner).await.unwrap().0.is_none());
+        assert!(
+            fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .is_some()
+        );
+        assert_eq!(
+            fixture.request(&[bearer(&fixture.human_token)]).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_body_delivers_identical_bytes_in_bounded_slices() {
+        use futures::StreamExt;
+        let fixture = Fixture::new("export_sliced_reader").await;
+        let expected: Vec<u8> = (0..EXPORT_CHUNK_BYTES * 20 + 13)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let guard = ExportReservationGuard {
+            limiter: fixture.state.account_export_limiter.clone(),
+            reservation: fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0,
+            shutdown: fixture.state.shutdown.clone(),
+            _permit: fixture
+                .state
+                .account_export_semaphore
+                .clone()
+                .try_acquire_owned()
+                .unwrap(),
+        };
+        let mut stream =
+            export_body_with_deadline(expected.clone().into(), guard, EXPORT_BODY_DEADLINE)
+                .into_data_stream();
+        let mut received = Vec::new();
+        let mut slices = 0;
+        // HTTP/1 stops polling when Content-Length bytes have been emitted;
+        // emulate that drop without an extra EOF poll.
+        while slices < expected.len().div_ceil(EXPORT_CHUNK_BYTES) {
+            let chunk = stream.next().await.unwrap().unwrap();
+            assert!(chunk.len() <= EXPORT_CHUNK_BYTES);
+            received.extend_from_slice(&chunk);
+            slices += 1;
+        }
+        drop(stream);
+        assert_eq!(slices, 21);
+        assert_eq!(received, expected);
+        assert_eq!(
+            fixture.state.account_export_semaphore.available_permits(),
+            2
+        );
+        fixture.state.shutdown.idle().await;
+        for _ in 0..2 {
+            assert!(
+                fixture
+                    .state
+                    .account_export_limiter
+                    .reserve(&fixture.owner)
+                    .await
+                    .unwrap()
+                    .0
+                    .is_some()
+            );
+        }
+        assert!(
+            fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .is_none(),
+            "a fully handed-off response must stay charged even without an EOF poll"
+        );
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_export_readers_expire_release_permits_and_refund_only_delivery_slots() {
+        assert_eq!(EXPORT_BODY_DEADLINE, std::time::Duration::from_secs(120));
+        let fixture = Fixture::new("export_stalled_reader").await;
+        let attempts = crate::mw::rate_limit::create_per_key_rate_limiter(
+            fixture.state.db.clone(),
+            "account_export_attempts",
+            12,
+            3600,
+        );
+        let mut guards = Vec::new();
+        for _ in 0..2 {
+            assert!(attempts.reserve(&fixture.owner).await.unwrap().0.is_some());
+            let reservation = fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .unwrap();
+            let permit = fixture
+                .state
+                .account_export_semaphore
+                .clone()
+                .try_acquire_owned()
+                .unwrap();
+            guards.push(ExportReservationGuard {
+                limiter: fixture.state.account_export_limiter.clone(),
+                reservation: Some(reservation),
+                shutdown: fixture.state.shutdown.clone(),
+                _permit: permit,
+            });
+        }
+        struct OwnedBuffer(std::sync::Arc<Vec<u8>>);
+        impl AsRef<[u8]> for OwnedBuffer {
+            fn as_ref(&self) -> &[u8] {
+                &self.0
+            }
+        }
+        let owner = std::sync::Arc::new(vec![42_u8; EXPORT_CHUNK_BYTES * 5]);
+        let weak = std::sync::Arc::downgrade(&owner);
+        let mut bodies: Vec<_> = guards
+            .into_iter()
+            .map(|guard| {
+                export_body_with_deadline(
+                    axum::body::Bytes::from_owner(OwnedBuffer(owner.clone())),
+                    guard,
+                    std::time::Duration::from_millis(30),
+                )
+            })
+            .collect();
+        assert_eq!(
+            fixture.state.account_export_semaphore.available_permits(),
+            0
+        );
+        drop(owner);
+        // One reader stops before polling; the other stops after one slice.
+        use http_body_util::BodyExt;
+        let first = bodies[0]
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        assert_eq!(first.len(), EXPORT_CHUNK_BYTES);
+        drop(first);
+        assert!(weak.upgrade().is_some());
+        // Keep both bodies alive, exactly as stalled readers do.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        fixture.state.shutdown.idle().await;
+        assert_eq!(
+            fixture.state.account_export_semaphore.available_permits(),
+            2
+        );
+        assert!(
+            weak.upgrade().is_none(),
+            "timer drops the owning buffer before another body poll"
+        );
+        for body in bodies {
+            assert!(
+                to_bytes(body, EXPORT_CHUNK_BYTES * 5).await.is_err(),
+                "expiry aborts instead of clean EOF"
+            );
+        }
+        assert_eq!(
+            fixture.request(&[bearer(&fixture.human_token)]).await.0,
+            StatusCode::OK
+        );
+        // The delivered request used one of three slots; both timed-out slots
+        // were refunded, while all three attempts remain charged.
+        for _ in 0..2 {
+            assert!(
+                fixture
+                    .state
+                    .account_export_limiter
+                    .reserve(&fixture.owner)
+                    .await
+                    .unwrap()
+                    .0
+                    .is_some()
+            );
+        }
+        assert!(
+            fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .is_none()
+        );
+        for _ in 0..9 {
+            assert!(attempts.reserve(&fixture.owner).await.unwrap().0.is_some());
+        }
+        assert!(attempts.reserve(&fixture.owner).await.unwrap().0.is_none());
+        fixture.state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mostly_unavailable_exports_refund_the_delivery_slot() {
+        let fixture = Fixture::new("export_mostly_unavailable").await;
+        let db = &fixture.state.db;
+        db.collection::<Document>("invalid_export_source")
+            .insert_one(doc! {"_id":"bad","bad":"not-an-integer"})
+            .await
+            .unwrap();
+        let collections = crate::services::personal_data_registry::entries()
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.export,
+                    crate::services::personal_data_registry::Export::Section(_)
+                ) && entry.collection != "users"
+            })
+            .map(|entry| entry.collection)
+            .collect::<Vec<_>>();
+        for collection in collections {
+            db.run_command(doc! {"create":collection,"viewOn":"invalid_export_source","pipeline":[{"$set":{"user_id":{"$toString":{"$toInt":"$bad"}}}}]}).await.unwrap();
+        }
+        for _ in 0..4 {
+            let (status, _, body) = fixture.request(&[bearer(&fixture.human_token)]).await;
+            assert_eq!(status, StatusCode::OK);
+            let export: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let count: usize = export["sections"]
+                .as_object()
+                .unwrap()
+                .values()
+                .map(|section| section.as_object().unwrap().len())
+                .sum();
+            assert!(export["unavailable_sections"].as_array().unwrap().len() * 2 > count);
+        }
+        assert!(
+            fixture
+                .state
+                .account_export_limiter
+                .reserve(&fixture.owner)
+                .await
+                .unwrap()
+                .0
+                .is_some()
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_http_human_response_headers_and_credential_refusals() {
+        let fixture = Fixture::new("account_export_http").await;
+        let (status, headers, body) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers.get("content-type").unwrap(), "application/json");
+        assert!(
+            headers
+                .get("content-disposition")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("attachment; filename=\"nyxid-account-export-")
+        );
+        assert_eq!(
+            headers
+                .get("content-length")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap(),
+            body.len()
+        );
+        assert!(!headers.contains_key("content-encoding"));
+        assert_eq!(headers.get("cache-control").unwrap(), "no-store");
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["format"],
+            "nyxid.account-export"
+        );
+        let audit = fixture
+            .state
+            .db
+            .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+            .find_one(doc! {
+                "event_type": "user.data_exported",
+                "user_id": &fixture.owner,
+            })
+            .await
+            .unwrap()
+            .expect("export audit event");
+        let metadata = audit
+            .get_document("event_data")
+            .expect("metadata-only event data");
+        assert_eq!(metadata.get_str("format").unwrap(), "nyxid.account-export");
+        let version = metadata
+            .get("version")
+            .and_then(|value| value.as_i32().or_else(|| value.as_i64().map(|v| v as i32)))
+            .expect("integer export version");
+        assert_eq!(version, 1);
+        assert!(metadata.get_array("sections").is_ok());
+        assert!(metadata.get_array("truncated_sections").is_ok());
+        assert!(metadata.get("byte_size").is_some());
+        assert!(!metadata.contains_key("content"));
+        assert!(
+            !serde_json::to_vec(&metadata)
+                .unwrap()
+                .windows("EXPORT_SECRET_SENTINEL".len())
+                .any(|window| window == b"EXPORT_SECRET_SENTINEL")
+        );
+
+        let raw_key = format!("nyxid_{}", Uuid::new_v4().simple());
+        let key_id = Uuid::new_v4().to_string();
+        fixture
+            .state
+            .db
+            .collection::<Document>(crate::models::api_key::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &key_id,
+                "user_id": &fixture.owner,
+                "name": "export test key",
+                "key_prefix": "nyxid_test",
+                "key_hash": hash_token(&raw_key),
+                "scopes": "account:read",
+                "is_active": true,
+                "created_at": mongodb::bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+        let delegated = jwt::generate_delegated_access_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &Uuid::parse_str(&fixture.owner).unwrap(),
+            "account:read",
+            "export-client",
+            60,
+            None,
+        )
+        .unwrap();
+        let relay = jwt::generate_relay_access_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &Uuid::parse_str(&fixture.owner).unwrap(),
+            "account:read",
+            None,
+            &jwt::RelayAgentScope {
+                api_key_id: key_id,
+                api_key_name: "export test key".into(),
+                allowed_service_ids: vec![],
+                allowed_node_ids: vec![],
+                allow_all_services: true,
+                allow_all_nodes: true,
+            },
+        )
+        .unwrap();
+        let oauth = jwt::generate_oauth_access_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &Uuid::parse_str(&fixture.owner).unwrap(),
+            "account:read",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "export-oauth-client",
+        )
+        .unwrap();
+        let refused = [
+            ("api_key", vec![("x-api-key", raw_key)]),
+            ("delegated", vec![bearer(&delegated)]),
+            ("relay", vec![bearer(&relay)]),
+            ("oauth_client", vec![bearer(&oauth)]),
+        ];
+        for (kind, headers) in refused {
+            let (status, _, _) = fixture.request(&headers).await;
+            assert!(
+                matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN),
+                "{kind} unexpectedly reached export: {status}"
+            );
+        }
+
+        let (service_account, secret) = service_account_service::create_service_account(
+            &fixture.state.db,
+            "export test service account",
+            None,
+            "account:read",
+            &[],
+            None,
+            &fixture.owner,
+        )
+        .await
+        .unwrap();
+        let service_token = service_account_service::authenticate_client_credentials(
+            &fixture.state.db,
+            &fixture.state.config,
+            &fixture.state.jwt_keys,
+            &service_account.client_id,
+            &secret,
+            Some("account:read"),
+        )
+        .await
+        .unwrap()
+        .access_token;
+        let (status, _, _) = fixture.request(&[bearer(&service_token)]).await;
+        assert!(matches!(
+            status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ));
+    }
+
+    #[tokio::test]
+    async fn export_http_busy_does_not_consume_rate_limit_budget() {
+        let fixture = Fixture::new("account_export_busy").await;
+        let permit_a = fixture
+            .state
+            .account_export_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        let permit_b = fixture
+            .state
+            .account_export_semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .unwrap();
+        let (status, _, _) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        drop((permit_a, permit_b));
+        let (status, _, _) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::OK);
+        for _ in 0..2 {
+            let (status, _, _) = fixture.request(&[bearer(&fixture.human_token)]).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (status, headers, _) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            headers
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some_and(|value| value > 0)
+        );
+    }
+    #[tokio::test]
+    async fn export_http_audit_lists_byte_share_truncation_exactly() {
+        use crate::models::assistant_message::{AssistantMessage, MessageAuthor};
+        let fixture = Fixture::new("export_truncation_audit").await;
+        let inputs: std::collections::BTreeMap<String, Vec<Document>> = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("test_data/account-export-models.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut message: AssistantMessage =
+            bson::from_document(inputs["assistant_messages"][0].clone()).unwrap();
+        message.user_id = fixture.owner.clone();
+        message.role = "user".into();
+        message.author = Some(MessageAuthor::Owner);
+        message.text = "x".repeat(512 * 1024);
+        fixture
+            .state
+            .db
+            .collection::<AssistantMessage>("assistant_messages")
+            .insert_many((0..80).map(|index| {
+                let mut row = message.clone();
+                row.id = format!("message-{index}");
+                row.seq = 80 - index;
+                row.created_at = chrono::Utc::now() - chrono::Duration::seconds(index);
+                row.text = format!("{index}:{}", row.text);
+                row
+            }))
+            .await
+            .unwrap();
+        let (status, _, body) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::OK);
+        let export: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            export["truncated_sections"],
+            serde_json::json!(["assistant.assistant_messages"])
+        );
+        let messages = &export["sections"]["assistant"]["assistant_messages"];
+        assert_eq!(messages["total_count"], 80);
+        assert!(messages["items"].as_array().unwrap().len() > 40);
+        assert!(
+            messages["items"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("0:")
+        );
+        assert!(body.len() <= crate::services::account_export_service::MAX_BYTES);
+        assert_eq!(export["unavailable_sections"], serde_json::json!([]));
+        let audit = fixture
+            .state
+            .db
+            .collection::<Document>("audit_log")
+            .find_one(doc! {"event_type": "user.data_exported"})
+            .await
+            .unwrap()
+            .unwrap();
+        let metadata = audit.get_document("event_data").unwrap();
+        assert_eq!(
+            serde_json::to_value(metadata.get_array("truncated_sections").unwrap()).unwrap(),
+            export["truncated_sections"]
+        );
+        assert!(audit.get("entry_hash").is_some());
+        fixture.state.db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn export_http_continues_failed_source_and_refunds_server_failures() {
+        let fixture = Fixture::new("export_unavailable_refund").await;
+        let db = &fixture.state.db;
+        db.collection::<Document>("invalid_session_source")
+            .insert_one(doc! {"_id":"bad", "bad":"not-an-integer"})
+            .await
+            .unwrap();
+        db.run_command(
+            doc! {"create":"sessions", "viewOn":"invalid_session_source", "pipeline":[
+                {"$set": {"user_id": {"$toString": {"$toInt": "$bad"}}}}
+            ]},
+        )
+        .await
+        .unwrap();
+        let (status, _, body) = fixture.request(&[bearer(&fixture.human_token)]).await;
+        assert_eq!(status, StatusCode::OK);
+        let export: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            export["sections"]["security"]["sessions"]["unavailable"],
+            true
+        );
+        assert_eq!(
+            export["sections"]["security"]["sessions"]["items"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            export["sections"]["account"]["profile"]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            export["unavailable_sections"],
+            serde_json::json!(["security.sessions"])
+        );
+        let audit = db
+            .collection::<Document>("audit_log")
+            .find_one(doc! {"event_type":"user.data_exported"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            audit
+                .get_document("event_data")
+                .unwrap()
+                .get_array("unavailable_sections")
+                .unwrap(),
+            &vec![bson::Bson::String("security.sessions".into())]
+        );
+        db.collection::<Document>("sessions").drop().await.unwrap();
+        // The export's audit append is mandatory. A view rejects writes and
+        // supplies a real server failure after rate admission, without changing
+        // infrastructure or affecting another source/database.
+        db.collection::<Document>("audit_log").drop().await.unwrap();
+        db.run_command(doc! {"create":"audit_log", "viewOn":"empty_audit_source"})
+            .await
+            .unwrap();
+        for _ in 0..4 {
+            assert_eq!(
+                fixture.request(&[bearer(&fixture.human_token)]).await.0,
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+        }
+        db.collection::<Document>("audit_log").drop().await.unwrap();
+        // One successful export above consumed one slot. Four failed attempts
+        // consumed none; exactly two remaining successes are admitted.
+        assert_eq!(
+            fixture.request(&[bearer(&fixture.human_token)]).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            fixture.request(&[bearer(&fixture.human_token)]).await.0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            fixture.request(&[bearer(&fixture.human_token)]).await.0,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        db.drop().await.unwrap();
+    }
+    #[tokio::test]
+    async fn p6_existing_preference_writers_preserve_quick_access_and_future_fields() {
+        use crate::models::user::{
+            SavedServiceView, ServiceViewPreferences, ServiceViewsPreferences,
+        };
+        use crate::services::{analytics_consent_service, user_preferences_service as preferences};
+        use mongodb::bson::{Document, doc};
+        let db = crate::test_utils::connect_test_database("quick_access_rolling_writers")
+            .await
+            .expect("Mongo required");
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let expected = doc! {"items":[{"kind":"agent","id":Uuid::new_v4().to_string()}], "future_rail_setting":"keep"};
+        db.collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id": &owner},
+                doc! {"$set":{
+                    "profile_config.quick_access": &expected, "profile_config.future_setting":"keep"
+                }},
+            )
+            .await
+            .unwrap();
+        let filters: ServiceViewPreferences = serde_json::from_value(serde_json::json!({
+        "search":"$literal", "organization_ids":[], "service_group_ids":[], "source":"all", "state":"all", "service_type":"all", "show_auto_connected":false
+    })).unwrap();
+        preferences::save_service_views(
+            &db,
+            &owner,
+            ServiceViewsPreferences {
+                views: vec![SavedServiceView {
+                    id: "one".into(),
+                    name: "One".into(),
+                    filters: filters.clone(),
+                }],
+                default_id: Some("one".into()),
+            },
+        )
+        .await
+        .unwrap();
+        preferences::save_services_view(&db, &owner, filters)
+            .await
+            .unwrap();
+        analytics_consent_service::set(&db, &owner, false)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let _ = crate::handlers::users::complete_onboarding(
+            axum::extract::State(state),
+            crate::test_utils::test_auth_user(&owner),
+            axum::Json(crate::handlers::users::CompleteOnboardingRequest {
+                key: "ai_services".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let row = db
+            .collection::<Document>(USERS)
+            .find_one(doc! {"_id":&owner})
+            .await
+            .unwrap()
+            .unwrap();
+        let profile = row.get_document("profile_config").unwrap();
+        assert_eq!(profile.get_document("quick_access").unwrap(), &expected);
+        assert_eq!(profile.get_str("future_setting").unwrap(), "keep");
+        db.drop().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod mixed_version_quick_access_tests {
+    use super::*;
+    use crate::test_utils::*;
+    use mongodb::bson::{self, Document, doc};
+
+    #[tokio::test]
+    async fn m2622_08_partial_read_refuses_replacement_preserves_raw_unknowns_and_allows_reset() {
+        let db = connect_test_database("quick_access_mixed_version")
+            .await
+            .expect("MongoDB required");
+        let id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&id, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let raw = doc! { "items": [
+            { "kind": "destination", "id": "plugins" },
+            { "kind": "destination", "id": "future_destination" },
+            { "kind": "future_workflow", "id": "opaque", "future_config": { "preserve": true } }
+        ] };
+        let bytes = bson::to_vec(&raw).unwrap();
+        db.collection::<Document>(USERS)
+            .update_one(
+                doc! {"_id": &id},
+                doc! {"$set":{"profile_config.quick_access": &raw}},
+            )
+            .await
+            .unwrap();
+        // Actual model serde is intentionally tolerant; it silently hides both
+        // future entries, so the HTTP flag must be grounded in raw BSON.
+        let typed = db
+            .collection::<User>(USERS)
+            .find_one(doc! {"_id": &id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(typed.profile_config.quick_access.unwrap().items.len(), 1);
+        let state = test_app_state(db.clone());
+        let Json(read) = get_quick_access(State(state.clone()), test_auth_user(&id))
+            .await
+            .unwrap();
+        assert_eq!(read.items.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&read).unwrap()["has_unsupported_entries"],
+            true
+        );
+        let result = save_quick_access(
+            State(state.clone()),
+            test_auth_user(&id),
+            Json(SaveQuickAccessRequest { items: vec![] }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        let stored = db
+            .collection::<Document>(USERS)
+            .find_one(doc! {"_id": &id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            bson::to_vec(
+                stored
+                    .get_document("profile_config")
+                    .unwrap()
+                    .get_document("quick_access")
+                    .unwrap()
+            )
+            .unwrap(),
+            bytes
+        );
+        let Json(reset) = reset_quick_access(State(state.clone()), test_auth_user(&id))
+            .await
+            .unwrap();
+        assert!(!reset.customized);
+        assert_eq!(
+            serde_json::to_value(&reset).unwrap()["has_unsupported_entries"],
+            false
+        );
+        let Json(saved) = save_quick_access(
+            State(state.clone()),
+            test_auth_user(&id),
+            Json(SaveQuickAccessRequest { items: vec![] }),
+        )
+        .await
+        .unwrap();
+        assert!(saved.customized);
+        db.drop().await.unwrap();
     }
 }

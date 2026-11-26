@@ -141,6 +141,16 @@ If you enable certificate auth, NyxID generates a per-service SSH CA and stores 
 5. User presents the certificate + private key to the target SSH server
 6. Target server verifies the certificate was signed by the trusted CA AND the principal is authorized
 
+PTY permission is granted only to terminal sessions (Web and mobile terminal),
+with exactly the `permit-pty` extension. Certificates issued through
+`POST /ssh/{id}/certificate` (`nyxid ssh proxy` / `issue-cert`) and for exec carry
+no extensions, as before; interactive `ssh` via `nyxid ssh proxy` remains PTY-less.
+NyxID does not issue agent-forwarding, port/TCP-forwarding, X11-forwarding, or
+user-rc extensions. A target with `PermitTTY no` or a `no-pty` principal option
+still refuses a PTY. Existing certificates are short-lived for the service TTL
+and simply expire, so no revocation or target change is needed for previously
+issued certificates.
+
 The identity file (private key) is required because SSH certificate auth is a two-part proof:
 - The **certificate** proves NyxID authorized this public key for this principal
 - The **private key** proves the user owns the public key the certificate was issued for

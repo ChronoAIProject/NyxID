@@ -17,13 +17,9 @@ pub(crate) async fn input_for_turn(
     if items.is_empty() {
         return Ok((items, String::new()));
     }
-    let chat = super::super::assistant_acknowledgement_service::for_key(
-        db,
-        &row.user_id,
-        Some(&row.credential_api_key_id),
-    )
-    .await?
-    .ok_or_else(missing)?;
+    let chat = super::super::assistant_acknowledgement_service::chat_for_conversation(db, row)
+        .await?
+        .ok_or_else(missing)?;
     if !chat.collaboration_thread
         || chat.turn_id.as_ref() != row.active_turn.as_ref().map(|t| &t.turn_id)
     {

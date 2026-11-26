@@ -1,3 +1,5 @@
+import { validateCliAuthUrl } from "@/pages/cli-auth.helpers";
+import { ChannelMetaCallbackPage } from "@/pages/channel-meta-callback";
 import { PlatformModelsPage } from "@/pages/platform-models";
 import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
@@ -74,6 +76,7 @@ import {
   PlatformSetupDetailPage,
   AdminPlatformBotsPage,
   LandingPage,
+  ActivityPage,
   NyxbotOnboardingPage,
   AiSetupPage,
   LoginPage,
@@ -113,7 +116,7 @@ import {
   OAuthErrorPage,
   PrivacyPage,
   TermsPage,
-  NotificationSettingsPage,
+  DataDeletionPage,
   ApprovalHistoryPage,
   ApprovalGrantsPage,
   NodesPage,
@@ -126,6 +129,8 @@ import {
   AdminUploadRetentionPage,
   AdminPlatformCredentialsPage,
   AdminIntegrityPage,
+  AdminCrashReportsPage,
+  AdminCrashReportPage,
   AdminCreditsPage,
   AdminBillingPage,
   AdminInviteCodesPage,
@@ -180,12 +185,16 @@ const rootRoute = createRootRoute({
 const authLayout = createRoute({
   id: "auth",
   getParentRoute: () => rootRoute,
-  beforeLoad: () => {
-    const { isAuthenticated, isLoading } = useAuthStore.getState();
+  beforeLoad: ({ location }) => {
+    const { isAuthenticated, isLoading, user } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
-      const returnTo = new URLSearchParams(window.location.search).get(
-        "return_to",
-      );
+      const params = new URLSearchParams(location.searchStr);
+      const confirmation = params.get("confirm_name");
+      if (
+        location.pathname === "/register" && user?.social_provider &&
+        (confirmation === "provider" || confirmation === "empty")
+      ) return;
+      const returnTo = params.get("return_to");
       const trusted = resolveTrustedAuthReturnTo(returnTo ?? undefined);
       if (trusted) {
         window.location.assign(trusted);
@@ -218,6 +227,12 @@ const loginRoute = createRoute({
   component: LoginPage,
 });
 
+const activityRoute = createRoute({
+  path: "/activity",
+  getParentRoute: () => rootRoute,
+  component: ActivityPage,
+});
+
 const nyxbotOnboardingRoute = createRoute({
   path: "/nyxbot/onboarding",
   getParentRoute: () => rootRoute,
@@ -231,7 +246,10 @@ const registerRoute = createRoute({
   getParentRoute: () => authLayout,
   validateSearch: (
     search: Record<string, unknown>,
-  ): { return_to?: string; code?: string } => ({
+  ): { return_to?: string; code?: string; confirm_name?: "provider" | "empty" } => ({
+    ...(search.confirm_name === "provider" || search.confirm_name === "empty"
+      ? { confirm_name: search.confirm_name }
+      : {}),
     ...(typeof search.return_to === "string"
       ? { return_to: search.return_to }
       : {}),
@@ -297,6 +315,12 @@ const termsRoute = createRoute({
   path: "/terms",
   getParentRoute: () => rootRoute,
   component: TermsPage,
+});
+
+const dataDeletionRoute = createRoute({
+  path: "/data-deletion",
+  getParentRoute: () => rootRoute,
+  component: DataDeletionPage,
 });
 
 const blogIndexRoute = createRoute({
@@ -812,7 +836,9 @@ const designSystemRoute = createRoute({
 const notificationSettingsRoute = createRoute({
   path: "/approvals/settings",
   getParentRoute: () => dashboardLayout,
-  component: NotificationSettingsPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/settings", search: { tab: "notifications" }, replace: true });
+  },
 });
 
 const approvalHistoryRoute = createRoute({
@@ -992,6 +1018,12 @@ export const channelBotSetupRoute = createRoute({
   beforeLoad: standaloneAuthBeforeLoad,
   validateSearch: parseChannelBotSetupPageSearch,
   component: ChannelBotSetupPage,
+});
+
+const channelMetaCallbackRoute = createRoute({
+  path: "/channel-bots/meta-callback/$platform",
+  getParentRoute: () => rootRoute,
+  component: ChannelMetaCallbackPage,
 });
 
 const channelBotDetailRoute = createRoute({
@@ -1208,6 +1240,17 @@ const adminUsageRoute = createRoute({
   },
 });
 
+const adminCrashReportsRoute = createRoute({
+  path: "crash-reports",
+  getParentRoute: () => adminLayout,
+  component: AdminCrashReportsPage,
+});
+const adminCrashReportRoute = createRoute({
+  path: "crash-reports/$id",
+  getParentRoute: () => adminLayout,
+  component: AdminCrashReportPage,
+});
+
 const adminIntegrityRoute = createRoute({
   path: "integrity",
   getParentRoute: () => adminLayout,
@@ -1278,6 +1321,7 @@ const routeTree = rootRoute.addChildren([
   platformBindingReviewRoute,
   platformPersonalLinkRoute,
   landingRoute,
+  activityRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
@@ -1287,6 +1331,7 @@ const routeTree = rootRoute.addChildren([
   oauthErrorRoute,
   privacyRoute,
   termsRoute,
+  dataDeletionRoute,
   blogIndexRoute,
   blogDetailRoute,
   blogPreviewRoute,
@@ -1298,6 +1343,7 @@ const routeTree = rootRoute.addChildren([
   loginCodeRoute,
   loginAgentKeyRoute,
   channelBotSetupRoute,
+  channelMetaCallbackRoute,
   connectLinkRoute,
   channelConnectLinkRoute,
   connectLinkReturnRoute,
@@ -1383,6 +1429,8 @@ const routeTree = rootRoute.addChildren([
       adminUsageRoute,
       adminAnalyticsRoute,
       adminIntegrityRoute,
+      adminCrashReportsRoute,
+      adminCrashReportRoute,
       adminCreditsRoute,
       adminBillingRoute,
       adminModelsRoute,
@@ -1398,7 +1446,12 @@ const routeTree = rootRoute.addChildren([
 
 export const router = createRouter({
   routeTree,
-  rewrite: channelBotSetupRewrite,
+  rewrite: {
+    input: ({ url }) =>
+      /^\/cli-auth\/?$/i.test(url.pathname)
+        ? validateCliAuthUrl(url)
+        : channelBotSetupRewrite.input({ url }),
+  },
   defaultPreload: "intent",
   defaultNotFoundComponent: AppNotFound,
   // Without an error component the router's CatchBoundary renders nothing on a

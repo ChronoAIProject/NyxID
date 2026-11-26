@@ -1,7 +1,9 @@
+
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { WORKSPACE_HEADER_ROW } from "./workspaceHeaderMetrics";
 import { useEffect, useState, type Ref } from "react";
-import { AppState, Pressable, StyleSheet, Text, View } from "react-native";
+import { Text, AppState, Pressable, StyleSheet, View } from "react-native";
 import {
   SafeAreaView,
   useSafeAreaInsets,
@@ -48,14 +50,27 @@ export type WorkspaceRoute =
   | "Agents"
   | "AccountSettings";
 const destinations = [
-  { route: "Automations", label: "Automations", Icon: CalendarClock },
-  { route: "Machines", label: "Machines", Icon: Monitor },
-  { route: "Plugins", label: "Plugins", Icon: Plug },
-  { route: "Activity", label: "Activity", Icon: ShieldCheck },
+  { route: "Automations",
+    get label() {
+      return translateApp("Automations");
+    }, Icon: CalendarClock, },
+  { route: "Machines",
+    get label() {
+      return translateApp("Machines");
+    }, Icon: Monitor, },
+  { route: "Plugins",
+    get label() {
+      return translateApp("Plugins");
+    }, Icon: Plug, },
+  { route: "Activity",
+    get label() {
+      return translateApp("Activity");
+    }, Icon: ShieldCheck, },
 ] as const;
 
 type Props = {
   visible: boolean;
+  disabled?: boolean;
   currentRoute?: string;
   initialFocusRef?: Ref<View>;
   onNavigate: (route: WorkspaceRoute) => void;
@@ -69,6 +84,7 @@ type Props = {
 };
 export function WorkspaceDrawer({
   visible,
+  disabled = false,
   currentRoute,
   initialFocusRef,
   onNavigate,
@@ -114,14 +130,16 @@ export function WorkspaceDrawer({
   const notifications = useNotificationIndicator(active);
   return (
     <SafeAreaView
-      edges={["top", "left", "right"]}
+      edges={["top", "left"]}
       style={[styles.panel, { backgroundColor: colors.sidebarBase }]}
     >
       <View testID="workspace-sidebar-header-row" style={styles.brandRow}>
         <Pressable
           ref={initialFocusRef}
           accessibilityRole="button"
+          disabled={disabled}
           accessibilityLabel={t("NyxID home")}
+          accessibilityState={{ disabled }}
           onPress={onHome}
           style={styles.brand}
         >
@@ -129,16 +147,22 @@ export function WorkspaceDrawer({
         </Pressable>
         <Pressable
           accessibilityRole="button"
+          disabled={disabled}
           accessibilityLabel={t("Search")}
+          accessibilityState={{ disabled }}
           onPress={() => onBrowse("WorkspaceSearch")}
           style={workspaceCloseControlStyle(colors.navActive)}
         >
-          <Search size={21} color={colors.textPrimary} />
+          <Search
+            size={21}
+            color={disabled ? colors.textMuted : colors.textPrimary}
+          />
         </Pressable>
       </View>
       <WorkspaceChatList
         key={epoch}
         visible={visible}
+        disabled={disabled}
         current={currentChat}
         unread={notifications.markers}
         onSelect={onOpenChat}
@@ -163,16 +187,16 @@ export function WorkspaceDrawer({
         scrollHeader={
           <View>
             <Text
-              accessibilityRole="header"
-              style={[styles.section, { color: colors.textPrimary }]}
+                accessibilityRole="header"
+                style={[styles.section, { color: colors.textPrimary }]}
             >
               {t("Quick actions")}
             </Text>
             {(
               [
-                { label: "Scan QR code", Icon: ScanQrCode, action: "scanner" },
+                { label: translateApp("Scan QR code"), Icon: ScanQrCode, action: "scanner", },
                 {
-                  label: "Terminal login code",
+                  label: translateApp("Terminal login code"),
                   Icon: Terminal,
                   action: "terminal",
                 },
@@ -181,7 +205,9 @@ export function WorkspaceDrawer({
               <Pressable
                 key={action}
                 accessibilityRole="button"
+                disabled={disabled}
                 accessibilityLabel={t(label)}
+                accessibilityState={{ disabled }}
                 onPress={() => onQuickAction(action)}
                 style={({ pressed }) => [
                   styles.row,
@@ -190,26 +216,39 @@ export function WorkspaceDrawer({
                   },
                 ]}
               >
-                <Icon size={20} color={colors.textSecondary} />
-                <Text style={[styles.rowText, { color: colors.textPrimary }]}>
+                <Icon
+                  size={20}
+                  color={disabled ? colors.textMuted : colors.textSecondary}
+                />
+                <Text
+                  accessibilityLabel={t(label)}
+                  style={[
+                    styles.rowText,
+                    { color: disabled ? colors.textMuted : colors.textPrimary },
+                  ]}
+                >
                   {t(label)}
                 </Text>
               </Pressable>
             ))}
             <Text
-              accessibilityRole="header"
-              style={[styles.section, { color: colors.textPrimary }]}
+                accessibilityRole="header"
+                style={[styles.section, { color: colors.textPrimary }]}
             >
               {t("Workspace")}
             </Text>
             {notifications.enabled ? (
               <Pressable
                 accessibilityRole="button"
+                disabled={disabled}
                 accessibilityLabel={notificationBellLabel(
                   notifications.unread,
                   notifications.needsDecision,
                 )}
-                accessibilityState={{ selected: currentRoute === "Notifications" }}
+                accessibilityState={{
+                  selected: currentRoute === "Notifications",
+                  disabled,
+                }}
                 onPress={() => onNavigate("Notifications")}
                 style={({ pressed }) => [
                   styles.row,
@@ -221,25 +260,33 @@ export function WorkspaceDrawer({
                   },
                 ]}
               >
-                <Bell size={20} color={colors.textSecondary} />
+                <Bell
+                  size={20}
+                  color={disabled ? colors.textMuted : colors.textSecondary}
+                />
                 <Text
                   numberOfLines={1}
-                  style={[styles.rowText, { color: colors.textPrimary }]}
+                  style={[
+                    styles.rowText,
+                    { color: disabled ? colors.textMuted : colors.textPrimary },
+                  ]}
                 >
-                  Notifications
+                  {translateApp("Notifications")}
                 </Text>
                 {notifications.badge ? (
                   <Text
                     testID="sidebar-notifications-count"
                     style={[
                       styles.count,
-                      notifications.needsDecision
+                      !disabled && notifications.needsDecision
                         ? {
                             color: colors.warningTone.text,
                             backgroundColor: colors.warningTone.bg,
                           }
                         : {
-                            color: colors.textPrimary,
+                            color: disabled
+                              ? colors.textMuted
+                              : colors.textPrimary,
                             backgroundColor: colors.navActive,
                           },
                     ]}
@@ -257,8 +304,9 @@ export function WorkspaceDrawer({
                 <Pressable
                   key={t(item.label)}
                   accessibilityRole="button"
-                  accessibilityLabel={`${t(item.label)}${route === "Activity" && count ? `, ${count} pending` : ""}`}
-                  accessibilityState={{ selected }}
+                  disabled={disabled}
+                  accessibilityLabel={route === "Activity" && count ? translateApp("{{label}}, {{count}} pending", { label: t(item.label), count: count,}) : t(item.label)}
+                  accessibilityState={{ selected, disabled }}
                   onPress={() => onNavigate(route)}
                   style={({ pressed }) => [
                     styles.row,
@@ -268,10 +316,18 @@ export function WorkspaceDrawer({
                     },
                   ]}
                 >
-                  <Icon size={20} color={colors.textSecondary} />
+                  <Icon
+                    size={20}
+                    color={disabled ? colors.textMuted : colors.textSecondary}
+                  />
                   <Text
                     numberOfLines={1}
-                    style={[styles.rowText, { color: colors.textPrimary }]}
+                    style={[
+                      styles.rowText,
+                      {
+                        color: disabled ? colors.textMuted : colors.textPrimary,
+                      },
+                    ]}
                   >
                     {t(item.label)}
                   </Text>
@@ -280,7 +336,9 @@ export function WorkspaceDrawer({
                       style={[
                         styles.count,
                         {
-                          color: colors.textPrimary,
+                          color: disabled
+                            ? colors.textMuted
+                            : colors.textPrimary,
                           backgroundColor: colors.navActive,
                         },
                       ]}
@@ -293,12 +351,23 @@ export function WorkspaceDrawer({
             })}
             <Pressable
               accessibilityRole="button"
+              disabled={disabled}
               accessibilityLabel={t("Create new agent")}
+              accessibilityState={{ disabled }}
               onPress={onCreateAgent}
               style={styles.row}
             >
-              <UserPlus size={20} color={colors.textSecondary} />
-              <Text style={[styles.rowText, { color: colors.textPrimary }]}>
+              <UserPlus
+                size={20}
+                color={disabled ? colors.textMuted : colors.textSecondary}
+              />
+              <Text
+                accessibilityLabel={t("Create new agent")}
+                style={[
+                  styles.rowText,
+                  { color: disabled ? colors.textMuted : colors.textPrimary },
+                ]}
+              >
                 {t("Create new agent")}
               </Text>
             </Pressable>
@@ -307,6 +376,7 @@ export function WorkspaceDrawer({
         scrollFooter={
           <WorkspaceRecents
             visible={visible}
+            disabled={disabled}
             unread={notifications.markers}
             onSelect={onOpenChat}
             onSeeAll={() => onBrowse("WorkspaceRecents")}
@@ -349,26 +419,45 @@ export function WorkspaceDrawer({
       >
         <Pressable
           accessibilityRole="button"
+          disabled={disabled}
+          accessibilityState={{ disabled }}
           accessibilityLabel={t("New chat")}
           accessibilityHint={t("Open NyxBot home")}
           onPress={onHome}
           style={({ pressed }) => [
             styles.chatPill,
-            { opacity: pressed ? 0.85 : 1 },
+            {
+              backgroundColor: disabled
+                ? colors.navActive
+                : pressed
+                  ? colors.cardSoft
+                  : colors.onPrimary,
+            },
           ]}
         >
-          <SquarePen size={20} color="#18181B" />
-          <Text maxFontSizeMultiplier={1.3} style={styles.chatLabel}>
+          <SquarePen
+            size={20}
+            color={disabled ? colors.textMuted : "#18181B"}
+          />
+          <Text
+            maxFontSizeMultiplier={1.3}
+            style={[styles.chatLabel, disabled && { color: colors.textMuted }]}
+          >
             {t("Chat")}
           </Text>
         </Pressable>
         <Pressable
           accessibilityRole="button"
+          disabled={disabled}
+          accessibilityState={{ disabled }}
           accessibilityLabel={t("Settings")}
           onPress={() => onNavigate("AccountSettings")}
           style={[styles.gear, { backgroundColor: colors.navActive }]}
         >
-          <Settings size={22} color={colors.textPrimary} />
+          <Settings
+            size={22}
+            color={disabled ? colors.textMuted : colors.textPrimary}
+          />
         </Pressable>
       </View>
     </SafeAreaView>
@@ -389,6 +478,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingTop: 8,
     paddingBottom: 10,
+    flexShrink: 0,
+    minWidth: 52,
   },
   row: {
     minHeight: 44,
@@ -424,7 +515,6 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     paddingHorizontal: 20,
     alignItems: "center",
-    backgroundColor: "#FFFFFF",
     borderColor: "#D4D4D8",
     borderWidth: StyleSheet.hairlineWidth,
   },

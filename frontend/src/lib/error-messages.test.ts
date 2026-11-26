@@ -90,3 +90,12 @@ it.each([0, 503, 429, 401, 400])("translates HTTP %s fallback copy in both Chine
     expect(error.status).toBe(status);
   }
 });
+
+it.each(['Invalid email or password','Invalid MFA code','This account uses social login. Please sign in with your social provider.','Password authentication is unavailable','Authentication changed; sign in again','Unknown server authentication detail'])('P2-3 preserves specific authentication detail: %s', async(message)=>{
+  for(const language of ['en','zh-CN','zh-TW']) {
+    await appI18n.changeLanguage(language);
+    const result=translateErrorMessage(`Authentication failed: ${message}`);
+    if(language==='en'||message.startsWith('Unknown'))expect(result).toBe(message);
+    else {expect(result).not.toContain('Authentication failed');expect(result).not.toContain(message);expect(result).toMatch(/[\u3400-\u9fff]/);}
+  }
+});

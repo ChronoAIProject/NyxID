@@ -566,6 +566,18 @@ fn agent_skill_pages_reconstruct_utf8_within_mcp_budget() {
     assert!(page("x", ID, "1.0", "SKILL.md", 10).is_err());
 }
 #[test]
+fn skill_zip_accepts_streamed_entries_and_requires_a_complete_directory() {
+    let mut writer = zip::ZipWriter::new_stream(Vec::new());
+    writer
+        .start_file("SKILL.md", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    writer.write_all(b"# Review").unwrap();
+    let archive = writer.finish().unwrap().into_inner();
+    assert_eq!(package(&archive).unwrap()["SKILL.md"], b"# Review");
+    assert!(package(&archive[..archive.len() / 2]).is_err());
+}
+
+#[test]
 fn agent_skill_zip_rejects_traversal_duplicates_bombs_and_binary_text() {
     for bad in [
         "../SKILL.md",
@@ -586,6 +598,15 @@ fn agent_skill_zip_rejects_traversal_duplicates_bombs_and_binary_text() {
             bytes[i + 4] = b'L';
             bytes
         });
+    let mut reader = zip::ZipArchive::new(std::io::Cursor::new(&duplicate)).unwrap();
+    assert!(reader.has_duplicate_names());
+    assert!(
+        reader
+            .validate_header_consistency()
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate file names in central directory")
+    );
     assert!(package(&duplicate).is_err());
     assert!(package(&archive(&[("SKILL.md", &vec![b'a'; MAX_EXPANDED + 1])])).is_err());
     assert!(package(b"not a zip").is_err());

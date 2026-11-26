@@ -1,9 +1,40 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { Translation } from "../../i18n/Translation";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
+import { LoginRequestTerminalView } from "./LoginRequestTerminalView";
+import { useUncertainLoginPreview } from "./useUncertainLoginPreview";
+import { useLoginRequestResume } from "./useLoginRequestResume";
+import { useLoginPreviewCooldown } from "./useLoginPreviewCooldown";
+import { useLoginRequestHandoff } from "./useLoginRequestHandoff";
+import {
+  takeLoginRequest,
+  resolveLoginRequest,
+  previewLoginRequest,
+  previewCooldownMs,
+  recordLoginPreviewFailure,
+  deviceLoginErrorCopy,
+  classifyLoginError,
+  isLoginDecisionUncertain,
+  loginServerHost,
+  terminalFromError,
+  terminalFromPreview,
+  type LoginTerminal,
+} from "./loginRequestResolver";
 import { AuthSubmitButton } from "./AuthSubmitButton";
 import { useMfaStepUp } from "./useMfaStepUp";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { WorkspaceSheetContext, useWorkspaceBack, useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import {
   ActivityIndicator,
+  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -13,7 +44,8 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
+import { KeyboardViewport } from "../../components/workspace/KeyboardViewport";
 import {
   ChevronDown,
   ChevronLeft,
@@ -23,14 +55,12 @@ import {
   X,
 } from "lucide-react-native";
 
+import { StackActions } from "@react-navigation/routers";
 import type { SheetScreenProps } from "../../app/navigationTypes";
 import { workspaceNavigateAction } from "../../app/navigationHierarchy";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
-import { MagicKeyIllustration } from "../../components/icons/empty-state/MagicKeyIllustration";
-import { RoadBarrierIllustration } from "../../components/icons/empty-state/RoadBarrierIllustration";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
-import { resolveAuthDeviceErrorMessage } from "../../lib/api/errorMessages";
 import { mobileApi } from "../../lib/api/mobileApi";
 import type { AuthDevicePreview } from "../../lib/api/authDeviceApi";
 import { spacing } from "../../theme/designTokens";
@@ -53,18 +83,14 @@ import {
 import { useAuthSession } from "./AuthSessionContext";
 
 type Props = SheetScreenProps<"DeviceLogin">;
-type TerminalState = "approved" | "denied" | null;
+type TerminalState = LoginTerminal | null;
 
 const ACTION_THROTTLE_MS = 750;
-const COMPLETION_MARK_SIZE = spacing.huge * 7;
-// Design-selected so completion marks stay clear without overpowering the title.
-const COMPLETION_MARK_OPACITY = 0.85;
-
 function formatTimestamp(value: string): string {
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime())
-    ? "Unknown time"
-    : parsed.toLocaleString();
+    ? translateApp("Unknown time")
+    : parsed.toLocaleString(appLocale());
 }
 
 function formatRemaining(seconds: number): string {
@@ -78,15 +104,20 @@ export function DetailRow({
   label,
   value,
   mono = false,
+  compact = false,
+  borderless = false,
   tone = "default",
   styles,
 }: {
   label: string;
   value: string;
   mono?: boolean;
+  compact?: boolean;
+  borderless?: boolean;
   tone?: "default" | "warning" | "danger";
   styles: ReturnType<typeof createDeviceLoginStyles>;
 }) {
+  useAppLanguage();
   const toneStyle =
     tone === "warning"
       ? styles.detailValueWarning
@@ -94,11 +125,12 @@ export function DetailRow({
         ? styles.detailValueDanger
         : null;
   return (
-    <View style={styles.detailRow}>
-      <Text style={styles.detailLabel}>{label}</Text>
+    <View style={[styles.detailRow, compact && styles.compactDetailRow, borderless && styles.borderlessDetailRow]}>
+      <Text style={[styles.detailLabel, compact && styles.compactDetailLabel]}>{label}</Text>
       <Text
         style={[
           styles.detailValue,
+          compact && styles.compactDetailValue,
           mono ? styles.detailValueMono : null,
           toneStyle,
         ]}
@@ -110,7 +142,7 @@ export function DetailRow({
 }
 
 export function formatLocation(preview: AuthDevicePreview): string {
-  if (preview.client_ip_attribution !== "verified") return "Not available";
+  if (preview.client_ip_attribution !== "verified") return translateApp("Not available");
   const locality = [preview.client_city, preview.client_region]
     .filter((value): value is string => Boolean(value))
     .join(", ");
@@ -123,12 +155,14 @@ export function formatLocation(preview: AuthDevicePreview): string {
   }
   if (place) return place;
   return preview.client_ip_timezone
-    ? `IP timezone: ${preview.client_ip_timezone}`
-    : "Not available";
+    ? translateApp("IP timezone: {{clientIpTimezone}}", {
+        clientIpTimezone: preview.client_ip_timezone,
+      })
+    : translateApp("Not available");
 }
 
 export function formatNetwork(preview: AuthDevicePreview): string {
-  if (preview.client_ip_attribution !== "verified") return "Not available";
+  if (preview.client_ip_attribution !== "verified") return translateApp("Not available");
   const relation =
     preview.network_relation ??
     (preview.same_ip_as_viewer === true
@@ -136,11 +170,11 @@ export function formatNetwork(preview: AuthDevicePreview): string {
       : preview.same_ip_as_viewer === false
         ? "different_ip"
         : null);
-  if (relation === "same_ip") return "Same IP as this phone";
-  if (relation === "same_network") return "Same network as this phone";
-  if (relation === "different_network") return "Different network";
-  if (relation === "different_ip") return "Different IP";
-  return "Not available";
+  if (relation === "same_ip") return translateApp("Same IP as this phone");
+  if (relation === "same_network") return translateApp("Same network as this phone");
+  if (relation === "different_network") return translateApp("Different network");
+  if (relation === "different_ip") return translateApp("Different IP");
+  return translateApp("Not available");
 }
 
 function formatScreen(preview: AuthDevicePreview): string {
@@ -148,20 +182,23 @@ function formatScreen(preview: AuthDevicePreview): string {
     preview.client_screen_width === null ||
     preview.client_screen_height === null
   ) {
-    return "Not reported";
+    return translateApp("Not reported");
   }
-  const ratio =
+  return translateApp(
     preview.client_device_pixel_ratio === null
-      ? ""
-      : ` at ${preview.client_device_pixel_ratio}x`;
-  return `${preview.client_screen_width} x ${preview.client_screen_height} CSS px${ratio}`;
+      ? "{{width}} x {{height}} CSS px"
+      : "{{width}} x {{height}} CSS px at {{scale}}x",
+    { width: preview.client_screen_width, height: preview.client_screen_height, scale: preview.client_device_pixel_ratio ?? 1 },
+  );
 }
 
 export function formatDevice(preview: AuthDevicePreview): string {
   if (preview.client_label && preview.client_model) {
     return `${preview.client_label} · ${preview.client_model}`;
   }
-  return preview.client_label ?? preview.client_model ?? "Not provided";
+  return (
+    preview.client_label ?? preview.client_model ?? translateApp("Not provided")
+  );
 }
 
 function timezoneRow(
@@ -169,19 +206,23 @@ function timezoneRow(
   localTimezone: string | null,
 ): { value: string; anomalous: boolean } {
   if (!preview.client_timezone)
-    return { value: "Not reported", anomalous: false };
+    return { value: translateApp("Not reported"), anomalous: false };
   const differsFromPhone =
     compareDeviceLoginTimezones(preview.client_timezone, localTimezone) ===
     "different";
   const differences = [
-    differsFromPhone ? "this phone" : null,
-    preview.client_timezone_matches_ip === false ? "IP location" : null,
+    differsFromPhone ? translateApp("this phone") : null,
+    preview.client_timezone_matches_ip === false ? translateApp("IP location")
+      : null,
   ].filter((value): value is string => value !== null);
   return {
     value:
       differences.length === 0
         ? preview.client_timezone
-        : `${preview.client_timezone} · differs from ${differences.join(" and ")}`,
+        : translateApp("{{clientTimezone}} · differs from {{details}}", {
+            clientTimezone: preview.client_timezone,
+            details: differences.join(" and "),
+          }),
     anomalous: differences.length > 0,
   };
 }
@@ -191,38 +232,70 @@ export function requesterValue(preview: AuthDevicePreview): string {
     return preview.client_ip;
   }
   return preview.client_ip_attribution === "unverified"
-    ? "Not verified"
-    : "IP unavailable on this deployment";
+    ? translateApp("Not verified")
+    : translateApp("IP unavailable on this deployment");
 }
 
 function requestedAtValue(preview: AuthDevicePreview, nowMs: number): string {
   return `${formatDeviceLoginRelativeTime(preview.initiated_at, nowMs)} · ${formatTimestamp(preview.initiated_at)}`;
 }
 
-function ManualCodeModal({
-  visible,
-  value,
-  errorMessage,
-  isPending,
-  colors,
-  styles,
-  onChange,
-  onDismiss,
-  onSubmit,
-}: {
+type ManualCodeModalProps = {
   visible: boolean;
   value: string;
   errorMessage: string | null;
   isPending: boolean;
+  coolingDown: boolean;
   colors: ReturnType<typeof useTheme>["colors"];
   styles: ReturnType<typeof createDeviceLoginStyles>;
   onChange: (value: string) => void;
   onDismiss: () => void;
   onSubmit: () => void;
-}) {
+};
+
+function ManualCodeModal(props: ManualCodeModalProps) {
+  const { visible, onDismiss } = props;
+  const reducedMotion = useReducedMotion();
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType={reducedMotion ? "none" : "slide"}
+      statusBarTranslucent
+      onRequestClose={() => {
+        // Native Modal owns Android Back separately from BackHandler.
+        if (Platform.OS === "android" && Keyboard.isVisible()) {
+          Keyboard.dismiss();
+          return;
+        }
+        onDismiss();
+      }}
+    >
+      <SafeAreaProvider>
+        <WorkspaceSheetContext.Provider value={null}>
+          <ManualCodeContent {...props} />
+        </WorkspaceSheetContext.Provider>
+      </SafeAreaProvider>
+    </Modal>
+  );
+}
+
+function ManualCodeContent({
+  visible,
+  value,
+  errorMessage,
+  isPending,
+  coolingDown,
+  colors,
+  styles,
+  onChange,
+  onDismiss,
+  onSubmit,
+}: ManualCodeModalProps) {
+  const { t } = useAppLanguage();
   const inputRef = useRef<TextInput>(null);
   const insets = useSafeAreaInsets();
-  const reducedMotion = useReducedMotion();
   const normalizedCode = normalizeAuthDeviceUserCode(value);
 
   useEffect(() => {
@@ -232,41 +305,41 @@ function ManualCodeModal({
   }, [visible]);
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType={reducedMotion ? "none" : "slide"}
-      statusBarTranslucent
-      onRequestClose={onDismiss}
-    >
-      <KeyboardAvoidingView
+    <KeyboardViewport>
+      <View
         accessibilityViewIsModal
-        style={styles.modalRoot}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        style={[styles.modalRoot, { paddingTop: insets.top }]}
       >
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Close manual code entry"
+          accessibilityLabel={translateApp("Close manual code entry")}
           style={styles.modalBackdrop}
           onPress={onDismiss}
         />
-        <View
-          style={[
+        <ScrollView
+          style={styles.modalScroll}
+          contentContainerStyle={[
             styles.modalCard,
             { paddingBottom: Math.max(insets.bottom, 16) },
           ]}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode={Platform.OS === "ios" ? "interactive" : "none"}
+          automaticallyAdjustKeyboardInsets={false}
         >
           <View style={styles.modalHeader}>
             <View style={styles.modalHeaderCopy}>
-              <Text style={styles.modalTitle}>Enter login code</Text>
+              <Text style={styles.modalTitle}>
+                {translateApp("Enter login code")}
+              </Text>
               <Text style={styles.modalDescription}>
-                Enter the eight-character code shown on the device requesting
-                access.
+                {t(
+                  "Enter a device login or Agent Key login code from the requesting device.",
+                )}
               </Text>
             </View>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Close manual code entry"
+              accessibilityLabel={translateApp("Close manual code entry")}
               disabled={isPending}
               onPress={onDismiss}
               style={({ pressed }) => [
@@ -280,12 +353,14 @@ function ManualCodeModal({
           </View>
 
           <View style={styles.modalField}>
-            <Text style={styles.inputLabel}>Login code</Text>
+            <Text style={styles.inputLabel}>{translateApp("Login code")}</Text>
             <AuthTextInput
               ref={inputRef}
               invalid={!!errorMessage}
-              accessibilityLabel="Login code"
-              accessibilityHint="Eight-character code shown on the requesting device"
+              accessibilityLabel={translateApp("Login code")}
+              accessibilityHint={translateApp(
+                "Eight-character code shown on the requesting device",
+              )}
               value={value}
               onChangeText={onChange}
               onSubmitEditing={onSubmit}
@@ -296,7 +371,7 @@ function ManualCodeModal({
               maxLength={11}
               returnKeyType="done"
               selectionColor={colors.primary}
-              placeholder="ABCD-EFGH"
+              placeholder={"ABCD-EFGH"}
               placeholderTextColor={colors.textTertiary}
               selectTextOnFocus
               style={[
@@ -311,18 +386,24 @@ function ManualCodeModal({
             ) : null}
           </View>
 
-          <AuthSubmitButton loading={isPending}
-            label={isPending ? "Checking..." : "Continue"}
-            disabled={isPending || !normalizedCode}
+          <AuthSubmitButton
+            loading={isPending}
+            label={
+              isPending ? translateApp("Checking...") : translateApp("Continue")
+            }
+            disabled={isPending || coolingDown || !normalizedCode}
             onPress={onSubmit}
           />
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
+        </ScrollView>
+      </View>
+    </KeyboardViewport>
   );
 }
 
 export function DeviceLoginScreen({ navigation, route }: Props) {
+  const { t } = useAppLanguage();
+  const cooldown = useLoginPreviewCooldown();
+  const handoffLoginRequest = useLoginRequestHandoff(navigation);
   const inWorkspaceSheet = Boolean(useWorkspaceSheet());
   const { colors } = useTheme();
   const styles = useMemo(() => createDeviceLoginStyles(colors), [colors]);
@@ -332,9 +413,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   );
   const [confirmedCode, setConfirmedCode] = useState<string | null>(null);
   const [preview, setPreview] = useState<AuthDevicePreview | null>(null);
+  const stagingScan = route.params?.staging_scan === true;
   const [terminal, setTerminal] = useState<TerminalState>(null);
   const stepUp = useMfaStepUp(
-    `${confirmedCode}:${isAuthenticated}:${terminal}`,
+    `${preview?.stagingBinding?.request_id ?? "local"}:${confirmedCode}:${isAuthenticated}:${terminal}`,
   );
   const [isScanning, setIsScanning] = useState(
     () => route.params?.start_scanner === true && !route.params?.user_code,
@@ -344,31 +426,65 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const [decisionPending, setDecisionPending] = useState<
     "approve" | "deny" | null
   >(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useLocalizedState<string | null>(null);
   const [clockMs, setClockMs] = useState(Date.now());
   const [deadlineMs, setDeadlineMs] = useState<number | null>(null);
+  const currentDeadline = useRef<number | null>(null);
   const [rawUserAgentExpanded, setRawUserAgentExpanded] = useState(false);
+  const [technicalDetailsExpanded, setTechnicalDetailsExpanded] = useState(false);
   const lastActionAt = useRef(0);
+  const generation = useRef(0);
+  const [linkedPreview, setLinkedPreview] = useState<{ code: string; generation: number } | null>(null);
+  const actionBusy = useRef(false);
+  const decisionOperation = useRef<symbol | null>(null);
+  const deferredRoute = useRef(false);
+  const [routeRevision, setRouteRevision] = useState(0);
+  const [decisionUncertain, setDecisionUncertain] = useState<
+    "approve" | "deny" | null
+  >(null);
+  const uncertainDecision = useRef(decisionUncertain);
+  function updateDecisionUncertain(value: typeof decisionUncertain) {
+    uncertainDecision.current = value;
+    setDecisionUncertain(value);
+  }
+  const currentCode = useRef(confirmedCode);
+  currentCode.current = confirmedCode;
   useWorkspaceBack({
     active: inWorkspaceSheet && isScanning,
     defaultRole: "back",
-    disabled: isPreviewing || !!decisionPending || stepUp.busy,
+    disabled: !!decisionPending || stepUp.busy,
     options: { headerShown: inWorkspaceSheet },
     onBack: () => setIsScanning(false),
   });
   const localTimezone = useMemo(() => {
     try {
-      return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+      return (
+        Intl.DateTimeFormat(appLocale()).resolvedOptions().timeZone || null
+      );
     } catch {
       return null;
     }
+    // The device's time zone does not depend on the display language.
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (
+      decisionOperation.current ||
+      uncertainDecision.current ||
+      (terminal && deferredRoute.current)
+    ) {
+      if (route.params?.user_code !== undefined) deferredRoute.current = true;
+      return;
+    }
     if (route.params?.user_code === undefined) {
+      setLinkedPreview(null);
       if (route.params?.start_scanner === true) setIsScanning(true);
       return;
     }
+    generation.current += 1;
+    actionBusy.current = false;
+    setDecisionPending(null);
+    setIsPreviewing(false);
     setUserCode(formatAuthDeviceUserCode(route.params.user_code));
     setConfirmedCode(null);
     setPreview(null);
@@ -377,18 +493,158 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     setManualEntryVisible(false);
     setIsScanning(false);
     setDeadlineMs(null);
+    currentDeadline.current = null;
     setRawUserAgentExpanded(false);
-  }, [route.params?.start_scanner, route.params?.user_code]);
+    setTechnicalDetailsExpanded(false);
+    updateDecisionUncertain(null);
+    const handoff = stagingScan ? null : takeLoginRequest(route.params.user_code, "device");
+    if (handoff?.result.kind === "device") {
+      lastActionAt.current = handoff.at;
+      acceptPreview(handoff.code, handoff.result.preview);
+      setLinkedPreview(null);
+    } else {
+      setLinkedPreview({ code: route.params.user_code, generation: generation.current });
+    }
+  }, [route.params?.start_scanner, route.params?.user_code, stagingScan, routeRevision]);
+  useEffect(() => {
+    // Commit the decision or verification prompt before applying the newest link.
+    if (
+      decisionOperation.current ||
+      terminal ||
+      decisionUncertain ||
+      !deferredRoute.current
+    )
+      return;
+    deferredRoute.current = false;
+    setRouteRevision((revision) => revision + 1);
+  }, [decisionPending, terminal, decisionUncertain]);
+
+  function applyDeferredRoute() {
+    if (!deferredRoute.current) return false;
+    deferredRoute.current = false;
+    const incoming = route.params?.user_code;
+    if (
+      incoming === undefined ||
+      (terminal && Boolean(preview?.stagingBinding) === stagingScan &&
+        normalizeAuthDeviceUserCode(incoming) ===
+          normalizeAuthDeviceUserCode(confirmedCode ?? userCode))
+    )
+      return false;
+    updateDecisionUncertain(null);
+    setRouteRevision((revision) => revision + 1);
+    return true;
+  }
+
+  useEffect(
+    () => () => {
+      generation.current += 1;
+      decisionOperation.current = null;
+    },
+    [],
+  );
+
+  function acceptPreview(code: string, result: AuthDevicePreview) {
+    setConfirmedCode(code);
+    refreshPreview(result);
+    setRawUserAgentExpanded(false);
+    setTechnicalDetailsExpanded(false);
+  }
+
+  function refreshPreview(result: AuthDevicePreview) {
+    updateDecisionUncertain(null);
+    setErrorMessage(null);
+    setPreview(result);
+    const now = Date.now();
+    const deadline = resolveDeviceLoginDeadlineMs(
+      result.expires_at,
+      result.seconds_remaining,
+      now,
+    );
+    setDeadlineMs(deadline);
+    currentDeadline.current = deadline;
+    setClockMs(now);
+    setTerminal(
+      terminalFromPreview(result, decisionUncertain) ??
+        (deadline <= now ? "expired" : null),
+    );
+  }
+
+  function refreshRequest(automatic = false): number | Promise<void> {
+    if (!confirmedCode || actionBusy.current) return 750;
+    if (deadlineMs !== null && Date.now() >= deadlineMs && !decisionUncertain) {
+      setTerminal("expired");
+      return Promise.resolve();
+    }
+    const delay = Math.max(
+      ACTION_THROTTLE_MS - (Date.now() - lastActionAt.current),
+      automatic ? previewCooldownMs() : 0,
+    );
+    if (delay > 0) return delay;
+    if (!automatic) uncertainPreview.reset();
+    lastActionAt.current = Date.now();
+    actionBusy.current = true;
+    setIsPreviewing(true);
+    const current = generation.current;
+    const requestCode = confirmedCode;
+    const staging = preview?.stagingBinding;
+    const request = staging
+      ? mobileApi.previewStagingDevice(requestCode, staging)
+      : previewLoginRequest(requestCode, "device");
+    return request.then(
+        (result) => {
+          if (
+            current === generation.current &&
+            currentCode.current === requestCode
+          )
+            refreshPreview(result);
+        },
+        (error: unknown) => {
+          if (current !== generation.current) return;
+          if (staging) recordLoginPreviewFailure(error);
+          setTerminal((previous) => terminalFromError(error) ?? previous);
+          if (!automatic)
+            setErrorMessage(
+              () => (translateApp(deviceLoginErrorCopy(error), { host: staging ? "staging.nyxid.ai" : loginServerHost() })),
+            );
+          cooldown.sync();
+        },
+      )
+      .finally(() => {
+        if (current === generation.current) {
+          setIsPreviewing(false);
+          actionBusy.current = false;
+        }
+      });
+  }
+
+  const uncertainPreview = useUncertainLoginPreview(
+    Boolean(decisionUncertain && preview && !terminal && !decisionPending),
+    `${generation.current}:${confirmedCode}`,
+    () => refreshRequest(true),
+  );
+  useLoginRequestResume(Boolean(preview && !terminal), () => {
+    if (actionBusy.current) return;
+    const result = refreshRequest();
+    if (typeof result === "number") return result;
+  });
 
   useEffect(() => {
     if (!preview || terminal || deadlineMs === null) return;
     const interval = setInterval(() => {
       const now = Date.now();
       setClockMs(now);
-      if (now >= deadlineMs) clearInterval(interval);
+      if (
+        currentDeadline.current !== null &&
+        now >= currentDeadline.current &&
+        !decisionOperation.current &&
+        !uncertainDecision.current
+      ) {
+        setTerminal((previous) => previous ?? "expired");
+        clearInterval(interval);
+      }
     }, 1000);
     return () => clearInterval(interval);
-  }, [deadlineMs, preview, terminal]);
+  }, [deadlineMs, preview, terminal, decisionUncertain]);
 
   const claimAction = useCallback(() => {
     const now = Date.now();
@@ -398,62 +654,96 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   }, []);
 
   const runPreview = useCallback(
-    async (candidate: string): Promise<boolean> => {
-      if (!claimAction()) {
-        setErrorMessage("Please wait a moment before trying again.");
+    async (candidate: string, automatic = false): Promise<boolean> => {
+      if (!automatic) setLinkedPreview(null);
+      if (automatic ? previewCooldownMs() > 0 : cooldown.coolingDown) return false;
+      if (actionBusy.current || !claimAction()) {
+        setErrorMessage(() => (translateApp("Please wait a moment before trying again.")));
         return false;
       }
-
-      const normalized = normalizeAuthDeviceUserCode(candidate);
-      if (!normalized) {
-        setErrorMessage("Enter a valid eight-character login code.");
-        return false;
-      }
-
+      actionBusy.current = true;
       setIsPreviewing(true);
       setErrorMessage(null);
+      const current = generation.current;
+      const normalized = normalizeAuthDeviceUserCode(candidate);
+      const staging = stagingScan && normalized !== null &&
+        normalized === normalizeAuthDeviceUserCode(route.params?.user_code ?? "");
       try {
-        const result = await mobileApi.previewAuthDevice(normalized);
-        if (result.status === "denied") {
-          setTerminal("denied");
-          return true;
-        }
-        if (result.status !== "pending") {
-          setErrorMessage(
-            result.status === "expired"
-              ? "This login request has expired."
-              : "This login request was already completed.",
-          );
-          return false;
-        }
-
-        setConfirmedCode(normalized);
-        setPreview(result);
-        const now = Date.now();
-        setDeadlineMs(
-          resolveDeviceLoginDeadlineMs(
-            result.expires_at,
-            result.seconds_remaining,
-            now,
-          ),
-        );
-        setClockMs(now);
-        setRawUserAgentExpanded(false);
+        const result = staging
+          ? { kind: "device" as const, preview: await mobileApi.previewStagingDevice(candidate) }
+          : await resolveLoginRequest(candidate, "device");
+        if (current !== generation.current) return false;
+        if (!normalized) return false;
+        if (result.kind === "agent-key") {
+          if (handoffLoginRequest(normalized, result))
+            navigation.navigate("AgentKeyLogin", { user_code: normalized });
+        } else acceptPreview(normalized, result.preview);
+        setManualEntryVisible(false);
+        setIsScanning(false);
         return true;
       } catch (error) {
-        setErrorMessage(resolveAuthDeviceErrorMessage(error));
+        if (current === generation.current) {
+          if (staging) recordLoginPreviewFailure(error);
+          const state = terminalFromError(error);
+          if (state && state !== "unavailable") {
+            setTerminal(state);
+            setIsScanning(false);
+            setManualEntryVisible(false);
+          }
+          setErrorMessage(
+            () => (translateApp(deviceLoginErrorCopy(error), { host: staging ? "staging.nyxid.ai" : loginServerHost() })),
+          );
+          cooldown.sync();
+        }
         return false;
       } finally {
-        setIsPreviewing(false);
+        if (current === generation.current) {
+          actionBusy.current = false;
+          setIsPreviewing(false);
+        }
       }
     },
-    [claimAction],
+    [claimAction, cooldown.coolingDown, navigation, stagingScan, route.params?.user_code, t],
   );
+
+  // Incoming links use the same resolver, throttle and cooldown as manual
+  // entry. Each route generation previews once; opening never makes a decision.
+  useEffect(() => {
+    if (!linkedPreview || linkedPreview.generation !== generation.current) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const run = () => {
+      if (linkedPreview.generation !== generation.current) return;
+      const delay = Math.max(
+        ACTION_THROTTLE_MS - (Date.now() - lastActionAt.current),
+        previewCooldownMs(),
+        actionBusy.current ? ACTION_THROTTLE_MS : 0,
+      );
+      if (delay > 0) {
+        timer = setTimeout(run, delay);
+        return;
+      }
+      setLinkedPreview(null);
+      void runPreview(linkedPreview.code, true);
+    };
+    run();
+    return () => clearTimeout(timer);
+  }, [linkedPreview, runPreview]);
 
   const handleScannedCode = (
     normalized: string,
-    kind: "device" | "agent-key",
+    kind: "device" | "agent-key" | "staging-device",
   ) => {
+    if (kind === "staging-device" || (stagingScan && kind === "device")) {
+      setIsScanning(false);
+      navigation.setParams({
+        user_code: normalized,
+        staging_scan: kind === "staging-device" ? true : undefined,
+        start_scanner: undefined,
+      });
+      // A repeat scan of the same URL still starts a fresh preview.
+      setRouteRevision((revision) => revision + 1);
+      return;
+    }
     if (kind === "agent-key") {
       setIsScanning(false);
       navigation.navigate("AgentKeyLogin", { user_code: normalized });
@@ -477,44 +767,94 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     decision: "approve" | "deny",
     verifiedRetry = false,
   ) => {
-    if (!confirmedCode || !preview) return;
+    if (!confirmedCode || !preview || terminal || actionBusy.current) return;
+    if (
+      deadlineMs === null ||
+      (deadlineMs <= Date.now() && !decisionUncertain)
+    ) {
+      setTerminal("expired");
+      return;
+    }
     if (!verifiedRetry && !claimAction()) {
-      setErrorMessage("Please wait a moment before trying again.");
+      setErrorMessage(() => (translateApp("Please wait a moment before trying again.")));
       return;
     }
 
-    if (deadlineMs === null || deadlineMs <= Date.now()) {
-      setErrorMessage("This login request has expired.");
-      return;
-    }
-
+    uncertainPreview.reset();
+    actionBusy.current = true;
+    const owner = Symbol("login-decision");
+    decisionOperation.current = owner;
+    const current = generation.current;
     setDecisionPending(decision);
     setErrorMessage(null);
+    let dispatched = false;
     try {
-      if (decision === "approve") {
+      dispatched = true;
+      if (preview.stagingBinding) {
+        await mobileApi.decideStagingDevice(decision, confirmedCode, preview.stagingBinding);
+      } else if (decision === "approve") {
         await mobileApi.approveAuthDevice(confirmedCode);
-        setTerminal("approved");
       } else {
         await mobileApi.denyAuthDevice(confirmedCode);
-        setTerminal("denied");
       }
+      if (current === generation.current)
+        setTerminal(decision === "approve" ? "approved" : "denied");
     } catch (error) {
-      if (await stepUp.handle(error, () => handleDecision(decision, true)))
+      if (current !== generation.current) return;
+      actionBusy.current = false;
+      if (dispatched && isLoginDecisionUncertain(error))
+        updateDecisionUncertain(decision);
+      if (
+        classifyLoginError(error) === "mfa_step_up" &&
+        (await stepUp.handle(error, () => handleDecision(decision, true)))
+      )
         return;
-      setErrorMessage(resolveAuthDeviceErrorMessage(error));
+      setTerminal(
+        (previous) => terminalFromError(error, decisionUncertain) ?? previous,
+      );
+      setErrorMessage(() => (translateApp(deviceLoginErrorCopy(error), { host: preview.stagingBinding ? "staging.nyxid.ai" : loginServerHost() })));
     } finally {
-      setDecisionPending(null);
+      if (decisionOperation.current === owner) {
+        decisionOperation.current = null;
+        actionBusy.current = false;
+        setDecisionPending(null);
+      }
     }
   };
 
   const handleBack = () => {
+    if (decisionOperation.current) return;
+    if ((terminal || uncertainDecision.current) && applyDeferredRoute()) return;
     if (navigation.canGoBack()) {
       navigation.goBack();
     } else if (isAuthenticated) {
       navigation.dispatch(workspaceNavigateAction("Activity"));
     } else {
-      navigation.navigate("Auth");
+      navigation.dispatch(StackActions.replace("Auth"));
     }
+  };
+
+  const handleRestart = () => {
+    if (decisionOperation.current) return;
+    if (applyDeferredRoute()) return;
+    updateDecisionUncertain(null);
+    generation.current += 1;
+    actionBusy.current = false;
+    setDecisionPending(null);
+    setIsPreviewing(false);
+    setTerminal(null);
+    setPreview(null);
+    setConfirmedCode(null);
+    setUserCode("");
+    setDeadlineMs(null);
+    currentDeadline.current = null;
+    setErrorMessage(null);
+    setIsScanning(false);
+    navigation.setParams({
+      user_code: undefined,
+      start_scanner: undefined,
+      staging_scan: undefined,
+    });
   };
 
   if (isScanning) {
@@ -526,7 +866,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           onCancel={handleBack}
           onCode={handleScannedCode}
           onManualEntry={() => {
-            setErrorMessage(null);
+            if (!cooldown.coolingDown) setErrorMessage(null);
             setManualEntryVisible(true);
           }}
         />
@@ -535,15 +875,16 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           value={userCode}
           errorMessage={errorMessage}
           isPending={isPreviewing}
+          coolingDown={cooldown.coolingDown}
           colors={colors}
           styles={styles}
           onChange={(value) => {
             setUserCode(formatAuthDeviceUserCode(value));
-            setErrorMessage(null);
+            if (!cooldown.coolingDown) setErrorMessage(null);
           }}
           onDismiss={() => {
             setManualEntryVisible(false);
-            setErrorMessage(null);
+            if (!cooldown.coolingDown) setErrorMessage(null);
           }}
           onSubmit={() => void handleManualSubmit()}
         />
@@ -555,7 +896,14 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     deadlineMs === null
       ? 0
       : secondsUntilDeviceLoginDeadline(deadlineMs, clockMs);
-  const isExpired = Boolean(preview) && secondsRemaining === 0;
+  const isExpired =
+    Boolean(preview) &&
+    secondsRemaining === 0 &&
+    !decisionUncertain &&
+    !decisionPending;
+  const waitingForDecision = Boolean(
+    decisionUncertain || (decisionPending && secondsRemaining === 0),
+  );
   const isPending = isPreviewing || decisionPending !== null;
   const loginCode = formatAuthDeviceUserCode(confirmedCode ?? userCode);
   const originValue = preview
@@ -566,15 +914,21 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     : null;
   const reportedTimezone = preview
     ? timezoneRow(preview, localTimezone)
-    : { value: "Not reported", anomalous: false };
+    : { value: translateApp("Not reported"), anomalous: false };
   const clientKindLabel = preview
     ? {
-        cli: "CLI client",
-        browser: "Browser client",
-        mobile: "Mobile client",
-        unknown: "Not identified",
+        cli: translateApp("CLI client"),
+        browser: translateApp("Browser client"),
+        mobile: translateApp("Mobile client"),
+        unknown: translateApp("Not identified"),
       }[preview.client_kind]
-    : "Not identified";
+    : translateApp("Not identified");
+  const reportedClient = preview
+    ? [
+        preview.client_app ?? (preview.client_kind !== "unknown" ? clientKindLabel : null),
+        preview.client_platform,
+      ].filter(Boolean).join(" · ") || translateApp("Not identified")
+    : translateApp("Not identified");
   const valueTones = resolveDeviceLoginValueTones(
     originValue !== null,
     reportedTimezone.anomalous,
@@ -582,34 +936,15 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   );
 
   if (terminal) {
-    const approved = terminal === "approved";
     return (
-      <ScreenContainer>
-        <View
-          style={[
-            styles.terminalScreen,
-            !inWorkspaceSheet && styles.rootContent,
-          ]}
-        >
-          {approved ? (
-            <MagicKeyIllustration
-              size={COMPLETION_MARK_SIZE}
-              color={colors.success}
-              opacity={COMPLETION_MARK_OPACITY}
-            />
-          ) : (
-            <RoadBarrierIllustration
-              size={COMPLETION_MARK_SIZE}
-              color={colors.danger}
-              opacity={COMPLETION_MARK_OPACITY}
-            />
-          )}
-          <Text style={styles.terminalTitle}>
-            {approved ? "Login approved" : "Request denied"}
-          </Text>
-          <AuthSubmitButton label="Done" onPress={handleBack} />
-        </View>
-      </ScreenContainer>
+      <LoginRequestTerminalView
+        state={terminal}
+        clientKind={preview?.client_kind}
+        inSheet={inWorkspaceSheet}
+        disabled={decisionPending !== null}
+        onDone={handleBack}
+        onRestart={handleRestart}
+      />
     );
   }
 
@@ -650,7 +985,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             <View style={styles.screenHeader}>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Back"
+                accessibilityLabel={translateApp("Back")}
                 hitSlop={4}
                 onPress={handleBack}
                 style={({ pressed }) => [
@@ -660,13 +995,19 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               >
                 <ChevronLeft size={24} color={colors.textPrimary} />
               </Pressable>
-              <Text style={styles.title}>Approve device login</Text>
+              <Text style={styles.title}>
+                {translateApp("Approve device login")}
+              </Text>
             </View>
           )}
-          <Text style={styles.subtitle}>Review the request details.</Text>
+          {!preview && (
+            <Text style={styles.subtitle}>
+              {t("Enter a device login or Agent Key login code from the requesting device.")}
+            </Text>
+          )}
           {!preview && (
             <PrimaryButton
-              label="Agent Key login"
+              label={translateApp("Agent Key login")}
               kind="ghost"
               onPress={() => navigation.navigate("AgentKeyLogin")}
             />
@@ -674,14 +1015,17 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
 
           {!preview ? (
             <View style={styles.inputSection}>
-              <Text style={styles.inputLabel}>Login code</Text>
+              <Text style={styles.inputLabel}>
+                {translateApp("Login code")}
+              </Text>
               <AuthTextInput
                 invalid={!!errorMessage}
-                accessibilityLabel="Login code"
+                accessibilityLabel={translateApp("Login code")}
                 value={userCode}
                 onChangeText={(value) => {
+                  setLinkedPreview(null);
                   setUserCode(formatAuthDeviceUserCode(value));
-                  setErrorMessage(null);
+                  if (!cooldown.coolingDown) setErrorMessage(null);
                 }}
                 editable={!isPending}
                 autoCapitalize="characters"
@@ -690,11 +1034,10 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 maxLength={11}
                 returnKeyType="done"
                 onSubmitEditing={() => {
-                  if (normalizeAuthDeviceUserCode(userCode))
-                    void runPreview(userCode);
+                  void runPreview(userCode);
                 }}
                 selectionColor={colors.primary}
-                placeholder="ABCD-EFGH"
+                placeholder={"ABCD-EFGH"}
                 placeholderTextColor={colors.textTertiary}
                 style={[
                   styles.codeInput,
@@ -706,14 +1049,23 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   {errorMessage}
                 </Text>
               ) : null}
-              <AuthSubmitButton loading={isPreviewing}
-                label={isPreviewing ? "Checking request..." : "Continue"}
+              <AuthSubmitButton
+                loading={isPreviewing}
+                label={
+                  isPreviewing
+                    ? translateApp("Checking request...")
+                    : translateApp("Continue")
+                }
                 onPress={() => void runPreview(userCode)}
-                disabled={isPending || !normalizeAuthDeviceUserCode(userCode)}
+                disabled={
+                  isPending ||
+                  cooldown.coolingDown ||
+                  !normalizeAuthDeviceUserCode(userCode)
+                }
               />
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel="Scan login QR code"
+                accessibilityLabel={translateApp("Scan login QR code")}
                 disabled={isPending}
                 onPress={() => setIsScanning(true)}
                 style={({ pressed }) => [
@@ -723,157 +1075,204 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 ]}
               >
                 <ScanQrCode size={20} color={colors.primary} />
-                <Text style={styles.scanButtonText}>Scan QR code</Text>
+                <Text style={styles.scanButtonText}>
+                  {translateApp("Scan QR code")}
+                </Text>
               </Pressable>
             </View>
           ) : (
             <View style={styles.previewSection}>
               <View style={styles.detailPanel}>
-                {loginCode ? (
+                {preview.stagingBinding ? (
                   <DetailRow
-                    label="Login code"
-                    value={loginCode}
-                    mono
+                    label={translateApp("Sign-in environment")}
+                    value="staging.nyxid.ai"
+                    compact
                     styles={styles}
                   />
                 ) : null}
-                {/*
-                  A signal whose "good" state can be produced by an attacker
-                  choosing what to send must never render as a positive assurance.
-                  Origin is forgeable on this public endpoint, and even a first-party
-                  proof would not stop a copied genuine QR, so only negative states
-                  render here.
-                */}
+                <View style={styles.codeAndExpiry}>
+                  {loginCode ? (
+                    <View style={styles.codeSummary}>
+                      <DetailRow
+                        label={translateApp("Login code")}
+                        value={loginCode}
+                        mono
+                        borderless
+                        styles={styles}
+                      />
+                    </View>
+                  ) : null}
+                  <View style={styles.expirySummary}>
+                    <DetailRow
+                      label={translateApp("Expires in")}
+                      value={
+                        waitingForDecision
+                          ? t("Waiting for NyxID…")
+                          : isExpired
+                            ? translateApp("Expired")
+                            : formatRemaining(secondsRemaining)
+                      }
+                      tone={waitingForDecision ? "default" : valueTones.expiry}
+                      borderless
+                      styles={styles}
+                    />
+                  </View>
+                </View>
+                <DetailRow
+                  label={translateApp("Reported device")}
+                  value={formatDevice(preview)}
+                  compact
+                  styles={styles}
+                />
+                <DetailRow
+                  label={translateApp("Reported client")}
+                  value={reportedClient}
+                  compact
+                  styles={styles}
+                />
+                <DetailRow
+                  label={translateApp("Requested")}
+                  value={requestedAtValue(preview, clockMs)}
+                  compact
+                  styles={styles}
+                />
+                <DetailRow
+                  label={translateApp("Requester")}
+                  value={requesterValue(preview)}
+                  compact
+                  styles={styles}
+                />
+                <DetailRow
+                  label={translateApp("Location")}
+                  value={formatLocation(preview)}
+                  compact
+                  styles={styles}
+                />
+                <DetailRow
+                  label={translateApp("Network")}
+                  value={formatNetwork(preview)}
+                  compact
+                  styles={styles}
+                />
+                {/* Requester-controlled origin hints never provide positive assurance. */}
                 {originValue ? (
                   <DetailRow
-                    label="Started from"
+                    label={translateApp("Started from")}
                     value={originValue}
                     tone={valueTones.origin}
+                    compact
                     styles={styles}
                   />
                 ) : null}
-                <DetailRow
-                  label="Requester"
-                  value={requesterValue(preview)}
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Location"
-                  value={formatLocation(preview)}
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Network"
-                  value={formatNetwork(preview)}
-                  styles={styles}
-                />
-                {preview.client_ip_attribution === "unverified" &&
-                preview.client_ip ? (
+                {preview.client_timezone ? (
                   <DetailRow
-                    label="Reported IP"
-                    value={`${preview.client_ip} · unverified`}
-                    mono
+                    label={translateApp("Timezone")}
+                    value={reportedTimezone.value}
+                    tone={valueTones.timezone}
+                    compact
                     styles={styles}
                   />
                 ) : null}
-                <DetailRow
-                  label="Requested"
-                  value={requestedAtValue(preview, clockMs)}
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Reported device"
-                  value={formatDevice(preview)}
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Reported client"
-                  value={preview.client_app ?? clientKindLabel}
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Platform"
-                  value={preview.client_platform ?? "Not identified"}
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Form factor"
-                  value={
-                    preview.client_form_factor
-                      ? `${preview.client_form_factor[0]?.toUpperCase() ?? ""}${preview.client_form_factor.slice(1)}`
-                      : "Not reported"
-                  }
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Timezone"
-                  value={reportedTimezone.value}
-                  tone={valueTones.timezone}
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Locale"
-                  value={preview.client_locale ?? "Not reported"}
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Screen"
-                  value={formatScreen(preview)}
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Processor"
-                  value={
-                    preview.client_hardware_concurrency === null
-                      ? "Not reported"
-                      : `${preview.client_hardware_concurrency} logical processors`
-                  }
-                  styles={styles}
-                />
-                <DetailRow
-                  label="Memory"
-                  value={
-                    preview.client_device_memory === null
-                      ? "Not reported"
-                      : `${preview.client_device_memory} GB`
-                  }
-                  styles={styles}
-                />
+
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={
-                    rawUserAgentExpanded
-                      ? "Hide raw user agent"
-                      : "Show raw user agent"
-                  }
-                  onPress={() =>
-                    setRawUserAgentExpanded((expanded) => !expanded)
-                  }
+                  accessibilityLabel={technicalDetailsExpanded
+                    ? translateApp("Hide more details")
+                    : translateApp("Show more details")}
+                  accessibilityState={{ expanded: technicalDetailsExpanded }}
+                  onPress={() => {
+                    setTechnicalDetailsExpanded((expanded) => !expanded);
+                    setRawUserAgentExpanded(false);
+                  }}
                   style={({ pressed }) => [
                     styles.rawUserAgentButton,
+                    !technicalDetailsExpanded && styles.borderlessDetailRow,
                     pressed && styles.pressed,
                   ]}
                 >
-                  <Text style={styles.rawUserAgentLabel}>Raw user agent</Text>
-                  {rawUserAgentExpanded ? (
+                  <Text style={styles.rawUserAgentLabel}>
+                    {translateApp("More details")}
+                  </Text>
+                  {technicalDetailsExpanded ? (
                     <ChevronUp size={16} color={colors.textMuted} />
                   ) : (
                     <ChevronDown size={16} color={colors.textMuted} />
                   )}
                 </Pressable>
-                {rawUserAgentExpanded ? (
-                  <Text style={styles.rawUserAgentValue}>
-                    {preview.client_user_agent ?? "Not provided"}
-                  </Text>
+                {technicalDetailsExpanded ? (
+                  <View>
+                    <DetailRow
+                      label={translateApp("Form factor")}
+                      value={preview.client_form_factor
+                        ? `${preview.client_form_factor[0]?.toUpperCase() ?? ""}${preview.client_form_factor.slice(1)}`
+                        : translateApp("Not reported")}
+                      styles={styles}
+                    />
+                    <DetailRow
+                      label={translateApp("Locale")}
+                      value={preview.client_locale ?? translateApp("Not reported")}
+                      styles={styles}
+                    />
+                    <DetailRow
+                      label={translateApp("Screen")}
+                      value={formatScreen(preview)}
+                      styles={styles}
+                    />
+                    <DetailRow
+                      label={translateApp("Processor")}
+                      value={preview.client_hardware_concurrency === null
+                        ? translateApp("Not reported")
+                        : translateApp("{{clientHardwareConcurrency}} logical processors", {
+                            clientHardwareConcurrency: preview.client_hardware_concurrency,
+                          })}
+                      styles={styles}
+                    />
+                    <DetailRow
+                      label={translateApp("Memory")}
+                      value={preview.client_device_memory === null
+                        ? translateApp("Not reported")
+                        : translateApp("{{gigabytes}} GB", {
+                            gigabytes: preview.client_device_memory,
+                          })}
+                      styles={styles}
+                    />
+                    {preview.client_ip_attribution === "unverified" && preview.client_ip ? (
+                      <DetailRow
+                        label={translateApp("Reported IP")}
+                        value={translateApp("{{clientIp}} · unverified", { clientIp: preview.client_ip })}
+                        mono
+                        styles={styles}
+                      />
+                    ) : null}
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={rawUserAgentExpanded
+                        ? translateApp("Hide raw user agent")
+                        : translateApp("Show raw user agent")}
+                      accessibilityState={{ expanded: rawUserAgentExpanded }}
+                      onPress={() => setRawUserAgentExpanded((expanded) => !expanded)}
+                      style={({ pressed }) => [
+                        styles.rawUserAgentButton,
+                        pressed && styles.pressed,
+                      ]}
+                    >
+                      <Text style={styles.rawUserAgentLabel}>
+                        {translateApp("Raw user agent")}
+                      </Text>
+                      {rawUserAgentExpanded ? (
+                        <ChevronUp size={16} color={colors.textMuted} />
+                      ) : (
+                        <ChevronDown size={16} color={colors.textMuted} />
+                      )}
+                    </Pressable>
+                    {rawUserAgentExpanded ? (
+                      <Text style={styles.rawUserAgentValue}>
+                        {preview.client_user_agent ?? translateApp("Not provided")}
+                      </Text>
+                    ) : null}
+                  </View>
                 ) : null}
-                <DetailRow
-                  label="Expires in"
-                  value={
-                    isExpired ? "Expired" : formatRemaining(secondsRemaining)
-                  }
-                  tone={valueTones.expiry}
-                  styles={styles}
-                />
               </View>
 
               <View style={styles.caution}>
@@ -883,66 +1282,79 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   style={styles.cautionIcon}
                 />
                 <Text style={styles.cautionText}>
-                  {"Only approve if you started this sign-in. "}
-                  {
-                    "Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match. "
-                  }
-                  <Text style={styles.cautionDanger}>
-                    If anything looks unfamiliar, reject it.
-                  </Text>
+                  <Translation
+                    message="Only approve a sign-in you started. Match this code with the requesting device. {{warning}}"
+                    values={{ warning: <Text style={styles.cautionDanger}>
+                      {translateApp("Reject if anything looks unfamiliar.")}
+                    </Text> }}
+                  />
                 </Text>
               </View>
 
+              {errorMessage ? (
+                <Text accessibilityRole="alert" style={styles.errorText}>
+                  {errorMessage}
+                </Text>
+              ) : null}
+
               {isAuthenticated ? (
                 <View style={{ gap: spacing.md }}>
-                  {preview.supports_grant_choice && (
-                    <PrimaryButton
-                      label="Restricted Agent Key"
-                      kind="ghost"
-                      disabled={isPending || isExpired}
-                      onPress={() =>
-                        navigation.navigate("AgentKeyLogin", {
-                          user_code: confirmedCode ?? userCode,
-                          flow: "device",
-                        })
-                      }
-                    />
-                  )}
-                  <Text style={styles.cautionText}>
-                    A full account session grants this machine your account,
-                    service, credential, and organization access. A restricted
-                    Agent Key grants only the permissions and resources you
-                    confirm next.
+                  <Text style={styles.scopeText}>
+                    {translateApp("A full account session grants account, service, credential, and organization access.")}
                   </Text>
-                  <View style={styles.decisionButton}>
-                    <PrimaryButton
-                      label={
-                        decisionPending === "deny" ? "Rejecting..." : "Reject"
-                      }
-                      kind="danger"
-                      disabled={isPending || isExpired}
-                      onPress={() => void handleDecision("deny")}
-                    />
+                  <View style={styles.decisionRow}>
+                    <View style={styles.decisionButton}>
+                      <AuthSubmitButton
+                        loading={decisionPending === "approve"}
+                        label={
+                          decisionPending === "approve"
+                            ? translateApp("Approving...")
+                            : preview.stagingBinding
+                              ? translateApp("Approve staging account session")
+                              : translateApp("Approve full account session")
+                        }
+                        disabled={isPending || isExpired}
+                        onPress={() => void handleDecision("approve")}
+                      />
+                    </View>
+                    <View style={styles.decisionButton}>
+                      <PrimaryButton
+                        label={
+                          decisionPending === "deny" ? translateApp("Rejecting...")
+                            : translateApp("Reject")
+                        }
+                        kind="danger"
+                        disabled={isPending || isExpired}
+                        onPress={() => void handleDecision("deny")}
+                      />
+                    </View>
                   </View>
-                  <View style={styles.decisionButton}>
-                    <AuthSubmitButton loading={decisionPending === "approve"}
-                      label={
-                        decisionPending === "approve"
-                          ? "Approving..."
-                          : "Approve full account session"
-                      }
-                      disabled={isPending || isExpired}
-                      onPress={() => void handleDecision("approve")}
-                    />
-                  </View>
+                  {preview.supports_grant_choice && (
+                    <>
+                      <PrimaryButton
+                        label={translateApp("Restricted Agent Key")}
+                        kind="ghost"
+                        disabled={isPending || isExpired}
+                        onPress={() =>
+                          navigation.navigate("AgentKeyLogin", {
+                            user_code: confirmedCode ?? userCode,
+                            flow: "device",
+                          })
+                        }
+                      />
+                      <Text style={styles.scopeText}>
+                        {translateApp("Use a restricted Agent Key for limited access.")}
+                      </Text>
+                    </>
+                  )}
                 </View>
               ) : (
                 <View style={styles.signInNotice}>
                   <Text style={styles.signInText}>
-                    Sign in to approve or reject this request.
+                    {translateApp("Sign in to approve or reject this request.")}
                   </Text>
                   <AuthSubmitButton
-                    label="Sign in"
+                    label={translateApp("Sign in")}
                     onPress={() => navigation.navigate("Auth")}
                   />
                 </View>
@@ -950,10 +1362,21 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             </View>
           )}
 
-          {errorMessage && preview ? (
-            <Text accessibilityRole="alert" style={styles.errorText}>
-              {errorMessage}
-            </Text>
+          {decisionUncertain ? (
+            <View style={{ gap: spacing.md }}>
+              <PrimaryButton
+                label={t("Done")}
+                kind="ghost"
+                disabled={decisionPending !== null}
+                onPress={handleBack}
+              />
+              <PrimaryButton
+                label={t("Scan or enter another code")}
+                kind="ghost"
+                disabled={decisionPending !== null}
+                onPress={handleRestart}
+              />
+            </View>
           ) : null}
           {isPending ? <ActivityIndicator color={colors.primary} /> : null}
         </ScrollView>

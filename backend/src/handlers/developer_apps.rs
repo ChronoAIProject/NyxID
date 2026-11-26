@@ -281,8 +281,8 @@ async fn require_platform_admin_for_broker_capability(
             .any(|scope| scope == oauth_broker_service::BROKER_BINDING_SCOPE)
     });
 
-    if state.broker_require_admin_capability()
-        && (requested_broker_capability == Some(true) || requested_broker_scope)
+    if (requested_broker_capability == Some(true) || requested_broker_scope)
+        && state.broker_require_admin_capability().await?
     {
         require_admin(state, auth_user).await.map_err(|_| {
             AppError::Forbidden(
@@ -362,11 +362,9 @@ pub(crate) async fn create_my_oauth_client_with_id(
     if let Some(url) = revocation_webhook_url {
         webhook_delivery_service::validate_webhook_url(url, "revocation_webhook_url").await?;
     }
-    let revocation_webhook_secret_encrypted =
-        match normalize_optional_nonempty(body.revocation_webhook_secret.as_deref()) {
-            Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
-            None => None,
-        };
+    let revocation_webhook_secret =
+        normalize_optional_nonempty(body.revocation_webhook_secret.as_deref())
+            .map(|secret| (state.encryption_keys.as_ref(), secret));
     let default_service_catalog_slugs = match body.default_service_catalog_slugs.as_deref() {
         Some(slugs) => validate_default_service_catalog_slugs(&state, slugs).await?,
         None => Vec::new(),
@@ -386,7 +384,7 @@ pub(crate) async fn create_my_oauth_client_with_id(
                 crate::models::oauth_client::ScopeProvenance::Explicit,
                 body.broker_capability_enabled.unwrap_or(false),
                 revocation_webhook_url,
-                revocation_webhook_secret_encrypted,
+                revocation_webhook_secret,
                 &default_service_catalog_slugs,
             )
             .await?
@@ -403,7 +401,7 @@ pub(crate) async fn create_my_oauth_client_with_id(
                 crate::models::oauth_client::ScopeProvenance::Explicit,
                 body.broker_capability_enabled.unwrap_or(false),
                 revocation_webhook_url,
-                revocation_webhook_secret_encrypted,
+                revocation_webhook_secret,
                 &default_service_catalog_slugs,
             )
             .await?
@@ -526,11 +524,9 @@ pub async fn update_my_oauth_client(
     if let Some(url) = revocation_webhook_url {
         webhook_delivery_service::validate_webhook_url(url, "revocation_webhook_url").await?;
     }
-    let revocation_webhook_secret_encrypted =
-        match normalize_optional_nonempty(body.revocation_webhook_secret.as_deref()) {
-            Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
-            None => None,
-        };
+    let revocation_webhook_secret =
+        normalize_optional_nonempty(body.revocation_webhook_secret.as_deref())
+            .map(|secret| (state.encryption_keys.as_ref(), secret));
     let validated_default_slugs = match body.default_service_catalog_slugs.as_deref() {
         Some(slugs) => Some(validate_default_service_catalog_slugs(&state, slugs).await?),
         None => None,
@@ -546,7 +542,7 @@ pub async fn update_my_oauth_client(
         validated_allowed_scopes.as_deref(),
         body.broker_capability_enabled,
         revocation_webhook_url,
-        revocation_webhook_secret_encrypted,
+        revocation_webhook_secret,
         validated_default_slugs.as_deref(),
     )
     .await?;
@@ -1649,6 +1645,7 @@ mod tests {
     fn to_response_maps_oauth_client_fields() {
         use chrono::Utc;
         let client = OauthClient {
+            secret_context_versions: Default::default(),
             id: "client_1".to_string(),
             client_name: "My App".to_string(),
             client_type: "confidential".to_string(),
@@ -1660,6 +1657,7 @@ mod tests {
             delegation_scopes: "proxy:*".to_string(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
+            first_party_management: false,
             revocation_webhook_url: Some("https://ex.com/revoke".to_string()),
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -1684,6 +1682,7 @@ mod tests {
     fn to_response_omits_secret_when_none() {
         use chrono::Utc;
         let client = OauthClient {
+            secret_context_versions: Default::default(),
             id: "client_2".to_string(),
             client_name: "Read App".to_string(),
             client_type: "public".to_string(),
@@ -1695,6 +1694,7 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,

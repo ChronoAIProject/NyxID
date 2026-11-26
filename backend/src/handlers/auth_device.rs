@@ -56,17 +56,20 @@ pub struct AuthDeviceRequestBody {
     pub client_device_memory: Option<f64>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Serialize, ToSchema)]
 pub struct AuthDeviceRequestResponse {
     pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
     pub verification_uri_complete: String,
+    /// First-party app link when native identity and separate HTTPS API origin are configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_verification_uri: Option<String>,
     pub expires_in: i64,
     pub interval: u32,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct AuthDevicePollBody {
     pub device_code: String,
 }
@@ -75,8 +78,10 @@ pub struct AuthDevicePollBody {
 #[serde(tag = "auth_kind", rename_all = "snake_case")]
 pub enum AuthDevicePollResponse {
     AccountSession {
-        access_token: String,
-        refresh_token: String,
+        #[schema(value_type = String)]
+        access_token: zeroize::Zeroizing<String>,
+        #[schema(value_type = String)]
+        refresh_token: zeroize::Zeroizing<String>,
         token_type: &'static str,
         expires_in: i64,
     },
@@ -93,14 +98,14 @@ impl std::fmt::Debug for AuthDevicePollResponse {
     }
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct AuthDeviceApproveBody {
     pub user_code: String,
     pub selection: Option<agent_key::Selection>,
     pub credential_expires_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct AuthDeviceDenyBody {
     pub user_code: String,
 }
@@ -118,12 +123,20 @@ pub struct AuthDeviceWebDeliveryResponse {
     pub login_code: Option<super::login_code::MintResponse>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct AuthDevicePreviewBody {
     pub user_code: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+crate::errors::redacted_debug!(
+    AuthDeviceRequestResponse,
+    AuthDevicePollBody,
+    AuthDeviceApproveBody,
+    AuthDeviceDenyBody,
+    AuthDevicePreviewBody,
+);
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct AuthDevicePreviewResponse {
     pub supports_grant_choice: bool,
     pub requested_profile: Option<String>,
@@ -235,6 +248,10 @@ async fn request_device(
     );
 
     Ok(Json(AuthDeviceRequestResponse {
+        app_verification_uri: super::mobile_app_links::app_verification_uri(
+            &state.config,
+            &initiated.user_code,
+        ),
         device_code: initiated.device_code,
         user_code: initiated.user_code,
         verification_uri,
@@ -898,6 +915,9 @@ fn trace_poll_error(client_ip_hash: &str, outcome: &str) {
 
 #[cfg(test)]
 mod tests {
+    mod staging_qr_tests {
+        include!("auth_device/staging_qr_tests.rs");
+    }
     use super::*;
     use crate::models::auth_device_code::AuthDeviceClientIpAttribution;
     use axum::http::{StatusCode, header};
@@ -1350,6 +1370,9 @@ mod tests {
 
     #[tokio::test]
     async fn auth_device_web_poll_skips_extra_mfa_and_revokes_approval_session() {
+        use crate::services::billing::schedules::eligibility::tests::{
+            assert_login_credits, login_test_schedule,
+        };
         let Some(state) = setup_state("auth_device_web_poll_happy").await else {
             return;
         };
@@ -1364,6 +1387,7 @@ mod tests {
             .update_one(doc! {"_id": &user_id}, doc! {"$set": {"mfa_enabled": true}})
             .await
             .expect("enable MFA");
+        let schedule = login_test_schedule(&state.db).await;
         let server = spawn_test_server(state.clone()).await;
         let (status, denied) = post_json(
             &server,
@@ -1387,6 +1411,7 @@ mod tests {
             .expect("auth-device row");
         let approved_session_id = device_row.approved_session_id.expect("approved session id");
 
+        assert_login_credits(&state.db, &schedule, &user_id, false).await;
         let response = server
             .client
             .post(format!("{}/api/v1/auth/device/poll-web", server.base_url))
@@ -1423,6 +1448,7 @@ mod tests {
         let body = response.json::<Value>().await.expect("web poll response");
         assert_eq!(body["ok"], true);
         assert_eq!(body["auth_kind"], "account_session");
+        assert_login_credits(&state.db, &schedule, &user_id, true).await;
         assert!(body.get("login_code").is_none_or(Value::is_null));
         assert!(body.get("access_token").is_none());
         assert!(body.get("refresh_token").is_none());
@@ -2316,6 +2342,9 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_full_happy_path_request_approve_poll_refresh() {
+        use crate::services::billing::schedules::eligibility::tests::{
+            assert_login_credits, login_test_schedule,
+        };
         let Some(state) = setup_state("auth_device_e2e_happy").await else {
             return;
         };
@@ -2359,6 +2388,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(approve_json, serde_json::json!({ "ok": true }));
 
+        let schedule = login_test_schedule(&state.db).await;
+        assert_login_credits(&state.db, &schedule, &user_id, false).await;
         let (status, poll_json) = post_json(
             &server,
             "/api/v1/auth/device/poll",
@@ -2379,6 +2410,7 @@ mod tests {
         );
         assert_eq!(poll_json["token_type"], "Bearer");
         assert_eq!(poll_json["expires_in"], 900);
+        assert_login_credits(&state.db, &schedule, &user_id, true).await;
 
         let access_token = poll_json["access_token"].as_str().unwrap();
         let (status, me_json) = get_json(&server, "/api/v1/users/me", Some(access_token)).await;
@@ -2387,6 +2419,7 @@ mod tests {
         assert_eq!(me_json["email"], format!("{user_id}@example.com"));
         assert_eq!(me_json["display_name"], "Test User");
 
+        let refresh_only_schedule = login_test_schedule(&state.db).await;
         let refresh_token = poll_json["refresh_token"].as_str().unwrap();
         let (status, refresh_json) = post_json(
             &server,
@@ -2407,6 +2440,7 @@ mod tests {
                 .is_some_and(|value| !value.is_empty() && value != refresh_token)
         );
         assert_eq!(refresh_json["expires_in"], 900);
+        assert_login_credits(&state.db, &refresh_only_schedule, &user_id, false).await;
 
         let (status, refreshed_me_json) = get_json(
             &server,
@@ -2523,3 +2557,7 @@ mod tests {
         assert_ne!(approve_json, serde_json::json!({ "ok": true }));
     }
 }
+
+#[cfg(test)]
+#[path = "device_login_debug_tests.rs"]
+mod device_login_debug_tests;

@@ -474,9 +474,11 @@ mod tests {
         let (_root, runtime, a, _rx) = fixture().await;
         assert!(start(&runtime, &a).await.get("error").is_none());
         let mut request = signed_owner(&runtime, &a, Operation::Job);
-        request.timestamp += 3;
-        request.parameters["owner_job_access"]["expires_at_ms"] =
-            json!(chrono::Utc::now().timestamp_millis() + 48_000);
+        // One clock read for both values: a second boundary between two reads
+        // would push the expiry past the signed timestamp's maximum lifetime.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        request.timestamp = now_ms.div_euclid(1000) + 3;
+        request.parameters["owner_job_access"]["expires_at_ms"] = json!(now_ms + 48_000);
         request.signature = nyxid_machine::signing::sign(&request, b"external-node-test");
         let result = runtime.handle(request.clone(), b"external-node-test").await;
         assert!(result.get("error").is_none(), "{result}");

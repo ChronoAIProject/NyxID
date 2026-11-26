@@ -134,7 +134,7 @@ pub async fn create_role(
         ));
     }
 
-    let role = role_service::create_role(
+    let role = role_service::create_role_as(
         &state.db,
         &body.name,
         &body.slug,
@@ -142,18 +142,9 @@ pub async fn create_role(
         &body.permissions,
         body.is_default.unwrap_or(false),
         body.client_id.as_deref(),
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.role.created",
-        Some(serde_json::json!({
-            "role_id": &role.id,
-            "role_slug": &role.slug,
-        })),
-    );
 
     Ok(Json(role_to_response(role)))
 }
@@ -180,7 +171,7 @@ pub async fn update_role(
 ) -> AppResult<Json<RoleResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    let role = role_service::update_role(
+    let role = role_service::update_role_as(
         &state.db,
         &role_id,
         body.name.as_deref(),
@@ -188,18 +179,9 @@ pub async fn update_role(
         body.description.as_deref(),
         body.permissions.as_deref(),
         body.is_default,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.role.updated",
-        Some(serde_json::json!({
-            "role_id": &role_id,
-            "role_slug": &role.slug,
-        })),
-    );
 
     Ok(Json(role_to_response(role)))
 }
@@ -213,14 +195,12 @@ pub async fn delete_role(
 ) -> AppResult<Json<RoleAssignmentResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    role_service::delete_role(&state.db, &role_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.role.deleted",
-        Some(serde_json::json!({ "role_id": &role_id })),
-    );
+    role_service::delete_role_as(
+        &state.db,
+        &role_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     Ok(Json(RoleAssignmentResponse {
         message: "Role deleted".to_string(),
@@ -279,17 +259,13 @@ pub async fn assign_role(
 ) -> AppResult<Json<RoleAssignmentResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    role_service::assign_role_to_user(&state.db, &user_id, &role_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.role.assigned",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "role_id": &role_id,
-        })),
-    );
+    role_service::assign_role_to_user_as(
+        &state.db,
+        &user_id,
+        &role_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     Ok(Json(RoleAssignmentResponse {
         message: "Role assigned".to_string(),
@@ -305,17 +281,13 @@ pub async fn revoke_role(
 ) -> AppResult<Json<RoleAssignmentResponse>> {
     require_admin(&state, &auth_user).await?;
 
-    role_service::revoke_role_from_user(&state.db, &user_id, &role_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.role.revoked",
-        Some(serde_json::json!({
-            "target_user_id": &user_id,
-            "role_id": &role_id,
-        })),
-    );
+    role_service::revoke_role_from_user_as(
+        &state.db,
+        &user_id,
+        &role_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     Ok(Json(RoleAssignmentResponse {
         message: "Role revoked".to_string(),
@@ -349,20 +321,13 @@ pub async fn bulk_assign_role(
         Some(&body.user_ids[..])
     };
 
-    let result = role_service::bulk_assign_role(&state.db, &role_id, user_ids_opt).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.role.bulk_assigned",
-        Some(serde_json::json!({
-            "role_id": &role_id,
-            "all": body.all,
-            "user_ids_count": body.user_ids.len(),
-            "assigned_count": result.assigned_count,
-            "already_assigned_count": result.already_assigned_count,
-        })),
-    );
+    let result = role_service::bulk_assign_role_as(
+        &state.db,
+        &role_id,
+        user_ids_opt,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+    )
+    .await?;
 
     Ok(Json(BulkAssignResponse {
         assigned_count: result.assigned_count,

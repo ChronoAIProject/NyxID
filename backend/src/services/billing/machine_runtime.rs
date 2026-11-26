@@ -716,6 +716,7 @@ impl BillingService {
             model_tariff: None,
             org_channel_guest: None,
             id: interval.usage_row_id.clone(),
+            stuck_request_exit: None,
             rollup_pending: true,
             transaction_id: format!(
                 "machine:{}:{}:{}:{}",
@@ -755,6 +756,8 @@ impl BillingService {
             quantity: None,
             pending_resale_quantity: None,
             pending_platform_usage: None,
+            usage_checkpoint: None,
+            realtime_session: None,
             pool_attempt: None,
             machine_usage: None,
             status: UsageStatus::Reserved,

@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
 // Preserve additive server fields (for example activation metadata) when a
@@ -103,21 +105,17 @@ export function buildSkillSelection(current: AgentSkills, change: SkillChange) {
   );
   if (change.type === "attach") {
     if (existing?.disabled)
-      throw new Error(
-        "Enable this skill before updating its exact version. Updating a disabled pin is not supported.",
-      );
+      throw localizedError("Enable this skill before updating its exact version. Updating a disabled pin is not supported.");
     const reference = change.preview.reference;
     if (
       reference.skill_id !== change.skillId ||
       reference.version !== change.selected.version ||
       reference.sha256 !== change.selected.sha256
     ) {
-      throw new Error(
-        "The package does not match the selected skill and exact version. Reload its versions and try again.",
-      );
+      throw localizedError("The package does not match the selected skill and exact version. Reload its versions and try again.");
     }
     if (!existing && current.skills.length >= 16)
-      throw new Error("This agent already has 16 skills. Detach one first.");
+      throw localizedError("This agent already has 16 skills. Detach one first.");
     const replacement = {
       ...existing,
       ...reference,
@@ -132,9 +130,7 @@ export function buildSkillSelection(current: AgentSkills, change: SkillChange) {
     };
   }
   if (!existing)
-    throw new Error(
-      "This skill is no longer attached. Reload the agent's skills.",
-    );
+    throw localizedError("This skill is no longer attached. Reload the agent's skills.");
   return {
     expected_revision: current.revision,
     skills: current.skills.filter((pin) => pin.skill_id !== change.skillId),
@@ -150,17 +146,29 @@ export function assertSkillRevision(
     (latest.agent_id && latest.agent_id !== agentId) ||
     baseline.revision !== latest.revision
   )
-    throw new Error(
-      "These skills changed elsewhere. Reload and review the current selection before saving.",
-    );
+    throw localizedError("These skills changed elsewhere. Reload and review the current selection before saving.");
 }
 
 export const SKILL_HISTORY_LABELS: Record<string, string> = {
-  assistant_skills_updated: "Attached skills changed",
-  assistant_learning_proposal_edited: "Skill draft edited",
-  assistant_learning_proposal_rejected: "Skill draft rejected",
-  assistant_learning_proposal_reprepared: "Skill draft package rebuilt",
-  assistant_learning_publication_approved: "Skill publication approved",
-  assistant_learning_publication_deferred: "Skill publication deferred",
-  assistant_learning_skill_pinned: "Published skill attached",
+  get assistant_skills_updated() {
+    return translateApp("Attached skills changed");
+  },
+  get assistant_learning_proposal_edited() {
+    return translateApp("Skill draft edited");
+  },
+  get assistant_learning_proposal_rejected() {
+    return translateApp("Skill draft rejected");
+  },
+  get assistant_learning_proposal_reprepared() {
+    return translateApp("Skill draft package rebuilt");
+  },
+  get assistant_learning_publication_approved() {
+    return translateApp("Skill publication approved");
+  },
+  get assistant_learning_publication_deferred() {
+    return translateApp("Skill publication deferred");
+  },
+  get assistant_learning_skill_pinned() {
+    return translateApp("Published skill attached");
+  },
 };

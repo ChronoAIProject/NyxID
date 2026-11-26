@@ -7,6 +7,15 @@ pub const CAPACITY: usize = 192 * 1024 * 1024;
 pub const CHANNEL_INITIAL_LIMIT: usize = 4 * 1024 * 1024;
 static BUDGET: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(CAPACITY)));
 
+/// Isolate tests that reserve or exhaust the process-wide budget. Acquire at
+/// test entry and hold until every reservation and spawned budget user is gone.
+/// Concurrency within a test still exercises the real shared semaphore.
+#[cfg(test)]
+pub(crate) async fn test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    TEST_LOCK.lock().await
+}
+
 /// The permit covers the payload and one copy through extraction/encryption.
 pub struct ByteReservation {
     pub payload_limit: usize,
@@ -59,6 +68,8 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn channel_media_byte_budget_saturates_across_owners_browser_and_egress_and_cancels() {
+        let _budget_guard =
+            crate::services::assistant_upload_service::byte_budget::test_guard().await;
         let full = super::super::super::attachment_extraction::MAX_BYTES;
         let mut owners = Vec::new();
         for _ in 0..4 {
@@ -71,6 +82,11 @@ mod tests {
         );
         let egress = reserve(16 * 1024 * 1024).await.unwrap();
         assert_eq!(BUDGET.available_permits(), 0);
+        assert!(
+            crate::services::assistant_tool_files::reserve()
+                .await
+                .is_none()
+        );
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), reserve(1))
                 .await

@@ -1,12 +1,16 @@
+import { localizedError } from "../../../i18n/localizedError";
 /** Pure NYXM/NYXD byte contract, shared by native admission and canvas tests.
  * No Blob, filesystem, React Native or browser APIs. All sequences stay u64. */
 export const HEADER_BYTES = 30;
 export const MAX_JPEG_BYTES = 5 * 1024 * 1024;
 export const MAX_WIDTH = 1920;
 export const MAX_HEIGHT = 1200;
-export type Rectangle = { width: number; height: number; x: number; y: number; patchWidth: number; patchHeight: number; base: bigint };
-export type DesktopFrame = { sequence: bigint; end: boolean; jpeg: Uint8Array; width: number; height: number; rectangle?: Rectangle };
-export type Envelope = { kind: 1 | 2 | 11; end: boolean; sequence: bigint; payload: Uint8Array };
+export type Rectangle = { width: number; height: number; x: number; y: number; patchWidth: number; patchHeight: number; base: bigint;
+};
+export type DesktopFrame = { sequence: bigint; end: boolean; jpeg: Uint8Array; width: number; height: number; rectangle?: Rectangle;
+};
+export type Envelope = { kind: 1 | 2 | 11; end: boolean; sequence: bigint; payload: Uint8Array;
+};
 const uuid = /^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/i;
 export function envelope(buffer: ArrayBuffer, session: string): Envelope | undefined {
   const bytes = new Uint8Array(buffer);
@@ -69,7 +73,8 @@ export function desktopActivity(buffer: ArrayBuffer, session: string): { tool: s
   try {
     const value: unknown = JSON.parse(Array.from(frame.payload, b => String.fromCharCode(b)).join(''));
     if (typeof value !== 'object' || value === null) return;
-    const { tool, cursor } = value as { tool?: unknown; cursor?: {x?: unknown; y?: unknown} };
+    const { tool, cursor } = value as { tool?: unknown; cursor?: {x?: unknown; y?: unknown};
+    };
     if (typeof tool !== 'string' || !/^[a-z_]{1,40}$/.test(tool)) return;
     if (cursor && (typeof cursor.x !== 'number' || typeof cursor.y !== 'number' || !Number.isFinite(cursor.x) ||
       !Number.isFinite(cursor.y) || cursor.x < 0 || cursor.x > 1 || cursor.y < 0 || cursor.y > 1)) return;
@@ -93,16 +98,26 @@ export function base64(bytes: Uint8Array): string {
 }
 
 export type DesktopInput =
-  | { tool: 'click'; arguments: { x: number; y: number; button: 'left' | 'right'; count: number } }
-  | { tool: 'drag'; arguments: { from_x: number; from_y: number; to_x: number; to_y: number; button: 'left'; duration_ms: number } }
-  | { tool: 'scroll'; arguments: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right'; amount: number } }
+  | { tool: 'click'; arguments: { x: number; y: number; button: 'left' | 'right'; count: number;
+      };
+    }
+  | { tool: 'drag'; arguments: { from_x: number; from_y: number; to_x: number; to_y: number; button: 'left'; duration_ms: number;
+      };
+    }
+  | { tool: 'scroll'; arguments: { x: number; y: number; direction: 'up' | 'down' | 'left' | 'right'; amount: number;
+      };
+    }
   | { tool: 'type_text'; arguments: { text: string } }
-  | { tool: 'press_key'; arguments: { key: 'ENTER' | 'TAB' | 'BACKSPACE' | 'ESC' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN' } };
+  | { tool: 'press_key'; arguments: { key:
+          | 'ENTER' | 'TAB' | 'BACKSPACE' | 'ESC' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN';
+      };
+    };
 const coordinate = (value: unknown, maximum: number): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= maximum;
 /** Validate renderer messages again at the native socket boundary. */
 export function desktopInputValue(value: unknown): DesktopInput | undefined {
   if (!value || typeof value !== 'object') return;
-  const { tool, arguments: args } = value as { tool?: unknown; arguments?: Record<string, unknown> };
+  const { tool, arguments: args } = value as { tool?: unknown; arguments?: Record<string, unknown>;
+  };
   if (!args || typeof args !== 'object') return;
   switch (tool) {
     case 'click': if (coordinate(args.x, MAX_WIDTH) && coordinate(args.y, MAX_HEIGHT) && ['left', 'right'].includes(String(args.button)) && args.count === 1)
@@ -120,17 +135,19 @@ export function desktopInputValue(value: unknown): DesktopInput | undefined {
 /** Same NYXM kind=2 UUID/u64 and JSON {tool,arguments} as the web client. */
 export function desktopInput(session: string, sequence: bigint, input: DesktopInput): ArrayBuffer {
   const command = desktopInputValue(input);
-  if (!uuid.test(session) || sequence <= 0n || sequence > 0xffffffffffffffffn || !command) throw new Error('Invalid desktop input');
+  if (!uuid.test(session) || sequence <= 0n || sequence > 0xffffffffffffffffn || !command) throw localizedError('Invalid desktop input');
   // RN/Hermes does not guarantee TextEncoder. Encode UTF-8 explicitly.
   const payload: number[] = [];
   for (const character of JSON.stringify(command)) {
     const code = character.codePointAt(0)!;
     if (code < 0x80) payload.push(code);
-    else if (code < 0x800) payload.push(0xc0 | code >> 6, 0x80 | code & 63);
-    else if (code < 0x10000) payload.push(0xe0 | code >> 12, 0x80 | code >> 6 & 63, 0x80 | code & 63);
-    else payload.push(0xf0 | code >> 18, 0x80 | code >> 12 & 63, 0x80 | code >> 6 & 63, 0x80 | code & 63);
+    else if (code < 0x800) payload.push(0xc0 | (code >> 6), 0x80 | (code & 63));
+    else if (code < 0x10000) payload.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 63), 0x80 | (code & 63),
+      );
+    else payload.push(0xf0 | (code >> 18), 0x80 | ((code >> 12) & 63), 0x80 | ((code >> 6) & 63), 0x80 | (code & 63),
+      );
   }
-  if (payload.length > 16384) throw new Error('Desktop input is too long');
+  if (payload.length > 16384) throw localizedError('Desktop input is too long');
   const bytes = new Uint8Array(HEADER_BYTES + payload.length);
   bytes.set([78, 89, 88, 77, 2, 0]);
   const id = session.replaceAll('-', '');

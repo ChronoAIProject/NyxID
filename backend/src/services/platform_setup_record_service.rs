@@ -2,7 +2,10 @@
 //! additionally use their server-keyed sender scope; adoption must re-encrypt
 //! under the new person in the same exact-source ownership transaction.
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::platform_setup::{COLLECTION_NAME, PlatformSetup, SetupFacts, SetupState},
 };
@@ -46,7 +49,7 @@ pub(crate) async fn encrypt(
     }
     let facts: SetupFacts = serde_json::from_slice(bytes).map_err(|_| invalid())?;
     drop(facts);
-    super::record_field_service::encrypt_context(
+    record_field::encrypt_context(
         keys,
         &RecordContext::new(COLLECTION_NAME, id, owner, &[FIELD, scope])?,
         bytes,
@@ -65,7 +68,7 @@ pub(super) async fn bytes(
     if row.facts_ciphertext.is_empty() {
         return Err(invalid());
     }
-    let bytes = super::record_field_service::decrypt_context(
+    let bytes = record_field::decrypt_context(
         keys,
         &RecordContext::new(
             COLLECTION_NAME,

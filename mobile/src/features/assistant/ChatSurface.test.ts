@@ -19,7 +19,13 @@ function surface(mode: "light" | "dark", bubblePalette = "gray") {
       Pressable: "Pressable",
       StyleSheet: { create: (s: any) => s },
     },
-    "../../theme/ThemeContext": { useTheme: () => ({ mode, bubblePalette }) },
+    "../../theme/ThemeContext": {
+      useTheme: () => ({
+        mode,
+        bubblePalette,
+        colors: { composerBg: "#fff", composerBorder: "#ccc", shadowColor: "#000" },
+      }),
+    },
     "../display/ChatLayoutContext": { useChatColumn: () => column },
   });
   const ui = h.load(
@@ -116,25 +122,47 @@ for (const mode of ["light", "dark"] as const) {
   });
 }
 
-test("chat header/settings controls share a 44pt target and pressed/disabled feedback", () => {
+test("plain chat controls (sheet Close) keep a 44pt target and pressed/disabled feedback", () => {
   const { ui } = surface("dark");
   let presses = 0;
   for (const disabled of [false, true]) {
     const button = ui.ChatIconButton({
-      label: "Settings",
+      label: "Close",
       disabled,
       onPress: () => presses++,
       children: "Icon",
     });
-    assert.equal(button.props.style({ pressed: false })[0].minWidth, 44);
-    assert.equal(button.props.style({ pressed: false })[0].minHeight, 44);
-    assert.equal(
-      button.props.style({ pressed: true })[1].opacity,
-      disabled ? 0.4 : 0.65,
-    );
+    const flat = (pressed: boolean) =>
+      Object.assign({}, ...button.props.style({ pressed }).filter(Boolean));
+    assert.equal(flat(false).minWidth, 44);
+    assert.equal(flat(false).minHeight, 44);
+    assert.equal(flat(true).opacity, disabled ? 0.4 : 0.65);
     assert.equal(button.props.disabled, disabled);
     assert.equal(button.props.accessibilityState.disabled, disabled);
     if (!disabled) button.props.onPress();
   }
   assert.equal(presses, 1);
+});
+
+test("header bars float a chat control as the shared glass button in every layout", () => {
+  for (const mode of ["light", "dark"] as const) {
+    const { ui } = surface(mode);
+    for (const disabled of [false, true]) {
+      const button = ui.ChatIconButton({
+        label: "Chat options",
+        floating: true,
+        disabled,
+        onPress() {},
+        children: "Icon",
+      });
+      // The one glass primitive: same glass, 44pt capsule, highlight and
+      // disabled treatment as the rail and the identity pill.
+      assert.equal(button.type, "FloatingButton");
+      assert.equal(button.props.accessibilityLabel, "Chat options");
+      assert.equal(button.props.disabled, disabled);
+      assert.equal(button.props.children, "Icon");
+      assert.equal(button.props.style, undefined, "no styling of its own");
+      assert.equal(button.props.capsuleStyle, undefined);
+    }
+  }
 });

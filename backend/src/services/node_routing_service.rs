@@ -94,6 +94,16 @@ async fn load_dispatchable_bindings(
     service_id: Option<&str>,
     ws_manager: &NodeWsManager,
 ) -> AppResult<Vec<NodeServiceBinding>> {
+    dispatchable_bindings(db, owner_user_id, service_id, ws_manager, &mut None).await
+}
+
+async fn dispatchable_bindings(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    service_id: Option<&str>,
+    ws_manager: &NodeWsManager,
+    first_configured: &mut Option<String>,
+) -> AppResult<Vec<NodeServiceBinding>> {
     let mut filter = doc! {
         "user_id": owner_user_id,
         "is_active": true,
@@ -112,6 +122,10 @@ async fn load_dispatchable_bindings(
 
     if bindings.is_empty() {
         return Ok(vec![]);
+    }
+
+    if first_configured.is_none() {
+        *first_configured = bindings.first().map(|b| b.node_id.clone());
     }
 
     let node_id_array: bson::Array = bindings
@@ -167,7 +181,7 @@ pub async fn resolve_node_route(
     ws_manager: &NodeWsManager,
 ) -> AppResult<Option<NodeRoute>> {
     let owner_user_id = effective_service_owner_id(db, user_id, service_id).await?;
-    resolve_node_route_for_owner(db, &owner_user_id, service_id, ws_manager).await
+    resolve_node_route_for_owner(db, &owner_user_id, service_id, ws_manager, true).await
 }
 
 async fn resolve_node_route_for_owner(
@@ -175,16 +189,36 @@ async fn resolve_node_route_for_owner(
     owner_user_id: &str,
     service_id: &str,
     ws_manager: &NodeWsManager,
+    recover: bool,
 ) -> AppResult<Option<NodeRoute>> {
-    let primary_node_id =
-        resolve_from_user_service(db, owner_user_id, service_id, ws_manager).await?;
-    let dispatchable_bindings =
-        load_dispatchable_bindings(db, owner_user_id, Some(service_id), ws_manager).await?;
-
-    Ok(build_node_route(collect_ordered_node_ids(
-        primary_node_id,
-        dispatchable_bindings,
-    )))
+    let mut can_wait = recover;
+    loop {
+        let mut configured = configured_user_service_node(db, owner_user_id, service_id).await?;
+        let primary = match configured.as_deref() {
+            Some(id) if is_node_id_dispatchable(db, id, ws_manager).await? => configured.clone(),
+            _ => None,
+        };
+        let bindings = dispatchable_bindings(
+            db,
+            owner_user_id,
+            Some(service_id),
+            ws_manager,
+            &mut configured,
+        )
+        .await?;
+        let route = build_node_route(collect_ordered_node_ids(primary, bindings));
+        if route.is_some() || !can_wait {
+            return Ok(route);
+        }
+        let Some(id) = configured else {
+            return Ok(None);
+        };
+        if !super::node_dispatch::NodeHandover::wait_recent_release(db, ws_manager, &id).await {
+            return Ok(None);
+        }
+        // Re-read the service and bindings after the wait before selecting a destination.
+        can_wait = false;
+    }
 }
 
 async fn effective_service_owner_id(
@@ -207,11 +241,10 @@ async fn effective_service_owner_id(
 ///
 /// Returns Some(node_id) if the user has a UserService with catalog_service_id
 /// matching the given service_id and a dispatchable node_id set.
-async fn resolve_from_user_service(
+async fn configured_user_service_node(
     db: &mongodb::Database,
     owner_user_id: &str,
     service_id: &str,
-    ws_manager: &NodeWsManager,
 ) -> AppResult<Option<String>> {
     let user_service: Option<UserService> =
         crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
@@ -222,16 +255,9 @@ async fn resolve_from_user_service(
             })
             .await?;
 
-    let node_id = match user_service.and_then(|s| s.node_id) {
-        Some(nid) if !nid.is_empty() => nid,
-        _ => return Ok(None),
-    };
-
-    if !is_node_id_dispatchable(db, &node_id, ws_manager).await? {
-        return Ok(None);
-    }
-
-    Ok(Some(node_id))
+    Ok(user_service
+        .and_then(|s| s.node_id)
+        .filter(|id| !id.is_empty()))
 }
 
 /// Check if a user has any currently routable node bindings for a specific service.
@@ -244,7 +270,7 @@ pub async fn has_routable_node_bindings(
 ) -> AppResult<bool> {
     let owner_user_id = effective_service_owner_id(db, user_id, service_id).await?;
     Ok(
-        resolve_node_route_for_owner(db, &owner_user_id, service_id, ws_manager)
+        resolve_node_route_for_owner(db, &owner_user_id, service_id, ws_manager, false)
             .await?
             .is_some(),
     )
@@ -531,6 +557,8 @@ mod tests {
         let mut node = node(node_id, "owner-1");
         let expired_at = Utc::now() - chrono::Duration::seconds(1);
         node.connection_owner = Some(crate::models::node::NodeConnectionOwner {
+            retirement_hash_v1: None,
+            handover_pending: false,
             http_signature_v2: false,
             proxy_upload_v1: false,
             http_cancellation: false,

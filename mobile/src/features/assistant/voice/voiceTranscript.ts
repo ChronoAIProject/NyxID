@@ -1,3 +1,4 @@
+import { translateApp } from "../../../i18n/appTranslation";
 import type { AssistantMessage } from "../assistantTypes";
 import type { VoiceSnapshot } from "./voiceContracts";
 
@@ -54,6 +55,7 @@ export function mergeVoiceTranscript(
         segment_id: caption.id,
         sealed: caption.sealed,
         complete: caption.complete,
+        ...(caption.interrupted ? { interrupted: true } : {}),
       },
     };
   });
@@ -80,6 +82,7 @@ export function mergeVoiceTranscript(
         segment_id: caption.id,
         sealed: caption.sealed,
         complete: caption.complete,
+        ...(caption.interrupted ? { interrupted: true } : {}),
       },
     };
     // A caption already in history anchors unknown rows on either side. Real
@@ -110,10 +113,10 @@ export function voiceTranscriptLabel(
   if (!row.voice.sealed)
     return live
       ? row.role === "user"
-        ? "Transcribing…"
-        : "Speaking…"
-      : "Partial transcript";
-  return row.voice.complete ? undefined : "Partial transcript";
+        ? translateApp("Transcribing…")
+        : translateApp("Speaking…")
+      : translateApp("Partial transcript");
+  return row.voice.complete ? undefined : translateApp("Partial transcript");
 }
 
 /**

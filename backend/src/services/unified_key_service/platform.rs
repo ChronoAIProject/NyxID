@@ -25,6 +25,9 @@ pub async fn create_platform_key(
         ));
     }
     platform_key_service::require(db, &catalog, owner_id).await?;
+    if actor_id != owner_id {
+        crate::services::catalog_service::require_connection_access(db, actor_id, &catalog).await?;
+    }
     let access = crate::services::org_service::resolve_owner_access(db, actor_id, owner_id).await?;
     if !access.can_write() {
         return Err(AppError::NotFound(

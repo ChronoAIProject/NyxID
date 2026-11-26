@@ -96,13 +96,7 @@ pub(super) async fn claim_inner(
         return Ok(None);
     }
     crate::services::security_readiness_service::require_serving(db, READINESS).await?;
-    let raw = Zeroizing::new(
-        keys.decrypt_with_aad(
-            &p.payload.as_ref().ok_or_else(conflict)?.bytes,
-            aad(&row.id).as_bytes(),
-        )
-        .await?,
-    );
+    let raw = Field::Payload.open(keys, row).await?.ok_or_else(conflict)?;
     if raw.len() > MAX_PAYLOAD {
         return Err(conflict());
     }
@@ -331,25 +325,66 @@ pub(super) async fn finish(
         }
     });
     let mut code = code;
-    let encrypted = if let Some(result) = result {
+    let (encrypted, marker) = if let Some(result) = result {
         let raw = Zeroizing::new(serde_json::to_vec(&result).map_err(encoding)?);
         if raw.len() + 2048 > MAX_PAYLOAD {
             code = Some("response_unavailable");
-            None
+            (None, None)
         } else {
-            Some(binary(
-                state
-                    .encryption_keys
-                    .encrypt_with_aad(&raw, format!("{}:result", aad(&row.id)).as_bytes())
-                    .await?,
-            ))
+            let (bytes, marker) = Slot::V2
+                .seal(
+                    &state.encryption_keys,
+                    &row.id,
+                    &row.user_id,
+                    Field::Result,
+                    &raw,
+                )
+                .await?;
+            (Some(binary(bytes)), marker)
         }
     } else {
-        None
+        (None, None)
     };
     let mut session = state.db.client().start_session().await?;
     session.start_transaction().await?;
-    if state.db.collection::<Document>(REQUESTS).update_one(doc!{"_id":&row.id,"execution_proposal.v2.claim_id":&resume.claim_id,"execution_proposal.v2.delivery_abandoned":{"$ne":true},"execution_proposal.v2.state":{"$in":["preparing","dispatched"]}},doc!{"$set":{"activity_outcome":activity_outcome,"execution_proposal.v2.state":state_name,"execution_proposal.v2.failure_code":code,"execution_proposal.v2.result":bson::to_bson(&encrypted).map_err(encoding)?},"$unset":{"execution_proposal.v2.payload":""}}).session(&mut session).await?.matched_count==1{super::super::lifecycle::retire_operations(&state.db,&mut session,std::slice::from_ref(&row.id)).await?;}
+    let filter = doc! {
+        "_id": &row.id,
+        "execution_proposal.v2.claim_id": &resume.claim_id,
+        "execution_proposal.v2.delivery_abandoned": {"$ne": true},
+        "execution_proposal.v2.state": {"$in": ["preparing", "dispatched"]},
+    };
+    let mut unset = Slot::V2.unset(&[Field::Payload]);
+    let mut set = doc! {
+        "activity_outcome": activity_outcome,
+        "execution_proposal.v2.state": state_name,
+        "execution_proposal.v2.failure_code": code,
+        "execution_proposal.v2.result": bson::to_bson(&encrypted).map_err(encoding)?,
+    };
+    if let Some(version) = marker {
+        set.insert(
+            "execution_proposal.v2.result_context_version",
+            i32::from(version),
+        );
+    } else {
+        unset.insert("execution_proposal.v2.result_context_version", "");
+    }
+    let update = doc! {"$set": set, "$unset": unset};
+    if state
+        .db
+        .collection::<Document>(REQUESTS)
+        .update_one(filter, update)
+        .session(&mut session)
+        .await?
+        .matched_count
+        == 1
+    {
+        super::super::lifecycle::retire_operations(
+            &state.db,
+            &mut session,
+            std::slice::from_ref(&row.id),
+        )
+        .await?;
+    }
     session.commit_transaction().await?;
     Ok(())
 }
@@ -365,7 +400,7 @@ pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
             );
         }
     }
-    state.db.collection::<Document>(REQUESTS).update_many(doc!{"execution_proposal.version":2,"created_at":{"$lt":bson::DateTime::from_chrono(Utc::now()-Duration::days(1))}},doc!{"$unset":{"execution_proposal.v2.payload":"","execution_proposal.v2.result":""}}).await?;
+    state.db.collection::<Document>(REQUESTS).update_many(doc!{"execution_proposal.version":2,"created_at":{"$lt":bson::DateTime::from_chrono(Utc::now()-Duration::days(1))}},doc!{"$unset":Slot::V2.unset(&[Field::Payload, Field::Result])}).await?;
     Ok(())
 }
 async fn maintain(state: &crate::AppState, row: &ApprovalRequest) -> AppResult<()> {
@@ -524,10 +559,16 @@ pub(crate) async fn cancel_in_session(
         ) {
             // Erasure or departure can withdraw delivery, but cannot rewrite
             // the recorded outcome of an effect that has already settled.
-            db.collection::<Document>(REQUESTS).update_one(doc! {"_id":&row.id}, doc! {
-                "$set":{"execution_proposal.v2.delivery_abandoned":true},
-                "$unset":{"execution_proposal.v2.payload":"","execution_proposal.v2.result":""}
-            }).session(&mut *session).await?;
+            db.collection::<Document>(REQUESTS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {
+                        "$set":{"execution_proposal.v2.delivery_abandoned":true},
+                        "$unset":Slot::V2.unset(&[Field::Payload, Field::Result])
+                    },
+                )
+                .session(&mut *session)
+                .await?;
             super::super::lifecycle::retire_operations(db, session, std::slice::from_ref(&row.id))
                 .await?;
             continue;
@@ -537,7 +578,7 @@ pub(crate) async fn cancel_in_session(
         } else {
             "cancelled"
         };
-        db.collection::<Document>(REQUESTS).update_one(doc!{"_id":&row.id},doc!{"$set":{"status":"expired","execution_proposal.v2.state":state,"execution_proposal.v2.failure_code":reason,"execution_proposal.v2.delivery_abandoned":true},"$unset":{"execution_proposal.v2.payload":"","execution_proposal.v2.result":""}}).session(&mut *session).await?;
+        db.collection::<Document>(REQUESTS).update_one(doc!{"_id":&row.id},doc!{"$set":{"status":"expired","execution_proposal.v2.state":state,"execution_proposal.v2.failure_code":reason,"execution_proposal.v2.delivery_abandoned":true},"$unset":Slot::V2.unset(&[Field::Payload, Field::Result])}).session(&mut *session).await?;
         super::super::lifecycle::retire_operations(db, session, std::slice::from_ref(&row.id))
             .await?;
     }
@@ -674,7 +715,7 @@ pub(crate) async fn not_sent_before_handoff(db: &Database, resume: &Resume) -> A
             "execution_proposal.v2.state": "dispatched"},
             doc! {"$set": {"execution_proposal.v2.state": "not_sent",
             "execution_proposal.v2.failure_code": "machine_source_unavailable"},
-            "$unset": {"execution_proposal.v2.payload": "", "execution_proposal.v2.result": ""}},
+            "$unset": Slot::V2.unset(&[Field::Payload, Field::Result])},
         )
         .session(&mut session)
         .await?;

@@ -319,7 +319,8 @@ pub(crate) async fn watch_scope(
     if current.is_none() {
         return Err(refused());
     }
-    let mut chat = acks::for_key(db, &watch.user_id, Some(&watch.api_key_id))
+    let key = super::key_service::get_api_key(db, &watch.user_id, &watch.api_key_id).await?;
+    let mut chat = acks::chat_for_authenticated_key(db, &key, None)
         .await?
         .ok_or_else(refused)?;
     if chat.conversation_id != watch.conversation_id || chat.agent_id != watch.agent_id {
@@ -343,7 +344,6 @@ pub(crate) async fn watch_scope(
     }
     // Restore the original key/watch lineage. Legacy descendants are explicitly
     // excluded from fresh task enrollment by this existing authentication path.
-    let key = super::key_service::get_api_key(db, &watch.user_id, &watch.api_key_id).await?;
     let auth = Box::pin(crate::mw::auth::api_key_auth_user_for_watch(
         db, &key, watch,
     ))

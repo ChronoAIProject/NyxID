@@ -13,6 +13,7 @@ import { mentionTokens } from "@/lib/assistant/nyxbot-mentions";
 import type { InlineMention } from "@/lib/assistant/group-mentions";
 import ReactMarkdown, { type Components, type ExtraProps } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import { remarkAutolinkPunctuation } from "@/lib/assistant/autolink-punctuation";
 import remarkGfm from "remark-gfm";
 import remarkCjkFriendly from "remark-cjk-friendly/parseOnly";
 import { AssistantLink } from "@/components/assistant/blocks/assistant-link";
@@ -404,6 +405,7 @@ const COMPONENTS: Components = {
 type MarkdownProps = ComponentProps<typeof ReactMarkdown>;
 const REMARK_PLUGINS: MarkdownProps["remarkPlugins"] = [
   remarkGfm,
+  remarkAutolinkPunctuation,
   // Parse CJK punctuation boundaries without rewriting code or escaped markers.
   remarkCjkFriendly,
   remarkSafeModelContent,

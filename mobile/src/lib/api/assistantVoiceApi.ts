@@ -1,3 +1,4 @@
+import { localizedError } from "../../i18n/localizedError";
 import {
   createAssistantVoiceApi,
   trustedVoiceOrigin,
@@ -21,12 +22,12 @@ export async function assistantVoiceFeatures(signal?: AbortSignal) {
 export function nativeVoiceEnvironment() {
   const configured = new URL(getFrontendUrl());
   if (configured.username || configured.password)
-    throw new Error("Voice requires a trusted NyxID frontend address.");
+    throw localizedError("Voice requires a trusted NyxID frontend address.");
   const origin = trustedVoiceOrigin(configured.origin);
   const epoch = getAuthEpoch();
   const api = createAssistantVoiceApi((path, options) => {
     if (getAuthEpoch() !== epoch)
-      throw Object.assign(new Error("Voice account changed."), {
+      throw Object.assign(localizedError("Voice account changed."), {
         name: "AbortError",
       });
     return requestJson(path, options);

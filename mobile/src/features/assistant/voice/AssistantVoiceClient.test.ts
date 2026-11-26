@@ -329,6 +329,91 @@ function setup() {
   };
 }
 
+test("foreground resync verifies the exact active call without recreating media or losing captions", async () => {
+  const e = setup();
+  await e.open();
+  e.socket.receive({
+    type: "snapshot",
+    session: session(),
+    captions: [
+      {
+        id: "caption",
+        speaker: "assistant",
+        text: "Still here",
+        sealed: true,
+        complete: true,
+      },
+    ],
+    tasks: [],
+  });
+  const reads: string[][] = [];
+  e.api.status = async (thread, id) => {
+    reads.push([thread, id]);
+    return session({ observed_seconds: 20, control_revision: 1 });
+  };
+  assert.equal(await e.client.resync(), "active");
+  assert.deepEqual(reads, [[conversationId, sessionId]]);
+  assert.equal(e.starts.length, 1);
+  assert.deepEqual(e.media.prepared, ["openai_live"]);
+  assert.equal(e.media.closed, 0);
+  assert.equal(e.snapshots.at(-1)?.session.observed_seconds, 20);
+  assert.equal(e.snapshots.at(-1)?.captions[0]?.text, "Still here");
+  assert.equal(e.socket.events().at(-1)?.type, "heartbeat");
+  await e.client.end();
+});
+
+test("foreground resync ends only on definitive current server evidence", async () => {
+  for (const observed of [
+    session({ state: "closed" }),
+    session({ state: "failed" }),
+    session({ end_requested: true }),
+    session({ id: requestId }),
+  ]) {
+    const e = setup();
+    await e.open();
+    e.api.status = async () => observed;
+    assert.equal(await e.client.resync(), "ended");
+    assert.equal(e.starts.length, 1);
+    await e.client.end();
+  }
+});
+
+test("foreground resync accepts higher-generation recovery and keeps inconclusive reads connected", async () => {
+  const e = setup();
+  await e.open();
+  e.socket.receive({
+    type: "snapshot",
+    session: session({ control_revision: 5 }),
+    captions: [],
+    tasks: [],
+  });
+  e.api.status = async () => session({ generation: 2, control_revision: 1 });
+  assert.equal(await e.client.resync(), "active");
+  assert.equal(e.snapshots.at(-1)?.session.generation, 2);
+  assert.equal(e.snapshots.at(-1)?.session.control_revision, 1);
+  for (const observed of [
+    session({ generation: 1, state: "closed" }),
+    session({ generation: 2, control_revision: 0, state: "closed" }),
+    null,
+  ]) {
+    e.api.status = async () => {
+      if (!observed) throw new Error("offline");
+      return observed;
+    };
+    assert.equal(await e.client.resync(), "inconclusive");
+    assert.equal(e.snapshots.at(-1)?.session.control_revision, 1);
+    assert.equal(e.media.closed, 0);
+    assert.equal(e.client.isClosed, false);
+  }
+  e.api.status = () => new Promise(() => {});
+  const check = e.client.resync();
+  e.clock.expire();
+  assert.equal(await check, "inconclusive");
+  assert.equal(e.media.closed, 0);
+  assert.equal(e.starts.length, 1);
+  await e.client.end();
+});
+
 test("a call creates exactly once, exchanges SDP and waits for both provider and authoritative readiness", async () => {
   const e = setup();
   await e.client.start(preferences);
@@ -943,6 +1028,15 @@ test("ending during POST cleans up a late successful owned session exactly once"
   const e = setup();
   const waiting = deferred<unknown>();
   e.responses.start = () => waiting.promise;
+  const dispatch = e.api.start;
+  e.api.start = (thread, input, signal) => {
+    signal?.addEventListener(
+      "abort",
+      () => waiting.reject(new Error("transport aborted")),
+      { once: true },
+    );
+    return dispatch(thread, input, signal);
+  };
   const starting = e.client.start(preferences);
   for (let step = 0; step < 8 && !e.starts.length; step++)
     await Promise.resolve();
@@ -950,9 +1044,11 @@ test("ending during POST cleans up a late successful owned session exactly once"
   assert.equal(e.client.pendingStart, true);
   await e.client.end();
   assert.equal(e.cleanup.at(-1)?.unknown, true);
-  assert.equal(e.starts[0]!.signal!.aborted, true);
-  waiting.resolve({ session: session(), sdp_answer: "answer" });
   await starting;
+  assert.equal(e.client.pendingStart, true);
+  assert.equal(e.starts[0]!.signal!.aborted, false);
+  waiting.resolve({ session: session(), sdp_answer: "answer" });
+  for (let step = 0; step < 32; step++) await Promise.resolve();
   assert.equal(e.client.pendingStart, false);
   assert.ok(
     e.cleanup.some(
@@ -974,6 +1070,31 @@ test("ending during POST cleans up a late successful owned session exactly once"
   assert.equal(e.count().closed, 1);
 });
 
+test("End between a provider response and foreground delivery still closes the exact owned session", async () => {
+  const e = setup();
+  const waiting = deferred<unknown>();
+  e.responses.start = () => waiting.promise;
+  const starting = e.client.start(preferences);
+  for (let step = 0; step < 32 && !e.starts.length; step++)
+    await Promise.resolve();
+  let ending: Promise<void> | undefined;
+  void waiting.promise.then(() => {
+    ending = e.client.end();
+  });
+  waiting.resolve({ session: session(), sdp_answer: "answer" });
+  await starting;
+  await ending;
+  for (let step = 0; step < 32; step++) await Promise.resolve();
+  assert.deepEqual(
+    e.controls.map((control) => control.id),
+    [sessionId],
+  );
+  assert.equal(e.client.pendingStart, false);
+  assert.equal(e.cleanup.at(-1)?.session, null);
+  assert.deepEqual(e.media.answers, []);
+  assert.equal(e.starts.length, 1);
+});
+
 test("a rejected POST after local End retains verified cross-chat recovery without replay or auto-End", async () => {
   const e = setup();
   const waiting = deferred<unknown>();
@@ -989,6 +1110,7 @@ test("a rejected POST after local End retains verified cross-chat recovery witho
   await e.client.end();
   waiting.reject(new Error("lost response"));
   await starting;
+  for (let step = 0; step < 32; step++) await Promise.resolve();
   assert.equal(e.client.pendingStart, false);
   assert.equal(e.cleanup.at(-1)?.unknown, false);
   assert.equal(e.cleanup.at(-1)?.session?.id, requestId);
@@ -1091,7 +1213,7 @@ for (const phase of ["microphone", "server", "webrtc", "transport"] as const) {
     await e.client.end();
     await starting;
     assert.equal(e.client.isClosed, true);
-    assert.equal(e.client.pendingStart, false);
+    assert.equal(e.client.pendingStart, phase === "server");
     assert.equal(e.count().closed, 1);
     assert.deepEqual(e.errors, []);
     assert.equal(e.media.inputs.includes(true), false);
@@ -1102,6 +1224,7 @@ for (const phase of ["microphone", "server", "webrtc", "transport"] as const) {
     answer.resolve();
     socket.resolve(e.socket);
     for (let step = 0; step < 32; step++) await Promise.resolve();
+    assert.equal(e.client.pendingStart, false);
     assert.deepEqual(
       e.controls.map((value) => value.input.action),
       phase === "microphone" ? [] : ["end"],
@@ -1957,4 +2080,70 @@ test("End polling ignores a foreign terminal call and never overlaps status read
   assert.equal(e.client.pendingEnd?.id, sessionId);
   assert.equal(e.media.closed, 1);
   assert.equal(e.clock.intervals.size, 0);
+});
+
+test("native cancellation listeners cannot tear down a known session before End dispatch", async () => {
+  const f = setup();
+  const order: string[] = [];
+  f.media.prepare = async (_protocol: string, signal?: AbortSignal) => {
+    signal?.addEventListener("abort", () => order.push("abort media"));
+    return "offer";
+  };
+  await f.client.start(preferences);
+  f.socket.readyState = 3;
+  f.api.control = async () => {
+    order.push("end");
+    return session({ state: "closed", end_requested: true });
+  };
+  f.media.close = () => {
+    order.push("close");
+  };
+  await f.client.end();
+  assert.deepEqual(order, ["end", "abort media", "close"]);
+});
+
+test("Android/WebView and Grok End is dispatched before media teardown", async () => {
+  for (const protocol of ["openai_live", "xai_realtime"] as const) {
+    const f = setup();
+    await f.client.start(preferences, protocol);
+    const order: string[] = [];
+    f.api.control = async () => {
+      order.push("end");
+      return session({ state: "closed", end_requested: true });
+    };
+    f.media.close = () => {
+      order.push("close");
+    };
+    if (protocol === "openai_live") f.socket.readyState = 3;
+    await f.client.end();
+    assert.deepEqual(order, ["end", "close"]);
+  }
+});
+
+test("a lost start response discovers and ends only this attempt's orphan without conflict", async () => {
+  const e = setup();
+  let requestId = "";
+  e.responses.start = async () => {
+    requestId = e.starts[0]!.input.client_request_id;
+    throw new Error("lost response");
+  };
+  e.responses.active = async () => ({
+    session: requestId ? session({ client_request_id: requestId }) : null,
+  });
+  await e.client.start(preferences);
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.controls.length, 1);
+  assert.equal(e.controls[0]!.id, sessionId);
+  assert.equal(e.controls[0]!.input.action, "end");
+  assert.deepEqual(
+    e.conflicts,
+    [null],
+    "terminal cleanup clears recovery without a conflict row",
+  );
+  assert.equal(e.client.pendingEnd, undefined);
+  assert.equal(e.client.isClosed, true);
+  const next = setup();
+  await next.client.start(preferences);
+  assert.equal(next.starts.length, 1);
+  await next.client.end();
 });

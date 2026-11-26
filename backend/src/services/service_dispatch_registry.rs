@@ -277,6 +277,7 @@ mod tests {
         service.base_url = base_url.clone();
         service.slug = "connection-alias".into();
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some("cma".into()),
             execution_request: None,
             execution_permission: None,
@@ -288,7 +289,7 @@ mod tests {
             auth_key_name: String::new(),
             credential: Default::default(),
             service,
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: Some("credential-connection".into()),
@@ -322,7 +323,7 @@ mod tests {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("idempotency-key", "original-key".parse().unwrap());
         proxy_service::forward_request_with_resource_proof(
-            &reqwest::Client::new(),
+            proxy_service::Redirects::Return,
             target,
             reqwest::Method::POST,
             "/operation",

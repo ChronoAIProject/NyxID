@@ -4,6 +4,8 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use futures::TryStreamExt;
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
@@ -281,10 +283,35 @@ pub struct CreateChannelBotResponse {
 
 #[derive(Debug, Serialize)]
 pub struct VerifyBotResponse {
+    verification_scope: VerificationScope,
     pub last_verification: Option<BotVerificationResponse>,
     pub id: String,
     pub status: String,
     pub webhook_registered: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum VerificationScope {
+    Credentials,
+    CredentialsAndWebhook,
+    StoredCredentials,
+}
+
+impl VerifyBotResponse {
+    fn from_bot(
+        bot: crate::models::channel_bot::ChannelBot,
+        verification_scope: VerificationScope,
+        last_verification: Option<BotVerificationResponse>,
+    ) -> Self {
+        Self {
+            id: bot.id,
+            status: bot.status,
+            webhook_registered: bot.webhook_registered,
+            verification_scope,
+            last_verification,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -345,6 +372,8 @@ pub struct ChannelBotDiagnosticsResponse {
 #[derive(Debug, Serialize)]
 pub struct ChannelBotHealthResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_delivery: Option<crate::services::channel_bot_health::answer::Delivery>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub discord_intake: Option<crate::services::channel_bot_health::discord::Intake>,
     pub diagnostics: ChannelBotDiagnosticsResponse,
     pub id: String,
@@ -363,6 +392,12 @@ pub struct ChannelBotHealthResponse {
     pub recommended_action_text: String,
     /// Whether the caller may run the recovery action (owner write access).
     pub can_write: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_restore_state: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -391,14 +426,25 @@ pub async fn admin_list(
     let ids: Vec<String> = bots.iter().map(|bot| bot.id.clone()).collect();
     let gateway = channel_bot_service::gateway_linked_ids(&state.db, &ids).await?;
     let intake = crate::services::channel_bot_health::discord::load(&state.db, &bots).await?;
+    let nyxbot_rows = latest_nyxbot_rows(&state.db, &ids).await?;
+    let billing = org_guest_billing_for_rows(&state.db, &bots, &nyxbot_rows).await?;
+    let mut nyxbot_states = std::collections::HashMap::new();
+    for row in nyxbot_rows.values() {
+        if let Some(code) = nyxbot_health_state(&state, row).await {
+            nyxbot_states.insert(row.channel_bot_id.clone(), code);
+        }
+    }
     Ok(Json(
         bots.iter()
             .map(|bot| {
-                health_with_intake(
+                health_with_nyxbot(
                     bot,
                     gateway.contains(&bot.id),
                     false,
                     intake.get(&bot.id).cloned(),
+                    nyxbot_rows.get(&bot.id),
+                    nyxbot_states.get(&bot.id).map(String::as_str),
+                    billing.get(&bot.id).copied(),
                 )
             })
             .collect(),
@@ -414,7 +460,7 @@ pub async fn admin_health(
     crate::handlers::admin_helpers::require_admin(&state, &auth_user).await?;
     let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(health_loaded(&state.db, &bot, gateway, false).await?))
+    Ok(Json(health_loaded(&state, &bot, gateway, false).await?))
 }
 
 /// GET /api/v1/admin/channel-bots/webhook-rejections
@@ -499,20 +545,151 @@ pub(crate) fn health_for(
     health_with_intake(bot, gateway, can_write, None)
 }
 
-async fn health_loaded(
-    db: &mongodb::Database,
+pub(crate) async fn health_loaded(
+    state: &AppState,
     bot: &crate::models::channel_bot::ChannelBot,
     gateway: bool,
     can_write: bool,
 ) -> AppResult<ChannelBotHealthResponse> {
     let mut intake =
-        crate::services::channel_bot_health::discord::load(db, std::slice::from_ref(bot)).await?;
-    Ok(health_with_intake(
+        crate::services::channel_bot_health::discord::load(&state.db, std::slice::from_ref(bot))
+            .await?;
+    let nyxbot_rows = latest_nyxbot_rows(&state.db, std::slice::from_ref(&bot.id)).await?;
+    let billing =
+        org_guest_billing_for_rows(&state.db, std::slice::from_ref(bot), &nyxbot_rows).await?;
+    let nyxbot_state = if let Some(row) = nyxbot_rows.get(&bot.id) {
+        nyxbot_health_state(state, row).await
+    } else {
+        None
+    };
+    Ok(health_with_nyxbot(
         bot,
         gateway,
         can_write,
         intake.remove(&bot.id),
+        nyxbot_rows.get(&bot.id),
+        nyxbot_state.as_deref(),
+        billing.get(&bot.id).copied(),
     ))
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+struct NyxbotHealthRow {
+    #[serde(default)]
+    answer_events: Vec<crate::services::channel_bot_health::answer::Observation>,
+    #[serde(default)]
+    answer_responses: Vec<crate::services::channel_bot_health::answer::Observation>,
+    #[serde(rename = "_id")]
+    id: String,
+    user_id: String,
+    channel_bot_id: String,
+    #[serde(default)]
+    bot_owner_id: Option<String>,
+    status: String,
+    #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
+    org_specialist: Option<crate::models::org_channel::Binding>,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    org_restore_last_reason: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    org_restore_next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    org_restore_claim_id: Option<String>,
+    #[serde(default)]
+    org_restore_attempts: i32,
+    #[serde(default)]
+    native_intake_refused: bool,
+    #[serde(default)]
+    gateway_not_received: Option<crate::services::channel_bot_health::MissingGatewayEvent>,
+}
+
+async fn latest_nyxbot_rows(
+    db: &mongodb::Database,
+    bot_ids: &[String],
+) -> AppResult<std::collections::HashMap<String, NyxbotHealthRow>> {
+    if bot_ids.is_empty() {
+        return Ok(Default::default());
+    }
+    // `nyxbot_health_latest` supplies the indexed sort. Project before the
+    // group so encrypted gateway material and sender data never enter the
+    // aggregation; the final limit is bounded by the requested page.
+    let documents: Vec<mongodb::bson::Document> = db
+        .collection::<mongodb::bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
+        .aggregate([
+            doc! {"$match": {"channel_bot_id": {"$in": bot_ids}}},
+            doc! {"$project": {
+                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1, "binding_id": 1,
+                "created_at": 1, "status": 1, "last_error": 1, "org_specialist": 1,
+                "agent_id": 1, "org_restore_last_reason": 1,
+                "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
+                "org_restore_attempts": 1,
+                "gateway_not_received": {"$cond":[{"$and":[
+                    {"$eq":["$status","active"]},{"$eq":["$transport","gateway"]},
+                    {"$eq":["$delivery_status","failing"]},{"$eq":["$delivery_error","not_received"]}]},
+                    {"message_at":"$delivery_failed_at"},null]},
+                "native_intake_refused": {"$and":[{"$eq":["$transport","gateway"]},
+                    {"$eq":["$status","active"]},{"$eq":["$gateway_native_phase","ready"]},
+                    {"$in":["$gateway_source.type",["discord","whatsapp"]]},
+                    {"$eq":[{"$ifNull":["$gateway_setup_release_id",null]},null]},
+                    {"$eq":[{"$ifNull":["$pending_agent_api_key_id",null]},null]},
+                    {"$eq":["$gateway_native_delivery",crate::services::channel_bot_health::codes::GATEWAY_INTAKE_REFUSED]}]},
+            }},
+            doc! {"$sort": {"channel_bot_id": 1, "created_at": -1, "_id": -1}},
+            doc! {"$group": {"_id": "$channel_bot_id", "row": {"$first": "$$ROOT"},
+                "gateway_not_received": {"$max": "$gateway_not_received"}}},
+            doc! {"$replaceWith": {"$mergeObjects": ["$row", {"gateway_not_received": "$gateway_not_received"}]}},
+            doc! {"$project": {
+                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1, "binding_id": 1,
+                "status": 1, "last_error": 1, "org_specialist": 1,
+                "agent_id": 1, "org_restore_last_reason": 1,
+                "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
+                "org_restore_attempts": 1, "native_intake_refused": 1, "gateway_not_received": 1,
+            }},
+            doc! {"$limit": bot_ids.len() as i64},
+            crate::services::channel_bot_health::answer::event_lookup(),
+            crate::services::channel_bot_health::answer::response_lookup(),
+        ])
+        .hint(mongodb::options::Hint::Name(
+            "nyxbot_health_latest".to_owned(),
+        ))
+        .await?
+        .try_collect()
+        .await?;
+    let rows: Vec<NyxbotHealthRow> = documents
+        .into_iter()
+        .map(|document| {
+            mongodb::bson::from_document(document)
+                .map_err(|error| AppError::Internal(format!("invalid NyxBot health row: {error}")))
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+    let mut latest = std::collections::HashMap::new();
+    for row in rows {
+        latest.entry(row.channel_bot_id.clone()).or_insert(row);
+    }
+    Ok(latest)
+}
+
+async fn org_guest_billing_for_rows(
+    db: &mongodb::Database,
+    bots: &[crate::models::channel_bot::ChannelBot],
+    rows: &std::collections::HashMap<String, NyxbotHealthRow>,
+) -> AppResult<std::collections::BTreeMap<String, &'static str>> {
+    let bindings: Vec<_> = bots
+        .iter()
+        .filter_map(|bot| {
+            let row = rows.get(&bot.id)?;
+            let binding = row.org_specialist.as_ref()?;
+            (matches!(row.status.as_str(), "active" | "pending")
+                && binding.version == 1
+                && binding.guests.enabled
+                && binding.org_id == bot.user_id)
+                .then(|| (bot.id.clone(), binding.org_id.clone()))
+        })
+        .collect();
+    crate::services::channel_bot_health::load_org_guest_billing_many(db, &bindings).await
 }
 
 fn health_with_intake(
@@ -528,6 +705,7 @@ fn health_with_intake(
     }
     let recommendation = crate::services::channel_bot_health::recommend(&facts);
     ChannelBotHealthResponse {
+        answer_delivery: facts.answer_delivery,
         discord_intake: facts.discord_intake.clone(),
         id: bot.id.clone(),
         platform: bot.platform.clone(),
@@ -545,6 +723,162 @@ fn health_with_intake(
         recommended_action: recommendation.action,
         recommended_action_text: recommendation.text,
         can_write,
+        nyxbot_status: None,
+        nyxbot_last_error: None,
+        nyxbot_restore_state: None,
+    }
+}
+
+fn health_with_nyxbot(
+    bot: &crate::models::channel_bot::ChannelBot,
+    gateway: bool,
+    can_write: bool,
+    intake: Option<crate::services::channel_bot_health::discord::Intake>,
+    nyxbot: Option<&NyxbotHealthRow>,
+    nyxbot_state: Option<&str>,
+    org_guest_billing: Option<&str>,
+) -> ChannelBotHealthResponse {
+    let mut facts =
+        crate::services::channel_bot_health::HealthFacts::for_bot(bot, chrono::Utc::now(), gateway);
+    facts.org_guest_billing = org_guest_billing;
+    if intake.is_some() {
+        facts.discord_intake = intake;
+    }
+    let mut response = health_with_intake(bot, gateway, can_write, facts.discord_intake.clone());
+    if let Some(row) = nyxbot {
+        facts.gateway_not_received = row.gateway_not_received;
+        crate::services::channel_bot_health::answer::apply_latest(
+            &mut facts,
+            row.answer_events.first(),
+            row.answer_responses.first(),
+            bot.diagnostics.last_outbound_error.as_ref(),
+        );
+        response.answer_delivery = facts.answer_delivery;
+        if row.native_intake_refused && facts.failure_reason.is_none() {
+            facts.failure_reason =
+                Some(crate::services::channel_bot_health::codes::GATEWAY_INTAKE_REFUSED);
+        }
+        if row.status == "failed" && row.last_error.as_deref() == Some("org_access_lost") {
+            facts.failure_reason = nyxbot_state.or(Some(
+                crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST,
+            ));
+        }
+        response.nyxbot_status = Some(row.status.clone());
+        response.nyxbot_last_error = row.last_error.clone();
+        response.nyxbot_restore_state = row
+            .org_restore_claim_id
+            .as_ref()
+            .map(|_| "in_flight".to_owned())
+            .or_else(|| row.org_restore_last_reason.clone());
+    }
+    let recommendation = crate::services::channel_bot_health::recommend(&facts);
+    response.recommended_action = recommendation.action;
+    response.recommended_action_text = recommendation.text;
+    response
+}
+
+async fn nyxbot_health_state_for_db(
+    db: &mongodb::Database,
+    row: &NyxbotHealthRow,
+) -> Option<String> {
+    if row.status != "failed" || row.last_error.as_deref() != Some("org_access_lost") {
+        return None;
+    }
+    if !crate::services::nyxbot_gateway_release_service::has_old_org_restore_proof(db, &row.id)
+        .await
+        .ok()?
+    {
+        return Some(crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST.to_owned());
+    }
+    let code = match row.org_restore_last_reason.as_deref() {
+        Some("readiness_unavailable") => {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS
+        }
+        Some(_)
+            if row
+                .org_restore_next_attempt_at
+                .is_some_and(|next| next > chrono::Utc::now()) =>
+        {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY
+        }
+        Some(reason) if reason != "readiness_unavailable" && reason != "restored" => {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY
+        }
+        Some("restored") => crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST,
+        None if row.org_restore_attempts == 0
+            && row
+                .org_restore_next_attempt_at
+                .is_none_or(|next| next <= chrono::Utc::now()) =>
+        {
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_PENDING
+        }
+        _ => crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_RETRYING_GATEWAY,
+    };
+    Some(code.to_owned())
+}
+
+async fn nyxbot_health_state(state: &AppState, row: &NyxbotHealthRow) -> Option<String> {
+    let proof = nyxbot_health_state_for_db(&state.db, row).await?;
+    if proof == crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST {
+        return Some(proof);
+    }
+    match nyxbot_health_org_access(state, row).await.ok()? {
+        crate::services::org_channel_service::OrgAccess::Holds => Some(proof),
+        crate::services::org_channel_service::OrgAccess::Unavailable => Some(
+            crate::services::channel_bot_health::codes::NYXBOT_ORG_RESTORATION_WAITING_READINESS
+                .to_owned(),
+        ),
+        crate::services::org_channel_service::OrgAccess::Lost => {
+            Some(crate::services::channel_bot_health::codes::NYXBOT_ORG_ACCESS_LOST.to_owned())
+        }
+    }
+}
+
+async fn nyxbot_health_org_access(
+    state: &AppState,
+    row: &NyxbotHealthRow,
+) -> AppResult<crate::services::org_channel_service::OrgAccess> {
+    if !crate::services::platform_bot_authority::permits_personal_routes(
+        &state.db,
+        &row.channel_bot_id,
+    )
+    .await?
+    {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    if let Some(org) = row.bot_owner_id.as_deref()
+        && !crate::handlers::nyxbot::manages_bot_owner(state, &row.user_id, org).await?
+    {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    let Some(binding) = row.org_specialist.as_ref() else {
+        return Ok(crate::services::org_channel_service::OrgAccess::Holds);
+    };
+    if binding.version != 1 || row.bot_owner_id.as_ref() != Some(&binding.org_id) {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    let specialist_live = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.agent_id, "user_id": &binding.org_id, "kind":"specialist", "destroyed_at": null})
+        .await?
+        .is_some();
+    let bot_live = state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id": &row.channel_bot_id, "user_id": &binding.org_id, "is_active": true, "status": "active"})
+        .await?
+        .is_some();
+    if !specialist_live || !bot_live {
+        return Ok(crate::services::org_channel_service::OrgAccess::Lost);
+    }
+    match crate::services::org_channel_service::enabled(&state.db, &row.user_id).await {
+        Ok(()) => Ok(crate::services::org_channel_service::OrgAccess::Holds),
+        Err(
+            crate::errors::AppError::Forbidden(_)
+            | crate::errors::AppError::SecurityReadinessUnavailable,
+        ) => Ok(crate::services::org_channel_service::OrgAccess::Unavailable),
+        Err(error) => Err(error),
     }
 }
 
@@ -578,6 +912,8 @@ impl From<crate::models::channel_bot::BotVerification> for BotVerificationRespon
 
 #[derive(Debug, Serialize)]
 pub struct DeleteChannelBotResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_delivery_stopped: Option<bool>,
     pub webhook_cleanup: Option<&'static str>,
 }
 
@@ -741,19 +1077,8 @@ pub(crate) async fn resolve_bot_owner_for_write(
     actor: &str,
     bot_id: &str,
 ) -> AppResult<(String, crate::models::channel_bot::ChannelBot)> {
-    let bot = channel_bot_service::get_bot(&state.db, bot_id).await?;
-    let access = org_service::resolve_owner_access(&state.db, actor, &bot.user_id).await?;
-    if !access.can_read() {
-        return Err(AppError::ChannelBotNotFound(bot_id.to_string()));
-    }
-    if !access.can_write() {
-        return Err(AppError::OrgRoleInsufficient(
-            "you do not have permission to modify this channel bot".to_string(),
-        ));
-    }
-    Ok((bot.user_id.clone(), bot))
+    channel_bot_service::resolve_bot_owner_for_write(&state.db, actor, bot_id).await
 }
-
 /// Resolve the effective owner id for a READ operation on a bot.
 /// Allows any active member of the owning org (including viewers).
 pub(crate) async fn resolve_bot_owner_for_read(
@@ -791,18 +1116,21 @@ pub(crate) async fn resolve_create_owner(
     }
 }
 
-/// Resolve the owner id for a list operation. If `org_id` is set, the
-/// caller must be an admin of that org; otherwise lists personal bots.
+/// Resolve a list owner, preserving admin access and admitting first-party human Members.
 async fn resolve_list_owner(
     state: &AppState,
-    actor: &str,
+    auth: &AuthUser,
     org_id: Option<&str>,
 ) -> AppResult<String> {
+    let actor = auth.user_id.to_string();
     if let Some(org_id) = org_id {
-        let access = org_service::resolve_owner_access(&state.db, actor, org_id).await?;
-        if !access.can_write() {
+        let access = org_service::resolve_owner_access(&state.db, &actor, org_id).await?;
+        if !access.can_write()
+            && !(crate::services::org_agent_service::can_use(&access)
+                && super::login_client_context::require_first_party_human(auth).is_ok())
+        {
             return Err(AppError::OrgRoleInsufficient(
-                "admin access to the target org is required to list its channel bots".to_string(),
+                "member access to the target org is required to list its channel bots".to_string(),
             ));
         }
         Ok(org_id.to_string())
@@ -904,6 +1232,12 @@ pub(crate) async fn create_bot_with_link(
     link_claim: Option<&crate::services::channel_connect_link_service::Claim>,
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
     let actor = auth_user.user_id.to_string();
+    crate::services::channel_adapters::meta_managed::require_enrollment(
+        &state.db,
+        &actor,
+        adapter.platform_id(),
+    )
+    .await?;
     let descriptor = adapter.registration();
     if descriptor.managed_only {
         return Err(AppError::ValidationError(
@@ -941,32 +1275,19 @@ pub(crate) async fn create_bot_with_link(
     let owner_id = resolve_create_owner(state, &actor, body.target_org_id.as_deref()).await?;
 
     // Create bot: verify token, encrypt, insert in pending status
-    let create_result = if let Some(claim) = link_claim {
-        channel_bot_service::create_bot_linked(
-            &state.db,
-            &state.config,
-            &state.encryption_keys,
-            &state.http_client,
-            adapter,
-            &owner_id,
-            label,
-            &fields,
-            Some(claim),
-        )
-        .await?
-    } else {
-        channel_bot_service::create_bot(
-            &state.db,
-            &state.config,
-            &state.encryption_keys,
-            &state.http_client,
-            adapter,
-            &owner_id,
-            label,
-            &fields,
-        )
-        .await?
-    };
+    let create_result = channel_bot_service::create_bot_linked(
+        &state.db,
+        &state.config,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter,
+        &actor,
+        &owner_id,
+        label,
+        &fields,
+        link_claim,
+    )
+    .await?;
 
     let bot_id = create_result.bot.id.clone();
     let webhook_secret = create_result.webhook_secret;
@@ -1171,13 +1492,16 @@ pub async fn update_bot(
         None => None,
     };
 
-    let mut updated = channel_bot_service::update_bot(
+    let mut updated = channel_bot_service::update_bot_as_actor(
         &state.db,
         &state.encryption_keys,
         &state.http_client,
         adapter.as_ref(),
         &bot_id,
-        &owner_id,
+        channel_bot_service::UpdateBotAuthority {
+            actor_id: &actor,
+            owner_id: &owner_id,
+        },
         crate::services::channel_bot_service::UpdateBotParams {
             x_events: body.x_events.as_deref(),
             bot_token: body.bot_token.as_deref().map(str::trim),
@@ -1289,13 +1613,17 @@ pub async fn list_bots(
     }
     let mut bots = match query.scope {
         Some(ChannelBotListScope::All) => {
-            channel_bot_service::list_all_bots(&state.db, &actor).await?
+            if super::login_client_context::require_first_party_human(&auth_user).is_ok() {
+                channel_bot_service::list_accessible_bots(&state.db, &actor).await?
+            } else {
+                channel_bot_service::list_all_bots(&state.db, &actor).await?
+            }
         }
         Some(ChannelBotListScope::User) => {
             channel_bot_service::list_bots(&state.db, &actor).await?
         }
         None => {
-            let owner_id = resolve_list_owner(&state, &actor, query.org_id.as_deref()).await?;
+            let owner_id = resolve_list_owner(&state, &auth_user, query.org_id.as_deref()).await?;
             channel_bot_service::list_bots(&state.db, &owner_id).await?
         }
     };
@@ -1386,18 +1714,20 @@ pub async fn delete_bot(
 
     // Resolve the effective owner (personal or org via admin access).
     let (owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
+    #[cfg(test)]
+    if crate::services::channel_adapters::meta::is_meta(&bot.platform) {
+        crate::services::durable_wake_tests::after("meta_delete_after_authorization").await;
+    }
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
-    let managed_webhook_cleanup = channel_bot_service::delete_bot(
-        &state.db,
-        &state.config,
-        &state.http_client,
-        &state.encryption_keys,
-        adapter.as_ref(),
-        &bot_id,
-        &owner_id,
-    )
-    .await?;
+    let managed_webhook_cleanup = if crate::services::channel_adapters::meta::is_meta(&bot.platform)
+    {
+        channel_bot_service::delete_bot_observed_with_state(&state, adapter.as_ref(), &bot, &actor)
+            .await?
+    } else {
+        channel_bot_service::delete_bot_with_state(&state, adapter.as_ref(), &bot_id, &owner_id)
+            .await?
+    };
 
     emit_event(
         state.telemetry.as_deref(),
@@ -1424,6 +1754,8 @@ pub async fn delete_bot(
 
     if adapter.serializes_lifecycle() {
         return Ok(Json(DeleteChannelBotResponse {
+            local_delivery_stopped: crate::services::channel_adapters::meta::is_meta(&bot.platform)
+                .then_some(true),
             webhook_cleanup: managed_webhook_cleanup,
         })
         .into_response());
@@ -1462,9 +1794,7 @@ pub async fn health(
         .await?
         .can_write();
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(
-        health_loaded(&state.db, &bot, gateway, can_write).await?,
-    ))
+    Ok(Json(health_loaded(&state, &bot, gateway, can_write).await?))
 }
 
 /// POST /api/v1/channel-bots/{id}/resubscribe
@@ -1501,9 +1831,7 @@ pub async fn resubscribe(
     outcome?;
     let updated = channel_bot_service::get_bot(&state.db, &bot.id).await?;
     let gateway = channel_bot_service::gateway_linked(&state.db, &bot.id).await?;
-    Ok(Json(
-        health_loaded(&state.db, &updated, gateway, true).await?,
-    ))
+    Ok(Json(health_loaded(&state, &updated, gateway, true).await?))
 }
 
 pub(crate) async fn resubscribe_with_adapter(
@@ -1561,6 +1889,17 @@ pub(crate) async fn verify_bot_with_adapter(
     telegram_api: &crate::services::telegram_new_api::TelegramApi<'_>,
     api_key_id: Option<&str>,
 ) -> AppResult<Json<VerifyBotResponse>> {
+    if crate::services::channel_adapters::meta::is_meta(&bot.platform) {
+        crate::services::channel_meta_service::MetaService::from(state)
+            .verify(&bot)
+            .await?;
+        let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+        return Ok(Json(VerifyBotResponse::from_bot(
+            current,
+            VerificationScope::CredentialsAndWebhook,
+            None,
+        )));
+    }
     if bot.platform == "telegram" {
         let verified = channel_bot_service::verify_telegram_bot(
             &state.db,
@@ -1572,12 +1911,11 @@ pub(crate) async fn verify_bot_with_adapter(
             &state.config,
         )
         .await?;
-        return Ok(Json(VerifyBotResponse {
-            last_verification: None,
-            id: verified.id,
-            status: verified.status,
-            webhook_registered: verified.webhook_registered,
-        }));
+        return Ok(Json(VerifyBotResponse::from_bot(
+            verified,
+            VerificationScope::CredentialsAndWebhook,
+            None,
+        )));
     }
     if bot.platform == "telegram-new" {
         if !bot.is_active || bot.status == "suspended" {
@@ -1611,12 +1949,11 @@ pub(crate) async fn verify_bot_with_adapter(
                         "Bot credentials or verification changed. Run verification again.".into(),
                     )
                 })?;
-        return Ok(Json(VerifyBotResponse {
-            id: current.id,
-            status: current.status,
-            webhook_registered: current.webhook_registered,
-            last_verification: Some(observed.into()),
-        }));
+        return Ok(Json(VerifyBotResponse::from_bot(
+            current,
+            VerificationScope::Credentials,
+            Some(observed.into()),
+        )));
     }
 
     if adapter.serializes_lifecycle() {
@@ -1634,12 +1971,11 @@ pub(crate) async fn verify_bot_with_adapter(
             &url,
         )
         .await?;
-        return Ok(Json(VerifyBotResponse {
-            last_verification: None,
-            id: verified.id,
-            status: verified.status,
-            webhook_registered: verified.webhook_registered,
-        }));
+        return Ok(Json(VerifyBotResponse::from_bot(
+            verified,
+            VerificationScope::CredentialsAndWebhook,
+            None,
+        )));
     }
 
     let bot_token = crate::services::channel_credentials::resolve_bot_token(
@@ -1714,24 +2050,33 @@ pub(crate) async fn verify_bot_with_adapter(
                     .await;
             }
             let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
-            return Ok(Json(VerifyBotResponse {
-                last_verification: None,
-                id: current.id,
-                status: current.status,
-                webhook_registered: current.webhook_registered,
-            }));
+            return Ok(Json(VerifyBotResponse::from_bot(
+                current,
+                VerificationScope::CredentialsAndWebhook,
+                None,
+            )));
         }
         ensure_verify_material_present(&bot, adapter)?;
     }
 
-    // Some subscription protocols bind the dashboard to the original secret.
-    if adapter.registration().preserve_subscription_on_verify || bot.platform == "telegram-new" {
-        return Ok(Json(VerifyBotResponse {
-            last_verification: None,
-            id: bot.id,
-            status: bot.status,
-            webhook_registered: bot.webhook_registered,
-        }));
+    // A manual webhook or Gateway receives its activation evidence from ingress.
+    // Running registration here would reset that evidence even for an active bot.
+    let registration = adapter.registration();
+    if !registration.automatic_webhook
+        || registration.preserve_subscription_on_verify
+        || bot.platform == "telegram-new"
+    {
+        if !registration.automatic_webhook && !registration.preserve_subscription_on_verify {
+            channel_bot_service::resume_manual_registration(&state.db, adapter, &bot).await?;
+        }
+        let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+        let scope = if adapter.platform_id() == "openclaw" {
+            // The legacy adapter can load the stored token but has no identity API.
+            VerificationScope::StoredCredentials
+        } else {
+            VerificationScope::Credentials
+        };
+        return Ok(Json(VerifyBotResponse::from_bot(current, scope, None)));
     }
 
     // Re-register webhook with a fresh secret. The original raw secret is not
@@ -1769,7 +2114,7 @@ pub(crate) async fn verify_bot_with_adapter(
 
     // Update the stored hash to match the new secret
     if reg_result.is_ok() {
-        let _ = state
+        state
             .db
             .collection::<crate::models::channel_bot::ChannelBot>(
                 crate::models::channel_bot::COLLECTION_NAME,
@@ -1778,23 +2123,17 @@ pub(crate) async fn verify_bot_with_adapter(
                 mongodb::bson::doc! { "_id": &bot.id },
                 mongodb::bson::doc! { "$set": { "webhook_secret_hash": &new_hash } },
             )
-            .await;
+            .await?;
+    } else {
+        channel_bot_service::mark_bot_failed(&state.db, &bot.id).await?;
     }
 
-    let (status, webhook_registered) = match reg_result {
-        Ok(()) => ("active".to_string(), true),
-        Err(_) => {
-            let _ = channel_bot_service::mark_bot_failed(&state.db, &bot.id).await;
-            ("failed".to_string(), false)
-        }
-    };
-
-    Ok(Json(VerifyBotResponse {
-        last_verification: None,
-        id: bot.id,
-        status,
-        webhook_registered,
-    }))
+    let current = channel_bot_service::get_bot(&state.db, &bot.id).await?;
+    Ok(Json(VerifyBotResponse::from_bot(
+        current,
+        VerificationScope::CredentialsAndWebhook,
+        None,
+    )))
 }
 
 #[cfg(test)]
@@ -1815,6 +2154,81 @@ mod tests {
         assert!(gateway.get("discord_intake").is_none());
         assert_eq!(gateway["recommended_action"], "gateway");
         assert_eq!(gateway["can_write"], false);
+    }
+
+    #[tokio::test]
+    async fn gateway_health_reports_missing_provider_event_until_delivery_recovers() {
+        let db = crate::test_utils::connect_test_database("bot_health_not_received")
+            .await
+            .unwrap();
+        crate::services::nyxbot_gateway_release_service::ensure_indexes(&db)
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let mut bot = make_telegram_bot();
+        bot.platform = "telegram-new".into();
+        bot.status = "active".into();
+        db.collection::<crate::models::channel_bot::ChannelBot>(
+            crate::models::channel_bot::COLLECTION_NAME,
+        )
+        .insert_one(&bot)
+        .await
+        .unwrap();
+        let read_health = || {
+            health(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&bot.user_id),
+                Path(bot.id.clone()),
+            )
+        };
+        let message_at = bson::DateTime::parse_rfc3339_str("2026-01-02T03:04:05.678Z").unwrap();
+        let channels =
+            db.collection::<bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME);
+        channels
+            .insert_one(doc! {
+                "delivery_failed_at": message_at,
+                "_id": "binding", "channel_bot_id": &bot.id, "user_id": &bot.user_id,
+                "created_at": bson::DateTime::now(), "status": "active", "transport": "gateway",
+                "delivery_status": "failing", "delivery_error": "not_received",
+            })
+            .await
+            .unwrap();
+        // A later failed setup can coexist with the active gateway connection.
+        channels
+            .insert_one(doc! {
+                "_id": "later-attempt", "channel_bot_id": &bot.id, "user_id": &bot.user_id,
+                "created_at": bson::DateTime::now(), "status": "failed", "transport": "gateway",
+                "delivery_status": "failing", "delivery_error": "not_received",
+            })
+            .await
+            .unwrap();
+
+        let Json(failing) = read_health().await.unwrap();
+        assert_eq!(failing.status, "active");
+        assert_eq!(failing.recommended_action, "contact_admin");
+        assert!(
+            failing
+                .recommended_action_text
+                .contains("matching provider event")
+        );
+
+        channels
+            .update_one(
+                doc! {"_id": "binding"},
+                doc! {
+                    "$set": {"delivery_status": "ok"}, "$unset": {"delivery_error": ""},
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            failing
+                .recommended_action_text
+                .contains("2026-01-02 03:04:05.678 UTC")
+        );
+        let Json(recovered) = read_health().await.unwrap();
+        assert_eq!(recovered.recommended_action, "gateway");
+        db.drop().await.unwrap();
     }
 
     #[test]
@@ -1848,6 +2262,83 @@ mod tests {
             let value = serde_json::to_value(bot_to_item(&legacy)).unwrap();
             assert!(value.get("gateway_state").is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn discord_verify_matches_detail_and_health_after_checking_credentials() {
+        use crate::services::channel_adapters::discord::DiscordAdapter;
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        let db = connect_test_database("discord_verify_status")
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/users/@me"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "123", "username": "bot"})),
+            )
+            .expect(4)
+            .mount(&server)
+            .await;
+        let adapter = DiscordAdapter::media_test_adapter(&server.uri());
+        for (status, expected) in [
+            ("pending_webhook", "pending_webhook"),
+            ("active", "active"),
+            ("pending", "pending_webhook"),
+            ("failed", "pending_webhook"),
+        ] {
+            let mut bot = make_telegram_bot();
+            bot.platform = "discord".into();
+            bot.public_key = Some("a".repeat(64));
+            bot.bot_token_encrypted = state.encryption_keys.encrypt(b"test-token").await.unwrap();
+            bot.status = status.into();
+            if status == "active" {
+                bot.diagnostics.discord_gateway =
+                    Some(crate::models::discord_gateway::DiscordGatewayStatus {
+                        state: "connected".into(),
+                        reason: None,
+                        updated_at: Utc::now(),
+                    });
+            }
+            db.collection::<crate::models::channel_bot::ChannelBot>(
+                crate::models::channel_bot::COLLECTION_NAME,
+            )
+            .insert_one(&bot)
+            .await
+            .unwrap();
+
+            let auth = || test_auth_user(&bot.user_id);
+            let id = || Path(bot.id.clone());
+            let Json(verified) = verify_bot_with_adapter(
+                &state,
+                bot.clone(),
+                &adapter,
+                &crate::services::telegram_new_api::TelegramApi::new(&state.http_client),
+                None,
+            )
+            .await
+            .unwrap();
+            let Json(detail) = get_bot(State(state.clone()), auth(), id()).await.unwrap();
+            let Json(health) = health(State(state.clone()), auth(), id()).await.unwrap();
+            assert_eq!(verified.status, detail.status);
+            assert_eq!(verified.webhook_registered, detail.webhook_registered);
+            assert_eq!(verified.status, health.status);
+            assert_eq!(verified.webhook_registered, health.webhook_registered);
+            assert_eq!(verified.status, expected);
+            assert!(matches!(
+                verified.verification_scope,
+                VerificationScope::Credentials
+            ));
+            assert!(!verified.webhook_registered);
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1993,20 +2484,21 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(response.total, 3);
+        assert_eq!(response.total, 4);
         assert_eq!(
             response
                 .bots
                 .iter()
                 .map(|bot| bot.user_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["admin-b", "admin-a", actor.as_str()]
+            vec!["member", "admin-b", "admin-a", actor.as_str()]
         );
 
         for (scope, org_id) in [
             (None, None),
             (Some(ChannelBotListScope::User), None),
             (None, Some("admin-a")),
+            (None, Some("member")),
         ] {
             let Json(response) = list_bots(
                 State(state.clone()),
@@ -2027,7 +2519,7 @@ mod tests {
                 test_auth_user(&actor),
                 Query(ChannelBotListQuery {
                     scope: None,
-                    org_id: Some("member".to_string())
+                    org_id: Some("viewer".to_string())
                 }),
             )
             .await,
@@ -2099,6 +2591,7 @@ mod tests {
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -2117,6 +2610,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -2177,6 +2672,7 @@ mod tests {
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
         crate::models::channel_bot::ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
@@ -2195,6 +2691,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

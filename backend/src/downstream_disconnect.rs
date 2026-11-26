@@ -4,6 +4,7 @@ use std::{
     io::{self, IoSlice},
     net::SocketAddr,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
@@ -112,12 +113,46 @@ impl<S> Drop for CancelOnDropStream<S> {
 }
 
 pub(crate) struct DisconnectAwareListener {
-    inner: TcpListener,
+    inner: SharedListener,
 }
 
 impl DisconnectAwareListener {
-    pub(crate) fn new(inner: TcpListener) -> Self {
-        Self { inner }
+    pub(crate) fn new(inner: impl Into<SharedListener>) -> Self {
+        Self {
+            inner: inner.into(),
+        }
+    }
+}
+
+/// Keep the bound socket across graceful connection-drain attempts. A request
+/// accepted just before an idle observation may still start detached work.
+#[derive(Clone)]
+pub(crate) struct SharedListener(Arc<TcpListener>);
+
+impl From<TcpListener> for SharedListener {
+    fn from(listener: TcpListener) -> Self {
+        Self(Arc::new(listener))
+    }
+}
+
+impl Listener for SharedListener {
+    type Io = TcpStream;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.0.accept().await {
+                Ok(connection) => return connection,
+                Err(error) => {
+                    tracing::warn!(%error, "Listener accept failed");
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.0.local_addr()
     }
 }
 
@@ -126,7 +161,7 @@ impl Listener for DisconnectAwareListener {
     type Addr = SocketAddr;
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        let (stream, peer) = <TcpListener as Listener>::accept(&mut self.inner).await;
+        let (stream, peer) = self.inner.accept().await;
         (DisconnectAwareIo::new(stream), peer)
     }
 

@@ -23,25 +23,40 @@ pub(crate) fn profile_filter(bot_id: &str, platform: &str, remote_id: &str) -> D
     }
 }
 
-/// Read persisted authority rather than trusting a cached channel/link snapshot.
-/// This checks profile authority; callers retain their normal bot-liveness checks.
-pub(crate) async fn permits_personal_routes(
+/// One fresh observation, passed only through a single provider-boundary check.
+/// It contains no authority for a later effect and is never retained by a sender.
+pub(crate) struct PersonalRouteCheck {
+    bot_id: String,
+    bot: Option<Document>,
+    allowed: bool,
+}
+
+pub(crate) async fn read_personal_routes(
     db: &mongodb::Database,
     bot_id: &str,
-) -> AppResult<bool> {
+) -> AppResult<PersonalRouteCheck> {
     let bot = db
         .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .find_one(doc! {"_id": bot_id})
+        .find_one(doc! {"_id":bot_id})
         .await?;
-    let Some(bot) = bot else {
-        return Ok(false);
+    let mut checked = PersonalRouteCheck {
+        bot_id: bot_id.into(),
+        bot,
+        allowed: false,
     };
-    if bot.contains_key("platform_profile_id")
-        || bot.contains_key("platform_installation_id")
-        || bot.contains_key("platform_entry_version")
-        || bot.contains_key("platform_entry_pending")
+    let Some(bot) = checked.bot.as_ref() else {
+        return Ok(checked);
+    };
+    if [
+        "platform_profile_id",
+        "platform_installation_id",
+        "platform_entry_version",
+        "platform_entry_pending",
+    ]
+    .iter()
+    .any(|field| bot.contains_key(*field))
     {
-        return Ok(false);
+        return Ok(checked);
     }
     if db
         .collection::<Document>(crate::models::platform_installation::COLLECTION_NAME)
@@ -53,18 +68,67 @@ pub(crate) async fn permits_personal_routes(
         .await?
         .is_some()
     {
-        return Ok(false);
+        return Ok(checked);
     }
-    // A paused or tombstoned profile must never restore personal routing.
-    let profile = db
+    // Paused and tombstoned reservations still deny personal routing.
+    checked.allowed = db
         .collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME)
         .find_one(profile_filter(
             bot_id,
             bot.get_str("platform").unwrap_or(""),
             bot.get_str("platform_bot_id").unwrap_or(""),
         ))
-        .await?;
-    Ok(profile.is_none())
+        .await?
+        .is_none();
+    Ok(checked)
+}
+
+pub(crate) async fn permits_personal_routes(
+    db: &mongodb::Database,
+    bot_id: &str,
+) -> AppResult<bool> {
+    permits_with(db, bot_id, None).await
+}
+
+pub(crate) async fn permits_with(
+    db: &mongodb::Database,
+    bot_id: &str,
+    checked: Option<&PersonalRouteCheck>,
+) -> AppResult<bool> {
+    match checked {
+        Some(checked) => Ok(checked.bot_id == bot_id && checked.allowed),
+        None => Ok(read_personal_routes(db, bot_id).await?.allowed),
+    }
+}
+
+pub(crate) async fn require_with(
+    db: &mongodb::Database,
+    bot_id: &str,
+    checked: Option<&PersonalRouteCheck>,
+) -> AppResult<()> {
+    if !permits_with(db, bot_id, checked).await? {
+        return Err(AppError::Forbidden(
+            "The platform manager cannot use personal channel routes".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn bot_with(
+    db: &mongodb::Database,
+    bot_id: &str,
+    checked: Option<&PersonalRouteCheck>,
+) -> AppResult<crate::models::channel_bot::ChannelBot> {
+    let Some(checked) = checked else {
+        return super::channel_bot_service::get_bot(db, bot_id).await;
+    };
+    let bot = checked
+        .bot
+        .as_ref()
+        .filter(|_| checked.bot_id == bot_id)
+        .ok_or_else(|| AppError::ChannelBotNotFound(bot_id.into()))?;
+    bson::from_document(bot.clone())
+        .map_err(|_| AppError::Internal("Invalid channel bot metadata".into()))
 }
 
 pub(crate) async fn require_personal_routes(db: &mongodb::Database, bot_id: &str) -> AppResult<()> {

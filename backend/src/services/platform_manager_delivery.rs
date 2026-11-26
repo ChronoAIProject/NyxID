@@ -442,7 +442,7 @@ pub(crate) async fn render_personal(
                         .limit(65)
                         .session(&mut *session)
                         .await?;
-                    let cards = cursor.stream(&mut *session).try_collect().await?;
+                    let cards = crate::db::read_documents(&mut cursor, session).await?;
                     let thread = conversations
                         .find_one(doc! {"_id":&message.conversation_id,"user_id":&message.user_id})
                         .session(session)
@@ -1666,7 +1666,7 @@ async fn send_impl(
         stall_native_claim_for_test(native.is_some()).await;
         let result:AppResult<_>=async {
             let Some(observation)=validate_in_session(state,identity.as_ref(),public.as_deref(),session,row,body.as_str()).await? else {return Ok(CapturedSend::Deferred);};
-            if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","expires_at":{"$gt":bson::DateTime::now()}},doc! {"$set":{"state":"dispatching","claim_id":&*claim,"multipart_version":1,"updated_at":bson::DateTime::now()}}).session(&mut *session).await?.matched_count!=1{return Ok(CapturedSend::Duplicate);}
+            if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(doc! {"_id":&row.id,"state":"pending","$expr":{"$gt":["$expires_at","$$NOW"]}},vec![doc! {"$set":{"state":"dispatching","claim_id":&*claim,"multipart_version":1,"updated_at":"$$NOW"}}]).session(&mut *session).await?.matched_count!=1{return Ok(CapturedSend::Duplicate);}
             capture_material_in_session(state,session,row,claim,&observation,*native).await
         }.await;
         tx::transaction_result(result)
@@ -1712,16 +1712,22 @@ async fn send_impl(
             return Err(error);
         }
     };
-    send_claimed(
-        state,
-        &row,
-        &claim_id,
-        body,
-        credential,
-        native.as_ref(),
-        api,
-        identity,
-        public,
+    super::channel_text_preparation::with_parent(
+        super::channel_text_preparation::Parent::Manager {
+            id: row.id.clone(),
+            claim: claim_id.clone(),
+        },
+        send_claimed(
+            state,
+            &row,
+            &claim_id,
+            body,
+            credential,
+            native.as_ref(),
+            api,
+            identity,
+            public,
+        ),
     )
     .await
 }
@@ -1822,8 +1828,8 @@ async fn send_claimed(
             row,
             claim_id,
             body.as_str(),
-            identity.as_ref(),
-            public.as_deref(),
+            identity.clone(),
+            public.clone(),
             token,
             api,
         )
@@ -1839,14 +1845,18 @@ async fn send_claimed(
             Err(error) => return Err(error),
         }
     }
-    let parts = super::channel_reply_plan::assistant_parts(&rendered, chat.platform(), &url);
-    let plan = journal::begin(
+    let (plan, parts) = journal::assistant_plan(
         &state.db,
         &multipart_key(row),
         owner,
         source,
-        &super::channel_reply_plan::fingerprint(&parts),
-        parts.len(),
+        chat.platform(),
+        None,
+        |version, _| {
+            let parts = super::channel_reply_plan::recorded_assistant_parts(&rendered, chat.platform(), &url, version)?;
+            let fingerprint = super::channel_reply_plan::fingerprint(&parts);
+            Ok((parts, fingerprint))
+        },
     )
     .await?;
     let mut telegram_ids = Vec::new();
@@ -1870,7 +1880,7 @@ async fn send_claimed(
             finish(state, row, claim_id, "refused", telegram_ids, None).await?;
             return Ok(DeliveryOutcome::Refused(UnavailableReason::OriginRevoked));
         }
-        let attempt = match journal::claim(&state.db, &plan, index).await {
+        let attempt = match super::channel_text_preparation::claim(&state.db, &plan, index).await {
             Ok(journal::PartClaim::Sent(previous)) => {
                 if let Some(id) = previous.platform_message_id {
                     if credential.is_some() {
@@ -1882,13 +1892,19 @@ async fn send_claimed(
                 continue;
             }
             Ok(journal::PartClaim::Send(attempt)) => attempt,
+            Err(error) if error.retry_after_seconds().is_some() => {
+                let retry_at=Utc::now()+Duration::seconds(super::channel_text_preparation::RETRY_SECS as i64);
+                finish(state,row,claim_id,"pending",telegram_ids,Some(retry_at)).await?;
+                return Ok(DeliveryOutcome::Deferred {retry_at});
+            }
             Err(_) => {
                 finish(state, row, claim_id, "uncertain", telegram_ids, None).await?;
                 return Ok(DeliveryOutcome::Uncertain);
             }
         };
         let mut part_trace = crate::turn_trace::Operation::part(crate::turn_trace::TurnContext::current(), index);
-        let result = if let Some(token) = &credential {
+        let result = super::channel_text_preparation::with_part(&state.db,&plan,index,&attempt,async {
+        let result=if let Some(token) = &credential {
             let guard = telegram_effect_guard(state, row, claim_id, &body, &identity, public.as_ref());
             super::telegram_formatting::scope(&state.db,
                 journal::formatting_receipt(&plan, index, &attempt), None,
@@ -1896,13 +1912,14 @@ async fn send_claimed(
                     telegram_part(api, token, scope::actor_string(&row.sender).as_str(), &part))).await
         } else if let CapturedMaterial::Native(authority) = &material {
             use super::platform_native_reply_service::NativeSendOutcome;
-            match super::platform_native_reply_service::send_part(
+            let guard=telegram_effect_guard(state,row,claim_id,&body,&identity,public.as_ref());
+            match super::channel_platform::with_post_effect_guard(guard,super::platform_native_reply_service::send_part(
                 state,
                 authority,
                 Zeroizing::new(part.text.clone().unwrap_or_default()),
                 native.ok_or_else(refused)?.adapter.as_ref(),
                 part.metadata.as_ref(),
-            )
+            ))
             .await?
             {
                 NativeSendOutcome::Sent {
@@ -1914,6 +1931,8 @@ async fn send_claimed(
         } else {
             return Err(refused());
         };
+        Ok::<_,AppError>(result)
+        }).await?;
         part_trace.finish(match &result {
             PartResult::Sent(_) => crate::turn_trace::Outcome::Confirmed,
             PartResult::Refused | PartResult::Retry(_) => crate::turn_trace::Outcome::Rejected,
@@ -1938,7 +1957,7 @@ async fn send_claimed(
                 }
                 state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
                     doc! {"_id":&row.id,"state":"dispatching","claim_id":claim_id},
-                    doc! {"$set":{"telegram_message_ids":&telegram_ids,"platform_message_ids":&platform_ids,"updated_at":bson::DateTime::now()}}
+                    vec![doc! {"$set":{"telegram_message_ids":{"$literal":&telegram_ids},"platform_message_ids":{"$literal":&platform_ids},"updated_at":"$$NOW"}}]
                 ).await?;
             }
             PartResult::Retry(delay) => {
@@ -1981,6 +2000,11 @@ async fn send_claimed(
                 ));
             }
             PartResult::Uncertain => {
+                if super::channel_text_preparation::release(&state.db,&plan,index,&attempt).await? {
+                    let retry_at=Utc::now()+Duration::seconds(super::channel_text_preparation::RETRY_SECS as i64);
+                    finish(state,row,claim_id,"pending",telegram_ids,Some(retry_at)).await?;
+                    return Ok(DeliveryOutcome::Deferred {retry_at});
+                }
                 finish(state, row, claim_id, "uncertain", telegram_ids, None).await?;
                 return Ok(DeliveryOutcome::Uncertain);
             }
@@ -2015,39 +2039,46 @@ async fn send_claimed(
 async fn pace_part(state: &AppState, row: &Delivery, claim: &str) -> AppResult<()> {
     loop {
         if state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
-            doc! {"_id":&row.id,"state":"dispatching","claim_id":claim,"expires_at":{"$gt":bson::DateTime::now()}},
-            doc! {"$set":{"updated_at":bson::DateTime::now()}},
+            doc! {"_id":&row.id,"state":"dispatching","claim_id":claim,"$expr":{"$gt":["$expires_at","$$NOW"]}},
+            vec![doc! {"$set":{"updated_at":"$$NOW"}}],
         ).await?.matched_count != 1 {
             return Err(refused());
         }
-        let chat = super::coordination_service::RateWindowStore::admit(
-            &state.db,
-            "manager_part_chat",
-            &format!("{}:{}", manager_lane(row), scope::actor_string(&row.sender)),
-            1,
-            std::time::Duration::from_secs(1),
-        )
-        .await?;
-        if chat.allowed {
-            let personal = matches!(row.reference, DeliveryReference::Reply { .. });
-            let lane = super::coordination_service::RateWindowStore::admit(
-                &state.db,
-                if personal {
-                    "manager_part_personal"
-                } else {
-                    "manager_part_public"
-                },
-                &manager_lane(row),
-                if personal { 24 } else { 4 },
-                std::time::Duration::from_secs(1),
-            )
-            .await?;
-            if lane.allowed {
-                return Ok(());
-            }
+        if part_rate_available(state, row).await? {
+            return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     }
+}
+
+async fn part_rate_available(state: &AppState, row: &Delivery) -> AppResult<bool> {
+    let chat = super::coordination_service::RateWindowStore::admit(
+        &state.db,
+        "manager_part_chat",
+        &format!("{}:{}", manager_lane(row), scope::actor_string(&row.sender)),
+        1,
+        std::time::Duration::from_secs(1),
+    )
+    .await?;
+    if chat.allowed {
+        let personal = matches!(row.reference, DeliveryReference::Reply { .. });
+        let lane = super::coordination_service::RateWindowStore::admit(
+            &state.db,
+            if personal {
+                "manager_part_personal"
+            } else {
+                "manager_part_public"
+            },
+            &manager_lane(row),
+            if personal { 24 } else { 4 },
+            std::time::Duration::from_secs(1),
+        )
+        .await?;
+        if lane.allowed {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn revalidate_part(
@@ -2079,8 +2110,8 @@ async fn revalidate_part(
                             .db
                             .collection::<Delivery>(COLLECTION_NAME)
                             .update_one(
-                                doc! {"_id":&row.id,"state":"dispatching","claim_id":*claim},
-                                doc! {"$set":{"updated_at":bson::DateTime::now()}},
+                                doc! {"_id":&row.id,"state":"dispatching","claim_id":*claim,"$expr":{"$gt":["$expires_at","$$NOW"]}},
+                                vec![doc! {"$set":{"updated_at":"$$NOW"}}],
                             )
                             .session(session)
                             .await?
@@ -2374,9 +2405,12 @@ async fn finish_parent(
     let previous = doc! {"$ifNull":["$telegram_message_ids",[]]};
     let mut set = doc! {"state":status,"telegram_message_ids":{
         "$cond":[{"$gte":[{"$size":previous.clone()},ids.len() as i64]},previous,{"$literal":ids}]
-    },"updated_at":bson::DateTime::now()};
+    },"updated_at":"$$NOW"};
     if let Some(at) = retry {
-        set.insert("retry_at", bson::DateTime::from_chrono(at));
+        set.insert(
+            "retry_at",
+            doc! {"$add":["$$NOW",(at-Utc::now()).num_milliseconds().max(0)]},
+        );
     }
     let changed = db
         .collection::<Delivery>(COLLECTION_NAME)
@@ -2881,6 +2915,27 @@ fn report_delivery(outcome: &DeliveryOutcome, source: &'static str) {
     }
 }
 
+pub(crate) async fn recover_attachment(
+    state: &AppState,
+    row: &crate::models::nyxbot_image_delivery::NyxbotImageDelivery,
+) -> AppResult<()> {
+    media::recover(
+        state,
+        row,
+        &super::telegram_new_api::TelegramApi::new(&state.http_client),
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn recover_attachment_with_api(
+    state: &AppState,
+    row: &crate::models::nyxbot_image_delivery::NyxbotImageDelivery,
+    api: &super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<()> {
+    media::recover(state, row, api).await
+}
+
 pub async fn sweep(
     state: &AppState,
     identity: Arc<dyn ManagerIdentityProducer>,
@@ -2895,20 +2950,22 @@ pub async fn sweep(
         });
     }
     let now = Utc::now();
-    let stale_before = bson::DateTime::from_chrono(now - Duration::minutes(2));
-    let due = bson::DateTime::from_chrono(now);
+    let stale = doc! {"$and":[{"$eq":[{"$type":"$updated_at"},"date"]},{"$lte":["$updated_at",{"$subtract":["$$NOW",super::channel_text_preparation::MANAGER_LEASE_SECS*1000]}]}]};
     let mut rows = state
         .db
         .collection::<Delivery>(COLLECTION_NAME)
         .find(doc! {"$or":[
-            {"state":"dispatching","updated_at":{"$lte":stale_before}},
-            {"state":"pending","retry_at":{"$lte":due}}
+            {"state":"dispatching","$expr":stale.clone()},
+            {"state":"pending","$expr":{"$lte":["$retry_at","$$NOW"]}}
         ]})
         .sort(doc! {"updated_at":1,"_id":1})
         .limit(i64::from(batch))
         .await?;
     let mut processed = 0;
     while let Some(row) = rows.try_next().await? {
+        let Some(_claim) = state.shutdown.background() else {
+            break;
+        };
         // A process lost after claim may have sent. Never replay the attempt.
         if row.state == DeliveryState::Dispatching {
             let versioned = state.db.collection::<bson::Document>(COLLECTION_NAME)
@@ -2919,8 +2976,8 @@ pub async fn sweep(
                     .as_ref()
                     .is_none_or(super::channel_text_delivery::recoverable);
             state.db.collection::<Delivery>(COLLECTION_NAME).update_one(
-                doc! {"_id":&row.id,"state":"dispatching","claim_id":&row.claim_id,"updated_at":{"$lte":stale_before}},
-                doc! {"$set":{"state":if safe {"pending"} else {"uncertain"},"updated_at":due,"retry_at":due}},
+                doc! {"_id":&row.id,"state":"dispatching","claim_id":&row.claim_id,"$expr":stale.clone()},
+                vec![doc! {"$set":{"state":if safe {"pending"} else {"uncertain"},"updated_at":"$$NOW","retry_at":"$$NOW"}}],
             ).await?;
         } else if row.expires_at <= now
             || matches!(

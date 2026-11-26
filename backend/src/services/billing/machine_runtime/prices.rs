@@ -64,20 +64,47 @@ impl BillingService {
             return Ok(0);
         }
         let mut synced = 0;
+        let mut failures = super::super::recovery_batch::Failures::default();
+        let mut failed_ids = Vec::new();
         for _ in 0..limit.min(16) {
+            if !crate::services::billing::reconcile::continue_reconcile() {
+                break;
+            }
             let now = Utc::now();
             let claim = Uuid::new_v4().to_string();
-            let row=self.db.collection::<Document>(RATE_COLLECTION).find_one_and_update(doc!{
+            let mut filter = doc! {
                 "retired":false,"sync_status":{"$in":["pending","failed"]},
                 "$and":[{"$or":[{"sync_retry_at":null},{"sync_retry_at":{"$lte":bson::DateTime::from_chrono(now)}}]},
                     {"$or":[{"sync_claim_until":null},{"sync_claim_until":{"$lte":bson::DateTime::from_chrono(now)}}]}]
-            },doc!{"$set":{"sync_claim":&claim,"sync_claim_until":bson::DateTime::from_chrono(now+Duration::minutes(2))}})
-                .return_document(mongodb::options::ReturnDocument::After).await?;
+            };
+            if !failed_ids.is_empty() {
+                filter.insert("_id", doc! {"$nin":&failed_ids});
+            }
+            let row=self.db.collection::<Document>(RATE_COLLECTION).find_one_and_update(filter.clone(),doc!{"$set":{"sync_claim":&claim,"sync_claim_until":bson::DateTime::from_chrono(now+Duration::minutes(2))}})
+                .return_document(mongodb::options::ReturnDocument::After).await;
+            let row = match row {
+                Ok(row) => row,
+                Err(error) if super::super::recovery_batch::document_rejected(&error) => {
+                    let Some(raw) = self
+                        .db
+                        .collection::<Document>(RATE_COLLECTION)
+                        .find_one(filter)
+                        .await?
+                    else {
+                        return Err(error.into());
+                    };
+                    failed_ids.push(raw.get("_id").cloned().unwrap_or(bson::Bson::Null));
+                    failures.note(error.into());
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
             let Some(row) = row else { break };
+            let result = super::super::recovery_batch::work(async {
             let id = row
                 .get_str("_id")
                 .map_err(|_| unavailable("invalid runtime rate identity"))?;
-            let ok = self.sync_machine_runtime_rate(id).await.is_ok();
+            let result = self.sync_machine_runtime_rate(id).await;
             let attempts = row
                 .get_i64("sync_attempts")
                 .unwrap_or(0)
@@ -88,11 +115,17 @@ impl BillingService {
                 "$set":{"sync_attempts":attempts,"sync_retry_at":bson::DateTime::from_chrono(now+Duration::seconds(delay))},
                 "$unset":{"sync_claim":"","sync_claim_until":""}
             }).await?;
-            if ok {
+            if result? {
                 synced += 1;
             }
+                AppResult::Ok(())
+            }).await;
+            if let Err(error) = result {
+                failed_ids.push(row.get("_id").cloned().unwrap_or(bson::Bson::Null));
+                failures.note(error);
+            }
         }
-        Ok(synced)
+        failures.finish(synced)
     }
 
     /// Administrative configuration only. A draft never admits paid runtime.
@@ -136,14 +169,20 @@ impl BillingService {
         Ok(row)
     }
 
-    pub async fn sync_machine_runtime_rate(&self, rate_version: &str) -> AppResult<()> {
+    pub async fn sync_machine_runtime_rate(&self, rate_version: &str) -> AppResult<bool> {
         let rate = self.runtime_rate(rate_version).await?;
         let lago = self
             .lago
             .as_deref()
             .ok_or_else(|| unavailable("billing provider is not configured"))?;
-        let result = async {
-            super::super::taxes::sync_charge(
+        super::super::plan_sync::run(
+            &self.db,
+            &rate.plan_code,
+            None,
+            super::super::plan_sync::CacheWrite::None,
+            async {
+                let result = async {
+                    super::super::taxes::sync_charge(
                 &self.db,
                 lago,
                 &rate.plan_code,
@@ -157,19 +196,42 @@ impl BillingService {
                 },
             )
             .await?;
-            verify_provider(lago, &rate).await
-        }
-        .await;
-        let status = if result.is_ok() { "synced" } else { "failed" };
-        let mut fields = doc! {"sync_status":status};
-        if result.is_ok() {
-            fields.insert("verified_at", bson::DateTime::from_chrono(Utc::now()));
-        }
-        self.db
-            .collection::<Document>(RATE_COLLECTION)
-            .update_one(doc! {"_id":&rate.id}, doc! {"$set":fields})
-            .await?;
-        result
+                    verify_provider_readback(lago, &rate, true).await
+                }
+                .await;
+                if super::super::plan_sync::lost() {
+                    return match result {
+                        Err(error) => super::super::recovery_batch::retry_outcome(false, error),
+                        Ok(()) => Ok(false),
+                    };
+                }
+                let pending = result
+                    .as_ref()
+                    .is_err_and(super::super::pricing::pending_readback);
+                let status = if result.is_ok() {
+                    "synced"
+                } else if pending {
+                    "pending"
+                } else {
+                    "failed"
+                };
+                let mut fields = doc! {"sync_status":status};
+                if result.is_ok() {
+                    fields.insert("verified_at", bson::DateTime::from_chrono(Utc::now()));
+                }
+                self.db
+                    .collection::<Document>(RATE_COLLECTION)
+                    .update_one(doc! {"_id":&rate.id}, doc! {"$set":fields})
+                    .await?;
+                if pending {
+                    Ok(false)
+                } else {
+                    result.map(|_| true)
+                }
+            },
+        )
+        .await
+        .map(|result| result.unwrap_or(false))
     }
 
     /// Stop issuing new quotes. Keep the immutable charge and exact record for
@@ -230,6 +292,13 @@ pub(super) fn validate_rate(rate: &MachineRuntimeRate) -> AppResult<()> {
     Ok(())
 }
 async fn verify_provider(lago: &dyn LagoApi, rate: &MachineRuntimeRate) -> AppResult<()> {
+    verify_provider_readback(lago, rate, false).await
+}
+async fn verify_provider_readback(
+    lago: &dyn LagoApi,
+    rate: &MachineRuntimeRate,
+    after_write: bool,
+) -> AppResult<()> {
     validate_rate(rate)?;
     let plan = lago
         .plan_rates(&rate.plan_code)
@@ -241,9 +310,15 @@ async fn verify_provider(lago: &dyn LagoApi, rate: &MachineRuntimeRate) -> AppRe
         .filter(|p| p.lago_metric_code == rate.lago_metric_code)
         .collect();
     if plan.rejected.contains(&rate.lago_metric_code) || matches.len() != 1 {
-        return Err(unavailable(
-            "runtime price is missing or invalid at provider",
-        ));
+        let error = unavailable("runtime price is missing or invalid at provider");
+        return Err(
+            if after_write && matches.is_empty() && !plan.rejected.contains(&rate.lago_metric_code)
+            {
+                super::super::recovery_batch::waiting(error)
+            } else {
+                error
+            },
+        );
     }
     let provider = matches[0];
     let pico = provider
@@ -251,9 +326,13 @@ async fn verify_provider(lago: &dyn LagoApi, rate: &MachineRuntimeRate) -> AppRe
         .map(i128::from)
         .unwrap_or(i128::from(provider.credits_per_unit_micros) * 1_000_000);
     if pico != rate.credits_per_second.pico() {
-        return Err(unavailable(
-            "runtime provider price changed; accepted rate cannot be fulfilled",
-        ));
+        let error =
+            unavailable("runtime provider price changed; accepted rate cannot be fulfilled");
+        return Err(if after_write {
+            super::super::recovery_batch::waiting(error)
+        } else {
+            error
+        });
     }
     Ok(())
 }
@@ -267,7 +346,7 @@ pub(in crate::services::billing) async fn verify_usage_provider_rate(
     db: &Database,
     lago: &dyn LagoApi,
     row: &UsageMeterRow,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<super::super::usage_delivery::UsageTarget>> {
     if row.metric != BillingMetric::MachineRunningSeconds {
         return Ok(None);
     }
@@ -311,5 +390,8 @@ pub(in crate::services::billing) async fn verify_usage_provider_rate(
     {
         return Err(unavailable("runtime usage subscription binding changed"));
     }
-    Ok(Some(subscription.external_id))
+    Ok(Some(super::super::usage_delivery::UsageTarget {
+        customer_id: subscription.external_customer_id,
+        subscription_id: subscription.external_id,
+    }))
 }

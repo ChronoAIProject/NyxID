@@ -19,6 +19,11 @@ pub const SSH_NODE_EXEC_CHANNEL_CLOSED_CODE: u32 = 1013;
 
 const SSH_NODE_EXEC_MAX_OUTPUT_BYTES: usize = 1_048_576;
 
+enum SessionKind {
+    NonInteractive(Duration),
+    InteractiveShell,
+}
+
 #[derive(Debug)]
 pub struct SshNodeExecOutput {
     pub exit_code: i32,
@@ -124,9 +129,9 @@ impl client::Handler for HostKeyVerifier {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &russh::keys::ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        let fingerprint = host_key_sha256(server_public_key);
+        let fingerprint = host_key_sha256(&server_public_key.public_key());
         *self.observed_sha256.lock().expect("host key lock poisoned") = Some(fingerprint.clone());
 
         match &self.policy {
@@ -201,7 +206,10 @@ pub async fn scan_host_key_sha256(
         policy: HostKeyPolicy::StaticExpected(None),
         observed_sha256: observed_sha256.clone(),
     };
-    let config = build_client_config(Duration::from_secs(timeout_secs.clamp(1, 300)), algorithms)?;
+    let config = build_client_config(
+        SessionKind::NonInteractive(Duration::from_secs(timeout_secs.clamp(1, 300))),
+        algorithms,
+    )?;
     let addr = (host, port);
     let session = tokio::time::timeout(
         Duration::from_secs(timeout_secs.clamp(1, 300)),
@@ -229,7 +237,9 @@ pub async fn test_connection(
 ) -> Result<(), SshNodeExecError> {
     let timeout = Duration::from_secs(timeout_secs.clamp(1, 300));
     match tokio::time::timeout(timeout, async move {
-        let session = connect_authenticated(&entry).await?;
+        let session =
+            connect_authenticated(&entry, SessionKind::NonInteractive(Duration::from_secs(30)))
+                .await?;
         let _ = session
             .disconnect(Disconnect::ByApplication, "", "English")
             .await;
@@ -249,7 +259,8 @@ async fn exec_command_inner(
     command: String,
 ) -> Result<SshNodeExecOutput, SshNodeExecError> {
     let started_at = Instant::now();
-    let session = connect_authenticated(&entry).await?;
+    let session =
+        connect_authenticated(&entry, SessionKind::NonInteractive(Duration::from_secs(30))).await?;
 
     let mut channel = session.channel_open_session().await.map_err(|error| {
         SshNodeExecError::channel_closed(format!("open session failed: {error}"))
@@ -346,7 +357,7 @@ async fn run_shell_inner(
     control_rx: &mut mpsc::Receiver<SshNodeShellControl>,
     event_tx: &mpsc::Sender<SshNodeShellEvent>,
 ) -> Result<(), SshNodeExecError> {
-    let session = connect_authenticated(&entry).await?;
+    let session = connect_authenticated(&entry, SessionKind::InteractiveShell).await?;
     let channel = session.channel_open_session().await.map_err(|error| {
         SshNodeExecError::channel_closed(format!("open shell session failed: {error}"))
     })?;
@@ -428,6 +439,7 @@ async fn run_shell_inner(
 
 async fn connect_authenticated(
     entry: &SshKeyEntry,
+    session_kind: SessionKind,
 ) -> Result<client::Handle<HostKeyVerifier>, SshNodeExecError> {
     let observed_sha256 = Arc::new(Mutex::new(None));
     let handler = HostKeyVerifier {
@@ -435,7 +447,7 @@ async fn connect_authenticated(
         observed_sha256: observed_sha256.clone(),
     };
 
-    let config = build_client_config(Duration::from_secs(30), entry.algorithms.as_ref())?;
+    let config = build_client_config(session_kind, entry.algorithms.as_ref())?;
 
     let addr = (entry.target_host.as_str(), entry.target_port);
     let mut session = match client::connect(config, addr, handler).await {
@@ -549,7 +561,7 @@ fn map_client_connect_error(error: SshClientError) -> SshNodeExecError {
 }
 
 fn build_client_config(
-    inactivity_timeout: Duration,
+    session_kind: SessionKind,
     algorithms: Option<&SshAlgorithmPreferences>,
 ) -> Result<Arc<client::Config>, SshNodeExecError> {
     let default_algorithms = SshAlgorithmPreferences::default();
@@ -561,8 +573,14 @@ fn build_client_config(
     // without weakening modern KEX paths (curve25519 / ECDH ignore gex).
     let gex = client::GexParams::new(2048, 8192, 8192)
         .expect("static GexParams bounds satisfy russh validation");
+    let (inactivity_timeout, keepalive_interval) = match session_kind {
+        SessionKind::NonInteractive(timeout) => (Some(timeout), None),
+        SessionKind::InteractiveShell => (None, Some(Duration::from_secs(15))),
+    };
     Ok(Arc::new(client::Config {
-        inactivity_timeout: Some(inactivity_timeout),
+        inactivity_timeout,
+        keepalive_interval,
+        keepalive_max: 3,
         preferred,
         gex,
         ..Default::default()
@@ -613,7 +631,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     fn test_entry_with_cert(certificate_openssh: Option<String>) -> SshKeyEntry {
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = rand_10::rng();
         let private_key =
             russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("private key");
         let private_key_pem = private_key.to_openssh(LineEnding::LF).expect("openssh");
@@ -634,7 +652,7 @@ mod tests {
     }
 
     fn user_certificate_for_entry(entry: &SshKeyEntry) -> String {
-        let mut rng = rand::rngs::OsRng;
+        let mut rng = rand_10::rng();
         let subject_key = decode_secret_key(entry.private_key_pem.as_str(), None).unwrap();
         let ca_key = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("ca key");
         let mut builder = certificate::Builder::new_with_random_nonce(
@@ -665,7 +683,11 @@ mod tests {
             mac: Some(vec!["hmac-sha2-256".to_string()]),
         };
 
-        let config = build_client_config(Duration::from_secs(10), Some(&algorithms)).unwrap();
+        let config = build_client_config(
+            SessionKind::NonInteractive(Duration::from_secs(10)),
+            Some(&algorithms),
+        )
+        .unwrap();
 
         assert_eq!(config.inactivity_timeout, Some(Duration::from_secs(10)));
         assert_eq!(
@@ -692,10 +714,33 @@ mod tests {
 
     #[test]
     fn client_config_relaxes_dh_gex_min_to_match_openssh() {
-        let config = build_client_config(Duration::from_secs(10), None).unwrap();
+        let config =
+            build_client_config(SessionKind::NonInteractive(Duration::from_secs(10)), None)
+                .unwrap();
         assert_eq!(config.gex.min_group_size(), 2048);
         assert_eq!(config.gex.preferred_group_size(), 8192);
         assert_eq!(config.gex.max_group_size(), 8192);
+    }
+
+    #[test]
+    fn client_config_interactive_shell_keeps_idle_sessions_alive() {
+        let config = build_client_config(SessionKind::InteractiveShell, None).unwrap();
+        assert_eq!(config.inactivity_timeout, None);
+        assert_eq!(config.keepalive_interval, Some(Duration::from_secs(15)));
+        assert_eq!(config.keepalive_max, 3);
+    }
+
+    #[test]
+    fn client_config_noninteractive_retains_timeout_without_keepalive() {
+        for timeout in [Duration::from_secs(30), Duration::from_secs(10)] {
+            let config = build_client_config(SessionKind::NonInteractive(timeout), None).unwrap();
+            assert_eq!(config.inactivity_timeout, Some(timeout));
+            assert_eq!(config.keepalive_interval, None);
+            assert_eq!(
+                config.keepalive_max,
+                client::Config::default().keepalive_max
+            );
+        }
     }
 
     #[test]
@@ -770,5 +815,41 @@ mod tests {
             }
             HostKeyPolicy::StaticExpected(_) => panic!("cert entry must use TOFU policy"),
         }
+    }
+
+    #[tokio::test]
+    async fn cert_exec_host_key_callback_pins_the_first_key_and_checks_reconnections() {
+        use russh::client::Handler;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut entry = test_entry_with_cert(None);
+        entry.cert_host_key_store = Some(Arc::new(Mutex::new(
+            CertHostKeyStore::load(dir.path()).unwrap(),
+        )));
+        let mut verifier = HostKeyVerifier {
+            policy: host_key_policy(&entry),
+            observed_sha256: Arc::default(),
+        };
+        let mut rng = rand_10::rng();
+        let host_key = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).unwrap();
+        let expected = host_key_sha256(host_key.public_key());
+        let presented = host_key.public_key().clone().into();
+        assert!(verifier.check_server_key(&presented).await.unwrap());
+        assert!(verifier.check_server_key(&presented).await.unwrap());
+        assert_eq!(
+            verifier.observed_sha256.lock().unwrap().as_ref(),
+            Some(&expected)
+        );
+
+        let other = russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519).unwrap();
+        let error = verifier
+            .check_server_key(&other.public_key().clone().into())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            map_client_connect_error(error).code,
+            SSH_HOST_KEY_MISMATCH_CODE
+        );
+        assert!(verifier.check_server_key(&presented).await.unwrap());
     }
 }

@@ -16,8 +16,10 @@ function setup(
     unread?: number;
     needsDecision?: number;
   } = { enabled: false },
+  onPrimary = lightColors.onPrimary,
 ) {
   const events: string[] = [];
+  let disabled = false;
   const indicatorCalls: boolean[] = [];
   const h = hookHarness<E>({
     "../../features/notifications/useNotifications": {
@@ -77,7 +79,9 @@ function setup(
     "../../lib/notifications/approvalRefreshSignal": {
       subscribeToApprovalRefreshSignals: () => () => {},
     },
-    "../../theme/ThemeContext": { useTheme: () => ({ colors: lightColors }) },
+    "../../theme/ThemeContext": {
+      useTheme: () => ({ colors: { ...lightColors, onPrimary } }),
+    },
     "../brand/NyxidLogo": { NyxidLogo: "Logo" },
     "./WorkspaceChatList": { WorkspaceChatList: "ChatList" },
     "./WorkspaceRecents": { WorkspaceRecents: "Recents" },
@@ -89,6 +93,7 @@ function setup(
   h.mount(() =>
     Drawer({
       visible: true,
+      disabled,
       onHome: () => events.push("home"),
       onQuickAction: (kind: string) => events.push(kind),
       onNavigate: (name: string) => events.push(name),
@@ -110,6 +115,10 @@ function setup(
   return {
     h,
     events,
+    disable: (next: boolean) => {
+      disabled = next;
+      h.render();
+    },
     all,
     label,
     indicatorCalls,
@@ -209,6 +218,8 @@ test("Quick actions precede Workspace with no placeholders and a live Activity p
     paddingHorizontal: 12,
     paddingTop: 8,
     paddingBottom: 10,
+    flexShrink: 0,
+    minWidth: 52,
     color: lightColors.textPrimary,
   });
   assert.deepEqual(
@@ -263,9 +274,9 @@ test("absolute bottom controls reserve their measured height and safe inset abov
     }
   }
   const pill = x.label("New chat");
-  const style = pill.props.style({ pressed: false })[0];
+  const style = Object.assign({}, ...pill.props.style({ pressed: false }));
   assert.equal(style.minHeight, 52);
-  assert.equal(style.backgroundColor, "#FFFFFF");
+  assert.equal(style.backgroundColor, lightColors.onPrimary);
   const gear = x.label("Settings");
   assert.ok(gear.props.style[0].height >= 44);
   x.h.unmount();
@@ -313,5 +324,83 @@ test("sidebar logo and Search are centered in the shared slab header row", () =>
     (row.props.style.height - search.props.style.height) / 2 +
     search.props.style.height / 2;
   assert.ok(Math.abs(center - WORKSPACE_HEADER_ROW_HEIGHT / 2) <= 0.5);
+  x.h.unmount();
+});
+
+
+test("drawer navigation controls expose disabled state with muted labels and 44pt targets until a write settles", () => {
+  const env = setup({ enabled: true, unread: 2 });
+  env.disable(true);
+  const controls = env.all().filter((node) => node.type === "Pressable");
+  assert.equal(controls.length, 12);
+  for (const control of controls) {
+    assert.equal(
+      control.props.disabled,
+      true,
+      control.props.accessibilityLabel,
+    );
+    assert.equal(control.props.accessibilityState.disabled, true);
+    const style = Object.assign(
+      {},
+      ...[
+        typeof control.props.style === "function"
+          ? control.props.style({ pressed: false })
+          : control.props.style,
+      ]
+        .flat(Infinity)
+        .filter(Boolean),
+    );
+    assert.ok(
+      (style.minHeight ?? style.height) >= 44,
+      control.props.accessibilityLabel,
+    );
+    assert.equal(style.opacity, undefined);
+    for (const label of nodes(control).filter(
+      (node) =>
+        node.type === "Text" &&
+        node.props.testID !== "sidebar-notifications-count",
+    )) {
+      const textStyle = Object.assign(
+        {},
+        ...[label.props.style].flat(Infinity).filter(Boolean),
+      );
+      assert.equal(
+        textStyle.color,
+        lightColors.textMuted,
+        String(label.props.children),
+      );
+      assert.equal(textStyle.opacity, undefined);
+    }
+  }
+  assert.equal(env.list().props.disabled, true);
+  assert.equal(env.list().props.scrollFooter.props.disabled, true);
+  env.disable(false);
+  assert.ok(
+    env
+      .all()
+      .filter((node) => node.type === "Pressable")
+      .every((node) => node.props.disabled === false),
+  );
+  assert.equal(env.list().props.disabled, false);
+  env.label("Settings").props.onPress();
+  env.label("Scan QR code").props.onPress();
+  assert.deepEqual(env.events, ["AccountSettings", "scanner"]);
+  env.h.unmount();
+});
+
+test("New chat uses the theme on-primary surface token instead of a literal white", () => {
+  const x = setup({ enabled: false }, "theme-on-primary-sentinel");
+  const pill = x.label("New chat");
+  const style = pill.props.style({ pressed: false });
+  assert.equal(
+    Object.assign({}, ...style).backgroundColor,
+    "theme-on-primary-sentinel",
+  );
+  x.disable(true);
+  assert.equal(
+    Object.assign({}, ...x.label("New chat").props.style({ pressed: false }))
+      .backgroundColor,
+    lightColors.navActive,
+  );
   x.h.unmount();
 });

@@ -11,6 +11,7 @@ import type { CreateApiKeyFormData } from "@/schemas/api-keys";
 import { useOrgs } from "./use-orgs";
 
 interface UseApiKeysParams {
+  readonly enabled?: boolean;
   /** `null` or omitted lists the caller's personal keys. When set, lists
    *  keys owned by the given org (admin-only). */
   readonly orgId?: string | null;
@@ -27,6 +28,7 @@ export function useApiKeys(params: UseApiKeysParams = {}) {
   const orgId = params.orgId ?? null;
   return useQuery({
     queryKey: ["api-keys", orgId ?? "personal"],
+    enabled: params.enabled,
     queryFn: async (): Promise<readonly ApiKey[]> => {
       const path = orgId
         ? `/api-keys?org_id=${encodeURIComponent(orgId)}`

@@ -294,7 +294,7 @@ pub(crate) async fn admit_dispatch(
 ) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run((db.clone(), handle.id.clone(), handle.route_digest.clone()), |session, (db,id,digest)| Box::pin(async move {
-        let result: AppResult<()> = async {
+        let result: AppResult<()> = billing::recovery_batch::work(async {
             let now = Utc::now();
             let calls = db.collection::<ManagedExecution>(COLLECTION_NAME);
             let row = calls.find_one(doc! {"_id":id,"route_digest":digest,"state":"funded","expires_at":{"$gt":bson::DateTime::from_chrono(now)}})
@@ -312,7 +312,7 @@ pub(crate) async fn admit_dispatch(
             if calls.update_one(doc! {"_id":&row.id,"state":"funded"},doc! {"$set":{"state":"dispatch_admitted","updated_at":bson::DateTime::from_chrono(now)}})
                 .session(&mut *session).await?.matched_count != 1 { return Err(unavailable()); }
             Ok(())
-        }.await;
+        }).await;
         tx::transaction_result(result)
     })).await.map_err(tx::map_transaction_error)
 }
@@ -499,7 +499,7 @@ pub(crate) async fn reject_before_send(
 async fn cancel(db: &Database, id: &str) -> AppResult<()> {
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run((db.clone(),id.to_owned()),|session,(db,id)|Box::pin(async move {
-        let result: AppResult<()> = async {
+        let result: AppResult<()> = billing::recovery_batch::work(async {
             let calls = db.collection::<ManagedExecution>(COLLECTION_NAME);
             let Some(row) = calls.find_one(doc! {"_id":id,"state":{"$in":["prepared","funded","cancelling"]}})
                 .session(&mut *session).await? else { return Ok(()); };
@@ -532,7 +532,7 @@ async fn cancel(db: &Database, id: &str) -> AppResult<()> {
                     .session(&mut *session).await?.matched_count != 1 { return Err(unavailable()); }
             }
             Ok(())
-        }.await;
+        }).await;
         tx::transaction_result(result)
     })).await.map_err(tx::map_transaction_error)?;
     let calls = db.collection::<ManagedExecution>(COLLECTION_NAME);
@@ -558,29 +558,50 @@ async fn cancel(db: &Database, id: &str) -> AppResult<()> {
 }
 
 pub(crate) async fn reconcile(db: &Database) -> AppResult<u64> {
+    use billing::recovery_batch::{self, Failures};
     let now = Utc::now();
     let calls = db.collection::<ManagedExecution>(COLLECTION_NAME);
-    let rows: Vec<ManagedExecution> = calls.find(doc! {"next_reconcile_at":{"$lte":bson::DateTime::from_chrono(now)},
+    let rows: Vec<bson::Document> = db.collection::<bson::Document>(COLLECTION_NAME).find(doc! {"next_reconcile_at":{"$lte":bson::DateTime::from_chrono(now)},
         "state":{"$in":["prepared","funded","cancelling","dispatch_admitted","evidence_ready"]}})
-        .sort(doc! {"next_reconcile_at":1,"_id":1}).limit(RECOVERY_BATCH).await?.try_collect().await?;
+        .sort(doc! {"next_reconcile_at":1,"_id":1}).limit(recovery_batch::limit(RECOVERY_BATCH)).await?.try_collect().await?;
     let mut count = 0;
-    for row in rows {
-        let result = match row.state {
-            State::Prepared|State::Funded if row.expires_at <= now => cancel(db,&row.id).await,
-            State::Cancelling => cancel(db,&row.id).await,
-            State::EvidenceReady => finish_evidence(db,&row.id).await,
-            State::DispatchAdmitted if row.expires_at <= now => calls.update_one(doc! {"_id":&row.id,"state":"dispatch_admitted"},
-                doc! {"$set":{"state":"pending","pending_reason":"worker_interrupted","updated_at":bson::DateTime::now()}}).await.map(|_|()).map_err(AppError::from),
-            _ => Ok(()),
-        };
-        if result.is_err() {
-            tracing::warn!(execution_id=%row.id,"Managed execution recovery will retry");
-            calls.update_one(doc! {"_id":&row.id},doc! {"$set":{"next_reconcile_at":bson::DateTime::from_chrono(now+Duration::seconds(30))}}).await?;
-        } else {
-            count += 1;
+    let mut failures = Failures::default();
+    for raw in rows {
+        if !billing::reconcile::continue_reconcile() {
+            break;
+        }
+        let result: AppResult<()> = billing::recovery_batch::work(async {
+            let row: ManagedExecution = recovery_batch::decode(&raw)?;
+            match row.state {
+                State::Prepared|State::Funded if row.expires_at <= now => cancel(db,&row.id).await,
+                State::Cancelling => cancel(db,&row.id).await,
+                State::EvidenceReady => finish_evidence(db,&row.id).await,
+                State::DispatchAdmitted if row.expires_at <= now => calls.update_one(doc! {"_id":&row.id,"state":"dispatch_admitted"},
+                    doc! {"$set":{"state":"pending","pending_reason":"worker_interrupted","updated_at":bson::DateTime::now()}}).await.map(|_|()).map_err(AppError::from),
+                _ => Ok(()),
+            }
+        }).await;
+        match result {
+            Ok(()) => count += 1,
+            Err(error) => {
+                failures.note(error);
+                if let Err(error) = db
+                    .collection::<bson::Document>(COLLECTION_NAME)
+                    .update_one(
+                        doc! {"_id":raw.get("_id")},
+                        vec![doc! {"$set":{"next_reconcile_at":{"$add":["$$NOW",30_000]}}}],
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        error_code = AppError::from(error).error_code(),
+                        "Managed recovery retry marker unavailable"
+                    );
+                }
+            }
         }
     }
-    Ok(count)
+    failures.finish(count)
 }
 
 fn visible_filter(actor_user_id: &str, wallet_owner_id: Option<&str>) -> bson::Document {

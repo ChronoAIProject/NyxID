@@ -64,7 +64,7 @@ async fn decrypt_factor_secret(
         crate::crypto::aes::RecordContext::new(MFA_FACTORS, &factor.id, &factor.user_id, &field)?;
     let plaintext = match factor.secret_context_version {
         Some(3) => keys.decrypt_record(encrypted, &context).await?,
-        None if keys.allow_legacy_record_reads() => Zeroizing::new(keys.decrypt(encrypted).await?),
+        None if keys.allow_legacy_record_reads() => keys.decrypt(encrypted).await?,
         _ => {
             return Err(AppError::Internal(
                 "MFA secret format is unavailable".into(),
@@ -1036,7 +1036,7 @@ fn schedule_recovery_notice(
     permit: tokio::sync::OwnedSemaphorePermit,
     notice: impl std::future::Future<Output = AppResult<()>> + Send + 'static,
 ) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         let _permit = permit;
         match tokio::time::timeout(RECOVERY_NOTICE_TIMEOUT, notice).await {
             Ok(Ok(())) => {}
@@ -1188,7 +1188,8 @@ mod tests {
         assert_eq!(
             keys.decrypt(legacy.secret_encrypted.as_ref().unwrap())
                 .await
-                .unwrap(),
+                .unwrap()
+                .as_slice(),
             setup.secret.as_bytes()
         );
         assert!(
@@ -1771,7 +1772,7 @@ mod tests {
             .decrypt(stored.secret_encrypted.as_ref().unwrap())
             .await
             .unwrap();
-        let secret = Secret::Encoded(String::from_utf8(plaintext).unwrap())
+        let secret = Secret::Encoded(std::str::from_utf8(&plaintext).unwrap().to_owned())
             .to_bytes()
             .unwrap();
         let totp = create_totp(secret, "NyxID", "test").unwrap();

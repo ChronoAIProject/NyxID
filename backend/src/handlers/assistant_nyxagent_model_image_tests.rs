@@ -37,6 +37,15 @@ fn modalities_are_optional_and_malformed_metadata_is_unknown() {
 
 #[tokio::test]
 async fn image_turn_respects_model_modalities_and_records_only_known_upstream_notices() {
+    check_image_modalities(false).await;
+}
+
+#[tokio::test]
+async fn pdf_turn_respects_model_modalities_and_records_unread_upstream_pages() {
+    check_image_modalities(true).await;
+}
+
+async fn check_image_modalities(pdf: bool) {
     for (modalities, failed_lookup, upstream_notice, expected_reason) in [
         (Some(json!(["text"])), false, None, Some("model_text_only")),
         (None, false, None, None),
@@ -49,6 +58,9 @@ async fn image_turn_respects_model_modalities_and_records_only_known_upstream_no
         ),
     ] {
         let (state, _, server) = setup(None, Duration::ZERO).await;
+        if pdf {
+            state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {"_id":Uuid::new_v4().to_string(),"flag_key":"assistant:pdf-vision","enabled":true,"target_kind":"global","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"updated_by":OWNER}).await.unwrap();
+        }
         let upstream = MockServer::start().await;
         state
             .db
@@ -76,7 +88,7 @@ async fn image_turn_respects_model_modalities_and_records_only_known_upstream_no
             .await;
         Mock::given(method("GET")).and(path("/v1/capabilities"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"protocol":"nyxagent-input-image-v1","input_image":{
-                "version":1,"sources":["nyxid_attachment_url"],"max_images":8,"max_image_bytes":5_000_000,"max_total_bytes":20_000_000,"content_types":["image/png"]}})))
+                "version":1,"sources":["nyxid_attachment_url"],"max_images":8,"max_image_bytes":5_000_000,"max_total_bytes":20_000_000,"content_types":["image/png","image/jpeg"]}})))
             .mount(&upstream).await;
         let mut completed = json!({"type":"response.completed","sequence_number":0,"response":{
             "id":RESPONSE,"conversation":{"id":SESSION},"status":"completed",
@@ -111,11 +123,28 @@ async fn image_turn_respects_model_modalities_and_records_only_known_upstream_no
             ))
             .unwrap();
         text_request.extensions_mut().insert(SERVER_TURN_POLICY);
-        drop(
-            turns(State(state.clone()), test_auth_user(OWNER), text_request)
-                .await
-                .unwrap(),
-        );
+        let ordinary = turns(State(state.clone()), test_auth_user(OWNER), text_request)
+            .await
+            .unwrap_or_else(|error| {
+                let AppError::DatabaseError(source) = &error else {
+                    panic!("ordinary turn admission: error={}", error.error_key());
+                };
+                use mongodb::error::{ErrorKind, WriteFailure};
+                let (kind, code) = match source.kind.as_ref() {
+                    ErrorKind::Command(command) => ("command", Some(command.code)),
+                    ErrorKind::Write(WriteFailure::WriteError(write)) => ("write", Some(write.code)),
+                    ErrorKind::Write(WriteFailure::WriteConcernError(write)) => ("write_concern", Some(write.code)),
+                    ErrorKind::ServerSelection { .. } => ("selection", None),
+                    ErrorKind::Io(_) => ("io", None),
+                    _ => ("other", None),
+                };
+                panic!(
+                    "ordinary turn admission: mongo_kind={kind}, mongo_code={code:?}, transient_transaction={}, unknown_commit={}",
+                    source.contains_label("TransientTransactionError"),
+                    source.contains_label("UnknownTransactionCommitResult")
+                );
+            });
+        drop(ordinary);
         settled(&state).await;
         assert!(
             !upstream
@@ -134,8 +163,12 @@ async fn image_turn_respects_model_modalities_and_records_only_known_upstream_no
             &state.encryption_keys,
             OWNER,
             &id,
-            "photo.png",
-            png.into_inner(),
+            if pdf { "scan.pdf" } else { "photo.png" },
+            if pdf {
+                crate::services::attachment_extraction::pdf_fixture(&[None, None], 0)
+            } else {
+                png.into_inner()
+            },
         )
         .await
         .unwrap();
@@ -155,18 +188,39 @@ async fn image_turn_respects_model_modalities_and_records_only_known_upstream_no
             .iter()
             .find(|m| m.role == "user" && !m.attachments.is_empty())
             .unwrap();
-        assert_eq!(
-            user.attachments[0].image_input.as_deref(),
-            Some(if expected_reason.is_some() {
-                "unavailable"
-            } else {
-                "sent"
-            })
-        );
-        assert_eq!(
-            user.attachments[0].image_input_reason.as_deref(),
-            expected_reason
-        );
+        if pdf {
+            let coverage = user.attachments[0].pdf.as_ref().unwrap();
+            assert_eq!(coverage.reason.as_deref(), expected_reason);
+            assert_eq!(
+                coverage.unread_pages,
+                if expected_reason.is_some() {
+                    vec![1, 2]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(
+                coverage.image_pages,
+                if expected_reason.is_some() {
+                    vec![]
+                } else {
+                    vec![1, 2]
+                }
+            );
+        } else {
+            assert_eq!(
+                user.attachments[0].image_input.as_deref(),
+                Some(if expected_reason.is_some() {
+                    "unavailable"
+                } else {
+                    "sent"
+                })
+            );
+            assert_eq!(
+                user.attachments[0].image_input_reason.as_deref(),
+                expected_reason
+            );
+        }
         let reply = messages
             .iter()
             .find(|m| m.role == "assistant" && m.turn_id == user.turn_id)
@@ -179,7 +233,11 @@ async fn image_turn_respects_model_modalities_and_records_only_known_upstream_no
         assert!(!String::from_utf8_lossy(&output).contains("SECRET upstream notice text"));
         let dto =
             serde_json::to_value(AttachmentResponse::from(user.attachments[0].clone())).unwrap();
-        assert_eq!(dto["image_input_reason"].as_str(), expected_reason);
+        if pdf {
+            assert_eq!(dto["pdf"]["reason"].as_str(), expected_reason);
+        } else {
+            assert_eq!(dto["image_input_reason"].as_str(), expected_reason);
+        }
         let requests = upstream.received_requests().await.unwrap();
         let sent = requests
             .iter()
@@ -190,7 +248,7 @@ async fn image_turn_respects_model_modalities_and_records_only_known_upstream_no
             body.to_string().contains("/assistant-attachments/"),
             expected_reason != Some("model_text_only")
         );
-        if expected_reason == Some("model_text_only") {
+        if !pdf && expected_reason == Some("model_text_only") {
             assert!(body.to_string().contains("this model can’t view images"));
             assert!(
                 !body["input"]
@@ -232,6 +290,7 @@ async fn text_only_tool_images_continue_with_a_notice_and_no_image_url() {
             Some(vec![ModelInfo {
                 id: engine::DEFAULT_MODEL.into(),
                 label: "Text model".into(),
+                inference_credential: None,
                 available: true,
                 description: None,
                 input_modalities: Some(vec!["text".into()]),

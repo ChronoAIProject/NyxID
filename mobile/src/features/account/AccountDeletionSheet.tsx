@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { Modal, Pressable, ScrollView, StyleSheet, View } from "react-native";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { ACCOUNT_DELETION_DISCLOSURE } from "../../lib/accountDeletionPolicy";
@@ -18,6 +20,7 @@ export function AccountDeletionSheet({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const paragraphs = ACCOUNT_DELETION_DISCLOSURE.split("\n\n");
   return (
@@ -31,29 +34,29 @@ export function AccountDeletionSheet({
         <View style={styles.bar}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Cancel"
+            accessibilityLabel={translateApp("Cancel")}
             hitSlop={12}
             onPress={onCancel}
             style={styles.barButton}
           >
             <Text style={[styles.barLabel, { color: colors.primary }]}>
-              Cancel
+              {translateApp("Cancel")}
             </Text>
           </Pressable>
         </View>
         <ScrollView
           style={styles.scroll}
           contentContainerStyle={styles.content}
-          accessibilityLabel="Account deletion details"
+          accessibilityLabel={translateApp("Account deletion details")}
         >
           <Text
             accessibilityRole="header"
             style={[styles.title, { color: colors.textPrimary }]}
           >
-            Delete Account?
+            {translateApp("Delete Account?")}
           </Text>
           <Text style={[styles.lead, { color: colors.danger }]}>
-            This cannot be undone.
+            {translateApp("This cannot be undone.")}
           </Text>
           <View style={[styles.card, { backgroundColor: colors.card }]}>
             {paragraphs.map((paragraph, index) => (
@@ -69,7 +72,7 @@ export function AccountDeletionSheet({
         <View style={[styles.actions, { borderTopColor: colors.borderSoft }]}>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Delete Account permanently"
+            accessibilityLabel={translateApp("Delete Account permanently")}
             onPress={onConfirm}
             style={({ pressed }) => [
               styles.delete,
@@ -81,17 +84,17 @@ export function AccountDeletionSheet({
             ]}
           >
             <Text style={[styles.deleteLabel, { color: colors.onPrimary }]}>
-              Delete Account
+              {translateApp("Delete Account")}
             </Text>
           </Pressable>
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Keep my account"
+            accessibilityLabel={translateApp("Keep my account")}
             onPress={onCancel}
             style={styles.keep}
           >
             <Text style={[styles.keepLabel, { color: colors.primary }]}>
-              Keep My Account
+              {translateApp("Keep My Account")}
             </Text>
           </Pressable>
         </View>

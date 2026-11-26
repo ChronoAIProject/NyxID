@@ -229,7 +229,7 @@ New file. Single endpoint: `POST /api/v1/channel-events/{conversation_id}`.
 Responsibilities:
 
 - Auth gate: reject `auth_user.auth_method != AuthMethod::ApiKey` with 401. Relay tokens, session cookies, and service-account tokens are all turned away at the handler boundary.
-- Envelope validation: `event_id` must be a UUID, `source` is `1..=128` ASCII in `[a-zA-Z0-9_\-./]`, `event_type` is `1..=128` ASCII in `[a-zA-Z0-9_\-.:]`, `timestamp` is RFC 3339. **No payload size limit** per ADR-013 — the router disables `DefaultBodyLimit` for this path.
+- Envelope validation: `event_id` must be a UUID, `source` is `1..=128` ASCII in `[a-zA-Z0-9_\-./]`, `event_type` is `1..=128` ASCII in `[a-zA-Z0-9_\-.:]`, `timestamp` is RFC 3339. The API-key check precedes JSON extraction. The streaming body limit is `PROXY_MAX_BODY_SIZE` (100 MiB by default).
 - Delegation: hands the validated envelope to `channel_event_service::forward_event()`.
 - Response shape: `{ "status": "accepted" | "duplicate", "event_id": "..." }`.
 
@@ -306,10 +306,10 @@ let channel_event_routes = Router::new()
         "/{conversation_id}",
         post(handlers::channel_events::post_event),
     )
-    .layer(DefaultBodyLimit::disable());
+    .layer(DefaultBodyLimit::max(config.proxy_max_body_size));
 ```
 
-Nested under `api_v1_delegated` so the existing API-key auth middleware is applied. `DefaultBodyLimit::disable()` opts this router out of the app-wide 1 MiB body cap — per ADR-013 the gateway does not enforce an application-level payload size limit on device events.
+Nested under `api_v1_delegated` so the existing API-key auth middleware is applied. A body exceeding the configured limit returns HTTP 413.
 
 ## AppState Integration
 
@@ -561,7 +561,28 @@ and account-link controls. Reconnect is disabled without a live target or while
 a mutation is pending. Disconnect remains available. Known errors have readable
 explanations and a secondary stable code; a gateway 401 means authentication
 failed and a 403 means gateway permission is missing. Remote response bodies are
-never displayed. There is **no automatic reconnect** of failed rows.
+never displayed. There is no general automatic reconnect of failed rows. The bounded #2458
+exception restores only pre-#2288 org-specialist `org_access_lost` rows when a
+matching old audit proof and fresh live authority both hold. It runs in the
+existing leased release worker, invokes the normal `connect_inner` path with
+the server-held actor-scoped creator bearer, and never bypasses gateway release
+or Discord's confirmed-delete-plus-90-second drain guard. It preserves guest
+policy, starts a fresh sender-verification boundary, and leaves the predecessor
+business state untouched if setup fails (only additive retry bookkeeping changes).
+
+`connect_inner` was originally reachable from a human request. Restoration
+passes no source conversation and sets its restoration flag, suppressing the human-only
+`nyxbot_channel_connected` and owner-linked audits, creates no watch, setup
+thread, action card, onboarding/setup notice, or waiting card, and emits no
+link instructions to a person. It still creates the route, fresh route/agent
+keys, gateway channel when the selected transport is gateway, the fresh policy
+identity, and the normal activation record; those are the durable effects an
+admin reconnect would create. Telegram remains gateway-only and reuses the
+server-held creator bearer, so no new Telegram consent is requested. Discord
+native setup remains behind the existing confirmed remote-delete-or-absence
+plus 90-second drain guard; uncertain deletion blocks indefinitely. Lark uses
+the gateway only when the linking admin's `nyxbot:gateway-lark` flag is on and
+otherwise uses the relay.
 
 Confirmed missing/inactive/invalid local `cmaeg` configuration reports
 `gateway_configuration_required`; ask an administrator to verify the active
@@ -793,10 +814,9 @@ channel through the existing read/delete and native-drain fences. Initial
 default-only routing, a successful direct reply, or `pending_discovery` alone
 never acknowledges the requested native policy.
 
-Deploy all replicas with readiness capability `nyxbot:native-gateway-v1` before
-its first clean, drained activation. Native selection uses serving readiness:
-recorded activation tolerates supported roster overlaps, while an unsupported
-or undrained live generation still refuses selection. A persisted `preparing`
+Native selection uses recorded `nyxbot:native-gateway-v1` support from every live
+generation. Activation converges automatically; roster/drain declarations are
+advisory. An unsupported live generation still refuses selection. A persisted `preparing`
 phase permits binding setup but refuses
 provider execution with CMA's exact pre-admission `429` JSON refusal
 `{"error":{"type":"invalid_request_error","code":"conversation_not_ready"}}`
@@ -837,6 +857,21 @@ and other-user mention suppression rules. Gateway admission, names and words
 never prove addressing. Native edits, reactions and controls are not accepted
 as replacement original messages. Incoming media receives explicit unavailable
 feedback; tool images cannot use old relay anchors and report unavailable.
+
+A retained native edit, deletion, reaction or control submission gets its own
+durable empty completion. The gateway routes a change to the original partition.
+Discord reports the deleting actor as unknown. NyxID keeps the response ID and
+the four command metadata values for the ordinary 24-hour replay window.
+The original turn can finish normally. No sender, reply target or turn is
+derived from the change. Private native WhatsApp notifications use the same
+completion under live callback custody.
+
+CMA routes a dispatch with a valid acceptance prefix to response GET and SSE
+replay. A 400 validation_error before acceptance can instead leave a FIFO head
+in `unknown` without a response ID. The routed CMA adapter at `01e30c8e`
+disables exact-body re-POST. Existing heads in that state require CMA-side
+resolution. During rollout, an old NyxID replica can still refuse a new
+notification. See [CMA's dispatcher](https://github.com/ChronoAIProject/cma/blob/01e30c8e9eb9ad2805ea6ba3d03a9a7070499d00/api/crates/cmaeg/src/turns/routed/dispatcher.rs).
 
 Status exposes `gateway_native_phase`, `gateway_native_activation` and
 `gateway_native_delivery`. A rejected native setup also exposes the optional
@@ -895,7 +930,8 @@ Lark and Feishu owner images, files and rich posts can reach NyxBot through the
 gateway when the per-person `assistant:channel-media` flag is enabled (default
 off), including org-owned bots whose linking person remains an org admin. This
 requires CMA at least `a570be21` with `CMAEG_MEDIA_ENABLED=true`. Upgrade all
-NyxID replicas and drain old workers before enabling it. Admission does no
+NyxID replicas to compatible media readers before enabling it; readiness-gated
+paths converge automatically without roster/drain declarations. Admission does no
 downloads, preserving CMA's default 30-second provider header budget
 (`CMAEG_PROVIDER_REQUEST_TIMEOUT_MS`). NyxID ingests the media at run start using
 its own stored source selectors and live authority, never gateway-supplied
@@ -929,8 +965,232 @@ authorized download chips with explicit model limitations. See
 This section concerns NyxID acting as CMAEG's `nyxbot` provider, not the generic
 `/channel-events` ingress. Generic ingress remains ADR-013 passthrough. NyxBot's
 existing assistant history owns answer content; additive `nyxbot_events.delivery`
-metadata arbitrates streamed versus delayed answers. The implementation contract
+metadata arbitrates streamed versus delayed answers. Late gateway answers now recover
+expired text preparations under current authority, with a fenced MongoDB-time
+lease. The claim becomes irreversible immediately before the gateway request;
+a missing or ambiguous receipt still forbids a new operation. The bounded
+reply-target cases described below permit re-asking the same operation. Interrupted sends add
+a fixed notice only to an existing authorized owner thread. No
+public-manager readback is added. The implementation contract
 is in [NyxBot channel delivery](chat/09-nyxbot-orchestrator.md#channel-turn-delivery-after-the-provider-stream-closes).
+
+### Reconciling a retained relay source
+
+An existing conversation reader can pass the workflow's `source_event_id` to
+`GET /api/v1/channel-conversations/{id}/messages?source_event_id=<alias>`.
+The alias is the 64-character lowercase hexadecimal value from verified channel
+context. The conversation ID is the same NyxID route ID used for the message
+history. The existing conversation ACL admits the resource owner and active
+members of the owning organization, including viewers. The lookup applies to
+NyxID-relayed events. Native gateway ingress, including native Discord and
+WhatsApp, uses its own receipt paths.
+
+Readers who supply the exact retained alias can see source and result metadata
+for its bound turn, including turns associated with a private channel
+conversation. The response is limited to the alias, the original inbound ID,
+the recorded platform message and sender IDs, the provider response ID, and
+the turn and reply status fields. Message text, attachments, assistant
+conversation and turn IDs, execution identity, and gateway credentials stay
+outside this response. The alias is a lookup key under the conversation ACL.
+
+Before using any returned IDs, require a top-level `source_event_id` that
+exactly equals the requested alias and an `inbound_message_id` that is a
+NyxID message UUID. Older servers can return a normal message page with HTTP
+200 because they ignore the query parameter. Treat any response without the
+exact mapping fields as unresolved during rollout.
+
+The response includes the original `inbound_message_id`, its native
+`platform_message_id` and `sender_platform_id` when recorded, and the provider
+`response_id` when retained. The relay activity's event UUID is the NyxID
+inbound message ID. That UUID also appears as `reply_to_message_id` on related
+outbound message rows. A source may have several related messages, such as an
+explicit tool post and an automatic reply. For CMA-owned delivery, use the
+designated consumer's receipt for the exact event and response to identify the
+answer, and use outbound rows to cross-check platform message IDs.
+
+`turn_status` reports the exact assistant turn's status. `reply_status` reports
+NyxID's local reply evidence. `confirmed` records the completion of NyxID's
+reply operation. `reply_evidence` distinguishes explicit confirmation returned
+by the gateway reply target from a complete set of locally recorded platform
+part receipts. `reply_kind`
+marks confirmed output as `completed_turn_output`, `failed_turn_output`, or
+`unclassified`. Failed-turn output can include a failure notice or partial
+answer and does not establish a successful final answer.
+`pending` covers preparation or a receipt wait, including a gateway 409
+`routed_reply_in_progress` admission. `handed_to_gateway` records provider
+stream or replay custody. A terminal provider frame carries no platform
+receipt evidence. `unconfirmed`, `unknown`,
+`silent` and `refused` preserve distinct local outcomes. A missing
+`response_id` or missing delivery evidence leaves the corresponding join
+or result unknown.
+
+Ordinary text source aliases expire 24 hours after admission. Media events can
+be retained for seven days, with response-read mappings still limited to
+24 hours. Unknown, expired and out-of-conversation sources return 404.
+A lookup does not extend retention or schedule execution.
+
+#### Reconcile the original Work item
+
+The read-only event-operations weekly report reads CMA's recent activity and
+saved snapshots, and paginates NyxID message history with `per_page=100&page=…`
+using the owner's local CLI session. Its join starts with the gateway event
+ID. The workflow still needs to consume the exact alias lookup and use an
+existing authorized Work writer to apply verified receipts to the original
+item. [Weekly report reader](https://github.com/ChronoAIProject/nyxid-nyxbot-trials/blob/c6a98d09f954a01311b3d6b5f23be8907243f764/automation/community-event-ops/ledger.py)
+
+1. Verify the unattended consumer's actual credential on the exact route
+   using an authorized test Work item. The reader must be eligible for that
+   route and have existing owner or active organization membership access.
+   Keep the pending Work item if the consumer lacks that access. Specialist
+   and conversation keys keep their existing route restrictions. Use
+   credentials issued to the reader under its own identity.
+2. Use the saved Work key, route ID and verified `source_event_id` to fetch
+   the exact mapping within the retention window. Verify the alias echo and
+   inbound UUID, then save the mapping with the Work key. Keep an unresolved
+   item pending when the mapping is missing or the old server returns a page.
+3. With the existing gateway reader, match the inbound UUID to the event on
+   the intended channel. Select the designated consumer and exact
+   `response_id`, then check its answer receipt and platform message ID. Keep
+   an absent or ambiguous result unverified. Record the turn outcome and
+   delivery evidence independently so a confirmed explicit post or failure
+   notice does not count as the automatic answer.
+4. Apply the result to the original Work key. Use the source and exact
+   receipt identifiers to reuse the same evidence on later reads. Preserve
+   verified evidence when a later activity view omits the receipt. Consume
+   the same receipt twice and verify one Work item, one set of evidence, no
+   second send, and no increase in the completion count on the second pass.
+   Check that the next report reflects the reconciled result. [Receipt consumption](https://github.com/ChronoAIProject/nyxid-nyxbot-trials/issues/108) · [Work update and replay](https://github.com/ChronoAIProject/nyxid-nyxbot-trials/issues/112)
+
+Saving an alias mapping preserves the join for that Work item. Weekly receipt
+coverage depends on the gateway's retained capture and its reported coverage
+window. The current recent activity view returns up to 50 events, and its
+saved snapshots can leave gaps. Track durable history activation and weekly
+coverage separately.
+[CMA receipt history](https://github.com/ChronoAIProject/cma/issues/2188)
+
+#### Investigate a historical failed turn after delivery
+
+Keep the UTC occurrence time, original relay event UUID or verified source
+alias, designated CMA `response_id` (`resp_…`), and any confirmed platform
+message ID in the protected incident record. The event and response IDs
+identify the gateway occurrence. The source alias joins the workflow to the
+original inbound. The platform message ID identifies the observed send. For
+the cases on #2487, start with the retained evidence from the incident.
+[Incident report](https://github.com/ChronoAIProject/NyxID/issues/2487#issuecomment-6892205110) · [Follow-up evidence](https://github.com/ChronoAIProject/NyxID/issues/2487#issuecomment-6893592385)
+
+The NyxID trace tools require the internal **turn UUID v4**. In retained
+operator evidence, a `nyxbot_channel_answer_delivery` audit row can carry the
+source alias in `event_data.event_id` and the bound UUID in
+`event_data.turn_id`. An operator with existing access to retained provider
+and event metadata can also follow the exact provider response to its source
+event and read the event's bound `turn_id`. The relay source lookup returns
+the gateway response ID for receipt correlation.
+`X-NyxID-Trace-Id` can also supply the UUID when the response headers were
+written after admission. Before admission that header can carry a request
+ID. Use only a confirmed turn association.
+
+With that UUID, use **Admin → Audit log → Search field → Turn ID (exact)**
+or the existing admin `GET /api/v1/admin/audit-log?turn_id=<UUID>` and
+`GET /api/v1/admin/audit-log/count?turn_id=<UUID>` under current RBAC. Check
+that the response echoes `applied_turn_id`. For timing, give the same UUID or
+its 32-character hex form to `scripts/turn-trace.py --trace-id` with the
+authorized NDJSON exports. Use delivery and execution milestones separately.
+[Turn trace reader and bounds](TURN_TRACE.md#admin-reader)
+
+If the turn association has expired, old audit rows lack the turn UUID, or
+trace exports lack the terminal span or counterpart records, record that
+coverage gap. Trace metadata contains stage, outcome and timing when recorded.
+It cannot recover tool arguments, tool results or message content. Preserve
+any confirmed send and recorded failed turn, and leave the historical cause
+unresolved when the retained evidence cannot establish it.
+
+### Reply-target receipts and dispatch lookup
+
+`POST /reply-targets/{ref}/messages` with exactly `409` and
+`detail: "routed_reply_in_progress"` proves gateway admission without a receipt.
+Exactly `503` and `detail: "routed_reply_unavailable"` permits the same retry but
+does not prove admission. NyxID also re-asks after no HTTP response, any other
+5xx, or a 2xx body that cannot be read or JSON-parsed, always with the same target,
+serialized body and Idempotency-Key. Delays are 15, 30, 60, 120, then 300 seconds;
+valid `Retry-After` can lengthen them. The deadline is the earliest original
+target expiry, event expiry and first retryable observation plus 24 hours.
+A 2xx with valid JSON and a missing/unrecognized outcome or explicit `unknown`,
+`rate_limited` or `unsupported` delivery stops as unknown; explicit `rejected`
+stops as rejected. Other definite 4xx refusals, including idempotency conflict
+and operation limit, stop as rejected even if their bodies cannot be read.
+Legacy unkeyed `/events/{ref}/replies` operations never re-ask these failures.
+
+Receipt waits reuse the text preparation claim and lease. The provider-boundary
+write renews the live polling lease and its crash wake-up together, without
+extending the absolute deadline. Their compatible outer
+state is `unknown`, with pending receipt marker version 2. New workers acquire
+v1 or v2 and upgrade v1 atomically; #2561 workers claim only v1. Older recovery
+readers suppress all unknown output. A stale `sending` row can resume only with
+preparation v1, frozen request hash v1, the committed encrypted target and
+expiry, and an expired database-time lease. Its persisted original `checked_at`
+anchors the 24-hour bound. Missing or invalid anchors never permit recovery;
+older unfrozen rows retain terminal behavior. Deadlines never move later.
+Rollback pauses v2 waits; upgrading resumes only inside their original bound.
+
+`GET /api/v1/nyxbot/dispatches` authenticates with the original channel provider
+bearer and `Idempotency-Key` header. Optional `dispatched_at` is Unix seconds.
+This endpoint observes; it never admits, resumes, claims replay or sends output.
+Successful responses are:
+
+```json
+{"state":"not_received"}
+{"state":"in_progress","response_id":"resp_..."}
+{"state":"finished","response_id":"resp_...","outcome":"completed","stored_response":false,"provider_delivery":"unconfirmed"}
+{"state":"expired"}
+```
+
+`outcome` is `completed` or `failed`, independent of chat delivery.
+`provider_delivery` is `none`, `started`, `confirmed` or `unconfirmed`. Every
+pending v1/v2 wait is `started`, describing NyxID’s attempt still in progress,
+regardless of gateway admission. Terminal uncertainty is `unconfirmed`. During
+rolling deployment, a #2561 reader reports a v2 wait as `unconfirmed`.
+`stored_response` means retained output is retrievable; it is false when the
+local sender owns the answer. Lookup does not reserve that ownership: the later
+GET or repeated POST arbitrates it atomically against the local send barrier,
+including `preparing_text`. A local winner returns the same response identity,
+queued `response.created`, optional `response.in_progress`, and empty
+`response.completed` with contiguous SSE IDs/sequences. No text/error output is
+returned, even if the execution failed; lookup retains the actual execution outcome.
+
+Provider admission records a versioned `dispatch_identity` with up to 32
+header-derived aliases (`keys`) on the event,
+including native group and thread-follow identities without a stored response.
+Custom bindings use the binding namespace. A recognized duplicate POST adds its
+alias; a 33rd distinct alias returns `409 dispatch_alias_limit` without resuming
+work or evicting an earlier key. Reusing a key for a different body-derived event,
+or adding an alias already owned by another event, returns
+`409 dispatch_identity_conflict`; no turn starts and no other event is replayed.
+Native gateway-source identities remain supported.
+Shared platform-entry providers use separate native receipts and return
+`400 dispatch_identity_unavailable`. Legacy body-keyed events without a retained
+association also return that refusal when their identity cannot be proven.
+
+Ordinary events retain 24 hours, admitted media events seven days, and stored
+response output 24 hours. A missing resolvable identity older than 24 hours is
+`expired` when `dispatched_at` is supplied. Without it, callers enforce their own
+history bound. For ambiguous legacy group/custom absence, the automatic capability's
+activation time and the absence of retained legacy admissions establish alias
+coverage. A dispatch before activation, or an ambiguous missing key while legacy
+admissions remain, receives a typed refusal unless it is older than seven days.
+Aliases appended to legacy admissions never mark their original identity complete;
+this also covers old writers returning during rollback. Never interpret that refusal
+as nonacceptance. The historical body-keyed relay platforms are Telegram, Lark,
+and Feishu; live adapter capabilities cannot describe past admission keys. This
+legacy branch covers seven days after activation (and old-writer rollback can
+introduce new legacy rows); without `dispatched_at`, the caller supplies the
+history bound.
+
+The lookup returns `503 response_delivery_not_ready` until all live generations
+support `nyxbot:gateway-reply-arbitration-v1` and its automatic activation exists.
+It uses the existing heartbeat/activation rules; no operator switch is required.
+Invalid keys return 401, inactive channels 404 `conversation_not_found`, and invalid
+headers/timestamps 400 `invalid_request`. Refusal auditing/rate limiting remains
+enabled; successful observation does not even touch key `last_used_at`.
 
 With `assistant:channel-media` enabled, a supported relay media activity whose source
 ID names an existing row outside its authorized owner/chat/sender/route returns
@@ -976,6 +1236,70 @@ Verified against CMA `develop`, `docs/CMAEG_Protocol.md` §§8–10 and
   delivery state is replica-local; writing SSE bytes does not prove platform
   delivery. NyxID therefore irrevocably marks a streamed answer before emission
   and never guesses that a disconnect means those bytes were not delivered.
+
+Supplemental NyxBot text on gateway channels with a `nyxid_relay` source uses
+NyxID's local route-key reply adapter. Checking/capacity notices, machine-control
+notices, team updates, followed-thread results and permission-result occurrences
+must not mark the gateway event replied. Verified against CMA
+`112b09c6b3dc25838cf1519b6ed26d0effe67ed0`, `tools/state.rs` (`replyToEvent`),
+`delivery/step.rs` and `turns/routed/replay_projection.rs`: a confirmed tool
+reply suppresses automatic final/failure delivery. The routed tool journal also
+blocks later tool sends after an unknown outcome, including reply targets.
+Local supplemental sends never enter that journal. Their outcome cannot change
+NyxID's provider stream, recovery payload or primary late-delivery claim. A
+failed supplemental text send retains its normal per-part receipts and audit,
+but does not append a primary-answer delivery-failure notice to the transcript.
+The local call scopes this distinction.
+
+Source-bound sends validate the admitted event's retained relay inbound.
+Unbound genuine chat results validate `last_relay_message_id`; only an absent
+pointer or deleted retained row permits the paired `event_ref_relay_message_id`
+fallback. A mismatching row refuses without fallback. The thread reference,
+expiry and optional relay anchor are written atomically; a digest binding to
+both reference ciphertext and expiry detects stale pairs from old writers.
+Old rows simply have no fallback until another inbound. No extra
+event-discovery lookup or index is needed; the retained anchor uses its
+existing `_id` lookup. Progress never uses that fallback. All sends retain live
+owner/guest, organization, route-key, bot, chat/topic/root authority checks.
+
+Relay-source gateway team results and additional-chat results may reply for
+24 hours from the selected retained inbound's `created_at`; genuine followed
+results use the original retained event's `created_at`. At or past that boundary,
+text is skipped with `anchor_expired`. These results do not require a live or
+decryptable gateway reference. A paired fallback remains valid after reference
+expiry if its digest matches and the retained inbound is inside the result window.
+The agent-key presence check and every live delivery-authority check remain.
+Checking, capacity and machine-control progress keep their existing reference
+window (29 minutes); permission occurrences keep their existing event/target gates.
+
+Only these widened result paths atomically claim the settled assistant message
+for their stable destination before text dispatch (#2462). Primary and additional
+results to the same destination share the claim. A repeated attempt skips with
+`already_claimed`; database errors authorize no send. Confirmed, rejected,
+unknown and interrupted attempts keep the claim, with no retry or preparation
+lease. A crash after claiming but before sending can lose text. Claims contain
+only destination digests, never appear in APIs/logs/audit, and leave with the
+message on purge. Missing settled replies authorize no send. New replicas share
+the serde-defaulted list; old replicas ignore it and retain their 29-minute
+behavior until drained, including on rollback. This cannot retroactively fence
+pre-upgrade sends or old writers; there is no readiness gate. Missing or expired
+sources do not redirect replies. A missing permission source finishes refused;
+other supplemental text is skipped while the transcript remains available.
+Direct and relay-era replies, images and multipart receipts retain their prior
+paths. Primary final and durable late replies retain their original barriers.
+
+Native-source progress is suppressed. Genuine independent native team results,
+followed results and permission occurrences retain their existing event replies
+and <29-minute original-event window. If the original primary final/failure is
+still pending, a confirmed independent result can suppress it; an unknown routed
+result may lose both and block later tool sends. This remaining native case
+needs a gateway non-answer send contract that changes neither tool marker nor
+unknown-tool barrier. NyxID does not defer these results for a day or retry
+uncertain sends. `nyxbot_channel_supplemental_delivery` records purpose, egress,
+outcome, closed skip reason, anchor class and turn/event/conversation IDs,
+including retained native `gateway_event` sends. No content or references enter
+the audit. Paired reference fields remain optional and ignored by older readers.
+No setting or reconnection is required.
 
 **Precise CMA follow-up request (no CMA code changed here):** pass the remaining
 absolute ingress turn deadline in the provider request, and expose a durable,
@@ -1122,8 +1446,15 @@ by claim, revision, state and lease. Recovery reads `/channel-records/{record_id
 and validates owner, provider, binding and the captured relay or native source. It never creates a record
 or replaces the captured deletion version with an observed version. Destination
 drift, version changes, malformed identity and live-reference conflicts require
-review. An uncertain POST that remains unobserved for 24 hours requires review:
-that deadline is not proof that creation never happened.
+review. Discord reviews are automatically re-observed on the existing sweep
+with leased, bounded backoff (30 seconds to one hour). Original matching proof
+can requeue exact cleanup; acknowledged absence can settle. Explicit preservation
+permits only read-only absence checks, never deletion. An uncertain POST that
+remains unobserved for 24 hours retains its review state and continues being
+checked: that deadline and repeated 404s are not proof that creation never
+happened. Unknown creation requires a recoverable exact record or a gateway
+contract that positively fences late creation; current record-lookup 404 alone
+cannot safely release it.
 
 Administrators use the [release review API](API.md#nyxbot-gateway-release-review)
 to inspect a sanitized observation and resolve its exact revision. `retry_original`
@@ -1141,7 +1472,12 @@ Filter audit events by `nyxbot_gateway_release_queued`,
 `nyxbot_gateway_release_settled`, `nyxbot_gateway_release_review_required`,
 `nyxbot_gateway_release_reviewed`, `nyxbot_channel_continuity_restored` and
 `nyxbot_gateway_release_reconcile_pass_completed`. These metadata events commit
-with their transitions. Retries do not add audit events. Review transition logs
+with their transitions. `nyxbot_gateway_release_failed` records failed attempts
+and automatic review observations, with closed stored/current reason and gateway
+answer codes, obligation/channel/channel-bot IDs, attempt counts and retry times.
+The event is emitted when the `(state, code, gateway_answer)` tuple changes,
+otherwise at most once per 24 hours per obligation, in the state transaction.
+Overdue non-adopted native guards follow the same daily diagnostic bound. Review transition logs
 contain only obligation ID, local channel ID and a stable reason.
 
 An hourly, resumable keyset scan processes at most 100 retained-identity retired
@@ -1347,14 +1683,82 @@ types at CMA `5b23e23a7aadead851ca2651a220eda4825b2335`, and merged
 #1152, #1156, #1157, #1159. CMA's broader features do not
 imply NyxID support for media, templates, reactions, controls or groups.
 
+### Formatting relay replies
+
+For a `nyxid_relay` address on Telegram (including `telegram-new`), Lark,
+Feishu or Discord, CMA can send original, unescaped CommonMark to `/reply/commonmark` and
+`/reply/update/commonmark` under `/api/v1/channel-relay`. A negotiated
+thread target uses `/thread-reply/commonmark` under the same prefix. Thread eligibility and
+reply-token or assigned-key authorization follow the ordinary route.
+
+NyxID plans Lark and Feishu text literally, Discord with renderer v2 and
+Telegram with explicit entities. Keep the Lark/Feishu/Discord selection
+separate from the Telegram flag until every serving NyxID replica supports it.
+Native CMA deliveries format their own provider messages. See the
+[relay format and multipart limits](CHANNEL_BOT_RELAY.md#commonmark-relay-replies).
+
+### Locally delivered response lifecycle (#2588)
+
+New relay admissions without stored turn output retain a version-1
+`response_read` mapping on `nyxbot_events` for 24 hours. This includes Lark/Feishu
+thread-follow candidates and events excluded from stored output by flag,
+readiness, discovery, metadata or binding. GET `/nyxbot/responses/{id}`, `/events`
+and repeated POST share the existing response renderer. Turn reads return
+created/queued at sequence 0 and in-progress at 1 while work runs, then completed
+at 2 with `output: []` after settlement, including failure. Settlement queries
+only assistant-message status. No read acquires delivery ownership, changes turn
+delivery or sets `gateway_response_id`; dispatch lookup remains
+`stored_response: false`.
+
+For these mapped events, valid exact four-key `cmaeg.*` metadata, a binding and
+the existing `response_recovery_providers: ["nyxbot"]` advertisement enable
+`X-CMA-Response-ID` and a `response.created` first frame with SSE id `0`,
+`sequence_number: 0`, status `queued`, object `response`, empty output, stable
+`conversation.id` and original metadata. The resolved `thread_reply` choice is
+frozen before acceptance and retained on both original and replayed created
+frames. A mapped turn snapshot carries that same marker while running and after
+settlement, including when its completed output is empty. The live stream still
+carries its answer and completion. A replica consumer drops after acceptance; NyxID's existing late sender delivers turn
+answers to the original thread target. Requests without this negotiated prefix
+retain legacy prefix bytes; their mapping echoes only bounded original strings
+from the four allowed metadata keys.
+
+No-turn replies under the conforming prefix (linking, membership, busy and
+unavailable notices) retain a separate encrypted `response_reply` on the event,
+using the existing `Payload` serializer, encryption and size bound. The original
+command's GET/events/repeated POST expose that reply as normal response output:
+created 0, progress 1, output-item 2, completed 3. Duplicate aliases remain empty.
+Only the gateway parent delivers this output; NyxID never sends it locally.
+Consuming or buffering the original stream does not consume its recovery copy,
+as with ordinary stored no-turn replies. An atomic no-turn/status fence prevents
+storing a reply on a bound turn, and turn reads never decrypt this field. The
+existing gateway delivery journal owns deduplication; reads are replayable.
+Silent no-turn outcomes remain completed with empty output.
+
+The mapping and encrypted reply expire at admission + 24 hours, including for
+seven-day media events; conversation deletion removes both. Indexed maintenance
+uses the existing sweep. There is no new flag/capability and no backfill: old
+admissions and expired identities remain 404. Old replicas ignore the additive
+fields and return 404.
+
+For prepared org threads, both stream formats record a fixed refusal on the
+terminal event before emitting it. The original negotiated command completes
+with that notice for the authenticated provider even if membership, guest
+exposure or funding changed. If transport authority closed while the provider
+can still authenticate to the original binding, it completes with empty output.
+Retirement revokes the provider credential. The relay checks the live audience
+before any platform send. Old relay replicas still refuse these notices until
+all admission, read and relay replicas are upgraded.
+
 ### Channel turn reliability (#2089, #2091, #2095)
 
 Relay-sourced provider responses can opt into the same encrypted, 24-hour durable
 snapshots and numbered event replay as native responses. The registered flag
 `nyxbot:relay-response-recovery` defaults off and resolves for the channel’s
 linking person (`row.user_id`), including live organization overrides. Flag-off
-returns to the existing live-stream path before recovery metadata validation or
-any capability request. In addition to this owner opt-in, NyxID requires the
+keeps output on the existing live-stream/local-delivery path before stored
+recovery metadata validation. Metadata-only lifecycle acceptance described above has its
+own scoped discovery check. In addition to this owner opt-in, NyxID requires the
 four exact `cmaeg.*` command identity fields and gateway discovery advertising
 `relay_authoring.response_recovery_providers` containing `nyxbot`. Gateways that
 omit these additive capabilities retain the existing live stream and late-reply
@@ -1365,6 +1769,11 @@ use the existing per-image ledger before the final recovery text is persisted,
 so replay does not resend confirmed or uncertain media. Relay recovery preserves
 complete multipart answer text instead of applying the native 32,000-character
 cap; the encrypted replay document remains bounded below MongoDB’s document limit.
+
+Supplemental relay-source text takes the local adapter path described above,
+so recovery GETs and replay see the same answer bytes as turns without a notice.
+A notice never claims, detaches or fences recovery. No supplemental attempt adds
+reads to an otherwise unchanged primary stream or recovery read.
 
 A recovery GET atomically claims final delivery for CMA. Until then, the live
 POST stream and the existing asynchronous late sender retain their shared
@@ -1408,6 +1817,17 @@ Exhausted proven refusals settle as `assistant_start_unavailable` and say that
 nothing was done; gateway presentation uses a human text reply instead of a
 generic failed-response fallback.
 
+For a settled relay turn, durable recovery returns its saved receipt or a
+deliverable text notice. A proven start refusal can say that nothing was done.
+A guest model-route refusal can report zero tool calls when the settled turn
+has complete zero-activity evidence. An uncertain outcome asks the caller to
+check the result, retaining any available partial reply within the original
+audience. The assistant transcript and dispatch lookup retain the execution
+outcome. A recovery read or repeated POST using the original command identity
+cannot execute tools. A newly typed Telegram command has its own identity.
+Deduplicating a business write across such messages requires a booking intent
+that the booking system can recognize.
+
 Typing uses the retained event's advertised `capabilities.typing` and
 `POST /events/{event_ref}/typing`. Current CMA documents relay typing as
 unsupported. For Telegram `nyxid_relay`, NyxID therefore uses its own adapter's
@@ -1424,15 +1844,15 @@ Telegram has no explicit stop-typing API; its last indicator expires naturally.
 
 Reader rollout is fenced by the existing security-readiness mechanism's
 `nyxbot:relay-response-recovery-v1` capability; a mixed fleet keeps admitting
-relay events through the legacy path until the capability has clean activation
-and serving readiness. Recorded active capabilities tolerate roster warnings
-while every live generation supports them, including native transport selection. This uses the existing roster and drain configuration, with
-no new environment variables. The separately negotiated Lark/Feishu followed
+relay events through the legacy path until the capability is durably activated
+and serving-ready. Recorded capabilities tolerate all roster/drain advisories
+while every live generation supports them, including native selection. No
+readiness environment configuration is required. The separately negotiated Lark/Feishu followed
 thread path retains its existing stream/late-send routing contract so its
 resolved `thread_reply` choice cannot change after the first durable frame.
 
-Only after the owner flag check, capability discovery uses a bounded in-process
-cache (64 gateway bases) with one refresh in flight per base. Positive results
+Stored-output capability discovery follows the owner flag check; conforming
+metadata-only admissions also use this same bounded in-process cache (64 gateway bases) with one refresh in flight per base. Positive results
 last five minutes, explicit negatives thirty seconds, and transport/HTTP errors
 only one second. A cache miss is best effort and bounded to two seconds: an
 unavailable capability endpoint leaves the legacy path available within CMA’s
@@ -1445,8 +1865,8 @@ Rollout: deploy all compatible readers first, then enable
 `nyxbot:relay-response-recovery` for one owner. Verify normal replies, observer
 disconnect recovery, exactly-once late delivery, and the metadata-only delivery
 audits for that owner before widening the flag to more people or organizations.
-Readiness and CMA advertisement alone never enable recovery. Turning the flag
-off restores legacy admission for new events; already accepted durable
+Readiness and CMA advertisement alone never enable stored-output recovery.
+Turning the flag off keeps new output locally delivered; already accepted durable
 responses retain their recovery and delivery barriers.
 
 Diagnostic correlation: `nyxbot_channel_delivery_failing` describes callback or
@@ -1491,3 +1911,24 @@ uploads belong to the guest's channel conversation and only the current guest
 turn can supply them to the model. Org-specialist guest media is deferred. Native
 Discord/WhatsApp still waits for CMA#1402; this flag does not enable native reads.
 See [guest uploads](chat/10-uploads.md#personal-channel-guest-media).
+
+Recovery claims at most ten additional Discord reviews sequentially per sweep,
+stopping on the first empty claim. The release index beginning with `platform`,
+`native_drain_for`, `state`, and `resolution` excludes unrelated platforms,
+native drain guards, and successfully settled history before checking retry/lease
+times. The original closed `review_reason` survives later observations;
+`last_gateway_answer` and `failure_audit` are optional diagnostic fields, ignored
+by old replicas and never used as cleanup or session authority. Legacy optional
+timestamps deserialize as absent. An administrator-preserved preparation may
+detach its own stale pending references without revoking its keys or routes:
+the preserved record may still use them, and observation uses creator authority.
+
+Health identifies authority, destination, owner, identity/version and explicit
+preservation decisions and names the administrator who must act. Retryable
+cleanup describes automatic checks. Unacknowledged creation with a not-found
+answer explicitly explains that the gateway cannot yet confirm it was never
+created. The existing warning action remains for old clients. Web and mobile
+channel summaries explain the local `gateway_native_draining` fence; web hides
+native activation retry only for `gateway_native_draining`, alongside the existing
+intake evidence; the previous `relay_draining` text and retry action are unchanged. None of these
+observations relaxes exclusive ingress or the persisted 90-second drain.

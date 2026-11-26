@@ -13,6 +13,7 @@ use super::channel_platform::{
 use crate::errors::{AppError, AppResult};
 
 pub const MAX_MEDIA_URL_BYTES: usize = 8192;
+pub(crate) const MAX_FILENAME_CHARS: usize = 180;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Returned when the provider outcome cannot be determined (for example a
@@ -62,6 +63,17 @@ pub async fn media_client(
     trusted_base: Option<&str>,
 ) -> AppResult<reqwest::Client> {
     tokio::time::timeout(TIMEOUT, async {
+        #[cfg(test)]
+        if let Ok((builder, host, addresses)) = TEST_PINNED_TRANSPORT.try_with(|fixture| {
+            assert_eq!(target, fixture.target);
+            (
+                (fixture.builder)(),
+                fixture.host.clone(),
+                fixture.addresses.clone(),
+            )
+        }) {
+            return pinned_client(builder, &host, &addresses);
+        }
         if target.len() > MAX_MEDIA_URL_BYTES {
             return Err(fetch_failed());
         }
@@ -81,40 +93,42 @@ pub async fn media_client(
         {
             return Err(fetch_failed());
         }
-        super::url_validation::validate_public_http_url_with_limit(
-            target,
-            "Media URL",
-            MAX_MEDIA_URL_BYTES,
-        )
-        .await
-        .map_err(|_| fetch_failed())?;
-        let host = parsed.host_str().ok_or_else(fetch_failed)?;
-        // Pin the addresses used for this request and re-check after resolution;
-        // no DNS rebinding or redirect may bypass the public-host boundary.
-        let addresses: Vec<_> = tokio::net::lookup_host((
-            host,
-            parsed.port_or_known_default().ok_or_else(fetch_failed)?,
-        ))
-        .await
-        .map_err(|_| fetch_failed())?
-        .collect();
-        if addresses.is_empty()
-            || addresses
-                .iter()
-                .any(|addr| super::url_validation::is_private_or_internal_ip(addr.ip()))
-        {
-            return Err(fetch_failed());
-        }
-        reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(TIMEOUT)
-            .resolve_to_addrs(host, &addresses)
-            .build()
+        super::proxy_destination::http::for_url(None, "", &parsed, true)
+            .map_err(AppError::from)
+            .and_then(|clients| clients.media())
             .map_err(|_| fetch_failed())
     })
     .await
     .map_err(|_| fetch_failed())?
+}
+
+#[cfg(test)]
+fn pinned_client(
+    builder: reqwest::ClientBuilder,
+    host: &str,
+    addresses: &[std::net::SocketAddr],
+) -> AppResult<reqwest::Client> {
+    builder
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(TIMEOUT)
+        .resolve_to_addrs(host, addresses)
+        .build()
+        .map_err(|_| fetch_failed())
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct TestPinnedTransport {
+    pub target: String,
+    pub host: String,
+    pub addresses: Vec<std::net::SocketAddr>,
+    pub builder: std::sync::Arc<dyn Fn() -> reqwest::ClientBuilder + Send + Sync>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_PINNED_TRANSPORT: TestPinnedTransport;
 }
 
 pub async fn bounded_response(
@@ -163,6 +177,24 @@ pub async fn download(
     attachment: &InboundAttachment,
     max_bytes: u64,
 ) -> AppResult<FetchedMedia> {
+    let response =
+        download_response(target, hosts, trusted_base, bearer, attachment, max_bytes).await?;
+    let mut media = bounded_response(response, max_bytes).await?;
+    media.filename = attachment.filename.clone();
+    media.mime_type = media.mime_type.or_else(|| attachment.mime_type.clone());
+    Ok(media)
+}
+
+/// Shared request and SSRF/size gates. Lark additionally reads filename headers
+/// before consuming this response; other adapters retain their metadata policy.
+pub(crate) async fn download_response(
+    target: &str,
+    hosts: &[&str],
+    trusted_base: Option<&str>,
+    bearer: Option<&str>,
+    attachment: &InboundAttachment,
+    max_bytes: u64,
+) -> AppResult<reqwest::Response> {
     let client = media_client(target, Some(hosts), trusted_base).await?;
     if attachment.size_bytes.is_some_and(|size| size > max_bytes) {
         return Err(AppError::ChannelMediaTooLarge);
@@ -171,11 +203,7 @@ pub async fn download(
     if let Some(token) = bearer {
         request = request.bearer_auth(token);
     }
-    let response = request.send().await.map_err(|_| fetch_failed())?;
-    let mut media = bounded_response(response, max_bytes).await?;
-    media.filename = attachment.filename.clone();
-    media.mime_type = media.mime_type.or_else(|| attachment.mime_type.clone());
-    Ok(media)
+    request.send().await.map_err(|_| fetch_failed())
 }
 
 pub fn decode_base64(data: &str, max_bytes: u64) -> AppResult<Bytes> {
@@ -338,7 +366,7 @@ pub fn safe_filename(filename: Option<&str>) -> String {
     let name: String = filename
         .unwrap_or("attachment")
         .chars()
-        .take(180)
+        .take(MAX_FILENAME_CHARS)
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
                 c

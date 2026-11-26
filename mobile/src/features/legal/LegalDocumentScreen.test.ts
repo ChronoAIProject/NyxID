@@ -42,7 +42,7 @@ test("root legal documents share a readable column with their sticky Back contro
       "../../app/WorkspaceHeader": {
         useWorkspaceSheet: () => (inSheet ? {} : null),
       },
-      "../../components/BlurBackButton": { BlurBackButton: "BlurBackButton" },
+      "../../components/FloatingBackButton": { FloatingBackButton: "FloatingBackButton" },
       "../../components/ScreenContainer": {
         ScreenContainer: "ScreenContainer",
       },
@@ -79,7 +79,7 @@ test("root legal documents share a readable column with their sticky Back contro
     assert.equal(content.maxWidth, inSheet ? undefined : 720);
     assert.equal(content.width, inSheet ? undefined : "100%");
     assert.equal(content.alignSelf, inSheet ? undefined : "center");
-    const back = nodes.find((item) => item.type === "BlurBackButton");
+    const back = nodes.find((item) => item.type === "FloatingBackButton");
     assert.equal(Boolean(back), !inSheet);
     if (back) {
       const column = nodes.find((item) => item.props.children === back)!;
@@ -134,7 +134,7 @@ function documentFixture(
       "../../app/WorkspaceHeader": {
         useWorkspaceSheet: () => (inSheet ? {} : null),
       },
-      "../../components/BlurBackButton": { BlurBackButton: "BlurBackButton" },
+      "../../components/FloatingBackButton": { FloatingBackButton: "FloatingBackButton" },
       "../../components/ScreenContainer": {
         ScreenContainer: "ScreenContainer",
       },
@@ -241,7 +241,7 @@ for (const inSheet of [false, true]) {
       assert.equal(f.alerts.length, 0);
       if (!inSheet) {
         const back = elements(f.h.value()).find(
-          (node) => node.type === "BlurBackButton",
+          (node) => node.type === "FloatingBackButton",
         );
         assert.ok(back);
         back.props.onPress();
@@ -259,6 +259,7 @@ test("native legal wrappers push the opposite document and pop on Back", () => {
     "./LegalDocumentScreen": { LegalDocumentScreen: "LegalDocumentScreen" },
   });
   const navigation = {
+    getState: () => ({ routes: [] }),
     push: (route: string) => pushes.push(route),
     goBack: () => {
       backs++;
@@ -370,32 +371,29 @@ test("an external-open failure after leaving the document does not display a sta
   assert.equal(f.alerts.length, 0);
 });
 
-test("legal Back exposes a named button and invokes its callback", () => {
+test("legal Back is the shared glass button, named, and invokes its callback", () => {
   let backs = 0;
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx },
     "react-native": {
-      Pressable: "Pressable",
-      Text: "Text",
       StyleSheet: { create: <T>(styles: T) => styles },
     },
-    "expo-blur": { BlurView: "BlurView" },
+    "lucide-react-native": { ChevronLeft: "ChevronLeft" },
     "../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
   });
-  const { BlurBackButton } = harness.load(
+  const { FloatingBackButton } = harness.load(
     fileURLToPath(
-      new URL("../../components/BlurBackButton.tsx", import.meta.url),
+      new URL("../../components/FloatingBackButton.tsx", import.meta.url),
     ),
-  ) as { BlurBackButton: (props: unknown) => Element };
+  ) as { FloatingBackButton: (props: unknown) => Element };
   harness.mount(() =>
-    BlurBackButton({
+    FloatingBackButton({
       onPress: () => {
         backs++;
       },
     }),
   );
-  assert.equal(harness.value().type, "Pressable");
-  assert.equal(harness.value().props.accessibilityRole, "button");
+  assert.equal(harness.value().type, "FloatingButton");
   assert.equal(harness.value().props.accessibilityLabel, "Back");
   harness.value().props.onPress();
   assert.equal(backs, 1);

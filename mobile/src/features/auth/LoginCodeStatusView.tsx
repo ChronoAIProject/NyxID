@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
@@ -17,7 +19,9 @@ function remaining(expiresAt: string, now: number) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-export function LoginCodeStatusView({ issued, onClearCode, onNew }: { issued: IssuedLoginCode; onClearCode: () => void; onNew: () => void }) {
+export function LoginCodeStatusView({ issued, onClearCode, onNew }: { issued: IssuedLoginCode; onClearCode: () => void; onNew: () => void;
+}) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = createDeviceLoginStyles(colors);
   const [{ status, error, pending }, setMonitorState] = useState<LoginCodeMonitorState>({status: null, error: false, pending: false});
@@ -39,21 +43,28 @@ export function LoginCodeStatusView({ issued, onClearCode, onNew }: { issued: Is
     const timer = setTimeout(() => setCopied(false), 1500);
     return () => clearTimeout(timer);
   }, [copied]);
-  return <View style={styles.inputSection}>
-    <Text style={styles.inputLabel}>{codePending ? "One-time terminal login" : status?.status === "redeemed" ? "Login redeemed" : "Login code closed"}</Text>
-    {codePending && <>
+  return (
+    <View style={styles.inputSection}>
+    <Text style={styles.inputLabel}>{codePending ? translateApp("One-time terminal login")
+          : status?.status === "redeemed" ? translateApp("Login redeemed")
+            : translateApp("Login code closed")}</Text>
+    {codePending && (
+        <>
       {/* The code centred in its own panel, with Copy, then the command to run. */}
       <View style={[local.ticket, { backgroundColor: colors.card, borderColor: colors.border }]}>
         <Text
           selectable
-          accessibilityLabel={`Login code ${issued.code.split("").join(" ")}`}
+          accessibilityLabel={translateApp("Login code {{code}}", {
+                code: issued.code.split("").join(" "),
+              })}
           style={[local.code, { color: colors.textPrimary }]}
         >
           {issued.code}
         </Text>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={copied ? "Code copied" : "Copy code"}
+          accessibilityLabel={copied ? translateApp("Code copied") : translateApp("Copy code")
+              }
           hitSlop={8}
           onPress={() => {
             void Clipboard.setStringAsync(issued.code)
@@ -71,35 +82,48 @@ export function LoginCodeStatusView({ issued, onClearCode, onNew }: { issued: Is
             <Copy size={15} color={colors.textPrimary} />
           )}
           <Text style={[local.copyLabel, { color: colors.textPrimary }]}>
-            {copied ? "Copied" : "Copy"}
+            {copied ? translateApp("Copied") : translateApp("Copy")}
           </Text>
         </Pressable>
       </View>
-      <Text style={[local.meta, { color: colors.textSecondary }]}>
-        Expires in {remaining(issued.expires_at, now)} · works once
-      </Text>
+      <Text style={[local.meta, { color: colors.textSecondary }]}>{translateApp("Expires in {{time}} · works once", { time: remaining(issued.expires_at, now)})}</Text>
       <View style={local.command}>
         <Text style={[local.commandLabel, { color: colors.textSecondary }]}>
-          In your terminal, run
-        </Text>
+              {translateApp("In your terminal, run")}
+            </Text>
         <View style={[local.commandChip, { backgroundColor: colors.segmentTrack }]}>
           <Text selectable style={[local.commandText, { color: colors.textPrimary }]}>
             {COMMAND}
           </Text>
         </View>
       </View>
-      <PrimaryButton label="Cancel code" kind="ghost" disabled={pending} onPress={() => void act("cancel")} />
-    </>}
-    {status?.redeemed_at && <>
-      <Text style={styles.cautionText}>Device: {status.client_label ?? "Not provided"}</Text>
-      <Text style={styles.cautionText}>IP: {status.client_ip ?? "Unavailable"} ({status.client_ip_attribution})</Text>
-      <Text style={styles.cautionText}>Redeemed: {new Date(status.redeemed_at).toLocaleString()}</Text>
-      <Text style={styles.cautionText}>Access: {status.auth_kind === "agent_key" ? "Restricted Agent Key" : "Full account session"}</Text>
-    </>}
-    {status?.can_revoke && <PrimaryButton label="Revoke login" kind="danger" disabled={pending} onPress={() => void act("revoke")} />}
-    {error && <Text style={styles.fieldErrorText} accessibilityRole="alert">Could not update login status. Try again.</Text>}
-    {!codePending && <PrimaryButton label="Generate another code" kind="ghost" onPress={onNew} />}
-  </View>;
+      <PrimaryButton label={translateApp("Cancel code")}
+            kind="ghost" disabled={pending} onPress={() => void act("cancel")} />
+    </>
+      )}
+    {status?.redeemed_at && (
+        <>
+      <Text style={styles.cautionText}>{translateApp("Device: {{status}}", { status: status.client_label ?? translateApp("Not provided") })}</Text>
+      <Text style={styles.cautionText}>{translateApp("IP: {{status}} ( {{time}})", { status: status.client_ip ?? translateApp("Unavailable"), time: status.client_ip_attribution })}</Text>
+          <Text style={styles.cautionText}>{translateApp("Redeemed: {{time}}", { time: new Date(status.redeemed_at).toLocaleString(appLocale()) })}</Text>
+          <Text style={styles.cautionText}>{(status.auth_kind === "agent_key" ? translateApp("Access: Restricted Agent Key") : translateApp("Access: Full account session"))}</Text>
+    </>
+      )}
+    {status?.can_revoke && (
+        <PrimaryButton label={translateApp("Revoke login")}
+          kind="danger" disabled={pending} onPress={() => void act("revoke")} />
+      )}
+    {error && (
+        <Text style={styles.fieldErrorText} accessibilityRole="alert">
+          {translateApp("Could not update login status. Try again.")}
+        </Text>
+      )}
+    {!codePending && (
+        <PrimaryButton label={translateApp("Generate another code")}
+          kind="ghost" onPress={onNew} />
+      )}
+  </View>
+  );
 }
 
 const local = StyleSheet.create({

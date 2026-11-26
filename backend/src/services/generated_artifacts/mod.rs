@@ -1,7 +1,10 @@
 //! Verified Sandbox files, fenced pending storage and owner-message recovery.
 use super::{api_key_mutation_service as transactions, assistant_upload_service::byte_budget};
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::{
         assistant_attachment::{AssistantAttachment, COLLECTION_NAME as ATTACHMENTS},
@@ -297,7 +300,7 @@ pub async fn persist(
         };
         let path = context_path(&row);
         row.data_encrypted = Some(
-            super::record_field_service::encrypt_context(
+            record_field::encrypt_context(
                 keys,
                 &RecordContext::new(ARTIFACTS, &row.id, &row.user_id, &path)?,
                 &file.bytes,
@@ -331,7 +334,7 @@ pub async fn persist(
         delivery_reason: "delivery_pending".into(),
         expires_at,
     };
-    let encrypted = super::record_field_service::encrypt(
+    let encrypted = record_field::encrypt(
         keys,
         WATCHES,
         &w.id,
@@ -357,6 +360,8 @@ pub async fn persist(
             if manifest.expires_at <= Utc::now() || current.deadline <= Utc::now() {return Err(AppError::AssistantAttachmentExpired);}
             // Conversation write conflicts with owner deletion and cancellation.
             if database.collection::<Document>(CONVERSATIONS).update_one(doc!{"_id":&watch.conversation_id,"user_id":&watch.user_id},doc!{"$inc":{"async_operation_generation":1}}).session(&mut *session).await?.matched_count != 1 {return Err(missing());}
+            super::channel_meta_service::scopes::fence_assistant_turn(&database,session,
+                &watch.user_id,&watch.conversation_id,&watch.turn_id).await?;
             let mut committed_manifest = current.artifact_result.clone().unwrap_or_else(|| manifest.clone());
             if current.artifact_result.is_some() {
                 let existing = pending_rows_in_session(&database, session, &current, &committed_manifest, false).await?;
@@ -755,6 +760,22 @@ async fn materialize(
     if !admitted(w) {
         return Err(invalid());
     }
+    super::channel_meta_service::scopes::fence_assistant_turn(
+        db,
+        session,
+        &w.user_id,
+        &w.conversation_id,
+        &w.turn_id,
+    )
+    .await?;
+    super::channel_meta_service::scopes::fence_assistant_turn(
+        db,
+        session,
+        &w.user_id,
+        &w.conversation_id,
+        turn_id,
+    )
+    .await?;
     if !matches!(
         w.reason.as_deref(),
         Some("completed" | "operation_failed" | "result_expired")
@@ -789,7 +810,13 @@ async fn materialize(
                 && !existing.iter().any(|a| a.id == r.assistant_attachment_id)
         })
         .count();
-    if existing.len() + additional > super::assistant_nyxagent::MAX_TURN_ATTACHMENTS {
+    if existing
+        .iter()
+        .filter(|a| !super::assistant_nyxagent::is_tool_file(a))
+        .count()
+        + additional
+        > super::assistant_nyxagent::MAX_TURN_ATTACHMENTS
+    {
         return Ok((Vec::new(), "delivery_capacity_exhausted"));
     }
     let policy = super::assistant_upload_retention::load_in_session(db, session)
@@ -843,6 +870,7 @@ async fn materialize(
             label: "Sandbox result".into(),
             chat_delivery: Some(false),
             image_input: None,
+            pdf: None,
             image_inspection: Some(false),
             pages: None,
         };
@@ -879,6 +907,7 @@ async fn materialize(
             .ok_or_else(invalid)?;
         let bytes = storage::decrypt(keys, &row).await?;
         let mut attachment = AssistantAttachment {
+            chunks: 0,
             artifact: meta.artifact.clone(),
             id: meta.id.clone(),
             origin: meta.origin.clone(),
@@ -1027,6 +1056,14 @@ pub async fn associate_in_session(
     if !admitted(&w) {
         return Err(invalid());
     }
+    super::channel_meta_service::scopes::fence_assistant_turn(
+        db,
+        session,
+        &w.user_id,
+        &w.conversation_id,
+        &w.turn_id,
+    )
+    .await?;
     let Some(manifest) = &w.artifact_result else {
         return Ok(());
     };

@@ -64,6 +64,12 @@ describe("humanizeUserAgent", () => {
     expect(humanizeUserAgent(ua)).toBe("Chrome 149 on macOS");
   });
 
+  it("names the NyxID Apple Watch app", () => {
+    expect(
+      humanizeUserAgent("NyxIDWatch/1.0.4 (watchOS 11.2; Watch7,3)"),
+    ).toBe("NyxID on Apple Watch");
+  });
+
   it("recognises Safari on iPhone with the Version/X token", () => {
     const ua =
       "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";

@@ -3,15 +3,12 @@ use axum::{
     extract::{Path, State},
 };
 use futures::TryStreamExt;
-use mongodb::bson::{self, Bson, doc};
+use mongodb::bson::{self, Bson};
 use serde::Serialize;
 
 use crate::AppState;
-use crate::errors::{AppError, AppResult};
+use crate::errors::AppResult;
 use crate::models::authorization_code::ExternalSubjectRef;
-use crate::models::oauth_broker_binding::{
-    COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding,
-};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, oauth_broker_service};
@@ -84,39 +81,13 @@ pub async fn revoke_my_broker_binding(
     auth_user: AuthUser,
     Path(binding_hash): Path<String>,
 ) -> AppResult<axum::http::StatusCode> {
-    let user_id = auth_user.user_id.to_string();
-    let binding = state
-        .db
-        .collection::<OauthBrokerBinding>(OAUTH_BROKER_BINDINGS)
-        .find_one(doc! {
-            "_id": &binding_hash,
-            "user_id": &user_id,
-            "revoked": false,
-        })
-        .await?
-        .ok_or_else(|| AppError::NotFound("binding not found".to_string()))?;
-
-    oauth_broker_service::revoke_binding_by_user(
+    oauth_broker_service::revoke_binding_by_user_as(
         &state.db,
-        state.encryption_keys.clone(),
-        &state.http_client,
-        &user_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
         &binding_hash,
         "user_revoked",
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "oauth_broker_binding_revoked",
-        Some(serde_json::json!({
-            "revoke_source": "user",
-            "client_id": binding.client_id,
-            "binding_hash": oauth_broker_service::binding_hash_prefix(&binding_hash),
-            "reason": "user_revoked",
-        })),
-    );
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

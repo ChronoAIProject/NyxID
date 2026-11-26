@@ -1,3 +1,7 @@
+import { localizedError } from "../../../i18n/localizedError";
+import { useLocalizedState } from "../../../i18n/useLocalizedState";
+import { useAppLanguage } from '../../../i18n/LanguageProvider';
+import { translateApp } from '../../../i18n/appTranslation';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, AppState, Keyboard, KeyboardAvoidingView, Platform, StatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useIsFocused } from '@react-navigation/native';
@@ -28,6 +32,7 @@ const documentSource = { html: canvasDocument(), baseUrl: 'about:blank' };
 /** Root full-screen route. Control intent lives in the socket owner, never in
  * renderer messages. Native snapshot protection is required in addition to JS. */
 export function MachineDesktopScreen({ route, navigation, privacyProtected = false }: MachineDesktopScreenProps) {
+  const appLanguage = useAppLanguage().language;
   const focused = useIsFocused();
   const { colors } = useTheme();
   const insets = useSafeAreaInsets();
@@ -39,11 +44,11 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
   const [ready, setReady] = useState(false);
   const [retry, setRetry] = useState(0);
   const [hasPixels, setHasPixels] = useState(false);
-  const [state, setState] = useState<ViewerState>({ phase: 'connecting', label: 'Connecting to the desktop…' });
+  const [state, setState] = useState<ViewerState>({ phase: 'connecting', label: translateApp('Connecting to the desktop…') });
   const [overlay, setOverlay] = useState(true);
   const [keyboard, setKeyboard] = useState(false);
   const [draft, setDraft] = useState('');
-  const [inputError, setInputError] = useState<string>();
+  const [inputError, setInputError] = useLocalizedState<string>();
   const viewerEpoch = useRef(-1);
   const viewer = useRef<ReturnType<typeof createDesktopViewer>>(undefined);
   const decodeTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -96,7 +101,7 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
       decoding.current = { generation: frame.generation, sequence: frame.sequence };
       webView.current?.injectJavaScript(`window.nyxDesktop?.frame(${JSON.stringify(frame)});true;`);
       clearTimeout(decodeTimer.current);
-      decodeTimer.current = setTimeout(() => viewer.current?.fail('The desktop renderer stopped responding.'), 8000);
+      decodeTimer.current = setTimeout(() => viewer.current?.fail(translateApp('The desktop renderer stopped responding.')), 8000);
     }, () => viewer.current?.refresh());
     const activeViewer = createDesktopViewer({
       current, clear, state: value => {
@@ -116,13 +121,13 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
       connect: async () => {
         const read = new AbortController(); pendingRead.current = read;
         await refreshAccessTokenIfNeeded();
-        if (!current()) throw new Error('Your sign-in session changed.');
+        if (!current()) throw localizedError('Your sign-in session changed.');
         await requestJson(`/assistant/nyxagent/machines/${encodeURIComponent(nodeId)}/contexts`, {
           invalidateSessionOnAuthFailure: false, signal: read.signal,
-          authorityGuard: () => { if (!current()) throw new Error('Your sign-in session changed.'); },
+          authorityGuard: () => { if (!current()) throw localizedError('Your sign-in session changed.'); },
         });
         const session = await loadStoredAuthSession();
-        if (!current() || !session?.accessToken) throw Object.assign(new Error('Sign in to open this desktop.'), { statusCode: 401 });
+        if (!current() || !session?.accessToken) throw Object.assign(localizedError('Sign in to open this desktop.'), { statusCode: 401 });
         const NativeWebSocket = WebSocket as unknown as {
           new(url: string, protocols: string[], options: { headers: Record<string, string> }): ViewSocket;
         };
@@ -131,25 +136,25 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
     });
     viewer.current = activeViewer; clear(); activeViewer.start();
     return () => { mounted = false; activeViewer.stop(); clear(); };
-  }, [privacyProtected, focused, foreground, oriented, ready, retry, nodeId, conversationId, contextId, display]);
+  }, [privacyProtected, focused, foreground, oriented, ready, retry, nodeId, conversationId, contextId, display, appLanguage]);
 
   const button = (label: string, action: () => void, disabled = false, longPress?: () => void) => <ActionButton
     key={label} label={label} variant="secondary" disabled={disabled}
-    accessibilityHint={longPress ? "Touch and hold for task stop options" : undefined}
+    accessibilityHint={longPress ? translateApp("Touch and hold for task stop options") : undefined}
     onPress={() => { revealOverlay(); action(); }} onLongPress={longPress} />;
   const sendText = () => {
     if (!draft) return;
     if (viewer.current?.input({ tool: 'type_text', arguments: { text: draft } })) {
       setDraft(''); setInputError(undefined);
     } else {
-      setInputError('Check control and try again in a moment, or send a shorter message.');
+      setInputError(() => (translateApp('Check control and try again in a moment, or send a shorter message.')));
     }
   };
   const controlOptions = () => {
     if (!state.controls) return;
-    Alert.alert('Desktop control', 'Stopping the task cancels its running machine work.', [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Stop task', style: 'destructive', onPress: () => viewer.current?.stopTask() },
+    Alert.alert(translateApp('Desktop control'), translateApp('Stopping the task cancels its running machine work.'), [
+      { text: translateApp('Cancel'), style: 'cancel' },
+      { text: translateApp('Stop task'), style: 'destructive', onPress: () => viewer.current?.stopTask() },
     ]);
   };
   const unavailable = !privacyProtected || state.phase === 'unavailable';
@@ -164,7 +169,7 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
       setSupportMultipleWindows={false} allowsLinkPreview={false} allowsBackForwardNavigationGestures={false}
       scrollEnabled={false} bounces={false} textZoom={100} automaticallyAdjustContentInsets={false}
       onLoadStart={() => { stop(); setReady(false); }}
-      onContentProcessDidTerminate={() => { stop(); setReady(false); setState({ phase: 'unavailable', label: 'The desktop renderer ended.' }); }}
+      onContentProcessDidTerminate={() => { stop(); setReady(false); setState({ phase: 'unavailable', label: translateApp('The desktop renderer ended.') }); }}
       onMessage={event => {
         if (event.nativeEvent.data.length > 20_000) return;
         try {
@@ -173,7 +178,7 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
           if (value.type === 'interaction') { revealOverlay(); return; }
           if (value.type === 'toggleOverlay') { setOverlay(previous => !previous); return; }
           if (value.type === 'input') { viewer.current?.input(value.input); return; }
-          if (value.type === 'unavailable') { stop(); setState({ phase: 'unavailable', label: 'This device cannot render the desktop.' }); return; }
+          if (value.type === 'unavailable') { stop(); setState({ phase: 'unavailable', label: translateApp('This device cannot render the desktop.') }); return; }
           if (value.type !== 'decoded' || typeof value.generation !== 'number' || typeof value.sequence !== 'string' || typeof value.ok !== 'boolean') return;
           if (decoding.current?.generation !== value.generation || decoding.current.sequence !== value.sequence) return;
           clearTimeout(decodeTimer.current); decoding.current = undefined;
@@ -181,31 +186,31 @@ export function MachineDesktopScreen({ route, navigation, privacyProtected = fal
           if (accepted && viewer.current && getAuthEpoch() === viewerEpoch.current && focused && AppState.currentState === 'active') {
             privacyCover.current?.setNativeProps({ style: { opacity: 0 } }); setHasPixels(true);
           }
-        } catch { viewer.current?.fail('The desktop renderer returned unsupported data.'); }
+        } catch { viewer.current?.fail(translateApp('The desktop renderer returned unsupported data.')); }
       }} />}
     <View ref={privacyCover} pointerEvents="none" accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
       style={[StyleSheet.absoluteFillObject, styles.cover, { opacity: hasPixels && focused && foreground ? 0 : 1 }]} />
     {visible && <View style={[styles.overlay, { top: Math.max(8, insets.top), left: Math.max(8, insets.left), right: Math.max(8, insets.right) }]}>
-      {button('Close', close)}
-      {button(state.controls ? 'Hand back' : state.taking ? 'Taking control…' : 'Take control', () => state.controls ? viewer.current?.handBack() : viewer.current?.takeControl(), unavailable || !hasPixels || state.taking, controlOptions)}
-      {button('Keyboard', () => setKeyboard(value => !value), !state.controls)}
-      {button('Refresh', () => viewer.current?.refresh(), unavailable)}
+      {button(translateApp('Close'), close)}
+      {button(state.controls ? translateApp('Hand back') : state.taking ? translateApp('Taking control…') : translateApp('Take control'), () => state.controls ? viewer.current?.handBack() : viewer.current?.takeControl(), unavailable || !hasPixels || state.taking, controlOptions)}
+      {button(translateApp('Keyboard'), () => setKeyboard(value => !value), !state.controls)}
+      {button(translateApp('Refresh'), () => viewer.current?.refresh(), unavailable)}
     </View>}
     {(unavailable || !hasPixels || state.phase === 'attention') && <View pointerEvents="box-none" style={styles.messageWrap}>
-      <Text accessibilityLiveRegion="polite" style={styles.message}>{privacyProtected ? state.label : 'Desktop snapshot protection is unavailable on this device.'}</Text>
-      {unavailable && <View style={styles.retryRow}>{button('Retry', () => { stop(); setReady(false); webView.current?.reload(); setState({ phase: 'connecting', label: 'Connecting to the desktop…' }); setRetry(value => value + 1); })}{button('Close desktop', close)}</View>}
+      <Text accessibilityLiveRegion="polite" style={styles.message}>{privacyProtected ? state.label : translateApp('Desktop snapshot protection is unavailable on this device.')}</Text>
+      {unavailable && <View style={styles.retryRow}>{button(translateApp('Retry'), () => { stop(); setReady(false); webView.current?.reload(); setState({ phase: 'connecting', label: translateApp('Connecting to the desktop…') }); setRetry(value => value + 1); })}{button(translateApp('Close desktop'), close)}</View>}
     </View>}
     {keyboard && state.controls && <View style={[styles.keyboard, { backgroundColor: colors.card, bottom: Math.max(8, insets.bottom), left: Math.max(8, insets.left), right: Math.max(8, insets.right) }]}>
       {inputError && <Notice message={inputError} tone="error" />}
       <View style={styles.keyRow}>
         {(['ENTER', 'TAB', 'BACKSPACE', 'ESC'] as const).map(key => button(key === 'BACKSPACE' ? '⌫' : key, () => viewer.current?.input({ tool: 'press_key', arguments: { key } })))}
-        {button('Hide keyboard', () => { setKeyboard(false); Keyboard.dismiss(); })}
+        {button(translateApp('Hide keyboard'), () => { setKeyboard(false); Keyboard.dismiss(); })}
       </View>
       <View style={styles.keyRow}><TextInput autoFocus value={draft} onChangeText={setDraft} maxLength={8192}
-        accessibilityLabel="Desktop text to send" placeholder="Type text, then Send" placeholderTextColor="#a1a1aa" style={styles.textInput}
-        autoCorrect={false} autoCapitalize="none" secureTextEntry onSubmitEditing={sendText} />{button('Send', sendText, !draft)}</View>
+        accessibilityLabel={translateApp("Desktop text to send")} placeholder={translateApp("Type text, then Send")} placeholderTextColor="#a1a1aa" style={styles.textInput}
+        autoCorrect={false} autoCapitalize="none" secureTextEntry onSubmitEditing={sendText} />{button(translateApp('Send'), sendText, !draft)}</View>
     </View>}
-    {!visible && <View style={styles.reveal}><ActionButton label="•••" accessibilityLabel="Show desktop controls" variant="secondary" onPress={revealOverlay} /></View>}
+    {!visible && <View style={styles.reveal}><ActionButton label="•••" accessibilityLabel={translateApp("Show desktop controls")} variant="secondary" onPress={revealOverlay} /></View>}
   </KeyboardAvoidingView>;
 }
 const styles = StyleSheet.create({

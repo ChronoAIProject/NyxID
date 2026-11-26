@@ -20,11 +20,21 @@ const SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE: i64 = 100;
 #[derive(Clone, Debug, Default)]
 pub struct MeteredProxyContext {
     pub route: Option<BillingRouteContext>,
+    // Actual admitted funding, not merely a configured billable route.
+    pub(crate) funded: bool,
 }
 
 impl MeteredProxyContext {
+    pub(crate) fn with_funding(mut self, funded: bool) -> Self {
+        self.funded = funded;
+        self
+    }
+
     pub fn disabled() -> Self {
-        Self { route: None }
+        Self {
+            route: None,
+            funded: false,
+        }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -34,29 +44,32 @@ impl MeteredProxyContext {
     pub(crate) fn from_route(route: &BillingRouteContext) -> Self {
         Self {
             route: Some(route.clone()),
+            funded: false,
         }
     }
-}
-
-pub(crate) async fn has_complete_meter(
-    db: &mongodb::Database,
-    ctx: &BillingRouteContext,
-) -> AppResult<bool> {
-    complete_meter(db, ctx, false).await
 }
 
 pub(crate) async fn has_complete_funded_meter(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
 ) -> AppResult<bool> {
-    complete_meter(db, ctx, true).await
+    complete_meter(db, ctx, true)
+        .await
+        .map(|value| value.is_some())
+}
+
+pub(crate) async fn complete_meter_funding(
+    db: &mongodb::Database,
+    ctx: &BillingRouteContext,
+) -> AppResult<Option<bool>> {
+    complete_meter(db, ctx, false).await
 }
 
 async fn complete_meter(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
     require_funding: bool,
-) -> AppResult<bool> {
+) -> AppResult<Option<bool>> {
     let mut transaction_ids = Vec::with_capacity(2);
     if ctx.platform_metered() {
         for (_, code) in ctx.platform_specs() {
@@ -71,7 +84,7 @@ async fn complete_meter(
         ));
     }
     if transaction_ids.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let rows: Vec<UsageMeterRow> = db
         .collection::<UsageMeterRow>(USAGE_METER)
@@ -80,7 +93,7 @@ async fn complete_meter(
         .try_collect()
         .await?;
     if rows.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     if rows.iter().any(|row| {
         row.org_channel_guest != ctx.org_channel_guest.as_ref().map(|g| g.usage())
@@ -206,7 +219,7 @@ async fn complete_meter(
         })
         .count();
     if rows.len() == transaction_ids.len() && active_count == transaction_ids.len() {
-        return Ok(true);
+        return Ok(Some(rows.iter().any(|row| row.wallet_id.is_some())));
     }
     Err(AppError::Conflict(
         "billing request id belongs to released or incomplete usage; retry with a fresh billing request id"
@@ -307,7 +320,7 @@ pub async fn open(
         return Err(error);
     }
 
-    Ok(MeteredProxyContext::from_route(ctx))
+    Ok(MeteredProxyContext::from_route(ctx).with_funding(reservation.is_some()))
 }
 
 // Free tariffs still need a live binding fence and atomic component rows.
@@ -316,7 +329,7 @@ async fn open_free_model(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
 ) -> AppResult<MeteredProxyContext> {
-    if complete_meter(db, ctx, false).await? {
+    if complete_meter(db, ctx, false).await?.is_some() {
         return Ok(MeteredProxyContext::from_route(ctx));
     }
     let rows: Vec<_> = ctx
@@ -345,7 +358,7 @@ async fn open_free_model(
         },
     )
     .await;
-    if result.is_err() && complete_meter(db, ctx, false).await? {
+    if result.is_err() && complete_meter(db, ctx, false).await?.is_some() {
         return Ok(MeteredProxyContext::from_route(ctx));
     }
     result?;
@@ -359,20 +372,16 @@ pub async fn mark_forwarded(
     let Some(ctx) = &metered.route else {
         return Ok(());
     };
-
+    let mut set = doc! {"status":"forwarded","forwarded":true,"updated_at":"$$NOW"};
+    if let Some(generation) = crate::services::security_readiness_service::local_generation() {
+        set.insert("forwarded_owner",doc! {
+            "generation_id":{"$literal":generation},"ingress":ctx.ingress.as_str(),"marked_at":"$$NOW",
+        });
+    }
     db.collection::<UsageMeterRow>(USAGE_METER)
         .update_many(
-            doc! {
-                "billing_request_id": &ctx.billing_request_id,
-                "status": "reserved",
-            },
-            doc! {
-                "$set": {
-                    "status": "forwarded",
-                    "forwarded": true,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
+            doc! {"billing_request_id":&ctx.billing_request_id,"status":"reserved"},
+            vec![doc! {"$set":set}],
         )
         .await?;
     Ok(())
@@ -755,39 +764,57 @@ pub(crate) async fn settle_voice_checkpoint(
 }
 
 pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> AppResult<u64> {
-    let components: Vec<UsageMeterRow> = db
-        .collection::<UsageMeterRow>(USAGE_METER)
+    use super::recovery_batch::{self, Failures};
+    let mut failures = Failures::default();
+    let components: Vec<bson::Document> = db
+        .collection::<bson::Document>(USAGE_METER)
         .find(doc! { "pending_platform_usage": { "$type": "object" } })
-        .limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE)
+        .limit(recovery_batch::limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE))
         .await?
         .try_collect()
         .await?;
-    for coordinator in components {
-        let rows = materialize_component_intent(db, &coordinator).await?;
-        settle_persisted(db, rows).await?;
+    for raw in components {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
+        failures
+            .unit(async {
+                let coordinator = recovery_batch::decode(&raw)?;
+                let rows = materialize_component_intent(db, &coordinator).await?;
+                settle_persisted(db, rows).await
+            })
+            .await;
     }
-    let coordinators: Vec<UsageMeterRow> = db
-        .collection::<UsageMeterRow>(USAGE_METER)
+    let coordinators: Vec<bson::Document> = db
+        .collection::<bson::Document>(USAGE_METER)
         .find(doc! {
             "layer": "platform",
             "pending_resale_quantity": { "$exists": true, "$ne": Bson::Null },
         })
-        .limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE)
+        .limit(recovery_batch::limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE))
         .await?
         .try_collect()
         .await?;
 
     let mut recovered = 0;
-    for coordinator in coordinators {
-        if materialize_pending_resale_intent(db, &coordinator)
-            .await?
+    for raw in coordinators {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
+        if failures
+            .unit(async {
+                let coordinator = recovery_batch::decode(&raw)?;
+                materialize_pending_resale_intent(db, &coordinator).await
+            })
+            .await
+            .flatten()
             .is_some()
         {
             recovered += 1;
         }
     }
 
-    Ok(recovered)
+    failures.finish(recovered)
 }
 
 pub(super) async fn settle_persisted(
@@ -798,7 +825,10 @@ pub(super) async fn settle_persisted(
     for row in finalized_rows {
         if let Err(error) = reservation::claim_released_and_settle(db, &row).await {
             reservation::record_settlement_failure(db, &row, Utc::now()).await?;
-            if first_error.is_none() {
+            if first_error
+                .as_ref()
+                .is_none_or(super::recovery_batch::is_wait)
+            {
                 first_error = Some(error);
             }
         }
@@ -874,6 +904,7 @@ pub(super) fn reserved_row(
     let funding = layer_reservation.map(|item| {
         let layer = Some(item);
         UsageFunding {
+            reserved_quantity: Some(item.estimated_quantity),
             wallet_only: ctx.model_tariff.is_some()
                 && super::amounts::rate_pico(
                     item.credits_per_unit_pico,
@@ -927,6 +958,7 @@ pub(super) fn reserved_row(
                 })
         }),
         org_channel_guest: ctx.org_channel_guest.as_ref().map(|g| g.usage()),
+        stuck_request_exit: None,
         rollup_pending: true,
         id: Uuid::new_v4().to_string(),
         transaction_id,
@@ -961,6 +993,8 @@ pub(super) fn reserved_row(
         quantity: None,
         pending_resale_quantity: None,
         pending_platform_usage: None,
+        usage_checkpoint: None,
+        realtime_session: None,
         pool_attempt: ctx.pool_attempt.clone(),
         machine_usage: ctx.machine_usage.clone(),
         status: UsageStatus::Reserved,
@@ -1033,6 +1067,47 @@ async fn finalize_matching(
     pending_resale_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
+    let literal_set = finalization_fields(
+        quantity,
+        model,
+        request_usage,
+        reported_model,
+        pending_resale_quantity,
+        finalized_at,
+    );
+    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
+    let identity: bson::Document = filter
+        .iter()
+        .filter(|(key, _)| matches!(key.as_str(), "_id" | "transaction_id"))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    let claimed = collection
+        .find_one_and_update(filter, vec![doc! { "$set": literal_set }])
+        .with_options(
+            mongodb::options::FindOneAndUpdateOptions::builder()
+                .return_document(mongodb::options::ReturnDocument::After)
+                .build(),
+        )
+        .await?;
+
+    let Some(claimed) = claimed else {
+        // A recovered terminal decision wins over a paused finalizer. Read its
+        // state and stop; never publish the stale caller's quantity afterward.
+        let _winner = collection.find_one(identity).await?;
+        return Ok(None);
+    };
+
+    Ok(Some(claimed))
+}
+
+pub(super) fn finalization_fields(
+    quantity: i64,
+    model: Option<String>,
+    request_usage: Option<&PlatformUsage>,
+    reported_model: Option<&str>,
+    pending_resale_quantity: Option<i64>,
+    finalized_at: chrono::DateTime<Utc>,
+) -> bson::Document {
     let model_for_row = model.clone();
     let mut set = doc! {
         "status": "finalized",
@@ -1078,21 +1153,7 @@ async fn finalize_matching(
             "$pool_attempt"
         ]},
     );
-    let collection = db.collection::<UsageMeterRow>(USAGE_METER);
-    let claimed = collection
-        .find_one_and_update(filter, vec![doc! { "$set": literal_set }])
-        .with_options(
-            mongodb::options::FindOneAndUpdateOptions::builder()
-                .return_document(mongodb::options::ReturnDocument::After)
-                .build(),
-        )
-        .await?;
-
-    let Some(claimed) = claimed else {
-        return Ok(None);
-    };
-
-    Ok(Some(claimed))
+    literal_set
 }
 
 pub(super) async fn materialize_pending_resale_intent(
@@ -1220,7 +1281,7 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
     }
 }
 
-fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
+pub(super) fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
     match metric {
         BillingMetric::Bytes => usage.bytes.max(0),
         BillingMetric::Requests => usage.requests.max(0),
@@ -2636,6 +2697,9 @@ mod tests {
         let now = Utc::now();
         db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
             .insert_one(BillingWallet {
+                snapshot_generation: 0,
+                tax_generation: 0,
+                tax_guard_token: None,
                 id: format!("wallet-{owner_id}"),
                 owner_id: owner_id.to_string(),
                 lago_customer_id: owner_id.to_string(),

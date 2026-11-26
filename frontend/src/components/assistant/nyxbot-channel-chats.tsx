@@ -99,11 +99,13 @@ function ChatRow({
   agents,
   botAgentName,
   onError,
+  readOnly,
 }: {
   readonly channel: NyxAgentChannelAgent;
   readonly chat: NyxAgentChannelChat;
   readonly agents: readonly AssistantAgent[];
   readonly botAgentName: string;
+  readonly readOnly: boolean;
   readonly onError: (message: string | undefined) => void;
 }) {
   useUiTranslation();
@@ -131,6 +133,7 @@ function ChatRow({
   const group = chat.kind !== null && chat.kind !== "private";
 
   async function change(settings: NyxAgentChannelChatSettings) {
+    if (readOnly || chat.can_manage === false) return;
     onError(undefined);
     setNotice(undefined);
     try {
@@ -194,7 +197,7 @@ function ChatRow({
                 <SettingSelect
                   label={translateUi("Replies in {{value1}}", { value1: title })}
                   value={chat.reply_mode}
-                  disabled={update.isPending}
+                  disabled={readOnly || chat.can_manage === false || update.isPending}
                   options={[
                     { value: "mention", label: "When mentioned" },
                     { value: "all", label: "Every message" },
@@ -210,7 +213,7 @@ function ChatRow({
                   <SettingSelect
                     label={translateUi("Thread follow in {{value1}}", { value1: title })}
                     value={chat.threads ?? "off"}
-                    disabled={update.isPending}
+                    disabled={readOnly || chat.can_manage === false || update.isPending}
                     options={[
                       { value: "follow", label: "Follow when addressed" },
                       { value: "off", label: "Off" },
@@ -226,7 +229,7 @@ function ChatRow({
                 <SettingSelect
                   label={translateUi("Who can talk in {{value1}}", { value1: title })}
                   value={chat.members_setting ?? "default"}
-                  disabled={update.isPending}
+                  disabled={readOnly || chat.can_manage === false || update.isPending}
                   options={[
                     {
                       value: "default",
@@ -253,7 +256,7 @@ function ChatRow({
             <SettingSelect
               label={translateUi("Agent for {{value1}}", { value1: title })}
               value={chat.agent_id ?? "default"}
-              disabled={update.isPending}
+              disabled={readOnly || chat.can_manage === false || update.isPending}
               options={[
                 {
                   value: "default",
@@ -273,14 +276,14 @@ function ChatRow({
           accessory={
             <Switch
               checked={chat.allow_posts}
-              disabled={update.isPending}
+              disabled={readOnly || chat.can_manage === false || update.isPending}
               aria-label={translateUi("Let the agent post in {{value1}} on its own", { value1: title })}
               onCheckedChange={(allow_posts) => void change({ allow_posts })}
             />
           }
         />
       </GroupedList>
-      {group &&
+      {!readOnly && chat.can_manage !== false && group &&
       (chat.thread_capabilities?.thread_follow ||
         chat.has_thread_history ||
         (chat.followed_thread_count ?? 0) > 0) ? (
@@ -295,10 +298,12 @@ function ChatRow({
  * on opening, or while indexed by the agent drawer search.
  */
 export function ChannelChats({
+  readOnly = false,
   channel,
   agents,
   botAgentName,
 }: {
+  readonly readOnly?: boolean;
   readonly channel: NyxAgentChannelAgent;
   readonly agents: readonly AssistantAgent[];
   readonly botAgentName: string;
@@ -329,6 +334,7 @@ export function ChannelChats({
     })),
   ]);
   async function setPosts(enabled: boolean) {
+    if (readOnly) return;
     setError(undefined);
     try {
       await posts.mutateAsync({
@@ -382,7 +388,7 @@ export function ChannelChats({
               <Switch
                 aria-label={translateUi("Allow posts in new private chats with {{value1}}", { value1: channel.bot_label })}
                 checked={channel.private_chat_posts}
-                disabled={posts.isPending}
+                disabled={readOnly || posts.isPending}
                 onCheckedChange={(value) => void setPosts(value)}
               />
             }
@@ -392,7 +398,7 @@ export function ChannelChats({
               <span className="min-w-0 flex-1">{translateUi("Also apply to existing private chats")}</span>
               <Switch
                 checked={applyToExisting}
-                disabled={posts.isPending}
+                disabled={readOnly || posts.isPending}
                 onCheckedChange={(checked) =>
                   setApplyToExisting(checked === true)
                 }
@@ -403,7 +409,7 @@ export function ChannelChats({
             <GroupedRow asChild interactive>
               <button
                 type="button"
-                disabled={posts.isPending}
+                disabled={readOnly || posts.isPending}
                 onClick={() => void setPosts(channel.private_chat_posts)}
               >{translateUi("Apply current setting")}</button>
             </GroupedRow>
@@ -436,6 +442,7 @@ export function ChannelChats({
                   chat={chat}
                   agents={agents}
                   botAgentName={botAgentName}
+                  readOnly={readOnly}
                   onError={setError}
                 />
                 {rows
@@ -447,6 +454,7 @@ export function ChannelChats({
                       chat={child}
                       agents={agents}
                       botAgentName={botAgentName}
+                      readOnly={readOnly}
                       onError={setError}
                     />
                   ))}

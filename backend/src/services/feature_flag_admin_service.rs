@@ -188,16 +188,19 @@ pub async fn mutate(
         }
         if key == flags::EXECUTION_PERMISSIONS_FLAG_KEY && *enabled == Some(true) {
             if *kind != FlagTargetKind::User {
-                security_readiness_service::require_activation(db, enrollment::READINESS).await?;
+                security_readiness_service::require_flag_enable(db, enrollment::READINESS).await?;
             }
-            security_readiness_service::require_activation(db, "permissions:execution-dispatch-v1")
-                .await?;
-            security_readiness_service::require_activation(
+            security_readiness_service::require_flag_enable(
+                db,
+                "permissions:execution-dispatch-v1",
+            )
+            .await?;
+            security_readiness_service::require_flag_enable(
                 db,
                 "permissions:execution-authoring-v1",
             )
             .await?;
-            security_readiness_service::require_activation(
+            security_readiness_service::require_flag_enable(
                 db,
                 "permissions:execution-authoring-v2",
             )
@@ -221,16 +224,17 @@ pub async fn mutate(
             }
         }
         // Security-gated capabilities may be disabled at any time but enabled
-        // only once every replica reports readiness, for every target scope.
+        // only with durable activation and live support, for every target scope.
         if *enabled == Some(true) {
-            security_readiness_service::require_activation(db, key).await?;
+            security_readiness_service::require_flag_enable(db, key).await?;
         }
     }
+    let crash_cache_db = (key == flags::CRASH_REPORTS_FLAG_KEY).then(|| db.clone());
     let db = db.clone();
     let key = key.to_owned();
     let actor = actor.clone();
     let mut session = db.client().start_session().await?;
-    session
+    let result = session
         .start_transaction()
         .write_concern(WriteConcern::majority())
         .and_run2(async move |session| {
@@ -248,7 +252,13 @@ pub async fn mutate(
             )
         })
         .await
-        .map_err(key_mutations::map_transaction_error)
+        .map_err(key_mutations::map_transaction_error);
+    if result.is_ok()
+        && let Some(db) = crash_cache_db
+    {
+        super::crash_report_service::invalidate_rollout_cache(&db).await;
+    }
+    result
 }
 
 async fn mutate_in_session(
@@ -260,6 +270,9 @@ async fn mutate_in_session(
     actor: &AuditActor,
     session: &mut mongodb::ClientSession,
 ) -> AppResult<WriteResult> {
+    if let Some(platform) = key.strip_prefix("channels:") {
+        flags::fence_meta_enrollment_in_session(db, platform, session).await?;
+    }
     let now = bson::DateTime::now();
     let mut output = WriteResult {
         definition: definition.clone(),
@@ -413,6 +426,13 @@ async fn mutate_in_session(
                     .session(&mut *session)
                     .await?
             };
+            if key == flags::ORG_AGENT_ACCESS_FLAG_KEY
+                && enabled.is_none()
+                && before.as_ref().is_some_and(|row| !row.enabled)
+                && flags::org_access_clear_enables(db, session, *kind, target_id.as_deref()).await?
+            {
+                security_readiness_service::require_flag_enable(db, key).await?;
+            }
             if key == enrollment::FLAG {
                 // A clear restores inheritance. Gate potential widening, while a
                 // disable stays available even if readiness or scope reads fail.
@@ -432,7 +452,7 @@ async fn mutate_in_session(
                             "permissions:execution-authoring-v1",
                             enrollment::READINESS,
                         ] {
-                            security_readiness_service::require_activation(db, capability).await?;
+                            security_readiness_service::require_flag_enable(db, capability).await?;
                         }
                     }
                 }

@@ -17,11 +17,14 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-const { loadEnv, resolveProfile, MOBILE_ROOT } = require("./lib/load-env");
+const { loadEnv, resolveProfile, appIdentity, MOBILE_ROOT } = require("./lib/load-env");
 
 const APP_ENV = process.env.APP_ENV === "dev" ? "dev" : "prod";
 const env = loadEnv();
 const r = resolveProfile(APP_ENV, env);
+const crashArtifacts = require('./crash-artifacts');
+const crash = crashArtifacts.prepare(MOBILE_ROOT, 'ios', appIdentity(env).version, r.iosBuildNumber);
+const crashMap = path.join(crash.directory, 'main.jsbundle.map');
 
 if (!env.APPLE_TEAM_ID) {
   console.error(
@@ -86,9 +89,12 @@ run(
     "-allowProvisioningUpdates",
     `DEVELOPMENT_TEAM=${APPLE_TEAM_ID}`,
     "CODE_SIGN_STYLE=Automatic",
+    `SOURCEMAP_FILE="${crashMap}"`,
     "archive",
   ].join(" "),
 );
+
+crashArtifacts.collect(crash, path.join(archivePath,'Products','Applications',`${SCHEME}.app`,'main.jsbundle'), crashMap, path.join(archivePath,'dSYMs'));
 
 const exportOptionsPath = path.join(buildDir, "ExportOptions.plist");
 const exportOptions = `<?xml version="1.0" encoding="UTF-8"?>

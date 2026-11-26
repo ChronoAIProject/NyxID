@@ -352,6 +352,50 @@ async fn voice_tool_wait_keeps_coordinator_pollable_and_close_settles_pending_tu
 }
 
 #[tokio::test]
+async fn voice_tool_transport_errors_reach_the_model_with_an_unknown_outcome() {
+    Box::pin(async {
+        let (mut state, _, call) = super::super::tests::setup("voice_mcp_transport_cause").await;
+        let upstream = MockServer::start().await;
+        state.config.base_url = upstream.uri();
+        let input = invocation("nyx__list_connected_services", json!({}));
+        for (reply, reason, status) in [
+            (
+                ResponseTemplate::new(503).set_body_string("private origin diagnostic"),
+                "http_error",
+                Some(503),
+            ),
+            (
+                ResponseTemplate::new(200).set_body_string("broken JSON"),
+                "invalid_json",
+                None,
+            ),
+        ] {
+            upstream.reset().await;
+            Mock::given(method("POST"))
+                .respond_with(reply)
+                .expect(1)
+                .mount(&upstream)
+                .await;
+            let mut workers = Workers::default();
+            workers
+                .start(&state, &call, "delegation", "lookup", &input)
+                .unwrap();
+            let output = workers.next().await.unwrap().result.unwrap();
+            let (output, _) = presentation(output);
+            let output = workers.present_output(&state, output);
+            assert_eq!(output["status"], "outcome_unknown");
+            assert_eq!(output["retry_allowed"], false);
+            assert_eq!(output["cause"]["stage"], "mcp_transport");
+            assert_eq!(output["cause"]["error"], reason);
+            assert_eq!(output["cause"]["status"].as_u64(), status);
+            assert!(!output.to_string().contains("private origin diagnostic"));
+            upstream.verify().await;
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn voice_tool_settlement_failure_retains_context_for_call_cleanup() {
     Box::pin(async {
         let (mut state, _, call) = super::super::tests::setup("voice_tools_cleanup_retry").await;
@@ -556,6 +600,43 @@ async fn voice_async_tool_reuses_existing_watch_without_a_second_task() {
 }
 
 #[tokio::test]
+async fn voice_skill_search_returns_the_unavailable_registry_cause_through_mcp() {
+    Box::pin(async {
+        let mut f = crate::services::assistant_authority_tests::orchestrator_fixture(
+            "voice_skill_registry_failure",
+        )
+        .await;
+        let call = call(&f.state, &f.owner, &f.row.id).await;
+        let server = mcp_server(&mut f.state).await;
+        let mut tools = Executions::default();
+        let lookup = invocation(
+            "nyx__call_tool",
+            json!({"tool_name":"nyxid__search_agent_skills",
+            "arguments_json":json!({"query":"temperature"}).to_string()}),
+        );
+        let missing = tools
+            .invoke(&f.state, &call, "delegation", "lookup", &lookup)
+            .await
+            .unwrap();
+        assert_eq!(missing["isError"], true, "{missing}");
+        let cause: Value =
+            serde_json::from_str(missing["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(missing["tool"], "nyxid__search_agent_skills");
+        assert_eq!(cause["error"], "forbidden", "{cause}");
+        assert_eq!(cause["error_code"], 1002);
+        assert!(
+            cause["message"]
+                .as_str()
+                .unwrap()
+                .contains("Ornn is unavailable")
+        );
+        tools.close(&f.state).await;
+        server.abort();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn voice_service_policy_refuses_new_approval_but_uses_existing_live_grant() {
     Box::pin(async {
         use crate::services::approval_service as approvals;
@@ -612,11 +693,10 @@ async fn voice_service_policy_refuses_new_approval_but_uses_existing_live_grant(
             .await
             .unwrap();
         assert_eq!(refused["isError"], true, "{refused}");
-        assert!(
-            refused
-                .to_string()
-                .contains(&AppError::ApprovalUnsupported.to_string()),
-            "{refused}"
+        assert_eq!(refused["tool"], "sensor__request");
+        assert_eq!(
+            refused["content"][0]["text"],
+            format!("Approval check failed: {}", AppError::ApprovalUnsupported)
         );
         assert!(upstream.received_requests().await.unwrap().is_empty());
         let auth = crate::mw::auth::api_key_auth_user_for_voice(
@@ -768,4 +848,57 @@ async fn voice_action_and_permission_requests_refuse_without_creating_cards() {
         server.abort();
     })
     .await;
+}
+
+#[tokio::test]
+async fn url_handles_restore_service_fetch_share_and_replay_but_dispatch_foreign_handles_literally()
+{
+    Box::pin(async {
+        let (mut state, _, call) = super::super::tests::setup("voice_url_chain").await;
+        let origin = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(|request: &wiremock::Request| {
+            let body: Value = request.body_json().unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({"jsonrpc":"2.0","id":body["id"],"result":{"isError":false,"content":[{"type":"text","text":"https://search.example/document"}]}}))
+        }).mount(&origin).await;
+        state.config.base_url = origin.uri();
+        let mut workers = Workers::default();
+        workers.start(&state,&call,"delegation","search",&invocation("nyx__search_tools",json!({"query":"document"}))).unwrap();
+        let found = workers.next().await.unwrap().result.unwrap();
+        let presented = workers.present_output(&state,found);
+        let handle = presented["content"][0]["text"].as_str().unwrap();
+        assert!(handle.starts_with("[link "));
+        assert!(presented.get("links_in_chat").is_none());
+        let fetch = invocation("nyx__call_tool",json!({"tool_name":"fetch__request","arguments_json":json!({"url":handle}).to_string()}));
+        workers.start(&state,&call,"delegation","fetch",&fetch).unwrap();
+        assert!(!workers.next().await.unwrap().result.unwrap().is_null());
+        let requests = origin.received_requests().await.unwrap();
+        assert_eq!(requests.len(),2);
+        let body: Value = requests[1].body_json().unwrap();
+        let arguments: Value = serde_json::from_str(body["params"]["arguments"]["arguments_json"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments["url"],"https://search.example/document");
+        // The same issued handle works again, including a service share operation.
+        for (id, tool) in [("replay", "fetch__request"), ("share", "drive__share")] {
+            let input = invocation("nyx__call_tool", json!({"tool_name":tool,"arguments_json":json!({"url":handle}).to_string()}));
+            workers.start(&state,&call,"delegation",id,&input).unwrap();
+            workers.next().await.unwrap().result.unwrap();
+        }
+        let mut foreign = Workers::default();
+        foreign.start(&state,&call,"new-worker","foreign",&fetch).unwrap();
+        let output = foreign.next().await.unwrap().result.unwrap();
+        assert_eq!(output["unrecognized_link_handles"], json!([handle]));
+        assert!(output["link_handle_notice"].as_str().unwrap().contains("passed literally"));
+        let unknown = invocation("nyx__call_tool",json!({"tool_name":"fetch__request","arguments_json":json!({"url":"[link missing:1]"}).to_string()}));
+        workers.start(&state,&call,"delegation","unknown",&unknown).unwrap();
+        let output = workers.next().await.unwrap().result.unwrap();
+        assert_eq!(output["unrecognized_link_handles"], json!(["[link missing:1]"]));
+        let requests = origin.received_requests().await.unwrap();
+        assert_eq!(requests.len(),6);
+        for (index, expected) in [(2,"https://search.example/document"),(3,"https://search.example/document"),(4,handle),(5,"[link missing:1]")] {
+            let body: Value = requests[index].body_json().unwrap();
+            let arguments: Value = serde_json::from_str(body["params"]["arguments"]["arguments_json"].as_str().unwrap()).unwrap();
+            assert_eq!(arguments["url"],expected);
+        }
+        workers.close(&state).await;
+        state.db.drop().await.unwrap();
+    }).await;
 }

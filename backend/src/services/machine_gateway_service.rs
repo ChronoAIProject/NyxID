@@ -783,6 +783,7 @@ mod tests {
     fn machine_git_structured_uploads_remain_buffered_for_override_inspection() {
         use axum::http::{HeaderMap, HeaderValue, header::CONTENT_TYPE};
         let target = super::super::proxy_service::ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: None,
             execution_request: None,
             execution_permission: None,
@@ -794,7 +795,7 @@ mod tests {
             auth_key_name: "Authorization".into(),
             credential: Default::default(),
             service: crate::models::downstream_service::test_helpers::dummy_service(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,

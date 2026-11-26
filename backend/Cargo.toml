@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.78.0"
+version = "0.79.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -18,8 +18,8 @@ name = "nyxid-server"
 path = "src/main.rs"
 
 [dependencies]
-lopdf = { version = "0.38", default-features = false }
-zip = { version = "6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+lopdf = { version = "0.42", default-features = false }
+zip = { version = "9.7.3", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 quick-xml = "0.41"
 image = { version = "0.25.9", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 csv = "1"
@@ -35,6 +35,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 pulldown-cmark = "0.13"
+linkify = "0.10"
 uuid = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = "0.10"
@@ -59,7 +60,6 @@ validator = { version = "0.20", features = ["derive"] }
 governor = "0.10"
 reqwest = { version = "0.12.28", features = ["json", "stream", "rustls-tls", "http2", "multipart"], default-features = false }
 utoipa = { version = "5.4", features = ["axum_extras", "uuid", "chrono"] }
-utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 bytes = { version = "1.11", features = ["serde"] }
 anyhow = "1.0.101"
 thiserror = "2.0.18"
@@ -108,12 +108,13 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 
 # Optional KMS provider dependencies (behind feature flags)
 aws-config = { version = "1", optional = true }
-aws-sdk-kms = { version = "1", optional = true }
+aws-sdk-kms = { version = "1", optional = true, default-features = false, features = ["default-https-client", "rt-tokio"] }
 google-cloud-kms = { version = "0.6", optional = true }
 tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+futures-timer = "3"
 serde_urlencoded = "0.7.1"
 nyxid-machine-updater = { path = "../machine-updater", features = ["test-support"] }
 flate2 = "1"

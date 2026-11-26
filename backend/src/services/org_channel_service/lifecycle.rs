@@ -111,8 +111,15 @@ pub(crate) async fn delete_conversation(
         .session(&mut *tx)
         .await?;
     db.collection::<Document>(crate::models::nyxbot_channel::EVENTS_COLLECTION_NAME)
-        .update_many(doc!{"guest_setup_conversation_id":conversation,"turn_id":null},
-            doc!{"$set":{"status":"refused","delivery.state":"refused"},"$unset":{"guest_setup_payload":""}}).session(tx).await?;
+        .update_many(
+            doc! {"guest_setup_conversation_id":conversation,"turn_id":null},
+            doc! {"$set":{"status":"refused","delivery.state":"refused"},"$unset": {
+                "guest_setup_payload": "",
+                "guest_setup_context_version": "",
+            }},
+        )
+        .session(tx)
+        .await?;
     Ok(())
 }
 
@@ -141,7 +148,7 @@ pub(crate) async fn erase_hidden(db: &Database, filter: Document) -> AppResult<b
             return Ok(false);
         }
         let context = (db.clone(), row.user_id.clone(), row.id.clone());
-        let children = crate::services::transaction_service::run_db_only(
+        let _children = crate::services::transaction_service::run_db_only(
             db,
             &context,
             |tx, (db, actor, id)| {
@@ -168,11 +175,6 @@ pub(crate) async fn erase_hidden(db: &Database, filter: Document) -> AppResult<b
             },
         )
         .await?;
-        crate::services::api_key_credential_service::audit_revocations(
-            db,
-            &children,
-            crate::models::api_key_credential::CredentialRevokedReason::ParentRevoked,
-        );
     }
     Ok(false)
 }
@@ -240,5 +242,6 @@ pub(crate) async fn erase_org(db: &Database, org: &str) -> AppResult<()> {
     db.collection::<Document>(MESSAGES)
         .delete_many(doc! {"user_id":org})
         .await?;
+    super::defaults::erase(db, doc! {"org_id":org}).await?;
     Ok(())
 }

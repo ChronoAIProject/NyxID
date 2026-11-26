@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp, appLocale } from "../../i18n/appTranslation";
 import { useEffect, useState } from "react";
 import {
   ActivityIndicator,
@@ -43,12 +45,13 @@ const ROOT = ["workspace", "services", "history"] as const;
 const time = (value: string) => {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
-    ? "Time not recorded"
-    : date.toLocaleString();
+    ? translateApp("Time not recorded")
+    : date.toLocaleString(appLocale());
 };
 
 /** Embedded in the connection's History tab; all records come from the Web API. */
 export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const focused = useIsFocused();
   const navigation = useNavigation<WorkspaceNavigationProp>();
@@ -123,15 +126,21 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
   });
   return (
     <View style={styles.stack}>
-      <SettingsGroup footer="Metadata only. Configuration changes and authorship are retained. Credentials are never shown.">
+      <SettingsGroup footer={translateApp(
+          "Metadata only. Configuration changes and authorship are retained. Credentials are never shown.",
+        )}
+      >
         <SettingsRow
           icon={SlidersHorizontal}
-          label="Actions"
+          label={translateApp("Actions")}
           value={
-            actions.length ? `${actions.length} action filters` : "All actions"
+            actions.length ? translateApp("{{count}} action filters", {
+                  count: actions.length,
+                })
+              : translateApp("All actions")
           }
-          accessibilityLabel="Filter history actions"
-          accessibilityHint="Opens a list of actions to include"
+          accessibilityLabel={translateApp("Filter history actions")}
+          accessibilityHint={translateApp("Opens a list of actions to include")}
           accessibilityState={{ expanded: filterOpen }}
           accessory={<ChevronsUpDown size={16} color={colors.textMuted} />}
           onPress={() => setFilterOpen((value) => !value)}
@@ -139,9 +148,11 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
       </SettingsGroup>
       {filterOpen && (
         <WorkspaceSelectionSheet
-          label="History actions"
-          title="Filter history actions"
-          description="Choose actions to include. Clear the selection to show all actions."
+          label={translateApp("History actions")}
+          title={translateApp("Filter history actions")}
+          description={translateApp(
+            "Choose actions to include. Clear the selection to show all actions.",
+          )}
           options={options.isError ? [] : (options.data ?? [])}
           value={actions}
           multiple
@@ -158,14 +169,15 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
               rows={4}
               icon={false}
               detail={false}
-              accessibilityLabel="Loading history filters"
+              accessibilityLabel={translateApp("Loading history filters")}
             />
           )}
           {options.isError && (
             <>
-              <Notice message="History filters could not be loaded." />
+              <Notice message={translateApp("History filters could not be loaded.")}
+              />
               <ActionButton
-                label="Retry filters"
+                label={translateApp("Retry filters")}
                 variant="secondary"
                 disabled={!active}
                 onPress={() => void options.refetch()}
@@ -179,7 +191,7 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
           rows={4}
           icon={false}
           title
-          accessibilityLabel="Loading connection history"
+          accessibilityLabel={translateApp("Loading connection history")}
         />
       )}
       {query.isError && (
@@ -188,13 +200,15 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
             tone="error"
             message={
               unavailable
-                ? "Connection history is unavailable. Personal owners and currently permitted organization admins can view it."
-                : "Connection history could not be loaded."
+                ? translateApp(
+                    "Connection history is unavailable. Personal owners and currently permitted organization admins can view it.",
+                  )
+                : translateApp("Connection history could not be loaded.")
             }
           />
           <SettingsGroup inset={false}>
             <SettingsRow
-              label="Retry history"
+              label={translateApp("Retry history")}
               tone="action"
               disabled={!active}
               onPress={() => void query.refetch()}
@@ -203,33 +217,38 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
         </>
       )}
       {first?.deleted && (
-        <Notice message="This connection was deleted. Its recorded history is retained." />
+        <Notice message={translateApp(
+            "This connection was deleted. Its recorded history is retained.",
+          )}
+        />
       )}
       {first?.legacy && (
         <Notice
-          message={`Creator and earlier edits may not have been recorded.${first.tracked_since ? ` Tracking since ${time(first.tracked_since)}.` : ""}`}
+          message={(first.tracked_since ? translateApp("Creator and earlier edits may not have been recorded. Tracking since {{time}}.", { time: time(first.tracked_since)}) : translateApp("Creator and earlier edits may not have been recorded."))}
         />
       )}
       {first && !rows.length && (
         <Text style={[styles.note, { color: colors.textMuted }]}>
           {actions.length
-            ? "No changes match these filters."
-            : "No recorded changes yet."}
+            ? translateApp("No changes match these filters.")
+            : translateApp("No recorded changes yet.")}
         </Text>
       )}
       {rows.length ? (
         <SettingsGroup
-          title="Changes"
+          title={translateApp("Changes")}
           inset={false}
-          footer="Deleted or unavailable connections may still retain a readable history."
+          footer={translateApp(
+            "Deleted or unavailable connections may still retain a readable history.",
+          )}
         >
           {rows.map(({ group, summary }) => {
-            const title = summary.action_label || "Connection updated";
+            const title = summary.action_label || translateApp("Connection updated");
             return (
               <SettingsRow
                 key={`${serviceId}:${group.id}`}
                 label={title}
-                detail={`${historyActor(summary.actor)} · ${time(group.events.at(-1)!.committed_at)}${group.events.length > 1 ? ` · ${group.events.length} changes` : ""}`}
+                detail={(group.events.length > 1 ? translateApp("{{summary}} · {{time}} · {{count}} changes", { summary: historyActor(summary.actor), time: time(group.events.at(-1)!.committed_at), count: group.events.length }) : translateApp("{{summary}} · {{time}}", { summary: historyActor(summary.actor), time: time(group.events.at(-1)!.committed_at) }))}
                 accessibilityLabel={`${title}, ${historyActor(summary.actor)}`}
                 onPress={() =>
                   navigation.push("ConnectionHistoryDetail", {
@@ -242,7 +261,7 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
           })}
           {query.hasNextPage && !query.isError ? (
             <SettingsRow
-              label="Load more history"
+              label={translateApp("Load more history")}
               tone="action"
               disabled={!active || query.isFetchingNextPage}
               accessory={
@@ -256,8 +275,9 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
         </SettingsGroup>
       ) : (
         <Text style={[styles.note, { color: colors.textMuted }]}>
-          Deleted or unavailable connections may still retain a readable
-          history.
+          {translateApp(
+            "Deleted or unavailable connections may still retain a readable history.",
+          )}
         </Text>
       )}
     </View>
@@ -268,6 +288,7 @@ export function PluginConnectionHistory({ serviceId }: { serviceId: string }) {
 export function ConnectionHistoryDetailScreen({
   route,
 }: ContentScreenProps<"ConnectionHistoryDetail">) {
+  useAppLanguage();
   const { group } = route.params;
   return (
     <WorkspacePage
@@ -278,21 +299,28 @@ export function ConnectionHistoryDetailScreen({
       {group.events.map((event) => (
         <View key={event.id} style={styles.event}>
           <SettingsGroup
-            title={event.action_label || "Connection updated"}
+            title={event.action_label || translateApp("Connection updated")}
             inset={false}
             footer={
               event.additional_changes
-                ? "Other service settings updated. Additional change details are unavailable."
+                ? translateApp(
+                    "Other service settings updated. Additional change details are unavailable.",
+                  )
                 : undefined
             }
           >
-            <SettingsRow label="Changed by" value={historyActor(event.actor)} />
-            <SettingsRow label="Time" value={time(event.committed_at)} />
+            <SettingsRow label={translateApp("Changed by")}
+              value={historyActor(event.actor)} />
+            <SettingsRow label={translateApp("Time")}
+              value={time(event.committed_at)} />
             {event.actor.api_key_id ? (
-              <SettingsRow label="Authenticated" value="API key" />
+              <SettingsRow label={translateApp("Authenticated")}
+                value={translateApp("API key")}
+              />
             ) : null}
             {event.actor.app_id ? (
-              <SettingsRow label="Application" value={event.actor.app_id} />
+              <SettingsRow label={translateApp("Application")}
+                value={event.actor.app_id} />
             ) : null}
             {event.changes.map((change, index) => (
               <SettingsRow
@@ -305,7 +333,9 @@ export function ConnectionHistoryDetailScreen({
           {event.audit_status === "mismatch" && (
             <Notice
               tone="error"
-              message="This record differs from its audit mirror."
+              message={translateApp(
+                "This record differs from its audit mirror.",
+              )}
             />
           )}
         </View>

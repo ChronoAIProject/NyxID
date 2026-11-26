@@ -1,9 +1,12 @@
+import { useLocalizedState } from "../../i18n/useLocalizedState";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { assistantApi } from "../../lib/api/assistantApi";
+import { useComposerSettingsQuery } from "./useComposerSettingsQuery";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useGroupAvailability } from "../groups/useGroupRuntime";
-import type { ComposerAccessMode } from "./composerSettings";
+import { type ComposerAccessMode } from "./composerSettings";
 
 export const COMPOSER_ACCESS_MODES = [
   "autopilot",
@@ -27,14 +30,9 @@ export function useComposerAccessChange(props: {
   const queryClient = useQueryClient();
   const epoch = getAuthEpoch();
   const settingsKey = ["assistant", "composer-settings", epoch];
-  const settings = useQuery({
-    queryKey: settingsKey,
-    queryFn: ({ signal }) => assistantApi.settings(signal),
-    enabled: availability.active,
-    retry: false,
-  });
+  const settings = useComposerSettingsQuery(epoch, availability.active, availability.available);
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string>();
+  const [error, setError] = useLocalizedState<string>();
   const lock = useRef(false);
   const mounted = useRef(true);
   const latest = useRef({ props, availability });
@@ -81,9 +79,9 @@ export function useComposerAccessChange(props: {
     } catch (cause) {
       if (current())
         setError(
-          cause instanceof Error
+          () => (cause instanceof Error
             ? cause.message
-            : "Could not change permissions.",
+            : translateApp("Could not change permissions.")),
         );
     } finally {
       lock.current = false;

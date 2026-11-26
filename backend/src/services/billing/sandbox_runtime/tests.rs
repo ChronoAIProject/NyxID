@@ -17,6 +17,7 @@ struct Provider {
     rates: Mutex<Vec<PlanRate>>,
     available: AtomicBool,
     lost_ack: AtomicBool,
+    balance_readback: AtomicBool,
     attempts: AtomicUsize,
     events: Mutex<std::collections::BTreeMap<String, LagoEvent>>,
 }
@@ -43,6 +44,13 @@ impl LagoApi for Provider {
         });
         Ok(())
     }
+    async fn plan_charges(&self, _: &str) -> AppResult<Vec<serde_json::Value>> {
+        Ok(self.rates.lock().unwrap().iter().map(|rate| serde_json::json!({
+            "billable_metric_code": rate.lago_metric_code,
+            "charge_model": "standard",
+            "properties": {"amount": Credits::from_pico(i128::from(rate.credits_per_unit_pico.unwrap())).unwrap().to_string()}
+        })).collect())
+    }
     async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
         self.attempts.fetch_add(1, Ordering::SeqCst);
         let mut events = self.events.lock().unwrap();
@@ -62,11 +70,50 @@ impl LagoApi for Provider {
     async fn record_events_batch(&self, _: &[LagoEvent]) -> Result<Vec<LagoAck>, LagoError> {
         panic!("unused")
     }
-    async fn current_usage(&self, _: &str, _: &str) -> AppResult<LagoUsage> {
-        Err(unavailable("Usage read unavailable in this fixture"))
+    async fn current_usage(&self, customer: &str, subscription: &str) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription)?;
+        if !self.balance_readback.load(Ordering::SeqCst) {
+            return Err(unavailable("Usage read unavailable in this fixture"));
+        }
+        let events = self.events.lock().unwrap();
+        let rates = self.rates.lock().unwrap();
+        let mut accrued = Credits::ZERO;
+        let mut charges = std::collections::BTreeMap::<String, i64>::new();
+        for event in events.values() {
+            let quantity = event
+                .properties
+                .quantity
+                .as_i64()
+                .expect("whole sandbox units");
+            *charges.entry(event.code.clone()).or_default() += quantity;
+            let rate = rates
+                .iter()
+                .find(|rate| rate.lago_metric_code == event.code)
+                .unwrap();
+            accrued = accrued
+                .checked_add(
+                    Credits::from_pico(i128::from(rate.credits_per_unit_pico.unwrap()))
+                        .unwrap()
+                        .checked_mul(quantity)
+                        .unwrap(),
+                )
+                .unwrap();
+        }
+        Ok(LagoUsage {
+            customer_id: customer.into(),
+            subscription_id: subscription.into(),
+            raw: serde_json::json!({
+                "amount_cents": accrued.checked_mul(100).unwrap().to_string(),
+                "charges": charges.into_iter().map(|(code, units)| serde_json::json!({"code": code, "units": units})).collect::<Vec<_>>()
+            }),
+        })
     }
     async fn wallet_balance(&self, _: &str) -> AppResult<i64> {
-        Err(unavailable("Balance refresh unavailable in this fixture"))
+        if self.balance_readback.load(Ordering::SeqCst) {
+            Ok(10)
+        } else {
+            Err(unavailable("Balance refresh unavailable in this fixture"))
+        }
     }
     async fn entitlements(&self, _: &str) -> AppResult<Vec<Entitlement>> {
         Ok(vec![Entitlement {
@@ -213,6 +260,7 @@ async fn fixture(name: &str) -> Fixture {
         rates: Mutex::new(rates),
         available: AtomicBool::new(true),
         lost_ack: AtomicBool::new(false),
+        balance_readback: AtomicBool::new(false),
         attempts: AtomicUsize::new(0),
         events: Mutex::new(Default::default()),
     });
@@ -543,8 +591,8 @@ async fn paused_compute_and_retained_disk_settle_exactly_once_through_shared_led
         verify_usage_provider_rate(&f.db, f.provider.as_ref(), &row)
             .await
             .unwrap()
-            .as_deref(),
-        Some("test-subscription")
+            .map(|target| target.subscription_id),
+        Some("test-subscription".into())
     );
     f.provider.available.store(false, Ordering::SeqCst);
     assert!(

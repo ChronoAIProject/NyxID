@@ -1,5 +1,6 @@
 import * as SecureStore from "expo-secure-store";
 import { DOMAIN_SETS, selectNewDomains } from "./domains";
+import { cachePublicConfigHints } from "./publicConfigHints";
 
 const SELECTION_KEY = "nyxid_mobile_new_domains_v1";
 export const DOMAIN_FLAG_TIMEOUT_MS = 5000;
@@ -23,6 +24,7 @@ type HostAnswer = {
   reachable: boolean;
   /** Older backends omit the field; that is no answer, not "off". */
   flag: boolean | undefined;
+  config?: unknown;
 };
 
 async function probeHost(
@@ -42,7 +44,7 @@ async function probeHost(
       body && typeof body === "object"
         ? (body as { mobile_new_domains?: unknown }).mobile_new_domains
         : undefined;
-    return { reachable: true, flag: typeof value === "boolean" ? value : undefined };
+    return { reachable: true, flag: typeof value === "boolean" ? value : undefined, config: body };
   } catch {
     return { reachable: false, flag: undefined };
   }
@@ -134,5 +136,8 @@ export async function initializeDomains(
       enabled = other === "new";
   } finally {
     selectNewDomains(enabled);
+    const selected = enabled ? "new" : "legacy";
+    if (survey.answers[selected]?.reachable)
+      cachePublicConfigHints(survey.answers[selected]?.config);
   }
 }

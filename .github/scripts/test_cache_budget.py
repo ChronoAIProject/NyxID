@@ -47,6 +47,37 @@ def coverage(id, sha, ref='refs/heads/main', date='2026-10-27T00:00:00Z'):
 
 
 class CacheBudgetTests(unittest.TestCase):
+    def test_integration_refs_keep_independent_generations(self):
+        for factory in (cache, incremental, dist):
+            with self.subTest(factory=factory):
+                rows = [factory(1, 'backend-build'),
+                        factory(2, 'backend-build', date='2026-10-28T00:00:00Z'),
+                        factory(3, 'backend-build', ref='refs/heads/dev'),
+                        factory(4, 'backend-build', ref='refs/heads/dev',
+                                date='2026-10-29T23:00:00Z')]
+                self.assertEqual([r['id'] for r in plan(rows, NOW)], [1, 3])
+                self.assertEqual(plan([rows[2], rows[1]], NOW), [])
+
+    def test_retired_dev_lane_waits_for_newer_dev_replacement(self):
+        old = cache(1, 'backend-billing-smoke-backend-billing-smoke', ref='refs/heads/dev')
+        older = cache(2, 'backend-build', ref='refs/heads/dev', date='2026-10-26T00:00:00Z')
+        newer = cache(3, 'backend-build', ref='refs/heads/dev', date='2026-10-28T00:00:00Z')
+        self.assertEqual(plan([old, older], NOW), [])
+        self.assertEqual([r['id'] for r in plan([old, newer], NOW)], [1])
+
+    def test_retired_dev_lane_breaks_equal_creation_times_by_cache_id(self):
+        retired = cache(2, 'backend-billing-smoke-backend-billing-smoke', ref='refs/heads/dev')
+        for replacement_id, removed in ((1, []), (3, [2])):
+            with self.subTest(replacement_id=replacement_id):
+                replacement = cache(replacement_id, 'backend-build', ref='refs/heads/dev')
+                self.assertEqual([r['id'] for r in plan([replacement, retired], NOW)], removed)
+
+    def test_dev_npm_cache_is_visible_to_default_branch_prs(self):
+        rows = [node(1), node(2, ref='refs/heads/dev'), node(3, ref='refs/pull/3/merge')]
+        self.assertEqual([r['id'] for r in plan(rows, NOW)], [3])
+        self.assertEqual(plan([rows[0], rows[2]], NOW, default_ref='refs/heads/dev'), [])
+        self.assertEqual([r['id'] for r in plan(rows[1:], NOW, default_ref='refs/heads/dev')], [3])
+
     def test_new_graph_prefix_is_isolated_and_receives_branch_grace(self):
         for old, new, expected_family in (
             (incremental(1, 'backend-build')['key'],

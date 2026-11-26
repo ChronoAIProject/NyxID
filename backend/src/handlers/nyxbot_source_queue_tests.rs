@@ -61,6 +61,7 @@ async fn queue(f: &Fixture, event: &NyxbotEvent, question: &str) -> bool {
         f.event.conversation_id.as_deref().unwrap(),
         work(event, question),
         None,
+        false,
     )
     .await
     .unwrap()
@@ -96,15 +97,17 @@ async fn accepted_queued_sources_mint_original_targets_without_a_turn_or_budget(
         let saved = record(&f, &event.id).await;
         assert_eq!(saved.status, "queued");
         assert!(saved.turn_id.is_none());
-        let d = saved.delivery.unwrap();
+        let d = saved.delivery.as_ref().unwrap();
         assert!(d.checked_at > event.created_at);
-        let plain = f
-            .state
-            .encryption_keys
-            .decrypt(d.target_ciphertext.as_ref().unwrap())
-            .await
-            .unwrap();
-        assert!(String::from_utf8(plain).unwrap().contains(target));
+        let plain = event_record::delivery_target(
+            &f.state.encryption_keys,
+            &saved,
+            d,
+            d.target_ciphertext.as_ref().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(std::str::from_utf8(&plain).unwrap().contains(target));
     }
     assert!(sends(&f).await.is_empty());
     let mut queued = row(&f).await;
@@ -193,7 +196,8 @@ async fn queue_transaction_rolls_back_source_acceptance_when_conversation_write_
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
             work(&event, "question"),
-            None
+            None,
+            false
         )
         .await
         .is_err()
@@ -319,7 +323,8 @@ async fn every_coalesced_destination_is_revalidated_and_recipient_limit_is_atomi
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
             work(&invalid, "another question"),
-            None
+            None,
+            false
         )
         .await
         .is_err()
@@ -412,6 +417,49 @@ async fn owner_gateway_home(f: &Fixture) -> AssistantConversation {
     row(f).await
 }
 
+async fn queued_provider_response(response: Response, replay: bool) {
+    use http_body_util::BodyExt;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    if !replay {
+        let body = body_text(response).await;
+        assert!(body.contains("response.completed"), "{body}");
+        assert!(!body.contains("response.output_text"), "{body}");
+        assert!(!body.contains("Got it"));
+        assert!(!body.contains("working on"));
+        return;
+    }
+
+    let mut body = response.into_body();
+    for (sequence, kind) in ["response.created", "response.in_progress"]
+        .into_iter()
+        .enumerate()
+    {
+        let bytes = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        let frame = std::str::from_utf8(&bytes).unwrap();
+        let data = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap();
+        let frame: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(frame["type"], kind);
+        assert_eq!(frame["sequence_number"], sequence);
+        assert_eq!(frame["response"]["output"], json!([]));
+    }
+    // The queued source has no settled answer. Recovery cannot release its parent yet.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), body.frame())
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn queued_gateway_handler_is_quiet_and_duplicate_replay_never_adds_busy_output() {
     let f = fixture("source_gateway_queue_handler").await;
@@ -435,14 +483,9 @@ async fn queued_gateway_handler_is_quiet_and_duplicate_replay_never_adds_busy_ou
     .await
     .unwrap();
     let request = super::super::event("next queued question", "7", "queued-handler");
-    for _ in 0..2 {
+    for replay in [false, true] {
         let response = respond(&f.state, &f.key, &request, "queued-handler").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = body_text(response).await;
-        assert!(body.contains("response.completed"), "{body}");
-        assert!(!body.contains("response.output_text"), "{body}");
-        assert!(!body.contains("Got it"));
-        assert!(!body.contains("working on"));
+        queued_provider_response(response, replay).await;
     }
     let queued = row(&f).await;
     assert_eq!(queued.pending_events.len(), 1);
@@ -504,6 +547,7 @@ async fn specialist_owner_private_home_keeps_its_original_delivery_authority() {
         &home.id,
         work(&event, "specialist question"),
         None,
+        false,
     )
     .await
     .unwrap();
@@ -716,12 +760,9 @@ async fn post_admission_reply_preference_failure_preserves_queued_and_bound_sour
         };
         let mut incoming = super::super::event(question, "7", "preference-failed");
         incoming["event_context"]["event_ref"] = json!("cmaeg1.ev.original");
-        for _ in 0..2 {
+        for replay in [false, true] {
             let response = respond(&f.state, &f.key, &incoming, "preference-failed").await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = body_text(response).await;
-            assert!(body.contains("response.completed"), "{body}");
-            assert!(!body.contains("response.output_text"), "{body}");
+            queued_provider_response(response, replay).await;
         }
         let saved = f
             .state
@@ -820,6 +861,7 @@ async fn personal_channel_repeat_joins_owner_app_turn_without_another_execution(
         &home.id,
         repeat,
         None,
+        false,
     )))
     .await;
     assert!(accepted.unwrap());
@@ -1009,7 +1051,8 @@ async fn original_route_revocation_prunes_only_that_source_before_event_executio
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 media_work,
-                None
+                None,
+                false
             )
             .await
             .unwrap()
@@ -1354,6 +1397,8 @@ fn verified_context(
     event: &NyxbotEvent,
 ) -> crate::models::assistant_conversation::ChannelTurnContext {
     crate::models::assistant_conversation::ChannelTurnContext {
+        meta_grant: None,
+        text_completeness: None,
         org_origin: None,
         source_event_id: event.id.clone(),
         channel_id: channel.id.clone(),
@@ -1405,7 +1450,8 @@ async fn identity_2187_coalesced_bot_sources_are_scoped_and_pruned_before_runtim
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 event,
-                None
+                None,
+                false
             )
             .await
             .unwrap()
@@ -1507,7 +1553,8 @@ async fn identity_2187_later_queued_source_lookup_error_fails_before_model_input
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 event,
-                None
+                None,
+                false
             )
             .await
             .unwrap()

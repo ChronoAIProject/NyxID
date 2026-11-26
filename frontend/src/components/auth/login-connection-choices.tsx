@@ -5,6 +5,8 @@ import {
   canonicalScope,
   connectionCovers,
   connectionReady,
+  connectionOwner,
+  connectionOwnerLabel,
   connectionSlug,
   permissionOptions,
   requestedGroups,
@@ -118,13 +120,17 @@ export function LoginConnectionChoices({
         const implied =
           selection.allowAll || selection.impliedIds.includes(service.id);
         const checked = implied || selection.selectedIds.includes(service.id);
+        const owner = connectionOwnerLabel(
+          connectionOwner(connection, selection.inventory),
+          t,
+        );
         return (
           <label
             key={service.id}
             className={`flex cursor-pointer items-start gap-2 rounded-md border p-2 ${checked ? "border-primary/30 bg-primary/5" : "border-transparent hover:bg-muted/40"}`}
           >
             <Checkbox
-              aria-label={t("Grant connection {{name}}", { name: service.name })}
+              aria-label={t("Grant connection {{name}}", { name: `${connection.label || service.name} (${owner})` })}
               disabled={disabled || implied || (!ready && !checked)}
               checked={checked}
               onCheckedChange={() => selection.onToggle(service.id)}
@@ -144,6 +150,9 @@ export function LoginConnectionChoices({
               <span className="block break-words text-10 text-muted-foreground">
                 {service.name}
                 {implied ? t(" · Included by your broader grant") : ""}
+              </span>
+              <span className="block break-words type-secondary text-muted-foreground">
+                {owner}
               </span>
               <span className="flex flex-wrap gap-1">
                 {permissions.slice(0, 3).map((p) => (

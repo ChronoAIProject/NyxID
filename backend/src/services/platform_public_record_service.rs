@@ -1,9 +1,11 @@
 //! Server-owned public-session credentials and disposable turn payloads. Empty
 //! lifecycle fields carry no ciphertext; they never prove an upstream effect
 //! absent. Authority checks remain with the public-session services.
-use super::record_field_service as fields;
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::{
         platform_public_session::PlatformPublicSession, platform_public_turn::PlatformPublicTurn,
@@ -30,7 +32,7 @@ pub(crate) async fn encrypt_session(
     {
         return Err(invalid());
     }
-    fields::encrypt_context(
+    record_field::encrypt_context(
         keys,
         &RecordContext::new(
             crate::models::platform_public_session::COLLECTION_NAME,
@@ -56,7 +58,7 @@ pub(crate) async fn decrypt_session(
     if ciphertext.is_empty() {
         return Err(invalid());
     }
-    let bytes = fields::decrypt_context(
+    let bytes = record_field::decrypt_context(
         keys,
         &RecordContext::new(
             crate::models::platform_public_session::COLLECTION_NAME,
@@ -113,7 +115,7 @@ pub(crate) async fn encrypt_turn(
     if !matches!(field, "input_ciphertext" | "reply_ciphertext") {
         return Err(invalid());
     }
-    fields::encrypt_context(
+    record_field::encrypt_context(
         keys,
         &RecordContext::new(
             crate::models::platform_public_turn::COLLECTION_NAME,
@@ -149,7 +151,7 @@ pub(crate) async fn decrypt_turn(
     if ciphertext.is_empty() {
         return Err(invalid());
     }
-    let bytes = fields::decrypt_context(
+    let bytes = record_field::decrypt_context(
         keys,
         &RecordContext::new(
             crate::models::platform_public_turn::COLLECTION_NAME,

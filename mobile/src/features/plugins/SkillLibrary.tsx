@@ -1,3 +1,5 @@
+import { Pager } from "../../components/settings/Pager";
+import { translateApp } from "../../i18n/appTranslation";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { Keyboard, Pressable, StyleSheet, TextInput, View } from "react-native";
 import { BookOpen, Search, X } from "lucide-react-native";
@@ -67,7 +69,7 @@ export function SkillLibrary({
   const filtered = added.items.filter((skill) =>
     searchable(`${skill.name} ${skill.description}`).includes(needle),
   );
-  const addedTitle = `Added to this agent${added.known ? ` · ${added.items.length} of 16` : ""}`;
+  const addedTitle = (added.known ? translateApp("Added to this agent · {{count}} of 16", { count: added.items.length }) : translateApp("Added to this agent"));
   // One page: the agent's skills, then the catalog. A single search filters
   // the added list and searches the catalog, so there is no nested selector.
   return (
@@ -75,8 +77,8 @@ export function SkillLibrary({
       <View style={[styles.search, { backgroundColor: colors.segmentTrack }]}>
         <Search size={17} color={colors.textMuted} accessible={false} />
         <TextInput
-          accessibilityLabel="Search skills"
-          placeholder="Search skills"
+          accessibilityLabel={translateApp("Search skills")}
+          placeholder={translateApp("Search skills")}
           placeholderTextColor={colors.textMuted}
           selectionColor={colors.primary}
           value={query}
@@ -91,7 +93,7 @@ export function SkillLibrary({
         {query.length > 0 && (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel="Clear skill search"
+            accessibilityLabel={translateApp("Clear skill search")}
             onPress={() => onQueryChange("")}
             style={styles.clear}
           >
@@ -104,7 +106,7 @@ export function SkillLibrary({
           <Notice tone="error" message={added.error} />
           <SettingsGroup inset={false}>
             <SettingsRow
-              label="Reload skills"
+              label={translateApp("Reload skills")}
               tone="action"
               disabled={offline}
               onPress={added.onRetry}
@@ -127,13 +129,15 @@ export function SkillLibrary({
         <SkeletonRows
           rows={2}
           title
-          accessibilityLabel="Loading added skills"
+          accessibilityLabel={translateApp("Loading added skills")}
         />
       )}
       {filtered.length ? (
         <SettingsGroup
           title={addedTitle}
-          footer="Open a skill to view its instructions or manage its version."
+          footer={translateApp(
+            "Open a skill to view its instructions or manage its version.",
+          )}
         >
           {filtered.map((item) => (
             <SkillListRow
@@ -151,14 +155,19 @@ export function SkillLibrary({
             title={addedTitle}
             footer={
               needle
-                ? "No added skill matches. Results from the catalog are below."
-                : "Add a skill from Discover below to teach this agent a workflow. Skills do not grant service access."
+                ? translateApp(
+                    "No added skill matches. Results from the catalog are below.",
+                  )
+                : translateApp(
+                    "Add a skill from Discover below to teach this agent a workflow. Skills do not grant service access.",
+                  )
             }
           >
             <SettingsRow
               icon={BookOpen}
               label={
-                needle ? "No matching added skills" : "No skills added yet"
+                needle ? translateApp("No matching added skills")
+                  : translateApp("No skills added yet")
               }
             />
           </SettingsGroup>
@@ -169,7 +178,7 @@ export function SkillLibrary({
           <Notice tone="error" message={catalog.error} />
           <SettingsGroup inset={false}>
             <SettingsRow
-              label="Retry skill catalog"
+              label={translateApp("Retry skill catalog")}
               tone="action"
               disabled={offline}
               onPress={catalog.onRetry}
@@ -179,7 +188,7 @@ export function SkillLibrary({
       )}
       {offline && !catalog.known && (
         <SettingsGroup
-          title="Discover"
+          title={translateApp("Discover")}
           footer={t("Reconnect to search the skill catalog.")}
         >
           <SettingsRow
@@ -190,8 +199,11 @@ export function SkillLibrary({
       )}
       {catalog.items.length ? (
         <SettingsGroup
-          title="Discover"
-          footer={`Find a skill for ${agentName}. Review its version before adding.`}
+          title={translateApp("Discover")}
+          footer={translateApp(
+            "Find a skill for {{name}}. Review its version before adding.",
+            { name: agentName },
+          )}
         >
           {catalog.items.map((item) => (
             <SkillListRow
@@ -207,10 +219,13 @@ export function SkillLibrary({
         !catalog.loading &&
         !catalog.error && (
           <SettingsGroup
-            title="Discover"
-            footer="Try another keyword. Only skills available through your Ornn access appear here."
+            title={translateApp("Discover")}
+            footer={translateApp(
+              "Try another keyword. Only skills available through your Ornn access appear here.",
+            )}
           >
-            <SettingsRow icon={Search} label="No skills found" />
+            <SettingsRow icon={Search} label={translateApp("No skills found")}
+            />
           </SettingsGroup>
         )
       )}
@@ -218,26 +233,16 @@ export function SkillLibrary({
         <SkeletonRows
           rows={4}
           title
-          accessibilityLabel="Searching skill catalog"
+          accessibilityLabel={translateApp("Searching skill catalog")}
         />
       )}
       {catalog.known && totalPages > 1 && (
-        <SettingsGroup title={`Page ${page} / ${totalPages}`} inset={false}>
-          <SettingsRow
-            label="Previous"
-            tone="action"
-            accessibilityLabel="Previous"
-            accessibilityHint="Shows the previous page of results"
-            disabled={offline || catalog.loading || page <= 1}
-            onPress={() => onPageChange(page - 1)}
-          />
-          <SettingsRow
-            label="Next"
-            tone="action"
-            accessibilityLabel="Next"
-            accessibilityHint="Shows the next page of results"
-            disabled={offline || catalog.loading || page >= totalPages}
-            onPress={() => onPageChange(page + 1)}
+        <SettingsGroup inset={false}>
+          <Pager
+            page={page}
+            total={totalPages}
+            disabled={offline || catalog.loading}
+            onChange={onPageChange}
           />
         </SettingsGroup>
       )}
@@ -255,34 +260,37 @@ function SkillListRow({
   attached?: boolean;
   onPress: () => void;
 }) {
+  useAppLanguage();
   const pin = "version" in item ? item : undefined;
   const state = pin
     ? pin.disabled
-      ? "Disabled"
-      : "Enabled"
+      ? translateApp("Disabled")
+      : translateApp("Enabled")
     : attached
-      ? "Added"
-      : "View versions";
+      ? translateApp("Added")
+      : translateApp("View versions");
   return (
     <SettingsRow
       icon={BookOpen}
       label={skillDisplayName(item.name)}
       detail={
         item.description?.trim() ||
-        "Open this skill to review its details and available versions."
+        translateApp(
+          "Open this skill to review its details and available versions.",
+        )
       }
       detailLines={2}
       value={
         pin
           ? pin.disabled
-            ? `${pin.version} · Disabled`
+            ? translateApp("{{version}} · Disabled", { version: pin.version })
             : pin.version
           : attached
-            ? "Added"
+            ? translateApp("Added")
             : undefined
       }
-      accessibilityLabel={`${item.name}${pin ? `, version ${pin.version}` : ""}, ${state}`}
-      accessibilityHint="View skill details"
+      accessibilityLabel={(pin ? translateApp("{{name}}, version {{version}}, {{state}}", { name: item.name, version: pin.version, state: state }) : translateApp("{{name}}, {{state}}", { name: item.name, state: state }))}
+      accessibilityHint={translateApp("View skill details")}
       onPress={onPress}
     />
   );

@@ -18,6 +18,8 @@ use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshTok
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::services::oauth_resource_service;
 
+pub(crate) mod observations;
+
 /// Validate an OAuth client and its redirect URI.
 pub async fn validate_client(
     db: &mongodb::Database,
@@ -25,9 +27,9 @@ pub async fn validate_client(
     redirect_uri: &str,
 ) -> AppResult<OauthClient> {
     // Always apply the execution-time redirect policy before looking at any
-    // stored registration branch. Legacy rows and public fallback redirects
+    // stored registration branch. Legacy rows and native registrations
     // must receive exactly the same scheme checks as new registrations.
-    validate_redirect_uri_scheme(redirect_uri).inspect_err(|_| {
+    let parsed = validate_redirect_uri_scheme(redirect_uri).inspect_err(|_| {
         tracing::warn!(
             client_id,
             reason = "invalid_redirect",
@@ -49,19 +51,103 @@ pub async fn validate_client(
         return Ok(client);
     }
 
-    // For public clients, also accept:
-    // - Loopback redirect URIs per RFC 8252 s7.3 (http://127.0.0.1:PORT/...)
-    // - Private-use URI scheme redirects per RFC 8252 s7.1 (cursor://, vscode://, etc.)
-    //
-    // Both are safe because our authorize endpoint requires PKCE (S256), which
-    // prevents authorization code interception attacks.
-    if client.client_type == "public"
-        && (is_loopback_redirect_uri(redirect_uri) || is_private_use_uri_scheme(redirect_uri))
-    {
-        return Ok(client);
+    if client.client_type == "public" {
+        let strict = loopback_redirect_parts(redirect_uri).is_some_and(|requested| {
+            client
+                .redirect_uris
+                .iter()
+                .any(|registered| loopback_redirect_parts(registered) == Some(requested))
+        });
+        let legacy = match parsed.scheme() {
+            "http" => {
+                matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+                    && parsed.port().is_some()
+            }
+            "https" => false,
+            _ => true,
+        };
+        if !strict {
+            observe_redirect(&client, &parsed, "unregistered_redirect");
+        }
+        let mut allowed = legacy;
+        if legacy != strict
+            && super::feature_flag_service::oauth_exact_redirects_enforced(db).await?
+        {
+            allowed = strict;
+        }
+        if allowed {
+            return Ok(client);
+        }
     }
 
     Err(AppError::InvalidRedirectUri)
+}
+
+#[derive(Clone, Hash, Eq, PartialEq)]
+struct RedirectObservation {
+    client_id: String,
+    scheme: String,
+    reason: &'static str,
+    host_class: &'static str,
+    path_matched: bool,
+}
+
+fn observe_redirect(client: &OauthClient, parsed: &Url, reason: &'static str) {
+    use std::sync::LazyLock;
+    static WINDOWS: LazyLock<observations::Windows<RedirectObservation>> =
+        LazyLock::new(Default::default);
+    let host_class = match parsed.scheme() {
+        "http" | "https"
+            if matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")) =>
+        {
+            "loopback"
+        }
+        "https" => "https",
+        "http" => "http",
+        _ => "custom_scheme",
+    };
+    let path_matched = client
+        .redirect_uris
+        .iter()
+        .filter_map(|uri| Url::parse(uri).ok())
+        .any(|registered| registered.path() == parsed.path());
+    let scheme = if parsed.scheme().len() <= 64 {
+        parsed.scheme()
+    } else {
+        "other"
+    };
+    let key = RedirectObservation {
+        scheme: scheme.to_owned(),
+        client_id: client.id.clone(),
+        reason,
+        host_class,
+        path_matched,
+    };
+    WINDOWS.record(key, |key| "other".clone_into(&mut key.scheme), |key, count| {
+        tracing::info!(parent: None, client_id = %key.client_id,
+        client_type = "public", reason = key.reason, scheme = %key.scheme, host_class = key.host_class,
+        path_matched = key.path_matched, count, "oauth_redirect_policy_observation")
+    });
+}
+
+pub async fn reviewed_redirect_requires_prompt(
+    db: &mongodb::Database,
+    client: &OauthClient,
+    uri: &str,
+    grant: &crate::models::consent::Consent,
+) -> AppResult<bool> {
+    if client.client_type != "public"
+        || grant.reviewed_redirect_hash.as_deref() == Some(&hash_token(uri))
+    {
+        return Ok(false);
+    }
+    let reason = if grant.reviewed_redirect_hash.is_none() {
+        "missing_reviewed_redirect"
+    } else {
+        "reviewed_redirect_changed"
+    };
+    observe_redirect(client, &validate_redirect_uri_scheme(uri)?, reason);
+    super::feature_flag_service::oauth_exact_redirects_enforced(db).await
 }
 
 const REJECTED_REDIRECT_SCHEMES: &[&str] = &[
@@ -250,7 +336,10 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 ///
 /// Compares the SHA-256 hash of the provided secret against the stored hash.
 /// Public clients (client_type == "public") do not require a secret.
-fn validate_client_secret(client: &OauthClient, client_secret: Option<&str>) -> AppResult<()> {
+pub(super) fn validate_client_secret(
+    client: &OauthClient,
+    client_secret: Option<&str>,
+) -> AppResult<()> {
     if client.client_type == "confidential" {
         let secret = client_secret.ok_or_else(|| {
             AppError::Unauthorized("client_secret is required for confidential clients".to_string())
@@ -285,6 +374,7 @@ pub struct ExchangedTokens {
     pub external_subject: Option<ExternalSubjectRef>,
     pub binding_grant_id: Option<String>,
     pub broker_capability_enabled: bool,
+    pub broker_require_sender_constraint: bool,
     pub resource_uris: Vec<String>,
     // Populated by the token exchange for the granted per-service access, but not
     // yet consumed on the access-token path (only the refresh_token_* siblings are
@@ -384,12 +474,49 @@ pub async fn issue_oauth_refresh_token(
     })
 }
 
+/// A missing value is an unverified permissive gate, not a policy denial.
+#[derive(Clone, Copy)]
+pub struct CodeBrokerRequirements {
+    pub require_admin_capability: Option<bool>,
+    pub require_sender_constraint: Option<bool>,
+}
+
+impl CodeBrokerRequirements {
+    pub fn known(require_admin_capability: bool, require_sender_constraint: bool) -> Self {
+        Self {
+            require_admin_capability: Some(require_admin_capability),
+            require_sender_constraint: Some(require_sender_constraint),
+        }
+    }
+
+    /// Resolve only gates that can change this exchange's result. None asks for
+    /// one live refresh before the code is consumed.
+    fn for_client(self, client: &OauthClient, sender_constrained: bool) -> Option<(bool, bool)> {
+        let broker = if super::oauth_broker_service::is_broker_client_with_policy(client, true) {
+            true
+        } else if !super::oauth_broker_service::is_broker_client_with_policy(client, false) {
+            false
+        } else {
+            !self.require_admin_capability?
+        };
+        let require_sender = if broker && !sender_constrained {
+            self.require_sender_constraint?
+        } else {
+            // Either this is not a broker exchange, or the sender already
+            // satisfies both possible policies.
+            self.require_sender_constraint.unwrap_or(false)
+        };
+        Some((broker, require_sender))
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn exchange_authorization_code(
     db: &mongodb::Database,
     config: &AppConfig,
     jwt_keys: &JwtKeys,
-    broker_require_admin_capability: bool,
+    broker_requirements: CodeBrokerRequirements,
+    refresh_broker_requirements: impl std::future::Future<Output = CodeBrokerRequirements>,
     code: &str,
     client_id: &str,
     redirect_uri: &str,
@@ -400,6 +527,29 @@ pub async fn exchange_authorization_code(
     dpop_jkt: Option<&str>,
     mtls_x5t_s256: Option<&str>,
 ) -> AppResult<ExchangedTokens> {
+    // Load the live client before claiming the code. Policy uncertainty must
+    // leave the code usable, and a non-broker client needs no policy refresh.
+    // Keep the active filter so soft-deleted clients cannot redeem old codes.
+    let client = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! { "_id": client_id, "is_active": true })
+        .await?;
+    let sender_constrained = dpop_jkt.is_some() || mtls_x5t_s256.is_some();
+    let (broker_capability_enabled, broker_require_sender_constraint) =
+        if let Some(client) = &client {
+            match broker_requirements.for_client(client, sender_constrained) {
+                Some(resolved) => resolved,
+                None => refresh_broker_requirements
+                    .await
+                    .for_client(client, sender_constrained)
+                    .ok_or(AppError::OAuthAuthorityUnavailable)?,
+            }
+        } else {
+            // Retain replay revocation even after the client was removed. A
+            // missing/inactive client cannot issue tokens under either policy.
+            (false, false)
+        };
+
     let code_hash = hash_token(code);
 
     // Atomically claim the authorization code (prevents TOCTOU race condition).
@@ -466,26 +616,9 @@ pub async fn exchange_authorization_code(
         return Err(AppError::InvalidRedirectUri);
     }
 
-    // Validate client_secret for confidential clients. Reject auth
-    // codes against soft-deleted clients (`is_active = false`) so an
-    // already-issued code cannot be exchanged after the developer
-    // app -- or its owning org -- has been deleted. The legacy
-    // delete path on `oauth_clients` is a soft-delete, so the row
-    // can linger with `is_active = false` until the org cascade
-    // sweeps it; without this filter the code window is up to the
-    // auth-code TTL after the delete.
-    let client = db
-        .collection::<OauthClient>(OAUTH_CLIENTS)
-        .find_one(doc! { "_id": client_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::BadRequest("OAuth client not found".to_string()))?;
-
+    let client =
+        client.ok_or_else(|| AppError::BadRequest("OAuth client not found".to_string()))?;
     validate_client_secret(&client, client_secret)?;
-    let broker_capability_enabled =
-        crate::services::oauth_broker_service::is_broker_client_with_policy(
-            &client,
-            broker_require_admin_capability,
-        );
 
     // PKCE verification (S256 only)
     if let Some(challenge) = &stored.code_challenge {
@@ -669,6 +802,7 @@ pub async fn exchange_authorization_code(
         external_subject: stored.external_subject,
         binding_grant_id: stored.binding_grant_id,
         broker_capability_enabled,
+        broker_require_sender_constraint,
         resource_uris: token_resource_scope.resource_uris,
         allowed_service_ids: token_resource_scope.allowed_service_ids,
         allow_all_services: token_resource_scope.allow_all_services,
@@ -688,36 +822,26 @@ pub async fn revoke_issued_refresh(db: &mongodb::Database, jti: &str) -> AppResu
     Ok(())
 }
 
-/// Check whether a redirect URI is a loopback address per RFC 8252 section 7.3.
-///
-/// For native/desktop OAuth clients (like MCP clients), the redirect URI is
-/// `http://localhost:{random_port}/callback`. The port varies per session because
-/// the client binds an ephemeral port. Only `http` scheme is accepted (loopback
-/// connections never leave the machine, so TLS is unnecessary).
-fn is_loopback_redirect_uri(uri: &str) -> bool {
-    let Ok(parsed) = validate_redirect_uri_scheme(uri) else {
-        return false;
+/// The port is the only component a native loopback registration can vary.
+fn loopback_redirect_parts(uri: &str) -> Option<(&str, &str)> {
+    let (scheme, address) = uri.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("http") {
+        return None;
+    }
+    let boundary = address.find(['/', '?', '#']).unwrap_or(address.len());
+    let (authority, suffix) = address.split_at(boundary);
+    let host = match authority.rsplit_once(':') {
+        Some((host, port))
+            if port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok() =>
+        {
+            host
+        }
+        _ => authority,
     };
-    parsed.scheme() == "http"
-        && matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
-        && parsed.port().is_some()
-}
-
-/// Check whether a redirect URI uses a private-use URI scheme per RFC 8252
-/// section 7.1.
-///
-/// Native/desktop OAuth clients (Cursor, Claude Code, VS Code, etc.) register
-/// custom URI schemes like `cursor://...` or `vscode://...` with the OS to
-/// receive authorization callbacks. These are safe for public clients because
-/// PKCE prevents authorization code interception attacks.
-///
-/// Only non-standard schemes are accepted (`http` and `https` require explicit
-/// registration to prevent open-redirector vulnerabilities).
-fn is_private_use_uri_scheme(uri: &str) -> bool {
-    let Ok(parsed) = validate_redirect_uri_scheme(uri) else {
-        return false;
-    };
-    !matches!(parsed.scheme(), "http" | "https")
+    if host != "127.0.0.1" && host != "[::1]" && !host.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    Some((&uri[..scheme.len() + 3 + host.len()], suffix))
 }
 
 #[cfg(test)]
@@ -744,11 +868,13 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            first_party_management: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
@@ -788,32 +914,6 @@ mod tests {
     fn validate_scopes_preserves_requested_order_and_duplicates() {
         let result = validate_scopes("email openid email", "openid profile email").unwrap();
         assert_eq!(result, "email openid email");
-    }
-
-    #[test]
-    fn loopback_redirect_uri_requires_http_loopback_host_and_port() {
-        assert!(is_loopback_redirect_uri("http://127.0.0.1:49152/callback"));
-        assert!(is_loopback_redirect_uri("http://localhost:3000/callback"));
-        assert!(is_loopback_redirect_uri("http://[::1]:31337/callback"));
-
-        assert!(!is_loopback_redirect_uri(
-            "https://127.0.0.1:49152/callback"
-        ));
-        assert!(!is_loopback_redirect_uri("http://127.0.0.1/callback"));
-        assert!(!is_loopback_redirect_uri(
-            "http://192.168.1.10:3000/callback"
-        ));
-        assert!(!is_loopback_redirect_uri("not a uri"));
-    }
-
-    #[test]
-    fn private_use_redirect_uri_rejects_standard_web_schemes() {
-        assert!(is_private_use_uri_scheme("cursor://oauth/callback"));
-        assert!(is_private_use_uri_scheme("vscode://nyxid/auth"));
-
-        assert!(!is_private_use_uri_scheme("http://localhost:3000/callback"));
-        assert!(!is_private_use_uri_scheme("https://app.example/callback"));
-        assert!(!is_private_use_uri_scheme("not a uri"));
     }
 
     #[test]
@@ -864,7 +964,11 @@ mod tests {
         let db = connect_test_database("oauth_val_ok")
             .await
             .expect("local MongoDB required for oauth_service tests");
-        let public = test_client("public-client", "public", "");
+        let mut public = test_client("public-client", "public", "");
+        public.redirect_uris.extend([
+            "http://127.0.0.1/callback".into(),
+            "cursor://nyxid/callback".into(),
+        ]);
         insert_client(&db, &public).await;
 
         let exact = validate_client(&db, &public.id, "https://app.example/callback")
@@ -881,6 +985,88 @@ mod tests {
             .await
             .expect("public private-use redirect accepted");
         assert_eq!(private_scheme.id, public.id);
+    }
+
+    #[tokio::test]
+    async fn public_redirect_registration_varies_only_the_loopback_port() {
+        let db = connect_test_database("oauth_registered_native")
+            .await
+            .unwrap();
+        let mut client = test_client("native", "public", "");
+        client.redirect_uris = vec![
+            "http://127.0.0.1/callback".into(),
+            "com.example.app:/done".into(),
+        ];
+        insert_client(&db, &client).await;
+        use tracing::instrument::WithSubscriber;
+        let (file, subscriber) = observations::capture();
+        async {
+            for _ in 0..3 {
+                validate_client(
+                    &db,
+                    &client.id,
+                    "http://localhost:32222/private-path?marker=private-query",
+                )
+                .await
+                .unwrap();
+            }
+            validate_client(&db, &client.id, "com.example.other:/done")
+                .await
+                .unwrap();
+        }
+        .with_subscriber(subscriber)
+        .await;
+        let log = std::fs::read_to_string(file.path()).unwrap();
+        let lines: Vec<_> = log
+            .lines()
+            .filter(|line| line.contains("oauth_redirect_policy_observation"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].contains("unregistered_redirect")
+                && lines[0].contains("loopback")
+                && lines[0].contains("path_matched=false")
+        );
+        assert!(
+            lines[1].contains("com.example.other")
+                && lines[1].contains("custom_scheme")
+                && lines[1].contains("path_matched=true")
+        );
+        for line in lines {
+            for field in ["native", "public", "count=1"] {
+                assert!(line.contains(field));
+            }
+            for private in ["localhost", "private-path", "private-query", ":/done"] {
+                assert!(!line.contains(private));
+            }
+        }
+        super::super::feature_flag_service::set_platform_override(
+            &db,
+            super::super::feature_flag_service::OAUTH_EXACT_REDIRECTS_FLAG_KEY,
+            &super::super::feature_flag_service::FlagTarget::Global,
+            true,
+            "test",
+        )
+        .await
+        .unwrap();
+        for allowed in ["http://127.0.0.1:32123/callback", "com.example.app:/done"] {
+            validate_client(&db, &client.id, allowed).await.unwrap();
+        }
+        for other in [
+            "http://127.0.0.1:32123/other",
+            "http://localhost:32123/callback",
+            "http://127.0.0.1:32123/callback?mode=test",
+            "com.example.other:/done",
+            "com.example.app:/other",
+        ] {
+            assert!(
+                matches!(
+                    validate_client(&db, &client.id, other).await,
+                    Err(AppError::InvalidRedirectUri)
+                ),
+                "{other}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1103,7 +1289,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -1210,7 +1397,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -1325,7 +1513,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             &client.id,
             "https://app.example/callback",
@@ -1414,7 +1603,8 @@ mod tests {
             &db,
             &config,
             &jwt_keys,
-            config.broker_require_admin_capability(),
+            CodeBrokerRequirements::known(config.broker_require_admin_capability(), false),
+            std::future::pending(),
             code,
             client_id,
             "https://app.example/callback",

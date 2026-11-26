@@ -272,12 +272,9 @@ pub async fn request_context(
     };
     let bot = Box::pin(team::ensure_nyxbot(&state.db, &actor)).await?;
     let home = Box::pin(team::home_thread(&state.db, &state.encryption_keys, &bot)).await?;
-    let Some(chat) = crate::services::assistant_acknowledgement_service::for_key(
-        &state.db,
-        &actor,
-        Some(&home.credential_api_key_id),
-    )
-    .await?
+    let Some(chat) =
+        crate::services::assistant_acknowledgement_service::chat_for_conversation(&state.db, &home)
+            .await?
     else {
         return Err(AppError::MachineBrowserUnavailable);
     };

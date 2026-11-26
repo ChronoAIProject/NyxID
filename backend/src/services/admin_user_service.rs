@@ -5,11 +5,20 @@ use uuid::Uuid;
 use crate::crypto::password;
 use crate::errors::{AppError, AppResult};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
-use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
+use crate::models::user::{COLLECTION_NAME as USERS, PROVIDER_DISPLAY_NAME, PlatformRole, User};
 use crate::services::{api_key_mutation_service as key_mutations, role_service};
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
+
+mod audit;
+use super::audit_service::{
+    AuditActor,
+    required::{self, TextField},
+};
+
+#[cfg(test)]
+mod audit_tests;
 
 /// Look up the email for `user_id` without erroring on "not found".
 ///
@@ -30,12 +39,35 @@ pub async fn get_user_email(db: &mongodb::Database, user_id: &str) -> AppResult<
 /// Hashes the password with Argon2id, validates email uniqueness
 /// (case-insensitive), and creates the user with the specified role.
 /// Admin-created accounts are pre-verified and active.
+#[cfg(test)]
 pub async fn create_user(
     db: &mongodb::Database,
     email: &str,
     password_raw: &str,
     display_name: Option<&str>,
     role: &str,
+) -> AppResult<User> {
+    create_user_with_actor(db, email, password_raw, display_name, role, None).await
+}
+
+pub async fn create_user_as(
+    db: &mongodb::Database,
+    email: &str,
+    password_raw: &str,
+    display_name: Option<&str>,
+    role: &str,
+    actor: &AuditActor,
+) -> AppResult<User> {
+    create_user_with_actor(db, email, password_raw, display_name, role, Some(actor)).await
+}
+
+async fn create_user_with_actor(
+    db: &mongodb::Database,
+    email: &str,
+    password_raw: &str,
+    display_name: Option<&str>,
+    role: &str,
+    actor: Option<&AuditActor>,
 ) -> AppResult<User> {
     // Validate email format
     let trimmed = email.trim();
@@ -156,7 +188,17 @@ pub async fn create_user(
         profile_config: Default::default(),
     };
 
-    db.collection::<User>(USERS).insert_one(&new_user).await?;
+    let intent = audit::intent(
+        actor,
+        "admin.user.created",
+        serde_json::json!({
+            "target_user_id": required::text(TextField::Identifier, &new_user.id),
+            "target_email": required::text(TextField::Email, &new_user.email),
+            "role": platform_role.as_str(),
+        }),
+    )?;
+    audit::insert_user(db, &new_user, intent).await?;
+    super::billing::schedules::eligibility::after_user_created(db, &new_user.id, now).await;
 
     tracing::info!(user_id = %user_id, is_admin = %is_admin, is_operator = %is_operator, "Admin created user");
 
@@ -167,12 +209,35 @@ pub async fn create_user(
 ///
 /// Only provided fields are updated. Validates email uniqueness and
 /// field constraints.
+#[cfg(test)]
 pub async fn update_user(
     db: &mongodb::Database,
     user_id: &str,
     display_name: Option<&str>,
     email: Option<&str>,
     avatar_url: Option<&str>,
+) -> AppResult<User> {
+    update_user_with_actor(db, user_id, display_name, email, avatar_url, None).await
+}
+
+pub async fn update_user_as(
+    db: &mongodb::Database,
+    user_id: &str,
+    display_name: Option<&str>,
+    email: Option<&str>,
+    avatar_url: Option<&str>,
+    actor: &AuditActor,
+) -> AppResult<User> {
+    update_user_with_actor(db, user_id, display_name, email, avatar_url, Some(actor)).await
+}
+
+async fn update_user_with_actor(
+    db: &mongodb::Database,
+    user_id: &str,
+    display_name: Option<&str>,
+    email: Option<&str>,
+    avatar_url: Option<&str>,
+    actor: Option<&AuditActor>,
 ) -> AppResult<User> {
     let existing = db
         .collection::<User>(USERS)
@@ -197,6 +262,7 @@ pub async fn update_user(
                 bson::Bson::String(name.to_string())
             },
         );
+        set_doc.insert(PROVIDER_DISPLAY_NAME, bson::Bson::Null);
     }
 
     if let Some(new_email) = email {
@@ -266,17 +332,36 @@ pub async fn update_user(
         );
     }
 
-    // Early return if no actual fields changed
+    let intent = audit::intent(
+        actor,
+        "admin.user.updated",
+        serde_json::json!({
+            "target_user_id": required::text(TextField::Identifier, user_id),
+            "target_email": required::text(TextField::Email, set_doc.get_str("email").unwrap_or(&existing.email)),
+            "changes": {
+                "display_name": display_name.map(|value| required::text(TextField::DisplayName, value)),
+                "email": email.map(|value| required::text(TextField::Email, value)),
+                "avatar_url": avatar_url.map(|value| required::text(TextField::AvatarUrl, &audit::avatar_for_audit(value))),
+            },
+        }),
+    )?;
+    // This successful no-op has no source mutation to couple to an intent.
     if set_doc.is_empty() {
+        audit::record_noop(db, intent).await?;
         return Ok(existing);
     }
 
     let now = Utc::now();
     set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
 
-    db.collection::<User>(USERS)
-        .update_one(doc! { "_id": user_id }, doc! { "$set": set_doc })
-        .await?;
+    audit::update_user(
+        db,
+        user_id,
+        doc! { "$set": set_doc },
+        || AppError::Internal("User disappeared after update".into()),
+        intent,
+    )
+    .await?;
 
     let updated = db
         .collection::<User>(USERS)
@@ -293,11 +378,32 @@ pub async fn update_user(
 /// Platform RBAC role membership is authoritative. The legacy boolean fields
 /// are still mirrored so older deployment code and stored documents remain
 /// compatible during the migration window.
+#[cfg(test)]
 pub async fn set_platform_role(
     db: &mongodb::Database,
     admin_user_id: &str,
     target_user_id: &str,
     role: &str,
+) -> AppResult<User> {
+    set_platform_role_with_actor(db, admin_user_id, target_user_id, role, None).await
+}
+
+pub async fn set_platform_role_as(
+    db: &mongodb::Database,
+    admin_user_id: &str,
+    target_user_id: &str,
+    role: &str,
+    actor: &AuditActor,
+) -> AppResult<User> {
+    set_platform_role_with_actor(db, admin_user_id, target_user_id, role, Some(actor)).await
+}
+
+async fn set_platform_role_with_actor(
+    db: &mongodb::Database,
+    admin_user_id: &str,
+    target_user_id: &str,
+    role: &str,
+    actor: Option<&AuditActor>,
 ) -> AppResult<User> {
     if admin_user_id == target_user_id {
         return Err(AppError::ValidationError(
@@ -328,9 +434,21 @@ pub async fn set_platform_role(
         &platform_role_ids,
         bson::DateTime::from_chrono(Utc::now()),
     );
-    db.collection::<User>(USERS)
-        .update_one(doc! { "_id": target_user_id }, pipeline)
-        .await?;
+    let intent = audit::intent(
+        actor,
+        "admin.user.role_changed",
+        serde_json::json!({
+            "target_user_id": required::text(TextField::Identifier, target_user_id), "role": platform_role.as_str(),
+        }),
+    )?;
+    audit::update_user(
+        db,
+        target_user_id,
+        pipeline,
+        || AppError::Internal("User disappeared after role update".into()),
+        intent,
+    )
+    .await?;
 
     db.collection::<User>(USERS)
         .find_one(doc! { "_id": target_user_id })
@@ -342,11 +460,32 @@ pub async fn set_platform_role(
 ///
 /// Self-protection: admin_user_id must differ from target_user_id.
 /// Side effect: when disabling, revokes all sessions.
+#[cfg(test)]
 pub async fn set_user_active(
     db: &mongodb::Database,
     admin_user_id: &str,
     target_user_id: &str,
     is_active: bool,
+) -> AppResult<()> {
+    set_user_active_with_actor(db, admin_user_id, target_user_id, is_active, None).await
+}
+
+pub async fn set_user_active_as(
+    db: &mongodb::Database,
+    admin_user_id: &str,
+    target_user_id: &str,
+    is_active: bool,
+    actor: &AuditActor,
+) -> AppResult<()> {
+    set_user_active_with_actor(db, admin_user_id, target_user_id, is_active, Some(actor)).await
+}
+
+async fn set_user_active_with_actor(
+    db: &mongodb::Database,
+    admin_user_id: &str,
+    target_user_id: &str,
+    is_active: bool,
+    actor: Option<&AuditActor>,
 ) -> AppResult<()> {
     if admin_user_id == target_user_id {
         return Err(AppError::ValidationError(
@@ -363,7 +502,22 @@ pub async fn set_user_active(
     if is_active && !target.is_active {
         super::platform_personal_owner_lifecycle::retire(db, target_user_id, false).await?;
     }
-    apply_user_security_state(db, target_user_id, is_active, false, target.is_active).await?;
+    let intent = audit::intent(
+        actor,
+        "admin.user.status_changed",
+        serde_json::json!({
+            "target_user_id": required::text(TextField::Identifier, target_user_id), "is_active": is_active,
+        }),
+    )?;
+    apply_user_security_state(
+        db,
+        target_user_id,
+        is_active,
+        false,
+        target.is_active,
+        intent,
+    )
+    .await?;
 
     if !is_active {
         super::platform_personal_owner_lifecycle::retire(db, target_user_id, false).await?;
@@ -381,18 +535,21 @@ async fn apply_user_security_state(
     active: bool,
     deleting: bool,
     expected_active: bool,
+    intent: Option<crate::models::security_effect_intent::SecurityEffectIntent>,
 ) -> AppResult<()> {
-    apply_user_security_state_with_deletion_policy(
+    apply_user_security_state_with_audit(
         db,
         user_id,
         active,
         deleting,
         None,
         Some(expected_active),
+        intent,
     )
     .await
 }
 
+#[cfg(test)]
 async fn apply_user_security_state_with_deletion_policy(
     db: &mongodb::Database,
     user_id: &str,
@@ -400,6 +557,27 @@ async fn apply_user_security_state_with_deletion_policy(
     deleting: bool,
     owner_deletion_policy: Option<&str>,
     expected_active: Option<bool>,
+) -> AppResult<()> {
+    apply_user_security_state_with_audit(
+        db,
+        user_id,
+        active,
+        deleting,
+        owner_deletion_policy,
+        expected_active,
+        None,
+    )
+    .await
+}
+
+async fn apply_user_security_state_with_audit(
+    db: &mongodb::Database,
+    user_id: &str,
+    active: bool,
+    deleting: bool,
+    owner_deletion_policy: Option<&str>,
+    expected_active: Option<bool>,
+    intent: Option<crate::models::security_effect_intent::SecurityEffectIntent>,
 ) -> AppResult<()> {
     if let Some(policy) = owner_deletion_policy {
         validate_account_deletion_policy(policy)?;
@@ -423,11 +601,22 @@ async fn apply_user_security_state_with_deletion_policy(
                 session,
                 &user_id,
                 active,
-                deleting,
+                deleting.then_some(user_id.as_str()),
                 owner_deletion_policy.as_deref(),
                 expected_active,
             )
             .await;
+            let result = match (result, intent.as_ref()) {
+                (Ok(()), Some(intent)) => {
+                    super::security_effect_service::enqueue_in_session(
+                        &db,
+                        session,
+                        std::slice::from_ref(intent),
+                    )
+                    .await
+                }
+                (result, _) => result,
+            };
             key_mutations::transaction_result(result)
         })
         .await
@@ -441,10 +630,11 @@ pub(crate) async fn apply_user_security_state_in_session(
     session: &mut mongodb::ClientSession,
     user_id: &str,
     active: bool,
-    deleting: bool,
+    departure_actor: Option<&str>,
     owner_deletion_policy: Option<&str>,
     expected_active: Option<bool>,
 ) -> AppResult<()> {
+    let deleting = departure_actor.is_some();
     if let Some(policy) = owner_deletion_policy {
         validate_account_deletion_policy(policy)?;
         if active || !deleting {
@@ -471,7 +661,10 @@ pub(crate) async fn apply_user_security_state_in_session(
     }
     if !active {
         super::org_membership_authority::fence_person_authority_loss(
-            db, user_id, session, deleting,
+            db,
+            user_id,
+            session,
+            departure_actor,
         )
         .await?;
     }
@@ -561,28 +754,21 @@ pub(crate) async fn apply_user_security_state_in_session(
 ///
 /// Returns the reset token on success, or an error if the user has no
 /// password (social login only).
+#[cfg(test)]
 pub async fn force_password_reset(
     db: &mongodb::Database,
     user_id: &str,
 ) -> AppResult<Option<String>> {
-    let user = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+    let actor = AuditActor::from_auth_user(&crate::test_utils::test_auth_user(user_id));
+    force_password_reset_as(db, user_id, &actor).await
+}
 
-    if user.password_hash.is_none() {
-        return Err(AppError::BadRequest(
-            "User has no password (social login only)".to_string(),
-        ));
-    }
-
-    let token = crate::services::auth_service::initiate_password_reset(db, &user.email).await?;
-
-    // Revoke all sessions to force re-authentication
-    revoke_all_user_sessions(db, user_id).await?;
-
-    Ok(token)
+pub async fn force_password_reset_as(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor: &AuditActor,
+) -> AppResult<Option<String>> {
+    audit::force_password_reset(db, user_id, actor).await
 }
 
 /// Explicit owner acknowledgement required before accepting Machine erasure.
@@ -602,7 +788,11 @@ pub fn validate_account_deletion_policy(policy: &str) -> AppResult<()> {
 /// Manually verify a user's email address.
 ///
 /// Sets email_verified = true and clears the verification token.
-pub async fn verify_email(db: &mongodb::Database, user_id: &str) -> AppResult<()> {
+pub async fn verify_email_as(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor: &AuditActor,
+) -> AppResult<()> {
     let user = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": user_id })
@@ -614,16 +804,25 @@ pub async fn verify_email(db: &mongodb::Database, user_id: &str) -> AppResult<()
     }
 
     let now = Utc::now();
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": user_id },
-            doc! { "$set": {
-                "email_verified": true,
-                "email_verification_token": null,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
-        )
-        .await?;
+    let intent = audit::intent(
+        Some(actor),
+        "admin.user.email_verified",
+        serde_json::json!({
+            "target_user_id": required::text(TextField::Identifier, user_id),
+        }),
+    )?;
+    audit::update_user(
+        db,
+        user_id,
+        doc! { "$set": {
+            "email_verified": true,
+            "email_verification_token": null,
+            "updated_at": bson::DateTime::from_chrono(now),
+        }},
+        || AppError::NotFound("User not found".into()),
+        intent,
+    )
+    .await?;
 
     Ok(())
 }
@@ -656,21 +855,35 @@ pub async fn list_user_sessions(db: &mongodb::Database, user_id: &str) -> AppRes
 ///
 /// Returns the number of sessions revoked.
 pub async fn revoke_all_user_sessions(db: &mongodb::Database, user_id: &str) -> AppResult<u64> {
+    revoke_all_user_sessions_with_actor(db, user_id, None).await
+}
+
+pub async fn revoke_all_user_sessions_as(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor: &AuditActor,
+) -> AppResult<u64> {
+    revoke_all_user_sessions_with_actor(db, user_id, Some(actor)).await
+}
+
+async fn revoke_all_user_sessions_with_actor(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor: Option<&AuditActor>,
+) -> AppResult<u64> {
     let mut transaction = db.client().start_session().await?;
     transaction
         .start_transaction()
         .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-    let count =
-        match super::session_authority::revoke_all_in_transaction(db, user_id, &mut transaction)
-            .await
-        {
-            Ok(count) => count,
-            Err(error) => {
-                transaction.abort_transaction().await?;
-                return Err(error);
-            }
-        };
+    let count = match audit::revoke_sessions_in_session(db, user_id, &mut transaction, actor).await
+    {
+        Ok(count) => count,
+        Err(error) => {
+            transaction.abort_transaction().await?;
+            return Err(error);
+        }
+    };
     super::transaction_service::commit(&mut transaction).await?;
     Ok(count)
 }
@@ -1369,7 +1582,8 @@ mod tests {
                 State(state),
                 test_auth_user(&admin_id),
                 HeaderMap::new(),
-                Path(org_id)
+                Path(org_id),
+                axum::extract::Query(crate::handlers::users::ErasureResponseQuery::default()),
             )
             .await,
             Err(AppError::ValidationError(_))

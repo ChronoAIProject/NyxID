@@ -45,6 +45,7 @@ fn generated_artifact_metadata_omits_absent_fields_but_persists_populated_bson()
         artifact: Metadata::default(),
         chat_delivery: None,
         image_input: None,
+        pdf: None,
         image_inspection: None,
         origin: "tool".into(),
         pages: None,
@@ -493,8 +494,45 @@ async fn seeded_body(
 }
 
 #[tokio::test]
+async fn generated_artifact_capacity_excludes_tool_files_but_preserves_legacy_limit() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    for legacy_count in [7, 8] {
+        let db =
+            crate::test_utils::connect_transaction_test_database("artifact_file_capacity").await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let (w, mut row) = seeded(&db, &keys).await;
+        let existing = &mut row.active_turn.as_mut().unwrap().attachments;
+        for index in 0..8 + legacy_count {
+            existing.push(serde_json::from_value(json!({
+                "id": format!("existing-{index}"), "origin": "tool", "size": 10,
+                "label": "existing", "content_type": if index < 8 { "application/pdf" } else { "image/png" },
+                "chat_delivery": index >= 8,
+            })).unwrap());
+        }
+        let reservation = byte_budget::reserve(sandbox::RESERVATION).await.unwrap();
+        let mut session = db.client().start_session().await.unwrap();
+        session.start_transaction().await.unwrap();
+        bind_in_session(&db, &keys, &mut row, &w, &mut session, Some(&reservation))
+            .await
+            .unwrap();
+        assert_eq!(row.active_turn.as_ref().unwrap().attachments.len(), 16);
+        assert_eq!(
+            db.collection::<Document>(ATTACHMENTS)
+                .count_documents(doc! {"origin": "generated_artifact"})
+                .session(&mut session)
+                .await
+                .unwrap(),
+            u64::from(legacy_count == 7)
+        );
+        session.abort_transaction().await.unwrap();
+        db.drop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn generated_artifact_admission_abort_keeps_pending_bytes_and_rolls_back_retention_and_association()
  {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let db = crate::test_utils::connect_transaction_test_database("artabort2037").await;
     let keys = crate::test_utils::test_encryption_keys();
     let (w, mut row) = seeded(&db, &keys).await;
@@ -588,6 +626,7 @@ fn generated_retention_live_policy_both_orderings_and_immutable_cap() {
 }
 #[tokio::test]
 async fn generated_delivery_roundtrip_private_binding_recovery_and_ttl() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use mongodb::event::command::CommandEvent;
     use std::sync::{
         Arc,
@@ -871,6 +910,7 @@ async fn generated_delivery_roundtrip_private_binding_recovery_and_ttl() {
 
 #[tokio::test]
 async fn maximum_encrypted_pending_document_fits_bson_and_rejects_oversize() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let keys = crate::test_utils::test_encryption_keys();
     let mut row:PendingArtifact=bson::from_document(doc!{"_id":Uuid::new_v4().to_string(),"watch_id":"watch","user_id":"owner","conversation_id":"conversation","turn_id":"turn","operation_id":"operation","source_result_identity":"a".repeat(64),"source_path_sha256":"b".repeat(64),"artifact_index":0,"filename":"x".repeat(160),"purge_after":bson::DateTime::now(),"content_type":"application/octet-stream","size":sandbox::FILE_BYTES as i64,"sha256":"a".repeat(64),"preview_kind":"download","content_revision":"1","state":"pending","assistant_attachment_id":Uuid::new_v4().to_string(),"created_at":bson::DateTime::now(),"expires_at":bson::DateTime::now()}).unwrap();
     let bytes = zeroize::Zeroizing::new(vec![42; sandbox::FILE_BYTES]);
@@ -891,6 +931,7 @@ async fn maximum_encrypted_pending_document_fits_bson_and_rejects_oversize() {
 
 #[tokio::test]
 async fn generated_artifact_missing_saved_bytes_are_no_material_in_actual_registry() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use super::super::encrypted_record_migration as migration;
     let db = crate::test_utils::connect_transaction_test_database("artmissingregistry2037").await;
     let keys = crate::test_utils::test_encryption_keys();
@@ -1035,6 +1076,7 @@ async fn generated_artifact_missing_saved_bytes_are_no_material_in_actual_regist
 
 #[tokio::test]
 async fn generated_artifacts_expiry_and_stale_lease_cannot_publish_or_relabel() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let db = crate::test_utils::connect_transaction_test_database("artrace2037").await;
     let keys = crate::test_utils::test_encryption_keys();
     ensure_indexes(&db).await.unwrap();
@@ -1206,6 +1248,7 @@ async fn generated_artifacts_expiry_and_stale_lease_cannot_publish_or_relabel() 
 
 #[tokio::test]
 async fn generated_artifact_worker_reservation_spans_persist_and_releases_on_error() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let db = crate::test_utils::connect_transaction_test_database("artbudget2037").await;
     let keys = crate::test_utils::test_encryption_keys();
     ensure_indexes(&db).await.unwrap();
@@ -1281,6 +1324,7 @@ async fn generated_artifact_worker_reservation_spans_persist_and_releases_on_err
 
 #[tokio::test]
 async fn conversation_delete_removes_encrypted_pending_artifacts_and_saved_associations() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let db = crate::test_utils::connect_transaction_test_database("artdelete2037").await;
     let keys = crate::test_utils::test_encryption_keys();
     let (w, row) = seeded(&db, &keys).await;
@@ -1358,6 +1402,7 @@ fn generated_artifacts_saved_admission_is_web_user_only_and_legacy_stays_legacy(
 
 #[tokio::test]
 async fn generated_registry_migrates_pending_and_materialized_files_with_fallback_and_cas() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use crate::crypto::local_key_provider::LocalKeyProvider;
     use crate::services::encrypted_record_migration as migration;
     use std::sync::Arc;
@@ -1441,6 +1486,7 @@ async fn generated_registry_migrates_pending_and_materialized_files_with_fallbac
 
 #[tokio::test]
 async fn generated_acquisition_preserves_status_version_presence_and_rechecks_without_submission() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1511,6 +1557,7 @@ async fn generated_acquisition_preserves_status_version_presence_and_rechecks_wi
 
 #[tokio::test]
 async fn generated_acquisition_second_producer_progresses_and_cancellation_releases_budget() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use std::sync::Arc;
     let db = crate::test_utils::connect_transaction_test_database("artslots2037").await;
     let keys = Arc::new(crate::test_utils::test_encryption_keys());
@@ -1593,6 +1640,7 @@ async fn generated_acquisition_second_producer_progresses_and_cancellation_relea
 
 #[tokio::test]
 async fn generated_legacy_http_keeps_main_headers_and_bytes_and_cross_chat_key_behavior() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     let db = crate::test_utils::connect_transaction_test_database("artlegacy2037").await;
     let keys = crate::test_utils::test_encryption_keys();
     let (w, row) = seeded(&db, &keys).await;
@@ -1622,6 +1670,7 @@ async fn generated_legacy_http_keeps_main_headers_and_bytes_and_cross_chat_key_b
         ("image/jpeg", JPEG),
     ] {
         let mut attachment = AssistantAttachment {
+            chunks: 0,
             artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
@@ -1705,6 +1754,7 @@ async fn generated_legacy_http_keeps_main_headers_and_bytes_and_cross_chat_key_b
 
 #[tokio::test]
 async fn generated_live_retention_enforces_both_materialization_policy_orderings_in_mongo() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
     use crate::models::assistant_upload_retention::{Policy, SETTINGS_ID, Settings};
     use crate::services::assistant_upload_retention as retention;
     let db = crate::test_utils::connect_transaction_test_database("artpolicy2037").await;
@@ -1811,3 +1861,143 @@ async fn generated_live_retention_enforces_both_materialization_policy_orderings
 }
 
 include!("writer_cutover_tests.rs");
+
+#[tokio::test]
+async fn generated_artifact_publication_uses_retained_turn_grant_and_refuses_after_claim() {
+    use crate::services::channel_meta_service::scopes;
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    let db =
+        crate::test_utils::connect_transaction_test_database("meta_artifact_source_fence").await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    ensure_indexes(&db).await.unwrap();
+    let (w, _) = seeded(&db, &state.encryption_keys).await;
+    let bot = crate::services::channel_adapters::meta::tests::registered_bot(
+        &state,
+        &w.user_id,
+        "instagram",
+    )
+    .await;
+    scopes::ensure_indexes(&db).await.unwrap();
+    let scope =
+        crate::services::transaction_service::run_db_only(&db, &(&db, &bot), |tx, &(db, bot)| {
+            Box::pin(scopes::ensure_current(db, tx, bot, true))
+        })
+        .await
+        .unwrap();
+    let grant = scopes::reference(&bot).unwrap();
+    // The immutable source row is the authority, not the mutable artifact
+    // watch or a caller-supplied grant. This also pins the generic writer's
+    // refusal if a channel-derived source reaches this retained lineage.
+    db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"user_id":&w.user_id,"conversation_id":&w.conversation_id,"turn_id":&w.turn_id},
+            doc! {"$set":{"meta_grants":[bson::to_bson(&grant).unwrap()]}},
+        )
+        .await
+        .unwrap();
+    // Long ordinary histories share this artifact path. Untagged rows must
+    // neither exhaust the proof limit nor hide the one tagged source.
+    let ordinary: Vec<_> = (2..=102).map(|seq| doc! {
+        "_id": Uuid::new_v4().to_string(), "user_id": &w.user_id,
+        "conversation_id": &w.conversation_id, "turn_id": &w.turn_id,
+        "role": "assistant", "origin":"user", "seq":seq,
+        "text":"Independent progress", "status":"completed", "created_at":bson::DateTime::now(),
+    }).collect();
+    db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .insert_many(ordinary)
+        .await
+        .unwrap();
+    db.collection::<Document>(WATCHES)
+        .update_one(
+            doc! {"_id":&w.id},
+            doc! {"$set":{"state":"waiting","lease_id":"source-fence",
+            "lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(1))}},
+        )
+        .await
+        .unwrap();
+    let live = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"_id":&w.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let result = sandbox::parse(
+        &body("../../movie.mp4", MP4),
+        live.operation_id.as_deref().unwrap(),
+    )
+    .unwrap();
+    let reservation = byte_budget::reserve(sandbox::RESERVATION).await.unwrap();
+    persist(
+        &db,
+        &state.encryption_keys,
+        &live,
+        &result,
+        &sandbox::Status {
+            expires_at: None,
+            version: Some("7".into()),
+        },
+        &reservation,
+    )
+    .await
+    .unwrap();
+    db.collection::<Document>(WATCHES)
+        .update_one(
+            doc! {"_id":&w.id},
+            doc! {"$set":{"state":"waiting","lease_id":"source-fence",
+            "lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(1))}},
+        )
+        .await
+        .unwrap();
+    let live = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"_id":&w.id})
+        .await
+        .unwrap()
+        .unwrap();
+    db.collection::<Document>(crate::models::channel_meta::GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":&scope.id},
+            doc! {"$set":{"erasure_requested":true},"$inc":{"revision":1_i64}},
+        )
+        .await
+        .unwrap();
+    let before = db
+        .collection::<Document>(ARTIFACTS)
+        .find_one(doc! {"watch_id":&w.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        persist(
+            &db,
+            &state.encryption_keys,
+            &live,
+            &result,
+            &sandbox::Status {
+                expires_at: None,
+                version: Some("7".into())
+            },
+            &reservation
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        db.collection::<Document>(ARTIFACTS)
+            .find_one(doc! {"watch_id":&w.id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        db.collection::<Document>(WATCHES)
+            .find_one(doc! {"_id":&w.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("state"),
+        Ok("waiting")
+    );
+    db.drop().await.unwrap();
+}

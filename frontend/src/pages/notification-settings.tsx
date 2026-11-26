@@ -30,7 +30,6 @@ import {
   enabledSimpleApprovalVerbs,
 } from "@/lib/approval-policies";
 import { ErrorBanner } from "@/components/shared/error-banner";
-import { PageHeader } from "@/components/shared/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -87,7 +86,7 @@ import type {
   ServiceApprovalConfigItem,
 } from "@/types/approvals";
 
-export function NotificationSettingsPage() {
+export function NotificationSettings() {
   useUiTranslation();
   const { data: rawSettings, isLoading, error, refetch } = useNotificationSettings();
   const updateMutation = useUpdateNotificationSettings();
@@ -471,11 +470,6 @@ export function NotificationSettingsPage() {
 
   return (
     <div className="space-y-8">
-      <PageHeader
-        title={translateUi("Notification Settings")}
-        description={translateUi("Configure how you receive approval and group mention notifications.")}
-      />
-
       {isLoading ? (
         <div className="space-y-4">
           <Skeleton className="h-48 w-full" />
@@ -651,7 +645,7 @@ export function NotificationSettingsPage() {
                           <FormLabel>{translateUi("Approval (Global Default)")}</FormLabel>
                           <FormDescription>{translateUi("Writes only requires approval for changes and destructive operations. Reads and stateless model inference can proceed. Per-service and organization policies still apply.")}</FormDescription>
                         </div>
-                        <Select value={field.value} onValueChange={field.onChange}>
+                        <Select value={field.value ?? ""} onValueChange={field.onChange}>
                           <FormControl>
                             <SelectTrigger className="w-48" aria-label={translateUi("Approval (Global Default)")}>
                               <SelectValue />
@@ -678,7 +672,7 @@ export function NotificationSettingsPage() {
                         </div>
                         <FormControl>
                           <Switch
-                            checked={field.value}
+                            checked={field.value ?? false}
                             onCheckedChange={field.onChange}
                             disabled={!settings?.telegram_connected}
                           />
@@ -698,7 +692,7 @@ export function NotificationSettingsPage() {
                         </div>
                         <FormControl>
                           <Switch
-                            checked={field.value}
+                            checked={field.value ?? false}
                             onCheckedChange={field.onChange}
                             disabled={!pushDevices?.devices.length}
                           />
@@ -832,8 +826,8 @@ export function NotificationSettingsPage() {
                       key={config.service_id}
                       className="rounded-lg border border-border p-4"
                     >
-                      <div className="flex items-center justify-between">
-                        <div className="space-y-0.5">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="min-w-0 space-y-0.5 wrap-anywhere">
                           <p className="type-row-title">
                             {config.service_name}
                           </p>
@@ -844,7 +838,7 @@ export function NotificationSettingsPage() {
                             {approvalPolicyLabel(config)}
                           </p>
                         </div>
-                        <div className="flex items-center gap-3">
+                        <div className="flex shrink-0 items-center gap-3">
                           <Switch
                             checked={hasPolicy}
                             onCheckedChange={(checked) =>
@@ -872,9 +866,9 @@ export function NotificationSettingsPage() {
                             <TabsTrigger value="simple">{translateUi("Simple")}</TabsTrigger>
                             <TabsTrigger value="advanced">{translateUi("Advanced")}</TabsTrigger>
                           </TabsList>
-                          <TabsContent value="simple" className="mt-3">
+                          <TabsContent value="simple" className="@container mt-3">
                             <div className="flex flex-col gap-3">
-                              <div className="flex flex-wrap items-center gap-2">
+                              <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-1 @lg:grid-cols-[auto_auto_minmax(0,1fr)]">
                                 <Label htmlFor={`approval-mode-${mutationKey}`}>{translateUi("Mode")}</Label>
                                 <Select
                                   value={config.approval_mode}
@@ -886,7 +880,11 @@ export function NotificationSettingsPage() {
                                     )
                                   }
                                 >
-                                  <SelectTrigger id={`approval-mode-${mutationKey}`} className="h-7 w-[180px]">
+                                  <SelectTrigger
+                                    id={`approval-mode-${mutationKey}`}
+                                    aria-describedby={`approval-mode-help-${mutationKey}`}
+                                    className="mt-0! w-full @lg:w-[180px]"
+                                  >
                                     <SelectValue />
                                   </SelectTrigger>
                                   <SelectContent>
@@ -894,19 +892,21 @@ export function NotificationSettingsPage() {
                                     <SelectItem value="grant">{translateUi("Time-based grant")}</SelectItem>
                                   </SelectContent>
                                 </Select>
-                                <span className="text-13 text-muted-foreground">
+                                <span id={`approval-mode-help-${mutationKey}`} className="col-start-2 text-13 text-muted-foreground @lg:col-start-3">
                                   {config.approval_mode === "grant"
                                     ? translateUi("Approval creates a reusable grant")
                                     : translateUi("Every request needs fresh approval")}
                                 </span>
                               </div>
-                              <div className="flex flex-wrap gap-3">
+                              <div className="divide-y divide-border/60">
                                 {approvalVerbs.map((verb) => (
                                   <Label
                                     key={verb}
-                                    className="flex items-center gap-2 text-muted-foreground"
+                                    className="flex min-h-11 cursor-pointer items-center justify-between gap-3 py-2"
                                   >
+                                    <span>{approvalVerbLabels[verb]}</span>
                                     <Switch
+                                      className="focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-card"
                                       checked={enabledVerbs.includes(verb)}
                                       onCheckedChange={(checked) =>
                                         void handleChangeVerbApproval(
@@ -917,7 +917,6 @@ export function NotificationSettingsPage() {
                                         )
                                       }
                                     />
-                                    {approvalVerbLabels[verb]}
                                   </Label>
                                 ))}
                               </div>

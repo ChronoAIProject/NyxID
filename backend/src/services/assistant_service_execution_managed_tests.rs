@@ -266,6 +266,8 @@ async fn call(f: &Fixture, id: &str, mcp: bool) -> crate::errors::AppResult<u16>
     let context = mcp_service::McpExecContext {
         strict_response_utf8: false,
         execution_permission: None,
+
+        attachment_owner_key: false,
         assistant_chat: f.auth.api_key_id.as_ref().map(|_| &f.chat),
         response_body_limit: None,
         actor_user_id: None,
@@ -330,6 +332,19 @@ async fn receipt_count(f: &Fixture) -> u64 {
         .await
         .unwrap()
 }
+fn pinned_telnyx(
+    fixture: &nyxid_service_adapters::test_support::ScriptedFixture,
+) -> crate::services::channel_media_service::TestPinnedTransport {
+    let certificate = fixture.certificate.clone();
+    crate::services::channel_media_service::TestPinnedTransport {
+        host: "api.telnyx.com".into(),
+        target: format!("https://api.telnyx.com/v2/{}", telnyx::CHAT_PATH),
+        addresses: vec![fixture.address],
+        builder: Arc::new(move || {
+            reqwest::Client::builder().add_root_certificate(certificate.clone())
+        }),
+    }
+}
 fn pause() -> telnyx::Pause {
     telnyx::Pause {
         entered: Arc::new(Notify::new()),
@@ -361,13 +376,7 @@ fn refused(admitted: bool, drift: &str) -> futures::future::BoxFuture<'_, ()> {
             .await;
             let pause = pause();
             let hooks = telnyx::TestHooks {
-                client: provider
-                    .builder
-                    .take()
-                    .unwrap()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()
-                    .unwrap(),
+                transport: pinned_telnyx(&provider),
                 funded: (!admitted).then(|| pause.clone()),
                 admitted: admitted.then(|| pause.clone()),
                 completed: None,
@@ -462,13 +471,7 @@ async fn actual_managed_http_and_mcp_success_settles_once_and_records_one_receip
         )
         .await;
         let hooks = telnyx::TestHooks {
-            client: provider
-                .builder
-                .take()
-                .unwrap()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap(),
+            transport: pinned_telnyx(&provider),
             funded: None,
             admitted: None,
             completed: None,
@@ -535,13 +538,7 @@ async fn actual_managed_http_and_mcp_incomplete_usage_retains_liability_without_
         )
         .await;
         let hooks = telnyx::TestHooks {
-            client: provider
-                .builder
-                .take()
-                .unwrap()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap(),
+            transport: pinned_telnyx(&provider),
             funded: None,
             admitted: None,
             completed: None,
@@ -579,13 +576,7 @@ async fn actual_managed_exchange_finishes_accounting_after_caller_disconnect_and
             .await;
         let completed = Arc::new(Notify::new());
         let hooks = telnyx::TestHooks {
-            client: provider
-                .builder
-                .take()
-                .unwrap()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap(),
+            transport: pinned_telnyx(&provider),
             funded: None,
             admitted: None,
             completed: Some(completed.clone()),
@@ -640,13 +631,7 @@ async fn actual_managed_nonassistant_org_connection_keeps_resource_acl_and_perso
         )
         .await;
         let hooks = telnyx::TestHooks {
-            client: provider
-                .builder
-                .take()
-                .unwrap()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap(),
+            transport: pinned_telnyx(&provider),
             funded: None,
             admitted: None,
             completed: None,
@@ -703,13 +688,7 @@ async fn actual_managed_catalog_only_call_keeps_final_turn_and_scope_fences() {
         .await;
         let pause = pause();
         let hooks = telnyx::TestHooks {
-            client: provider
-                .builder
-                .take()
-                .unwrap()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap(),
+            transport: pinned_telnyx(&provider),
             funded: None,
             admitted: Some(pause.clone()),
             completed: None,
@@ -894,13 +873,7 @@ async fn assert_shared_transports_managed_actor_funding_once_consent_and_pre_dis
     }
     let gate = pause();
     let hooks = telnyx::TestHooks {
-        client: provider
-            .builder
-            .take()
-            .unwrap()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .unwrap(),
+        transport: pinned_telnyx(&provider),
         funded: revoke.then(|| gate.clone()),
         admitted: None,
         completed: None,

@@ -167,6 +167,7 @@ impl DiscordAdapter {
             }
             response
         } else {
+            crate::services::channel_turn_preparation::effect().await?;
             support::json(request).await?
         };
         response["id"]
@@ -257,6 +258,7 @@ impl DiscordAdapter {
                 support::push(
                     &mut history,
                     ThreadHistoryMessage {
+                        truncated_original_bytes: None,
                         message_id: mid.into(),
                         sender_id: sender.into(),
                         sender_kind: kind,

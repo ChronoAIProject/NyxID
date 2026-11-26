@@ -10,11 +10,17 @@ const setup = (params?: Record<string, unknown>) =>
 
 test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hold no controls", () => {
   const env = setup();
-  const groups = env
+  const headings = env
     .all()
-    .filter((node) => node.props.accessibilityRole === "header")
-    .map((node) => [node.props.children].flat(Infinity).join(""));
-  assert.deepEqual(groups, ["ACCOUNT", "PREFERENCES", "SUPPORT"]);
+    .filter((node) => node.props.accessibilityRole === "header");
+  for (const heading of headings) {
+    assert.equal(style(heading).textTransform, undefined);
+    assert.equal(style(heading).fontSize, 11);
+    assert.equal(style(heading).fontWeight, "500");
+    assert.equal(style(heading).letterSpacing, 0.6);
+  }
+  assert.deepEqual(headings.map((node) => String(node.props.children).toUpperCase()), ["ACCOUNT", "PREFERENCES", "SUPPORT"]);
+  assert.equal(headings[0]!.props.children, "ACCOUNT", "base uppercase presentation is retained");
   const routes = [
     ["Account & security", "AccountSecurity"],
     ["Usage & credits", "UsageCredits"],
@@ -24,6 +30,7 @@ test("Settings is a menu: grouped icon rows with chevrons open sub-pages and hol
     ["Privacy", "PrivacySettings"],
     ["Terms of Service", "TermsOfService"],
     ["Privacy Policy", "PrivacyPolicy"],
+    ["Open-source notices", "OpenSourceNotices"],
   ];
   for (const [label, route] of routes) {
     const row = env.row(label!);
@@ -105,7 +112,7 @@ test("Sign Out and Delete Account are centred actions, not navigation, and delet
   );
   assert.ok(
     env.text(
-      "Permanently deletes your account and its data. This cannot be undone.",
+      "Permanently deletes your account and personal data. Necessary security and financial records are retained. This cannot be undone.",
     ),
   );
   env.pending();
@@ -214,6 +221,23 @@ test("Preferences always offers dictation; it is Voice only when live voice is e
   on.harness.unmount();
 });
 
+test("Apple Watch setup appears only on builds that include the watch app", () => {
+  const without = setupSettingsScreen(
+    "./AccountSettingsScreen.tsx",
+    "AccountSettingsScreen",
+  );
+  assert.throws(() => without.row("Apple Watch"));
+  without.harness.unmount();
+  const withWatch = setupSettingsScreen(
+    "./AccountSettingsScreen.tsx",
+    "AccountSettingsScreen",
+    { watchAvailable: true },
+  );
+  withWatch.row("Apple Watch").props.onPress();
+  assert.equal(JSON.stringify(withWatch.pushes.at(-1)), '["AppleWatchSettings"]');
+  withWatch.harness.unmount();
+});
+
 test("tablet account identity uses its measured card width when Dynamic Type outgrows the sheet", () => {
   const env = setup();
   env.resize(1032, 2.2);
@@ -230,4 +254,47 @@ test("tablet account identity uses its measured card width when Dynamic Type out
   env.resize(1194, 1);
   assert.equal(style(identity()).flexDirection, "row");
   env.harness.unmount();
+});
+
+test("Quick access (the Duo rail's list) is offered only where the window shows the rail", () => {
+  const phone = setupSettingsScreen("./AccountSettingsScreen.tsx", "AccountSettingsScreen");
+  // Ordinary iPhones and iPads have no rail, so no Quick access row.
+  assert.throws(() => phone.row("Quick access"));
+  phone.harness.unmount();
+  const duo = setupSettingsScreen("./AccountSettingsScreen.tsx", "AccountSettingsScreen", {
+    railWindow: true,
+  });
+  const row = duo.row("Quick access");
+  assert.equal(row.props.accessibilityRole, "button");
+  // Under Preferences, right after Language.
+  const labels = duo
+    .all()
+    .filter((node) => node.type === "Pressable" && typeof node.props.accessibilityHint === "string")
+    .map((node) => node.props.accessibilityHint);
+  assert.ok(labels.indexOf("Opens Quick access") === labels.indexOf("Opens Language") + 1);
+  row.props.onPress();
+  assert.equal(JSON.stringify(duo.pushes.at(-1)), '["QuickAccessSettings"]');
+  duo.harness.unmount();
+});
+
+
+test('M2622-03 sign-out waits for durability, blocks double taps and offers retry after failure', async () => {
+  let resolve!: () => void, reject!: (reason: unknown) => void, calls = 0;
+  const env = setupSettingsScreen('./AccountSettingsScreen.tsx', 'AccountSettingsScreen', {
+    signOut: () => { calls++; return new Promise<void>((yes, no) => { resolve = yes; reject = no; }); },
+  });
+  try {
+    const confirm = () => { env.row('Sign Out').props.onPress(); return env.alerts.at(-1)!.buttons![1]!.onPress!; };
+    const press = confirm(); press(); press();
+    await env.harness.settle();
+    assert.equal(calls, 1);
+    assert.equal(env.row('Signing out...').props.disabled, true);
+    assert.equal(env.all().find(n => n.type === 'ToastOverlay')!.props.toast, null);
+    reject(new Error('disk unavailable')); await env.harness.settle();
+    assert.equal(env.row('Sign Out').props.disabled, false);
+    assert.match(env.all().find(n => n.type === 'ToastOverlay')!.props.toast.message, /Couldn't sign out.*try again/);
+    confirm()(); resolve(); await env.harness.settle();
+    assert.equal(calls, 2);
+    assert.equal(env.all().find(n => n.type === 'ToastOverlay')!.props.toast.message, 'You are signed out.');
+  } finally { env.harness.unmount(); }
 });

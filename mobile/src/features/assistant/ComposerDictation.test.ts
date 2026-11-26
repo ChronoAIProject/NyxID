@@ -21,6 +21,9 @@ function setup({ introSeen = true, granted = false } = {}) {
     interim: "",
     error: undefined,
     permissionDenied: false,
+    recognitionLocale: undefined,
+    chooseLanguage: false,
+    retry: async () => {},
     subscribeLevel: (listener) => {
       levelListeners.add(listener);
       return () => {
@@ -145,6 +148,21 @@ function setup({ introSeen = true, granted = false } = {}) {
     "./DictationWaveform",
     h.load(fileURLToPath(new URL("./DictationWaveform.tsx", import.meta.url))),
   );
+  const nextLanguage = {
+    resolved: "en-GB",
+    loading: false,
+    label: "English",
+    summary: "Device language · English",
+    options: [],
+    suggested: [],
+    choose() {},
+  };
+  h.mock("./voice/useDictationLanguage", {
+    useDictationLanguage: () => nextLanguage,
+  });
+  h.mock("./voice/DictationLanguagePicker", {
+    DictationLanguagePicker: "DictationLanguagePicker",
+  });
   const components = h.load(
     fileURLToPath(new URL("./ComposerDictation.tsx", import.meta.url)),
   ) as {
@@ -298,6 +316,51 @@ test("listening stays in the composer: words above a streaming waveform, Discard
     .find((node) => node.props.accessibilityLabel === "Discard dictation")!
     .props.onPress();
   assert.deepEqual(x.events, ["stop", "discard"]);
+});
+
+test("a queued language keeps the listening chip and transcript bound to this recording", () => {
+  const x = setup();
+  x.dictation.phase = "listening";
+  x.dictation.active = true;
+  x.dictation.recognitionLocale = "zh-CN";
+  x.dictation.final = "你好";
+  x.dictation.text = "你好";
+  x.h.mount(
+    () =>
+      render(
+        x.ComposerDictationReview({
+          dictation: x.dictation,
+          draft: "Draft",
+        }),
+      ) as Element,
+  );
+  const nodes = () => all(x.h.value());
+  const chip = () =>
+    nodes().find(
+      (node) =>
+        node.props.accessibilityLabel === "Language for the next recording",
+    )!;
+  assert.equal(chip().props.accessibilityValue.text, "name:zh-CN");
+  assert.ok(
+    nodes().some((node) => node.props.children === "For the next recording: English"),
+  );
+  chip().props.onPress();
+  x.h.flush();
+  const picker = nodes().find(
+    (node) => node.type === "DictationLanguagePicker",
+  )!;
+  assert.equal(picker.props.currentRecordingLanguage, "name:zh-CN");
+  picker.props.onClose();
+  x.h.flush();
+  assert.equal(chip().props.accessibilityValue.text, "name:zh-CN");
+  assert.ok(
+    nodes().some((node) => [node.props.children].flat().includes("Draft")),
+  );
+  assert.ok(
+    nodes().some((node) => [node.props.children].flat().includes("你好")),
+  );
+  assert.deepEqual(x.events, []);
+  x.h.unmount();
 });
 
 test("with nothing said yet the waveform takes the field's place; an existing draft stays before new words", () => {
@@ -458,11 +521,16 @@ test("dictation grows within the typing height limit and keeps the meter between
           ),
     )!;
     const children = [row.props.children].flat().filter(Boolean);
-    assert.equal(children.length, 3);
+    assert.equal(children.length, 4);
     assert.equal(children[0].props.accessibilityLabel, "Discard dictation");
-    assert.equal(children[2].props.accessibilityLabel, "Finish dictation");
+    assert.equal(
+      children[1].props.accessibilityLabel,
+      "Language for the next recording",
+    );
+    assert.equal(children[1].props.disabled, phase !== "listening");
+    assert.equal(children[3].props.accessibilityLabel, "Finish dictation");
     assert.ok(
-      all(children[1]).some(
+      all(children[2]).some(
         (node) => node.type === "Text" || node.type === "ActivityIndicator",
       ),
     );

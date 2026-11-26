@@ -13,6 +13,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::oauth_flow_kind::OAuthFlowKind;
 use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::security_effect_intent::SecurityEffectIntent;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
 use crate::services::connection_expiry_service::{self, ConnectionExpiryNotifier};
@@ -23,8 +24,8 @@ use crate::services::user_credentials_service;
 /// Decrypted token ready for injection.
 pub struct DecryptedProviderToken {
     pub token_type: String,
-    pub access_token: Option<String>,
-    pub api_key: Option<String>,
+    pub access_token: Option<zeroize::Zeroizing<String>>,
+    pub api_key: Option<zeroize::Zeroizing<String>>,
 }
 
 /// Outcome of an OAuth/device-code callback, regardless of write path.
@@ -49,51 +50,62 @@ async fn insert_oauth_state(
     db: &mongodb::Database,
     state: &OAuthState,
     owner_id: &str,
+    audit: Option<&SecurityEffectIntent>,
 ) -> AppResult<()> {
-    let Some(connection_id) = state.connection_id.clone() else {
+    if state.connection_id.is_none() && audit.is_none() {
         db.collection::<OAuthState>(OAUTH_STATES)
             .insert_one(state)
             .await?;
         return Ok(());
-    };
-    let state = state.clone();
-    let owner_id = owner_id.to_string();
-    let db = db.clone();
-    crate::services::service_history::transaction::run(&db.clone(), async move |transaction| {
-        let operation: AppResult<()> = async {
-            let key =
-                crate::services::service_history::collection::<UserApiKey>(&db, USER_API_KEYS)
-                    .find_one(doc! {
-                        "connection_id": &connection_id,
-                        "user_id": &owner_id,
-                        "provider_config_id": &state.provider_config_id,
-                    })
-                    .session(&mut *transaction)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound("OAuth connection key not found".into()))?;
-            let session: &mut mongodb::ClientSession = transaction.into();
-            let fenced = crate::services::service_history::mutation::fence_backing_reference(
-                &db,
-                USER_API_KEYS,
-                &key.id,
-                &owner_id,
-                session,
+    }
+    let context = (db, state, owner_id, audit);
+    super::service_history::transaction::run_send(db, &context, |tx, context| {
+        Box::pin(async move {
+            super::api_key_mutation_service::transaction_result(
+                insert_oauth_state_in_session(tx, context).await,
             )
-            .await?;
-            if !fenced {
-                return Err(AppError::NotFound("OAuth connection key not found".into()));
-            }
-            db.collection::<OAuthState>(OAUTH_STATES)
-                .insert_one(&state)
-                .session(session)
-                .await?;
-            Ok(())
-        }
-        .await;
-        super::api_key_mutation_service::transaction_result(operation)
+        })
     })
     .await
     .map_err(super::api_key_mutation_service::map_transaction_error)
+}
+
+async fn insert_oauth_state_in_session(
+    tx: &mut super::service_history::transaction::Transaction,
+    context: &(
+        &mongodb::Database,
+        &OAuthState,
+        &str,
+        Option<&SecurityEffectIntent>,
+    ),
+) -> AppResult<()> {
+    let &(db, state, owner, audit) = context;
+    if let Some(connection_id) = &state.connection_id {
+        let key = super::service_history::collection::<UserApiKey>(db, USER_API_KEYS)
+                .find_one(doc! {"connection_id":connection_id,"user_id":owner,"provider_config_id":&state.provider_config_id})
+                .session(&mut *tx).await?
+                .ok_or_else(||AppError::NotFound("OAuth connection key not found".into()))?;
+        if !super::service_history::mutation::fence_backing_reference(
+            db,
+            USER_API_KEYS,
+            &key.id,
+            owner,
+            &mut *tx,
+        )
+        .await?
+        {
+            return Err(AppError::NotFound("OAuth connection key not found".into()));
+        }
+    }
+    db.collection::<OAuthState>(OAUTH_STATES)
+        .insert_one(state)
+        .session(&mut **tx)
+        .await?;
+    if let Some(audit) = audit {
+        super::security_effect_service::enqueue_in_session(db, tx, std::slice::from_ref(audit))
+            .await?;
+    }
+    Ok(())
 }
 
 /// Summary for listing (no decrypted tokens).
@@ -412,6 +424,30 @@ pub async fn store_api_key(
     label: Option<&str>,
     gateway_url: Option<&str>,
 ) -> AppResult<UserProviderToken> {
+    store_api_key_with_audit(
+        db,
+        encryption_keys,
+        user_id,
+        provider_id,
+        api_key,
+        label,
+        gateway_url,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn store_api_key_with_audit(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_id: &str,
+    api_key: &str,
+    label: Option<&str>,
+    gateway_url: Option<&str>,
+    audit: Option<&SecurityEffectIntent>,
+) -> AppResult<UserProviderToken> {
     // Verify provider exists and is active
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -443,121 +479,170 @@ pub async fn store_api_key(
         .read_concern(mongodb::options::ReadConcern::snapshot())
         .write_concern(mongodb::options::WriteConcern::majority())
         .await?;
-    let result: AppResult<UserProviderToken> = async {
-        super::erasure_admission::fence_credential_target_in_session(
-            db,
-            user_id,
-            &lifecycle_owner,
-            &mut tx,
-        )
-        .await?;
-        let existing = db
-            .collection::<UserProviderToken>(COLLECTION_NAME)
-            .find_one(doc! {
-                "user_id": user_id,
-                "provider_config_id": provider_id,
-            })
-            .sort(doc! { "updated_at": -1_i32 })
-            .session(&mut tx)
-            .await?;
-
-        let now = Utc::now();
-        use super::credential_record_service as records;
-        let id=existing.as_ref().map(|row|row.id.clone()).unwrap_or_else(||Uuid::new_v4().to_string());
-        let mut versions=std::collections::BTreeMap::new();
-        let encrypted=records::encrypt(encryption_keys,COLLECTION_NAME,&id,user_id,"api_key_encrypted",api_key_to_store.as_bytes()).await?;
-        records::mark_version(&mut versions,encryption_keys,"api_key_encrypted");
-
-        if let Some(existing_token) = existing {
-            // Update existing token
-            let mut set_doc = doc! {
-                "api_key_encrypted": bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: encrypted,
-                },
-                "status": "active",
-                "token_type": "api_key",
-                "access_token_encrypted": bson::Bson::Null,
-                "refresh_token_encrypted": bson::Bson::Null,
-                "credential_user_id": bson::Bson::Null,
-                "expires_at": bson::Bson::Null,
-                "token_scopes": bson::Bson::Null,
-                "secret_context_versions":{"$literal":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?},
-                "label": {"$literal":label},
-                "error_message": bson::Bson::Null,
-                "updated_at": bson::DateTime::from_chrono(now),
-            };
-            match gateway_url {
-                Some(url) => {
-                    set_doc.insert("gateway_url", url);
-                }
-                None => {
-                    set_doc.insert("gateway_url", bson::Bson::Null);
-                }
-            }
-            set_doc.insert(
-                "state_version",
-                doc! { "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64] },
-            );
-            db.collection::<UserProviderToken>(COLLECTION_NAME)
-                .update_one(
-                    doc! { "_id": &existing_token.id },
-                    vec![doc! { "$set": set_doc }],
-                )
-                .session(&mut tx)
-                .await?;
-
-            let updated = db
-                .collection::<UserProviderToken>(COLLECTION_NAME)
-                .find_one(doc! { "_id": &existing_token.id })
-                .session(&mut tx)
-                .await?
-                .ok_or_else(|| AppError::Internal("Token disappeared after update".to_string()))?;
-
-            return Ok(updated);
-        }
-
-        let token = UserProviderToken {
-
-            secret_context_versions: versions,
-            id,
-            user_id: user_id.to_string(),
-            provider_config_id: provider_id.to_string(),
-            connection_id: None,
-            credential_user_id: None,
-            token_type: "api_key".to_string(),
-            access_token_encrypted: None,
-            refresh_token_encrypted: None,
-            token_scopes: None,
-            expires_at: None,
-            api_key_encrypted: Some(encrypted),
-            status: "active".to_string(),
-            state_version: 1,
-            last_refreshed_at: None,
-            last_used_at: None,
-            error_message: None,
-            label: label.map(String::from),
-            metadata: None,
-            gateway_url: gateway_url.map(String::from),
-            created_at: now,
-            updated_at: now,
-        };
-
-        db.collection::<UserProviderToken>(COLLECTION_NAME)
-            .insert_one(&token)
-            .session(&mut tx)
-            .await?;
-
-        tracing::info!(
-            user_id = %user_id,
-            provider_id = %provider_id,
-            "API key stored for provider"
-        );
-
-        Ok(token)
-    }
+    let result = store_api_key_in_session(
+        db,
+        encryption_keys,
+        user_id,
+        provider_id,
+        &api_key_to_store,
+        label,
+        gateway_url,
+        &lifecycle_owner,
+        audit,
+        &mut tx,
+    )
     .await;
     super::org_membership_authority::finish(tx, result).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn store_api_key_in_session(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_id: &str,
+    api_key_to_store: &str,
+    label: Option<&str>,
+    gateway_url: Option<&str>,
+    lifecycle_owner: &str,
+    audit: Option<&SecurityEffectIntent>,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<UserProviderToken> {
+    super::erasure_admission::fence_credential_target_in_session(
+        db,
+        user_id,
+        lifecycle_owner,
+        &mut *tx,
+    )
+    .await?;
+    let existing = db
+        .collection::<UserProviderToken>(COLLECTION_NAME)
+        .find_one(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_id,
+        })
+        .sort(doc! { "updated_at": -1_i32 })
+        .session(&mut *tx)
+        .await?;
+
+    let now = Utc::now();
+    use super::credential_record_service as records;
+    let id = existing
+        .as_ref()
+        .map(|row| row.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let mut versions = std::collections::BTreeMap::new();
+    let encrypted = records::encrypt(
+        encryption_keys,
+        COLLECTION_NAME,
+        &id,
+        user_id,
+        "api_key_encrypted",
+        api_key_to_store.as_bytes(),
+    )
+    .await?;
+    records::mark_version(&mut versions, encryption_keys, "api_key_encrypted");
+
+    if let Some(existing_token) = existing {
+        // Update existing token
+        let mut set_doc = doc! {
+            "api_key_encrypted": bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: encrypted,
+            },
+            "status": "active",
+            "token_type": "api_key",
+            "access_token_encrypted": bson::Bson::Null,
+            "refresh_token_encrypted": bson::Bson::Null,
+            "credential_user_id": bson::Bson::Null,
+            "expires_at": bson::Bson::Null,
+            "token_scopes": bson::Bson::Null,
+            "secret_context_versions":{"$literal":bson::to_bson(&versions).map_err(|_|AppError::Internal("Invalid credential version map".into()))?},
+            "label": {"$literal":label},
+            "error_message": bson::Bson::Null,
+            "updated_at": bson::DateTime::from_chrono(now),
+        };
+        match gateway_url {
+            Some(url) => {
+                set_doc.insert("gateway_url", url);
+            }
+            None => {
+                set_doc.insert("gateway_url", bson::Bson::Null);
+            }
+        }
+        set_doc.insert(
+            "state_version",
+            doc! { "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64] },
+        );
+        let changed = db
+            .collection::<UserProviderToken>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &existing_token.id },
+                vec![doc! { "$set": set_doc }],
+            )
+            .session(&mut *tx)
+            .await?;
+
+        let updated = db
+            .collection::<UserProviderToken>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &existing_token.id })
+            .session(&mut *tx)
+            .await?
+            .ok_or_else(|| AppError::Internal("Token disappeared after update".to_string()))?;
+
+        if changed.matched_count != 1 {
+            return Err(AppError::Internal("Token disappeared after update".into()));
+        }
+        if changed.modified_count == 1
+            && let Some(audit) = audit
+        {
+            super::security_effect_service::enqueue_in_session(db, tx, std::slice::from_ref(audit))
+                .await?;
+        }
+        return Ok(updated);
+    }
+
+    let token = UserProviderToken {
+        secret_context_versions: versions,
+        id,
+        user_id: user_id.to_string(),
+        provider_config_id: provider_id.to_string(),
+        connection_id: None,
+        credential_user_id: None,
+        token_type: "api_key".to_string(),
+        access_token_encrypted: None,
+        refresh_token_encrypted: None,
+        token_scopes: None,
+        expires_at: None,
+        api_key_encrypted: Some(encrypted),
+        status: "active".to_string(),
+        state_version: 1,
+        last_refreshed_at: None,
+        last_used_at: None,
+        error_message: None,
+        label: label.map(String::from),
+        metadata: None,
+        gateway_url: gateway_url.map(String::from),
+        created_at: now,
+        updated_at: now,
+    };
+
+    db.collection::<UserProviderToken>(COLLECTION_NAME)
+        .insert_one(&token)
+        .session(&mut *tx)
+        .await?;
+
+    if let Some(audit) = audit {
+        super::security_effect_service::enqueue_in_session(db, tx, std::slice::from_ref(audit))
+            .await?;
+    }
+    tracing::info!(
+        user_id = %user_id,
+        provider_id = %provider_id,
+        "API key stored for provider"
+    );
+
+    Ok(token)
 }
 
 /// Return the Telegram bot username needed to render the Login Widget.
@@ -775,6 +860,43 @@ pub async fn initiate_oauth_connect(
     connection_id: Option<&str>,
     connect_link_id: Option<&str>,
     flow_kind: Option<OAuthFlowKind>,
+    app_return_uri: Option<&str>,
+) -> AppResult<OAuthInitiateResult> {
+    initiate_oauth_connect_with_audit(
+        db,
+        encryption_keys,
+        base_url,
+        user_id,
+        provider_id,
+        on_behalf_of,
+        redirect_path,
+        additional_scopes,
+        scope_override,
+        connection_id,
+        connect_link_id,
+        flow_kind,
+        app_return_uri,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn initiate_oauth_connect_with_audit(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    base_url: &str,
+    user_id: &str,
+    provider_id: &str,
+    on_behalf_of: Option<&str>,
+    redirect_path: Option<&str>,
+    additional_scopes: &[String],
+    scope_override: Option<&[String]>,
+    connection_id: Option<&str>,
+    connect_link_id: Option<&str>,
+    flow_kind: Option<OAuthFlowKind>,
+    app_return_uri: Option<&str>,
+    audit: Option<&SecurityEffectIntent>,
 ) -> AppResult<OAuthInitiateResult> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -971,6 +1093,7 @@ pub async fn initiate_oauth_connect(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
+        app_return_uri: app_return_uri.map(String::from),
         flow_kind: flow_kind.map(|kind| kind.as_wire().to_string()),
         attempt_nonce: attempt_nonce.clone(),
         connection_id: connection_id.map(String::from),
@@ -993,7 +1116,7 @@ pub async fn initiate_oauth_connect(
         );
     }
 
-    insert_oauth_state(db, &oauth_state, on_behalf_of.unwrap_or(user_id)).await?;
+    insert_oauth_state(db, &oauth_state, on_behalf_of.unwrap_or(user_id), audit).await?;
 
     if let (Some(connection_id), Some(nonce)) = (connection_id, attempt_nonce.as_deref())
         && let Err(error) = crate::services::user_api_key_service::begin_chat_oauth_attempt(
@@ -1159,6 +1282,32 @@ pub async fn request_device_code(
     scope_override: Option<&[String]>,
     connection_id: Option<&str>,
 ) -> AppResult<DeviceCodeInitiateResult> {
+    request_device_code_with_audit(
+        db,
+        encryption_keys,
+        user_id,
+        provider_id,
+        on_behalf_of,
+        additional_scopes,
+        scope_override,
+        connection_id,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn request_device_code_with_audit(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_id: &str,
+    on_behalf_of: Option<&str>,
+    additional_scopes: &[String],
+    scope_override: Option<&[String]>,
+    connection_id: Option<&str>,
+    audit: Option<&SecurityEffectIntent>,
+) -> AppResult<DeviceCodeInitiateResult> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
         .find_one(doc! { "_id": provider_id, "is_active": true })
@@ -1323,6 +1472,7 @@ pub async fn request_device_code(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
+        app_return_uri: None,
         flow_kind: None,
         attempt_nonce: None,
         connection_id: connection_id.map(String::from),
@@ -1352,7 +1502,7 @@ pub async fn request_device_code(
         .await?,
     );
 
-    insert_oauth_state(db, &oauth_state, on_behalf_of.unwrap_or(user_id)).await?;
+    insert_oauth_state(db, &oauth_state, on_behalf_of.unwrap_or(user_id), audit).await?;
 
     tracing::info!(
         user_id = %user_id,
@@ -1382,6 +1532,18 @@ pub async fn poll_device_code(
     provider_id: &str,
     state: &str,
 ) -> AppResult<DeviceCodePollResult> {
+    poll_device_code_with_audit(db, encryption_keys, user_id, provider_id, state, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn poll_device_code_with_audit(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_id: &str,
+    state: &str,
+    admin_audit: Option<(&str, &SecurityEffectIntent)>,
+) -> AppResult<DeviceCodePollResult> {
     let now = Utc::now();
 
     // Look up state without deleting (we need it for multiple polls)
@@ -1390,6 +1552,16 @@ pub async fn poll_device_code(
         .find_one(doc! { "_id": state })
         .await?
         .ok_or_else(|| AppError::BadRequest("Invalid or expired device code state".to_string()))?;
+
+    // Check the URL account before even expiry cleanup or the polling claim.
+    if let Some((target, _)) = admin_audit
+        && oauth_state.target_user_id.as_deref() != Some(target)
+    {
+        return Err(AppError::BadRequest(
+            "Device code state service account mismatch".into(),
+        ));
+    }
+    let audit = admin_audit.map(|(_, audit)| audit);
 
     if oauth_state.expires_at < now {
         db.collection::<OAuthState>(OAUTH_STATES)
@@ -1718,6 +1890,7 @@ pub async fn poll_device_code(
             &provider,
             &resolved,
             &attempt,
+            audit,
         )
         .await;
     }
@@ -1738,6 +1911,7 @@ pub async fn poll_device_code(
         &provider,
         &resolved,
         &attempt,
+        audit,
     )
     .await
 }
@@ -1765,6 +1939,7 @@ async fn store_device_code_tokens(
     provider: &ProviderConfig,
     credentials: &user_credentials_service::ResolvedOAuthCredentials,
     attempt: &str,
+    audit: Option<&SecurityEffectIntent>,
 ) -> AppResult<DeviceCodePollResult> {
     super::personal_erasure_service::issuance::received(
         db,
@@ -1779,7 +1954,45 @@ async fn store_device_code_tokens(
         },
     )
     .await?;
-    let result: AppResult<DeviceCodePollResult> = async {
+    let result = publish_device_code_tokens(
+        db,
+        encryption_keys,
+        user_id,
+        provider_id,
+        state,
+        credential_user_id,
+        connection_id,
+        token_data,
+        now,
+        app_source,
+        lifecycle_owner,
+        attempt,
+        audit,
+    )
+    .await;
+
+    if result.is_ok() {
+        super::personal_erasure_service::issuance::settled(db, attempt, true).await?;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_device_code_tokens(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_id: &str,
+    state: &str,
+    credential_user_id: Option<&str>,
+    connection_id: Option<&str>,
+    token_data: &serde_json::Value,
+    now: chrono::DateTime<Utc>,
+    app_source: super::oauth_app_source::OAuthAppSource,
+    lifecycle_owner: &str,
+    attempt: &str,
+    audit: Option<&SecurityEffectIntent>,
+) -> AppResult<DeviceCodePollResult> {
     let access_token = token_data["access_token"]
         .as_str()
         .ok_or_else(|| AppError::Internal("Missing access_token in token response".to_string()))?;
@@ -1850,9 +2063,19 @@ async fn store_device_code_tokens(
         .await?;
     let state_version = next_provider_token_state_version(existing_token.as_ref())?;
 
-    let id=existing_token.as_ref().map(|old|old.id.clone()).unwrap_or_else(||Uuid::new_v4().to_string());
-    let (versions,access_enc,refresh_enc)=super::credential_record_service::oauth_token_fields(
-        encryption_keys,&id,user_id,existing_token.as_ref(),access_token,refresh_token).await?;
+    let id = existing_token
+        .as_ref()
+        .map(|old| old.id.clone())
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let (versions, access_enc, refresh_enc) = super::credential_record_service::oauth_token_fields(
+        encryption_keys,
+        &id,
+        user_id,
+        existing_token.as_ref(),
+        access_token,
+        refresh_token,
+    )
+    .await?;
     let token = UserProviderToken {
         secret_context_versions: versions,
         id,
@@ -1878,10 +2101,22 @@ async fn store_device_code_tokens(
         updated_at: now,
     };
 
-    commit_legacy_authorization(db, LegacyAuthorization {
-    token: &token, expected: existing_token.as_ref(), lifecycle_owner, state, attempt,
-    tokens: crate::services::personal_erasure_service::issuance::IssuedTokens {access: Some(access_token), refresh: refresh_token},
-}).await?;
+    commit_legacy_authorization(
+        db,
+        LegacyAuthorization {
+            token: &token,
+            expected: existing_token.as_ref(),
+            lifecycle_owner,
+            state,
+            attempt,
+            audit,
+            tokens: crate::services::personal_erasure_service::issuance::IssuedTokens {
+                access: Some(access_token),
+                refresh: refresh_token,
+            },
+        },
+    )
+    .await?;
 
     tracing::info!(
         user_id = %user_id,
@@ -1894,11 +2129,6 @@ async fn store_device_code_tokens(
         interval: None,
         effective_user_id: Some(user_id.to_string()),
     })
-    }.await;
-    if result.is_ok() {
-        super::personal_erasure_service::issuance::settled(db, attempt, true).await?;
-    }
-    result
 }
 
 struct LegacyAuthorization<'a> {
@@ -1908,6 +2138,7 @@ struct LegacyAuthorization<'a> {
     state: &'a str,
     attempt: &'a str,
     tokens: super::personal_erasure_service::issuance::IssuedTokens<'a>,
+    audit: Option<&'a SecurityEffectIntent>,
 }
 
 /// Commit legacy reconnects under their stable record identity. Source-state
@@ -1917,6 +2148,20 @@ async fn commit_legacy_authorization(
     db: &mongodb::Database,
     authorization: LegacyAuthorization<'_>,
 ) -> AppResult<()> {
+    let mut tx = db.client().start_session().await?;
+    tx.start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .write_concern(mongodb::options::WriteConcern::majority())
+        .await?;
+    let result = commit_legacy_authorization_in_session(db, authorization, &mut tx).await;
+    super::org_membership_authority::finish(tx, result).await
+}
+
+async fn commit_legacy_authorization_in_session(
+    db: &mongodb::Database,
+    authorization: LegacyAuthorization<'_>,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
     let LegacyAuthorization {
         token,
         expected,
@@ -1924,91 +2169,92 @@ async fn commit_legacy_authorization(
         state,
         attempt,
         tokens,
+        audit,
     } = authorization;
     let super::personal_erasure_service::issuance::IssuedTokens { access, refresh } = tokens;
-    let mut tx = db.client().start_session().await?;
-    tx.start_transaction()
-        .read_concern(mongodb::options::ReadConcern::snapshot())
-        .write_concern(mongodb::options::WriteConcern::majority())
+
+    super::erasure_admission::fence_credential_target_in_session(
+        db,
+        &token.user_id,
+        lifecycle_owner,
+        &mut *tx,
+    )
+    .await?;
+    let current = db
+        .collection::<UserProviderToken>(COLLECTION_NAME)
+        .find_one(doc! {"user_id":&token.user_id,"provider_config_id":&token.provider_config_id})
+        .sort(doc! {"updated_at":-1})
+        .session(&mut *tx)
         .await?;
-    let result: AppResult<()> = async {
-        super::erasure_admission::fence_credential_target_in_session(
-            db,
-            &token.user_id,
-            lifecycle_owner,
-            &mut tx,
-        )
-        .await?;
-        let current = db
-            .collection::<UserProviderToken>(COLLECTION_NAME)
-            .find_one(
-                doc! {"user_id":&token.user_id,"provider_config_id":&token.provider_config_id},
-            )
-            .sort(doc! {"updated_at":-1})
-            .session(&mut tx)
-            .await?;
-        let same = match (&current, expected) {
-            (None, None) => true,
-            (Some(live), Some(old)) => {
-                live.id == old.id
-                    && live.user_id == old.user_id
-                    && live.provider_config_id == old.provider_config_id
-                    && live.state_version == old.state_version
-                    && live.secret_context_versions == old.secret_context_versions
-                    && live.access_token_encrypted == old.access_token_encrypted
-                    && live.refresh_token_encrypted == old.refresh_token_encrypted
-                    && live.api_key_encrypted == old.api_key_encrypted
-                    && live.credential_user_id == old.credential_user_id
-            }
-            _ => false,
-        };
-        if !same {
-            return Err(AppError::Conflict(
-                "Provider authorization changed while this exchange was held".into(),
-            ));
+    let same = match (&current, expected) {
+        (None, None) => true,
+        (Some(live), Some(old)) => {
+            live.id == old.id
+                && live.user_id == old.user_id
+                && live.provider_config_id == old.provider_config_id
+                && live.state_version == old.state_version
+                && live.secret_context_versions == old.secret_context_versions
+                && live.access_token_encrypted == old.access_token_encrypted
+                && live.refresh_token_encrypted == old.refresh_token_encrypted
+                && live.api_key_encrypted == old.api_key_encrypted
+                && live.credential_user_id == old.credential_user_id
         }
-        if current.is_some() {
-            let changed = db
-                .collection::<UserProviderToken>(COLLECTION_NAME)
-                .replace_one(doc! {"_id":&token.id,"user_id":&token.user_id}, token)
-                .session(&mut tx)
-                .await?;
-            if changed.matched_count != 1 {
-                return Err(AppError::Conflict("Provider credential changed".into()));
-            }
-        } else {
-            db.collection::<UserProviderToken>(COLLECTION_NAME)
-                .insert_one(token)
-                .session(&mut tx)
-                .await?;
-        }
-        super::personal_erasure_service::issuance::installed_in_session(
-            db,
-            attempt,
-            crate::services::personal_erasure_service::issuance::InstallationTarget {
-                owner: &token.user_id,
-                provider: &token.provider_config_id,
-                collection: COLLECTION_NAME,
-                record_id: &token.id,
-            },
-            super::personal_erasure_service::issuance::installation_tokens(access, refresh)?,
-            &mut tx,
-        )
-        .await?;
-        let consumed = db
-            .collection::<OAuthState>(OAUTH_STATES)
-            .delete_one(doc! {"_id":state,"provider_config_id":&token.provider_config_id})
-            .session(&mut tx)
-            .await?;
-        if consumed.deleted_count != 1 {
-            return Err(AppError::Conflict(
-                "OAuth authorization state changed".into(),
-            ));
-        }
-        Ok(())
+        _ => false,
+    };
+    if !same {
+        return Err(AppError::Conflict(
+            "Provider authorization changed while this exchange was held".into(),
+        ));
     }
-    .await;
-    super::org_membership_authority::finish(tx, result).await
+    let modified = if current.is_some() {
+        let changed = db
+            .collection::<UserProviderToken>(COLLECTION_NAME)
+            .replace_one(doc! {"_id":&token.id,"user_id":&token.user_id}, token)
+            .session(&mut *tx)
+            .await?;
+        if changed.matched_count != 1 {
+            return Err(AppError::Conflict("Provider credential changed".into()));
+        }
+        changed.modified_count == 1
+    } else {
+        db.collection::<UserProviderToken>(COLLECTION_NAME)
+            .insert_one(token)
+            .session(&mut *tx)
+            .await?;
+        true
+    };
+    super::personal_erasure_service::issuance::installed_in_session(
+        db,
+        attempt,
+        crate::services::personal_erasure_service::issuance::InstallationTarget {
+            owner: &token.user_id,
+            provider: &token.provider_config_id,
+            collection: COLLECTION_NAME,
+            record_id: &token.id,
+        },
+        super::personal_erasure_service::issuance::installation_tokens(access, refresh)?,
+        &mut *tx,
+    )
+    .await?;
+    let consumed = db
+        .collection::<OAuthState>(OAUTH_STATES)
+        .delete_one(doc! {"_id":state,"provider_config_id":&token.provider_config_id})
+        .session(&mut *tx)
+        .await?;
+    if consumed.deleted_count != 1 {
+        return Err(AppError::Conflict(
+            "OAuth authorization state changed".into(),
+        ));
+    }
+    if modified && let Some(audit) = audit {
+        super::security_effect_service::enqueue_in_session(
+            db,
+            &mut *tx,
+            std::slice::from_ref(audit),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Peek at an OAuth state without consuming it (for the generic callback handler).
@@ -2420,7 +2666,7 @@ pub async fn handle_oauth_callback(
         };
 
         commit_legacy_authorization(db, LegacyAuthorization {
-    token: &token, expected: existing_token.as_ref(), lifecycle_owner: &lifecycle_owner, state, attempt: &attempt,
+    token: &token, expected: existing_token.as_ref(), lifecycle_owner: &lifecycle_owner, state, attempt: &attempt, audit: None,
     tokens: crate::services::personal_erasure_service::issuance::IssuedTokens {access: Some(access_token), refresh: refresh_token},
 })
             .await?;
@@ -3145,6 +3391,9 @@ pub async fn refresh_expiring_oauth_keys(
     };
 
     for key in &candidates {
+        let Some(_claim) = super::shutdown::process().background() else {
+            break;
+        };
         match refresh_user_api_key_in_place(db, encryption_keys, key, notifier).await {
             Ok(_) => report.refreshed += 1,
             Err(error) => {
@@ -3207,7 +3456,7 @@ async fn load_provider_token(
 async fn decrypt_provider_access_token(
     encryption_keys: &EncryptionKeys,
     token: &UserProviderToken,
-) -> AppResult<String> {
+) -> AppResult<zeroize::Zeroizing<String>> {
     if !matches!(token.status.as_str(), "active" | "expired") {
         return Err(AppError::Internal(
             "OAuth credential is no longer active".to_string(),
@@ -3216,12 +3465,9 @@ async fn decrypt_provider_access_token(
     let encrypted = token.access_token_encrypted.as_ref().ok_or_else(|| {
         AppError::Internal("OAuth token missing encrypted access_token".to_string())
     })?;
-    Ok(
-        super::credential_record_service::CredentialRecord::token(token)
-            .text(encryption_keys, "access_token_encrypted", encrypted)
-            .await?
-            .to_string(),
-    )
+    super::credential_record_service::CredentialRecord::token(token)
+        .text(encryption_keys, "access_token_encrypted", encrypted)
+        .await
 }
 
 async fn refresh_provider_token_with_runtime(
@@ -3229,7 +3475,7 @@ async fn refresh_provider_token_with_runtime(
     encryption_keys: &EncryptionKeys,
     token: &UserProviderToken,
     runtime: &ClusterLeaseRuntime,
-) -> AppResult<String> {
+) -> AppResult<zeroize::Zeroizing<String>> {
     let lease_name = provider_token_refresh_lease_name(&token.id);
     let Some(lease) = runtime.acquire(db, &lease_name).await? else {
         let current = wait_for_concurrent_refresh(
@@ -3369,8 +3615,7 @@ async fn materialize_active_provider_token(
             })?;
             let decrypted = super::credential_record_service::CredentialRecord::token(&token)
                 .text(encryption_keys, "api_key_encrypted", encrypted)
-                .await?
-                .to_string();
+                .await?;
 
             Ok(DecryptedProviderToken {
                 token_type: "api_key".to_string(),
@@ -3429,8 +3674,7 @@ async fn materialize_active_provider_token(
             })?;
             let decrypted = super::credential_record_service::CredentialRecord::token(&token)
                 .text(encryption_keys, "access_token_encrypted", encrypted)
-                .await?
-                .to_string();
+                .await?;
 
             Ok(DecryptedProviderToken {
                 token_type: "oauth2".to_string(),
@@ -3479,50 +3723,55 @@ async fn transition_legacy_keys_from_stored_token_state(
 
 /// Atomically claim the currently active provider token by its observed `_id`.
 /// A callback replacement receives a new `_id` and cannot be captured by this claim.
+#[cfg(test)]
 pub async fn claim_provider_token_by_id(
     db: &mongodb::Database,
     user_id: &str,
     token_id: &str,
 ) -> AppResult<Option<UserProviderToken>> {
-    claim_provider_token_by_id_with_expected_state_version(db, user_id, token_id, None).await
+    let context = (db, user_id, token_id);
+    super::transaction_service::run_db_only(db, &context, |tx, &(db, user_id, token_id)| {
+        Box::pin(claim_provider_token_in_session(
+            db, user_id, token_id, None, tx,
+        ))
+    })
+    .await
 }
 
-/// Atomically claim a provider token while optionally fencing the write on
-/// authorization evidence read by the browser.
-pub async fn claim_provider_token_by_id_with_expected_state_version(
+pub(super) async fn claim_provider_token_in_session(
     db: &mongodb::Database,
     user_id: &str,
     token_id: &str,
     expected_state_version: Option<i64>,
+    tx: &mut mongodb::ClientSession,
 ) -> AppResult<Option<UserProviderToken>> {
-    let context = (db, user_id, token_id, expected_state_version);
-    super::transaction_service::run_db_only(db, &context, |tx, context| {
-        let &(db, user_id, token_id, expected_state_version) = context;
-        Box::pin(async move {
-            let collection = db.collection::<UserProviderToken>(COLLECTION_NAME);
-            if let Some(expected) = expected_state_version {
-                let current = collection.find_one(doc! {"_id":token_id,"user_id":user_id})
-                    .session(&mut *tx).await?;
-                if current.is_some_and(|token| token.state_version != expected) {
-                    return Err(AppError::Conflict(
-                        "the provider token changed since this action was prepared".into(),
-                    ));
-                }
-            }
-            let mut filter = doc! {"_id":token_id,"user_id":user_id,"status":{"$ne":"revoked"}};
-            if let Some(expected) = expected_state_version {
-                filter.insert("$expr", doc! {"$eq":[{"$ifNull":["$state_version",0_i64]},expected]});
-            }
-            let claimed = collection.find_one_and_update(filter, vec![doc! {"$set":{
+    let collection = db.collection::<UserProviderToken>(COLLECTION_NAME);
+    if let Some(expected) = expected_state_version {
+        let current = collection
+            .find_one(doc! {"_id":token_id,"user_id":user_id})
+            .session(&mut *tx)
+            .await?;
+        if current.is_some_and(|token| token.state_version != expected) {
+            return Err(AppError::Conflict(
+                "the provider token changed since this action was prepared".into(),
+            ));
+        }
+    }
+    let mut filter = doc! {"_id":token_id,"user_id":user_id,"status":{"$ne":"revoked"}};
+    if let Some(expected) = expected_state_version {
+        filter.insert(
+            "$expr",
+            doc! {"$eq":[{"$ifNull":["$state_version",0_i64]},expected]},
+        );
+    }
+    let claimed = collection.find_one_and_update(filter, vec![doc! {"$set":{
                 "status":"revoked","api_key_encrypted":bson::Bson::Null,
                 "access_token_encrypted":bson::Bson::Null,"refresh_token_encrypted":bson::Bson::Null,
                 "secret_context_versions":{"$literal":{}},
                 "updated_at":bson::DateTime::from_chrono(Utc::now()),
                 "state_version":{"$add":[{"$ifNull":["$state_version",0_i64]},1_i64]},
             }}]).return_document(ReturnDocument::Before).session(&mut *tx).await?;
-            Ok(claimed)
-        })
-    }).await
+    Ok(claimed)
 }
 
 fn build_user_token_summary(
@@ -3653,6 +3902,7 @@ mod tests {
                 connection_id: None,
                 connect_link_id: None,
                 redirect_path: None,
+                app_return_uri: None,
                 flow_kind: None,
                 attempt_nonce: None,
                 authorization_nonce: None,
@@ -4379,6 +4629,7 @@ mod tests {
                     connection,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -4507,6 +4758,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap_err();
@@ -4566,6 +4818,7 @@ mod tests {
                     &[],
                     None,
                     key.connection_id.as_deref(),
+                    None,
                     None,
                     None,
                 )
@@ -4736,6 +4989,7 @@ mod tests {
                         key.connection_id.as_deref(),
                         None,
                         None,
+                        None,
                     )
                     .await;
                     if byo {
@@ -4871,7 +5125,8 @@ mod tests {
             assert_eq!(
                 oauth_flow::refresh_oauth_token(&db, &enc, &legacy)
                     .await
-                    .unwrap(),
+                    .unwrap()
+                    .as_str(),
                 "rotated-access"
             );
             let saved = db
@@ -5034,7 +5289,8 @@ mod tests {
                 assert_eq!(
                     oauth_flow::refresh_oauth_token(&db, &enc, &token)
                         .await
-                        .unwrap(),
+                        .unwrap()
+                        .as_str(),
                     "rotated-access"
                 );
                 let requests = server.received_requests().await.unwrap();
@@ -5312,6 +5568,7 @@ mod tests {
                 key.connection_id.as_deref(),
                 Some(&link),
                 chat.then_some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+                None,
             )
             .await
             .unwrap();
@@ -5441,6 +5698,7 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -5538,6 +5796,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -5594,6 +5853,7 @@ mod tests {
                 key.connection_id.as_deref(),
                 None,
                 Some(crate::models::oauth_flow_kind::OAuthFlowKind::ChatConnect),
+                None,
             )
             .await;
             assert!(matches!(result, Err(AppError::ValidationError(_))));
@@ -5646,6 +5906,7 @@ mod tests {
                 None,
                 None,
                 &[],
+                None,
                 None,
                 None,
                 None,
@@ -6365,6 +6626,7 @@ mod tests {
             Some(&connection_id),
             None,
             None,
+            None,
         )
         .await
         .expect("initiation should succeed");
@@ -6483,6 +6745,7 @@ mod tests {
             Some(&connection_id),
             None,
             None,
+            None,
         )
         .await
         .expect("initiation should succeed");
@@ -6574,6 +6837,7 @@ mod tests {
             &[],
             None,
             Some(&connection_id),
+            None,
             None,
             None,
         )
@@ -6672,6 +6936,7 @@ mod tests {
                     conn,
                     None,
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -6712,6 +6977,7 @@ mod tests {
                         conn,
                         None,
                         None,
+                        None,
                     )
                     .await
                     .unwrap();
@@ -6738,6 +7004,7 @@ mod tests {
                         &[],
                         Some(&scopes),
                         conn,
+                        None,
                         None,
                         None,
                     )
@@ -6779,6 +7046,7 @@ mod tests {
                     additional,
                     scope_override,
                     conn,
+                    None,
                     None,
                     None,
                 )
@@ -6870,6 +7138,7 @@ mod tests {
                     &[],
                     None,
                     key.connection_id.as_deref(),
+                    None,
                     None,
                     None,
                 )
@@ -7035,6 +7304,7 @@ mod tests {
                 Some(&connection_id),
                 None,
                 None,
+                None,
             )
             .await
             .expect_err("unreviewed or excluded scopes must be rejected on the shared app");
@@ -7067,6 +7337,7 @@ mod tests {
                     additional,
                     scope_override,
                     Some(&connection_id),
+                    None,
                     None,
                     None,
                 )
@@ -7830,8 +8101,8 @@ mod tests {
             .expect("contender task")
             .expect("second replica refresh");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert_eq!(first, "fresh-legacy-access");
-        assert_eq!(second, "fresh-legacy-access");
+        assert_eq!(first.as_str(), "fresh-legacy-access");
+        assert_eq!(second.as_str(), "fresh-legacy-access");
     }
 
     #[tokio::test]
@@ -7950,8 +8221,13 @@ mod tests {
             .await
             .expect("should return decrypted token");
 
+        let _: &zeroize::Zeroizing<String> = result.api_key.as_ref().unwrap();
+        assert!(!format!("{result:?} {result:#?}").contains("sk-secret-123"));
         assert_eq!(result.token_type, "api_key");
-        assert_eq!(result.api_key.as_deref(), Some("sk-secret-123"));
+        assert_eq!(
+            result.api_key.as_ref().map(|s| s.as_str()),
+            Some("sk-secret-123")
+        );
         assert!(result.access_token.is_none());
     }
 
@@ -7983,7 +8259,10 @@ mod tests {
             .expect("should return decrypted token");
 
         assert_eq!(result.token_type, "oauth2");
-        assert_eq!(result.access_token.as_deref(), Some("access-token-xyz"));
+        assert_eq!(
+            result.access_token.as_ref().map(|s| s.as_str()),
+            Some("access-token-xyz")
+        );
         assert!(result.api_key.is_none());
     }
 
@@ -8037,7 +8316,10 @@ mod tests {
         let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None)
             .await
             .expect("should find expired-status token");
-        assert_eq!(result.api_key.as_deref(), Some("key-expired"));
+        assert_eq!(
+            result.api_key.as_ref().map(|s| s.as_str()),
+            Some("key-expired")
+        );
     }
 
     #[tokio::test]
@@ -8389,7 +8671,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.token_type, "api_key");
-        assert_eq!(result.api_key.as_deref(), Some("roundtrip-key"));
+        assert_eq!(
+            result.api_key.as_ref().map(|s| s.as_str()),
+            Some("roundtrip-key")
+        );
     }
 
     #[tokio::test]

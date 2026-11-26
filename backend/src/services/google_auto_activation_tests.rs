@@ -445,6 +445,7 @@ async fn google_upload_post_patch_preserve_binary_multipart_and_html_bytes_direc
     let owner = uuid::Uuid::new_v4().to_string();
     let mut state = test_app_state(db.clone());
     state.http_client = echo.client.clone();
+    crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(), async {
     let spec = crate::services::catalog_spec_registry::spec_for_key("google-drive").unwrap();
     for slug in ["api-google-drive", "api-google-workspace"] {
         connect(&db, &owner, slug).await;
@@ -519,6 +520,7 @@ async fn google_upload_post_patch_preserve_binary_multipart_and_html_bytes_direc
         }
     }
     assert_eq!(echo.calls.lock().unwrap().len(), 32);
+    }).await;
 }
 
 #[tokio::test]
@@ -529,6 +531,7 @@ async fn google_upload_mcp_projection_rejects_before_dispatch_and_keeps_binary_m
     let owner = uuid::Uuid::new_v4().to_string();
     let mut state = test_app_state(db.clone());
     state.http_client = echo.client.clone();
+    crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(), async {
     for slug in ["api-google-drive", "api-google-workspace"] {
         connect(&db, &owner, slug).await;
     }
@@ -615,6 +618,7 @@ async fn google_upload_mcp_projection_rejects_before_dispatch_and_keeps_binary_m
         }
     }
     assert_eq!(echo.calls.lock().unwrap().len(), 4);
+    }).await;
 }
 
 #[tokio::test]
@@ -894,6 +898,7 @@ async fn google_durable_corrected_grant_drifts_unchanged_grant_survives_and_reap
             None,
             &selections,
             &plan.normalized_grant_digest,
+            None,
         )
         .await
         .unwrap();
@@ -961,7 +966,9 @@ async fn google_durable_corrected_grant_drifts_unchanged_grant_survives_and_reap
         let renewed = durable_operation_grant_service::reauthorize_scheduled_key(
             &db,
             &manager,
-            &owner.id,
+            &crate::services::audit_service::AuditActor::from_auth_user(
+                &crate::test_utils::test_auth_user(&owner.id),
+            ),
             &owner.id,
             &provisioned.key.id,
             &selections,
@@ -1105,6 +1112,7 @@ async fn google_generic_mcp_cannot_set_multipart_content_type() {
     connect(&db, &owner, "api-google-drive").await;
     let mut state = test_app_state(db.clone());
     state.http_client = echo.client.clone();
+    crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER.scope(echo.client_builder.clone(), async {
     let mut catalog = mcp_service::load_operation_catalog(
         &db,
         &state.node_ws_manager,
@@ -1146,6 +1154,7 @@ async fn google_generic_mcp_cannot_set_multipart_content_type() {
             .unwrap()
             .contains("content-type: multipart/related")
     );
+    }).await;
 }
 
 #[tokio::test]

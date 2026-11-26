@@ -165,7 +165,7 @@ Capabilities are declarations, not adapter certifications. Unknown capability
 values remain absent; authoring them never activates an executor. Updates include
 `expected_revision`, display text, capabilities, lifecycle, enabled and optional
 `billing_service_id`. Only an active model can be enabled. Activation requires the local execution
-capability and the same capability on every declared live replica.
+capability to be durably recorded and supported by every live observation.
 Disabling, retirement, reads and entitlement revocation remain available.
 
 An entitlement body has `expected_revision` and `entitlements`:
@@ -250,16 +250,15 @@ The registry, billing and executor advertise `inference:platform-model-registry-
 `billing:model-prices-v1` and `inference:platform-models-v1`. PR 3b adds
 `inference:platform-model-images-v1`; the PR 5 adapter adds
 `assistant:platform-models-v1` and separately requires the live paired NyxAgent
-bridge handshake. Flag enable and active-model publication fail
-closed until this binary **and** the whole declared fleet support execution and
-billing. Fabricating future capabilities in heartbeat rows cannot make a PR 1
+bridge handshake. Flag enables and active-model
+publication use serving readiness: durable activation must exist and every live
+generation must support the required capabilities. Roster/drain declarations
+are optional diagnostics; an undeclared fleet converges automatically after 90 seconds. Fabricating future capabilities in heartbeat rows cannot make a PR 1
 binary activate. NyxAgent exposure additionally needs the paired assistant
 capability. `nyxid/` requests cannot fall through to provider-name heuristics.
 
 Before enabling model-only credentials, upgrade/drain all API replicas and every
-alternate/internal credential consumer and writer. Use the existing immutable
-`INSTANCE_NAME`, complete `SECURITY_ROLLOUT_REPLICAS` roster and
-`SECURITY_ROLLOUT_DRAINED=true` declaration. Older binaries ignore `purpose`, so
+alternate/internal credential consumer and writer. No readiness roster/drain declaration or unique instance name is required. Older binaries ignore `purpose`, so
 optional/defaulted serialization alone is not a security rollout guarantee.
 Old binaries must not rejoin after restricted credential records are enabled.
 
@@ -496,9 +495,11 @@ Gemini Enterprise Agent Platform documentation while retaining the Vertex API.
 ## PR 2: immutable tariffs and exact units
 
 PR 2 introduced `billing:model-prices-v1`; PR 3 adds execution readiness. PR 5's
-separate paired assistant gate is described below. Upgrade **all** API, worker and reader binaries and confirm the
-existing drained-fleet readiness roster before authoring tariffs or allowances
-using the new units. No new environment variable, price, model or rate is seeded.
+separate paired assistant gate is described below. Upgrade **all** API, worker and
+reader binaries and confirm serving readiness before authoring tariffs or
+allowances using the new units. Supported roster warnings permit publication once
+activation is recorded; roster/drain assertions are not required. No new environment
+variable, price, model or rate is seeded.
 The platform-model flag stays default-off; inference requires the PR 3 execution
 capability across the fleet.
 
@@ -624,10 +625,13 @@ No page sends a provider probe or creates credentials.
 Public IDs and families cannot be edited. Contract/route/access writes include the
 model's `expected_revision`; tariff create/retire includes its current `revision`.
 A 409 preserves the form and requires explicit reload/discard; there is no blind
-retry. The admin editor's `execution_ready` projection remains strict activation
-readiness because it controls the enable switch. Already active execution can
-continue under roster warnings while that switch is unavailable; inspect
-`/api/v1/admin/security-readiness` for the separate serving state.
+retry. The admin editor's `execution_ready` projection uses serving readiness,
+including its family-contract capability when applicable. Model enable, routes,
+tariffs, model-only credentials and model-evidence allowances can be published
+under supported roster warnings after activation is recorded. Newly introduced
+capabilities can be picked up after 90 seconds of consecutive heartbeat
+assessments without hard blockers; see [security readiness](SECURITY_ROLLOUT_READINESS.md). Feature-flag
+enables and clear-that-enables use the same durable observed-support gate.
 Readiness is reported independently of lifecycle and rate sync. Admin responses
 return `execution_ready: false` and `blocking_reason: execution_fleet_not_ready`
 until the registry, billing and execution fleet gates pass; once ready, the
@@ -930,7 +934,7 @@ Legacy `nyxagent/` selections retain their existing behavior and read budget.
 **Release gate remains open:** NyxAgent must implement NxyAgent#16. Contract mocks
 are not real runtime certification. Enable only after paired long-conversation,
 function-loop, image delivery, stop/revocation and compaction tests pass on the
-actual NyxAgent release, with all replicas upgraded and old workers drained.
+actual NyxAgent release, with support on every live replica and recorded activation.
 
 ### Selection and public discovery
 
@@ -944,7 +948,8 @@ and additive `model_unavailable: true`, displayed as “Model unavailable”.
 Missing, stale or unknown serving readiness degrades discovery: entitled metadata and
 prices remain readable, models are unavailable and image limits are omitted.
 Recorded active capabilities retain discovery and execution under roster warnings
-when every live generation supports them; model/route/tariff authoring stays strict.
+when every live generation supports them; model/route/tariff publication uses
+the same serving readiness. Gated feature-flag enables use the same gate; no roster/drain assertion is needed.
 The list does not probe NyxAgent when serving readiness is absent. Execution still
 enforces every readiness gate; database failures remain errors.
 
@@ -1066,8 +1071,8 @@ cannot opt into the new contracts. Open MaaS still requires the exact reviewed
 
 New-contract authoring and execution require
 `inference:platform-model-contracts-v1` in addition to the existing default-off
-flag, entitlements and readiness. Deploy every API/worker replica and drain old
-workers before authoring/activating these contracts. Old replicas reject the new
+flag, entitlements and serving readiness. Observed API/worker support and durable
+activation permit authoring these contracts without roster/drain declarations. Old replicas reject the new
 version/digest before executing, including when its native name was previously
 supported. New workers check readiness before credential materialization or
 funding, and on dispatch; the assistant uses that same planner/executor. Admin

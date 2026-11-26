@@ -71,6 +71,7 @@ impl LagoApi for LocalLago {
             .collect())
     }
     async fn current_usage(&self, customer: &str, subscription: &str) -> AppResult<LagoUsage> {
+        crate::services::billing::lago_client::require_subscription_id(subscription)?;
         Ok(LagoUsage {
             customer_id: customer.into(),
             subscription_id: subscription.into(),
@@ -1291,7 +1292,7 @@ async fn unknown_stop_holds_liability_and_topup_never_resumes_a_closed_run() {
             .close_machine_runtime_in_session(&mut s, &w.run_id)
     )
     .unwrap();
-    super::super::webhook::refresh_wallet_balance(&f.db, &f.owner, Credits::from_whole(20))
+    super::super::webhook::refresh_test_balance(&f.db, &f.owner, Credits::from_whole(20))
         .await
         .unwrap();
     assert_eq!(
@@ -1727,7 +1728,13 @@ async fn runtime_price_retry_is_leased_bounded_and_retains_historical_versions()
         .await
         .unwrap();
     f.lago.available.store(false, Ordering::SeqCst);
-    assert_eq!(f.billing.retry_machine_runtime_rates(1).await.unwrap(), 0);
+    assert!(matches!(
+        f.billing.retry_machine_runtime_rates(1).await,
+        Err(AppError::BillingRecoveryFailed {
+            failed_units: 1,
+            ..
+        })
+    ));
     let first =
         f.db.collection::<Document>(RATE_COLLECTION)
             .find_one(doc! {"_id":&pending.id})
@@ -1743,6 +1750,12 @@ async fn runtime_price_retry_is_leased_bounded_and_retains_historical_versions()
         "backoff remains authoritative"
     );
     f.db.collection::<Document>(RATE_COLLECTION).update_one(doc!{"_id":&pending.id},doc!{"$set":{"sync_retry_at":bson::DateTime::from_chrono(Utc::now()-Duration::seconds(1))}}).await.unwrap();
+    // Advance the fixture to the next pass after the uncertain plan lease expires.
+    crate::services::billing::plan_writers_tests::expire_plan_lease(
+        &f.db,
+        &f.billing.config.lago_plan_code,
+    )
+    .await;
     let (a, b) = tokio::join!(
         f.billing.retry_machine_runtime_rates(1),
         f.billing.retry_machine_runtime_rates(1)
@@ -1760,6 +1773,17 @@ async fn runtime_price_retry_is_leased_bounded_and_retains_historical_versions()
     );
     assert!(listed.iter().any(|r| r.id == f.rate.id));
     f.db.drop().await.unwrap();
+}
+
+fn assert_only_tax_guard_changed(mut before: Document, mut after: Document) {
+    // Cold tax publication must make a real wallet write to serialize with
+    // owner invalidation. Every identity, money and other metadata field stays.
+    assert_eq!(before.remove("tax_guard_token"), Some(bson::Bson::Null));
+    let Some(bson::Bson::String(token)) = after.remove("tax_guard_token") else {
+        panic!("cold tax publication must commit its wallet guard");
+    };
+    assert!(Uuid::parse_str(&token).is_ok());
+    assert_eq!(after, before);
 }
 
 #[tokio::test]
@@ -1801,7 +1825,15 @@ async fn quote_preflight_reports_live_prerequisites_without_funding_or_account_m
     assert_eq!(view.credits_per_second, Some(f.rate.credits_per_second));
     assert!(!view.reservation_guarantee);
     assert_eq!(view.funds.unwrap().estimated_seconds, "250000");
-    assert_eq!(bson::to_document(&wallet(&f).await).unwrap(), before_wallet);
+    assert_only_tax_guard_changed(before_wallet, bson::to_document(&wallet(&f).await).unwrap());
+    let warm_wallet = bson::to_document(&wallet(&f).await).unwrap();
+    let warm = f
+        .billing
+        .machine_runtime_preflight(&f.owner, "remote-machine", None)
+        .await
+        .unwrap();
+    assert!(warm.ready);
+    assert_eq!(bson::to_document(&wallet(&f).await).unwrap(), warm_wallet);
     for collection in [
         QUOTE_COLLECTION,
         RUN_COLLECTION,

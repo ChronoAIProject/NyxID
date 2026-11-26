@@ -11,6 +11,7 @@ const mock = vi.hoisted(() => ({
   scheduleActive: true,
   scheduleAmount: undefined as string | undefined,
   scheduleWhole: 20,
+  scheduleTiming: undefined as "calendar" | "recipient" | undefined,
   capable: false,
   overviewFailure: true,
   updateAllowance: vi.fn(),
@@ -91,6 +92,7 @@ vi.mock("@/hooks/use-billing-credits", () => ({
           quantity: 10,
           metric: "requests",
           recurrence: "monthly",
+          timing: mock.scheduleTiming,
           target_kind: mock.targetKind,
           target_org_ids:
             mock.targetKind === "org_members" ? ["a", "b", "c"] : [],
@@ -128,6 +130,7 @@ vi.mock("@/hooks/use-billing-credits", () => ({
           amount: mock.scheduleAmount,
           expiry: { kind: "end_of_period" },
           recurrence: "monthly",
+          timing: mock.scheduleTiming,
           target_kind: mock.targetKind,
           target_org_ids:
             mock.targetKind === "org_members" ? ["a", "b", "c"] : [],
@@ -165,6 +168,7 @@ beforeEach(() => {
   mock.scheduleActive = true;
   mock.scheduleAmount = undefined;
   mock.scheduleWhole = 20;
+  mock.scheduleTiming = undefined;
   mock.capable = false;
   mock.overviewFailure = true;
   mock.search = {};
@@ -312,6 +316,26 @@ it.each([undefined, "20"])(
     expect(input).toHaveValue(20);
     expect(screen.getByRole("button", { name: "Save changes" })).toBeDisabled();
     fireEvent.change(input, { target: { value: "21" } });
+    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await user.click(screen.getByRole("button", { name: "Confirm changes" }));
+    await waitFor(() => expect(mock.updateSchedule).toHaveBeenCalledOnce());
+    expect(mock.updateSchedule.mock.calls[0]![0]).toEqual({
+      id: "schedule-a",
+      body: { amount_credits: 21 },
+    });
+  },
+);
+it.each(["calendar", "recipient"] as const)(
+  "edits an existing %s schedule without sending immutable timing or recurrence",
+  async (timing) => {
+    mock.scheduleTiming = timing;
+    mock.search = { tab: "schedules" };
+    const user = userEvent.setup();
+    render(<AdminCreditsPage />);
+    await user.click(screen.getByRole("button", { name: "Edit schedule" }));
+    fireEvent.change(screen.getByLabelText("Credits per recipient"), {
+      target: { value: "21" },
+    });
     await user.click(screen.getByRole("button", { name: "Save changes" }));
     await user.click(screen.getByRole("button", { name: "Confirm changes" }));
     await waitFor(() => expect(mock.updateSchedule).toHaveBeenCalledOnce());

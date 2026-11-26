@@ -26,11 +26,14 @@ fn attribution_keeps_unknown_and_transport_failures_distinct() {
         ("healthy", false, "", Assessment::Unknown),
     ] {
         assert_eq!(
-            project(&result(status, reachable, reason)).assessment,
+            project(&result(status, reachable, reason), Observation::Caller).assessment,
             expected
         );
     }
-    let unavailable = project(&result("unknown", false, "no_health_path"));
+    let unavailable = project(
+        &result("unknown", false, "no_health_path"),
+        Observation::Caller,
+    );
     assert_eq!(unavailable.observation, Observation::Unknown);
     assert_eq!(unavailable.assessment, Assessment::Unknown);
 }
@@ -45,7 +48,7 @@ fn readiness_is_independent_and_stale_evidence_cannot_attribute() {
         ..Default::default()
     });
     assert_eq!(
-        project(&response).assessment,
+        project(&response, Observation::Caller).assessment,
         Assessment::DependencyUnavailable
     );
     response.readiness = Some(CheckResult {
@@ -53,7 +56,7 @@ fn readiness_is_independent_and_stale_evidence_cannot_attribute() {
         ..Default::default()
     });
     assert_eq!(
-        project(&response).assessment,
+        project(&response, Observation::Caller).assessment,
         Assessment::OperationSpecificLikely
     );
     response.readiness = Some(CheckResult {
@@ -61,7 +64,7 @@ fn readiness_is_independent_and_stale_evidence_cannot_attribute() {
         ..Default::default()
     });
     assert_eq!(
-        project(&response).assessment,
+        project(&response, Observation::Caller).assessment,
         Assessment::OperationSpecificLikely
     );
     response.readiness = Some(CheckResult {
@@ -69,9 +72,15 @@ fn readiness_is_independent_and_stale_evidence_cannot_attribute() {
         reachable: Some(true),
         ..Default::default()
     });
-    assert_eq!(project(&response).assessment, Assessment::Unknown);
+    assert_eq!(
+        project(&response, Observation::Caller).assessment,
+        Assessment::Unknown
+    );
     response.health.checked_at = Some(Utc::now() - chrono::Duration::seconds(61));
-    assert_eq!(project(&response).observation, Observation::Unknown);
+    assert_eq!(
+        project(&response, Observation::Caller).observation,
+        Observation::Unknown
+    );
 }
 
 #[test]
@@ -83,11 +92,10 @@ fn only_known_health_recipes_allow_automatic_probes() {
     assert!(known_health_path(&check));
     check.reason = "no_health_path".into();
     assert!(!known_health_path(&check));
-    let evidence = serde_json::to_string(&project(&result(
-        "unhealthy",
-        true,
-        "arbitrary_internal_secret",
-    )))
+    let evidence = serde_json::to_string(&project(
+        &result("unhealthy", true, "arbitrary_internal_secret"),
+        Observation::Caller,
+    ))
     .unwrap();
     assert!(!evidence.contains("arbitrary_internal_secret"));
     assert!(!evidence.contains("healthz"));
@@ -113,6 +121,30 @@ fn local_denials_and_cancellation_do_not_probe() {
     assert!(!same_origin("http://other:8080", "http://probe:8080"));
 }
 
+#[test]
+fn only_access_tokens_and_general_agent_keys_can_probe() {
+    assert!(can_probe(&AuthMethod::AccessToken, None, None));
+    assert!(can_probe(
+        &AuthMethod::ApiKey,
+        Some(ApiKeyPurpose::General),
+        None
+    ));
+    for purpose in [
+        None,
+        Some(ApiKeyPurpose::ScheduledInvocation),
+        Some(ApiKeyPurpose::PermissionBound),
+        Some(ApiKeyPurpose::PublicNyxbot),
+        Some(ApiKeyPurpose::SharedEntryTransport),
+    ] {
+        assert!(!can_probe(&AuthMethod::ApiKey, purpose, None));
+    }
+    assert!(!can_probe(
+        &AuthMethod::AccessToken,
+        None,
+        Some("chrono-probe")
+    ));
+}
+
 use crate::{
     AppState,
     models::api_key::ApiKeyPurpose,
@@ -133,10 +165,7 @@ use wiremock::{
 pub(crate) async fn legacy_handle(
     db: &Database,
     _config: &AppConfig,
-    actor: &str,
-    method: &AuthMethod,
-    key: Option<&str>,
-    client: Option<&str>,
+    identity: IssueIdentity<'_>,
     service: &str,
 ) -> AppResult<Option<IssuedHandle>> {
     let raw = format!(
@@ -148,10 +177,11 @@ pub(crate) async fn legacy_handle(
         .insert_one(InvocationDiagnostic {
             id: Uuid::new_v4().to_string(),
             handle_hash: crate::crypto::token::hash_token(&raw),
-            actor_user_id: actor.to_owned(),
-            original_auth_method: auth_method_name(method).into(),
-            original_api_key_id: key.map(str::to_owned),
-            original_client_id: client.map(str::to_owned),
+            actor_user_id: identity.actor_id.to_owned(),
+            original_auth_method: auth_method_name(identity.auth_method).into(),
+            original_api_key_id: identity.api_key_id.map(str::to_owned),
+            original_api_key_credential_id: None,
+            original_client_id: identity.client_id.map(str::to_owned),
             exact_user_service_id: service.to_owned(),
             state: InvocationDiagnosticState::Pending,
             diagnostic: None,
@@ -251,7 +281,32 @@ async fn redeem_for_test(
     if auth.auth_method == AuthMethod::ServiceAccount {
         auth.approval_owner_user_id = Some(execution_owner_id.to_owned());
     }
-    redeem(db, config, &auth, handle, caller_token).await
+    let credential = match auth.auth_method {
+        AuthMethod::AccessToken => caller_token.map(CallerCredential::Bearer),
+        AuthMethod::ApiKey => caller_token.map(CallerCredential::ApiKey),
+        _ => None,
+    };
+    redeem(db, config, &auth, handle, credential).await
+}
+
+async fn diagnose_for_test(
+    db: &mongodb::Database,
+    config: &crate::config::AppConfig,
+    actor_id: &str,
+    exact_id: &str,
+    caller_token: Option<&str>,
+) -> Option<Diagnostic> {
+    let mut auth = test_auth_user(actor_id);
+    auth.auth_method = AuthMethod::AccessToken;
+    diagnose(
+        db,
+        config,
+        &auth,
+        exact_id,
+        caller_token.map(CallerCredential::Bearer),
+        Observation::Caller,
+    )
+    .await
 }
 
 pub(crate) fn status(id: &str, health: &str, reachable: bool, reason: &str) -> serde_json::Value {
@@ -267,6 +322,20 @@ pub(crate) async fn mount_healthy(server: &MockServer, id: &str) {
         Mock::given(method(verb))
             .and(path(format!("/api/v1/monitoring/services/{id}/{suffix}")))
             .and(header("authorization", "Bearer original-caller"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(status(id, "healthy", true, "ok")),
+            )
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+}
+
+pub(crate) async fn mount_healthy_agent(server: &MockServer, id: &str, key: &str) {
+    for (verb, suffix) in [("GET", "status"), ("POST", "probes")] {
+        Mock::given(method(verb))
+            .and(path(format!("/api/v1/monitoring/services/{id}/{suffix}")))
+            .and(header("x-api-key", key))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(status(id, "healthy", true, "ok")),
             )
@@ -295,7 +364,7 @@ async fn personal_exact_service_forwards_only_the_original_bearer_and_limits_rep
         .await
         .unwrap();
     mount_healthy(&server, &id).await;
-    let observed = diagnose(
+    let observed = diagnose_for_test(
         &state.db,
         &state.config,
         &actor,
@@ -306,7 +375,7 @@ async fn personal_exact_service_forwards_only_the_original_bearer_and_limits_rep
     .unwrap();
     assert_eq!(observed.observation, Observation::Caller);
     assert_eq!(observed.assessment, Assessment::OperationSpecificLikely);
-    let limited = diagnose(
+    let limited = diagnose_for_test(
         &state.db,
         &state.config,
         &actor,
@@ -322,7 +391,7 @@ async fn personal_exact_service_forwards_only_the_original_bearer_and_limits_rep
 #[tokio::test]
 async fn non_delegable_and_unauthorized_calls_never_use_a_system_key() {
     let (state, actor, id, server) = fixture().await;
-    let result = diagnose(&state.db, &state.config, &actor, &id, None)
+    let result = diagnose_for_test(&state.db, &state.config, &actor, &id, None)
         .await
         .unwrap();
     assert_eq!(result.outcome, Outcome::NonDelegable);
@@ -335,7 +404,7 @@ async fn non_delegable_and_unauthorized_calls_never_use_a_system_key() {
         .await
         .unwrap();
     assert!(
-        diagnose(
+        diagnose_for_test(
             &state.db,
             &state.config,
             &stranger,
@@ -362,7 +431,7 @@ async fn unconfigured_paths_do_not_start_discovery_and_identity_mismatches_fail_
             .expect(1)
             .mount(&server)
             .await;
-        let result = diagnose(
+        let result = diagnose_for_test(
             &state.db,
             &state.config,
             &actor,
@@ -406,7 +475,7 @@ async fn changed_recipe_and_probe_identity_cannot_be_used_as_caller_evidence() {
             .expect(1)
             .mount(&server)
             .await;
-        let result = diagnose(
+        let result = diagnose_for_test(
             &state.db,
             &state.config,
             &actor,
@@ -438,7 +507,7 @@ async fn monitoring_outage_and_timeout_are_unknown_and_bounded() {
             .mount(&server)
             .await;
         let start = std::time::Instant::now();
-        let result = diagnose(
+        let result = diagnose_for_test(
             &state.db,
             &state.config,
             &actor,
@@ -473,7 +542,7 @@ async fn flag_off_and_monitoring_service_aliases_do_not_recurse() {
         .await
         .unwrap();
     assert!(
-        diagnose(
+        diagnose_for_test(
             &state.db,
             &state.config,
             &actor,
@@ -493,7 +562,7 @@ async fn flag_off_and_monitoring_service_aliases_do_not_recurse() {
     .await
     .unwrap();
     assert!(
-        diagnose(
+        diagnose_for_test(
             &state.db,
             &state.config,
             &actor,
@@ -513,10 +582,7 @@ async fn handle_redemption_probes_once_and_completed_result_is_retry_readable() 
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -573,15 +639,81 @@ async fn handle_redemption_probes_once_and_completed_result_is_retry_readable() 
 }
 
 #[tokio::test]
+async fn general_agent_key_preserves_child_binding_and_returns_agent_evidence() {
+    let (state, actor, id, server) = fixture().await;
+    let key_id = Uuid::new_v4().to_string();
+    let child_id = Uuid::new_v4().to_string();
+    mount_healthy_agent(&server, &id, "current-agent-key").await;
+    let issued = issue(
+        &state.db,
+        &state.config,
+        IssueIdentity::new(
+            &actor,
+            &AuthMethod::ApiKey,
+            Some(&key_id),
+            Some(&child_id),
+            None,
+        )
+        .with_api_key_purpose(ApiKeyPurpose::General),
+        &id,
+    )
+    .await
+    .unwrap()
+    .expect("Agent Key diagnostic handle must be issued");
+
+    let mut sibling = test_auth_user(&actor);
+    sibling.auth_method = AuthMethod::ApiKey;
+    sibling.api_key_id = Some(key_id.clone());
+    sibling.api_key_credential_id = Some(Uuid::new_v4().to_string());
+    sibling.scope = "proxy".into();
+    let error = redeem(
+        &state.db,
+        &state.config,
+        &sibling,
+        &issued.handle,
+        Some(CallerCredential::ApiKey("sibling-agent-key")),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, AppError::NotFound(_)));
+
+    let mut auth = sibling;
+    auth.api_key_credential_id = Some(child_id);
+    let result = redeem(
+        &state.db,
+        &state.config,
+        &auth,
+        &issued.handle,
+        Some(CallerCredential::ApiKey("current-agent-key")),
+    )
+    .await
+    .unwrap();
+    let RedeemResult::Completed {
+        diagnostic, fresh, ..
+    } = result
+    else {
+        panic!("Agent Key redemption must complete");
+    };
+    assert!(fresh);
+    assert_eq!(diagnostic.observation, Observation::Agent);
+    assert_eq!(diagnostic.assessment, Assessment::OperationSpecificLikely);
+    assert_eq!(diagnostic.outcome, Outcome::Completed);
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
 async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
     let (state, actor, id, server) = fixture().await;
     let client_bound = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        Some("oauth-client-a"),
+        IssueIdentity::new(
+            &actor,
+            &AuthMethod::AccessToken,
+            None,
+            None,
+            Some("oauth-client-a"),
+        ),
         &id,
     )
     .await
@@ -607,10 +739,13 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
     let issued = legacy_handle(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::ApiKey,
-        Some("agent-key-id"),
-        None,
+        IssueIdentity::new(
+            &actor,
+            &AuthMethod::ApiKey,
+            Some("agent-key-id"),
+            None,
+            None,
+        ),
         &id,
     )
     .await
@@ -660,10 +795,7 @@ async fn handle_binding_expiry_and_non_delegable_identities_do_not_probe() {
     let expired = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -703,10 +835,13 @@ async fn service_account_redemption_revalidates_with_its_execution_owner() {
     let issued = legacy_handle(
         &state.db,
         &state.config,
-        &service_account_id,
-        &AuthMethod::ServiceAccount,
-        None,
-        None,
+        IssueIdentity::new(
+            &service_account_id,
+            &AuthMethod::ServiceAccount,
+            None,
+            None,
+            None,
+        ),
         &id,
     )
     .await
@@ -815,10 +950,13 @@ async fn shared_agent_redemption_preserves_owner_shared_connection_authority() {
     let issued = legacy_handle(
         &fixture.state.db,
         &config,
-        &fixture.outsider,
-        &AuthMethod::ApiKey,
-        auth.api_key_id.as_deref(),
-        None,
+        IssueIdentity::new(
+            &fixture.outsider,
+            &AuthMethod::ApiKey,
+            auth.api_key_id.as_deref(),
+            None,
+            None,
+        ),
         &service,
     )
     .await
@@ -895,10 +1033,7 @@ async fn assistant_model_transport_redemption_preserves_the_proxy_scope_exceptio
     let issued = legacy_handle(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::ApiKey,
-        Some(&key_id),
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::ApiKey, Some(&key_id), None, None),
         &service,
     )
     .await
@@ -921,10 +1056,7 @@ async fn running_claims_are_never_replayed() {
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -986,10 +1118,7 @@ async fn concurrent_redemptions_start_only_one_probe() {
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -1087,10 +1216,7 @@ async fn redemption_waits_only_while_concurrency_capacity_is_exhausted() {
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -1170,10 +1296,7 @@ async fn issuance_does_not_read_the_feature_flag_but_redemption_respects_it() {
     let issued = issue(
         &state.db,
         &state.config,
-        &actor,
-        &AuthMethod::AccessToken,
-        None,
-        None,
+        IssueIdentity::new(&actor, &AuthMethod::AccessToken, None, None, None),
         &id,
     )
     .await
@@ -1217,10 +1340,7 @@ async fn invocation_diagnostic_issuance_guards_do_not_touch_unavailable_database
         issue(
             &db,
             &config,
-            "actor",
-            &AuthMethod::AccessToken,
-            None,
-            None,
+            IssueIdentity::new("actor", &AuthMethod::AccessToken, None, None, None),
             "service"
         )
         .await
@@ -1229,27 +1349,53 @@ async fn invocation_diagnostic_issuance_guards_do_not_touch_unavailable_database
     );
     config.invocation_diagnostics_enabled = true;
     for method in [
-        AuthMethod::ApiKey,
         AuthMethod::Session,
         AuthMethod::Delegated,
         AuthMethod::ServiceAccount,
         AuthMethod::Relay,
     ] {
         assert!(
-            issue(&db, &config, "actor", &method, None, None, "service")
-                .await
-                .unwrap()
-                .is_none()
+            issue(
+                &db,
+                &config,
+                IssueIdentity::new("actor", &method, None, None, None),
+                "service"
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+    for purpose in [
+        ApiKeyPurpose::ScheduledInvocation,
+        ApiKeyPurpose::PermissionBound,
+        ApiKeyPurpose::PublicNyxbot,
+        ApiKeyPurpose::SharedEntryTransport,
+    ] {
+        assert!(
+            issue(
+                &db,
+                &config,
+                IssueIdentity::new("actor", &AuthMethod::ApiKey, Some("key"), None, None,)
+                    .with_api_key_purpose(purpose),
+                "service",
+            )
+            .await
+            .unwrap()
+            .is_none()
         );
     }
     assert!(
         issue(
             &db,
             &config,
-            "actor",
-            &AuthMethod::AccessToken,
-            None,
-            Some("chrono-probe"),
+            IssueIdentity::new(
+                "actor",
+                &AuthMethod::AccessToken,
+                None,
+                None,
+                Some("chrono-probe"),
+            ),
             "service"
         )
         .await

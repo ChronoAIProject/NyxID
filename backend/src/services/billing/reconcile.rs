@@ -1,26 +1,65 @@
+#[cfg(test)]
 use crate::models::credits::Credits;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::{Bson, Document, doc};
+use mongodb::bson::{Document, doc};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
 use crate::config::AppConfig;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::models::billing_rate_cache::BillingRateCache;
 use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET};
 use crate::models::usage_meter::{COLLECTION_NAME as USAGE_METER, UsageMeterRow};
+use crate::services::coordination_service::{
+    ClusterLeaseRuntime, LeaseStore, cluster_lease_runtime,
+};
 
 use super::lago_client::{LagoApi, LagoError, LagoErrorKind, LagoEvent};
+use super::reconcile_status::Pass;
 use super::reservation;
 use super::webhook;
+
+pub(crate) const RECONCILE_LEASE: &str = "billing:reconcile";
+
+tokio::task_local! {
+    // Scoped to the supervisor future, never inherited by request tasks. Leaf
+    // callers outside a pass keep their existing behavior and row fences.
+    static CONTINUE_RECONCILE: Cell<bool>;
+}
+
+/// Check only BETWEEN recoverable units, never inside a financial write
+/// protocol. Once renewal fails, finish the current unit and admit no next one.
+pub(crate) fn continue_reconcile() -> bool {
+    CONTINUE_RECONCILE
+        .try_with(|running| {
+            crate::services::job_health::checkpoint(true);
+            running.get()
+        })
+        .unwrap_or(true)
+}
+
+#[cfg(test)]
+pub(crate) async fn with_drain_for_test<T>(future: impl std::future::Future<Output = T>) -> T {
+    CONTINUE_RECONCILE.scope(Cell::new(true), future).await
+}
+#[cfg(test)]
+pub(crate) fn drain_for_test() {
+    CONTINUE_RECONCILE.with(|running| running.set(false));
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static LEASE_LOSS_OBSERVED: std::sync::Arc<tokio::sync::Notify>;
+}
 
 const PUSH_GRACE_SECS: i64 = 30;
 const MAX_RECONCILE_PUSH_BATCH: i64 = 100;
 const MAX_WALLET_REFRESH_BATCH: i64 = 100;
-const ACKED_RETENTION_DAYS: i64 = 30;
+pub(crate) const ACKED_RETENTION_DAYS: i64 = 30;
 
 #[derive(Clone)]
 pub struct BillingReconciler {
@@ -59,13 +98,48 @@ pub enum LagoPushDecision {
     DeadLetter(String),
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_PASS_STATS: std::cell::RefCell<Option<ReconcileStats>>;
+}
+
 impl BillingReconciler {
     #[cfg(test)]
-    pub(crate) async fn compare_usage_for_test(&self) -> AppResult<ReconcileStats> {
+    pub(crate) async fn run_once_failing_for_test(&self, expected: &[&str]) -> ReconcileStats {
+        TEST_PASS_STATS
+            .scope(std::cell::RefCell::new(None), async {
+                let error = self
+                    .run_once()
+                    .await
+                    .expect_err("injected failure must fail the pass");
+                let crate::errors::AppError::Internal(message) = error else {
+                    panic!("unexpected pass error: {error}");
+                };
+                let mut actual: Vec<_> = message
+                    .strip_prefix("Billing reconcile failed steps: ")
+                    .expect("pass failure summary")
+                    .split(", ")
+                    .map(|entry| entry.split(':').next().unwrap())
+                    .collect();
+                let mut expected = expected.to_vec();
+                actual.sort();
+                expected.sort();
+                assert_eq!(actual, expected, "{message}");
+                TEST_PASS_STATS.with(|slot| slot.borrow_mut().take().expect("completed pass stats"))
+            })
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn compare_usage_for_test(
+        &self,
+        token: &crate::services::coordination_service::LeaseToken,
+    ) -> AppResult<ReconcileStats> {
         let mut stats = ReconcileStats::default();
         self.compare_finalized_usage(
             self.lago.as_ref().expect("test Lago client").as_ref(),
             &mut stats,
+            token,
         )
         .await?;
         Ok(stats)
@@ -82,6 +156,28 @@ impl BillingReconciler {
         Ok(stats)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn push_usage_outage_for_test(&self) -> ReconcileStats {
+        let mut stats = ReconcileStats::default();
+        let error = self
+            .push_unacked(
+                self.lago.as_ref().expect("test Lago client").as_ref(),
+                &mut stats,
+            )
+            .await
+            .expect_err("injected provider outage must fail the step");
+        let AppError::BillingRecoveryFailed {
+            failed_units,
+            source,
+        } = error
+        else {
+            panic!("unexpected step error: {error}");
+        };
+        assert!(matches!(*source, AppError::BillingProviderUnavailable(_)));
+        assert_eq!(failed_units, stats.retried);
+        stats
+    }
+
     pub fn new(
         db: mongodb::Database,
         lago: Option<Arc<dyn LagoApi>>,
@@ -91,117 +187,375 @@ impl BillingReconciler {
     }
 
     pub async fn run_once(&self) -> AppResult<ReconcileStats> {
-        if !super::exact_migration::ready(&self.db).await? {
+        self.run_once_with_runtime(cluster_lease_runtime()).await
+    }
+
+    async fn run_once_with_runtime(
+        &self,
+        runtime: &ClusterLeaseRuntime,
+    ) -> AppResult<ReconcileStats> {
+        self.run_once_with_shutdown(runtime, &crate::services::shutdown::process())
+            .await
+    }
+
+    async fn run_once_with_shutdown(
+        &self,
+        runtime: &ClusterLeaseRuntime,
+        shutdown: &crate::services::shutdown::Runtime,
+    ) -> AppResult<ReconcileStats> {
+        let Some(_work) = shutdown.background() else {
+            return Ok(ReconcileStats::default());
+        };
+        let Some((token, checkpoint)) = LeaseStore::acquire_with_checkpoint(
+            &self.db,
+            RECONCILE_LEASE,
+            &runtime.holder,
+            runtime.ttl,
+        )
+        .await?
+        else {
+            crate::services::job_health::skipped();
+            runtime.notify_contender_observed();
+            return Ok(ReconcileStats::default());
+        };
+        let mut report = Pass::new(checkpoint);
+        let result = CONTINUE_RECONCILE
+            .scope(Cell::new(true), async {
+                let pass = self.run_steps(&mut report, &token);
+                tokio::pin!(pass);
+                // Passing a borrow keeps the pass alive when the house renewal
+                // runner drops its operation on loss. Do not drop a multi-write
+                // settlement/release between its durable steps.
+                let outcome = {
+                    let renewed = runtime.run_while_renewed(&self.db, &token, &mut pass);
+                    tokio::pin!(renewed);
+                    tokio::select! {
+                        biased;
+                        () = shutdown.intake_stopped() => {
+                            CONTINUE_RECONCILE.with(|running| running.set(false));
+                            // Keep renewing while the current unit finishes. If the
+                            // hard deadline aborts us, retain the token until TTL.
+                            renewed.await
+                        },
+                        result = &mut renewed => result,
+                    }
+                };
+                match outcome {
+                    Some(result) => result,
+                    None => {
+                        CONTINUE_RECONCILE.with(|running| running.set(false));
+                        #[cfg(test)]
+                        let _ = LEASE_LOSS_OBSERVED.try_with(|notify| notify.notify_one());
+                        crate::services::job_health::checkpoint(false);
+                        tracing::warn!("Billing reconcile lease lost; finishing current unit");
+                        pass.await
+                    }
+                }
+            })
+            .await;
+        // Publish once, fenced by the still-live token, in the release command.
+        // A lost holder may finish its current money protocol but cannot publish
+        // status over a successor's pass.
+        if let Err(error) = report.release(&self.db, &token).await {
+            report.record::<()>("status_publication", Err(error));
+            if LeaseStore::release(&self.db, &token).await.is_err() {
+                tracing::warn!("Billing reconcile lease release failed; waiting for expiry");
+            }
+        }
+        #[cfg(test)]
+        if let Ok(stats) = &result {
+            let _ = TEST_PASS_STATS.try_with(|slot| *slot.borrow_mut() = Some(stats.clone()));
+        }
+        report.result(result)
+    }
+
+    #[cfg(test)]
+    async fn run_pass(
+        &self,
+        token: &crate::services::coordination_service::LeaseToken,
+    ) -> AppResult<ReconcileStats> {
+        let mut report = Pass::new(None);
+        let result = self.run_steps(&mut report, token).await;
+        report.result(result)
+    }
+
+    async fn run_steps(
+        &self,
+        report: &mut Pass,
+        token: &crate::services::coordination_service::LeaseToken,
+    ) -> AppResult<ReconcileStats> {
+        if !report.observe(
+            "exact_readiness",
+            super::exact_migration::ready(&self.db).await,
+        )? {
             return Ok(ReconcileStats::default());
         }
+        let result = self.run_billing_steps(report, token).await;
+        if continue_reconcile() {
+            report.record(
+                "metering_retention",
+                super::usage_rollup::retention::backfill(&self.db, Utc::now()).await,
+            );
+        }
+        result
+    }
+
+    async fn run_billing_steps(
+        &self,
+        report: &mut Pass,
+        token: &crate::services::coordination_service::LeaseToken,
+    ) -> AppResult<ReconcileStats> {
+        let mut stats = ReconcileStats::default();
         // Benefit-only estimates can spill into wallet funding at settlement.
         // Refresh before recovery: pending component/voice recovery may return
         // early on a missing profile and must not starve its own refresh.
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
         if self.config.billing_enabled
             && let Some(lago) = &self.lago
         {
-            super::taxes::reconcile(
-                &self.db,
-                lago.as_ref(),
-                self.config.billing_rate_cache_ttl_secs,
+            report.record(
+                "taxes_before_recovery",
+                super::taxes::reconcile(
+                    &self.db,
+                    lago.as_ref(),
+                    self.config.billing_rate_cache_ttl_secs,
+                )
+                .await,
+            );
+        }
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        report.record(
+            "model_recovery",
+            crate::services::platform_model_execution::recover(&self.db).await,
+        );
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        let pool = super::pool_attempt::recover_expired(&self.db, Utc::now()).await;
+        if let Err(error) = &pool {
+            super::pool_attempt::record_recovery_error(&self.db, None, error).await;
+        }
+        stats.abandoned += report.record("pool_recovery", pool).unwrap_or_default();
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        stats.recovered_settlements += report
+            .record("voice_recovery", super::voice::reconcile(&self.db).await)
+            .unwrap_or_default();
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        stats.recovered_settlements += report
+            .record(
+                "managed_recovery",
+                crate::services::managed_execution_service::reconcile(&self.db).await,
             )
-            .await?;
+            .unwrap_or_default();
+        if !continue_reconcile() {
+            return Ok(stats);
         }
-        crate::services::platform_model_execution::recover(&self.db).await?;
-        let mut stats = ReconcileStats::default();
-        match super::pool_attempt::recover_expired(&self.db, Utc::now()).await {
-            Ok(count) => stats.abandoned += count,
-            Err(error) => super::pool_attempt::record_recovery_error(&self.db, None, &error).await,
+        stats.abandoned += report
+            .record(
+                "abandon_unforwarded",
+                self.abandon_unforwarded_reserved().await,
+            )
+            .unwrap_or_default();
+        if !continue_reconcile() {
+            return Ok(stats);
         }
-        stats.recovered_settlements += super::voice::reconcile(&self.db).await?;
-        stats.recovered_settlements +=
-            crate::services::managed_execution_service::reconcile(&self.db).await?;
-        stats.abandoned += self.abandon_unforwarded_reserved().await?;
-        stats.funding_releases_recovered +=
-            super::funding::recover_terminal_releases(&self.db).await?;
-        stats.grants_expired += super::grants::expire_due_grants(&self.db, Utc::now()).await?;
-        let schedule_stats = super::schedules::disburse_due(
-            &self.db,
-            Utc::now(),
-            super::schedules::MAX_RECIPIENTS_PER_TICK,
-        )
-        .await?;
-        stats.schedule_grants_created += schedule_stats.grants_created as u64;
-        stats.schedule_grants_already_disbursed += schedule_stats.already_disbursed as u64;
-        stats.schedule_periods_completed += schedule_stats.periods_completed as u64;
-        stats.schedule_periods_abandoned += schedule_stats.periods_abandoned as u64;
-        stats.schedule_budget_exhausted = schedule_stats.budget_exhausted;
-        stats.grant_ledger_recoveries +=
-            super::grants::recover_unledgered_events(&self.db, Utc::now()).await?;
+        stats.funding_releases_recovered += report
+            .record(
+                "funding_releases",
+                super::funding::recover_terminal_releases(&self.db).await,
+            )
+            .unwrap_or_default();
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        stats.grants_expired += report
+            .record(
+                "grant_expiry",
+                super::grants::expire_due_grants(&self.db, Utc::now()).await,
+            )
+            .unwrap_or_default();
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        if let Some(schedule_stats) = report.record(
+            "schedules",
+            super::schedules::disburse_due(
+                &self.db,
+                Utc::now(),
+                super::schedules::MAX_RECIPIENTS_PER_TICK,
+            )
+            .await,
+        ) {
+            stats.schedule_grants_created += schedule_stats.grants_created as u64;
+            stats.schedule_grants_already_disbursed += schedule_stats.already_disbursed as u64;
+            stats.schedule_periods_completed += schedule_stats.periods_completed as u64;
+            stats.schedule_periods_abandoned += schedule_stats.periods_abandoned as u64;
+            stats.schedule_budget_exhausted = schedule_stats.budget_exhausted;
+        }
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        stats.grant_ledger_recoveries += report
+            .record(
+                "grant_ledger",
+                super::grants::recover_unledgered_events(&self.db, Utc::now()).await,
+            )
+            .unwrap_or_default();
         // Anchor the billing-ledger head into the audit chain whenever it
         // advanced, so tail truncation of the ledger is detectable. Best
         // effort: an anchor failure must not stall the sweep.
-        if let Err(error) = super::ledger::anchor_head(&self.db).await {
-            tracing::warn!(error = %error, "billing ledger head anchoring failed");
+        if !continue_reconcile() {
+            return Ok(stats);
         }
+        report.record("ledger_anchor", super::ledger::anchor_head(&self.db).await);
         if !self.config.billing_enabled {
             return Ok(stats);
         }
-        let settlement = reservation::recover_retryable_settlements(&self.db).await?;
-        stats.recovered_settlements += settlement.recovered;
-        stats.retried += settlement.retried;
-        stats.dead_lettered += settlement.dead_lettered;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        if let Some(settlement) = report.record(
+            "settlement_recovery",
+            reservation::recover_retryable_settlements(&self.db).await,
+        ) {
+            stats.recovered_settlements += settlement.recovered;
+            stats.retried += settlement.retried;
+            stats.dead_lettered += settlement.dead_lettered;
+        }
 
         let Some(lago) = &self.lago else {
             return Ok(stats);
         };
 
-        stats.topups_expired +=
-            super::topup_expiry::expire_purchased_credits(&self.db, lago.as_ref(), Utc::now())
-                .await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        stats.topups_expired += report
+            .record(
+                "topup_expiry",
+                super::topup_expiry::expire_purchased_credits(&self.db, lago.as_ref(), Utc::now())
+                    .await,
+            )
+            .unwrap_or_default();
 
-        stats.service_price_syncs += super::pricing::retry_pending_service_prices(
-            &self.db,
-            lago.as_ref(),
-            &self.config.lago_plan_code,
-        )
-        .await?;
-        match super::model_tariffs::retry_pending(
-            &self.db,
-            lago.as_ref(),
-            &self.config.lago_plan_code,
-        )
-        .await
-        {
-            Ok(n) => stats.service_price_syncs += n,
-            Err(error) => tracing::warn!(
-                error_code = error.error_code(),
-                "Model tariff synchronization will retry"
-            ),
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        stats.service_price_syncs += report
+            .record(
+                "service_prices",
+                super::pricing::retry_pending_service_prices(
+                    &self.db,
+                    lago.as_ref(),
+                    &self.config.lago_plan_code,
+                )
+                .await,
+            )
+            .unwrap_or_default();
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        stats.service_price_syncs += report
+            .record(
+                "model_prices",
+                super::model_tariffs::retry_pending(
+                    &self.db,
+                    lago.as_ref(),
+                    &self.config.lago_plan_code,
+                )
+                .await,
+            )
+            .unwrap_or_default();
+        if !continue_reconcile() {
+            return Ok(stats);
         }
         let mut runtime_billing = super::BillingService::new(self.db.clone(), self.config.clone());
         runtime_billing.lago = self.lago.clone();
         // CMA configuration work must not prevent ordinary usage emission or
         // tax/balance refresh. Pending/failed cards remain durable retry work;
         // an ambiguous timeout retains the sync lease until its expiry.
-        match runtime_billing.retry_sandbox_rate_cards().await {
-            Ok(synced) => stats.service_price_syncs += synced,
-            Err(error) => tracing::warn!(
-                plan_code = %self.config.lago_plan_code,
-                error_code = error.error_code(),
-                "CMA rate synchronization failed; retaining retry work and continuing billing reconciliation"
-            ),
+        if !continue_reconcile() {
+            return Ok(stats);
         }
-        stats.service_price_syncs += runtime_billing.retry_machine_runtime_rates(4).await?;
+        stats.service_price_syncs += report
+            .record(
+                "sandbox_prices",
+                runtime_billing.retry_sandbox_rate_cards().await,
+            )
+            .unwrap_or_default();
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        stats.service_price_syncs += report
+            .record(
+                "machine_prices",
+                runtime_billing.retry_machine_runtime_rates(4).await,
+            )
+            .unwrap_or_default();
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        report.record(
+            "plan_repair",
+            super::plan_sync::repair_other_plans(
+                &self.db,
+                lago.as_ref(),
+                &self.config.lago_plan_code,
+            )
+            .await,
+        );
         // Price synchronization invalidates affected profiles. Refresh those
         // within this pass; admissions also refresh individually on demand.
-        super::taxes::reconcile(
-            &self.db,
-            lago.as_ref(),
-            self.config.billing_rate_cache_ttl_secs,
-        )
-        .await?;
-        self.push_unacked(lago.as_ref(), &mut stats).await?;
-        self.compare_finalized_usage(lago.as_ref(), &mut stats)
-            .await?;
-        self.refresh_wallet_balances(lago.as_ref(), &mut stats)
-            .await?;
-        self.refresh_rate_cache(lago.as_ref(), &mut stats).await?;
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        report.record(
+            "taxes_after_prices",
+            super::taxes::reconcile(
+                &self.db,
+                lago.as_ref(),
+                self.config.billing_rate_cache_ttl_secs,
+            )
+            .await,
+        );
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        report.record(
+            "usage_push",
+            self.push_unacked(lago.as_ref(), &mut stats).await,
+        );
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        report.record(
+            "usage_comparison",
+            self.compare_finalized_usage(lago.as_ref(), &mut stats, token)
+                .await,
+        );
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        report.record(
+            "wallet_balances",
+            self.refresh_wallet_balances(lago.as_ref(), &mut stats)
+                .await,
+        );
+        if !continue_reconcile() {
+            return Ok(stats);
+        }
+        report.record(
+            "rate_cache",
+            self.refresh_rate_cache(lago.as_ref(), &mut stats).await,
+        );
         Ok(stats)
     }
 
@@ -217,6 +571,8 @@ impl BillingReconciler {
         lago: &dyn LagoApi,
         stats: &mut ReconcileStats,
     ) -> AppResult<()> {
+        let mut failures = super::recovery_batch::Failures::default();
+        let mut captured = super::rate_cache::capture(&self.db).await?;
         let plan = match lago.plan_rates(&self.config.lago_plan_code).await {
             Ok(plan) => plan,
             Err(error) => {
@@ -225,37 +581,15 @@ impl BillingReconciler {
                     error = %error,
                     "Billing rate cache refresh failed to fetch plan charges"
                 );
-                return Ok(());
+                failures.note(error);
+                return failures.finish(());
             }
         };
-        let rejected = plan.rejected;
-        let diagnostics = self.db.collection::<Document>("billing_rate_diagnostics");
-        diagnostics
-            .update_one(
-                doc! { "_id": &self.config.lago_plan_code },
-                doc! {
-                    "$set": {
-                        "rejected_metrics": &rejected,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    },
-                },
-            )
-            .upsert(true)
-            .await?;
-        if !rejected.is_empty() {
-            self.db
-                .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .delete_many(doc! { "lago_metric_code": { "$in": &rejected } })
-                .await?;
-        }
-        if plan.rates.is_empty() {
-            tracing::warn!(
-                plan_code = %self.config.lago_plan_code,
-                "Billing rate cache refresh found no standard charges; keeping existing rates"
-            );
+        if !continue_reconcile() {
             return Ok(());
         }
-
+        let rejected = plan.rejected;
+        let empty = plan.rates.is_empty();
         let mut by_code: BTreeMap<String, (i64, Option<i64>)> = plan
             .rates
             .into_iter()
@@ -266,52 +600,77 @@ impl BillingReconciler {
                 )
             })
             .collect();
-        for metric_code in [
-            super::meter::PLATFORM_REQUESTS_METRIC_CODE,
-            super::meter::PLATFORM_BYTES_METRIC_CODE,
-            super::meter::PLATFORM_TOKENS_METRIC_CODE,
-        ] {
-            if !rejected.iter().any(|code| code == metric_code) {
-                by_code
-                    .entry(metric_code.to_string())
-                    .or_insert((0, Some(0)));
+        if !empty {
+            for metric_code in [
+                super::meter::PLATFORM_REQUESTS_METRIC_CODE,
+                super::meter::PLATFORM_BYTES_METRIC_CODE,
+                super::meter::PLATFORM_TOKENS_METRIC_CODE,
+            ] {
+                if !rejected.iter().any(|code| code == metric_code) {
+                    by_code
+                        .entry(metric_code.to_owned())
+                        .or_insert((0, Some(0)));
+                }
             }
         }
-
         let now = Utc::now();
-        let collection = self
-            .db
-            .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME);
-        for (metric_code, (credits_per_unit_micros, credits_per_unit_pico)) in by_code {
-            let row = BillingRateCache {
+        let rows: Vec<_> = by_code
+            .into_iter()
+            .map(|(metric_code, (micros, pico))| BillingRateCache {
                 id: BillingRateCache::cache_id(&metric_code, None),
                 lago_metric_code: metric_code,
                 model: None,
-                credits_per_unit_micros,
-                credits_per_unit_pico,
+                credits_per_unit_micros: micros,
+                credits_per_unit_pico: pico,
                 synced_at: now,
                 retired_at: None,
+            })
+            .collect();
+        let size = super::rate_cache::PUBLICATION_BATCH_SIZE;
+        let chunks = rows.len().max(rejected.len()).div_ceil(size).max(1);
+        for index in 0..chunks {
+            if !continue_reconcile() {
+                break;
+            }
+            let start = index * size;
+            let chunk = super::rate_cache::Chunk {
+                captured,
+                plan: &self.config.lago_plan_code,
+                diagnostics: (index == 0).then_some(rejected.as_slice()),
+                rejected: &rejected[start.min(rejected.len())..(start + size).min(rejected.len())],
+                rows: &rows[start.min(rows.len())..(start + size).min(rows.len())],
             };
-            collection
-                .replace_one(doc! { "_id": &row.id }, &row)
-                .upsert(true)
-                .await?;
-            stats.rate_cache_refreshes += 1;
+            let Some((next, written)) =
+                super::rate_cache::publish_isolated(&self.db, chunk, &mut failures).await?
+            else {
+                // Never reuse this provider response with a newly read epoch.
+                return failures.finish(());
+            };
+            captured = next;
+            stats.rate_cache_refreshes += written;
+            #[cfg(test)]
+            rate_ordering_tests::after_publication(stats.rate_cache_refreshes).await;
         }
-        Ok(())
+        if empty {
+            tracing::warn!(
+                plan_code = %self.config.lago_plan_code,
+                "Billing rate cache refresh found no standard charges; keeping existing rates"
+            );
+        }
+        failures.finish(())
     }
 
     /// Pull wallet balances from Lago into the local cache. Webhooks are the
     /// primary balance signal, but deployments Lago cannot reach (or missed
     /// deliveries) would otherwise never converge.
-    async fn refresh_wallet_balances(
+    pub(super) async fn refresh_wallet_balances(
         &self,
         lago: &dyn LagoApi,
         stats: &mut ReconcileStats,
     ) -> AppResult<()> {
-        let wallets: Vec<BillingWallet> = self
+        let wallets: Vec<Document> = self
             .db
-            .collection::<BillingWallet>(BILLING_WALLET)
+            .collection::<Document>(BILLING_WALLET)
             .find(doc! {})
             .sort(doc! { "balance_synced_at": 1 })
             .limit(MAX_WALLET_REFRESH_BATCH)
@@ -319,30 +678,41 @@ impl BillingReconciler {
             .try_collect()
             .await?;
 
-        for wallet in wallets {
-            match webhook::provider_effective_balance(lago, &wallet).await {
-                Ok(balance_credits) => {
-                    if webhook::refresh_wallet_balance(
-                        &self.db,
-                        &wallet.lago_customer_id,
-                        balance_credits,
-                    )
-                    .await?
-                    .is_some()
-                    {
-                        stats.wallet_balance_refreshes += 1;
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        owner_id = %wallet.owner_id,
-                        error = %error,
-                        "Billing wallet balance refresh from Lago failed"
-                    );
-                }
+        let mut failures = super::recovery_batch::Failures::default();
+        for raw in wallets {
+            if !continue_reconcile() {
+                break;
             }
+            failures
+                .unit(async {
+                    let wallet: BillingWallet = super::recovery_batch::decode(&raw)?;
+                    match webhook::provider_effective_balance(lago, &wallet).await {
+                        Ok(balance_credits) => {
+                            // No write has begun; a lost pass can discard this read.
+                            if !continue_reconcile() {
+                                return Ok(());
+                            }
+                            if webhook::refresh_wallet_balance(&self.db, &wallet, balance_credits)
+                                .await?
+                                .is_some()
+                            {
+                                stats.wallet_balance_refreshes += 1;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                owner_id = %wallet.owner_id,
+                                error = %error,
+                                "Billing wallet balance refresh from Lago failed"
+                            );
+                            return Err(error);
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
         }
-        Ok(())
+        failures.finish(())
     }
 
     async fn abandon_unforwarded_reserved(&self) -> AppResult<u64> {
@@ -352,10 +722,15 @@ impl BillingReconciler {
     }
 
     async fn push_unacked(&self, lago: &dyn LagoApi, stats: &mut ReconcileStats) -> AppResult<()> {
+        // Receipt repair is bounded bookkeeping. A stale or malformed receipt
+        // must never prevent the meter rows below from reaching the provider.
+        if let Err(error) = super::usage_delivery::reconcile_prepared(&self.db).await {
+            tracing::warn!(error = %error, "usage delivery receipt repair deferred");
+        }
         let cutoff = Utc::now() - Duration::seconds(PUSH_GRACE_SECS);
-        let rows: Vec<UsageMeterRow> = self
+        let rows: Vec<Document> = self
             .db
-            .collection::<UsageMeterRow>(USAGE_METER)
+            .collection::<Document>(USAGE_METER)
             .find(doc! {
                 "status": "finalized",
                 "released": true,
@@ -374,143 +749,203 @@ impl BillingReconciler {
         // Lago but never attached to a subscription's charges, so usage
         // silently aggregates to zero. Resolve each owner's subscription
         // from the local wallet, memoized for the batch.
-        let mut subscriptions: BTreeMap<String, Option<String>> = BTreeMap::new();
-        for row in rows {
-            if row.funding.as_ref().is_some_and(|funding| {
-                funding.settled && funding.lago_billable_quantity_micros.unwrap_or_default() <= 0
-            }) {
-                mark_lago_acked(&self.db, &row.id).await?;
-                continue;
+        let mut subscriptions: BTreeMap<String, Option<super::usage_delivery::UsageTarget>> =
+            BTreeMap::new();
+        let mut failures = super::recovery_batch::Failures::default();
+        for raw in rows {
+            if !continue_reconcile() {
+                break;
             }
-            // Runtime contracts keep their accepted rate even after retirement.
-            // Emit to the subscription verified on that plan, without a second
-            // mutable wallet lookup or the ordinary service cache.
-            let binding = if super::sandbox_runtime::METRICS.contains(&row.metric) {
-                super::sandbox_runtime::verify_usage_provider_rate(&self.db, lago, &row).await
-            } else {
-                super::machine_runtime::verify_usage_provider_rate(&self.db, lago, &row).await
-            };
-            let verified_subscription = match binding {
-                Ok(binding) => binding,
-                Err(_) => {
-                    bump_attempt(
+            failures
+                .unit(async {
+                    let row: UsageMeterRow = super::recovery_batch::decode(&raw)?;
+                    if row.funding.as_ref().is_some_and(|funding| {
+                        funding.settled
+                            && funding.lago_billable_quantity_micros.unwrap_or_default() <= 0
+                    }) {
+                        mark_lago_acked(&self.db, &row.id).await?;
+                        return Ok(());
+                    }
+                    // Runtime contracts keep their accepted rate even after retirement.
+                    // Emit to the subscription verified on that plan, without a second
+                    // mutable wallet lookup or the ordinary service cache.
+                    let binding = if super::sandbox_runtime::METRICS.contains(&row.metric) {
+                        super::sandbox_runtime::verify_usage_provider_rate(&self.db, lago, &row)
+                            .await
+                    } else {
+                        super::machine_runtime::verify_usage_provider_rate(&self.db, lago, &row)
+                            .await
+                    };
+                    let verified_subscription = match binding {
+                        Ok(binding) => binding,
+                        Err(error) => {
+                            bump_attempt(
+                                &self.db,
+                                &row.id,
+                                "Runtime billing provider binding verification will retry",
+                            )
+                            .await?;
+                            stats.retried += 1;
+                            return Err(error);
+                        }
+                    };
+                    let runtime_binding = verified_subscription.is_some();
+                    let target = match verified_subscription {
+                        Some(verified) => Some(verified),
+                        None => match subscriptions.get(&row.billing_owner_id) {
+                            Some(cached) => cached.clone(),
+                            None => {
+                                let resolved = self
+                                    .db
+                                    .collection::<BillingWallet>(BILLING_WALLET)
+                                    .find_one(doc! { "owner_id": &row.billing_owner_id })
+                                    .await?
+                                    .and_then(|wallet| {
+                                        wallet.lago_subscription_id.map(|subscription_id| {
+                                            super::usage_delivery::UsageTarget {
+                                                customer_id: wallet.lago_customer_id,
+                                                subscription_id,
+                                            }
+                                        })
+                                    });
+                                subscriptions
+                                    .insert(row.billing_owner_id.clone(), resolved.clone());
+                                resolved
+                            }
+                        },
+                    };
+                    let Some(event) = LagoEvent::from_usage_row(
+                        &row,
+                        target.as_ref().map(|target| target.subscription_id.clone()),
+                    ) else {
+                        mark_dead_letter(
+                            &self.db,
+                            &row.id,
+                            "usage row has no finalized quantity for Lago event",
+                        )
+                        .await?;
+                        stats.dead_lettered += 1;
+                        return Ok(());
+                    };
+
+                    let receipt = super::usage_delivery::prepare(
                         &self.db,
-                        &row.id,
-                        "Runtime billing provider binding verification will retry",
+                        &row,
+                        target
+                            .as_ref()
+                            .map_or(row.billing_owner_id.as_str(), |target| {
+                                target.customer_id.as_str()
+                            }),
+                        event,
                     )
                     .await?;
-                    stats.retried += 1;
-                    continue;
-                }
-            };
-            let subscription_id = match verified_subscription {
-                Some(verified) => Some(verified),
-                None => match subscriptions.get(&row.billing_owner_id) {
-                    Some(cached) => cached.clone(),
-                    None => {
-                        let resolved = self
-                            .db
-                            .collection::<BillingWallet>(BILLING_WALLET)
-                            .find_one(doc! { "owner_id": &row.billing_owner_id })
-                            .await?
-                            .and_then(|wallet| wallet.lago_subscription_id);
-                        subscriptions.insert(row.billing_owner_id.clone(), resolved.clone());
-                        resolved
+                    if runtime_binding
+                        && target.as_ref().is_some_and(|target| {
+                            receipt.customer_id != target.customer_id
+                                || receipt.subscription_id.as_deref()
+                                    != Some(target.subscription_id.as_str())
+                        })
+                    {
+                        bump_attempt(
+                            &self.db,
+                            &row.id,
+                            "Recorded runtime delivery target no longer matches verified binding",
+                        )
+                        .await?;
+                        stats.retried += 1;
+                        return Err(AppError::BillingProviderUnavailable(
+                            "Recorded runtime delivery target could not be verified".into(),
+                        ));
                     }
-                },
-            };
-            let Some(event) = LagoEvent::from_usage_row(&row, subscription_id) else {
-                mark_dead_letter(
-                    &self.db,
-                    &row.id,
-                    "usage row has no finalized quantity for Lago event",
-                )
-                .await?;
-                stats.dead_lettered += 1;
-                continue;
-            };
-
-            let result = lago.record_event(&event).await;
-            match decide_lago_push(result) {
-                LagoPushDecision::Ack => {
-                    mark_lago_acked(&self.db, &row.id).await?;
-                    stats.pushed += 1;
-                }
-                LagoPushDecision::Retry => {
-                    bump_attempt(&self.db, &row.id, "Lago event push will retry").await?;
-                    stats.retried += 1;
-                }
-                LagoPushDecision::DeadLetter(reason) => {
-                    mark_dead_letter(&self.db, &row.id, &reason).await?;
-                    stats.dead_lettered += 1;
-                }
-            }
+                    let event = super::usage_delivery::event(&receipt);
+                    let result = lago.record_event(&event).await;
+                    let duplicate = result
+                        .as_ref()
+                        .err()
+                        .is_some_and(|error| error.kind == LagoErrorKind::Duplicate);
+                    // A typed rate-limit response is waiting, not an outage. Transport
+                    // failures and server errors retain the same retry write but fail
+                    // this maintenance unit after that write is durable.
+                    let retry_error = result.as_ref().err().and_then(|error| {
+                        matches!(
+                            error.kind,
+                            LagoErrorKind::Retry | LagoErrorKind::Unavailable
+                        )
+                        .then(|| {
+                            let source = AppError::BillingProviderUnavailable(
+                                "Lago event push will retry".into(),
+                            );
+                            if error.status == Some(reqwest::StatusCode::TOO_MANY_REQUESTS) {
+                                super::recovery_batch::waiting(source)
+                            } else {
+                                source
+                            }
+                        })
+                    });
+                    match decide_lago_push(result) {
+                        LagoPushDecision::Ack => {
+                            mark_delivered(&self.db, &row.id, Some((receipt, duplicate))).await?;
+                            stats.pushed += 1;
+                        }
+                        LagoPushDecision::Retry => {
+                            bump_attempt(&self.db, &row.id, "Lago event push will retry").await?;
+                            stats.retried += 1;
+                            if let Some(error) = retry_error {
+                                return Err(error);
+                            }
+                        }
+                        LagoPushDecision::DeadLetter(reason) => {
+                            super::usage_delivery::reject(&self.db, &receipt).await?;
+                            mark_dead_letter(&self.db, &row.id, &reason).await?;
+                            stats.dead_lettered += 1;
+                        }
+                    }
+                    Ok(())
+                })
+                .await;
         }
 
-        Ok(())
+        failures.finish(())
     }
 
     async fn compare_finalized_usage(
         &self,
         lago: &dyn LagoApi,
         stats: &mut ReconcileStats,
+        token: &crate::services::coordination_service::LeaseToken,
     ) -> AppResult<()> {
-        let local = finalized_sums_by_owner_metric(&self.db).await?;
-        for ((owner_id, metric_code), local_quantity) in local {
-            let Ok(usage) = lago.current_usage(&owner_id, "").await else {
-                continue;
-            };
-            let remote_quantity = extract_metric_quantity_micros(&usage.raw, &metric_code);
-            if let Some(remote) = remote_quantity
-                && remote != local_quantity
-            {
-                stats.drift_alerts += 1;
-                let latest = self
-                    .db
-                    .collection::<UsageMeterRow>(USAGE_METER)
-                    .find_one(doc! { "billing_owner_id": &owner_id,
-                        "lago_metric_code": &metric_code,
-                        "funding.lago_carry_id": { "$type": "string" },
-                    })
-                    .sort(doc! { "created_at": -1 })
-                    .await?;
-                let latest_carry_id = latest
-                    .and_then(|row| row.funding)
-                    .and_then(|funding| funding.lago_carry_id);
-                tracing::warn!(
-                    owner_id = %owner_id,
-                    metric_code = %metric_code,
-                    latest_carry_id = ?latest_carry_id,
-                    local_quantity_micros = local_quantity,
-                    remote_quantity_micros = remote,
-                    "Billing Lago usage drift detected"
-                );
-            }
-        }
-        Ok(())
+        super::usage_comparison::run(&self.db, lago, token, stats).await
     }
 }
 
-pub fn spawn_reconcile_worker(
+pub(crate) fn spawn_reconcile_worker(
     reconciler: BillingReconciler,
     interval_secs: u64,
+    job: crate::services::job_health::Job,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if interval_secs == 0 {
         return None;
     }
 
-    Some(tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        // The first tick fires immediately so a fresh deploy has rate-cache
-        // rows and wallet balances before the first billable request.
-        loop {
-            interval.tick().await;
-            if let Err(error) = reconciler.run_once().await {
-                tracing::warn!(error = %error, "Billing reconcile sweep failed");
+    Some(
+        crate::services::shutdown::process().spawn_worker(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick fires immediately so a fresh deploy has rate-cache
+            // rows and wallet balances before the first billable request.
+            loop {
+                let Some(_work) = job
+                    .tick(&crate::services::shutdown::process(), &mut interval)
+                    .await
+                else {
+                    break;
+                };
+                if let Err(error) = job.observe(reconciler.run_once()).await {
+                    tracing::warn!(error = %error, "Billing reconcile sweep failed");
+                }
             }
-        }
-    }))
+        }),
+    )
 }
 
 pub fn decide_lago_push(
@@ -531,21 +966,87 @@ pub fn decide_lago_push(
     }
 }
 
-async fn mark_lago_acked(db: &mongodb::Database, row_id: &str) -> AppResult<()> {
+pub(super) async fn mark_lago_acked(db: &mongodb::Database, row_id: &str) -> AppResult<()> {
+    mark_delivered(db, row_id, None).await
+}
+
+async fn mark_delivered(
+    db: &mongodb::Database,
+    row_id: &str,
+    receipt: Option<(
+        crate::models::billing_usage_delivery::BillingUsageDelivery,
+        bool,
+    )>,
+) -> AppResult<()> {
+    let mut session = db.client().start_session().await?;
+    let database = db.clone();
+    let row_id = row_id.to_owned();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let result = ack_in_session(&database, session, &row_id, receipt.as_ref()).await;
+            crate::services::api_key_mutation_service::transaction_result(result)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
+}
+
+async fn ack_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    row_id: &str,
+    receipt: Option<&(
+        crate::models::billing_usage_delivery::BillingUsageDelivery,
+        bool,
+    )>,
+) -> AppResult<()> {
     let now = Utc::now();
     let expires_at = now + Duration::days(ACKED_RETENTION_DAYS);
-    db.collection::<UsageMeterRow>(USAGE_METER)
-        .update_one(
+    let row = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one_and_update(
             doc! { "_id": row_id, "lago_acked": false },
-            doc! {
-                "$set": {
-                    "lago_acked": true,
-                    "updated_at": bson::DateTime::from_chrono(now),
-                    "expires_at": bson::DateTime::from_chrono(expires_at),
-                }
-            },
+            doc! { "$set": {
+                "lago_acked": true,
+                "updated_at": bson::DateTime::from_chrono(now),
+                "expires_at": bson::DateTime::from_chrono(expires_at),
+            } },
         )
+        .session(&mut *session)
         .await?;
+    if let Some(row) = row {
+        if let Some((receipt, _)) = receipt
+            && (receipt.transaction_id != row.transaction_id
+                || receipt.owner_id != row.billing_owner_id
+                || Some(&receipt.wallet_id) != row.wallet_id.as_ref())
+        {
+            super::usage_delivery::record_acknowledgement_issue(
+                db,
+                session,
+                receipt,
+                "delivery_receipt_mismatch",
+            )
+            .await?;
+        }
+        if let Some(wallet_id) = &row.wallet_id {
+            // The acknowledgement can make pending debits clearable. A
+            // provider read started before it cannot decide that clearing.
+            db.collection::<BillingWallet>(BILLING_WALLET)
+                .update_one(
+                    doc! { "_id": wallet_id },
+                    doc! { "$inc": { "snapshot_generation": 1_i64 } },
+                )
+                .session(&mut *session)
+                .await?;
+        }
+        if let Some((receipt, duplicate)) = receipt
+            && receipt.transaction_id == row.transaction_id
+            && receipt.owner_id == row.billing_owner_id
+            && Some(&receipt.wallet_id) == row.wallet_id.as_ref()
+        {
+            super::usage_delivery::acknowledge(db, session, receipt, *duplicate).await?;
+        }
+    }
     Ok(())
 }
 
@@ -593,123 +1094,17 @@ async fn mark_dead_letter(db: &mongodb::Database, row_id: &str, reason: &str) ->
     Ok(())
 }
 
-async fn finalized_sums_by_owner_metric(
-    db: &mongodb::Database,
-) -> AppResult<BTreeMap<(String, String), i64>> {
-    let mut cursor = db
-        .collection::<Document>(USAGE_METER)
-        .aggregate(vec![
-            doc! {
-                "$match": {
-                    "status": "finalized",
-                    "released": true,
-                    "wallet_id": { "$ne": null },
-                    "quantity": { "$ne": null },
-                }
-            },
-            doc! {
-                "$set": {
-                    "lago_billable_quantity_micros": {
-                        "$ifNull": [
-                            "$funding.lago_billable_quantity_micros",
-                            { "$multiply": ["$quantity", 1_000_000_i64] },
-                        ]
-                    }
-                }
-            },
-            doc! { "$match": { "lago_billable_quantity_micros": { "$gt": 0_i64 } } },
-            doc! {
-                "$group": {
-                    "_id": {
-                        "owner": "$billing_owner_id",
-                        "metric": "$lago_metric_code",
-                    },
-                    "quantity": { "$sum": "$lago_billable_quantity_micros" },
-                }
-            },
-        ])
-        .await?;
-
-    let mut out = BTreeMap::new();
-    while let Some(doc) = cursor.try_next().await? {
-        let Some(id_doc) = doc.get_document("_id").ok() else {
-            continue;
-        };
-        let Some(owner_id) = id_doc.get_str("owner").ok().map(ToString::to_string) else {
-            continue;
-        };
-        let Some(metric_code) = id_doc.get_str("metric").ok().map(ToString::to_string) else {
-            continue;
-        };
-        let quantity = doc_i64(&doc, "quantity").unwrap_or(0);
-        out.insert((owner_id, metric_code), quantity);
-    }
-
-    Ok(out)
-}
-
-fn extract_metric_quantity_micros(value: &serde_json::Value, metric_code: &str) -> Option<i64> {
-    let mut seen = BTreeSet::new();
-    extract_metric_quantity_micros_inner(value, metric_code, &mut seen)
-}
-
-fn extract_metric_quantity_micros_inner(
-    value: &serde_json::Value,
-    metric_code: &str,
-    seen: &mut BTreeSet<usize>,
-) -> Option<i64> {
-    let ptr = value as *const serde_json::Value as usize;
-    if !seen.insert(ptr) {
-        return None;
-    }
-    match value {
-        serde_json::Value::Array(items) => items
-            .iter()
-            .find_map(|item| extract_metric_quantity_micros_inner(item, metric_code, seen)),
-        serde_json::Value::Object(map) => {
-            let matches_metric = ["code", "metric_code", "billable_metric_code"]
-                .iter()
-                .any(|key| map.get(*key).and_then(serde_json::Value::as_str) == Some(metric_code));
-            if matches_metric {
-                for key in ["units", "quantity", "amount", "usage"] {
-                    if let Some(quantity) = json_decimal_micros(map.get(key)) {
-                        return Some(quantity);
-                    }
-                }
-            }
-            map.values()
-                .find_map(|item| extract_metric_quantity_micros_inner(item, metric_code, seen))
-        }
-        _ => None,
-    }
-}
-
-fn json_decimal_micros(value: Option<&serde_json::Value>) -> Option<i64> {
-    let text = match value? {
-        serde_json::Value::Number(number) => number.to_string(),
-        serde_json::Value::String(value) => value.clone(),
-        _ => return None,
-    };
-    // Quantity boundary: Lago emits millionths. Reject finer values instead
-    // of hiding drift through truncation.
-    let quantity: Credits = text.parse().ok()?;
-    (quantity >= Credits::ZERO && quantity.pico() % 1_000_000 == 0)
-        .then(|| quantity.legacy_micros().ok())
-        .flatten()
-}
-
-fn doc_i64(doc: &Document, key: &str) -> Option<i64> {
-    match doc.get(key)? {
-        Bson::Int32(v) => Some(i64::from(*v)),
-        Bson::Int64(v) => Some(*v),
-        Bson::Double(v) => Some(v.round() as i64),
-        _ => None,
-    }
-}
+#[cfg(test)]
+#[path = "rate_ordering_tests.rs"]
+pub(super) mod rate_ordering_tests;
 
 #[cfg(test)]
 #[path = "reconcile_cma_tests.rs"]
 mod cma_tests;
+
+#[cfg(test)]
+#[path = "usage_capture_tests.rs"]
+mod usage_capture_tests;
 
 #[cfg(test)]
 mod tests {
@@ -780,6 +1175,7 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> crate::errors::AppResult<LagoUsage> {
+            crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
             Ok(LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),
@@ -804,6 +1200,7 @@ mod tests {
         UsageMeterRow {
             model_tariff: None,
             org_channel_guest: None,
+            stuck_request_exit: None,
             rollup_pending: true,
             id: Uuid::new_v4().to_string(),
             transaction_id: transaction_id.to_string(),
@@ -832,6 +1229,8 @@ mod tests {
             quantity: Some(1),
             pending_resale_quantity: None,
             pending_platform_usage: None,
+            usage_checkpoint: None,
+            realtime_session: None,
             pool_attempt: None,
             machine_usage: None,
             status: UsageStatus::Finalized,
@@ -861,6 +1260,7 @@ mod tests {
         let decision = decide_lago_push(Err(LagoError {
             status: Some(StatusCode::UNPROCESSABLE_ENTITY),
             code: Some("billable_metric_not_found".to_string()),
+            code_conflict: false,
             message: "missing metric".to_string(),
             kind: LagoErrorKind::DeadLetter,
         }));
@@ -882,23 +1282,6 @@ mod tests {
         }));
 
         assert_eq!(decision, LagoPushDecision::Ack);
-    }
-
-    #[test]
-    fn current_usage_decimal_quantity_supports_fractional_and_large_units() {
-        let usage = json!({
-            "customer_usage": {
-                "charges_usage": [{
-                    "billable_metric_code": "platform_requests",
-                    "units": "1000000001.250000"
-                }]
-            }
-        });
-
-        assert_eq!(
-            super::extract_metric_quantity_micros(&usage, "platform_requests"),
-            Some(1_000_000_001_250_000)
-        );
     }
 
     #[tokio::test]
@@ -1030,7 +1413,7 @@ mod tests {
             std::sync::Arc::new(billing_enabled_config()),
         );
 
-        let stats = reconciler.run_once().await.expect("run reconcile");
+        let stats = reconciler.run_once_failing_for_test(&["usage_push"]).await;
         let saved = db
             .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
             .find_one(doc! { "_id": row_id })
@@ -1247,6 +1630,7 @@ mod tests {
             customer_id: &str,
             subscription_id: &str,
         ) -> crate::errors::AppResult<super::super::lago_client::LagoUsage> {
+            crate::services::billing::lago_client::require_subscription_id(subscription_id)?;
             Ok(super::super::lago_client::LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),
@@ -1358,7 +1742,13 @@ mod tests {
             std::sync::Arc::new(billing_enabled_config()),
         );
         let mut stats = super::ReconcileStats::default();
-        reconciler.push_unacked(&lago, &mut stats).await.unwrap();
+        assert!(matches!(
+            reconciler.push_unacked(&lago, &mut stats).await,
+            Err(crate::errors::AppError::BillingRecoveryFailed {
+                failed_units: 1,
+                ..
+            })
+        ));
         assert_eq!(stats.pushed, 1);
         assert_eq!(stats.retried, 1);
         assert_eq!(stats.dead_lettered, 0);
@@ -1603,7 +1993,13 @@ mod tests {
                 std::sync::Arc::new(billing_enabled_config()),
             );
             let mut stats = super::ReconcileStats::default();
-            reconciler.push_unacked(&lago, &mut stats).await.unwrap();
+            assert!(matches!(
+                reconciler.push_unacked(&lago, &mut stats).await,
+                Err(crate::errors::AppError::BillingRecoveryFailed {
+                    failed_units: 1,
+                    ..
+                })
+            ));
             assert_eq!(stats.pushed, 1, "{mismatch}");
             assert_eq!(stats.retried, 1, "{mismatch}");
             assert_eq!(stats.dead_lettered, 0, "{mismatch}");
@@ -1623,6 +2019,43 @@ mod tests {
             assert!(saved.expires_at.is_none(), "{mismatch}");
             db.drop().await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn usage_capture_runtime_retry_refuses_a_different_verified_target() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("capture_runtime_rebinding").await;
+        let (row, mut lago) = machine_emission_fixture(&db).await;
+        db.collection::<UsageMeterRow>(super::USAGE_METER)
+            .insert_one(&row)
+            .await
+            .unwrap();
+        super::super::usage_delivery::prepare(
+            &db,
+            &row,
+            "machine-customer",
+            LagoEvent::from_usage_row(&row, Some("machine-subscription".into())).unwrap(),
+        )
+        .await
+        .unwrap();
+        db.collection::<super::BillingWallet>(super::BILLING_WALLET)
+            .update_one(
+                doc! {"_id":"wallet-1"},
+                doc! {"$set":{"lago_subscription_id":"replacement-subscription"}},
+            )
+            .await
+            .unwrap();
+        lago.subscription.as_mut().unwrap().external_id = "replacement-subscription".into();
+        let worker = BillingReconciler::new(
+            db.clone(),
+            None,
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+        let mut stats = super::ReconcileStats::default();
+        assert!(worker.push_unacked(&lago, &mut stats).await.is_err());
+        assert_eq!(stats.retried, 1);
+        assert!(lago.events.lock().unwrap().is_empty());
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
@@ -1654,6 +2087,17 @@ mod tests {
             Some("machine-subscription")
         );
         assert_eq!(emitted[0].external_customer_id, None);
+        let receipt = db
+            .collection::<mongodb::bson::Document>("billing_usage_deliveries")
+            .find_one(doc! {"transaction_id":&machine.transaction_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.get_str("customer_id"), Ok("machine-customer"));
+        assert_eq!(
+            receipt.get_str("subscription_id"),
+            Ok("machine-subscription")
+        );
         let wallet = db
             .collection::<super::BillingWallet>(super::BILLING_WALLET)
             .find_one(doc! {"_id":"wallet-1"})
@@ -1823,3 +2267,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "reconcile_provider_isolation_tests.rs"]
+mod provider_isolation_tests;

@@ -15,6 +15,7 @@ use crate::{
     },
 };
 use chrono::Utc;
+use futures::TryStreamExt;
 use mongodb::{
     ClientSession, Database, IndexModel,
     bson::{self, Document, doc},
@@ -23,6 +24,39 @@ use mongodb::{
 
 fn stale() -> AppError {
     AppError::Conflict("Setup authority changed; review the current setup".into())
+}
+
+/// Indexed parent-scoped export reads; these keys do not change retention.
+pub async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    for (name, field) in crate::services::personal_data_registry::EXPORT_JOIN_INDEX_GAPS {
+        let collection = db.collection::<Document>(name);
+        let mut covered = false;
+        match collection.list_indexes().await {
+            Ok(mut indexes) => {
+                while let Some(index) = indexes.try_next().await? {
+                    covered |= index.keys.keys().next().is_some_and(|first| first == field);
+                }
+            }
+            Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+                {}
+            Err(error) => return Err(error),
+        }
+        if !covered {
+            collection
+                .create_index(
+                    IndexModel::builder()
+                        .keys(doc! {*field:1})
+                        .options(
+                            IndexOptions::builder()
+                                .name(format!("account_export_{name}_{field}"))
+                                .build(),
+                        )
+                        .build(),
+                )
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
@@ -569,10 +603,19 @@ pub(crate) async fn claim_step(db: &Database) -> AppResult<Option<SetupStepJob>>
 
 pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
     for _ in 0..8 {
+        let Some(_work) = state.shutdown.background() else {
+            break;
+        };
         let Some(job) = claim_step(&state.db).await? else {
             break;
         };
         let claim = job.claim_id.as_deref().ok_or_else(stale)?;
+        let release = state.shutdown.register_release(super::shutdown::Release {
+        safe_after_stop: false,
+            db: state.db.clone(), collection: STEPS,
+            filter: doc! {"_id": &job.id, "generation": job.generation, "claim_id": claim, "phase": "running"},
+            update: doc! {"$set": {"retry_at": bson::DateTime::from_millis(0)}},
+        });
         let outcome = if job.attempts > 5 {
             Err(AppError::Conflict(
                 "Provisioning needs a fresh owner review".into(),
@@ -609,6 +652,7 @@ pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
             }.await;
             transaction_result(result)
         }).await.map_err(map_transaction_error)?;
+        release.completed();
     }
     Ok(())
 }
@@ -1449,7 +1493,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let job = claim_step(&f.state.db).await.unwrap().unwrap();
+        let job = f.claim().await;
         execute_step(&f.state, &job).await.unwrap();
         let candidate =
             child_candidate(&f.state.db, &f.state.encryption_keys, &f.owner, &f.setup.id)

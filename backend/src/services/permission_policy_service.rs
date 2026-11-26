@@ -86,7 +86,7 @@ pub fn validate_target(target: &ProxyTarget) -> AppResult<()> {
         || service.inject_delegation_token
         || service.identity_propagation_mode != "none"
         || service.token_exchange_config.is_some()
-        || !target.catalog_default_headers.is_empty()
+        || !target.catalog_default_headers.configured().is_empty()
         || !target.user_service_default_headers.is_empty()
     {
         return Err(unavailable());
@@ -229,6 +229,7 @@ pub async fn create(
     connection: &str,
     expires_at: DateTime<Utc>,
     policy: Policy,
+    actor: Option<&super::audit_service::AuditActor>,
 ) -> AppResult<(key_service::CreatedApiKey, PermissionPolicy)> {
     validate_policy(&policy)?;
     if expires_at <= Utc::now() || expires_at > Utc::now() + chrono::Duration::days(90) {
@@ -256,6 +257,15 @@ pub async fn create(
         created_at: now,
         updated_at: now,
     };
+    let intent = actor
+        .map(|actor| {
+            super::api_key_audit_service::permission_created(
+                actor,
+                &binding.id,
+                &binding.user_service_id,
+            )
+        })
+        .transpose()?;
     let db = db.clone();
     let name = name.to_owned();
     let bound = binding.clone();
@@ -263,44 +273,61 @@ pub async fn create(
     let created = session
         .start_transaction()
         .and_run2(async move |session| {
-            let result: AppResult<_> = async {
-                let services = [bound.user_service_id.clone()];
-                let key = key_service::create_api_key_with_security_class_and_id(
-                    &db,
-                    &bound.user_id,
-                    Some(&bound.user_id),
-                    Some(&bound.id),
-                    &name,
-                    "proxy",
-                    Some(expires_at),
-                    None,
-                    Some(&services),
-                    Some(&[]),
-                    Some(false),
-                    Some(false),
-                    Some(false),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    ApiKeyPurpose::PermissionBound,
-                    false,
-                    Some(&mut *session),
-                )
-                .await?;
-                db.collection::<PermissionPolicy>(POLICIES)
-                    .insert_one(&bound)
-                    .session(&mut *session)
-                    .await?;
-                Ok(key)
-            }
-            .await;
-            mutations::transaction_result(result)
+            mutations::transaction_result(
+                create_in_session(&db, &name, &bound, expires_at, intent.as_ref(), session).await,
+            )
         })
         .await
         .map_err(mutations::map_transaction_error)?;
     Ok((created, binding))
+}
+
+async fn create_in_session(
+    db: &Database,
+    name: &str,
+    bound: &PermissionPolicy,
+    expires_at: DateTime<Utc>,
+    intent: Option<&crate::models::security_effect_intent::SecurityEffectIntent>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<key_service::CreatedApiKey> {
+    let services = [bound.user_service_id.clone()];
+    let key = key_service::create_api_key_with_security_class_and_id(
+        db,
+        &bound.user_id,
+        Some(&bound.user_id),
+        Some(&bound.id),
+        name,
+        "proxy",
+        Some(expires_at),
+        None,
+        Some(&services),
+        Some(&[]),
+        Some(false),
+        Some(false),
+        Some(false),
+        None,
+        None,
+        None,
+        None,
+        None,
+        ApiKeyPurpose::PermissionBound,
+        false,
+        Some(&mut *session),
+    )
+    .await?;
+    db.collection::<PermissionPolicy>(POLICIES)
+        .insert_one(bound)
+        .session(&mut *session)
+        .await?;
+    if let Some(intent) = intent {
+        super::security_effect_service::enqueue_in_session(
+            db,
+            session,
+            std::slice::from_ref(intent),
+        )
+        .await?;
+    }
+    Ok(key)
 }
 
 pub async fn get(db: &Database, owner: &str, id: &str) -> AppResult<PermissionPolicy> {
@@ -316,11 +343,61 @@ pub async fn set_paused(
     id: &str,
     revision: i64,
     paused: bool,
+    actor: Option<&super::audit_service::AuditActor>,
 ) -> AppResult<PermissionPolicy> {
-    let updated = db.collection::<PermissionPolicy>(POLICIES).find_one_and_update(
+    let Some(actor) = actor else {
+        return set_paused_in_session(db, owner, id, revision, paused, None).await;
+    };
+    let mut session = db.client().start_session().await?;
+    let db = db.clone();
+    let owner = owner.to_owned();
+    let actor = actor.clone();
+    let id = id.to_owned();
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            mutations::transaction_result(
+                pause_with_intent(&db, &owner, &actor, &id, revision, paused, session).await,
+            )
+        })
+        .await
+        .map_err(mutations::map_transaction_error)
+}
+
+async fn pause_with_intent(
+    db: &Database,
+    owner: &str,
+    actor: &super::audit_service::AuditActor,
+    id: &str,
+    revision: i64,
+    paused: bool,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<PermissionPolicy> {
+    let binding =
+        set_paused_in_session(db, owner, id, revision, paused, Some(&mut *session)).await?;
+    let intent =
+        super::api_key_audit_service::permission_paused(actor, id, paused, binding.revision)?;
+    super::security_effect_service::enqueue_in_session(db, session, &[intent]).await?;
+    Ok(binding)
+}
+
+async fn set_paused_in_session(
+    db: &Database,
+    owner: &str,
+    id: &str,
+    revision: i64,
+    paused: bool,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<PermissionPolicy> {
+    let collection = db.collection::<PermissionPolicy>(POLICIES);
+    let update = collection.find_one_and_update(
         doc! {"_id": id, "user_id": owner, "revision": revision},
         doc! {"$set": {"paused": paused, "updated_at": bson::DateTime::now()}, "$inc": {"revision": 1_i64}},
-    ).return_document(mongodb::options::ReturnDocument::After).await?;
+    ).return_document(mongodb::options::ReturnDocument::After);
+    let updated = match session {
+        Some(tx) => update.session(tx).await?,
+        None => update.await?,
+    };
     updated.ok_or_else(|| {
         AppError::Conflict(
             "Permission key missing or revision changed; reload before updating".into(),

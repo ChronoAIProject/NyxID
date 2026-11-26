@@ -1,0 +1,19 @@
+{
+  "Add a crew": "新增團隊",
+  "Add an agent": "新增代理程式",
+  "Add from the menu": "從選單新增",
+  "Add {{name}}": "新增{{name}}",
+  "Agent unavailable": "代理程式無法使用",
+  "Couldn't load quick access.": "無法載入快速存取。",
+  "Couldn't save quick access. Your previous list is back.": "無法儲存快速存取，已還原先前的清單。",
+  "Crew unavailable": "團隊無法使用",
+  "Move {{name}} down": "將{{name}}下移",
+  "Move {{name}} up": "將{{name}}上移",
+  "Not shown: it was deleted or you no longer have access": "不顯示：已刪除或你已無權存取",
+  "Nothing in quick access yet. Add destinations, agents or crews below.": "快速存取中尚無內容。請在下方新增目的地、代理程式或團隊。",
+  "Puts New chat, Notifications, Scan QR code, Recent chats and Settings back.": "還原為新聊天、通知、掃描 QR Code、最近的聊天和設定。",
+  "Quick access holds up to 12 items. Remove one to add another.": "快速存取最多可容納 12 項。請先移除一項再新增。",
+  "Reset to default": "還原為預設值",
+  "Shown in the column under the clock, in this order. Saved to your account, so your other devices show the same list.": "依此順序顯示在時鐘下方的一欄中。已儲存到你的帳號，其他裝置會顯示相同的清單。",
+  "Your shortcuts": "你的捷徑"
+}

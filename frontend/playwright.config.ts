@@ -18,7 +18,7 @@ const PORT = 4611;
 export default defineConfig({
   testDir: "./e2e",
   // This suite exercises actual HTTP clients with its dedicated development-mode server.
-  testIgnore: ["**/platform-personal.spec.ts"],
+  testIgnore: ["**/platform-personal.spec.ts", "**/platform-setups.spec.ts"],
   fullyParallel: true,
   workers: 3,
   forbidOnly: !!process.env.CI,

@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
 export const connectLinkStatusSchema = z.enum([
@@ -48,26 +49,34 @@ export const connectLinkPreviewSchema = z.object({
 });
 
 export const connectCredentialFormSchema = z.object({
-  credential: z.string().trim().min(1, "Credential is required").max(16_384),
-  endpoint_url: z
+  get credential() {
+    return z.string().trim().min(1, translateApp("Credential is required")).max(16_384);
+  },
+  get endpoint_url() {
+    return z
     .string()
     .trim()
     .refine(
       (value) => value.length === 0 || /^https?:\/\//i.test(value),
-      "Enter an absolute HTTP(S) URL",
+        translateApp("Enter an absolute HTTP(S) URL",
     ),
+    );
+  },
   oauth_client_id: z.string().trim().max(1_024),
   oauth_client_secret: z.string().trim().max(16_384),
 });
 
 export const connectOAuthFormSchema = z.object({
-  endpoint_url: z
+  get endpoint_url() {
+    return z
     .string()
     .trim()
     .refine(
       (value) => value.length === 0 || /^https?:\/\//i.test(value),
-      "Enter an absolute HTTP(S) URL",
+        translateApp("Enter an absolute HTTP(S) URL",
     ),
+    );
+  },
   oauth_client_id: z.string().trim().max(1_024),
   oauth_client_secret: z.string().trim().max(16_384),
 });
@@ -128,12 +137,12 @@ export function validateConnectCredentialForm(
   requiresGatewayUrl: boolean,
 ): string | null {
   if (requiresGatewayUrl && values.endpoint_url.length === 0) {
-    return "Endpoint URL is required for this service";
+    return translateApp("Endpoint URL is required for this service");
   }
   const hasClientId = values.oauth_client_id.length > 0;
   const hasClientSecret = values.oauth_client_secret.length > 0;
   if (hasClientId !== hasClientSecret) {
-    return "OAuth client ID and secret must be supplied together";
+    return translateApp("OAuth client ID and secret must be supplied together");
   }
   return null;
 }
@@ -144,19 +153,21 @@ export function validateConnectOAuthForm(
   requiresClientCredentials: boolean,
 ): string | null {
   if (requiresGatewayUrl && values.endpoint_url.length === 0) {
-    return "Endpoint URL is required for this service";
+    return translateApp("Endpoint URL is required for this service");
   }
   if (
     requiresClientCredentials &&
     (values.oauth_client_id.length === 0 ||
       values.oauth_client_secret.length === 0)
   ) {
-    return "OAuth client ID and secret are required for this service";
+    return translateApp(
+      "OAuth client ID and secret are required for this service",
+    );
   }
   const hasClientId = values.oauth_client_id.length > 0;
   const hasClientSecret = values.oauth_client_secret.length > 0;
   if (hasClientId !== hasClientSecret) {
-    return "OAuth client ID and secret must be supplied together";
+    return translateApp("OAuth client ID and secret must be supplied together");
   }
   return null;
 }

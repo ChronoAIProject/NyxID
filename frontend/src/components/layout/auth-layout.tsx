@@ -67,7 +67,7 @@ export function AuthLayout() {
           </div>
           <p className="text-center text-13 text-muted-foreground">{translateUi("By continuing, you agree to NyxID's")}{" "}
             <a href="/terms" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">{translateUi("Terms of Service")}</a>{" "}{translateUi("and")}<br />
-            <a href="/privacy" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">{translateUi("Privacy Policy")}</a>{translateUi(", and to receive periodic emails with updates.")}</p>
+            <a href="/privacy" className="text-muted-foreground underline underline-offset-2 hover:text-foreground">{translateUi("Privacy Policy")}</a>{translateUi(".")}</p>
         </div>
       </div>
 

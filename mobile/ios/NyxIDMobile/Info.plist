@@ -69,14 +69,34 @@
     <string>Expo Dev Launcher uses the local network to discover and connect to development servers running on your computer.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Allow NyxID to use your microphone for dictation and voice conversations.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Allow NyxID to save images you choose from chats to your photo library.</string>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>Allow NyxID to attach photos you choose from your library to chats.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Allow NyxID to turn your speech into text for messages. Recognition runs on your iPhone when available.</string>
     <key>RCTNewArchEnabled</key>
     <true/>
+    <key>UIApplicationSceneManifest</key>
+    <dict>
+      <key>UIApplicationSupportsMultipleScenes</key>
+      <false/>
+      <key>UISceneConfigurations</key>
+      <dict>
+        <key>UIWindowSceneSessionRoleApplication</key>
+        <array>
+          <dict>
+            <key>UISceneConfigurationName</key>
+            <string>Default Configuration</string>
+            <key>UISceneDelegateClassName</key>
+            <string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+          </dict>
+        </array>
+      </dict>
+    </dict>
     <key>UIBackgroundModes</key>
     <array>
+      <string>audio</string>
       <string>fetch</string>
       <string>remote-notification</string>
     </array>

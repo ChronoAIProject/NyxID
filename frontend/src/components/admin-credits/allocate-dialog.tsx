@@ -68,6 +68,7 @@ export function AllocateDialog({
   servicesLoading,
   retryServices,
   canRecurring,
+  recipientSchedules = false,
   initialRecurrence = "one_time",
 }: {
   readonly open: boolean;
@@ -77,6 +78,7 @@ export function AllocateDialog({
   readonly servicesLoading: boolean;
   readonly retryServices: () => void;
   readonly canRecurring: boolean;
+  readonly recipientSchedules?: boolean;
   readonly initialRecurrence?: AllocationForm["recurrence"];
 }) {
   useUiTranslation();
@@ -87,15 +89,26 @@ export function AllocateDialog({
     mode: "onChange",
   });
   const mutation = useAllocateCredits();
+  const wasOpen = useRef(false);
   useEffect(() => {
-    if (open) form.reset({ ...defaults, recurrence: initialRecurrence });
-  }, [open, initialRecurrence, form]);
+    if (open && !wasOpen.current)
+      form.reset({
+        ...defaults,
+        recurrence: initialRecurrence,
+        timing: recipientSchedules ? "recipient" : undefined,
+      });
+    wasOpen.current = open;
+  }, [open, initialRecurrence, recipientSchedules, form]);
   const submission = useRef<{ payload: string; key: string } | null>(null);
   const inFlight = useRef(false);
   const value = form.watch();
   const needsServices = !value.all_services || value.service_limits.length > 0;
   const blocked =
-    lookupBlocked || (needsServices && (servicesError || servicesLoading));
+    lookupBlocked ||
+    (needsServices && (servicesError || servicesLoading)) ||
+    (value.recurrence !== "one_time" &&
+      value.timing === "recipient" &&
+      !recipientSchedules);
   const close = (next: boolean) => {
     if (inFlight.current || mutation.isPending) return;
     if (!next) {
@@ -125,22 +138,36 @@ export function AllocateDialog({
       });
       if (response.kind === "one_time") {
         toast.success(
-          response.result.pending_activation_count ? translateUi("Allocated credits to {{value1}} owners; {{value2}} pending activation", { value1: response.result.created_count, value2: response.result.pending_activation_count }) : translateUi("Allocated credits to {{value1}} owners", { value1: response.result.created_count }),
+          response.result.pending_activation_count
+            ? translateUi(
+                "Allocated credits to {{value1}} owners; {{value2}} pending activation",
+                {
+                  value1: response.result.created_count,
+                  value2: response.result.pending_activation_count,
+                },
+              )
+            : translateUi("Allocated credits to {{value1}} owners", {
+                value1: response.result.created_count,
+              }),
         );
         const warning = rolloutWarningMessage(response.result.recipients);
         if (warning) toast.warning(translateUi(warning));
       } else
         toast.success(
-          translateUi("Recurring allocation created. The current period is issued on the next billing update."),
+          translateUi(
+            "Recurring allocation created. Credits are issued on the next billing update.",
+          ),
         );
       form.reset(defaults);
       submission.current = null;
       onOpenChange(false);
     } catch (error) {
       toast.error(
-        translateErrorMessage(error instanceof Error
-          ? error.message
-          : "Failed to allocate credits. Retry with the same settings to safely resume."),
+        translateErrorMessage(
+          error instanceof Error
+            ? error.message
+            : "Failed to allocate credits. Retry with the same settings to safely resume.",
+        ),
       );
     } finally {
       inFlight.current = false;
@@ -151,7 +178,11 @@ export function AllocateDialog({
       <DialogContent scrollMode="body" className="md:max-w-2xl">
         <DialogHeader>
           <DialogTitle>{translateUi("Allocate credits")}</DialogTitle>
-          <DialogDescription>{translateUi("Allocate one shared credit total per recipient. Issued credits are used before purchased credits.")}</DialogDescription>
+          <DialogDescription>
+            {translateUi(
+              "Allocate one shared credit total per recipient. Issued credits are used before purchased credits.",
+            )}
+          </DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form onSubmit={form.handleSubmit(submit)}>
@@ -162,7 +193,9 @@ export function AllocateDialog({
                   name="amount"
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{translateUi("Credits per recipient")}</FormLabel>
+                      <FormLabel>
+                        {translateUi("Credits per recipient")}
+                      </FormLabel>
                       <FormControl>
                         <Input inputMode="decimal" {...field} />
                       </FormControl>
@@ -186,12 +219,20 @@ export function AllocateDialog({
                           </SelectTrigger>
                         </FormControl>
                         <SelectContent>
-                          <SelectItem value="one_time">{translateUi("One time")}</SelectItem>
+                          <SelectItem value="one_time">
+                            {translateUi("One time")}
+                          </SelectItem>
                           {canRecurring ? (
                             <>
-                              <SelectItem value="daily">{translateUi("Daily")}</SelectItem>
-                              <SelectItem value="weekly">{translateUi("Weekly")}</SelectItem>
-                              <SelectItem value="monthly">{translateUi("Monthly")}</SelectItem>
+                              <SelectItem value="daily">
+                                {translateUi("Daily")}
+                              </SelectItem>
+                              <SelectItem value="weekly">
+                                {translateUi("Weekly")}
+                              </SelectItem>
+                              <SelectItem value="monthly">
+                                {translateUi("Monthly")}
+                              </SelectItem>
                             </>
                           ) : null}
                         </SelectContent>
@@ -200,12 +241,61 @@ export function AllocateDialog({
                     </FormItem>
                   )}
                 />
+                {value.recurrence !== "one_time" &&
+                (recipientSchedules || value.timing === "recipient") ? (
+                  <FormField
+                    control={form.control}
+                    name="timing"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{translateUi("Renewal cycle")}</FormLabel>
+                        <Select
+                          value={field.value ?? "calendar"}
+                          onValueChange={field.onChange}
+                        >
+                          <FormControl>
+                            <SelectTrigger>
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            <SelectItem
+                              value="recipient"
+                              disabled={!recipientSchedules}
+                            >
+                              {translateUi("From when each recipient joins")}
+                            </SelectItem>
+                            <SelectItem value="calendar">
+                              {translateUi("Calendar periods (UTC)")}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                        {!recipientSchedules ? (
+                          <p className="text-13 text-muted-foreground">
+                            {translateUi(
+                              "Recipient scheduling is currently unavailable. Choose calendar periods or try again later.",
+                            )}
+                          </p>
+                        ) : null}
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                ) : null}
                 <RecipientTargetFields
                   onLookupBlocked={setLookupBlocked}
                   description={
                     value.recurrence === "one_time"
-                      ? translateUi("Recipients are captured when this allocation is submitted. Retrying preserves that snapshot.")
-                      : translateUi("Each UTC period captures eligible recipients. Later signups and organization joins wait until the next period. Each issuance gets a fresh total and fresh service limits.")
+                      ? translateUi(
+                          "Recipients are captured when this allocation is submitted. Retrying preserves that snapshot.",
+                        )
+                      : value.timing === "recipient"
+                        ? translateUi(
+                            "New members can receive their full first allocation when they join. Existing members can start on sign-in or during a billing update. Each recipient renews from their own start date.",
+                          )
+                        : translateUi(
+                            "Calendar periods use UTC. New signups and organization or group joins can receive the current period's grant. Use Grant missing credits to recover missed grants. Each issuance gets a fresh total and service limits.",
+                          )
                   }
                 />
                 {value.recurrence === "one_time" ? (
@@ -214,7 +304,9 @@ export function AllocateDialog({
                     name="expires_at"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{translateUi("Expiry (optional)")}</FormLabel>
+                        <FormLabel>
+                          {translateUi("Expiry (optional)")}
+                        </FormLabel>
                         <FormControl>
                           <Input type="datetime-local" {...field} />
                         </FormControl>
@@ -229,7 +321,9 @@ export function AllocateDialog({
                       name="expiry.kind"
                       render={({ field }) => (
                         <FormItem>
-                          <FormLabel>{translateUi("Expiry for each issuance")}</FormLabel>
+                          <FormLabel>
+                            {translateUi("Expiry for each issuance")}
+                          </FormLabel>
                           <Select
                             value={field.value}
                             onValueChange={(kind) =>
@@ -252,9 +346,15 @@ export function AllocateDialog({
                               </SelectTrigger>
                             </FormControl>
                             <SelectContent>
-                              <SelectItem value="end_of_period">{translateUi("End of period")}</SelectItem>
-                              <SelectItem value="after_days">{translateUi("After a number of days")}</SelectItem>
-                              <SelectItem value="never">{translateUi("Never")}</SelectItem>
+                              <SelectItem value="end_of_period">
+                                {translateUi("End of period")}
+                              </SelectItem>
+                              <SelectItem value="after_days">
+                                {translateUi("After a number of days")}
+                              </SelectItem>
+                              <SelectItem value="never">
+                                {translateUi("Never")}
+                              </SelectItem>
                             </SelectContent>
                           </Select>
                           <FormMessage />
@@ -267,7 +367,9 @@ export function AllocateDialog({
                         name="expiry.days"
                         render={({ field }) => (
                           <FormItem>
-                            <FormLabel>{translateUi("Days until expiry")}</FormLabel>
+                            <FormLabel>
+                              {translateUi("Days until expiry")}
+                            </FormLabel>
                             <FormControl>
                               <Input
                                 type="number"
@@ -296,7 +398,9 @@ export function AllocateDialog({
                   name="all_services"
                   render={({ field }) => (
                     <FormItem className="flex items-center justify-between">
-                      <FormLabel>{translateUi("All services eligible")}</FormLabel>
+                      <FormLabel>
+                        {translateUi("All services eligible")}
+                      </FormLabel>
                       <FormControl>
                         <Switch
                           checked={field.value}
@@ -312,7 +416,9 @@ export function AllocateDialog({
                 />
                 {needsServices && servicesError ? (
                   <ErrorBanner
-                    message={translateUi("Services could not be loaded. Retry to verify service restrictions.")}
+                    message={translateUi(
+                      "Services could not be loaded. Retry to verify service restrictions.",
+                    )}
                     onRetry={retryServices}
                   />
                 ) : null}
@@ -325,7 +431,9 @@ export function AllocateDialog({
                     name="service_refs"
                     render={({ field }) => (
                       <FormItem>
-                        <FormLabel>{translateUi("Eligible services")}</FormLabel>
+                        <FormLabel>
+                          {translateUi("Eligible services")}
+                        </FormLabel>
                         <FormControl>
                           <ServicePicker
                             services={services}
@@ -350,12 +458,15 @@ export function AllocateDialog({
                   disabled={servicesError || servicesLoading}
                 />
                 {(servicesError || servicesLoading) && !needsServices ? (
-                  <p className="text-14 text-muted-foreground">{translateUi("Service limits need the service catalog.")}{" "}
+                  <p className="text-14 text-muted-foreground">
+                    {translateUi("Service limits need the service catalog.")}{" "}
                     <Button
                       variant="link"
                       type="button"
                       onClick={retryServices}
-                    >{translateUi("Retry services")}</Button>
+                    >
+                      {translateUi("Retry services")}
+                    </Button>
                   </p>
                 ) : null}
                 <FormField
@@ -371,15 +482,26 @@ export function AllocateDialog({
                     </FormItem>
                   )}
                 />
-                <p className="text-14 text-muted-foreground">{translateUi("The amount is shared across eligible services. Service ceilings do not set aside funds.")}{" "}
+                <p className="text-14 text-muted-foreground">
+                  {translateUi(
+                    "The amount is shared across eligible services. Service ceilings do not set aside funds.",
+                  )}{" "}
                   {value.recurrence !== "one_time"
-                    ? translateUi("Recurring changes apply to future issuances; existing allocations keep their original limits.")
-                    : translateUi("You can reclaim the unused part of this allocation, including while requests finish.")}
+                    ? translateUi(
+                        "Recurring changes apply to future issuances; existing allocations keep their original limits.",
+                      )
+                    : translateUi(
+                        "You can reclaim the unused part of this allocation, including while requests finish.",
+                      )}
                 </p>
               </fieldset>
               {mutation.isError ? (
                 <p role="alert" className="text-14 text-destructive">
-                  {mutation.error.message}{translateUi(" Retry with unchanged settings to safely resume the same allocation.")}</p>
+                  {mutation.error.message}
+                  {translateUi(
+                    " Retry with unchanged settings to safely resume the same allocation.",
+                  )}
+                </p>
               ) : null}
             </DialogBody>
             <DialogFooter className="flex-wrap">
@@ -389,7 +511,9 @@ export function AllocateDialog({
                 variant="outline"
                 disabled={mutation.isPending}
                 onClick={() => close(false)}
-              >{translateUi("Cancel")}</Button>
+              >
+                {translateUi("Cancel")}
+              </Button>
               <Button
                 type="submit"
                 variant="primary"
@@ -397,7 +521,9 @@ export function AllocateDialog({
                   !form.formState.isDirty || !form.formState.isValid || blocked
                 }
                 isLoading={mutation.isPending}
-              >{translateUi("Allocate credits")}</Button>
+              >
+                {translateUi("Allocate credits")}
+              </Button>
             </DialogFooter>
           </form>
         </Form>

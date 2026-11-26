@@ -9,6 +9,7 @@ async fn setup_approval(
     operation_name: &str,
 ) -> (ExactServiceApprovalCaller, ExactServiceApprovalResult) {
     let caller = ExactServiceApprovalCaller {
+        key_version: 0,
         delegation_restrictions: Default::default(),
         org_agent_access: None,
         assistant_group_id: None,
@@ -292,7 +293,12 @@ async fn google_corrected_contracts_drift_pending_exact_approvals_then_reapprove
                 .await
                 .unwrap();
             assert_eq!(observed.failure_code.as_deref(), Some("catalog_drift"));
-            let result = redeem(&state, &caller, &request).await;
+            let result = crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER
+                .scope(
+                    echo.client_builder.clone(),
+                    redeem(&state, &caller, &request),
+                )
+                .await;
             assert_eq!(result.state, ExactServiceApprovalState::Drifted);
         }
         let before = echo.calls.lock().unwrap().len();
@@ -345,7 +351,12 @@ async fn google_corrected_contracts_drift_pending_exact_approvals_then_reapprove
                 assert_eq!(echo.calls.lock().unwrap().len(), calls);
             }
             approve(&state, &request).await;
-            let result = redeem(&state, &caller, &request).await;
+            let result = crate::services::proxy_service::TARGET_HTTP_CLIENT_BUILDER
+                .scope(
+                    echo.client_builder.clone(),
+                    redeem(&state, &caller, &request),
+                )
+                .await;
             assert_eq!(
                 result.state,
                 ExactServiceApprovalState::Redeemed,

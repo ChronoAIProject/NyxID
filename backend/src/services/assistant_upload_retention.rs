@@ -28,7 +28,7 @@ use std::{
 pub const REFRESH_SECONDS: u64 = 5;
 const SWEEP_SECONDS: u64 = 60;
 const BATCH: i64 = 100;
-const LEASE: &str = "assistant-upload-retention";
+pub(crate) const LEASE: &str = "assistant-upload-retention";
 
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
@@ -167,7 +167,7 @@ async fn ensure_settings(db: &Database) -> AppResult<()> {
 fn projection() -> Document {
     doc! {"_id":1, "user_id":1, "conversation_id":1, "group_id":1, "collaboration_group_id":1, "origin":1,
     "content_type":1, "message_id":1, "created_at":1, "bound_at":1, "expires_at":1,
-    "first_used_turn_id":1, "first_used_conversation_id":1, "first_turn_settled_at":1}
+    "parent_attachment_id":1, "first_used_turn_id":1, "first_used_conversation_id":1, "first_turn_settled_at":1}
 }
 fn date(row: &Document, key: &str) -> Option<DateTime<Utc>> {
     row.get_datetime(key).ok().map(|v| v.to_chrono())
@@ -273,6 +273,16 @@ async fn expired(
     policy: Policy,
     now: DateTime<Utc>,
 ) -> AppResult<bool> {
+    if row.get_str("origin").ok() == Some(super::assistant_upload_service::pdf_vision::ORIGIN) {
+        let Some(parent_id) = row.get_str("parent_attachment_id").ok() else {
+            return Ok(true);
+        };
+        let parent = db.collection::<Document>(ATTACHMENTS).find_one(doc! {"_id":parent_id,"user_id":row.get_str("user_id").unwrap_or_default(),"origin":"user_upload","content_type":"application/pdf"}).projection(projection()).await?;
+        return match parent {
+            Some(parent) => Box::pin(expired(db, &parent, policy, now)).await,
+            None => Ok(true),
+        };
+    }
     if age_expired(row, policy, now) {
         return Ok(true);
     }
@@ -441,7 +451,7 @@ async fn delete_root(db: &Database, session: &mut ClientSession, row: &Document)
         .projection(doc! {"_id":1})
         .session(&mut *session)
         .await?;
-    let roots: Vec<Document> = children.stream(&mut *session).try_collect().await?;
+    let roots: Vec<Document> = crate::db::read_documents(&mut children, session).await?;
     let ids: Vec<&str> = roots
         .iter()
         .filter_map(|row| row.get_str("_id").ok())
@@ -500,6 +510,48 @@ pub async fn settled_in_session(
             Box::pin(delete_root(db, session, &row)).await?;
         }
     }
+    Ok(())
+}
+
+/// Tool-image and upload history needs a prefix covering every attachment origin.
+/// Keep this late startup addition separate from the base index sequence.
+pub(crate) async fn ensure_account_export_indexes(db: &Database) -> mongodb::error::Result<()> {
+    use futures::TryStreamExt;
+    use mongodb::{IndexModel, options::IndexOptions};
+    let collection = db.collection::<bson::Document>(ATTACHMENTS);
+    match collection.list_indexes().await {
+        Ok(mut indexes) => {
+            while let Some(index) = indexes.try_next().await? {
+                if index
+                    .keys
+                    .keys()
+                    .next()
+                    .is_some_and(|field| field == "user_id")
+                    && index
+                        .options
+                        .as_ref()
+                        .is_none_or(|options| options.partial_filter_expression.is_none())
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err(error) if matches!(error.kind.as_ref(),mongodb::error::ErrorKind::Command(command) if command.code==26) =>
+            {}
+        Err(error) => return Err(error),
+    }
+    collection
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"user_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("account_export_assistant_attachments_user_id".to_owned())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     Ok(())
 }
 
@@ -631,6 +683,8 @@ async fn sweep_batch(db: &Database, token: &LeaseToken) -> AppResult<usize> {
             deleted += 1;
         }
     }
+    // These are direct dependents: raw payload chunks OR inline PDF pages.
+    // PDF pages never have chunks; deleting the root remains one bounded level.
     let chunk_cursor = previous
         .and_then(|v| v.get_str("chunk_cursor").ok())
         .unwrap_or_default();
@@ -713,7 +767,7 @@ pub async fn sweep(db: &Database) -> AppResult<usize> {
 
 pub fn spawn(state: AppState) {
     let refresh_state = state.clone();
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(StdDuration::from_secs(REFRESH_SECONDS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -728,11 +782,13 @@ pub fn spawn(state: AppState) {
             }
         }
     });
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(StdDuration::from_secs(SWEEP_SECONDS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             if Box::pin(sweep(&state.db)).await.is_err() {
                 tracing::warn!("Upload retention sweep deferred");
             }

@@ -8,14 +8,19 @@ use crate::models::group::{COLLECTION_NAME as GROUPS, Group};
 use crate::models::role::{COLLECTION_NAME as ROLES, Role};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 
+use crate::services::audit_service::AuditActor;
+
+mod audit;
+
 /// Create a new group.
-pub async fn create_group(
+pub async fn create_group_as(
     db: &mongodb::Database,
     name: &str,
     slug: &str,
     description: Option<&str>,
     role_ids: &[String],
     parent_group_id: Option<&str>,
+    actor: &AuditActor,
 ) -> AppResult<Group> {
     crate::handlers::admin_helpers::validate_slug(slug)?;
 
@@ -54,7 +59,7 @@ pub async fn create_group(
         updated_at: now,
     };
 
-    db.collection::<Group>(GROUPS).insert_one(&group).await?;
+    audit::create(db, &group, actor).await?;
     Ok(group)
 }
 
@@ -81,7 +86,8 @@ pub async fn list_groups(db: &mongodb::Database) -> AppResult<Vec<Group>> {
 }
 
 /// Update a group.
-pub async fn update_group(
+#[allow(clippy::too_many_arguments)]
+pub async fn update_group_as(
     db: &mongodb::Database,
     group_id: &str,
     name: Option<&str>,
@@ -89,6 +95,7 @@ pub async fn update_group(
     description: Option<&str>,
     role_ids: Option<&[String]>,
     parent_group_id: Option<Option<&str>>,
+    actor: &AuditActor,
 ) -> AppResult<Group> {
     let existing = get_group(db, group_id).await?;
 
@@ -166,16 +173,16 @@ pub async fn update_group(
         }
     }
 
-    db.collection::<Group>(GROUPS)
-        .update_one(doc! { "_id": group_id }, doc! { "$set": update })
-        .await?;
-
-    get_group(db, group_id).await
+    audit::update_group(db, group_id, update, actor).await
 }
 
 /// Delete a group. Blocks deletion if the group has child groups.
 /// Removes group_id from all member users.
-pub async fn delete_group(db: &mongodb::Database, group_id: &str) -> AppResult<()> {
+pub async fn delete_group_as(
+    db: &mongodb::Database,
+    group_id: &str,
+    actor: &AuditActor,
+) -> AppResult<()> {
     let _group = get_group(db, group_id).await?;
 
     // Block deletion if the group has child groups
@@ -189,23 +196,16 @@ pub async fn delete_group(db: &mongodb::Database, group_id: &str) -> AppResult<(
         )));
     }
 
-    // Remove group from all users
-    db.collection::<User>(USERS)
-        .update_many(
-            doc! { "group_ids": group_id },
-            doc! { "$pull": { "group_ids": group_id } },
-        )
-        .await?;
-
-    db.collection::<Group>(GROUPS)
-        .delete_one(doc! { "_id": group_id })
-        .await?;
-
-    Ok(())
+    audit::delete(db, group_id, actor).await
 }
 
 /// Add a user to a group.
-pub async fn add_member(db: &mongodb::Database, group_id: &str, user_id: &str) -> AppResult<()> {
+pub async fn add_member_as(
+    db: &mongodb::Database,
+    group_id: &str,
+    user_id: &str,
+    actor: &AuditActor,
+) -> AppResult<()> {
     // Verify group exists
     let _group = get_group(db, group_id).await?;
 
@@ -220,26 +220,26 @@ pub async fn add_member(db: &mongodb::Database, group_id: &str, user_id: &str) -
         return Err(AppError::GroupMembershipExists);
     }
 
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": user_id },
-            doc! { "$addToSet": { "group_ids": group_id } },
-        )
-        .await?;
+    let joined_at = Utc::now();
+    audit::user_group(db, user_id, group_id, audit::Membership::Add, actor).await?;
 
+    // Membership succeeded; scheduled credits are best effort and never turn
+    // a successful join into an error. Discovery or admin seeding recovers.
+    crate::services::billing::schedules::eligibility::after_group_joined(
+        db, group_id, user_id, joined_at,
+    )
+    .await;
     Ok(())
 }
 
 /// Remove a user from a group.
-pub async fn remove_member(db: &mongodb::Database, group_id: &str, user_id: &str) -> AppResult<()> {
-    db.collection::<User>(USERS)
-        .update_one(
-            doc! { "_id": user_id },
-            doc! { "$pull": { "group_ids": group_id } },
-        )
-        .await?;
-
-    Ok(())
+pub async fn remove_member_as(
+    db: &mongodb::Database,
+    group_id: &str,
+    user_id: &str,
+    actor: &AuditActor,
+) -> AppResult<()> {
+    audit::user_group(db, user_id, group_id, audit::Membership::Remove, actor).await
 }
 
 /// Get all members of a group.
@@ -548,5 +548,74 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(self_err, AppError::CircularGroupHierarchy));
+    }
+}
+
+#[cfg(test)]
+mod audit_tests;
+
+// Fixture helpers use the same preparation and transactional mutation.
+#[cfg(test)]
+pub async fn create_group(
+    db: &mongodb::Database,
+    name: &str,
+    slug: &str,
+    description: Option<&str>,
+    role_ids: &[String],
+    parent_group_id: Option<&str>,
+) -> AppResult<Group> {
+    create_group_as(
+        db,
+        name,
+        slug,
+        description,
+        role_ids,
+        parent_group_id,
+        &fixture_actor(),
+    )
+    .await
+}
+#[cfg(test)]
+pub async fn update_group(
+    db: &mongodb::Database,
+    group_id: &str,
+    name: Option<&str>,
+    slug: Option<&str>,
+    description: Option<&str>,
+    role_ids: Option<&[String]>,
+    parent_group_id: Option<Option<&str>>,
+) -> AppResult<Group> {
+    update_group_as(
+        db,
+        group_id,
+        name,
+        slug,
+        description,
+        role_ids,
+        parent_group_id,
+        &fixture_actor(),
+    )
+    .await
+}
+#[cfg(test)]
+pub async fn delete_group(db: &mongodb::Database, group_id: &str) -> AppResult<()> {
+    delete_group_as(db, group_id, &fixture_actor()).await
+}
+#[cfg(test)]
+pub async fn add_member(db: &mongodb::Database, group_id: &str, user_id: &str) -> AppResult<()> {
+    add_member_as(db, group_id, user_id, &fixture_actor()).await
+}
+#[cfg(test)]
+pub async fn remove_member(db: &mongodb::Database, group_id: &str, user_id: &str) -> AppResult<()> {
+    remove_member_as(db, group_id, user_id, &fixture_actor()).await
+}
+#[cfg(test)]
+fn fixture_actor() -> AuditActor {
+    AuditActor {
+        user_id: Uuid::nil().to_string(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
     }
 }

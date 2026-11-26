@@ -34,6 +34,7 @@ transient interactions, rather than workspace destinations.
 | Content / Machines, MachineDetail, MachinePolicy, MachineActivity                    | Inventory, detail, owner policy, updates, saved logins and machine activity.                                                               |
 | Content / AgentMachines, AgentMachineEditor                                          | Guarded per-agent machine access.                                                                                                          |
 | Content / Plugins, PluginConnections, Services, ServiceSetup, ConnectionHistoryDetail | Plugins, connections, hosted service setup and one recorded connection change.                                                            |
+| Content / SshTerminal | Active certificate-mode SSH terminal opened from a connection, with an explicit principal picker when needed. `nyxid://ssh/:serviceId/terminal?principal=…` selects the connection; leaving closes the socket. |
 | Content / Agents, AgentCreate, AgentDetail, AgentProfileEdit, GroupEditor            | Agents, crews and their guarded editors; each agent profile value is edited on its own page.                                              |
 | Content / AgentSkills, SkillDetail, SkillVersions, SkillHistory, AuthoredSkillReview | Read-only skill files/history, exact version pinning and owner publication decisions.                                                      |
 | Content / Activity, ActivityDetail, ActiveGrants                                     | Incoming actionable approvals, date-grouped history, detail and the existing grants view. Canonical approval links still address Activity. |
@@ -60,8 +61,16 @@ actions (Scan QR code and Terminal login code) precede Workspace. Workspace
 contains Notifications with its unread count (only while both the
 `assistant:notifications` and `assistant:nyxagent-engine` flags are on; the
 count turns amber while a decision waits), Automations, Machines, Plugins,
-Activity with its live pending count, and Create new agent. Private chats also
-show the same bell in their header. Thread, crew, channel-bot and Recents rows
+Activity with its live pending count, and Create new agent. Private chats group
+New chat and More in the top bar. More grows that measured capsule into an
+anchored options bubble over the existing chat, with Chat details, Notifications
+when enabled, Settings, and Voice preferences during a call. Crew options grow
+from their single-button capsule and retain the existing Settings destination.
+Both shrink back to their source on outside tap, Android Back or accessibility
+escape; reduced motion changes size immediately. Accessibility focus enters the
+options and returns to the trigger on dismissal. Selected destinations wait for
+the bubble and native modal to dismiss. The Notifications row carries the unread count. Thread, crew,
+channel-bot and Recents rows
 carry the unread counts the one notification summary attributes to them.
 Opening a thread or crew marks its notifications read once it has stayed in
 front for 1.5 seconds. A notification row follows the server's canonical
@@ -122,12 +131,32 @@ account state and unmounts editors. `navigationHierarchy.test.ts`,
 `workspaceChatNavigation.test.ts` and the surface/guard tests cover route,
 restoration, transition and dismissal behavior.
 
-At window widths of at least 768pt, Settings and quick-action sheets use a
-centered card up to 720×860pt with 24pt plus safe-area margins. Narrow windows
-retain the bottom sheet. The measured host shrinks above the keyboard, retaining
+At window widths of at least 768pt without a corner status column, Settings and
+quick-action sheets use a centered card up to 720×860pt with 24pt plus safe-area
+margins. Narrow windows and both Duo postures retain the bottom sheet. Duo
+sheets start at the leading edge, end 8pt before the quick rail's column, and
+reach the bottom with no gap or rounded bottom corners. Device classification
+uses the full window so the keyboard cannot switch the Duo to an iPad card.
+The measured host shrinks above the keyboard, retaining
 the same sheet navigator and guarded edits; rotation does not replay entrance
 animation. Settings content is centered up to 720pt and row wrapping follows
 measured row width and Dynamic Type.
+
+The Duo rail rests 8pt below the idle status cluster (160pt folded, 108pt
+unfolded). Native status-frame will-change and safe-area events drive its
+displacement; did-change/foreground events read the current frame. Actual
+camera-ready, recognizer audio-start/end and media capture/teardown events
+also move it while NyxID uses the camera/microphone. iOS has no public privacy-
+light event; capture lifecycle events cover that case without polling, UI
+timers or route-open guesses. After capture ends and the system column settles,
+the rail returns to idle. The extra offset is capped at 36pt. Folded, its active
+default stack starts at 196pt and ends at the collapsed composer's 640pt baseline, accounting
+for the same 4pt page padding above the bottom safe area; all five shortcuts
+fit without scrolling. Physical-device acceptance:
+open Settings folded, unfold with it open, and dismiss/reopen unfolded; the
+drawer stays attached to the bottom. Open QR scanning repeatedly and verify
+the expanded camera indicator, clock and Wi-Fi never cover the full-screen
+capsule. The shortcuts scroll within the space left above the chat controls.
 
 Accessibility exposure follows the shell's settled visual endpoint. While
 navigation is open the slab is hidden except for Close navigation; focus moves

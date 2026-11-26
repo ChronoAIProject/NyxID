@@ -36,6 +36,9 @@ impl ProxyActivity {
 tokio::task_local! { pub static PROXY_ACTIVITY: ProxyActivity; }
 tokio::task_local! { pub static DECISION_PENDING: std::sync::Arc<std::sync::atomic::AtomicBool>; }
 
+#[cfg(test)]
+tokio::task_local! { pub(crate) static PROXY_FINALIZATIONS: std::sync::Arc<std::sync::atomic::AtomicUsize>; }
+
 pub fn execution(chat: &ChatAuthority) -> Option<ActivityExecution> {
     Some(ActivityExecution {
         machine: None,
@@ -47,6 +50,52 @@ pub fn execution(chat: &ChatAuthority) -> Option<ActivityExecution> {
     })
 }
 
+/// Request-local state is published only after the owning transaction commits.
+pub(crate) struct ActivityBinding {
+    proxy: bool,
+    executing: bool,
+}
+impl ActivityBinding {
+    fn mark_proxy(&self) {
+        if self.proxy {
+            let _ = PROXY_ACTIVITY
+                .try_with(|a| a.used.store(true, std::sync::atomic::Ordering::Relaxed));
+        }
+    }
+    fn mark_decision(&self) {
+        let _ = DECISION_PENDING.try_with(|pending| {
+            pending.store(!self.executing, std::sync::atomic::Ordering::Relaxed)
+        });
+    }
+    pub(crate) fn publish_after_commit(self) {
+        self.mark_proxy();
+        self.mark_decision();
+    }
+}
+
+/// Persist the binding without publishing any request-local flags. The caller
+/// publishes the returned receipt after committing its transaction.
+pub(crate) async fn bind_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    kind: &str,
+    id: &str,
+    executing: bool,
+    session: &mut ClientSession,
+) -> AppResult<Option<ActivityBinding>> {
+    bind_inner(db, chat, kind, id, executing, Some(session), false, false).await
+}
+
+pub(crate) async fn bind_meta_in_session(
+    db: &Database,
+    chat: &ChatAuthority,
+    kind: &str,
+    id: &str,
+    session: &mut ClientSession,
+) -> AppResult<Option<ActivityBinding>> {
+    bind_inner(db, chat, kind, id, false, Some(session), false, true).await
+}
+
 /// Called only at trusted gates, after their owner/key/turn checks. The update
 /// shares their transaction when present, including reused pending cards.
 pub async fn bind(
@@ -55,15 +104,36 @@ pub async fn bind(
     kind: &str,
     id: &str,
     executing: bool,
-    mut session: Option<&mut ClientSession>,
+    session: Option<&mut ClientSession>,
 ) -> AppResult<()> {
+    bind_inner(db, chat, kind, id, executing, session, true, false)
+        .await
+        .map(|_| ())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn bind_inner(
+    db: &Database,
+    chat: &ChatAuthority,
+    kind: &str,
+    id: &str,
+    executing: bool,
+    mut session: Option<&mut ClientSession>,
+    publish_flags: bool,
+    require_match: bool,
+) -> AppResult<Option<ActivityBinding>> {
     let Some(execution) = execution(chat) else {
-        return Ok(());
+        return Ok(None);
+    };
+    let binding = ActivityBinding {
+        proxy: super::machine_activity_service::activity_id().is_none(),
+        executing,
     };
     let conversations = db.collection::<Document>(CONVERSATIONS);
-    if super::machine_activity_service::activity_id().is_none() {
-        let _ =
-            PROXY_ACTIVITY.try_with(|a| a.used.store(true, std::sync::atomic::Ordering::Relaxed));
+    if binding.proxy {
+        if publish_flags {
+            binding.mark_proxy();
+        }
         let insert = conversations.update_one(
             doc! {"_id": &chat.conversation_id, "user_id": &chat.user_id,
             "credential_api_key_id": &chat.api_key_id, "active_turn.turn_id": &execution.turn_id,
@@ -98,8 +168,9 @@ pub async fn bind(
             }
         }
     }
-    let _ = DECISION_PENDING
-        .try_with(|pending| pending.store(!executing, std::sync::atomic::Ordering::Relaxed));
+    if publish_flags {
+        binding.mark_decision();
+    }
     let decision = ActivityDecision {
         kind: kind.into(),
         id: id.into(),
@@ -112,15 +183,14 @@ pub async fn bind(
             "active_turn.activities.id": &execution.activity_id},
         doc! {"$set": {"active_turn.activities.$.decision": bson::to_bson(&decision).expect("decision metadata")}},
     );
-    match session {
-        Some(session) => {
-            update.session(session).await?;
-        }
-        None => {
-            update.await?;
-        }
+    let changed = match session {
+        Some(session) => update.session(session).await?,
+        None => update.await?,
+    };
+    if require_match && changed.matched_count != 1 {
+        return Err(crate::errors::AppError::AssistantTurnRequired);
     }
-    Ok(())
+    Ok(Some(binding))
 }
 
 pub enum Completion {
@@ -576,6 +646,9 @@ pub async fn proxy_response(
     connect: bool,
     response: AppResult<axum::response::Response>,
 ) -> AppResult<axum::response::Response> {
+    #[cfg(test)]
+    let _ = PROXY_FINALIZATIONS
+        .try_with(|count| count.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let response = match response {
         Ok(response) => response,
         Err(error) => {

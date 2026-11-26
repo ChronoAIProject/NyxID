@@ -1,5 +1,6 @@
 import { composerInputMinHeight } from "./composerGeometry";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "./assistantHookTestHarness";
@@ -43,6 +44,7 @@ function elements(root: Element): Element[] {
 function setup(
   initial: Record<string, unknown> = {},
   platform: "android" | "ios" = "android",
+  fontScale = 1,
 ) {
   let maxHeight = 120;
   const writes: string[] = [];
@@ -95,7 +97,7 @@ function setup(
       }),
     },
     "react-native": {
-      useWindowDimensions: () => ({ fontScale: 1 }),
+      useWindowDimensions: () => ({ fontScale }),
       Platform: { OS: platform },
       Pressable: "Pressable",
       ScrollView: "ScrollView",
@@ -463,3 +465,226 @@ test("the empty iOS placeholder stays one visual line and cannot enlarge the nor
   assert.equal(placeholder.props.pointerEvents, "none");
   f.harness.unmount();
 });
+
+test("the composer field and its placeholder line scale together at every Dynamic Type size", () => {
+  // 3.12 is iOS's largest accessibility size for body text.
+  for (const fontScale of [1, 1.35, 2, 3.12]) {
+    const empty = setup(
+      { value: "", placeholder: "Message NyxBot" },
+      "ios",
+      fontScale,
+    );
+    const field = inputStyle(empty.input());
+    const placeholder = elements(empty.harness.flush()).find(
+      (n) => n.type === "Text" && n.props.children === "Message NyxBot",
+    )!;
+    const line = Object.assign({}, ...[placeholder.props.style].flat(Infinity));
+    // RN scales lineHeight by the same multiplier as fontSize.
+    assert.equal(field.height, composerInputMinHeight(fontScale));
+    assert.ok(
+      field.height >=
+        line.top + line.lineHeight * fontScale + field.paddingBottom,
+      `placeholder fits the empty field at ${fontScale}x`,
+    );
+    assert.equal(line.lineHeight, field.lineHeight);
+    assert.equal(line.fontSize, field.fontSize);
+    empty.harness.unmount();
+    const typed = setup({ value: "Draft reply" }, "ios", fontScale);
+    const typedField = inputStyle(typed.input());
+    assert.equal(typedField.height, undefined, "typed text sizes the field");
+    assert.equal(typedField.minHeight, composerInputMinHeight(fontScale));
+    typed.harness.unmount();
+  }
+  // P9: retain the base native paragraph identity outside the Duo.
+  const source = readFileSync(
+    new URL("./AssistantMentionInput.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /DynamicTypeText as Text/);
+  assert.match(source, /import \{[^}]*\bText\b[^}]*\} from "react-native"/);
+});
+
+test("a whitespace-only draft collapses once unfocused, keeping its whitespace, cursor and one native input", () => {
+  const layouts: any[] = [];
+  const view = setup(
+    {
+      value: "",
+      placeholder: "Message NyxBot",
+      compactWhenIdle: true,
+      renderActions: (mention: Element, layout: any) => {
+        layouts.push(layout);
+        return { type: "Toolbar", props: { children: [mention] } };
+      },
+    },
+    "ios",
+  );
+  const compact = () => layouts.at(-1).compact;
+  const prompt = () =>
+    elements(view.harness.flush()).some(
+      (n) => n.type === "Text" && n.props.children === "Message NyxBot",
+    );
+  const key = view.input().key;
+  view.focus();
+  view.input().props.onChangeText("  \n\n ");
+  view.input().props.onSelectionChange({
+    nativeEvent: { selection: { start: 3, end: 3 } },
+  });
+  view.harness.render();
+  assert.equal(compact(), false, "focused: two rows");
+  view.input().props.onBlur();
+  view.harness.flush();
+  assert.equal(compact(), true, "unfocused with only whitespace: one row");
+  assert.equal(view.input().props.value, "  \n\n ", "the draft is not trimmed");
+  assert.equal(
+    view.writes.at(-1),
+    "  \n\n ",
+    "no write discards the whitespace",
+  );
+  // One line: the field is pinned and the prompt shows over it.
+  assert.equal(inputStyle(view.input()).height, composerInputMinHeight(1));
+  assert.ok(prompt());
+  view.focus();
+  assert.equal(compact(), false, "focus reopens two rows");
+  assert.equal(view.input().key, key, "the same native input keeps focus");
+  assert.equal(view.input().props.value, "  \n\n ");
+  assert.equal(prompt(), false);
+  // Any non-whitespace text keeps two rows when unfocused.
+  view.input().props.onChangeText("  x ");
+  view.input().props.onBlur();
+  view.harness.flush();
+  assert.equal(compact(), false);
+  view.harness.unmount();
+  // Attachments, uploads and dictation reach the input as compactWhenIdle
+  // false: two rows even for an empty or whitespace draft.
+  for (const value of ["", " \n"]) {
+    const busy = setup({
+      value,
+      compactWhenIdle: false,
+      renderActions: (mention: Element, layout: any) => {
+        layouts.push(layout);
+        return { type: "Toolbar", props: { children: [mention] } };
+      },
+    });
+    assert.equal(layouts.at(-1).compact, false);
+    busy.harness.unmount();
+  }
+});
+
+test("the collapse rule reads trimmed text only while unfocused and idle", async () => {
+  const { composerCompact } = await import("./composerCompact");
+  assert.equal(composerCompact(true, false, ""), true);
+  assert.equal(composerCompact(true, false, " \n\t "), true);
+  assert.equal(composerCompact(true, true, " "), false, "focused");
+  assert.equal(composerCompact(true, false, " a "), false, "text");
+  assert.equal(
+    composerCompact(false, false, " "),
+    false,
+    "attachments, uploads or dictation",
+  );
+});
+
+test("an idle phone composer is one row until it is focused or holds a draft, keeping one native input", () => {
+  const layouts: any[] = [];
+  const view = setup(
+    {
+      value: "",
+      placeholder: "Message NyxBot",
+      compactWhenIdle: true,
+      renderActions: (mention: Element, layout: any) => {
+        layouts.push(layout);
+        return { type: "Toolbar", props: { children: [mention] } };
+      },
+    },
+    "ios",
+  );
+  const compact = () => layouts.at(-1).compact;
+  const frame = () =>
+    Object.assign(
+      {},
+      ...[
+        elements(view.harness.flush()).find(
+          (n) => n.props.testID === "chat-composer-input-frame",
+        )!.props.style,
+      ]
+        .flat(Infinity)
+        .filter(Boolean),
+    );
+  const placeholder = () =>
+    Object.assign(
+      {},
+      ...[
+        elements(view.harness.flush()).find(
+          (n) => n.type === "Text" && n.props.children === "Message NyxBot",
+        )!.props.style,
+      ]
+        .flat(Infinity)
+        .filter(Boolean),
+    );
+  const key = view.input().key;
+  assert.equal(compact(), true, "unfocused and empty");
+  // Measured toolbar ends clear the text: [+] … [mic][send].
+  layouts.at(-1).onLeadingWidth(44);
+  layouts.at(-1).onTrailingWidth(132);
+  view.harness.flush();
+  assert.equal(frame().paddingLeft, 48);
+  assert.equal(frame().paddingRight, 136);
+  assert.equal(placeholder().left, 48);
+  assert.equal(placeholder().right, 136);
+  view.focus();
+  assert.equal(compact(), false, "focus opens the two-row layout");
+  assert.equal(frame().paddingLeft, undefined);
+  assert.equal(frame().paddingHorizontal, 12);
+  view.input().props.onBlur();
+  view.harness.flush();
+  assert.equal(compact(), true);
+  view.input().props.onChangeText("Draft");
+  view.harness.render();
+  assert.equal(compact(), false, "a draft is never collapsed");
+  view.input().props.onChangeText("");
+  view.harness.render();
+  assert.equal(compact(), true);
+  assert.equal(view.input().key, key, "focus, cursor and text keep one input");
+  view.harness.unmount();
+  const optedOut = setup({
+    value: "",
+    compactWhenIdle: false,
+    renderActions: (mention: Element, layout: any) => {
+      layouts.push(layout);
+      return { type: "Toolbar", props: { children: [mention] } };
+    },
+  });
+  assert.equal(
+    layouts.at(-1).compact,
+    false,
+    "an explicit active-layout override can keep two rows",
+  );
+  optedOut.harness.unmount();
+});
+
+for (const platform of ["ios", "android"] as const) {
+  test(`${platform}: idle row expands on focus and preserves meaningful drafts and native input`, () => {
+    let compact = false;
+    const view = setup(
+      {
+        value: " ",
+        compactWhenIdle: true,
+        renderActions: (_mention: Element, layout: { compact: boolean }) => {
+          compact = layout.compact;
+          return { type: "Toolbar", props: {} };
+        },
+      },
+      platform,
+    );
+    const key = view.input().key;
+    assert.equal(compact, true);
+    view.focus();
+    assert.equal(compact, false);
+    view.input().props.onChangeText("meaningful draft");
+    view.input().props.onBlur();
+    view.harness.render();
+    assert.equal(compact, false);
+    assert.equal(view.props.value, "meaningful draft");
+    assert.equal(view.input().key, key);
+    view.harness.unmount();
+  });
+}

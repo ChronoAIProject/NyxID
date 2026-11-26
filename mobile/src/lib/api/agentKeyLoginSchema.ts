@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 import { authDevicePreviewSchema } from "./authDeviceSchema";
 import { normalizeAuthDeviceUserCode } from "../../features/auth/deviceUserCode";
@@ -69,12 +70,17 @@ export const futureExpirySchema = z
     (value) =>
       !value ||
       (Number.isFinite(Date.parse(value)) && Date.parse(value) > Date.now()),
-    "Expiry must be a future date",
+    {
+      get error() {
+        return () => translateApp("Expiry must be a future date");
+      },
+    },
   );
 export const newAgentKeySchema = z.object({
   kind: z.literal("new"),
   name: z.string().trim().min(1).max(64),
-  scopes: z
+    get scopes() {
+      return z
     .string()
     .refine(
       (value) =>
@@ -84,8 +90,10 @@ export const newAgentKeySchema = z.object({
           .every((scope) =>
             (agentKeyScopes as readonly string[]).includes(scope),
           ),
-      "Select valid scopes",
-    ),
+          { error: () => translateApp("Select valid scopes",
+    ) },
+    );
+    },
   allowed_service_ids: z.array(z.string()).default([]),
   allowed_node_ids: z.array(z.string()).default([]),
   allow_all_services: z.boolean().default(false),

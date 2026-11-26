@@ -1,3 +1,4 @@
+import { translateApp } from "../../i18n/appTranslation";
 import { formatRelativeTimeFromMs } from "../../lib/time";
 import {
   isNotificationKind,
@@ -9,15 +10,47 @@ import {
 } from "./notificationContracts";
 
 export const NOTIFICATION_KIND_LABEL: Record<NotificationKind, string> = {
-  automation_result: "Automation finished",
-  automation_problem: "Automation needs attention",
-  needs_decision: "Needs your decision",
-  agent_update: "Agent update",
-  chat_update: "Chat update",
-  group_mention: "Mentioned you",
+  get automation_result() {
+    return translateApp("Automation finished");
+  },
+  get automation_problem() {
+    return translateApp("Automation needs attention");
+  },
+  get needs_decision() {
+    return translateApp("Needs your decision");
+  },
+  get agent_update() {
+    return translateApp("Agent update");
+  },
+  get chat_update() {
+    return translateApp("Chat update");
+  },
+  get group_mention() {
+    return translateApp("Mentioned you");
+  },
 };
 
 export type NotificationTone = "default" | "warning" | "danger" | "success";
+
+/** Search the same human-readable content the feed presents, including identities. */
+export function notificationMatchesSearch(item: AssistantNotification, query: string): boolean {
+  const normalize = (value: string) => value.normalize("NFKC").toLowerCase();
+  const terms = normalize(query).trim().split(/\s+/u).filter(Boolean);
+  if (!terms.length) return true;
+  const text = normalize([
+    notificationTitle(item),
+    notificationSentence(item).text,
+    item.preview,
+    item.source.label,
+    item.actor?.name,
+    item.actor?.display_name,
+    ...(item.participants ?? []).flatMap(actor => [actor.name, actor.display_name]),
+    notificationContextLabel(item),
+    item.platform,
+  ].filter(Boolean).join(" "));
+  return terms.every(term => text.includes(term));
+}
+
 export function notificationTone(kind: NotificationKind): NotificationTone {
   switch (kind) {
     case "automation_problem":
@@ -35,11 +68,12 @@ export function notificationBellLabel(
   unread: number,
   needsDecision: number,
 ): string {
-  let label = "Notifications";
-  if (unread > 0 || needsDecision > 0) label += `, ${unread} unread`;
-  if (needsDecision > 0)
-    label += `, ${needsDecision} ${needsDecision === 1 ? "needs" : "need"} your decision`;
-  return label;
+  return translateApp(
+    needsDecision === 1 ? "Notifications, {{unread}} unread, {{count}} needs your decision"
+      : needsDecision > 1 ? "Notifications, {{unread}} unread, {{count}} need your decision"
+      : unread > 0 ? "Notifications, {{unread}} unread" : "Notifications",
+    { unread, count: needsDecision },
+  );
 }
 
 export const NOTIFICATION_BADGE_CAP = 99;
@@ -54,7 +88,7 @@ export function notificationBadge(unread: number): string {
 /** Coalesced rows say how many updates arrived since the row was opened. */
 export function notificationCountLabel(count: number): string | null {
   return Number.isFinite(count) && count > 1
-    ? `${Math.floor(count)} new`
+    ? translateApp("{{count}} new", { count: Math.floor(count) })
     : null;
 }
 
@@ -91,8 +125,8 @@ export function notificationAccessibilityLabel(
   if (time) parts.push(time);
   const count = notificationCountLabel(item.count);
   if (count) parts.push(count);
-  if (notificationPending(item)) parts.push("needs your decision");
-  if (!item.read) parts.push("unread");
+  if (notificationPending(item)) parts.push(translateApp("needs your decision"));
+  if (!item.read) parts.push(translateApp("unread"));
   return parts.join(", ");
 }
 
@@ -351,33 +385,33 @@ export function notificationSentence(item: AssistantNotification) {
     case "automation_problem":
       action =
         item.outcome === "paused"
-          ? "was paused"
+          ? translateApp("was paused")
           : item.outcome === "delivery_failed" ||
               item.reason === "result_delivery_failed"
-            ? "could not deliver its result"
+            ? translateApp("could not deliver its result")
             : item.outcome === "skipped"
-              ? "was skipped"
+              ? translateApp("was skipped")
               : "failed";
       showTarget = false;
       break;
     case "needs_decision":
       action = item.resolved
-        ? "closed a decision in"
-        : "needs your decision in";
+        ? translateApp("closed a decision in")
+        : translateApp("needs your decision in");
       break;
     case "agent_update":
       action =
         item.outcome === "failed"
-          ? "could not finish in"
+          ? translateApp("could not finish in")
           : item.actor?.kind === "specialist" && !item.source.group_id
-            ? "reported back in"
-            : "replied in";
+            ? translateApp("reported back in")
+            : translateApp("replied in");
       break;
     case "chat_update":
-      action = "replied in";
+      action = translateApp("replied in");
       break;
     case "group_mention":
-      action = "mentioned you in";
+      action = translateApp("mentioned you in");
       break;
   }
   // Old servers have no actor field. Preserve their complete title during rollout.
@@ -391,8 +425,10 @@ export function notificationSentence(item: AssistantNotification) {
       : "";
   const shownTarget = showTarget ? target : "";
   if (!shownTarget && item.kind === "needs_decision")
-    action = item.resolved ? "closed a decision" : "needs your decision";
-  const suffix = platform ? `on ${platform}` : "";
+    action = item.resolved ? translateApp("closed a decision")
+      : translateApp("needs your decision");
+  const suffix = platform ? translateApp("on {{platform}}", { platform: platform })
+    : "";
   return {
     actor,
     action,

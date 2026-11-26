@@ -36,7 +36,10 @@ pub use admission::Admission;
 pub use node_routes::verify_node_route;
 pub use pools::pinned_pool_member;
 mod bootstrap;
+mod card_binding;
 pub use bootstrap::{begin_model_attempt, finish_model_attempt};
+#[cfg(test)]
+pub(crate) use card_binding::publish as publish_card_binding;
 mod authority;
 pub use authority::{connection_binding, org_card_binding};
 mod availability;
@@ -881,7 +884,8 @@ async fn check_inner(
         let gate = if resource_replay && acknowledgement.is_some() {
             acks::Gate::Ask(acks::ConfirmationNeed { org_instruction: if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }, class: facts.class, mode: None, webhook: false, policy: true, delegation: false })
         } else { acks::confirmation_needed_with_org(db, chat, facts,
-            org && !model_consent && !instruction_covered && !org_guest_setup,
+            (org && !model_consent && !instruction_covered && !org_guest_setup)
+                || operation.get("attachment_upload").is_some(),
             if instruction_required { acks::OrgInstructionRequirement::Required } else { acks::OrgInstructionRequirement::None }).await? };
         let gate = super::execution_permission_dispatch::risk_gate(chat, connection_id, gate);
         if gate.ask().is_some() {
@@ -897,13 +901,13 @@ async fn check_inner(
             if refusal["error"] == "acknowledgement_required"
                 && let Some(id) = refusal["acknowledgement_id"].as_str()
             {
-                db.collection::<Document>(COLLECTION).update_one(doc! {"_id": id}, doc! {"$setOnInsert": {
+                card_binding::publish(db,chat,id,doc! {
                             "kind": "card_binding", "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                             "api_key_id": &chat.api_key_id, "turn_id": &chat.turn_id, "connection_id": connection_id,
                             "owner_id": effective_owner, "catalog_service_id": &service.catalog_service_id,
                             "binding": &approval, "operation": bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
                             "expires_at": bson::DateTime::from_chrono(Utc::now() + Duration::minutes(25)),
-                        }}).upsert(true).await?;
+                        }).await?;
             }
             let mut refusal = refusal;
             if instruction_required {
@@ -965,13 +969,13 @@ async fn attach_org_offer(
     let refusal =
         super::assistant_connection_service::org_refusal(db, chat, service, refusal).await?;
     if let Some(id) = refusal["acknowledgement_id"].as_str() {
-        db.collection::<Document>(COLLECTION).update_one(doc! {"_id":id},doc! {"$setOnInsert":{
+        card_binding::publish(db,chat,id,doc! {
             "kind":"card_binding","user_id":&chat.user_id,"conversation_id":&chat.conversation_id,
             "api_key_id":&chat.api_key_id,"turn_id":&chat.turn_id,"connection_id":&service.id,
             "owner_id":&service.user_id,"catalog_service_id":&service.catalog_service_id,
             "binding":binding,"operation":bson::to_bson(operation).map_err(|_| AppError::Internal("Operation binding failed".into()))?,
             "expires_at":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(25))
-        }}).upsert(true).await?;
+        }).await?;
     }
     Ok(refusal)
 }
@@ -1011,7 +1015,7 @@ fn execution_projection_digest(
         "auth_key_name": target.auth_key_name, "auth_scheme": target.service.auth_scheme,
         "custom_user_agent": target.service.custom_user_agent, "category": target.service.service_category,
         "requires_user_credential": target.service.requires_user_credential, "credential": credential.then(|| held_credential_fingerprint(target.credential.as_bytes())),
-        "catalog_headers": target.catalog_default_headers, "connection_headers": target.user_service_default_headers,
+        "catalog_headers": target.catalog_header_binding(std::convert::identity), "connection_headers": target.user_service_default_headers,
         "identity": [target.service.identity_propagation_mode.clone(), target.service.delegation_token_scope.clone()],
         "identity_fields": [target.service.identity_include_user_id, target.service.identity_include_email, target.service.identity_include_name,
             target.service.forward_access_token, target.service.inject_delegation_token],

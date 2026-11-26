@@ -1,0 +1,19 @@
+{
+  "POST /api/v1/sandboxes/sandbox_1/pause { \"example\": true }": "1e476596632a3fe17d6d9557734553db70b6055c40ac6cab4fca082b50082fc9",
+  "DELETE /api/v1/sandboxes/sandbox_1 ": "1229708775796364c2bafa18c0219488592c75e0190aec74a8bb009118729e22",
+  "POST /api/v1/agents/agent_1/stop {}": "64d07a7d635dcaaa174d6819c5b145fe39ee33b99ab4ef18bab39aaf1a8231e3",
+  "DELETE /api/v1/agents/agent_1 ": "35113ae7e938a2ce8677c9ff1b835b2c4d48c2773b6a992ad601e58b6aa8f8f0",
+  "POST /api/v1/agents/agent_1/files {\"path\":\"example.txt\",\"content_base64\":\"\"}": "ee10b58b8cc39dc0f8dc8d0c8f073af8964cbbbf35de51dc238c65a882012cea",
+  "POST /api/v2/agents/agent_1/responses/response_1/controls {\"turn_sequence\":1,\"expected_agent_revision\":1,\"command\":{\"type\":\"cancel\"}}": "62b6268db34a48523889ae351e58d6dcc5bd201cca4e593f81a94f188538c282",
+  "POST /api/v1/agents { \"name\": \"example\", \"sandbox_id\": \"sandbox_1\" }": "55b5dbb38364c6dea0799a5761aea223d8e9b9c287799e5ede1c17091eebdeda",
+  "POST /api/v1/agents { \"name\": \"example\", \"workspace_id\": \"workspace_1\" }": "4adddb610a7c78e7368857fa088d7483df6ffe22b9c54de20d9077a0ce4af25f",
+  "POST /api/v1/workspaces/workspace_1/agents { \"name\": \"example\" }": "ee70c5c4cac34ce20f1844ff3ed39d1c3c0ff4d3bb7cdd76f0a81aa61d4e3383",
+  "POST /api/v1/sandboxes/sandbox_1/revive {}": "3a5f010c799255a1a9606d5f2545a662d86a8fefffb01534417f9fcf1e7778d7",
+  "POST /api/v1/sandboxes/sandbox_1/workspaces {}": "3749b40596b11d7df203a948cbb9f29633dfe7f68154869d69baeb884f101074",
+  "POST /api/v1/sandboxes/sandbox_1/workspaces/inline {}": "f5b59224b4eaec49e48dbfdd3f4862756f7fb9534f34c83746365ad7948b3ac0",
+  "POST /api/v1/agents/agent_1/input {}": "e9f17ec3b6edb530e3509012560e1a1379edadda642f588ee724513e78bf65c7",
+  "POST /api/v1/responses {\"conversation\":\"agent_1\",\"stream\":true}": "a1012764c4a0f3b28e02c6a00e32f4221f77472051b92ae3976176ea32347c2f",
+  "POST /api/v2/responses {\"conversation\":\"agent_1\",\"stream\":true}": "640f946799b9fc71d1aeffcb59e92c02068229f03c4b48ce12dfdc474ae0fb48",
+  "POST /api/v2/agents/agent_1/responses {\"stream\":true}": "8bca94d0426a0dbb3f40cf298cc0a56c6cb3b8b3579d94190fef6bbb33f04aaa",
+  "POST /api/v2/agents/agent_1/responses/response_1/interrupt {\"turn_sequence\":1,\"expected_agent_revision\":1,\"text\":\"example\"}": "51d85db76c31ca7a0ab9630c3aeda862eb9b45eebab5e313f1d74145be08a461"
+}

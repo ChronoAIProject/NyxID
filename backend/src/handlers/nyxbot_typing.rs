@@ -33,23 +33,25 @@ pub(crate) fn start(
     crate::services::assistant_checking_notice::destination(row)?;
     let state = state.clone();
     let row = row.clone();
-    Some(tokio::spawn(async move {
-        let Ok(Some(prepared)) = resolve(&state, &row, &event_id).await else {
-            return;
-        };
-        let mut interval = tokio::time::interval(Duration::from_secs(4));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            interval.tick().await;
-            if !live(&state, &row, &event_id, &prepared.channel)
-                .await
-                .unwrap_or(false)
-                || !prepared.destination.send(&state).await.unwrap_or(false)
-            {
-                break;
+    Some(
+        crate::services::shutdown::process().spawn_worker(async move {
+            let Ok(Some(prepared)) = resolve(&state, &row, &event_id).await else {
+                return;
+            };
+            let mut interval = tokio::time::interval(Duration::from_secs(4));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if !live(&state, &row, &event_id, &prepared.channel)
+                    .await
+                    .unwrap_or(false)
+                    || !prepared.destination.send(&state).await.unwrap_or(false)
+                {
+                    break;
+                }
             }
-        }
-    }))
+        }),
+    )
 }
 
 fn event_filter(row: &AssistantConversation, event_id: &str) -> bson::Document {
@@ -84,7 +86,12 @@ async fn resolve(
     let destination = if channel.transport == "gateway" {
         let context = match event.event_context_ciphertext.as_ref() {
             Some(bytes) => {
-                let plaintext = Zeroizing::new(state.encryption_keys.decrypt(bytes).await?);
+                let plaintext = crate::services::nyxbot_event_record::event_context(
+                    &state.encryption_keys,
+                    &event,
+                    bytes,
+                )
+                .await?;
                 serde_json::from_slice::<Value>(&plaintext)
                     .map_err(|_| AppError::OAuthAuthorityUnavailable)?
             }
@@ -128,9 +135,7 @@ async fn resolve(
             };
             let bot = channel_bot_service::get_bot(&state.db, &channel.channel_bot_id).await?;
             Destination::Telegram {
-                token: Zeroizing::new(
-                    channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?,
-                ),
+                token: channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?,
                 adapter: crate::services::channel_adapters::resolve_adapter(
                     &channel.platform,
                     &state.token_exchange_cache,

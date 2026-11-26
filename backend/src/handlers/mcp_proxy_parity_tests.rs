@@ -189,6 +189,21 @@ async fn mcp_proxy_caller_bearer_matches_rest_for_each_auth_type_direct_and_node
         },
     )
     .unwrap();
+    f.state
+        .db
+        .collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.catalog},
+            doc! {"$set": {"forward_access_token": true}},
+        )
+        .await
+        .unwrap();
+    crate::services::caller_token_approval::bootstrap(
+        &f.state.db,
+        f.state.audit_chain_hmac_key.as_slice(),
+    )
+    .await
+    .unwrap();
     let (sa_id, sa_headers) = Box::pin(service_account(&f, &f.owner)).await;
     // Cookie and MCP sessions authenticate the same person without a bearer.
     let raw_session = uuid::Uuid::new_v4().to_string();
@@ -236,7 +251,8 @@ async fn mcp_proxy_caller_bearer_matches_rest_for_each_auth_type_direct_and_node
         let responder = if node {
             bind_node(&f, &f.owner).await;
             bind_node(&f, &sa_id).await;
-            Some(node_responder(&f, callers.len() * 6).await)
+            // The service account cannot send its bearer through the person's node.
+            Some(node_responder(&f, callers.len() * 6 - 3).await)
         } else {
             None
         };
@@ -253,6 +269,36 @@ async fn mcp_proxy_caller_bearer_matches_rest_for_each_auth_type_direct_and_node
             for (name, headers) in &callers {
                 let expected = headers.get("authorization").filter(|_| enabled);
                 for (mcp, universal) in [(false, false), (true, false), (true, true)] {
+                    if node && enabled && *name == "service-account" {
+                        let response = Box::pin(f.call_service_response(
+                            "chrono-sandbox",
+                            mcp,
+                            universal,
+                            headers,
+                            json!({"body": {}}),
+                        ))
+                        .await;
+                        if mcp {
+                            assert_eq!(response.status(), StatusCode::OK);
+                            let body: Value = serde_json::from_slice(
+                                &to_bytes(response.into_body(), 32768).await.unwrap(),
+                            )
+                            .unwrap();
+                            assert_eq!(body["result"]["isError"], true);
+                            assert!(
+                                body["result"]["content"][0]["text"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains(
+                                        "This destination cannot receive the caller's access token"
+                                    )
+                            );
+                        } else {
+                            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                        }
+                        assert!(f.headers.lock().unwrap().is_empty());
+                        continue;
+                    }
                     Box::pin(f.call_service(
                         "chrono-sandbox",
                         mcp,
@@ -316,6 +362,71 @@ async fn provider_requirement(f: &Fixture, owner: &str, method: &str, key: &str)
 }
 
 #[tokio::test]
+async fn catalog_headers_follow_the_resolved_connection_destination_for_rest_and_mcp() {
+    let f = Box::pin(Fixture::new()).await;
+    let db = &f.state.db;
+    let endpoints = db.collection::<UserEndpoint>(crate::models::user_endpoint::COLLECTION_NAME);
+    let endpoint = endpoints
+        .find_one(doc! {"user_id": &f.owner})
+        .await
+        .unwrap()
+        .unwrap();
+    let services = db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME);
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.catalog},
+            doc! {"$set": {"default_request_headers": [
+                {"name": "X-Catalog", "value": "version"}
+            ]}},
+        )
+        .await
+        .unwrap();
+    services
+        .update_one(
+            doc! {"_id": &f.service},
+            doc! {"$set": {"default_request_headers": [
+                {"name": "X-Connection", "value": "instance"}
+            ]}},
+        )
+        .await
+        .unwrap();
+
+    for via_node in [false, true] {
+        let responder = if via_node {
+            services
+                .update_one(
+                    doc! {"_id": &f.service},
+                    doc! {"$set": {"node_id": &f.node}},
+                )
+                .await
+                .unwrap();
+            Some(node_responder(&f, 6).await)
+        } else {
+            None
+        };
+        for (url, catalog_destination) in [
+            (endpoint.url.clone(), true),
+            (format!("{}/instance", endpoint.url), false),
+        ] {
+            endpoints
+                .update_one(doc! {"_id": &endpoint.id}, doc! {"$set": {"url": url}})
+                .await
+                .unwrap();
+            for (mcp, universal) in [(false, false), (true, false), (true, true)] {
+                Box::pin(f.call(mcp, universal, &f.key_headers())).await;
+                let headers = f.headers.lock().unwrap().pop().unwrap();
+                assert_eq!(headers.contains_key("x-catalog"), catalog_destination);
+                assert_eq!(headers.get("x-connection").unwrap(), "instance");
+            }
+        }
+        if let Some(responder) = responder {
+            responder.await.unwrap();
+        }
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn mcp_proxy_node_provider_path_query_and_headers_match_rest() {
     let f = Box::pin(legacy_fixture()).await;
     let path = Box::pin(provider_requirement(&f, &f.owner, "path", "prefix-")).await;
@@ -375,6 +486,12 @@ async fn mcp_proxy_node_provider_path_query_and_headers_match_rest() {
         );
         // REST creates its own ingress correlation ID; it is not credential state.
         sent.remove("x-request-id");
+        // Only MCP reads provider usage for this request-priced fixture.
+        let encoding = sent.remove("accept-encoding");
+        assert_eq!(
+            encoding.as_ref().map(|v| v.as_bytes()),
+            mcp.then_some(b"identity".as_slice())
+        );
         if let Some((path, headers)) = &rest {
             assert!(
                 &sent_path == path && &sent == headers,

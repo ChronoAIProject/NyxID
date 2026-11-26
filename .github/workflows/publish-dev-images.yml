@@ -1,0 +1,86 @@
+name: Publish Dev Images
+
+# Builds staging images from pushes to `dev`, keeping one pending pair:
+#   backend and frontend, linux/amd64 only -> dev-<sha> and dev (current tip).
+#
+# Deliberately separate from publish-images.yml. A dev push never creates,
+# moves or attests a production tag (`main`, `main-<sha>`, `edge`, semver,
+# `latest`), never builds the node or machine images, and never writes the
+# `buildcache-*` references that main builds restore from.
+#
+# There is no CI gate here: ci.yml already runs on pushes and pull requests to
+# `dev`, and a staging image may be published while those checks still run.
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/dev'
+    # Coalesce pushes before expanding the matrix so both components build
+    # the same admitted SHA even when their build times differ.
+    concurrency:
+      group: publish-dev-images-build
+    uses: ./.github/workflows/build-dev-images.yml
+
+  deploy-staging:
+    needs: build
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    environment:
+      name: staging
+      url: https://staging.nyxid.ai
+    concurrency:
+      # Check the live commits inside this slot. A late rerun can be older.
+      group: deploy-nyxid-staging
+      queue: max
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Resolve staging's abbreviated SHAs across branches, including manual deploys.
+          fetch-depth: 0
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+      - name: Roll out backend and frontend
+        id: rollout
+        env:
+          NYXID_PIN_CHECK_IMAGES: ${{ secrets.NYXID_CHECK_ACCOUNT != '' && secrets.NYXID_CHECK_ALERT_URL != '' }}
+          NYXID_DEPLOY_TARGET: ${{ secrets.NYXID_DEPLOY_TARGET }}
+          NYXID_STAGING_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_ID }}
+          NYXID_STAGING_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_SECRET }}
+        run: python3 .github/scripts/deploy_images.py staging
+
+      - name: Check NyxBot and restore a compatible release on failure
+        if: steps.rollout.outputs.deployed == 'true'
+        id: nyxbot
+        env:
+          NYXID_DEPLOY_TARGET: ${{ secrets.NYXID_DEPLOY_TARGET }}
+          NYXID_STAGING_DEPLOY_CLIENT_ID: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_ID }}
+          NYXID_STAGING_DEPLOY_CLIENT_SECRET: ${{ secrets.NYXID_STAGING_DEPLOY_CLIENT_SECRET }}
+          GH_TOKEN: ${{ github.token }}
+          BACKEND_DEPLOY_DIGEST: ${{ steps.rollout.outputs.backend_digest }}
+          FRONTEND_DEPLOY_DIGEST: ${{ steps.rollout.outputs.frontend_digest }}
+          PREVIOUS_COMMIT: ${{ steps.rollout.outputs.previous }}
+          NYXID_CHECK_ACCOUNT: ${{ secrets.NYXID_CHECK_ACCOUNT }}
+          NYXID_CHECK_ALERT_URL: ${{ secrets.NYXID_CHECK_ALERT_URL }}
+          NYXID_ROLLBACK_PAIR: ${{ vars.NYXID_ROLLBACK_PAIR }}
+        run: python3 .github/scripts/post_deploy_check.py staging
+
+      - name: Archive deployment check result
+        if: ${{ !cancelled() && steps.nyxbot.outputs.outcome != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: nyxbot-staging-${{ steps.nyxbot.outputs.outcome }}-${{ github.run_attempt }}${{ steps.nyxbot.outputs.image_suffix }}
+          path: ${{ runner.temp }}/nyxbot-deploy.json
+          retention-days: 90
+          if-no-files-found: error

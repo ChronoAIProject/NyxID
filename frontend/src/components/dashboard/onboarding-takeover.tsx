@@ -143,7 +143,7 @@ export function OnboardingTakeover() {
         {/* Trust signals */}
         <div className="flex items-center gap-6 text-13 text-text-tertiary">
           <span className="flex items-center gap-1.5">
-            <ShieldCheck className="h-3.5 w-3.5" />{translateUi("End-to-end encrypted")}</span>
+            <ShieldCheck className="h-3.5 w-3.5" />{translateUi("Encrypted at rest")}</span>
           <span className="flex items-center gap-1.5">
             <KeyRound className="h-3.5 w-3.5" />{translateUi("Zero credential exposure")}</span>
         </div>

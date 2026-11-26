@@ -1463,6 +1463,7 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
             execution_enrollment: false,
             execution_parent: None,
             channel_context: None,
+            capacity: None,
             owner_instruction_source: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -2198,3 +2199,743 @@ async fn notifications_are_purged_with_personal_group_transcript() {
 
 #[path = "assistant_group_model_approval_tests.rs"]
 mod model_approval_tests;
+
+#[tokio::test]
+async fn durable_wake_member_survives_crash_before_turn_admission() {
+    let (state, calls, server) = setup("wake_member_crash").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let member = researcher(&state).await;
+    let group = group_with(&state, "Pending", &[&member]).await;
+    groups::append(
+        &state.db,
+        OWNER,
+        &group.id,
+        "user",
+        None,
+        "Summarize",
+        vec![],
+    )
+    .await
+    .unwrap();
+    groups::address(
+        &state.db,
+        OWNER,
+        &group.id,
+        std::slice::from_ref(&member.id),
+    )
+    .await
+    .unwrap();
+    crate::services::durable_wake_tests::drop_after(
+        "member_taken",
+        advance_inner(&state, OWNER, &group.id, true),
+    )
+    .await;
+    advance_inner(&state, OWNER, &group.id, true).await;
+    for _ in 0..100 {
+        if !calls.lock().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        calls.lock().await.len(),
+        1,
+        "surviving advance must admit the pending member once"
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_follower_survives_crash_after_quiet_transition() {
+    let (state, _, server) = setup("wake_follower_crash").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let home = team::home_thread(&state.db, &state.encryption_keys, &nyxbot)
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id":&home.id}, doc! {"$set":{"event_streak":3}})
+        .await
+        .unwrap();
+    let member = researcher(&state).await;
+    let group = group_with(&state, "Quiet", &[&member]).await;
+    groups::append_following(
+        &state.db,
+        OWNER,
+        &group.id,
+        "agent",
+        Some(&nyxbot),
+        "Summarize",
+        &[],
+        vec![],
+        Some(&home.id),
+    )
+    .await
+    .unwrap();
+    crate::services::durable_wake_tests::drop_after(
+        "followers_taken",
+        notify_followers(&state, OWNER, &group.id),
+    )
+    .await;
+    notify_followers(&state, OWNER, &group.id).await;
+    assert_eq!(
+        engine::get(&state.db, OWNER, &home.id)
+            .await
+            .unwrap()
+            .pending_events
+            .len(),
+        1,
+        "quiet group transition must leave a durable follower event"
+    );
+    notify_followers(&state, OWNER, &group.id).await;
+    assert_eq!(
+        engine::get(&state.db, OWNER, &home.id)
+            .await
+            .unwrap()
+            .pending_events
+            .len(),
+        1
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_two_follower_sweepers_keep_one_frozen_transcript_bound() {
+    use crate::services::assistant_wake_service as wakes;
+    let (state, _, server) = setup("wake_follower_fence").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let home = team::home_thread(&state.db, &state.encryption_keys, &nyxbot)
+        .await
+        .unwrap();
+    let member = researcher(&state).await;
+    let group = group_with(&state, "Bound", &[&member]).await;
+    groups::append_following(
+        &state.db,
+        OWNER,
+        &group.id,
+        "agent",
+        Some(&nyxbot),
+        "Question",
+        &[],
+        vec![],
+        Some(&home.id),
+    )
+    .await
+    .unwrap();
+    groups::append(
+        &state.db,
+        OWNER,
+        &group.id,
+        "agent",
+        Some(&member),
+        "first-answer-canary",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let (a, b) = tokio::join!(
+        wakes::group::followers(&state.db, OWNER, &group.id),
+        wakes::group::followers(&state.db, OWNER, &group.id)
+    );
+    assert_eq!(a.unwrap().len() + b.unwrap().len(), 1);
+    let queued = engine::get(&state.db, OWNER, &home.id).await.unwrap();
+    assert_eq!(queued.pending_events.len(), 1);
+    assert!(queued.pending_events[0].text.is_empty());
+    let saved = bson::to_document(&queued.pending_events[0])
+        .unwrap()
+        .to_string();
+    assert!(!saved.contains("first-answer-canary"));
+    groups::append(
+        &state.db,
+        OWNER,
+        &group.id,
+        "agent",
+        Some(&member),
+        "late-answer-canary",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let request = engine::TurnRequest {
+        conversation_id: Some(home.id.clone()),
+        agent_id: None,
+        text: String::new(),
+        model: None,
+        access_mode: None,
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+    };
+    let mut start: TurnStart = (&request).into();
+    start.origin = TurnOrigin::Event;
+    let admitted = engine::begin_turn(&state.db, OWNER, start, &state.encryption_keys)
+        .await
+        .unwrap();
+    let text = &admitted.active_turn.as_ref().unwrap().events[0].text;
+    assert!(text.contains("first-answer-canary"));
+    assert!(!text.contains("late-answer-canary"));
+    assert!(
+        wakes::group::followers(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_full_queue_retains_the_follower_until_enqueue_commits() {
+    use crate::{models::assistant_wake::WakeReference, services::assistant_wake_service as wakes};
+    let (state, _, server) = setup("wake_follower_full").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let home = team::home_thread(&state.db, &state.encryption_keys, &nyxbot)
+        .await
+        .unwrap();
+    let member = researcher(&state).await;
+    let group = group_with(&state, "Full", &[&member]).await;
+    groups::append_following(
+        &state.db,
+        OWNER,
+        &group.id,
+        "agent",
+        Some(&nyxbot),
+        "Question",
+        &[],
+        vec![],
+        Some(&home.id),
+    )
+    .await
+    .unwrap();
+    let events = (0..engine::MAX_PENDING_EVENTS)
+        .map(|_| {
+            wakes::event(
+                "group_settled",
+                WakeReference::GroupFollower {
+                    group_id: group.id.clone(),
+                    since_seq: 0,
+                    upper_seq: 1,
+                },
+            )
+        })
+        .collect();
+    engine::push_events(&state.db, OWNER, &home.id, events)
+        .await
+        .unwrap();
+    assert!(matches!(
+        wakes::group::followers(&state.db, OWNER, &group.id).await,
+        Err(AppError::Conflict(_))
+    ));
+    assert_eq!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .followers
+            .len(),
+        1
+    );
+    state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id":&home.id}, doc! {"$pop":{"pending_events":1}})
+        .await
+        .unwrap();
+    assert_eq!(
+        wakes::group::followers(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .followers
+            .is_empty()
+    );
+    assert!(
+        wakes::group::followers(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_two_group_replicas_consume_member_with_admission_once() {
+    let (state, calls, server) = setup("wake_member_two_replicas").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let member = researcher(&state).await;
+    let group = group_with(&state, "Concurrent", &[&member]).await;
+    let posted = groups::append(
+        &state.db,
+        OWNER,
+        &group.id,
+        "user",
+        None,
+        "Summarize",
+        vec![],
+    )
+    .await
+    .unwrap();
+    groups::address(
+        &state.db,
+        OWNER,
+        &group.id,
+        std::slice::from_ref(&member.id),
+    )
+    .await
+    .unwrap();
+    tokio::join!(
+        advance_inner(&state, OWNER, &group.id, true),
+        advance_inner(&state, OWNER, &group.id, true)
+    );
+    settled(&state, &group.id, posted.seq as usize + 1).await;
+    advance_inner(&state, OWNER, &group.id, true).await;
+    assert_eq!(calls.lock().await.len(), 1);
+    let thread = groups::member_thread(&state.db, OWNER, &group.id, &member.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(thread.group_seen_seq, posted.seq);
+    assert!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .pending_agent_ids
+            .is_empty()
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_legacy_reply_survives_missing_callback_and_late_callback_once() {
+    let (mut state, calls, server) = setup("wake_legacy_publication").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let source = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let target = researcher(&state).await;
+    let group = group_with(&state, "Publication", &[&source, &target]).await;
+    let posted = groups::append(
+        &state.db,
+        OWNER,
+        &group.id,
+        "user",
+        None,
+        "Review this",
+        vec![],
+    )
+    .await
+    .unwrap();
+    let request = engine::TurnRequest {
+        conversation_id: None,
+        agent_id: Some(source.id.clone()),
+        text: "Review this".into(),
+        model: None,
+        access_mode: None,
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+    };
+    let mut start: TurnStart = (&request).into();
+    start.origin = TurnOrigin::Group;
+    start.group_id = Some(group.id.clone());
+    let (monitored, counts) = crate::services::durable_wake_tests::monitored(&state.db).await;
+    state.db = monitored;
+    let row = engine::begin_turn(&state.db, OWNER, start, &state.encryption_keys)
+        .await
+        .unwrap();
+    eprintln!(
+        "personal group admission commands: {:?}",
+        crate::services::durable_wake_tests::take(&counts)
+    );
+    let message_id = Uuid::new_v4().to_string();
+    let result = engine::TurnResult {
+        text: "Please summarize @researcher.".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    engine::finish_turn(
+        &state.db,
+        &row,
+        &row.credential_api_key_id,
+        &message_id,
+        &result,
+    )
+    .await
+    .unwrap();
+    eprintln!(
+        "personal group settlement with handoff commands: {:?}",
+        crate::services::durable_wake_tests::take(&counts)
+    );
+    let queued = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+    assert_eq!(queued.pending_agent_ids, vec![target.id.clone()]);
+    assert_eq!(queued.hops_remaining, group.hops_remaining - 1);
+    // The original process never runs member_settled. Two survivors run the
+    // existing group sweep; the committed result must already be public.
+    tokio::join!(
+        advance_inner(&state, OWNER, &group.id, true),
+        advance_inner(&state, OWNER, &group.id, true),
+    );
+    let public = groups::messages(&state.db, OWNER, &group.id, 100, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        public
+            .iter()
+            .filter(|m| m.agent_id.as_deref() == Some(source.id.as_str()))
+            .count(),
+        1,
+        "settled member reply must survive without its callback"
+    );
+    let public = settled(&state, &group.id, posted.seq as usize + 2).await;
+    assert_eq!(calls.lock().await.len(), 1);
+    let before = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+    assert_eq!(before.hops_remaining, group.hops_remaining - 1);
+    let budgets = state
+        .db
+        .collection::<bson::Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME);
+    let budget_before = budgets
+        .find_one(doc! {"namespace":"assistant_group_handoffs"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(budget_before.get_i64("count").unwrap(), 1);
+    // An ambiguous settlement retry and the old callback body cannot publish,
+    // queue another target, or spend either budget a second time.
+    engine::finish_turn(
+        &state.db,
+        &row,
+        &row.credential_api_key_id,
+        &message_id,
+        &result,
+    )
+    .await
+    .unwrap();
+    tokio::join!(
+        member_settled(&state, &row, &result.text, None),
+        member_settled(&state, &row, &result.text, None),
+    );
+    let after = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+    assert_eq!(after.message_count, public.len() as i64);
+    assert_eq!(after.hops_remaining, before.hops_remaining);
+    assert!(after.pending_agent_ids.is_empty());
+    assert_eq!(calls.lock().await.len(), 1);
+    assert_eq!(
+        budgets
+            .find_one(doc! {"namespace":"assistant_group_handoffs"})
+            .await
+            .unwrap()
+            .unwrap(),
+        budget_before
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_legacy_event_reply_and_stopped_notice_publish_without_callbacks() {
+    let (state, calls, server) = setup("wake_legacy_event_publication").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let source = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let group = group_with(&state, "Event publication", &[&source]).await;
+    let request = engine::TurnRequest {
+        conversation_id: None,
+        agent_id: Some(source.id.clone()),
+        text: "Start".into(),
+        model: None,
+        access_mode: None,
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+    };
+    let mut start: TurnStart = (&request).into();
+    start.origin = TurnOrigin::Group;
+    start.group_id = Some(group.id.clone());
+    let row = engine::begin_turn(&state.db, OWNER, start, &state.encryption_keys)
+        .await
+        .unwrap();
+    assert!(row.active_turn.as_ref().unwrap().group_reply_in_settlement);
+    engine::finish_turn(
+        &state.db,
+        &row,
+        &row.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "private-failed-draft".into(),
+            session_id: None,
+            response_id: None,
+            error: Some(engine::TurnError::internal("cancelled", "stop")),
+        },
+    )
+    .await
+    .unwrap();
+    let messages = groups::messages(&state.db, OWNER, &group.id, 100, None)
+        .await
+        .unwrap();
+    let notice = messages.last().unwrap();
+    assert_eq!(notice.role, "notice");
+    assert_eq!(notice.text, "NyxBot stopped.");
+    assert!(
+        !messages
+            .iter()
+            .any(|m| m.text.contains("private-failed-draft"))
+    );
+    engine::push_events(
+        &state.db,
+        OWNER,
+        &row.id,
+        vec![team::bound_event(
+            "connect_link",
+            "Connection ready".into(),
+            None,
+            None,
+        )],
+    )
+    .await
+    .unwrap();
+    let request = engine::TurnRequest {
+        conversation_id: Some(row.id.clone()),
+        text: String::new(),
+        ..request
+    };
+    let mut start: TurnStart = (&request).into();
+    start.origin = TurnOrigin::Event;
+    let event = engine::begin_turn(&state.db, OWNER, start, &state.encryption_keys)
+        .await
+        .unwrap();
+    assert!(
+        event
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .group_reply_in_settlement
+    );
+    engine::finish_turn(
+        &state.db,
+        &event,
+        &event.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "Follow-up complete".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    let messages = groups::messages(&state.db, OWNER, &group.id, 100, None)
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), group.message_count as usize + 2);
+    assert_eq!(messages.last().unwrap().text, "Follow-up complete");
+    member_settled(&state, &row, "private-failed-draft", Some("cancelled")).await;
+    member_settled(&state, &event, "Follow-up complete", None).await;
+    assert_eq!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .message_count,
+        messages.len() as i64
+    );
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_legacy_reply_cannot_publish_or_handoff_after_member_removal() {
+    let (state, calls, server) = setup("wake_legacy_publication_removed").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let source = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let target = researcher(&state).await;
+    let group = group_with(&state, "Removed member", &[&source, &target]).await;
+    let request = engine::TurnRequest {
+        conversation_id: None,
+        agent_id: Some(source.id.clone()),
+        text: "Start".into(),
+        model: None,
+        access_mode: None,
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+    };
+    let mut start: TurnStart = (&request).into();
+    start.origin = TurnOrigin::Group;
+    start.group_id = Some(group.id.clone());
+    let row = engine::begin_turn(&state.db, OWNER, start, &state.encryption_keys)
+        .await
+        .unwrap();
+    let groups = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_group::COLLECTION_NAME);
+    // Retain the old thread deliberately: roster removal alone must fence
+    // publication even before the ordinary thread-retirement cleanup runs.
+    groups
+        .update_one(
+            doc! {"_id":&group.id},
+            doc! {"$pull":{"member_agent_ids":&source.id}},
+        )
+        .await
+        .unwrap();
+    engine::finish_turn(
+        &state.db,
+        &row,
+        &row.credential_api_key_id,
+        &Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "@researcher private-old-reply".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    groups
+        .update_one(
+            doc! {"_id":&group.id},
+            doc! {"$addToSet":{"member_agent_ids":&source.id}},
+        )
+        .await
+        .unwrap();
+    member_settled(&state, &row, "@researcher private-old-reply", None).await;
+    let after = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+    assert_eq!(after.message_count, group.message_count);
+    assert_eq!(after.hops_remaining, group.hops_remaining);
+    assert!(after.pending_agent_ids.is_empty());
+    assert!(calls.lock().await.is_empty());
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .count_documents(doc! {"namespace":"assistant_group_handoffs"})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_review_revoked_legacy_target_keeps_reply_without_budget_spend() {
+    let (state, calls, server) = setup("wake_legacy_refused_target").await;
+    let source = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let target = shared_researcher(&state).await;
+    let group = group_with(&state, "Refused target", &[&source, &target]).await;
+    let request = engine::TurnRequest {
+        conversation_id: None,
+        agent_id: Some(source.id.clone()),
+        text: "Start".into(),
+        model: None,
+        access_mode: None,
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+    };
+    let mut start: TurnStart = (&request).into();
+    start.origin = TurnOrigin::Group;
+    start.group_id = Some(group.id.clone());
+    let row = engine::begin_turn(&state.db, OWNER, start, &state.encryption_keys)
+        .await
+        .unwrap();
+    share_researcher(&state, &target, false).await;
+    let id = Uuid::new_v4().to_string();
+    let result = engine::TurnResult {
+        text: "@researcher continue".into(),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    for _ in 0..2 {
+        engine::finish_turn(&state.db, &row, &row.credential_api_key_id, &id, &result)
+            .await
+            .unwrap();
+    }
+    let after = groups::get(&state.db, OWNER, &group.id).await.unwrap();
+    assert_eq!(after.message_count, group.message_count + 1);
+    assert_eq!(
+        after.hops_remaining, group.hops_remaining,
+        "refused target must spend no hop"
+    );
+    assert!(after.pending_agent_ids.is_empty());
+    member_settled(&state, &row, &result.text, None).await;
+    assert_eq!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .message_count,
+        after.message_count
+    );
+    assert!(calls.lock().await.is_empty());
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .count_documents(doc! {"namespace":"assistant_group_handoffs"})
+            .await
+            .unwrap(),
+        0
+    );
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_review_destroyed_during_admission_retires_member_request() {
+    let (state, calls, server) = setup("wake_permanent_conflict").await;
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    let member = researcher(&state).await;
+    let group = group_with(&state, "Destroyed during admission", &[&member]).await;
+    groups::append(&state.db, OWNER, &group.id, "user", None, "Start", vec![])
+        .await
+        .unwrap();
+    groups::address(
+        &state.db,
+        OWNER,
+        &group.id,
+        std::slice::from_ref(&member.id),
+    )
+    .await
+    .unwrap();
+    crate::services::durable_wake_tests::resume_after(
+        "member_prepared",
+        advance_inner(&state, OWNER, &group.id, true),
+        async {
+            state
+                .db
+                .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":&member.id},
+                    doc! {"$set":{"destroyed_at":bson::DateTime::now()}},
+                )
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    assert!(
+        groups::get(&state.db, OWNER, &group.id)
+            .await
+            .unwrap()
+            .pending_agent_ids
+            .is_empty(),
+        "permanent conflict must retire the observed wake"
+    );
+    advance_inner(&state, OWNER, &group.id, true).await;
+    assert!(calls.lock().await.is_empty());
+    server.abort();
+    state.db.drop().await.unwrap();
+}

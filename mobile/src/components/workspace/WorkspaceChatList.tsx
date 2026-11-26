@@ -1,3 +1,15 @@
+import { useContext } from "react";
+import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";
+import { workspaceAgentPickerSections } from "./workspaceAgentPickerModel";
+import { recentUnread, type WorkspaceRecent } from "./workspaceSidebarModel";
+import {
+  workspaceCrewLabel,
+  workspaceDisclosureLabel,
+  workspaceRecentLabel,
+  workspaceThreadLabel,
+} from "./workspaceAccessibilityLabels";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import {
   sidebarAgentOwner,
   sidebarOrderedAgents,
@@ -5,6 +17,7 @@ import {
 import { AgentAvatar, AgentAvatarStack } from "../AgentAvatar";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
+  Text,
   ActivityIndicator,
   AppState,
   Pressable,
@@ -12,7 +25,6 @@ import {
   ScrollView,
   type ScrollViewProps,
   StyleSheet,
-  Text,
   View,
 } from "react-native";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
@@ -20,8 +32,7 @@ import {
   ChevronDown,
   ChevronRight,
   Plus,
-  RefreshCw,
-  Users,
+  Users
 } from "lucide-react-native";
 import type { WorkspaceChatTarget } from "../../app/workspaceChatNavigation";
 import type { AssistantAgent } from "../../features/agents/agentContracts";
@@ -46,6 +57,7 @@ import { fonts } from "../../theme/designTokens";
 import { SkeletonRows } from "../Skeleton";
 import { WorkspaceChatBrowser } from "./WorkspaceChatBrowser";
 import { sidebarSectionTitle } from "./workspaceSidebarStyles";
+import { SidebarSectionHeader as SectionHeading } from "./SidebarSectionHeader";
 import {
   boundedDrawerPreview,
   DRAWER_PREVIEW_LIMIT,
@@ -57,8 +69,10 @@ import {
   threadStatus,
 } from "./workspaceChatListModel";
 
-type Props = {
+export type WorkspaceChatListProps = {
   mode?: "drawer" | "picker";
+  disabled?: boolean;
+  recentRows?: readonly WorkspaceRecent[];
   scrollFooter?: ReactNode;
   scrollHeader?: ReactNode;
   scrollProps?: ScrollViewProps;
@@ -76,11 +90,14 @@ type BrowseRow =
   | { id: string; group: Group }
   | { id: string; chat: AssistantConversation };
 type Browser =
-  | { kind: "agents" | "groups" }
+  |
+  { kind: "agents" | "groups" }
   | { kind: "chats"; fromAgents: boolean };
 
 export function WorkspaceChatList({
   mode = "drawer",
+  disabled = false,
+  recentRows = [],
   scrollFooter,
   scrollHeader,
   scrollProps,
@@ -90,7 +107,8 @@ export function WorkspaceChatList({
   onSelect,
   onCreateAgent,
   onCreateGroup,
-}: Props) {
+}: WorkspaceChatListProps) {
+  useAppLanguage();
   const { colors } = useTheme();
   const epoch = getAuthEpoch();
   const { isConnected } = useNetworkStatus();
@@ -193,9 +211,24 @@ export function WorkspaceChatList({
       a.last_message_at || a.created_at,
     ),
   );
+  const cornerWindow = useContext(WorkspaceCornerSensorContext);
+  const picker = workspaceAgentPickerSections(
+    allAgents,
+    mode === "picker" && cornerWindow ? recentRows : [],
+  );
+  const roster = mode === "picker" ? picker.roster : allAgents;
   const currentAgentId =
     current?.kind === "agent" ? current.agentId : undefined;
-  const openId = expandedAgent !== undefined ? expandedAgent : currentAgentId;
+  // A current agent shown under Recent has no inline roster row to expand.
+  const currentInRecent = picker.recent.some(
+    (entry) => entry.agent.id === currentAgentId,
+  );
+  const openId =
+    expandedAgent !== undefined
+      ? expandedAgent
+      : currentInRecent
+        ? undefined
+        : currentAgentId;
   // Retain historical context for an open chat/browser without adding deleted
   // agents back to the current roster or its count.
   const agent = (mode === "drawer" ? indexedAgents : allAgents).find(
@@ -295,20 +328,20 @@ export function WorkspaceChatList({
   };
   const agentDetail = (row: AssistantAgent) =>
     row.status === "destroyed"
-      ? "Past agent · chat history"
+      ? translateApp("Past agent · chat history")
       : row.can_use === false
-        ? "View only"
+        ? translateApp("View only")
         : row.owner_kind === "org"
-          ? row.owner_name || "Shared agent"
+          ? row.owner_name || translateApp("Shared agent")
           : row.kind === "nyxbot"
-            ? "Personal · Your personal agent"
-            : "Personal";
+            ? translateApp("Personal · Your personal agent")
+            : translateApp("Personal");
   const agentRowDetail = (row: AssistantAgent) =>
     [
       row.pending_acknowledgements
-        ? "Needs you"
+        ? translateApp("Needs you")
         : row.status === "running"
-          ? "Running"
+          ? translateApp("Running")
           : undefined,
       agentDetail(row),
     ]
@@ -317,22 +350,23 @@ export function WorkspaceChatList({
   const groupedAgentSubtitle = (row: AssistantAgent) =>
     [
       row.pending_acknowledgements
-        ? "Needs you"
+        ? translateApp("Needs you")
         : row.status === "running"
-          ? "Running"
+          ? translateApp("Running")
           : undefined,
       row.status === "destroyed"
-        ? "Past agent · chat history"
+        ? translateApp("Past agent · chat history")
         : row.can_use === false
-          ? "View only"
+          ? translateApp("View only")
           : row.kind === "nyxbot"
-            ? "Your personal agent"
+            ? translateApp("Your personal agent")
             : row.description,
     ]
       .filter(Boolean)
       .join(" · ");
   const chatRow = (row: AssistantConversation) => (
     <ChatRow
+      disabled={disabled}
       key={row.id}
       label={threadTitle(row)}
       detail={formatRelativeTimeFromMs(Date.parse(row.last_message_at))}
@@ -340,11 +374,15 @@ export function WorkspaceChatList({
       selected={selectedChatId === row.id}
       unread={markers.conversations[row.id]}
       onPress={() => openChat(row.id)}
-      accessibilityLabel={`Open chat ${threadTitle(row)} with ${agent ? chatAgentLabel(agent) : "agent"}${threadStatus(row) ? `, ${threadStatus(row)}` : ""}${selectedChatId === row.id ? ", current thread" : ""}${unreadSuffix(markers.conversations[row.id])}`}
+      accessibilityLabel={workspaceThreadLabel(
+        threadTitle(row), agent ? chatAgentLabel(agent) : translateApp("Agent"),
+        threadStatus(row), selectedChatId === row.id, markers.conversations[row.id],
+      )}
     />
   );
   const groupRow = (row: Group) => (
     <GroupChatRow
+      disabled={disabled}
       key={row.id}
       group={row}
       selected={current?.kind === "group" && current.groupId === row.id}
@@ -356,22 +394,25 @@ export function WorkspaceChatList({
   const historyStatus = (showLoading: boolean) => (
     <>
       {agent?.can_use === false ? (
-        <DrawerMessage text="View only · chat access isn’t available for this agent." />
+        <DrawerMessage text={translateApp(
+            "View only · chat access isn’t available for this agent.",
+          )}
+        />
       ) : (
         <>
           {showLoading && history.isPending ? (
             <SkeletonRows
               rows={3}
               icon={false}
-              accessibilityLabel="Loading chats"
+              accessibilityLabel={translateApp("Loading chats")}
             />
           ) : null}
           {history.isError ? (
             <DrawerMessage
               text={
                 history.data
-                  ? "Couldn’t refresh chats."
-                  : "Couldn’t load chats."
+                  ? translateApp("Couldn’t refresh chats.")
+                  : translateApp("Couldn’t load chats.")
               }
               retry={() => void history.refetch()}
               disabled={!active}
@@ -384,7 +425,10 @@ export function WorkspaceChatList({
   const startChat =
     canStartChat && agent ? (
       <ChatRow
-        label={`New chat with ${chatAgentLabel(agent)}`}
+        disabled={disabled}
+        label={translateApp("New chat with {{label}}", {
+          label: chatAgentLabel(agent),
+        })}
         create
         selected={
           current?.kind === "agent" &&
@@ -392,19 +436,22 @@ export function WorkspaceChatList({
           !current.conversationId
         }
         onPress={() => openChat()}
-        accessibilityLabel={`New chat with ${chatAgentLabel(agent)}`}
+        accessibilityLabel={translateApp("New chat with {{label}}", {
+          label: chatAgentLabel(agent),
+        })}
       />
     ) : null;
-  const currentRow = missingCurrent ? (
+  const currentRow = missingCurrent && agent?.can_use !== false ? (
     <ChatRow
-      label="Current chat"
+      disabled={disabled}
+      label={translateApp("Current chat")}
       selected
       onPress={() => openChat(selectedChatId)}
     />
   ) : null;
   const previewAgents = boundedDrawerPreview(
-    allAgents,
-    openId || currentAgentId,
+    roster,
+    openId || currentAgentId
   );
   const ownerCounts = new Map<string, { total: number; shown: number }>();
   for (const row of allAgents) {
@@ -416,16 +463,63 @@ export function WorkspaceChatList({
   for (const row of previewAgents)
     ownerCounts.get(sidebarAgentOwner(row).key)!.shown += 1;
   const rows: ReactNode[] = [<View key="workspace">{scrollHeader}</View>];
+  if (mode === "picker" && picker.recent.length) {
+    rows.push(
+      <Text
+        key="recent-heading"
+        accessibilityRole="header"
+        style={[styles.ownerHeading, { color: colors.textMuted }]}
+      >
+        {translateApp("Recent")}
+      </Text>,
+    );
+    // Recent opens the agent's latest thread, exactly like a sidebar Recents row.
+    for (const { agent: recentAgent, row } of picker.recent) {
+      const label = chatAgentLabel(recentAgent);
+      const unread = recentUnread(row, markers);
+      rows.push(
+        <ChatRow
+          key={`recent:${recentAgent.id}`}
+          agent={recentAgent}
+          label={label}
+          detail={formatRelativeTimeFromMs(Date.parse(row.activityAt))}
+          selected={
+            current?.kind === "agent" &&
+            row.target.kind === "agent" &&
+            current.conversationId === row.target.conversationId
+          }
+          unread={unread}
+          status={row.status}
+          accessibilityLabel={workspaceRecentLabel(label, row.status, unread)}
+          onPress={() =>
+            selectAfterBrowser(() => onSelectRef.current(row.target))
+          }
+        />,
+      );
+    }
+    if (roster.length)
+      rows.push(
+        <Text
+          key="roster-heading"
+          accessibilityRole="header"
+          style={[styles.ownerHeading, { color: colors.textMuted }]}
+        >
+          {translateApp("Agents")}
+        </Text>,
+      );
+  }
   if (mode === "drawer")
     rows.push(
       <SectionHeading
+        disabled={disabled}
         key="agents"
-        label="Agents"
-        count={`${allAgents.length} total`}
+        section="agents"
+        label={translateApp("Agents")}
+        count={translateApp("{{count}} total", { count: allAgents.length })}
         expanded={sections.agents}
-        createLabel="New agent"
+        createLabel={translateApp("New agent")}
         onCreate={onCreateAgent}
-        createDisabled={!active}
+        createDisabled={disabled || !active}
         onRefresh={() => void refreshAgents()}
         refreshing={refreshingAgents}
         refreshDisabled={!active}
@@ -445,28 +539,34 @@ export function WorkspaceChatList({
           ? !allAgents.some((row) => row.id === current.agentId)
           : !chats.some((row) => row.id === current.conversationId)) ? (
           <ChatRow
-            label="Current chat"
+            disabled={disabled}
+            label={translateApp("Current chat")}
             selected
             onPress={() => onSelect(current)}
           />
         ) : null}
         {!isConnected ? (
-          <DrawerMessage text="Offline · showing saved chats" />
+          <DrawerMessage text={translateApp("Offline · showing saved chats")} />
         ) : null}
         {agents.isPending ? (
-          <SkeletonRows rows={3} accessibilityLabel="Loading agents" />
+          <SkeletonRows
+            rows={3}
+            accessibilityLabel={translateApp("Loading agents")}
+          />
         ) : null}
         {agents.isError ? (
           <DrawerMessage
             text={
-              agents.data ? "Couldn’t refresh agents." : "Couldn’t load agents."
+              agents.data
+                ? translateApp("Couldn’t refresh agents.")
+                : translateApp("Couldn’t load agents.")
             }
             retry={() => void refreshAgents()}
             disabled={!active}
           />
         ) : null}
         {agents.isSuccess && !allAgents.length ? (
-          <DrawerMessage text="No agents yet." />
+          <DrawerMessage text={translateApp("No agents yet.")} />
         ) : null}
       </View>,
     );
@@ -480,13 +580,26 @@ export function WorkspaceChatList({
             <Text
               key={`owner:${owner.key}`}
               accessibilityRole="header"
-              accessibilityLabel={`${owner.label}, ${counts.shown} of ${counts.total} agents shown`}
+              accessibilityLabel={translateApp(
+                "{{owner}}, {{shown}} of {{total}} agents shown",
+                {
+                  owner: owner.label,
+                  shown: counts.shown,
+                  total: counts.total,
+                },
+              )}
               style={[styles.ownerHeading, { color: colors.textMuted }]}
             >
-              {owner.label} ·{" "}
               {counts.shown === counts.total
-                ? counts.total
-                : `${counts.shown} of ${counts.total}`}
+                ? translateApp("{{label}} · {{count}}", {
+                    label: owner.label,
+                    count: counts.total,
+                  })
+                : translateApp("{{label}} · {{shown}} of {{count}}", {
+                    label: owner.label,
+                    shown: counts.shown,
+                    count: counts.total,
+                  })}
             </Text>,
           );
         previousOwner = owner.key;
@@ -509,6 +622,7 @@ export function WorkspaceChatList({
           }
         >
           <DisclosureRow
+            disabled={disabled}
             agent={row}
             label={chatAgentLabel(row)}
             detail={
@@ -534,7 +648,9 @@ export function WorkspaceChatList({
       rows.push(
         <View
           key={`threads:${row.id}`}
-          accessibilityLabel={`Threads with ${chatAgentLabel(row)}`}
+          accessibilityLabel={translateApp("Threads with {{label}}", {
+            label: chatAgentLabel(row),
+          })}
           style={[styles.children, { borderColor: colors.borderSoft }]}
           onLayout={(event) => {
             const { y, height } = event.nativeEvent.layout;
@@ -567,9 +683,9 @@ export function WorkspaceChatList({
             const status = bot.threads.some(
               (thread) => thread.pending_acknowledgements,
             )
-              ? "Needs you"
+              ? translateApp("Needs you")
               : bot.threads.some((thread) => thread.active_turn)
-                ? "Running"
+                ? translateApp("Running")
                 : undefined;
             const platform = channelPlatformName(bot.platform);
             const botUnread = bot.threads.reduce(
@@ -589,8 +705,37 @@ export function WorkspaceChatList({
             return (
               <View key={key}>
                 <DisclosureRow
+                  disabled={disabled}
                   label={bot.label}
-                  detail={`${platform} · ${bot.threads.length} ${bot.threads.length === 1 ? "chat" : "chats"}${status ? ` · ${status}` : ""}`}
+                  detail={
+                    bot.threads.length === 1
+                      ? status
+                        ? translateApp(
+                            "{{platform}} · {{count}} chat · {{status}}",
+                            {
+                              platform: platform,
+                              count: bot.threads.length,
+                              status: status,
+                            },
+                          )
+                        : translateApp("{{platform}} · {{count}} chat", {
+                            platform: platform,
+                            count: bot.threads.length,
+                          })
+                      : status
+                        ? translateApp(
+                            "{{platform}} · {{count}} chats · {{status}}",
+                            {
+                              platform: platform,
+                              count: bot.threads.length,
+                              status: status,
+                            },
+                          )
+                        : translateApp("{{platform}} · {{count}} chats", {
+                            platform: platform,
+                            count: bot.threads.length,
+                          })
+                  }
                   expanded={Boolean(open)}
                   selected={holdsActive}
                   unread={botUnread}
@@ -599,7 +744,10 @@ export function WorkspaceChatList({
                 />
                 {open ? (
                   <View
-                    style={[styles.children, { borderColor: colors.borderSoft }]}
+                    style={[
+                      styles.children,
+                      { borderColor: colors.borderSoft },
+                    ]}
                   >
                     {[
                       ...new Set(
@@ -631,7 +779,8 @@ export function WorkspaceChatList({
                             >
                               {children.find(
                                 (thread) => thread.channel?.parent_title,
-                              )?.channel?.parent_title || "Channel chat"}
+                              )?.channel?.parent_title ||
+                                translateApp("Channel chat")}
                             </Text>
                           ) : null}
                           <View
@@ -651,7 +800,10 @@ export function WorkspaceChatList({
                     })}
                     {hidden > 0 ? (
                       <MoreButton
-                        label={`Show ${Math.min(hidden, DRAWER_PREVIEW_LIMIT * 4)} more`}
+                        disabled={disabled}
+                        label={translateApp("Show {{min}} more", {
+                          min: Math.min(hidden, DRAWER_PREVIEW_LIMIT * 4),
+                        })}
                         onPress={() =>
                           update(true, shown + DRAWER_PREVIEW_LIMIT * 4)
                         }
@@ -666,15 +818,16 @@ export function WorkspaceChatList({
             <DrawerMessage
               text={
                 row.status === "destroyed"
-                  ? "No saved chats for this deleted agent."
-                  : "No chats yet."
+                  ? translateApp("No saved chats for this deleted agent.")
+                  : translateApp("No chats yet.")
               }
             />
           ) : null}
           {row.can_use !== false &&
           (threads.own.length > previewChats.length || history.hasNextPage) ? (
             <MoreButton
-              label="View all chats"
+              disabled={disabled}
+              label={translateApp("View all chats")}
               onPress={() => setBrowser({ kind: "chats", fromAgents: false })}
             />
           ) : null}
@@ -682,11 +835,15 @@ export function WorkspaceChatList({
         </View>,
       );
     }
-    if (allAgents.length > DRAWER_PREVIEW_LIMIT)
+    // Recent only shortens the inline preview; the full browser lists everyone.
+    if (roster.length > DRAWER_PREVIEW_LIMIT)
       rows.push(
         <MoreButton
+          disabled={disabled}
           key="all-agents"
-          label={`View all agents (${allAgents.length})`}
+          label={translateApp("View all agents ({{count}})", {
+            count: allAgents.length,
+          })}
           onPress={() => setBrowser({ kind: "agents" })}
         />,
       );
@@ -694,13 +851,15 @@ export function WorkspaceChatList({
   if (mode === "drawer")
     rows.push(
       <SectionHeading
+        disabled={disabled}
         key="crews"
-        label="Crews"
+        section="crews"
+        label={translateApp("Crews")}
         count={allGroups.length}
         expanded={sections.groups}
-        createLabel="New crew"
+        createLabel={translateApp("New crew")}
         onCreate={onCreateGroup}
-        createDisabled={!active}
+        createDisabled={disabled || !active}
         onPress={() =>
           setSections((value) => ({ ...value, groups: !value.groups }))
         }
@@ -710,17 +869,20 @@ export function WorkspaceChatList({
     rows.push(
       <View key="crew-rows">
         {groups.isPending ? (
-          <SkeletonRows rows={2} accessibilityLabel="Loading crews" />
+          <SkeletonRows
+            rows={2}
+            accessibilityLabel={translateApp("Loading crews")}
+          />
         ) : null}
         {groups.isError ? (
           <DrawerMessage
-            text="Couldn’t load crews."
+            text={translateApp("Couldn’t load crews.")}
             retry={() => void groups.refetch()}
             disabled={!active}
           />
         ) : null}
         {groups.isSuccess && !allGroups.length ? (
-          <DrawerMessage text="No crews yet." />
+          <DrawerMessage text={translateApp("No crews yet.")} />
         ) : null}
         {boundedDrawerPreview(
           allGroups,
@@ -728,7 +890,10 @@ export function WorkspaceChatList({
         ).map(groupRow)}
         {allGroups.length > DRAWER_PREVIEW_LIMIT ? (
           <MoreButton
-            label={`View all crews (${allGroups.length})`}
+            disabled={disabled}
+            label={translateApp("View all crews ({{count}})", {
+              count: allGroups.length,
+            })}
             onPress={() => setBrowser({ kind: "groups" })}
           />
         ) : null}
@@ -741,7 +906,7 @@ export function WorkspaceChatList({
         alwaysBounceVertical
         refreshControl={
           <RefreshControl
-            accessibilityLabel="Refresh agents"
+            accessibilityLabel={translateApp("Refresh agents")}
             enabled={active}
             refreshing={pullRefreshing}
             onRefresh={() => void refreshAgents()}
@@ -769,12 +934,12 @@ export function WorkspaceChatList({
         <WorkspaceChatBrowser<BrowseRow>
           title={
             browser.kind === "agents"
-              ? "All agents"
+              ? translateApp("All agents")
               : browser.kind === "groups"
-                ? "All crews"
+                ? translateApp("All crews")
                 : agent
                   ? chatAgentLabel(agent)
-                  : "Agent chats"
+                  : translateApp("Agent chats")
           }
           titleIcon={
             browser.kind === "chats" && agent ? (
@@ -786,18 +951,28 @@ export function WorkspaceChatList({
           }
           description={
             browser.kind === "agents"
-              ? "Choose an agent to browse its chats."
+              ? translateApp("Choose an agent to browse its chats.")
               : browser.kind === "groups"
-                ? "Each crew has one shared conversation."
+                ? translateApp("Each crew has one shared conversation.")
                 : !agent
-                  ? "This agent is no longer available. Choose another agent to start a chat."
+                  ? translateApp(
+                      "This agent is no longer available. Choose another agent to start a chat.",
+                    )
                   : agent.can_use === false
-                    ? "You don’t have permission to chat with this agent. Choose another agent to continue."
+                    ? translateApp(
+                        "You don’t have permission to chat with this agent. Choose another agent to continue.",
+                      )
                     : agent.status === "destroyed"
-                      ? "This agent was deleted. You can still view its saved chats, or choose another agent to start a new chat."
+                      ? translateApp(
+                          "This agent was deleted. You can still view its saved chats, or choose another agent to start a new chat.",
+                        )
                       : history.hasNextPage
-                        ? "Search loaded chats. Load older chats to search more history."
-                        : "Start a new chat or return to a saved conversation."
+                        ? translateApp(
+                            "Search loaded chats. Load older chats to search more history.",
+                          )
+                        : translateApp(
+                            "Start a new chat or return to a saved conversation.",
+                          )
           }
           items={
             browser.kind === "agents"
@@ -816,6 +991,7 @@ export function WorkspaceChatList({
           renderItem={(row) =>
             "agent" in row ? (
               <DisclosureRow
+                disabled={disabled}
                 agent={row.agent}
                 label={chatAgentLabel(row.agent)}
                 detail={agentRowDetail(row.agent)}
@@ -839,18 +1015,18 @@ export function WorkspaceChatList({
           }
           refreshing={refreshingAgents}
           refreshDisabled={!active}
-          refreshLabel="Refresh agents"
+          refreshLabel={translateApp("Refresh agents")}
           loadingLabel={
             browser.kind === "agents"
               ? agents.isPending
-                ? "Loading agents"
+                ? translateApp("Loading agents")
                 : undefined
               : browser.kind === "groups"
                 ? groups.isPending
-                  ? "Loading crews"
+                  ? translateApp("Loading crews")
                   : undefined
                 : agent && agent.can_use !== false && history.isPending
-                  ? "Loading chats"
+                  ? translateApp("Loading chats")
                   : undefined
           }
           onClose={() => dismissBrowser()}
@@ -859,13 +1035,18 @@ export function WorkspaceChatList({
             browser.kind === "chats"
               ? canStartChat && agent
                 ? {
-                    label: "New chat",
-                    accessibilityLabel: `New chat with ${chatAgentLabel(agent)}`,
+                    disabled,
+                    label: translateApp("New chat"),
+                    accessibilityLabel: translateApp(
+                      "New chat with {{label}}",
+                      { label: chatAgentLabel(agent) },
+                    ),
                     onPress: () => openChat(),
                   }
                 : {
-                    label: "Choose another agent",
-                    accessibilityLabel: "Choose another agent",
+                    disabled,
+                    label: translateApp("Choose another agent"),
+                    accessibilityLabel: translateApp("Choose another agent"),
                     onPress: () => setBrowser({ kind: "agents" }),
                   }
               : undefined
@@ -877,26 +1058,32 @@ export function WorkspaceChatList({
           }
           emptyText={
             browser.kind === "agents"
-              ? "No agents available."
+              ? translateApp("No agents available.")
               : browser.kind === "groups"
-                ? "No crews yet."
+                ? translateApp("No crews yet.")
                 : !agent
-                  ? "This agent is no longer available."
+                  ? translateApp("This agent is no longer available.")
                   : agent.can_use === false
-                    ? "Chat access isn’t available for this agent."
+                    ? translateApp(
+                        "Chat access isn’t available for this agent.",
+                      )
                     : history.isError && !history.data
-                      ? "Couldn’t load chats. You can retry below."
+                      ? translateApp(
+                          "Couldn’t load chats. You can retry below.",
+                        )
                       : agent.status === "destroyed"
-                        ? "No saved chats for this deleted agent."
-                        : "No chats yet. Start your first conversation above."
+                        ? translateApp("No saved chats for this deleted agent.")
+                        : translateApp(
+                            "No chats yet. Start your first conversation above.",
+                          )
           }
           footer={
             browser.kind === "agents" && agents.isError ? (
               <DrawerMessage
                 text={
                   agents.data
-                    ? "Couldn’t refresh agents."
-                    : "Couldn’t load agents."
+                    ? translateApp("Couldn’t refresh agents.")
+                    : translateApp("Couldn’t load agents.")
                 }
                 retry={() => void refreshAgents()}
                 disabled={!active || refreshingAgents}
@@ -909,12 +1096,12 @@ export function WorkspaceChatList({
                   <MoreButton
                     label={
                       history.isFetchingNextPage
-                        ? "Loading older chats…"
+                        ? translateApp("Loading older chats…")
                         : history.isFetchNextPageError
-                          ? "Retry older chats"
-                          : "Load older chats"
+                          ? translateApp("Retry older chats")
+                          : translateApp("Load older chats")
                     }
-                    disabled={!active || history.isFetchingNextPage}
+                    disabled={disabled || !active || history.isFetchingNextPage}
                     onPress={() => void history.fetchNextPage()}
                   />
                 ) : null}
@@ -927,84 +1114,6 @@ export function WorkspaceChatList({
   );
 }
 
-function SectionHeading({
-  label,
-  count,
-  expanded,
-  onPress,
-  createLabel,
-  onCreate,
-  createDisabled,
-  onRefresh,
-  refreshing = false,
-  refreshDisabled = false,
-}: {
-  label: string;
-  count: number | string;
-  expanded: boolean;
-  onPress: () => void;
-  createLabel: string;
-  onCreate: () => void;
-  createDisabled: boolean;
-  onRefresh?: () => void;
-  refreshing?: boolean;
-  refreshDisabled?: boolean;
-}) {
-  const { colors } = useTheme();
-  const Chevron = expanded ? ChevronDown : ChevronRight;
-  return (
-    <View style={styles.sectionHeading}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={`${expanded ? "Collapse" : "Expand"} ${label.toLowerCase()}`}
-        accessibilityState={{ expanded }}
-        accessibilityValue={{ text: String(count) }}
-        onPress={onPress}
-        style={styles.sectionRow}
-      >
-        <Text
-          accessibilityRole="header"
-          style={[styles.section, { color: colors.textPrimary }]}
-        >
-          {label}
-        </Text>
-        <Text style={[styles.sectionCount, { color: colors.textMuted }]}>
-          {count}
-        </Text>
-        <Chevron size={16} color={colors.textMuted} />
-      </Pressable>
-      {onRefresh ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={`Refresh ${label.toLowerCase()}`}
-          accessibilityState={{
-            disabled: refreshDisabled || refreshing,
-            busy: refreshing,
-          }}
-          disabled={refreshDisabled || refreshing}
-          onPress={onRefresh}
-          style={[styles.createButton, { opacity: refreshDisabled ? 0.4 : 1 }]}
-        >
-          {refreshing ? (
-            <ActivityIndicator size="small" color={colors.textSecondary} />
-          ) : (
-            <RefreshCw size={18} color={colors.textSecondary} />
-          )}
-        </Pressable>
-      ) : null}
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel={createLabel}
-        accessibilityState={{ disabled: createDisabled }}
-        disabled={createDisabled}
-        onPress={onCreate}
-        style={[styles.createButton, { opacity: createDisabled ? 0.4 : 1 }]}
-      >
-        <Plus size={18} color={colors.textSecondary} />
-      </Pressable>
-    </View>
-  );
-}
 function MoreButton({
   label,
   onPress,
@@ -1014,6 +1123,7 @@ function MoreButton({
   onPress: () => void;
   disabled?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Pressable
@@ -1026,7 +1136,7 @@ function MoreButton({
       <Text
         style={[
           styles.moreText,
-          { color: colors.primaryOnTint, opacity: disabled ? 0.5 : 1 },
+          { color: disabled ? colors.textMuted : colors.primaryOnTint },
         ]}
       >
         {label}
@@ -1034,13 +1144,15 @@ function MoreButton({
     </Pressable>
   );
 }
-/** "N unread" for accessibility labels; empty when nothing is unread. */
-export function unreadSuffix(unread: number | undefined): string {
-  return unread && unread > 0 ? `, ${unread} unread` : "";
-}
-
 /** The compact count pill a sidebar row shows for its unread notifications. */
-function UnreadCount({ count }: { count: number | undefined }) {
+function UnreadCount({
+  count,
+  disabled = false,
+}: {
+  count: number | undefined;
+  disabled?: boolean;
+}) {
+  useAppLanguage();
   const { colors } = useTheme();
   if (!count || count <= 0) return null;
   return (
@@ -1048,7 +1160,10 @@ function UnreadCount({ count }: { count: number | undefined }) {
       testID="sidebar-unread-count"
       style={[
         styles.count,
-        { color: colors.textPrimary, backgroundColor: colors.navActive },
+        {
+          color: disabled ? colors.textMuted : colors.textPrimary,
+          backgroundColor: colors.navActive,
+        },
       ]}
     >
       {count > 99 ? "99+" : String(count)}
@@ -1061,18 +1176,108 @@ function GroupChatRow({
   selected,
   unread,
   onPress,
+  disabled = false,
 }: {
   group: Group;
   selected: boolean;
   unread?: number;
   onPress: () => void;
+  disabled?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
+  const detail = group.working_agent_ids.length
+    ? group.owner?.type === "org"
+      ? selected
+        ? translateApp(
+            "Agents working… · {{count}} agents · {{name}} · {{time}} · Current",
+            {
+              count: group.members.length,
+              name: group.owner.name,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+        : translateApp(
+            "Agents working… · {{count}} agents · {{name}} · {{time}}",
+            {
+              count: group.members.length,
+              name: group.owner.name,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+      : selected
+        ? translateApp(
+            "Agents working… · {{count}} agents · {{time}} · Current",
+            {
+              count: group.members.length,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+        : translateApp("Agents working… · {{count}} agents · {{time}}", {
+            count: group.members.length,
+            time: formatRelativeTimeFromMs(
+              Date.parse(group.last_message_at || group.created_at),
+            ),
+          })
+    : group.owner?.type === "org"
+      ? selected
+        ? translateApp(
+            "{{count}} messages · {{agents}} agents · {{name}} · {{time}} · Current",
+            {
+              count: group.message_count,
+              agents: group.members.length,
+              name: group.owner.name,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+        : translateApp(
+            "{{count}} messages · {{agents}} agents · {{name}} · {{time}}",
+            {
+              count: group.message_count,
+              agents: group.members.length,
+              name: group.owner.name,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+      : selected
+        ? translateApp(
+            "{{count}} messages · {{agents}} agents · {{time}} · Current",
+            {
+              count: group.message_count,
+              agents: group.members.length,
+              time: formatRelativeTimeFromMs(
+                Date.parse(group.last_message_at || group.created_at),
+              ),
+            },
+          )
+        : translateApp("{{count}} messages · {{agents}} agents · {{time}}", {
+            count: group.message_count,
+            agents: group.members.length,
+            time: formatRelativeTimeFromMs(
+              Date.parse(group.last_message_at || group.created_at),
+            ),
+          });
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`Open crew ${group.name}${group.working_agent_ids.length ? `, ${group.working_agent_ids.length} running` : ""}${selected ? ", current crew" : ""}${unreadSuffix(unread)}`}
-      accessibilityState={{ selected }}
+      accessibilityLabel={workspaceCrewLabel(
+        group.name,
+        group.working_agent_ids.length,
+        selected,
+        unread,
+      )}
+      accessibilityState={{ selected, disabled }}
+      disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
         styles.row,
@@ -1089,7 +1294,10 @@ function GroupChatRow({
       <View style={styles.label}>
         <Text
           numberOfLines={1}
-          style={[styles.name, { color: colors.textPrimary }]}
+          style={[
+            styles.name,
+            { color: disabled ? colors.textMuted : colors.textPrimary },
+          ]}
         >
           {group.name}
         </Text>
@@ -1097,16 +1305,10 @@ function GroupChatRow({
           numberOfLines={1}
           style={[styles.detail, { color: colors.textMuted }]}
         >
-          {group.working_agent_ids.length
-            ? "Agents working…"
-            : `${group.message_count} messages`}{" "}
-          · {group.members.length} agents
-          {group.owner?.type === "org" ? ` · ${group.owner.name}` : ""}
-          {` · ${formatRelativeTimeFromMs(Date.parse(group.last_message_at || group.created_at))}`}
-          {selected ? " · Current" : ""}
+          {detail}
         </Text>
       </View>
-      <UnreadCount count={unread} />
+      <UnreadCount count={unread} disabled={disabled} />
       <ChevronRight size={16} color={colors.textMuted} />
     </Pressable>
   );
@@ -1121,6 +1323,7 @@ function DisclosureRow({
   selected,
   unread,
   onPress,
+  disabled = false,
   kind,
 }: {
   label: string;
@@ -1131,16 +1334,24 @@ function DisclosureRow({
   /** Unread notifications across the chats this row folds. */
   unread?: number;
   onPress: () => void;
+  disabled?: boolean;
   kind: "agent" | "group";
   agent?: AssistantAgent;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const Chevron = expanded ? ChevronDown : ChevronRight;
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`${expanded ? "Collapse" : "Expand"} chats for ${label}${(accessibilityDetail ?? detail) ? `, ${accessibilityDetail ?? detail}` : ""}${unreadSuffix(unread)}`}
-      accessibilityState={{ expanded, selected }}
+      accessibilityLabel={workspaceDisclosureLabel(
+        label,
+        expanded,
+        accessibilityDetail ?? detail,
+        unread,
+      )}
+      accessibilityState={{ expanded, selected, disabled }}
+      disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
         styles.row,
@@ -1161,7 +1372,10 @@ function DisclosureRow({
       <View style={styles.label}>
         <Text
           numberOfLines={1}
-          style={[styles.name, { color: colors.textPrimary }]}
+          style={[
+            styles.name,
+            { color: disabled ? colors.textMuted : colors.textPrimary },
+          ]}
         >
           {label}
         </Text>
@@ -1179,7 +1393,7 @@ function DisclosureRow({
                 style={[
                   styles.channelBadge,
                   {
-                    color: colors.textSecondary,
+                    color: disabled ? colors.textMuted : colors.textSecondary,
                     backgroundColor: colors.navActive,
                   },
                 ]}
@@ -1198,37 +1412,51 @@ function DisclosureRow({
           </Text>
         ) : null}
       </View>
-      <UnreadCount count={unread} />
+      <UnreadCount count={unread} disabled={disabled} />
       <Chevron size={16} color={colors.textMuted} />
     </Pressable>
   );
 }
 
 function ChatRow({
+  agent,
   label,
   detail,
   selected,
   unread,
   onPress,
+  disabled = false,
   accessibilityLabel,
   status,
   create,
 }: {
+  agent?: AssistantAgent;
   label: string;
   detail?: string;
   selected: boolean;
   unread?: number;
   onPress: () => void;
+  disabled?: boolean;
   accessibilityLabel?: string;
   status?: string;
   create?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={accessibilityLabel || `Open ${label.toLowerCase()}`}
-      accessibilityState={{ selected }}
+      accessibilityLabel={
+        accessibilityLabel ||
+        translateApp(
+          label === translateApp("Current chat")
+            ? "Open current chat"
+            : "Open {{label}}",
+          { label },
+        )
+      }
+      accessibilityState={{ selected, disabled }}
+      disabled={disabled}
       onPress={onPress}
       style={({ pressed }) => [
         styles.chat,
@@ -1238,6 +1466,7 @@ function ChatRow({
         },
       ]}
     >
+      {agent ? <AgentAvatar agent={agent} size="lg" /> : null}
       {create ? <Plus size={14} color={colors.textMuted} /> : null}
       <View style={styles.label}>
         <View style={styles.chatLine}>
@@ -1246,8 +1475,11 @@ function ChatRow({
             style={[
               styles.chatTitle,
               {
-                color:
-                  selected || unread ? colors.textPrimary : colors.textSecondary,
+                color: disabled
+                  ? colors.textMuted
+                  : selected || unread
+                    ? colors.textPrimary
+                    : colors.textSecondary,
                 fontFamily: selected || unread ? fonts.bodySemi : fonts.body,
               },
             ]}
@@ -1268,16 +1500,19 @@ function ChatRow({
             style={[
               styles.detail,
               {
-                color:
-                  status === "Needs you" ? colors.warning : colors.primaryOnTint,
+                color: disabled
+                  ? colors.textMuted
+                  : status === "Needs you"
+                    ? colors.warning
+                    : colors.primaryOnTint,
               },
             ]}
           >
-            {status}
+            {translateApp(status)}
           </Text>
         ) : null}
       </View>
-      <UnreadCount count={unread} />
+      <UnreadCount count={unread} disabled={disabled} />
     </Pressable>
   );
 }
@@ -1291,6 +1526,7 @@ function DrawerMessage({
   retry?: () => void;
   disabled?: boolean;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View style={styles.message}>
@@ -1300,13 +1536,13 @@ function DrawerMessage({
       {retry ? (
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={`Retry: ${text}`}
+          accessibilityLabel={translateApp("Retry: {{text}}", { text: text })}
           disabled={disabled}
           onPress={retry}
           style={styles.retry}
         >
           <Text style={[styles.moreText, { color: colors.primaryOnTint }]}>
-            Retry
+            {translateApp("Retry")}
           </Text>
         </Pressable>
       ) : null}
@@ -1332,24 +1568,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 5,
     paddingVertical: 2,
   },
-  sectionHeading: { flexDirection: "row", alignItems: "center" },
-  createButton: {
-    width: 44,
-    height: 44,
-    alignItems: "center",
-    justifyContent: "center",
-    borderRadius: 8,
-  },
   sections: { gap: 4, marginTop: 12 },
-  sectionRow: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    minHeight: 44,
-    paddingRight: 10,
-    gap: 8,
-  },
-  sectionCount: { fontFamily: fonts.bodyRegular, fontSize: 11 },
   count: {
     fontFamily: fonts.bodySemi,
     fontSize: 11,
@@ -1357,11 +1576,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 7,
     paddingVertical: 2,
     overflow: "hidden",
-  },
-  section: {
-    ...sidebarSectionTitle,
-    padding: 12,
-    flex: 1,
   },
   row: {
     flexDirection: "row",

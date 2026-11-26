@@ -176,9 +176,14 @@ async fn rebuild<R: OrnnReader>(
     let operation = Uuid::new_v4().to_string();
     let bytes =
         publication::package_with_snapshot(body, &operation, &p.name, &p.version, Some(&snapshot))?;
-    let interface = state
-        .encryption_keys
-        .encrypt(&serde_json::to_vec(&snapshot).map_err(|_| conflict())?)
+    let (interface, interface_context_version) = record::Field::Interface(&operation)
+        .seal(
+            &state.encryption_keys,
+            &row.id,
+            &row.owner_id,
+            &row.agent_id,
+            &serde_json::to_vec(&snapshot).map_err(|_| conflict())?,
+        )
         .await?;
     let next = LearningPublication {
         invocation_id: p.invocation_id.clone(),
@@ -190,6 +195,7 @@ async fn rebuild<R: OrnnReader>(
         target_kind: Some("update".into()),
         target_skill_id: Some(base.skill_id.clone()),
         interface_encrypted: Some(interface),
+        interface_context_version,
         package_format: PACKAGE_FORMAT_SNAPSHOT,
         review_card_pending: row.source == ProposalSource::Authored,
         ..Default::default()
@@ -201,7 +207,7 @@ async fn rebuild<R: OrnnReader>(
         "acknowledgement_id":clicked});
     let mut filter = legacy_package_filter();
     filter.extend(undispatched_status_filter());
-    filter.extend(doc! {"_id":&row.id,"owner_id":actor,"revision":revision_filter(row.revision),
+    filter.extend(doc! {"_id":&row.id,"owner_id":actor,"agent_id":&row.agent_id,"revision":revision_filter(row.revision),
         "publication.operation_id":&p.operation_id,"publication.sha256":&p.sha256,
         "publication.attempt":attempt_filter(p.attempt),
         "publication.target_kind":{"$in":[bson::Bson::Null,bson::Bson::String("update".into())]},

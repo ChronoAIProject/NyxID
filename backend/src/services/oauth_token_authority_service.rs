@@ -15,6 +15,7 @@ use crate::{
     crypto::jwt::{Claims, DelegationOrigin},
     errors::{AppError, AppResult},
     models::{
+        catalog_delegation_grant::{COLLECTION_NAME as CATALOG_GRANTS, CatalogDelegationGrant},
         consent::Consent,
         oauth_client::OauthClient,
         oauth_delegation_authority::{COLLECTION_NAME, ConsentBinding, OauthDelegationAuthority},
@@ -100,26 +101,25 @@ impl<'a> AuthorityReads<'a> {
             .unwrap_or(None);
         #[cfg(test)]
         let started = std::time::Instant::now();
-        let result = tokio::time::timeout(
-            AUTHORITY_READ_BUDGET + std::time::Duration::from_millis(250),
-            async {
-                #[cfg(test)]
-                if matches!(fault, Some(ReadFaultKind::Timeout)) {
-                    std::future::pending::<()>().await;
-                }
-                let query = filter.clone();
-                #[cfg(test)]
-                let query = if matches!(fault, Some(ReadFaultKind::Database)) {
-                    doc! {"$invalidAuthorityTestOperator": true}
-                } else {
-                    query
-                };
-                collection
-                    .find_one(query)
-                    .max_time(AUTHORITY_READ_BUDGET)
-                    .await
-            },
-        )
+        let budget = AUTHORITY_READ_BUDGET;
+        #[cfg(test)]
+        let budget = FIXTURE_READ_BUDGET
+            .try_with(|budget| *budget)
+            .unwrap_or(budget);
+        let result = tokio::time::timeout(budget + std::time::Duration::from_millis(250), async {
+            #[cfg(test)]
+            if matches!(fault, Some(ReadFaultKind::Timeout)) {
+                std::future::pending::<()>().await;
+            }
+            let query = filter.clone();
+            #[cfg(test)]
+            let query = if matches!(fault, Some(ReadFaultKind::Database)) {
+                doc! {"$invalidAuthorityTestOperator": true}
+            } else {
+                query
+            };
+            collection.find_one(query).max_time(budget).await
+        })
         .await;
         #[cfg(test)]
         record_read_latency(
@@ -164,6 +164,30 @@ pub(super) struct ReadFault {
 
 #[cfg(test)]
 tokio::task_local! { pub(super) static READ_FAULT: ReadFault; }
+
+#[cfg(test)]
+tokio::task_local! { static FIXTURE_READ_BUDGET: std::time::Duration; }
+
+/// Functional router fixtures exercise real primary reads even on a stalled CI replica.
+#[cfg(test)]
+pub(crate) async fn with_fixture_read_budget<F: Future>(operation: F) -> F::Output {
+    FIXTURE_READ_BUDGET
+        .scope(std::time::Duration::from_secs(90), operation)
+        .await
+}
+
+#[cfg(test)]
+pub(crate) async fn with_unavailable_user_read<F: Future>(operation: F) -> F::Output {
+    READ_FAULT
+        .scope(
+            ReadFault {
+                collection: crate::models::user::COLLECTION_NAME,
+                kind: ReadFaultKind::Database,
+            },
+            operation,
+        )
+        .await
+}
 
 // Opt-in measurement for the real parallel test selection. Only collection,
 // duration and outcome are recorded; no query, user, token or credential data.
@@ -326,8 +350,11 @@ async fn validate_lineage(
 
 /// Called only after signature/type validation. Service-issued delegation has
 /// its own signed origin and retains the existing service-policy contract.
-pub async fn validate_claims(db: &Database, claims: &Claims) -> AppResult<()> {
-    validate_claims_with_user(db, claims).await.map(|_| ())
+/// Returns the client needing designation only for a direct, verified app token.
+pub async fn validate_claims(db: &Database, claims: &Claims) -> AppResult<Option<String>> {
+    validate_claims_with_reads(&mut AuthorityReads::new(db), claims)
+        .await
+        .map(|access| access.unflagged_client_id)
 }
 
 pub async fn validate_claims_for_route(
@@ -343,8 +370,10 @@ pub async fn validate_claims_for_route(
 /// Retain the active user loaded during authority validation so callers can
 /// apply account checks without another read. Service accounts and relay tokens
 /// keep their separate authority checks and return no human user.
-pub async fn validate_claims_with_user(db: &Database, claims: &Claims) -> AppResult<Option<User>> {
-    validate_claims_with_reads(&mut AuthorityReads::new(db), claims).await
+struct ValidatedAccess {
+    user: Option<User>,
+    /// Present only for a direct user access token from an undesignated active client.
+    unflagged_client_id: Option<String>,
 }
 
 pub async fn validate_claims_with_user_for_route(
@@ -352,15 +381,20 @@ pub async fn validate_claims_with_user_for_route(
     claims: &Claims,
     route_class: &'static str,
 ) -> AppResult<Option<User>> {
-    validate_claims_with_reads(&mut AuthorityReads::for_route(db, route_class), claims).await
+    validate_claims_with_reads(&mut AuthorityReads::for_route(db, route_class), claims)
+        .await
+        .map(|access| access.user)
 }
 
 async fn validate_claims_with_reads(
     reads: &mut AuthorityReads<'_>,
     claims: &Claims,
-) -> AppResult<Option<User>> {
+) -> AppResult<ValidatedAccess> {
     if claims.sa == Some(true) || claims.relay == Some(true) {
-        return Ok(None);
+        return Ok(ValidatedAccess {
+            user: None,
+            unflagged_client_id: None,
+        });
     }
     let user: User = reads
         .required(
@@ -368,13 +402,17 @@ async fn validate_claims_with_reads(
             doc! {"_id":&claims.sub,"is_active":true,"platform_personal_deleting":{"$ne":true}},
         )
         .await?;
+    let mut unflagged_client_id = None;
     if let Some(actor) = &claims.act {
         match claims.delegation_origin {
             Some(DelegationOrigin::Service) if claims.client_id.is_none() => {
                 if let Some(lineage) = &claims.oauth_lineage {
                     validate_lineage(reads, &claims.sub, lineage).await?;
                 }
-                return Ok(Some(user));
+                return Ok(ValidatedAccess {
+                    user: Some(user),
+                    unflagged_client_id,
+                });
             }
             // Legacy delegation has no authenticated origin discriminator.
             // It cannot fall back to service authority when a client is deleted.
@@ -391,7 +429,10 @@ async fn validate_claims_with_reads(
             return Err(denied());
         }
     } else if let Some(client) = claims.client_id.as_deref() {
-        active_client(reads, client).await?;
+        let registration = active_client(reads, client).await?;
+        if !registration.first_party_management {
+            unflagged_client_id = Some(registration.id);
+        }
         consent_service::validate_protected_reference_with_reads(
             reads,
             &claims.sub,
@@ -404,7 +445,10 @@ async fn validate_claims_with_reads(
     } else if let Some(session) = claims.sid.as_deref() {
         source_session(reads, &claims.sub, session).await?;
     }
-    Ok(Some(user))
+    Ok(ValidatedAccess {
+        user: Some(user),
+        unflagged_client_id,
+    })
 }
 
 /// Capture references only during an already-authorized new exchange. Renewal
@@ -476,48 +520,99 @@ pub async fn persist(
         expires_at: chrono::DateTime::from_timestamp(claims.exp, 0).ok_or_else(denied)?,
         created_at: Utc::now(),
     };
-    bindings_live(&mut AuthorityReads::new(db), &row).await?;
+    let catalog_grant = super::catalog_delegation_service::scope_has_catalog_read(&row.scope)
+        .then(|| super::catalog_delegation_service::grant_from_claims(claims))
+        .transpose()?;
+    let mut reads = AuthorityReads::new(db);
+    let live = bindings_live(&mut reads, &row);
+    #[cfg(test)]
+    let live = tests::catalog_issuance::with_test_delay(live);
+    live.await?;
+    if let Some(grant) = catalog_grant {
+        let issuance = (db.clone(), row, grant);
+        return super::transaction_service::run_db_only(db, &issuance, |tx, (db, row, grant)| {
+            Box::pin(async move {
+                super::erasure_admission::fence_in_session(db, &row.user_id, tx).await?;
+                db.collection::<CatalogDelegationGrant>(CATALOG_GRANTS)
+                    .insert_one(grant)
+                    .session(&mut *tx)
+                    .await?;
+                insert_fenced_authority(db, row, tx).await
+            })
+        })
+        .await;
+    }
+
     let mut transaction = db.client().start_session().await?;
     transaction
         .start_transaction()
         .write_concern(WriteConcern::majority())
         .await?;
-    let result: AppResult<()> = async {
-        let live = db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
-            .update_one(doc! {"_id":&row.user_id,"is_active":true,"platform_personal_deleting":{"$ne":true}},
-                doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}})
-            .session(&mut transaction).await?;
-        if live.matched_count != 1 { return Err(denied()); }
-        for binding in &row.consents {
-            let client = db.collection::<OauthClient>(crate::models::oauth_client::COLLECTION_NAME)
-                .update_one(doc! {"_id":&binding.client_id,"is_active":true},
-                    doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}})
-                .session(&mut transaction).await?;
-            if client.matched_count != 1 { return Err(denied()); }
-            let consent = db.collection::<Consent>(crate::models::consent::COLLECTION_NAME)
-                .update_one(doc! {"_id":&binding.reference.consent_id,"revision":&binding.reference.consent_revision,
-                    "user_id":&row.user_id,"client_id":&binding.client_id},
-                    doc! {"$set":{"issuance_fence":uuid::Uuid::new_v4().to_string()}})
-                .session(&mut transaction).await?;
-            if consent.matched_count != 1 { return Err(denied()); }
-        }
-        if let Some(session) = &row.source_session_id {
-            let live = db.collection::<Session>(crate::models::session::COLLECTION_NAME)
-                .update_one(super::session_authority::authenticated(doc! {"_id":session,"user_id":&row.user_id,
-                    "revoked":false,"expires_at":{"$gt":bson::DateTime::now()}}),
-                    doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}})
-                .session(&mut transaction).await?;
-            if live.matched_count != 1 { return Err(denied()); }
-        }
-        db.collection::<OauthDelegationAuthority>(COLLECTION_NAME).insert_one(&row)
-            .session(&mut transaction).await?;
-        Ok(())
-    }.await;
-    if let Err(error) = result {
+    if let Err(error) = insert_fenced_authority(db, &row, &mut transaction).await {
         transaction.abort_transaction().await?;
         return Err(error);
     }
     super::transaction_service::commit(&mut transaction).await
+}
+
+async fn insert_fenced_authority(
+    db: &Database,
+    row: &OauthDelegationAuthority,
+    tx: &mut mongodb::ClientSession,
+) -> AppResult<()> {
+    let live = db
+        .collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&row.user_id,"is_active":true,"platform_personal_deleting":{"$ne":true}},
+            doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}},
+        )
+        .session(&mut *tx)
+        .await?;
+    if live.matched_count != 1 {
+        return Err(denied());
+    }
+    for binding in &row.consents {
+        let client = db
+            .collection::<OauthClient>(crate::models::oauth_client::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&binding.client_id,"is_active":true},
+                doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}},
+            )
+            .session(&mut *tx)
+            .await?;
+        if client.matched_count != 1 {
+            return Err(denied());
+        }
+        let consent = db.collection::<Consent>(crate::models::consent::COLLECTION_NAME)
+            .update_one(doc! {"_id":&binding.reference.consent_id,"revision":&binding.reference.consent_revision,
+                "user_id":&row.user_id,"client_id":&binding.client_id},
+                doc! {"$set":{"issuance_fence":uuid::Uuid::new_v4().to_string()}})
+            .session(&mut *tx).await?;
+        if consent.matched_count != 1 {
+            return Err(denied());
+        }
+    }
+    if let Some(session) = &row.source_session_id {
+        let live = db
+            .collection::<Session>(crate::models::session::COLLECTION_NAME)
+            .update_one(
+                super::session_authority::authenticated(
+                    doc! {"_id":session,"user_id":&row.user_id,
+                    "revoked":false,"expires_at":{"$gt":bson::DateTime::now()}},
+                ),
+                doc! {"$set":{"oauth_issuance_fence":uuid::Uuid::new_v4().to_string()}},
+            )
+            .session(&mut *tx)
+            .await?;
+        if live.matched_count != 1 {
+            return Err(denied());
+        }
+    }
+    db.collection::<OauthDelegationAuthority>(COLLECTION_NAME)
+        .insert_one(row)
+        .session(&mut *tx)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]

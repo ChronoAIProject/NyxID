@@ -1,8 +1,6 @@
-import { appI18n } from "@/i18n/instance";
-import english from "@/i18n/locales/errors-en.json";
+import { appI18n, englishErrorMessages } from "@/i18n/instance";
 import type { TOptions } from "i18next";
 
-const messages = new Set(Object.keys(english));
 const envelopePrefix =
   /^(Bad request|Unauthorized|Forbidden|Not found|Conflict|Validation error|Authentication failed): ([\s\S]+)$/;
 
@@ -17,7 +15,9 @@ function translateKnown(message: string, options?: TOptions): string {
 }
 
 function translateBare(message: string, options?: TOptions): string {
-  if (messages.has(message)) return translateKnown(message, options);
+  const authentication = /^Authentication failed:\s*([\s\S]*)$/i.exec(message);
+  if (authentication) return translateBare(authentication[1]!, options);
+  if (englishErrorMessages.has(message)) return translateKnown(message, options);
 
   const status = /^Request failed with status (\d{3})$/.exec(message);
   if (status) {
@@ -39,7 +39,7 @@ function translateBare(message: string, options?: TOptions): string {
     ns: "errors",
     keySeparator: false,
     nsSeparator: false,
-    message: messages.has(detail) ? translateKnown(detail, options) : detail,
+    message: englishErrorMessages.has(detail) ? translateKnown(detail, options) : detail,
     defaultValue: message,
   });
 }

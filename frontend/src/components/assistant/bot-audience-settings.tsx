@@ -1,3 +1,4 @@
+import { GuestServices } from "./org-channel-preview";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import {
@@ -264,6 +265,7 @@ function GuestSettings({
   readonly disabled: boolean;
 }) {
   useUiTranslation();
+  const privateAccess = useSetNyxBotPrivateChats();
   const legacy = settings.guest_policy_mode !== "grants";
   const grantsLink = `/assistant?agent=${encodeURIComponent(settings.agent_id ?? channel.agent_id ?? "")}&details=grants`;
   return (
@@ -273,6 +275,7 @@ function GuestSettings({
         <>
           <p>{botAudienceDescription(channel)}</p>
           <p>{translateUi("Group chats keep their own audience settings.")}</p>
+          {!settings.can_manage ? <p>{translateUi("An organization admin can change these settings.")}</p> : null}
           {!settings.grants_ready ? (
             <p role="status">
               {translateUi(
@@ -280,21 +283,11 @@ function GuestSettings({
               )}
             </p>
           ) : null}
-          {settings.readiness_reason ? (
-            <p role="status">
-              {settings.readiness_reason === "org_wallet_not_provisioned"
-                ? translateUi(
-                    "Provision the organization billing wallet and subscription before enabling guests.",
-                  )
-                : translateUi("The organization wallet is suspended.")}{" "}
-              <a
-                className="type-button underline"
-                href={`/billing?ownerId=${encodeURIComponent(settings.org_id)}`}
-              >
-                {translateUi("Open organization Billing")}
-              </a>
-            </p>
-          ) : null}
+          {settings.health ? <p role="status">
+            {translateUi(settings.health.text)}{" "}
+            {settings.can_manage ? <a className="type-button underline" href={`/billing?ownerId=${encodeURIComponent(settings.org_id)}`}>{translateUi("Open organization Billing")}</a> : null}
+          </p> : settings.readiness_reason ? <p role="status">{translateUi(settings.readiness_reason === "org_wallet_suspended" ? "The organization wallet is suspended." : "Set up organization billing to serve guests.")}</p> : null}
+          {privateAccess.error ? <p role="alert">{privateAccess.error.message}</p> : null}
           {api.save.error ? (
             <p role="alert" className="text-destructive">
               {api.save.error.message}
@@ -324,12 +317,22 @@ function GuestSettings({
           />
         }
       />
+      <GroupedRow title={translateUi("Private chats")} accessory={
+        <Select value={settings.private_chats ?? channel.private_chats} disabled={disabled || privateAccess.isPending}
+          onValueChange={(value) => privateAccess.mutate({ channelAgentId: channel.id, privateChats: value as "owner" | "everyone" })}>
+          <GroupedSelectTrigger aria-label={translateUi("Private chats")}><SelectValue /></GroupedSelectTrigger>
+          <SelectContent>
+            <SelectItem value="owner">{translateUi("Verified organization members")}</SelectItem>
+            <SelectItem value="everyone">{translateUi("Anyone")}</SelectItem>
+          </SelectContent>
+        </Select>
+      } />
       <GroupedRow className="block space-y-1">
         {legacy ? (
           <p>
-            {translateUi(
-              "Existing guest limits are kept. Review them in Grants.",
-            )}
+            {settings.binding_limits_guest_services
+              ? translateUi("This bot's saved limits exclude services listed for guests in the specialist's Grants. An organization admin can review access for all linked bots in Grants.")
+              : translateUi("Existing guest limits are kept. Review them in Grants.")}
           </p>
         ) : (
           <>
@@ -338,24 +341,15 @@ function GuestSettings({
                 "Enabling guests applies this specialist's Grants, including the default Use access.",
               )}
             </p>
-            <p>
-              {translateUi("Guests can use")}:{" "}
-              {settings.effective_guest_services.length
-                ? settings.effective_guest_services
-                    .map((s) =>
-                      s.label === "Unavailable service"
-                        ? translateUi("Unavailable service")
-                        : s.label,
-                    )
-                    .join(", ")
-                : translateUi("Model-only chat")}
-            </p>
           </>
         )}
+        <p>{translateUi("Guests can use")}</p>
+        <GuestServices services={settings.effective_guest_services} />
         <a className="type-button underline" href={grantsLink}>
           {translateUi("Guest service access · Agent details → Grants")}
         </a>
       </GroupedRow>
+      {settings.can_manage && settings.spent_today_credits !== undefined && settings.reserved_today_credits !== undefined ? <>
       <GroupedRow
         title={translateUi("Organization spend today")}
         description={translateUi("{{value1}} credits ({{value2}} reserved)", {
@@ -368,6 +362,7 @@ function GuestSettings({
           "This bot's guest spend today, including earlier connections. The organization pays.",
         )}
       />
+      </> : null}
     </GroupedList>
   );
 }

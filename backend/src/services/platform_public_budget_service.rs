@@ -814,6 +814,9 @@ pub async fn sweep(db: &Database, limit: u32) -> AppResult<RecoveryBatch> {
         .try_collect()
         .await?;
     for call in calls {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         if let Ok(id) = call.get_str("_id")
             && reconcile_call(db, id).await.is_err()
         {
@@ -831,6 +834,9 @@ pub async fn sweep(db: &Database, limit: u32) -> AppResult<RecoveryBatch> {
         .try_collect()
         .await?;
     for row in loops {
+        let Some(_claim) = crate::services::shutdown::process().background() else {
+            break;
+        };
         let Ok(id) = row.get_str("_id") else {
             continue;
         };

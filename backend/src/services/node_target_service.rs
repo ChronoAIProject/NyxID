@@ -136,6 +136,7 @@ impl Migration {
             "unsupported"
         } else {
             let params = CredentialUpdateParams {
+                version: None,
                 service_slug: service.slug.clone(),
                 injection_method: "target_url".into(),
                 target_url: Some(self.new_url.clone()),
@@ -208,6 +209,94 @@ impl Migration {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn is_direct(&self) -> bool {
+        self.services.is_empty()
+    }
+
+    /// Return the endpoint and authorship from the same majority-committed edit.
+    pub(crate) async fn commit_for_connection(
+        &self,
+        db: &Database,
+        service_id: &str,
+        state_version: i64,
+    ) -> AppResult<(crate::models::user_endpoint::UserEndpoint, UserService)> {
+        use super::{api_key_mutation_service as transactions, service_history as history};
+        use mongodb::bson::Bson;
+        let revision = if state_version == 0 {
+            doc! {"$in": [0_i64, Bson::Null]}
+        } else {
+            doc! {"$eq": state_version}
+        };
+        let exact_service = doc! {
+            "_id": service_id, "user_id": &self.owner, "endpoint_id": &self.endpoint,
+            "catalog_service_id": null, "deleted_at": null, "state_version": revision,
+            "node_id": {"$in": [Bson::Null, Bson::String(String::new())]},
+            "source": {"$ne": crate::models::user_service::AUTO_PROVISION_SOURCE},
+        };
+        let exact_endpoint = doc! {
+            "_id": &self.endpoint, "user_id": &self.owner, "deleted_at": null, "url": &self.old_url,
+        };
+        let update = user_endpoint_service::build_endpoint_update(
+            Some(&self.new_url),
+            None,
+            user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
+            user_endpoint_service::RecommendedSkillsUpdate::Leave,
+        )?;
+        let input = (db.clone(), exact_service, exact_endpoint, update);
+        history::transaction::run_send(db, &input, |session, input| {
+            let (db, exact_service, exact_endpoint, update) = (*input).clone();
+            Box::pin(async move {
+                let services =
+                    db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME);
+                let endpoints = history::collection::<crate::models::user_endpoint::UserEndpoint>(
+                    &db,
+                    crate::models::user_endpoint::COLLECTION_NAME,
+                );
+                let operation: AppResult<_> = async {
+                    // Take a write conflict against deletion or rebinding of the
+                    // connection while committing the endpoint and its journal.
+                    let service = services
+                        .update_one(
+                            exact_service.clone(),
+                            doc! {"$inc": {"endpoint_update_generation": 1_i64}},
+                        )
+                        .session(&mut **session)
+                        .await?;
+                    if service.matched_count != 1 {
+                        return Err(AppError::Conflict(
+                            "Connection changed during endpoint update; reload and retry".into(),
+                        ));
+                    }
+                    let endpoint = endpoints
+                        .find_one_and_update(exact_endpoint.clone(), update.clone())
+                        .return_document(mongodb::options::ReturnDocument::After)
+                        .session(&mut *session)
+                        .await?
+                        .ok_or_else(|| {
+                            AppError::Conflict(
+                                "Endpoint changed during migration; reload and retry".into(),
+                            )
+                        })?;
+                    let service = services
+                        .find_one(exact_service.clone())
+                        .session(&mut **session)
+                        .await?
+                        .ok_or_else(|| {
+                            AppError::Conflict(
+                                "Connection changed during endpoint update; reload and retry"
+                                    .into(),
+                            )
+                        })?;
+                    Ok((endpoint, service))
+                }
+                .await;
+                transactions::transaction_result(operation)
+            })
+        })
+        .await
+        .map_err(transactions::map_transaction_error)
     }
 
     pub async fn after_commit(

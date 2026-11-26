@@ -1130,7 +1130,7 @@ async fn machine_git_final_send_rejects_live_catalog_and_credential_drift() {
             .scope(
                 upstream.client_builder.clone(),
                 proxy::forward_request_with_egress_guard(
-                    &upstream.client,
+                    proxy::Redirects::Return,
                     &resolved.target,
                     reqwest::Method::GET,
                     path,

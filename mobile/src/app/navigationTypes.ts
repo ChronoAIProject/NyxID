@@ -17,6 +17,8 @@ export type AssistantParams = {
   /** Local identity of an unsent compose session; never sent to the server. */
   draftId?: string;
   conversationId?: string;
+  /** Resolve any persisted segment ID to its displayed transcript row. */
+  messageId?: string;
   acknowledgementId?: string;
   agentId?: string;
   draft?: boolean;
@@ -31,6 +33,8 @@ export type WorkspaceParamList = {
   Plugins: { tab?: "connectors" | "skills"; agentId?: string } | undefined;
   Agents: { tab?: "agents" | "groups" } | undefined;
   Activity: { challengeId?: string } | undefined;
+  /** Stacked approval inbox used while a terminal remains pending. */
+  ActivityReview: undefined;
   /** The owner's durable notification feed (bell); hidden while the flag is off. */
   Notifications: undefined;
   AccountSettings:
@@ -55,7 +59,8 @@ export type AuthoredSkillPageParams = {
 type SharedEntryParamList = {
   TermsOfService: undefined;
   PrivacyPolicy: undefined;
-  DeviceLogin: { user_code?: string; start_scanner?: boolean } | undefined;
+  OpenSourceNotices: undefined;
+  DeviceLogin: { user_code?: string; start_scanner?: boolean; staging_scan?: true } | undefined;
   AgentKeyLogin:
     | { user_code?: string; flow?: "agent-key" | "device"; mint?: boolean }
     | undefined;
@@ -68,7 +73,7 @@ export type WorkspaceContentParamList = Omit<
 > & {
   AssistantContext: AssistantParams | undefined;
   GroupChat: { groupId: string };
-  AssistantDetails: { agentId?: string; conversationId?: string };
+  AssistantDetails: { agentId?: string; conversationId?: string; draftKey?: string; draftEpoch?: number };
   AssistantTitleEdit: { conversationId: string; agentId?: string };
   AssistantHistory: { agentId?: string } | undefined;
   AssistantWorkingContext: { conversationId: string };
@@ -78,6 +83,15 @@ export type WorkspaceContentParamList = Omit<
   AgentDetail: { agentId: string };
   AgentProfileEdit: { agentId: string; field: AgentProfileField };
   GroupEditor: { groupId?: string } | undefined;
+  SshTerminal: {
+    /** Catalog service id used by the terminal WebSocket and deep links. */
+    serviceId: string;
+    /** Exact UserService connection id when opened from Services/Plugins. */
+    connectionId?: string;
+    principal?: string;
+    /** Only Services/Plugins may set this boolean; link parsing never does. */
+    autoConnect?: boolean;
+  };
   ServiceSetup: { connectionId?: string; catalogSlug?: string };
   AgentSkills: { agentId: string };
   SkillDetail: SkillPageParams;
@@ -124,12 +138,17 @@ export type WorkspaceSheetParamList = SharedEntryParamList & {
   NotificationSettings: undefined;
   DisplaySettings: undefined;
   LanguageSettings: undefined;
+  /** The Duo rail's quick-access list (saved to the account). */
+  QuickAccessSettings: undefined;
   /** `voice` false: only dictation settings (no live voice for this account). */
   VoiceSettings: { voice?: boolean } | undefined;
+  AppleWatchSettings: undefined;
   PrivacySettings: undefined;
   ProfileEdit: { field: "display_name" | "avatar_url" };
   SessionDetail: { sessionId: string };
   ChatLayoutEdit: { key: "columnWidth" | "composerMaxHeight" };
+  /** The folded Duo quick rail's Recent chats. */
+  RecentChats: undefined;
 };
 
 export type RootStackParamList = SharedEntryParamList & {
@@ -174,8 +193,10 @@ export const workspaceContentRouteNames: (keyof WorkspaceContentParamList)[] = [
   "Agents",
   "Plugins",
   "Services",
+  "SshTerminal",
   "Machines",
   "Activity",
+  "ActivityReview",
   "Notifications",
   "WorkspaceSearch",
   "WorkspaceRecents",
@@ -213,10 +234,14 @@ export const workspaceSettingsRouteNames: (keyof WorkspaceSheetParamList)[] = [
   "NotificationSettings",
   "DisplaySettings",
   "LanguageSettings",
+  "QuickAccessSettings",
   "VoiceSettings",
+  "AppleWatchSettings",
   "PrivacySettings",
   "DeviceLogin",
   "AgentKeyLogin",
+  "RecentChats",
   "TermsOfService",
   "PrivacyPolicy",
+  "OpenSourceNotices",
 ];

@@ -70,7 +70,11 @@ async fn fixture(label: &str, backup: ResponseTemplate) -> Fixture {
     ] {
         let mut catalog = test_auto_connected_catalog_service();
         catalog.slug = format!("review-inference-{index}");
-        catalog.base_url = format!("https://catalog-{index}.invalid/v1");
+        catalog.base_url = if index == 0 {
+            "https://catalog-primary.invalid/v1".into()
+        } else {
+            format!("{}/v1", server.uri())
+        };
         catalog.default_request_headers = Some(vec![
             crate::models::default_request_header::DefaultRequestHeader {
                 name: "x-review-trace".into(),
@@ -533,10 +537,12 @@ async fn pool_ai_slug_and_gateway_preserve_destination_and_translate_each_member
         assert_eq!(primary[0].url.path(), "/v1/chat/completions");
         assert_eq!(backup[0].url.path(), "/v1/messages");
         assert!(backup[0].headers.contains_key("anthropic-version"));
+        assert!(!primary[0].headers.contains_key("x-review-default"));
+        assert!(!primary[0].headers.contains_key("x-review-trace"));
         assert_eq!(backup[0].headers["x-review-default"], "catalog-default");
+        assert_eq!(backup[0].headers["x-review-trace"], "pool-ai");
         for request in [&primary[0], &backup[0]] {
             assert_eq!(request.url.query(), Some("trace=review"));
-            assert_eq!(request.headers["x-review-trace"], "pool-ai");
         }
         let primary: Value = serde_json::from_slice(&primary[0].body).unwrap();
         let backup: Value = serde_json::from_slice(&backup[0].body).unwrap();

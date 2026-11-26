@@ -128,6 +128,9 @@ pub async fn materialized_conversations(
         .iter()
         .filter_map(|r| r.conversation_id.as_deref())
         .collect();
+    if ids.is_empty() {
+        return Ok(Default::default());
+    }
     let rows: Vec<bson::Document> = db
         .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
         .find(doc! {"user_id":owner,"_id":{"$in":ids}})
@@ -139,5 +142,123 @@ pub async fn materialized_conversations(
     Ok(rows
         .into_iter()
         .filter_map(|r| r.get_str("_id").ok().map(str::to_owned))
+        .collect())
+}
+
+/// Owner lists may link only to that viewer's current org lane. A child's
+/// reserved personal-thread ID is never another member's execution identity.
+pub(crate) async fn actor_conversations(
+    db: &Database,
+    viewer: &str,
+    children: &[NyxbotThread],
+    channels: &[NyxbotChannel],
+) -> AppResult<std::collections::HashMap<String, String>> {
+    // Each full lane key uses the existing unique index. Never scan a viewer's
+    // conversation history; only materialize at most one lane per page child.
+    let mut candidates: Vec<_> = children
+        .iter()
+        .filter_map(|child| {
+            let channel = channels.iter().find(|c| c.id == child.channel_id)?;
+            let org = channel.org_specialist.as_ref()?;
+            Some((child, channel, org, child.follow.bound_agent_id.as_deref()?))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(Default::default());
+    }
+    let settings_ids: Vec<_> = candidates
+        .iter()
+        .filter_map(|(child, _, _, _)| child.follow.settings_chat_id.as_deref())
+        .collect();
+    let settings: Vec<NyxbotThread> = db
+        .collection(THREADS)
+        .find(doc! {"_id":{"$in":settings_ids},"record_scope":{"$ne":SCOPE}})
+        .hint(mongodb::options::Hint::Name("_id_".into()))
+        .limit(candidates.len() as i64)
+        .await?
+        .try_collect()
+        .await?;
+    candidates.retain(|(child, channel, _, agent)| {
+        settings.iter().any(|parent| {
+            Some(parent.id.as_str()) == child.follow.settings_chat_id.as_deref()
+                && parent.channel_id == channel.id
+                && parent.follow.binding_generation == child.follow.binding_generation
+                && channel_generation(channel, parent) == child.follow.binding_channel_generation
+                && parent.agent_id.as_deref().or(channel.agent_id.as_deref()) == Some(*agent)
+        })
+    });
+    if candidates.is_empty() {
+        return Ok(Default::default());
+    }
+    let agents: Vec<_> = candidates
+        .iter()
+        .map(|(_, _, org, agent)| {
+            doc! {
+                "_id":*agent, "user_id":&org.org_id, "destroyed_at":bson::Bson::Null
+            }
+        })
+        .collect();
+    let live: Vec<bson::Document> = db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .find(doc! {"$or":agents})
+        .projection(doc! {"_id":1})
+        .limit(candidates.len() as i64)
+        .await?
+        .try_collect()
+        .await?;
+    let filters: Vec<_> = candidates
+        .iter()
+        .filter(|(_, _, _, agent)| live.iter().any(|a| a.get_str("_id").ok() == Some(*agent)))
+        .map(|(child, channel, org, agent)| {
+            doc! {
+                "channel_id":&channel.id,"partition":&child.partition,"actor_id":viewer,
+                "agent_id":*agent,"binding_revision":&org.revision,
+                "guest_revision":bson::Bson::Null,"sender_hash":""
+            }
+        })
+        .collect();
+    if filters.is_empty() {
+        return Ok(Default::default());
+    }
+    let lanes: Vec<bson::Document> = db
+        .collection::<bson::Document>(crate::models::org_channel::LANES)
+        .find(doc! {"$or":filters})
+        .projection(doc! {"conversation_id":1})
+        .limit(candidates.len() as i64)
+        .await?
+        .try_collect()
+        .await?;
+    let ids: Vec<_> = lanes
+        .iter()
+        .filter_map(|lane| lane.get_str("conversation_id").ok())
+        .collect();
+    if ids.is_empty() {
+        return Ok(Default::default());
+    }
+    let filters: Vec<_> = candidates.iter().map(|(child, channel, org, agent)| doc! {
+        "channel.nyxbot_channel_id":&channel.id,"channel.partition":&child.partition,
+        "channel.thread.child_id":&child.id,"channel.thread.generation":child.follow.binding_generation,
+        "channel.org_execution.actor_id":viewer,"channel.org_execution.revision":&org.revision,
+        "channel.org_execution.guest":false,"agent_id":*agent
+    }).collect();
+    let conversations: Vec<bson::Document> = db.collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .find(doc!{"_id":{"$in":ids},"user_id":viewer,"guest_model_setup":{"$ne":true},"guest_turn":false,"$or":filters})
+        .hint(mongodb::options::Hint::Name("_id_".into()))
+        .projection(doc!{"_id":1,"channel.thread.child_id":1})
+        .limit(candidates.len() as i64).await?.try_collect().await?;
+    Ok(conversations
+        .into_iter()
+        .filter_map(|row| {
+            Some((
+                row.get_document("channel")
+                    .ok()?
+                    .get_document("thread")
+                    .ok()?
+                    .get_str("child_id")
+                    .ok()?
+                    .to_owned(),
+                row.get_str("_id").ok()?.to_owned(),
+            ))
+        })
         .collect())
 }

@@ -14,11 +14,27 @@ pub(crate) fn advance(
     state: &AppState,
     group: Option<&str>,
 ) -> futures::future::BoxFuture<'static, AppResult<()>> {
+    advance_inner(state, group, false)
+}
+
+fn advance_inner(
+    state: &AppState,
+    group: Option<&str>,
+    background: bool,
+) -> futures::future::BoxFuture<'static, AppResult<()>> {
     let state = state.clone();
     let group = group.map(str::to_owned);
     Box::pin(async move {
         for request in groups::requests::pending(&state.db, group.as_deref()).await? {
             for agent in &request.pending_agent_ids {
+                let _claim = if background {
+                    let Some(work) = state.shutdown.background() else {
+                        return Ok(());
+                    };
+                    Some(work)
+                } else {
+                    None
+                };
                 let owner = request.actor_user_id.as_str();
                 let guest_owner = request
                     .collaboration
@@ -87,7 +103,7 @@ pub(crate) fn advance(
                 started.claim.log_reclaimed();
                 let auth = owner_auth(&started.claim.conversation.user_id)?;
                 let (sender, _) = tokio::sync::broadcast::channel(256);
-                tokio::spawn(super::assistant_nyxagent::run_turn(
+                state.shutdown.spawn(super::assistant_nyxagent::run_turn(
                     state.clone(),
                     auth,
                     started.claim.conversation,
@@ -141,7 +157,7 @@ pub(crate) async fn settled(
             tracing::debug!("Collaboration handoff declined");
         }
     }
-    if Box::pin(advance(state, Some(&binding.group_id)))
+    if Box::pin(advance_inner(state, Some(&binding.group_id), true))
         .await
         .is_err()
     {
@@ -154,7 +170,7 @@ pub(crate) async fn sweep(state: &AppState) {
     if groups::cleanup::sweep(&state.db).await.is_err() {
         tracing::debug!("Collaboration cleanup deferred");
     }
-    if Box::pin(advance(state, None)).await.is_err() {
+    if Box::pin(advance_inner(state, None, true)).await.is_err() {
         tracing::debug!("Collaboration queue deferred");
     }
 }
@@ -1070,7 +1086,7 @@ pub async fn request_guest_access(
         groups::guest_requests::ask(&state.db, &actor, &group, &agent, &home.id).await?;
     if created {
         let state = state.clone();
-        tokio::spawn(async move {
+        state.shutdown.clone().spawn(async move {
             Box::pin(super::assistant_team::wake(&state, &owner, &home.id)).await;
         });
     }
@@ -1092,7 +1108,7 @@ pub async fn cancel_guest_request(
 fn notify_mentions(state: &AppState, group: Option<&str>) {
     let state = state.clone();
     let group = group.map(str::to_owned);
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn(async move {
         if groups::notifications::deliver(&state, group.as_deref())
             .await
             .is_err()

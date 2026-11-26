@@ -3,7 +3,9 @@ import { z } from "zod";
 
 export const conversationIdSchema = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 export const activitySchema = z.object({
-  decision: z.object({ kind: z.string(), id: z.string(), state: z.string() }).nullish(),
+  decision: z
+    .object({ kind: z.string(), id: z.string(), state: z.string() })
+    .nullish(),
   id: z.string(),
   label: z.string(),
   status: historyEnum(["running", "completed", "error"]),
@@ -87,6 +89,7 @@ export const conversationSchema = z.object({
       capacity_wait_started_at: z.string().nullish(),
       capacity_wait_deadline: z.string().nullish(),
       activity_total: z.number().int().nonnegative().nullish(),
+      continued_after_restart: z.boolean().optional(),
       activities: z.array(activitySchema).default([]),
       attachments: z.array(attachmentSchema).default([]),
     })
@@ -176,6 +179,7 @@ export const messageSchema = z.object({
       segment_id: z.string(),
       sealed: z.boolean(),
       complete: z.boolean(),
+      interrupted: z.boolean().optional(),
     })
     .nullish(),
   steering: z
@@ -189,6 +193,7 @@ export const messageSchema = z.object({
   recovery: recoverySchema.nullish(),
   upstream_error_code: z.string().nullish(),
   activity_total: z.number().int().nonnegative().nullish(),
+  continued_after_restart: z.boolean().optional(),
   turn_metadata: turnMetadataSchema.nullish(),
   error_detail: z
     .object({
@@ -295,10 +300,11 @@ const historyBodySchema = z.object({
   before_seq: z.number().int().positive().nullable(),
 });
 export const historySchema = z.preprocess(
-  (value) => isolateHistoryItems(value, {
-    acknowledgements: acknowledgementSchema,
-    approvals: historyApprovalSchema,
-  }),
+  (value) =>
+    isolateHistoryItems(value, {
+      acknowledgements: acknowledgementSchema,
+      approvals: historyApprovalSchema,
+    }),
   historyBodySchema,
 );
 export const indexSchema = z.object({

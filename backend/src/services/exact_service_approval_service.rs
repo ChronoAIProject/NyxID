@@ -33,6 +33,7 @@ pub const DELEGATED_CATALOG_SCOPE_REQUIRED: &str = "delegated_catalog_scope_requ
 
 #[derive(Clone, Debug)]
 pub struct ExactServiceApprovalCaller {
+    pub(crate) key_version: i64,
     pub delegation_restrictions: Box<crate::crypto::jwt::TokenRestrictionClaims>,
     pub assistant_group_id: Option<String>,
     pub org_agent_access: Option<std::sync::Arc<super::org_agent_service::RequestAccess>>,
@@ -236,10 +237,11 @@ pub async fn create_request(
     )?
     .operation_descriptor();
     let approval_target = approval_target(state, caller, service).await?;
-    let chat = super::assistant_acknowledgement_service::for_key_with_access(
+    let chat = super::assistant_acknowledgement_service::chat_for_key_version(
         &state.db,
         &caller.actor_user_id,
         caller.api_key_id.as_deref(),
+        caller.key_version,
         caller.org_agent_access.as_ref(),
     )
     .await?;
@@ -496,6 +498,8 @@ pub async fn redeem_request(
         let exec_ctx = mcp_service::McpExecContext {
             strict_response_utf8: false,
             execution_permission: None,
+
+            attachment_owner_key: false,
             assistant_chat: None,
             response_body_limit: None,
             actor_user_id: Some(&caller.actor_user_id),
@@ -1334,6 +1338,7 @@ async fn resolve_exact_catalog(
                     &state.db,
                     &caller.actor_user_id,
                     caller.api_key_id.as_deref(),
+                    caller.key_version,
                     caller.org_agent_access.as_ref(),
                     &caller.operation_scopes,
                     &service.service_id,
@@ -1357,6 +1362,7 @@ async fn resolve_exact_catalog(
             &state.db,
             &caller.actor_user_id,
             caller.api_key_id.as_deref(),
+            caller.key_version,
             caller.org_agent_access.as_ref(),
         ))
         .await?
@@ -1939,6 +1945,7 @@ mod tests {
 
     fn caller() -> ExactServiceApprovalCaller {
         ExactServiceApprovalCaller {
+            key_version: 0,
             delegation_restrictions: Default::default(),
             assistant_group_id: None,
             agent_owner: None,
@@ -2365,6 +2372,8 @@ mod tests {
             "client-alpha",
             None,
             approval_service::ApprovalRequestOperation {
+                connected_request_id: None,
+                connected_deadline: None,
                 approval: Default::default(),
                 assistant_group: None,
                 operation_summary: "write".to_string(),

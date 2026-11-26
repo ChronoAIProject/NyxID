@@ -1,4 +1,5 @@
-import { fireEvent, render, screen } from "@testing-library/react-native";
+import { ActionSheetIOS } from "react-native";
+import { act, fireEvent, render, screen } from "@testing-library/react-native";
 import { NotificationsScreen, NotificationRow } from "./NotificationsScreen";
 import { notificationSentence } from "./notificationPresentation";
 import { notificationSchema } from "./notificationContracts";
@@ -13,6 +14,7 @@ const mockFilters: string[] = [];
 const mockFetched: string[] = [];
 let mockUnreadCount = 1;
 let mockHasNextPage = true;
+let mockHeaderOptions: { headerRight?: () => React.ReactNode } = {};
 const mockRows = [
   notificationSchema.parse({
     id: "n1",
@@ -52,14 +54,15 @@ jest.mock("../../lib/env", () => ({
   firstPartyFrontendUrls: () => ["https://app.nyxid.test"],
 }));
 jest.mock("../../app/WorkspaceHeader", () => ({
-  useWorkspaceBack: () => {},
+  useWorkspaceBack: ({ options }: { options: typeof mockHeaderOptions }) => { mockHeaderOptions = options; },
+  WorkspaceHeaderVisibility: ({ children }: { children: React.ReactNode }) => children,
   useOpenWorkspaceChat: () => (params: unknown) => mockOpened.push(params),
 }));
 jest.mock("../../components/workspace/WorkspaceUI", () => {
   const React = jest.requireActual("react");
   const { View, Text } = jest.requireActual("react-native");
   return {
-    WorkspacePage: ({ children }: { children: React.ReactNode }) => React.createElement(View, null, children),
+    WorkspacePage: ({ children }: { children: React.ReactNode }) => React.createElement(View, null, mockHeaderOptions.headerRight?.(), children),
     Notice: ({ message }: { message: string }) => React.createElement(Text, null, message),
   };
 });
@@ -108,6 +111,7 @@ describe("NotificationsScreen", () => {
     mockFetched.length = 0;
     mockUnreadCount = 1;
     mockHasNextPage = true;
+    mockHeaderOptions = {};
     (navigation as { push: jest.Mock }).push.mockClear();
   });
 
@@ -138,32 +142,59 @@ describe("NotificationsScreen", () => {
     expect((navigation as { push: jest.Mock }).push).toHaveBeenCalledWith("AgentDetail", { agentId: MOCK_AGENT });
   });
 
-  it("marks everything read behind the server fence and switches mockFilters", async () => {
+  it("keeps mark-all in the header options and uses the server fence after selecting it", async () => {
+    const menu = jest.spyOn(ActionSheetIOS, "showActionSheetWithOptions").mockImplementation(() => {});
     await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
-    const footer = screen.getByRole("button", { name: "Mark all notifications as read" });
-    expect(footer).toBeEnabled();
-    await fireEvent.press(footer);
+    expect(screen.queryByText("Mark all as read")).toBeNull();
+    expect(screen.queryByTestId("notifications-mark-all")).toBeNull();
+    await fireEvent.press(screen.getByRole("button", { name: "Notification options" }));
+    expect(menu).toHaveBeenCalledWith(expect.objectContaining({ options: ["Mark all as read", "Cancel"], disabledButtonIndices: [] }), expect.any(Function));
+    await act(() => menu.mock.calls.at(-1)![1](1));
+    expect(mockReads).toEqual([]);
+    await fireEvent.press(screen.getByRole("button", { name: "Notification options" }));
+    await act(() => menu.mock.calls.at(-1)![1](0));
     expect(mockReads).toEqual([{ all: true, before: MOCK_AS_OF }]);
     await fireEvent.press(screen.getByRole("tab", { name: /Needs you/ }));
     expect(mockFilters.at(-1)).toBe("needs_you");
+    menu.mockRestore();
   });
 
-  it("keeps the global read action available on an empty filter when other kinds are unread", async () => {
+  it("keeps mark-all available on an empty filter and disables it once nothing is unread", async () => {
+    const menu = jest.spyOn(ActionSheetIOS, "showActionSheetWithOptions").mockImplementation(() => {});
     mockHasNextPage = false;
-    await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
+    const view = await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
     await fireEvent.press(screen.getByRole("tab", { name: "Automations" }));
     expect(screen.getByText("No automation results yet.")).toBeTruthy();
-    const footer = screen.getByRole("button", { name: "Mark all notifications as read" });
-    expect(footer).toBeEnabled();
-    await fireEvent.press(footer);
-    expect(mockReads).toEqual([{ all: true, before: MOCK_AS_OF }]);
+    await fireEvent.press(screen.getByRole("button", { name: "Notification options" }));
+    expect(menu.mock.calls.at(-1)![0].disabledButtonIndices).toEqual([]);
+    mockUnreadCount = 0;
+    await view.rerender(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
+    await fireEvent.press(screen.getByRole("button", { name: "Notification options" }));
+    expect(menu.mock.calls.at(-1)![0].disabledButtonIndices).toEqual([0]);
+    await act(() => menu.mock.calls.at(-1)![1](0));
+    expect(mockReads).toEqual([]);
+    menu.mockRestore();
   });
 
-  it("disables the global read action when the summary has no unread notifications", async () => {
-    mockUnreadCount = 0;
+  it("searches titles and preview text, clears search, and keeps the query when changing tabs", async () => {
+    mockHasNextPage = false;
     await render(<NotificationsScreen navigation={navigation} route={{ key: "r", name: "Notifications", params: undefined }} />);
-    expect(screen.getByRole("button", { name: "Mark all notifications as read" })).toBeDisabled();
+    const input = screen.getByLabelText("Search notifications");
+    await fireEvent.changeText(input, "  SUPPORT thanks  ");
+    expect(screen.getByTestId("notification-n1")).toBeTruthy();
+    expect(screen.queryByTestId("notification-n2")).toBeNull();
+    expect(screen.queryByTestId("notification-n3")).toBeNull();
+    await fireEvent.press(screen.getByRole("tab", { name: "Automations" }));
+    expect(input).toHaveDisplayValue("  SUPPORT thanks  ");
+    expect(screen.getByText("No matching notifications.")).toBeTruthy();
+    await fireEvent.press(screen.getByRole("button", { name: "Clear notification search" }));
+    expect(input).toHaveDisplayValue("");
+    expect(screen.getByText("No automation results yet.")).toBeTruthy();
+    await fireEvent.press(screen.getByRole("tab", { name: "All" }));
+    expect(screen.getByTestId("notification-n1")).toBeTruthy();
+    expect(screen.getByTestId("notification-n3")).toBeTruthy();
   });
+
 });
 
 

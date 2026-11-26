@@ -62,11 +62,13 @@ pub async fn register_destinations(db: &Database, clients: &ErasureClients) -> A
 
 pub fn spawn_worker(db: crate::db::DbHandle, clients: ErasureClients) {
     let clients = Arc::new(clients);
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn_worker(async move {
         let mut timer = tokio::time::interval(Duration::from_secs(30));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            timer.tick().await;
+            let Some(_work) = crate::services::shutdown::process().tick(&mut timer).await else {
+                break;
+            };
             if drain_once(&db, &clients).await.is_err() {
                 tracing::warn!("Telemetry erasure pass failed; durable checkpoints retained");
             }
@@ -730,10 +732,21 @@ pub(crate) async fn drain_once(db: &Database, clients: &ErasureClients) -> AppRe
     let db = &durable;
     backfill_intents(db).await?;
     for _ in 0..BATCH_SIZE {
+        let Some(_work) = super::shutdown::process().background() else {
+            break;
+        };
         let Some(job) = claim(db).await? else {
             break;
         };
+        let release = super::shutdown::process().register_release(super::shutdown::Release {
+            safe_after_stop: false,
+            db: db.clone(),
+            collection: COLLECTION_NAME,
+            filter: doc! {"_id": &job.id, "lease_token": &job.lease_token},
+            update: doc! {"$set": {"lease_expires_at": null, "lease_token": null}},
+        });
         process(db, clients, &job).await?;
+        release.completed();
     }
     Ok(())
 }
@@ -1007,11 +1020,13 @@ mod tests {
             owner_deletion_policy: None,
             status: crate::models::personal_erasure::ErasureStatus::Complete,
             inventory_version: 1,
+            local_inventory_revision: 0,
             domains: vec![crate::models::personal_erasure::DomainCheckpoint {
                 retry_generation: 0,
                 last_retry_key_hash: None,
                 last_retry_request_digest: None,
                 consecutive_failures: 0,
+                remote_wait_started_at: None,
                 domain: "vendor".into(),
                 status: crate::models::personal_erasure::DomainStatus::Complete,
                 cursor: Some(personal_evidence),
@@ -1353,61 +1368,56 @@ mod tests {
         config.telemetry_dsn = Some("test-ingest".into());
         config.telemetry_host = Some(clients.0.values().next().unwrap().api_host.clone());
         let telemetry = TelemetryClient::from_config(&config, Some(db.clone())).unwrap();
-        telemetry
-            .track(
-                &user,
-                TelemetryEvent::KeyCreated {
-                    source: "catalog".into(),
-                    catalog_slug: None,
-                    has_node_binding: false,
-                },
-                &TelemetryContext {
-                    surface: "ui",
-                    client_version: None,
-                    analytics_allowed: true,
-                    analytics_account: Some(user.clone()),
-                },
-                None,
-            )
-            .await;
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            server.state.capture_started.notified(),
-        )
-        .await
-        .unwrap();
-        let root = ensure_job(&db, &user, None).await.unwrap();
-        db.collection::<Document>("users")
-            .delete_one(doc! {"_id":&user})
-            .await
-            .unwrap();
-        drain_once(&db, &clients).await.unwrap();
-        assert_eq!(
-            server.state.deletes.load(Ordering::SeqCst),
-            0,
-            "DELETE raced an in-flight capture"
-        );
-        assert_ne!(
-            jobs(&db)
-                .find_one(doc! {"_id":&root})
+        let root = crate::test_utils::with_manual_clock(async {
+            telemetry
+                .track(
+                    &user,
+                    TelemetryEvent::KeyCreated {
+                        source: "catalog".into(),
+                        catalog_slug: None,
+                        has_node_binding: false,
+                    },
+                    &TelemetryContext {
+                        surface: "ui",
+                        client_version: None,
+                        analytics_allowed: true,
+                        analytics_account: Some(user.clone()),
+                    },
+                    None,
+                )
+                .await;
+            server.state.capture_started.notified().await;
+            let root = ensure_job(&db, &user, None).await.unwrap();
+            db.collection::<Document>("users")
+                .delete_one(doc! {"_id":&user})
                 .await
-                .unwrap()
-                .unwrap()
-                .get_str("status")
-                .unwrap(),
-            "completed"
-        );
-        server.state.capture_release.notify_one();
-        tokio::time::timeout(Duration::from_secs(2), async {
+                .unwrap();
+            drain_once(&db, &clients).await.unwrap();
+            assert_eq!(
+                server.state.deletes.load(Ordering::SeqCst),
+                0,
+                "DELETE raced an in-flight capture"
+            );
+            assert_ne!(
+                jobs(&db)
+                    .find_one(doc! {"_id":&root})
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .get_str("status")
+                    .unwrap(),
+                "completed"
+            );
+            server.state.capture_release.notify_one();
             while super::super::analytics_dispatch_service::has_unsettled(&db, &user)
                 .await
                 .unwrap()
             {
                 tokio::task::yield_now().await;
             }
+            root
         })
-        .await
-        .unwrap();
+        .await;
         assert!(
             super::super::analytics_dispatch_service::needs_provider_drain(&db, &user)
                 .await

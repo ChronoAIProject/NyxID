@@ -8,6 +8,7 @@ import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
 import type { AssistantParams } from "../../app/navigationTypes";
+import { workspaceNavigateAction } from "../../app/navigationHierarchy";
 import type { AssistantUploadedMessage } from "./AssistantUploadSession";
 import * as voiceSelection from "./voice/voiceSelection";
 import {
@@ -17,6 +18,7 @@ import {
   type AssistantMessage,
 } from "./assistantTypes";
 import { voiceSnapshotSchema } from "./voice/voiceContracts";
+import voiceGroupFixtures from "../../../../shared/voice-message-groups.json";
 import { VOICE_RECOVERY_TIMEOUT_MS } from "./voice/voiceRequestDeadline";
 
 // Exercise the screen's real handlers and render conditions. Native UI, network,
@@ -85,10 +87,12 @@ function setup(
 ) {
   let onAdopt: ((id: string) => void) | undefined;
   let headerOptions: Record<string, any> = {};
+  let columnHeader: Record<string, any> | undefined;
   const headerModule = {};
+  let navigationDisabled = false;
   const draft = deferred<string>();
   const events: unknown[][] = [];
-  const alerts: { text: string; onPress?: () => void }[][] = [];
+  const alerts: { text: string; style?: string; onPress?: () => void }[][] = [];
   const drafts: {
     agentId: string;
     signal: AbortSignal;
@@ -96,6 +100,15 @@ function setup(
   }[] = [];
   const featureQueries: { enabled: boolean }[] = [];
   let epoch = 7;
+  // Ordinary iPhone width: below the persistent-sidebar breakpoint.
+  let windowWidth = 390;
+  let bellEnabled = false;
+  let fontScale = 1;
+  // A nonzero right inset stands in for the folded Duo's corner cluster.
+  let rightInset = 0;
+  // The folded Duo's quick rail is showing (it owns New chat and Scan QR).
+  let quickRail = false;
+  let dictating = false;
   let focused = true;
   let keyboardVisible = false;
   let hideOnDismiss = false;
@@ -141,7 +154,10 @@ function setup(
     model: "nyxagent/chat",
     agents: [agent],
     agentsError: undefined as string | undefined,
-    reloadAgents: async () => { events.push(["reloadAgents"]); assistant.agentsError = undefined; },
+    reloadAgents: async () => {
+      events.push(["reloadAgents"]);
+      assistant.agentsError = undefined;
+    },
     conversations: [],
     inputAttachments: [],
     online: true,
@@ -163,8 +179,10 @@ function setup(
       text: string,
       _options?: unknown,
       files?: AssistantUploadedMessage,
+      _acknowledgement?: string,
+      model?: string,
     ) => {
-      events.push(["send", text, files]);
+      events.push(model ? ["send", text, files, model] : ["send", text, files]);
       return true;
     },
     setModel: (model: string) => events.push(["model", model]),
@@ -191,9 +209,16 @@ function setup(
     sent: () => events.push(["connection-sent"]),
   };
   const uploads = {
+    sourcePicker: undefined as undefined | { choices: { label: string; onPress: () => void }[]; onClose: () => void },
     files: [] as any[],
     session: {
       sending: false,
+      model: undefined as string | undefined,
+      ensureConversation: (create: () => Promise<string>) => create(),
+      applyDraftModel: async (id: string, _change: unknown) => {
+        events.push(["patch-draft-model", id, uploads.session.model]);
+      },
+      consumeDraft: async () => {},
       submit: async (
         submit: (
           payload: AssistantUploadedMessage | undefined,
@@ -218,7 +243,7 @@ function setup(
       } as AssistantParams,
     },
   };
-  const harness = hookHarness<Element>({
+  const mocks = {
     "../../i18n/LanguageProvider": {
       useAppLanguage: () => ({
         t: (phrase: string) => translations[phrase] ?? phrase,
@@ -232,7 +257,27 @@ function setup(
       assistantDraftStore: createAssistantDraftStore(() => epoch),
     },
     "./ChatIdentityHeader": headerModule,
-    "react-native-safe-area-context": { SafeAreaView: "SafeAreaView" },
+    "react-native-safe-area-context": {
+      SafeAreaView: "SafeAreaView",
+      useSafeAreaInsets: () => ({
+        top: 0,
+        left: 0,
+        bottom: 0,
+        right: rightInset,
+      }),
+    },
+    "../../components/workspace/WorkspaceLayoutContext": {
+      WorkspaceCornerSensorContext: {
+        get value() {
+          return rightInset > 0;
+        },
+      },
+      WorkspaceQuickRailContext: {
+        get value() {
+          return quickRail;
+        },
+      },
+    },
     "../display/ChatLayoutContext": {
       useComposerHeight: () => 120,
       useChatColumn: () => ({
@@ -269,7 +314,11 @@ function setup(
       }),
     },
     "react-native": {
-      useWindowDimensions: () => ({ width: 390, height: 844, fontScale: 1 }),
+      useWindowDimensions: () => ({
+        width: windowWidth,
+        height: 844,
+        fontScale,
+      }),
       ...Object.fromEntries(
         [
           "ActivityIndicator",
@@ -302,7 +351,16 @@ function setup(
           if (hideOnDismiss) hideKeyboard();
         },
       },
-      StyleSheet: { create: (value: unknown) => value },
+      Animated: {
+        View: "Animated.View",
+        Value: class {
+          setValue() {}
+          interpolate(value: unknown) { return value; }
+        },
+        timing: () => ({ start: (complete: any) => complete({ finished: true }), stop() {} }),
+      },
+      Easing: { out: (value: unknown) => value, cubic: "cubic" },
+      StyleSheet: { create: (value: unknown) => value, hairlineWidth: 0.5 },
     },
     "@react-navigation/native": {
       useIsFocused: () => focused,
@@ -352,6 +410,7 @@ function setup(
         "Check",
         "MoreHorizontal",
         "Paperclip",
+        "ScanQrCode",
         "SquarePen",
         "ArrowUp",
         "Square",
@@ -360,23 +419,32 @@ function setup(
       ].map((name) => [name, name]),
     ),
     "../../app/WorkspaceHeader": {
-      useWorkspaceBack: (input: { options: Record<string, any> }) => {
+      useWorkspaceBack: (input: {
+        options: Record<string, unknown>;
+        disabled: boolean;
+      }) => {
+        navigationDisabled = input.disabled;
         headerOptions = input.options;
+      },
+      useWorkspaceColumnHeader: (input: Record<string, any>) => {
+        columnHeader = input;
       },
       WorkspaceHeaderVisibility: "WorkspaceHeaderVisibility",
     },
-    "../../app/navigationHierarchy": {},
+    "../../components/workspace/WorkspaceSheetSurface": {
+      WorkspaceSheetSurface: "WorkspaceSheetSurface",
+    },
     "../../components/workspace/WorkspaceUI": Object.fromEntries(
       ["WorkspacePage", "ActionButton", "Card", "Field", "Label", "Notice"].map(
         (name) => [name, name],
       ),
     ),
     "../../theme/ThemeContext": {
-      useTheme: () => ({ colors: { warningTone: {} } }),
+      useTheme: () => ({ colors: { warningTone: {} }, mode: "light" }),
     },
-    "../../components/workspace/WorkspaceChatList": {
-      WorkspaceChatList: (props: Record<string, any>) => ({
-        type: "WorkspaceChatList",
+    "../../components/workspace/WorkspaceAgentPicker": {
+      WorkspaceAgentPicker: (props: Record<string, any>) => ({
+        type: "WorkspaceAgentPicker",
         props: { ...props, children: [props.scrollHeader, props.scrollFooter] },
       }),
     },
@@ -385,16 +453,27 @@ function setup(
     "./ComposerConnectionPicker": {
       ComposerConnectionPicker: "ConnectionPicker",
     },
+    "../../components/workspace/WorkspaceRightPanel": {
+      RightPanelProvider: "RightPanelProvider",
+      RightPanelRegistration: "RightPanelRegistration",
+      RightPanelSlot: "RightPanelSlot",
+    },
     "./NyxBotHome": { NyxBotHome: "NyxBotHome" },
+    "./AssistantRightPanel": { AssistantRightPanel: "AssistantRightPanel" },
     "./useAssistant": {
       useAssistant: (_id: unknown, _agent: unknown, adopt: typeof onAdopt) => {
         onAdopt = adopt;
         return assistant;
       },
     },
+    "./AttachmentSourcePicker": { AttachmentSourcePicker: "AttachmentSourcePicker" },
     "./useAssistantUploads": { useAssistantUploads: () => uploads },
+    "../../lib/api/assistantApi": { assistantApi: { changeModel: () => {} } },
     "./useComposerDictation": {
-      useComposerDictation: () => ({ active: false, phase: "idle" }),
+      useComposerDictation: () =>
+        dictating
+          ? { active: true, phase: "listening" }
+          : { active: false, phase: "idle" },
       appendDictation: (draft: string, text: string) =>
         `${draft}${draft ? " " : ""}${text}`,
     },
@@ -458,10 +537,21 @@ function setup(
     },
     "./AssistantMentionInput": {
       AssistantMentionInput: (props: {
-        renderActions?: (mention: null) => unknown;
+        renderActions?: (mention: null, layout: {
+          compact: boolean;
+          onLeadingWidth: (width: number) => void;
+          onTrailingWidth: (width: number) => void;
+        }) => unknown;
       }) => ({
         type: "AssistantMentionInput",
-        props: { ...props, children: props.renderActions?.(null) },
+        props: {
+          ...props,
+          children: props.renderActions?.(null, {
+            compact: false,
+            onLeadingWidth() {},
+            onTrailingWidth() {},
+          }),
+        },
       }),
     },
     "./ChatComposer": {
@@ -505,10 +595,9 @@ function setup(
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
-    "../notifications/NotificationBell": { NotificationBell: "NotificationBell" },
     "../notifications/useNotifications": {
       useNotificationIndicator: () => ({
-        enabled: false,
+        enabled: bellEnabled,
         live: false,
         unread: 0,
         needsDecision: 0,
@@ -517,7 +606,14 @@ function setup(
       useNotificationRuntime: () => ({ active: true, online: true }),
       useVisibleThreadRead: () => {},
     },
-  });
+  };
+  const harness = hookHarness<Element>(mocks);
+  // React Navigation mounts headerRight separately from the screen.
+  const headerHarness = hookHarness<Element>({ ...mocks });
+  headerHarness.mock("./ChatHeaderMenu", headerHarness.load(
+    fileURLToPath(new URL("./ChatHeaderMenu.tsx", import.meta.url)),
+  ));
+  harness.mock("expo-linear-gradient", { LinearGradient: "LinearGradient" });
   Object.assign(
     headerModule,
     harness.load(
@@ -540,10 +636,45 @@ function setup(
     "./ChatSurface",
     harness.load(fileURLToPath(new URL("./ChatSurface.tsx", import.meta.url))),
   );
+  harness.mock(
+    "./ChatHeaderActions",
+    headerHarness.load(
+      fileURLToPath(new URL("./ChatHeaderActions.tsx", import.meta.url)),
+    ),
+  );
   const Screen = harness.load(
     fileURLToPath(new URL("./AssistantScreen.tsx", import.meta.url)),
   ).AssistantScreen as (input: typeof props) => Element;
   harness.mount(() => expand(Screen(props)));
+  headerHarness.mount(() => {
+    const tree = expand(headerOptions.headerRight());
+    const anchor = elements(tree).find(
+      (item) => item.props.testID === "chat-header-actions",
+    )!;
+    anchor.props.ref.current = {
+      measureInWindow: (report: (...values: number[]) => void) =>
+        report(windowWidth - 100, 66, 88, 44),
+    };
+    return tree;
+  });
+  const headerRight = () => headerHarness.render();
+  const headerNodes = () => elements(headerRight());
+  const menuItems = () =>
+    headerNodes().filter((n) => n.props.accessibilityRole === "menuitem");
+  const finishMenuDismissal = () => {
+    headerHarness.flush();
+    if (platform === "ios")
+      headerNodes()
+        .find((n) => n.type === "Modal")!
+        .props.onDismiss();
+    harness.flush();
+  };
+  function options() {
+    headerNodes()
+      .find((n) => n.props.accessibilityLabel === "Chat options")!
+      .props.onPress();
+    headerHarness.flush();
+  }
   const all = () => elements(harness.value());
   const button = (name: string) =>
     all().find((element) => element.props.accessibilityLabel === name);
@@ -551,6 +682,7 @@ function setup(
     all().find((element) => element.type === "AssistantVoiceConversation");
   return {
     harness,
+    navigationDisabled: () => navigationDisabled,
     assistant,
     uploads,
     connection,
@@ -568,15 +700,46 @@ function setup(
     },
     all,
     button,
+    columnHeader: () => columnHeader!,
     header: () => expand(headerOptions.headerTitle()),
-    options: () => {
-      elements(expand(headerOptions.headerRight()))
-        .find((n) => n.props.accessibilityLabel === "Chat options")!
-        .props.onPress();
-      harness.flush();
+    headerRight,
+    headerActions: () => {
+      const nodes = headerNodes();
+      return nodes.some((n) => n.type === "Modal" && n.props.visible) ? [] : nodes.filter((n) => n.type === "FloatingItem");
+    },
+    options,
+    menuItems,
+    finishMenuDismissal,
+    chooseOption: (label: string) => {
+      menuItems().find((item) => item.props.accessibilityLabel === label)!.props.onPress();
+      finishMenuDismissal();
+    },
+    setWidth: (value: number) => {
+      windowWidth = value;
+      harness.render();
+    },
+    setBell: (value: boolean) => {
+      bellEnabled = value;
+      harness.render();
+    },
+    setFontScale: (value: number) => {
+      fontScale = value;
+      harness.render();
+    },
+    setDictating: (value: boolean) => {
+      dictating = value;
+      harness.render();
+    },
+    setQuickRail: (value: boolean) => {
+      quickRail = value;
+      harness.render();
+    },
+    setCornerSensor: (inset: number) => {
+      rightInset = inset;
+      harness.render();
     },
     compose: () => {
-      const actions = expand(headerOptions.headerRight());
+      const actions = headerRight();
       elements(actions)
         .find((n) => n.props.accessibilityLabel === "New chat")!
         .props.onPress();
@@ -647,6 +810,204 @@ function liveVoice(text: string, sealed = false) {
     tasks: [],
   });
 }
+
+test("a shielded voice link publication renders as completed without pending UI", () => {
+  const x = setup(A, false);
+  const link = "https://nyxid.ai/connect/bot/nyx_bcl_example";
+  const message = messageSchema.parse({
+    id: "published-link",
+    seq: 3,
+    turn_id: "hidden-turn",
+    role: "assistant",
+    text: `<${link}>`,
+    status: "completed",
+    execution_pending: true,
+    via: "voice",
+    error_code: null,
+    created_at: "2026-11-14T01:00:00Z",
+    activities: [],
+    attachments: [],
+  });
+  // The API field is ignored by the schema; even a retained field must not
+  // turn an assistant publication into pending execution UI.
+  Object.assign(message, { execution_pending: true });
+  x.assistant.history!.messages = [message];
+  x.harness.render();
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  assert.equal(list.props.data.length, 1);
+  const rendered = elements(
+    expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+  );
+  const footer = rendered.find(
+    (node) => node.type === "AssistantMessageFooter",
+  );
+  assert.equal(footer?.props.text, `<${link}>`);
+  assert.equal(footer?.props.report.messageId, message.id);
+  assert.equal(
+    rendered.some((node) =>
+      ["ActivityIndicator", "AssistantTurnStatus"].includes(String(node.type)),
+    ),
+    false,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(rendered),
+    /Queued|Waiting for|Thinking|Speaking/,
+  );
+  x.harness.unmount();
+});
+
+test("persisted voice segments render one Copy/date footer and Report targets the latest feedback anchor", () => {
+  for (const savedFeedback of [false, true]) {
+    const x = setup(A);
+    const fixture = voiceGroupFixtures[0]!;
+    x.assistant.history!.messages = fixture.rows.map((row, index) =>
+      messageSchema.parse({
+        ...row,
+        seq: index + 6,
+        role: "assistant",
+        status: "completed",
+        error_code: null,
+        created_at: `2026-11-09T01:00:0${index}Z`,
+        via: "voice",
+        ...(savedFeedback && index === 1 ? { feedback: { vote: "down" } } : {}),
+      }),
+    );
+    x.harness.render();
+    const list = x.all().find((node) => node.type === "FlatList")!;
+    assert.equal(list.props.data.length, 1);
+    const rendered = elements(
+      expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+    );
+    const footers = rendered.filter(
+      (node) => node.type === "AssistantMessageFooter",
+    );
+    assert.equal(footers.length, 1);
+    assert.equal(footers[0]!.props.text, fixture.copy![0]);
+    assert.equal(footers[0]!.props.timestamp, "2026-11-09T01:00:00Z");
+    assert.equal(footers[0]!.props.report.messageId, savedFeedback ? "7" : "8");
+    assert.equal(footers[0]!.props.report.id, x.assistant.conversationId);
+    assert.equal(x.assistant.history!.messages.length, 3);
+    x.harness.unmount();
+  }
+});
+
+test("appending voice parts keeps the mobile row key stable and Report follows its anchor", () => {
+  const x = setup(A);
+  const rows = voiceGroupFixtures[0]!.rows.map((row, index) =>
+    messageSchema.parse({
+      ...row,
+      seq: index + 6,
+      role: "assistant",
+      status: "completed",
+      error_code: null,
+      created_at: `2026-11-09T01:00:0${index}Z`,
+      via: "voice",
+    }),
+  );
+  x.assistant.history!.messages = rows.slice(0, 1);
+  x.harness.render();
+  const list = () => x.all().find((node) => node.type === "FlatList")!;
+  const key = list().props.keyExtractor(list().props.data[0]);
+  x.assistant.history!.messages = rows;
+  x.harness.render();
+  assert.equal(list().props.keyExtractor(list().props.data[0]), key);
+  const rendered = elements(
+    expand(list().props.renderItem({ item: list().props.data[0], index: 0 })),
+  );
+  assert.equal(
+    rendered.find((node) => node.type === "AssistantMessageFooter")!.props
+      .report.messageId,
+    "8",
+  );
+  x.harness.unmount();
+});
+test("a navigation target for a middle voice segment reveals its stable group row", () => {
+  const x = setup(A);
+  x.assistant.history!.messages = voiceGroupFixtures[0]!.rows.map(
+    (row, index) =>
+      messageSchema.parse({
+        ...row,
+        seq: index + 6,
+        role: "assistant",
+        status: "completed",
+        error_code: null,
+        created_at: "2026-11-09T01:00:00Z",
+        via: "voice",
+      }),
+  );
+  x.props.route.params.messageId = "7";
+  x.harness.render();
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  const scrolls: { index: number }[] = [];
+  list.props.ref.current = {
+    scrollToIndex: (target: { index: number }) => scrolls.push(target),
+  };
+  x.harness.render();
+  assert.equal(list.props.data[0].id, "6");
+  assert.deepEqual(
+    scrolls.map((target) => target.index),
+    [0],
+  );
+  x.harness.render();
+  assert.equal(scrolls.length, 1);
+  x.harness.unmount();
+});
+test("voice footers hide live continuations and keep sealed disconnect partial groups", async () => {
+  for (const [sealed, state, interrupted, visible] of [
+    [false, "active", false, false],
+    [true, "active", false, false],
+    [true, "closed", false, true],
+    [true, "failed", false, true],
+    [true, "active", true, true],
+  ] as const) {
+    const x = setup(A);
+    x.assistant.history!.messages = voiceGroupFixtures[0]!.rows
+      .slice(0, 2)
+      .map((row, index) =>
+        messageSchema.parse({
+          ...row,
+          seq: index + 6,
+          role: "assistant",
+          status: "completed",
+          error_code: null,
+          created_at: `2026-11-09T01:00:0${index}Z`,
+          via: "voice",
+          voice: {
+            ...row.voice,
+            sealed: index === 0 || sealed,
+            complete: index === 0,
+            interrupted: index !== 0 && interrupted,
+          },
+        }),
+      );
+    x.button("Open voice call")!.props.onPress();
+    await x.harness.settle();
+    const snapshot = liveVoice("");
+    snapshot.session.id = x.assistant.history!.messages[0]!.voice!.session_id;
+    snapshot.session.state = state;
+    snapshot.captions = [];
+    x.voice()!.props.onSnapshot(snapshot);
+    x.harness.flush();
+    const list = x.all().find((node) => node.type === "FlatList")!;
+    assert.equal(list.props.data.length, 1);
+    const rendered = elements(
+      expand(list.props.renderItem({ item: list.props.data[0], index: 0 })),
+    );
+    assert.equal(
+      rendered.filter((node) => node.type === "AssistantMessageFooter").length,
+      visible ? 1 : 0,
+    );
+    if (visible) {
+      const footer = rendered.find(
+        (node) => node.type === "AssistantMessageFooter",
+      )!;
+      assert.equal(footer.props.text, list.props.data[0].text);
+      assert.equal(footer.props.timestamp, "2026-11-09T01:00:00Z");
+      assert.equal(footer.props.report.messageId, "7");
+    }
+    x.harness.unmount();
+  }
+});
 
 test("live speech grows in the main chat and sealed history replaces it once", async () => {
   const x = setup(A);
@@ -836,23 +1197,121 @@ test("old voice callbacks cannot populate a different chat or account", async ()
   }
 });
 
-test("voice preferences are reached through header More and ordinary chat still opens Details directly", async () => {
+test("the Duo rail opens Details during a call and the call exposes its own preferences", async () => {
   const x = setup(A);
+  x.setQuickRail(true);
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  x.columnHeader().more.onPress();
+  assert.equal(x.alerts.length, 0);
+  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
+  // Uncontrolled: the call shows its own Voice preferences control.
+  assert.equal(x.voice()!.props.preferencesOpen, undefined);
+  x.harness.unmount();
+});
+
+test("a wide chat exposes voice preferences in the dropdown for the active call", async () => {
+  const x = setup(A);
+  x.setWidth(1024);
   x.options();
+  assert.deepEqual(
+    x.menuItems().map((n) => n.props.accessibilityLabel),
+    ["Chat details", "Settings"],
+  );
+  x.chooseOption("Chat details");
   assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
   x.options();
-  assert.deepEqual(
-    Array.from(x.alerts.at(-1)!, (action) => action.text),
-    ["Voice preferences", "Chat details", "Cancel"],
-  );
-  x.alerts.at(-1)![0]!.onPress!();
-  x.harness.flush();
+  x.chooseOption("Voice preferences");
   assert.equal(x.voice()!.props.preferencesOpen, true);
   x.voice()!.props.onPreferencesClose();
   x.harness.flush();
   assert.equal(x.voice()!.props.preferencesOpen, false);
+  assert.equal(x.alerts.length, 0);
+  x.harness.unmount();
+});
+
+test("the chat menu routes each option after dismissal and follows notification availability", () => {
+  const x = setup(A);
+  x.options();
+  assert.deepEqual(
+    x.menuItems().map((n) => n.props.accessibilityLabel),
+    ["Chat details", "Settings"],
+  );
+  x.chooseOption("Settings");
+  assert.deepEqual(x.events.at(-1), [
+    "dispatch",
+    workspaceNavigateAction("AccountSettings"),
+  ]);
+  x.setBell(true);
+  x.options();
+  assert.deepEqual(
+    x.menuItems().map((n) => n.props.accessibilityLabel),
+    ["Chat details", "Notifications", "Settings"],
+  );
+  const select = x
+    .menuItems()
+    .find((n) => n.props.accessibilityLabel === "Notifications")!.props.onPress;
+  select();
+  assert.equal(
+    x.events.some(
+      ([type, route]) => type === "push" && route === "Notifications",
+    ),
+    false,
+  );
+  x.finishMenuDismissal();
+  x.finishMenuDismissal();
+  assert.equal(
+    x.events.filter(
+      ([type, route]) => type === "push" && route === "Notifications",
+    ).length,
+    1,
+  );
+  assert.equal(x.alerts.length, 0);
+  x.harness.unmount();
+});
+
+test("an account change while More is open makes its Preferences and Details entries inert", async () => {
+  const x = setup(A);
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  x.options();
+  const menu = x.menuItems();
+  const before = x.events.length;
+  x.setEpoch(8);
+  for (const action of menu) {
+    action.props.onPress();
+    x.finishMenuDismissal();
+  }
+  x.harness.flush();
+  assert.equal(x.events.length, before);
+  x.harness.unmount();
+});
+
+test("Android Back restores the capsule, and tapping an option twice navigates once", () => {
+  const x = setup(A, false, "android");
+  x.options();
+  elements(x.headerRight())
+    .find((n) => n.type === "Modal")!
+    .props.onRequestClose();
+  assert.deepEqual(
+    x.headerActions().map((n) => n.props.accessibilityLabel),
+    ["New chat", "Chat options"],
+  );
+  x.options();
+  const select = x
+    .menuItems()
+    .find((n) => n.props.accessibilityLabel === "Chat details")!.props.onPress;
+  select();
+  select();
+  x.finishMenuDismissal();
+  assert.equal(
+    x.events.filter(
+      ([type, route]) => type === "push" && route === "AssistantDetails",
+    ).length,
+    1,
+  );
   x.harness.unmount();
 });
 
@@ -862,16 +1321,19 @@ test("closed voice surface callbacks and native menu actions cannot affect a new
   await x.harness.settle();
   const stale = x.voice()!.props;
   x.options();
-  const oldMenu = x.alerts.at(-1)!;
+  const oldMenu = x.menuItems();
   stale.onClose();
   x.harness.flush();
+  x.headerRight();
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
   x.voice()!.props.onSnapshot(liveVoice("current call"));
   stale.onSnapshot(liveVoice("old call"));
   stale.onClose();
-  oldMenu[0]!.onPress!();
-  oldMenu[1]!.onPress!();
+  for (const item of oldMenu) {
+    item.props.onPress();
+    x.finishMenuDismissal();
+  }
   x.harness.flush();
   assert.ok(x.voice());
   assert.equal(x.voice()!.props.preferencesOpen, false);
@@ -1885,6 +2347,41 @@ test("home roster Chat reuses latest-thread navigation and crew navigation retai
   x.harness.unmount();
 });
 
+test("the folded Duo's agent picker is the workspace bottom sheet ending before the rail; elsewhere a native page sheet", () => {
+  const x = setup(A);
+  x.setWidth(678);
+  x.setCornerSensor(104);
+  x.chooseAgent();
+  const modal = () =>
+    x
+      .all()
+      .find((n) => n.type === "Modal" && n.props.visible && n.props.children)!;
+  // A transparent Modal hosting the shared surface (its own travel, scrim,
+  // handle, and the rail reserve), never a full-window page sheet.
+  assert.equal(modal().props.transparent, true);
+  assert.equal(modal().props.presentationStyle, undefined);
+  assert.ok(x.all().some((n) => n.type === "WorkspaceSheetSurface"));
+  assert.ok(x.all().some((n) => n.type === "WorkspaceAgentPicker"));
+  x.harness.unmount();
+  const phone = setup(A);
+  phone.chooseAgent();
+  assert.ok(
+    phone
+      .all()
+      .some(
+        (n) =>
+          n.type === "Modal" &&
+          n.props.visible &&
+          n.props.presentationStyle === "pageSheet",
+      ),
+  );
+  assert.equal(
+    phone.all().some((n) => n.type === "WorkspaceSheetSurface"),
+    false,
+  );
+  phone.harness.unmount();
+});
+
 test("Choose agent preserves its hierarchy and dismisses before pushing History or Details into main content", () => {
   for (const [label, route] of [
     ["History", "AssistantHistory"],
@@ -1892,8 +2389,8 @@ test("Choose agent preserves its hierarchy and dismisses before pushing History 
   ]) {
     const x = setup(A);
     x.chooseAgent();
-    const hierarchy = x.all().find((n) => n.type === "WorkspaceChatList")!;
-    assert.equal(hierarchy.props.mode, "picker");
+    const hierarchy = x.all().find((n) => n.type === "WorkspaceAgentPicker")!;
+    assert.equal(hierarchy.props.visible, true);
     assert.equal(hierarchy.props.current.agentId, "agent-a");
     assert.equal(hierarchy.props.current.conversationId, A);
     const labels = x
@@ -1902,7 +2399,11 @@ test("Choose agent preserves its hierarchy and dismisses before pushing History 
       .flatMap((n) => n.props.children.flat(Infinity));
     assert.ok(labels.includes("This thread"));
     assert.ok(labels.includes("Saved chat"));
-    assert.ok(labels.includes(12));
+    assert.ok(
+      labels.some(
+        (label) => typeof label === "string" && label.includes("12 messages"),
+      ),
+    );
     const button = x
       .all()
       .find((n) => n.type === "ActionButton" && n.props.label === label)!;
@@ -1910,7 +2411,7 @@ test("Choose agent preserves its hierarchy and dismisses before pushing History 
     button.props.onPress();
     x.harness.flush();
     assert.equal(
-      x.all().some((n) => n.type === "WorkspaceChatList"),
+      x.all().some((n) => n.type === "WorkspaceAgentPicker"),
       false,
     );
     assert.equal(
@@ -1935,6 +2436,7 @@ test("header Details uses the latest conversation even when header identity stay
   const x = setup(A);
   x.adopt(B);
   x.options();
+  x.chooseOption("Chat details");
   const pushed = x.events.find((e) => e[0] === "push")!;
   assert.equal(pushed[1], "AssistantDetails");
   assert.equal((pushed[2] as any).conversationId, B);
@@ -1965,7 +2467,7 @@ test("picker retains each saved thread draft and starts an independent empty com
   x.harness.flush();
   x.chooseAgent();
   x.all()
-    .find((node) => node.type === "WorkspaceChatList")!
+    .find((node) => node.type === "WorkspaceAgentPicker")!
     .props.onSelect({ kind: "agent", agentId: "agent-a", conversationId: A });
   x.harness.flush();
   assert.equal(x.input().props.value, "Unsent review");
@@ -1975,7 +2477,7 @@ test("picker retains each saved thread draft and starts an independent empty com
   );
   x.chooseAgent();
   x.all()
-    .find((node) => node.type === "WorkspaceChatList")!
+    .find((node) => node.type === "WorkspaceAgentPicker")!
     .props.onSelect({ kind: "agent", agentId: "agent-a", conversationId: B });
   x.harness.flush();
   assert.equal(x.input().props.value, "");
@@ -1994,7 +2496,7 @@ test("picker retains each saved thread draft and starts an independent empty com
   ]);
   x.chooseAgent();
   x.all()
-    .find((node) => node.type === "WorkspaceChatList")!
+    .find((node) => node.type === "WorkspaceAgentPicker")!
     .props.onSelect({ kind: "agent", agentId: "agent-a" });
   x.harness.flush();
   assert.deepEqual(x.events.at(-1), [
@@ -2137,6 +2639,9 @@ test("settled decisions fold into their exact recorded turn and CMA operations f
 test("private, specialist and contextual header identities open the picker without changing the draft", () => {
   for (const mode of ["nyxbot", "specialist", "contextual"] as const) {
     const x = setup(A, false);
+    // Wide bars float the same compact glass pill as narrow bars (covered
+    // below); the thread line stays in the accessibility label.
+    x.setWidth(1024);
     if (mode !== "nyxbot") {
       x.assistant.agent.kind = "specialist";
       x.assistant.agent.name = "researcher";
@@ -2145,14 +2650,16 @@ test("private, specialist and contextual header identities open the picker witho
     }
     x.input().props.onChangeText("Unsent draft");
     x.harness.flush();
-    const identity = elements(x.header()).find((n) => n.type === "Pressable")!;
+    const identity = elements(x.header()).find(
+      (n) => n.type === "FloatingButton",
+    )!;
     assert.match(
       identity.props.accessibilityLabel,
       /Chatting with .*Saved chat.*Choose agent/,
     );
     assert.ok(
       elements(x.header()).some(
-        (n) => n.type === "AgentAvatar" && n.props.size === "xl",
+        (n) => n.type === "AgentAvatar" && n.props.size === "lg",
       ),
     );
     identity.props.onPress();
@@ -2172,11 +2679,274 @@ test("private, specialist and contextual header identities open the picker witho
   draft.props.route.params = { home: false, draft: true };
   draft.harness.render();
   assert.match(
-    elements(draft.header()).find((n) => n.type === "Pressable")!.props
+    elements(draft.header()).find((n) => n.type === "FloatingButton")!.props
       .accessibilityLabel,
     /NyxBot, New chat\. Choose agent/,
   );
   draft.harness.unmount();
+});
+
+test("Chat replaces the shared two-button capsule with a menu at its top-right corner", () => {
+  for (const width of [390, 1024]) {
+    const x = setup(undefined, false);
+    x.setWidth(width);
+    x.setBell(true);
+    const labels = () =>
+      x.headerActions().map((n) => n.props.accessibilityLabel);
+    const capsule = elements(x.headerRight()).find(
+      (n) => n.type === "FloatingCapsule",
+    )!;
+    assert.deepEqual(
+      elements(capsule)
+        .filter((n) => n.type === "FloatingItem")
+        .map((n) => n.props.accessibilityLabel),
+      ["New chat", "Chat options"],
+    );
+    for (const dismiss of ["outside", "back", "escape"]) {
+      x.options();
+      assert.deepEqual(labels(), []);
+      const nodes = elements(x.headerRight());
+      const menu = nodes.find((n) => n.props.accessibilityRole === "menu")!;
+      const style = Object.assign({}, ...[menu.props.style].flat(Infinity));
+      assert.equal(style.top, 66);
+      assert.equal(style.right, 12);
+      if (dismiss === "outside")
+        nodes
+          .find((n) => n.props.accessibilityLabel === "Close menu")!
+          .props.onPress();
+      if (dismiss === "back")
+        nodes.find((n) => n.type === "Modal")!.props.onRequestClose();
+      if (dismiss === "escape") menu.props.onAccessibilityEscape();
+      x.finishMenuDismissal();
+      assert.deepEqual(labels(), ["New chat", "Chat options"]);
+      assert.equal(x.menuItems().length, 0);
+    }
+    assert.equal(
+      x.events.some(([kind]) => kind === "push" || kind === "dispatch"),
+      false,
+    );
+    x.harness.unmount();
+  }
+});
+
+test("on the Duo this chat's controls go to the column in both modes: Menu, the agent's picker and More, with the bar's handlers", () => {
+  const x = setup(A, false);
+  const column = x.columnHeader();
+  // Menu on the primary chat (contextual chats get Back), like the bar.
+  assert.equal(column.role, "menu");
+  assert.equal(column.disabled, false);
+  // The agent: its avatar and one complete translated phrase (this test's
+  // translator returns the template; the name is its placeholder).
+  assert.equal(column.identity.agent.id, "agent-a");
+  assert.equal(column.identity.label, "{{name}}. Choose agent");
+  assert.equal(column.more.label, "Chat options");
+  // The agent opens the identity pill's picker (the same Modal).
+  const modals = () =>
+    x.all().filter((n) => n.type === "Modal" && n.props.visible).length;
+  const before = modals();
+  column.identity.onPress();
+  x.harness.flush();
+  assert.equal(modals(), before + 1);
+  // More retains the base direct Details action outside a corner window.
+  const alerts = x.alerts.length;
+  column.more.onPress();
+  x.harness.flush();
+  assert.equal(x.alerts.length, alerts);
+  assert.equal(
+    x.events.some((e) => e[0] === "push"),
+    false,
+    "Details waits for picker dismissal",
+  );
+  x.all()
+    .find((n) => n.type === "Modal")!
+    .props.onDismiss();
+  x.harness.flush();
+  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
+  // A contextual chat (pushed from another page) has Back, like its bar.
+  x.props.contextual = true;
+  x.harness.render();
+  assert.equal(x.columnHeader().role, "back");
+  x.harness.unmount();
+});
+
+for (const platform of ["ios", "android"]) {
+  for (const surface of ["home", "private", "contextual"]) {
+    test(`${platform}: ${surface} enables the shared idle input and toolbar without corner hardware`, () => {
+      const x = setup(surface === "private" ? A : undefined, false, platform);
+      x.props.contextual = surface === "contextual";
+      x.harness.render();
+      assert.equal(x.input().props.compactWhenIdle, true);
+      const layout = { compact: true, onLeadingWidth() {}, onTrailingWidth() {} };
+      assert.equal(x.input().props.renderActions(undefined, layout).props.layout, layout);
+      x.harness.unmount();
+    });
+  }
+}
+
+test("all idle composers collapse across phone, Duo and wide windows; attachment previews stay separate", () => {
+  const x = setup(A, false);
+  const idle = () => x.input().props.compactWhenIdle;
+  assert.equal(idle(), true, "ordinary phone uses the shared idle row");
+  const layout = { compact: true, onLeadingWidth() {}, onTrailingWidth() {} };
+  assert.equal(x.input().props.renderActions(undefined, layout).props.layout, layout, "ordinary toolbar receives the same compact layout");
+  x.setQuickRail(true);
+  assert.equal(idle(), true, "folded Duo may collapse");
+  x.uploads.files.push({ key: "photo", status: "uploaded" });
+  x.harness.render();
+  assert.equal(idle(), true, "attachments keep their own preview strip");
+  x.uploads.files.length = 0;
+  x.uploads.picking = true;
+  x.harness.render();
+  assert.equal(idle(), true, "the picker does not expand an idle text input");
+  x.uploads.picking = false;
+  x.setDictating(true);
+  assert.equal(idle(), false, "dictation keeps its controls");
+  x.setDictating(false);
+  assert.equal(idle(), true);
+  x.setWidth(1024);
+  assert.equal(idle(), true, "wide windows use the same idle row");
+  x.harness.unmount();
+});
+
+test("the Duo bar keeps a fixed avatar; its title is the one tail-truncating line before the actions", () => {
+  const x = setup(A, false);
+  x.setQuickRail(true);
+  x.assistant.agent.display_name =
+    "A very long specialist name that cannot fit beside three actions";
+  x.harness.render();
+  const identity = elements(x.header()).find(
+    (n) => n.type === "FloatingButton",
+  )!;
+  // One shared glass pill around avatar, title and chevron; its glass hugs
+  // the pill and yields width.
+  const capsule = Object.assign(
+    {},
+    ...[identity.props.capsuleStyle].flat(Infinity).filter(Boolean),
+  );
+  assert.equal(capsule.alignSelf, "flex-start");
+  assert.equal(capsule.maxWidth, "100%");
+  const lines = elements(identity).filter((n) => n.type === "Text");
+  const title = lines.find((n) => n.props.ellipsizeMode === "tail")!;
+  assert.equal(
+    lines.filter((n) => n.props.ellipsizeMode === "tail").length,
+    1,
+    "the thread line is omitted on narrow bars",
+  );
+  assert.equal(title.props.numberOfLines, 1);
+  assert.equal(title.props.allowFontScaling, true);
+  // Largest accessibility size: capped growth, still a single shrinking line.
+  assert.ok(title.props.maxFontSizeMultiplier <= 1.35);
+  const titleStyle = Object.assign({}, ...[title.props.style].flat());
+  assert.equal(titleStyle.flexShrink, 1);
+  assert.equal(
+    titleStyle.lineHeight,
+    undefined,
+    "a fixed line box would clip scaled descenders",
+  );
+  const labels = elements(identity).find(
+    (n) => n.type === "View" && n.props.style?.flexShrink === 1,
+  );
+  assert.ok(labels, "the label column shrinks instead of the actions");
+  // ☰ | avatar + title ⌄ | actions: the avatar is a fixed 32pt mark.
+  const order = elements(identity).map((n) =>
+    n.type === "AgentAvatar"
+      ? "avatar"
+      : n === title
+        ? "title"
+        : n.type === "ChevronDown"
+          ? "chevron"
+          : undefined,
+  );
+  assert.deepEqual(order.filter(Boolean), ["avatar", "title", "chevron"]);
+  const avatar = elements(identity).find((n) => n.type === "AgentAvatar")!;
+  assert.equal(avatar.props.size, "lg");
+  assert.equal(avatar.props.agent.id, "agent-a");
+  x.harness.unmount();
+});
+
+test("on a corner-sensor phone the agent picker's header stays at the top; its full-width body starts below the cluster", () => {
+  const x = setup(A, false);
+  const sheet = () => {
+    const modal = x.all().find((n) => n.type === "Modal")!;
+    const panel = modal.props.children[0];
+    return {
+      panel,
+      header: panel.props.children[0],
+      body: panel.props.children[1],
+    };
+  };
+  x.chooseAgent();
+  const style = (node: { props: Record<string, any> }) =>
+    Object.assign({}, ...[node.props.style].flat().filter(Boolean));
+  const bodyStyle = () =>
+    Object.assign(
+      {},
+      ...[sheet().body.props.contentContainerStyle ?? sheet().body.props.style]
+        .flat()
+        .filter(Boolean),
+    );
+  assert.equal(style(sheet().panel).paddingTop, 20);
+  assert.equal(style(sheet().header).paddingHorizontal, 20);
+  assert.equal(style(sheet().header).paddingRight, undefined);
+  assert.equal(style(sheet().header).marginBottom, 0);
+  x.setCornerSensor(83);
+  // The header stays flush at its 20pt top padding and its trailing Close
+  // stays left of the column; the full-width body starts at the measured
+  // 152pt cluster bottom (20pt top + 44pt row + 88pt), rail or not.
+  for (const rail of [false, true]) {
+    x.setQuickRail(rail);
+    assert.equal(style(sheet().panel).paddingTop, 20);
+    assert.equal(style(sheet().header).paddingRight, 20 + 83);
+    assert.equal(20 + 44 + style(sheet().header).marginBottom, 152);
+    assert.equal(bodyStyle().paddingRight, undefined, "runs to the edge");
+  }
+  x.setQuickRail(false);
+  x.setWidth(1024);
+  assert.ok(
+    x.all().some((n) => n.type === "WorkspaceSheetSurface"),
+    "a wide Duo uses the same bottom-attached surface as Settings",
+  );
+  assert.equal(
+    x.all().find((n) => n.type === "Modal")!.props.transparent,
+    true,
+    "the status column stays beside the sheet",
+  );
+  // An iPad still uses its native page sheet.
+  x.setCornerSensor(0);
+  assert.equal(x.all().some((n) => n.type === "WorkspaceSheetSurface"), false);
+  assert.equal(style(sheet().panel).paddingTop, 20);
+  assert.equal(style(sheet().header).marginBottom, 0);
+  x.harness.unmount();
+});
+
+test("scrolling the transcript dismisses the keyboard and never swallows a first tap", () => {
+  const x = setup(A, false);
+  const list = x.all().find((n) => n.type === "FlatList")!;
+  // On-drag dismissal; taps on links, message actions and cards act while
+  // the keyboard is up instead of only dismissing it.
+  assert.equal(list.props.keyboardDismissMode, "on-drag");
+  assert.equal(list.props.keyboardShouldPersistTaps, "handled");
+  x.harness.unmount();
+});
+
+test("P9 transcript keeps base native identity outside Duo and remeasures in corner windows", () => {
+  const x = setup(A, false);
+  const list = () => x.all().find((n) => n.type === "FlatList")!;
+  const before = list().key;
+  x.harness.render();
+  assert.equal(
+    list().key,
+    before,
+    "ordinary renders keep the list and its scroll",
+  );
+  x.setFontScale(3.12);
+  assert.equal(list().key, before, "ordinary font changes preserve the list");
+  x.setQuickRail(true);
+  const duoBefore = list().key;
+  x.setFontScale(2);
+  assert.notEqual(list().key, duoBefore);
+  assert.ok(String(list().key).startsWith(`${A}:`), "still scoped to its chat");
+  x.harness.unmount();
 });
 
 test("header needs-you status takes precedence over active-turn running status", () => {
@@ -2185,7 +2955,7 @@ test("header needs-you status takes precedence over active-turn running status",
   conversation.active_turn = { id: "turn", tools: [] };
   x.harness.render();
   assert.match(
-    elements(x.header()).find((n) => n.type === "Pressable")!.props
+    elements(x.header()).find((n) => n.type === "FloatingButton")!.props
       .accessibilityLabel,
     /Running/,
   );
@@ -2204,7 +2974,7 @@ test("header needs-you status takes precedence over active-turn running status",
   ];
   x.harness.render();
   assert.match(
-    elements(x.header()).find((n) => n.type === "Pressable")!.props
+    elements(x.header()).find((n) => n.type === "FloatingButton")!.props
       .accessibilityLabel,
     /Needs you/,
   );
@@ -2315,7 +3085,7 @@ test("header compose preserves the viewed agent and starts a normal empty chat f
       origin,
     );
     assert.match(
-      elements(x.header()).find((n) => n.type === "Pressable")!.props
+      elements(x.header()).find((n) => n.type === "FloatingButton")!.props
         .accessibilityLabel,
       new RegExp(`Chatting with ${x.assistant.agent.display_name}, New chat`),
       origin,
@@ -2356,7 +3126,7 @@ test("agent picker New chat starts NyxBot and specialists in the normal empty-ch
     x.harness.flush();
     x.chooseAgent();
     x.all()
-      .find((n) => n.type === "WorkspaceChatList")!
+      .find((n) => n.type === "WorkspaceAgentPicker")!
       .props.onSelect({ kind: "agent", agentId: x.assistant.agent.id });
     x.harness.flush();
     assert.equal(x.props.route.params.agentId, x.assistant.agent.id);
@@ -2575,7 +3345,7 @@ test("Home header names the dashboard without calling it a new chat", () => {
   x.props.route.params = { home: true, openLatest: false };
   x.harness.render();
   assert.match(
-    elements(x.header()).find((node) => node.type === "Pressable")!.props
+    elements(x.header()).find((node) => node.type === "FloatingButton")!.props
       .accessibilityLabel,
     /NyxBot, Home\. Choose agent/,
   );
@@ -2583,7 +3353,7 @@ test("Home header names the dashboard without calling it a new chat", () => {
   x.compose();
   x.harness.flush();
   assert.match(
-    elements(x.header()).find((node) => node.type === "Pressable")!.props
+    elements(x.header()).find((node) => node.type === "FloatingButton")!.props
       .accessibilityLabel,
     /NyxBot, New chat\. Choose agent/,
   );
@@ -2612,12 +3382,22 @@ test("Android picker destinations wait for the dismiss slide; reduced motion ski
   }
 });
 
-
 test("Home displays a friendly 503 beside Reload agents and clears it after retry", async () => {
   const x = setup();
-  x.assistant.agentsError = buildApiError("<html><center>nginx</center></html>", 503).message;
+  x.assistant.agentsError = buildApiError(
+    "<html><center>nginx</center></html>",
+    503,
+  ).message;
   x.harness.render();
-  assert.ok(x.all().some((node) => node.props.message === "NyxID is temporarily unavailable. Try again in a moment."));
+  assert.ok(
+    x
+      .all()
+      .some(
+        (node) =>
+          node.props.message ===
+          "NyxID is temporarily unavailable. Try again in a moment.",
+      ),
+  );
   assert.doesNotMatch(JSON.stringify(x.harness.value()), /<html>|nginx/);
   const reload = x.all().find((node) => node.props.label === "Reload agents");
   assert.ok(reload);
@@ -2625,22 +3405,156 @@ test("Home displays a friendly 503 beside Reload agents and clears it after retr
   await x.harness.settle();
   x.harness.render();
   assert.ok(x.events.some(([name]) => name === "reloadAgents"));
-  assert.equal(x.all().some((node) => node.props.label === "Reload agents"), false);
-  assert.equal(x.all().some((node) => node.props.message === "NyxID is temporarily unavailable. Try again in a moment."), false);
+  assert.equal(
+    x.all().some((node) => node.props.label === "Reload agents"),
+    false,
+  );
+  assert.equal(
+    x
+      .all()
+      .some(
+        (node) =>
+          node.props.message ===
+          "NyxID is temporarily unavailable. Try again in a moment.",
+      ),
+    false,
+  );
   x.harness.unmount();
 });
 
 test("2345 history failure keeps the composer usable, offers refresh, and respects destroyed state", async () => {
   const x = setup(A);
-  x.assistant.error = "Conversation history could not be loaded. Please try again.";
+  x.assistant.error =
+    "Conversation history could not be loaded. Please try again.";
   x.harness.render();
   assert.notEqual(x.input().props.editable, false);
-  const refresh = x.all().find((node) => node.props.label === "Refresh history" || node.props.accessibilityLabel === "Refresh history");
+  const refresh = x
+    .all()
+    .find(
+      (node) =>
+        node.props.label === "Refresh history" ||
+        node.props.accessibilityLabel === "Refresh history",
+    );
   assert.ok(refresh);
   await refresh.props.onPress();
   assert.ok(x.events.some(([name]) => name === "recover"));
-  x.assistant.history!.conversation.agent = { ...x.assistant.agent, destroyed: true };
+  x.assistant.history!.conversation.agent = {
+    ...x.assistant.agent,
+    destroyed: true,
+  };
   x.harness.render();
   assert.equal(x.input().props.editable, false);
+  x.harness.unmount();
+});
+
+test("Home loading never registers a critical navigation guard; only its initial send or upload does", () => {
+  const env = setup();
+  env.assistant.loading = true;
+  env.harness.render();
+  assert.equal(env.navigationDisabled(), false);
+  assert.equal(
+    env
+      .headerActions()
+      .find((node) => node.props.accessibilityLabel === "New chat")?.props
+      .disabled,
+    true,
+  );
+  env.assistant.sending = true;
+  env.harness.render();
+  assert.equal(env.navigationDisabled(), true);
+  env.assistant.sending = false;
+  env.uploads.session.sending = true;
+  env.harness.render();
+  assert.equal(env.navigationDisabled(), true);
+  env.adopt(A);
+  assert.equal(
+    env.navigationDisabled(),
+    false,
+    "an established chat can leave during a send",
+  );
+  env.harness.unmount();
+});
+
+test("P9 ordinary floating identity retains the base thread detail", () => {
+  const x = setup(A, false);
+  const lines = elements(x.header()).filter(
+    (n) => n.type === "Text" && n.props.ellipsizeMode === "tail",
+  );
+  assert.equal(lines.length, 2, "name and thread details stay visible");
+  x.harness.unmount();
+});
+
+test("private chat mounts the guarded attachment-source sheet returned by its upload session", () => {
+  const x = setup("chat");
+  const sourcePicker = { choices: [{ label: "Files", onPress() {} }], onClose() {} };
+  x.uploads.sourcePicker = sourcePicker;
+  x.harness.render();
+  const picker = x.all().find(n => n.type === "AttachmentSourcePicker")!;
+  assert.equal(picker.props.choices, sourcePicker.choices);
+  assert.equal(picker.props.onClose, sourcePicker.onClose);
+  x.harness.unmount();
+});
+
+test("the selected draft model reaches a first text-only send", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxagent/research";
+  x.input().props.onChangeText("Compare these plans");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  assert.deepEqual(x.events.find(([name]) => name === "send"),
+    ["send", "Compare these plans", undefined, "nyxagent/research"]);
+  assert.equal(x.drafts.length, 0);
+  x.harness.unmount();
+});
+
+test("a previously created attachment draft applies the selected model to that ID before sending", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxid/model-choice";
+  const payload: AssistantUploadedMessage = {
+    conversationId: A,
+    attachmentIds: ["11111111-1111-4111-8111-111111111111"],
+    attachments: [],
+  };
+  x.uploads.session.submit = async (submit) => submit(payload);
+  x.input().props.onChangeText("Review this file");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  assert.deepEqual(x.events.filter(([name]) => name === "patch-draft-model" || name === "send"), [
+    ["patch-draft-model", A, "nyxid/model-choice"],
+    ["send", "Review this file", payload],
+  ]);
+  assert.equal(x.drafts.length, 0);
+  x.harness.unmount();
+});
+
+test("a refused draft model PATCH prevents dispatch and preserves the message and model", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxid/revoked";
+  x.uploads.session.applyDraftModel = async () => { throw new Error("The selected model is unavailable."); };
+  x.uploads.session.submit = async (submit) => submit({ conversationId: A, attachmentIds: [], attachments: [] });
+  x.input().props.onChangeText("Keep this draft");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  assert.equal(x.events.some(([name]) => name === "send"), false);
+  assert.equal(x.input().props.value, "Keep this draft");
+  assert.equal(x.uploads.session.model, "nyxid/revoked");
+  x.harness.unmount();
+});
+
+test("opening voice reuses a draft prepared earlier and applies its model before adoption", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxagent/research";
+  x.uploads.session.ensureConversation = async () => A;
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  assert.equal(x.voice()?.props.thread, A);
+  assert.deepEqual(x.events.filter(([name]) => name === "patch-draft-model" || name === "open"), [
+    ["patch-draft-model", A, "nyxagent/research"],
+    ["open", A, undefined],
+  ]);
+  assert.equal(x.drafts.length, 0);
   x.harness.unmount();
 });

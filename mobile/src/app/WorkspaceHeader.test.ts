@@ -1,3 +1,4 @@
+import { translationTestMocks } from "../i18n/translationTestHarness";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -8,6 +9,7 @@ import ts from "typescript";
 import type { NavigationAction } from "@react-navigation/native";
 import type {
   useWorkspaceBack,
+  useWorkspaceColumnHeader,
   workspaceHeaderOptions,
 } from "./WorkspaceHeader";
 
@@ -30,8 +32,9 @@ const same = (a?: unknown[], b?: unknown[]) =>
 /** Execute the real header and React Navigation removal hook at their native boundaries. */
 function setup({
   inSheet = true,
+  column = false,
   ...initial
-}: Partial<BackProps> & { inSheet?: boolean } = {}) {
+}: Partial<BackProps> & { inSheet?: boolean; column?: boolean } = {}) {
   const slots: unknown[] = [];
   const effects = new Map<number, Effect>();
   const layoutEffects = new Map<number, Effect>();
@@ -40,6 +43,10 @@ function setup({
   let cursor = 0;
   let dirty = false;
   let focused = true;
+  let sidebarOpen = false;
+  // A workspace sheet open over the workspace (the shared accessibility state).
+  let sheetOpen = inSheet;
+  const columnRegistrations: [symbol, unknown][] = [];
   let localBacks = 0;
   let nativeBacks = 0;
   let menuOpens = 0;
@@ -159,13 +166,18 @@ function setup({
     props: elementProps,
   });
   const mocks: Record<string, unknown> = {
+    ...translationTestMocks,
     react,
+    "../i18n/LanguageProvider": {
+      useAppLanguage: () => ({ t: (phrase: string) => phrase }),
+    },
     "../lib/accessibility/WorkspaceInteractionSurface": {
       WorkspaceInteractionSurface: "WorkspaceInteractionSurface",
     },
     "../lib/accessibility/workspaceAccessibility": {
       useWorkspaceAccessibility: () => ({
-        sheetOpen: inSheet,
+        sheetOpen,
+        sidebarOpen,
         primaryKey: "chat",
       }),
     },
@@ -190,9 +202,17 @@ function setup({
         },
       },
       Pressable: "Pressable",
-      StyleSheet: { create: <T>(styles: T) => styles },
+      StyleSheet: { create: <T,>(styles: T) => styles, hairlineWidth: 0.5 },
+      useWindowDimensions: () => ({ width: 402, height: 874, fontScale: 1 }),
     },
     "lucide-react-native": { ChevronLeft: "ChevronLeft", Menu: "Menu", X: "X" },
+    "../components/FloatingControl": { FloatingButton: "FloatingButton" },
+    "../components/workspace/workspaceColumnHeader": {
+      WorkspaceColumnHeaderContext: {
+        value: (owner: symbol, controls: unknown) =>
+          columnRegistrations.push([owner, controls]),
+      },
+    },
     "../theme/ThemeContext": {
       useTheme: () => ({ colors: { textPrimary: "white" } }),
     },
@@ -205,7 +225,7 @@ function setup({
       }),
     },
     "use-latest-callback": {
-      default: <T>(callback: T) => {
+      default: <T,>(callback: T) => {
         const current = react.useRef(callback);
         current.current = callback;
         return react.useCallback(
@@ -258,6 +278,7 @@ function setup({
     fileURLToPath(new URL("./WorkspaceHeader.tsx", import.meta.url)),
   ) as {
     useWorkspaceBack: typeof useWorkspaceBack;
+    useWorkspaceColumnHeader: typeof useWorkspaceColumnHeader;
     workspaceHeaderOptions: typeof workspaceHeaderOptions;
     WorkspaceSheetContext: Context;
     WorkspaceSessionContext: Context;
@@ -317,7 +338,14 @@ function setup({
       if (dirty) {
         dirty = false;
         cursor = 0;
-        module.useWorkspaceBack(props);
+        if (column)
+          module.useWorkspaceColumnHeader({
+            role: "menu",
+            onBack: () => {},
+            identity: { label: "NyxBot", onPress: () => {} },
+            more: { label: "More", onPress: () => {} },
+          });
+        else module.useWorkspaceBack(props);
       }
       const layouts = pendingLayouts;
       pendingLayouts = [];
@@ -339,6 +367,9 @@ function setup({
   dirty = true;
   flush();
   return {
+    sidebar: (open: boolean) => {
+      sidebarOpen = open;
+    },
     preflight: async () => {
       for (const guard of dismissGuards.values())
         if (!(await guard())) return false;
@@ -373,6 +404,15 @@ function setup({
       dirty = true;
       flush();
     },
+    /** Open or close a workspace sheet over the page (blurring it). */
+    sheet: (open: boolean) => {
+      sheetOpen = open;
+      focused = !open;
+      dirty = true;
+      flush();
+    },
+    /** The column's current controls (the last registration). */
+    column: () => columnRegistrations.at(-1)?.[1] ?? null,
     hardwareBack: () => [...hardware].reverse().some((callback) => callback()),
     choose: (text: string, settle = true) => {
       const item = alerts
@@ -389,11 +429,15 @@ function setup({
   };
 }
 
+/** The header button's icon (inside the shared glass button, or the sheet's Close). */
+const icon = (button: { props: Record<string, any> } | null | undefined) =>
+  [button?.props.children].flat().filter(Boolean).at(-1)?.type;
+
 test("a drawer root shows Close while nested local history adds Back independently", () => {
   const env = setup();
   assert.equal(env.button("left"), null);
   assert.equal(env.button("right")?.props.accessibilityLabel, "Close drawer");
-  assert.equal(env.button("right")?.props.children.type, "X");
+  assert.equal(icon(env.button("right")), "X");
   assert.equal(env.options().unstable_headerLeftItems?.({} as never).length, 0);
   assert.equal(
     env.options().unstable_headerRightItems?.({} as never).length,
@@ -402,7 +446,7 @@ test("a drawer root shows Close while nested local history adds Back independent
   env.update({ active: true, label: "Previous step" });
   const back = env.button("left");
   assert.equal(back?.props.accessibilityLabel, "Previous step");
-  assert.equal(back?.props.children.type, "ChevronLeft");
+  assert.equal(icon(back), "ChevronLeft");
   back?.props.onPress();
   assert.equal(env.counts().localBacks, 1);
   assert.equal(env.counts().closePresses, 0);
@@ -466,6 +510,10 @@ test("a native nested drawer route keeps Back and Close as separate destinations
   const env = setup({ active: false, defaultRole: "back" });
   assert.equal(env.button("left")?.props.accessibilityLabel, "Back");
   assert.equal(env.button("right")?.props.accessibilityLabel, "Close drawer");
+  // A sheet page's Back floats in the bars' glass like every workspace bar;
+  // the sheet's own Close stays the plain circular control.
+  assert.equal(env.button("left")?.type, "FloatingButton");
+  assert.equal(env.button("right")?.type, "Pressable");
   env.button("left")?.props.onPress();
   assert.equal(env.counts().nativeBacks, 1);
   assert.equal(env.counts().closePresses, 0);
@@ -664,7 +712,7 @@ test("normal chat menu and contextual Back stay outside drawer dismissal behavio
     main.button("left")?.props.accessibilityLabel,
     "Open navigation",
   );
-  assert.equal(main.button("left")?.props.children.type, "Menu");
+  assert.equal(icon(main.button("left")), "Menu");
   assert.equal(main.button("right"), null);
   assert.equal(
     main.options().unstable_headerRightItems?.({} as never).length,
@@ -878,4 +926,60 @@ test("the real dirty leave guard reports Keep editing to the sidebar but never c
   assert.equal(x.cancelled(), 1);
   assert.deepEqual(x.dispatched.at(-1), x.rootAction);
   x.unmount();
+});
+
+
+test("critical guard releases on settle, blur, session loss and unmount even when a dirty editor remains", () => {
+  for (const boundary of ["settle", "blur", "signout", "unmount"] as const) {
+    const env = setup({
+      inSheet: false,
+      disabled: true,
+      discardOnClose: { title: "Discard?", message: "Draft" },
+    });
+    assert.equal(env.criticalChanges.at(-1), true);
+    if (boundary === "settle") env.update({ disabled: false });
+    else if (boundary === "blur") env.focus(false);
+    else if (boundary === "signout") env.setSessionActive(false);
+    else env.unmount();
+    assert.equal(env.criticalChanges.at(-1), false, boundary);
+    if (boundary === "settle" || boundary === "blur") {
+      assert.equal(
+        env.guardChanges.at(-1),
+        true,
+        "unsaved changes retain noncritical protection",
+      );
+    } else assert.equal(env.guardChanges.at(-1), false);
+    if (boundary !== "unmount") env.unmount();
+    assert.equal(env.guardChanges.at(-1), false);
+  }
+});
+
+test("a blocked Home menu button can close an already presented sidebar", () => {
+  const env = setup({ inSheet: false, active: false, disabled: true });
+  assert.equal(env.button("left")?.props.disabled, true);
+  env.sidebar(true);
+  const menu = env.button("left");
+  assert.equal(menu?.props.disabled, false);
+  assert.equal(menu?.props.accessibilityState.disabled, false);
+  menu?.props.onPress();
+  assert.equal(env.counts().menuOpens, 1);
+  env.unmount();
+});
+
+test("the Duo column keeps a chat's controls while a workspace sheet is open over it, and only that chat's", () => {
+  const chat = setup({ inSheet: false, column: true });
+  assert.ok(chat.column(), "focused chat registers its controls");
+  // Settings (or the agent picker, Recent chats) opens over the chat: the
+  // chat blurs, but it is still the page beside the sheet.
+  chat.sheet(true);
+  assert.ok(chat.column(), "kept beside the open sheet");
+  chat.sheet(false);
+  assert.ok(chat.column());
+  // Navigating away (a plain blur) withdraws them.
+  chat.focus(false);
+  assert.equal(chat.column(), null);
+  // A chat that was not focused when the sheet opened never claims them.
+  chat.sheet(true);
+  assert.equal(chat.column(), null);
+  chat.unmount();
 });

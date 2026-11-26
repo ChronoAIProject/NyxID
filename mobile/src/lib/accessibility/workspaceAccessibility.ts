@@ -3,6 +3,7 @@ import type { NavigationState, PartialState } from "@react-navigation/native";
 
 export type WorkspaceAccessibility = {
   sheetOpen: boolean;
+  sidebarOpen?: boolean;
   primaryKey?: string;
 };
 export const WorkspaceAccessibilityContext =

@@ -964,17 +964,25 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
 - At window widths of 900pt and above, a persistent 300pt sidebar sits beside
   the same retained content navigator. Both columns remain touch- and
   accessibility-accessible; the sidebar does not own modal focus or a closing
-  scrim. Narrower windows use the push interaction above, with the sidebar capped
+  scrim. Ordinary iPad and Android windows retain the visible sidebar. Only an
+  iOS corner-sensor window (the unfolded Duo) starts with it closed and lets Menu
+  show or hide it (VoiceOver “Show sidebar”/“Hide sidebar”). That Duo choice is
+  saved per device, independently of full screen. Its slab edge follows on the UI
+  thread in one 250ms ease-out; Reduce Motion swaps at once.
+  Narrower windows use the push interaction above, with the sidebar capped
   at 360pt. Resizing changes layout without replacing the chat or its draft.
 - Drawer top is the window's safe-area top plus 10pt. On windows at least 768pt
-  wide, it becomes a centered card up to 720×860pt with 24pt plus safe-area margins
-  and rounded bottom corners. The keyboard resizes the measured available host;
+  wide without a corner status column, it becomes a centered card up to 720×860pt
+  with 24pt plus safe-area margins and rounded bottom corners. The Duo keeps a
+  bottom-attached sheet in both postures, with only its top corners rounded and
+  no bottom margin. The keyboard resizes the measured available host;
   the panel fits that space without remounting navigation. Settings content stays
   within a centered 720pt column, and row wrapping uses actual measured row width.
   Top corners are 24pt; the
   centered 36×4pt handle has a 44pt drag region. A dedicated translucent scrim
   stays fixed over retained chat and fades independently while the panel slides.
-  Sidebar and content headers share a 60pt row below the same safe-area inset.
+  Sidebar and content headers share a 60pt row below the same safe-area inset;
+  beside a corner status cluster the row centers on the clock row instead (below).
   Page and Settings titles are centered across the full header, with equal control
   columns, 18pt type, one line and a 1.25 scaling cap. Chat identity keeps its avatar
   and name alignment. Close is a circular 44pt target. Only pages pushed within a
@@ -982,7 +990,205 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   Sidebar accessibility follows the settled UI endpoint; cancelled or zero-distance
   gestures release its focus ownership and restore the content at offset zero.
   Forms retain async dirty/pending guards across every dismissal path. Reduced
-  motion removes stack travel and springs. No fake home indicator or native rail.
+  motion removes stack travel and springs. No fake home indicator; the Duo's
+  quick rail (below) is the only rail.
+- One floating-control style everywhere: Apple's liquid glass. Every floating
+  control renders through one primitive (`components/FloatingControl.tsx`):
+  `FloatingButton` is one control in its own capsule (a 44pt circle, or a pill
+  that hugs its contents), `FloatingItem` is a control inside a shared
+  `FloatingCapsule`, and `FloatingGroup` puts capsules that belong together in
+  one `GlassContainer`. On iOS 26+ each capsule is an interactive
+  `expo-glass-effect` `GlassView` with style 'regular', the app's colour scheme
+  (never the system's) and the same explicit tint: the header-button token
+  `floatingControlBg` (#F9F9F9 light, #353539 dark) at 60% alpha
+  (`floatingControlGlassTint`), so header and rail glass sample the same
+  colour over the page. Without liquid glass (older iOS, Android) the capsule
+  is the opaque theme surface with the same token (`floatingControlSurface`:
+  hairline `floatingControlBorder`, the composer's soft lift in light). A test
+  resolves every control to the same glass props and fallback surface in both
+  themes. Controls draw no fill, border or shadow of their own; pressing tints
+  `segmentTrack` in the capsule's shape and disabled controls dim their
+  contents. Glass never sits under a fading ancestor: a capsule hides its own
+  glass natively.
+- Every slab header bar, narrow or beside the persistent sidebar, floats its
+  controls as these floating buttons, 8pt apart with 12pt side margins:
+  Menu/Back (or Show/Hide sidebar), the agent identity (avatar, title,
+  chevron) as one glass pill, then New chat and More together in a capsule.
+  More grows that exact measured capsule into an anchored options bubble over
+  the existing chat, then shrinks back on dismissal. The floating surface keeps
+  its top-right anchor, with a rounded theme border and soft floating elevation
+  outside the clipped content; icons yield to Chat details, Notifications when enabled
+  (with its unread count), Settings and Voice preferences during a call. Crew
+  options use the same transition from their single-button capsule to Settings,
+  retaining the crew's existing settings destination. Outside tap, Android Back
+  and accessibility escape reverse the transition. Reduced motion changes size
+  immediately; focus enters the menu and returns to its trigger on dismissal.
+  A selected destination opens only after the bubble/native modal dismisses. The Duo's chats (folded or
+  unfolded, either mode) have no bar: these controls sit in the status
+  column (below). The chevron always follows the title.
+  Every other workspace bar uses the same floating controls, on ordinary
+  iPhones and the Duo alike: workspace pages (Notifications, Automations,
+  Machines, Plugins, Activity, Agents & Crews, every detail page pushed in
+  the workspace) and sheet pages (Settings and its account pages) float
+  Menu/Back as the same `FloatingButton` (standard glass, 44pt), and an
+  edit page's commit action (Save, Done; `SettingsHeaderButton`, also behind
+  `useSettingsHeaderAction`) is a floating glass pill hugging its label,
+  with its spinner inside the same capsule while saving.
+  `WorkspacePageHeader`, `WorkspaceDrawerHeader` and the chat bar share
+  `WORKSPACE_HEADER_ROW`, 12pt side margins and 8pt gaps between controls. A
+  structural test lists every place that puts a control in a bar
+  (`headerLeft` / `headerRight`) with the floating control it renders.
+  The legal pages' floating Back is the same button. Sheets keep their own
+  plain circular Close. Header, page content and composer share 12pt side
+  margins.
+- Corner-sensor windows (iPhone Duo) keep the header beside the status column:
+  the camera and clock occupy only that column, so the header row sits flush at
+  the top, 8pt from the window's edge (a sheet's row sits directly under its
+  handle or padding), with its trailing controls left of the column's measured
+  ink (a test asserts both postures). Folded portrait: row 8–68pt (was
+  62.5–122.5pt); unfolded landscape: row 8–68pt (was 10–70pt). Content that
+  keeps the Duo's rail inset (every workspace page, folded or unfolded, rail
+  shown or full screen) starts right under the row, at 68pt (was 152pt
+  folded, 100pt unfolded); chats have no row there and start at the top
+  inset (their controls are in the column, below). Bottom sheets never run
+  under the column (see the rail, below). Ordinary iPhones keep the row at their real top inset. Content
+  keeps the 12pt margin, except where the Duo's quick rail floats (below).
+- The Duo's quick rail exists on every window with the corner status column:
+  folded (narrow) and unfolded (beside the persistent sidebar, open or
+  closed), the same component, order, glass, behaviour and saved choice in
+  both. Ordinary iPhones and iPads (no corner cluster) never show it and keep
+  their bars. It is grouped floating controls in one glass container (Apple's
+  grouped glass), centered on the measured clock/Wi‑Fi column (48pt from the
+  right edge), 12pt between capsules, top to bottom:
+  1. The full-screen toggle uses a `FloatingButton` in its own small capsule
+     with the other capsules' glass, 44pt width and fully rounded ends. It sits
+     8pt below the posture's idle status cluster (folded 160–204pt, unfolded
+     108–152pt). Only native status-frame/safe-area growth or actual camera/
+     microphone capture events move it down, up to 36pt (folded 196–240pt,
+     unfolded 144–188pt). The native will-change event moves it before the
+     system finishes its transition; did-change and foreground events read the
+     current frame. Camera-ready, recognizer audio-start/end and media capture/
+     teardown events cover activity whose privacy light does not resize the
+     status frame. No polling, UI timers or route-open guesses trigger movement.
+     It returns to idle when capture ends and the system column settles.
+     The offset is capped so the default
+     folded chat rail ends at the collapsed composer's 640pt bottom edge;
+     its column includes the same 4pt page padding above the bottom safe area.
+     All five default shortcuts fit without scrolling at the cap. Its icons are Lucide Maximize2/Minimize2's two bold arrows
+     turned horizontal, drawn on Lucide's 24×24 grid (stroke 2, round caps
+     and joins, x 2–22, ±5 chevron heads, a gap in the centre) because Lucide
+     has no such pair, at the shortcut icons' 20pt: the icon shows the
+     current state: rail mode →  ← (inward), full screen ←  → (outward);
+     they cross-fade and a
+     geometry test checks both directions.
+  2. Rail mode only: one vertical capsule holding the person's Quick access
+     as `FloatingItem`s 4pt apart, directly below the toggle. The list is
+     saved to the account (`GET`/`PUT`/`DELETE /api/v1/users/me/quick-access`,
+     first-party human sessions only; `UserProfileConfig.quick_access`), so
+     every device shows the same one; absent, it is the default New chat,
+     Notifications (feature-gated, unread dot on the bell and count in its
+     label), Scan QR, Recent chats (a sheet of the sidebar's Recents) and
+     Settings. Settings › Quick access
+     (shown only where the rail exists) picks and orders up to 12 entries:
+     the side menu's destinations (New chat, Notifications, Scan QR, Terminal
+     login code, Recent chats, Automations, Machines, Plugins, Activity,
+     Create new agent, Settings, Agents, Crews) with its icons, and pinned
+     agents and crews (an agent's 20pt avatar or a crew's first two members;
+     each opens that chat, spoken "Chat with {name}" / "Open crew {name}").
+     Rows move up or down, are removed, or are added from the menu, agents
+     and crews not yet there; Reset to default clears the saved list. Changes
+     apply optimistically, one at a time, and a failed save puts the previous
+     list back. Deleted, destroyed or not-yet-loaded agents and crews are
+     skipped in the rail (Settings lists them as unavailable so they can be
+     removed); unknown entries from a newer server are skipped, never fatal.
+     When the entries do not fit the column between the toggle and the ☰ /
+     agent / ⋯ capsule (bounded by the composer's bottom), the capsule takes
+     the room left and its entries scroll inside the glass, with no
+     indicator; otherwise it hugs them. An empty list shows no capsule.
+  3. On a chat (Home, private chats and crews), its bar's controls: the Duo's
+     chats have no top bar in rail mode, so Menu (or Back), the agent (its
+     avatar, or a crew's two-avatar stack; it opens the identity pill's
+     picker; spoken "{name}. Choose agent", one translated phrase) and More
+     (Chat options / Crew options) sit in one capsule as vertical 44pt
+     `FloatingItem`s 4pt apart below the shortcuts in rail mode. The shortcuts
+     scroll when necessary to keep this capsule above the column's bottom.
+     Full screen brings back the chat's own top bar, fading in, with
+     only the column's group (Menu, the identity pill with its chevron,
+     More; New chat and Scan QR stay on the rail) in the flush 8–68pt row,
+     left of the status column; its bottom edge fades 24pt into the page
+     (page colour to clear) so content scrolls under it gradually. The
+     column capsule fades out with the shortcuts (hidden, it takes no
+     touches and leaves VoiceOver). On the Duo, More always opens Chat
+     details (Settings and Notifications are on the rail; a voice call
+     shows its own preferences control). The
+     focused chat registers these controls (`useWorkspaceColumnHeader`, never
+     inside a sheet); the column's Menu is the chat's focus-restoration
+     target. Chats start at the top inset (68pt more height than the old
+     8–68pt bar). Other workspace pages keep their own bars in both modes and
+     have no header capsule.
+  The column renders outside the sliding content slab: when the folded
+  drawer slides the page aside, the toggle, header capsule and shortcuts stay
+  fixed on the status column over the slab's visible edge.
+  Rail mode: nothing readable or tappable sits under the rail. The shared page
+  containers (`WorkspacePage`, `ScreenContainer` and so `SettingsPage`) add a
+  66pt trailing inset to everything they hold (text, headings, inline links,
+  row controls, chips, segment controls, empty states, transcript bubbles,
+  tables, code blocks, the composer, in-page toasts); `WorkspacePage` narrows
+  its own scroller. Only the page background runs underneath, and the inset
+  also keeps content clear of the status column at the top. Pages never add
+  their own rail inset, and a structural test keeps every workspace page
+  inside one of these containers.
+  Full screen extends the page, and that is the only difference between the
+  modes: the shortcuts capsule's glass dissolves (its icons fade; the
+  fallback surface fades with its wrapper) and the inset animates to 0, so
+  content, cards, lists, transcript and composer reach the normal 12pt margin
+  (+66pt width folded and unfolded; folded 400→466pt: 40,260pt² more over the
+  610pt folded body). One 250ms UI-thread ease-out drives the inset and the
+  shortcuts' fade (Reduce Motion: instant). The toggle
+  (now "Show quick actions") stays where it is and floats over the content like the status bar, with no backdrop behind the
+  column: only the glass capsules show. The Duo rail's capsules (toggle,
+  header capsule, shortcuts) alone use see-through glass (style 'clear',
+  25% tint, `FloatingGlass` `rail`); in full screen, floating over content,
+  the toggle is nearly solid (style 'regular', 90%
+  tint, `railOpaque`). Every other floating control, on every device, keeps
+  the standard glass above. While a workspace sheet is open over a chat, the
+  column keeps that chat's header capsule beside the sheet. Scrollers keep
+  their natural top in full screen (no extra top inset, so content never
+  rests below where it starts) and scroll under the toggle like under a
+  status bar.
+  Vertical scroll indicators: every vertical scroller spreads the shared
+  `useRailScrollIndicator()` (rail mode: between the content and the rail;
+  full screen: at the window edge; UIKit's automatic safe-area adjustment
+  off; a structural test checks), except horizontal ones, ones that hide the
+  indicator and ones in modals. Sheets (Settings, the agent picker,
+  Recent chats, a crew's recipient picker) respect the rail: in both Duo
+  postures the panel stays attached to the bottom, starts at the leading edge
+  and ends 8pt before the rail's
+  column (466 → 382pt, `workspaceSheetRailReserve`; the chat's agent picker
+  uses the shared `WorkspaceSheetSurface` in a transparent Modal instead of
+  a full-window native page sheet), so the clock and the rail stay in view
+  beside it under the scrim (a tap there dismisses the sheet). The unfolded
+  Duo uses the same bottom attachment and rail clearance. The choice is saved per device (default shown).
+- On iOS corner-sensor windows, search placeholders choose among complete phrases,
+  most descriptive first ("Search chats, agents, settings", then "Search"),
+  and shows the first that fits its measured width at the current text size.
+  The descriptive phrase must fit a 320pt window and the folded Duo in rail
+  mode at default size in every language; the short one at the largest
+  Dynamic Type (budget test against the bundled font's advance widths). The
+  descriptive phrase stays the field's accessibility label. Ordinary devices
+  retain their existing full placeholder, translated into the chosen language.
+- On iOS corner-sensor windows, workspace page large titles and the Home greeting
+  grow with text size up to 1.25× and wrap to at most two lines before an ellipsis.
+  Ordinary devices retain the base scaling and each page's wrapping policy. The
+  greeting is one translated phrase, including the first name.
+- Ordinary devices retain base sidebar label wrapping/counts, the complete agent
+  picker roster, and notification title/preview/footer scaling. Only corner-sensor
+  windows use the measured sidebar headers, picker Recent section, stacked recent
+  metadata at accessibility sizes, notification caps, transcript remount on text
+  size changes, and optional assistant companion panel. Segment controls keep base
+  equal-width cells and fixed-height count badges whenever every label fits. Only
+  measured label overflow enables natural widths and horizontal scrolling; labels
+  that fit in English retain the base appearance on iPhone, iPad and Android.
 - Home is an explicit primary-chat state, reached from the navigation logo/Chats,
   bare `/assistant`, or app start without a restored chat. New chat with NyxBot
   shows the same normal empty chat as a specialist: identity header, intro and
@@ -1025,7 +1231,17 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   Finish circle. Permission, startup, capture and stopping retain the same toolbar.
   Finish adds the words to the draft for editing and explicit Send. Dictation
   errors and their Settings/Dismiss actions sit outside, above the composer pill
-  (user decision 2026-11-11). The jump-to-latest arrow
+  (user decision 2026-11-11). On every window on both iOS and Android an idle
+  Home, private, contextual or crew composer is one row:
+  unfocused with an empty or whitespace-only draft (the draft itself is never
+  trimmed), Attach, dictation and Send overlay its text line and the permission
+  pill hides. Focus, non-whitespace text or active dictation restore two rows
+  without remounting the input. Attachments retain their own preview strip;
+  uploads do not expand an idle text input. Crew recipients appear above the
+  active input. Input and toolbar use the same compact layout on ordinary and
+  corner-sensor phones, iPad and wide windows (user clarification 2026-11-24).
+  On corner-sensor windows, a tap outside the composer blurs it as the touch ends, so the tapped control still acts on the
+  first tap; dragging the transcript dismisses the keyboard. The jump-to-latest arrow
   dips 6pt and springs back as the transcript scrolls to the newest message
   (immediate under Reduce Motion). Chat pages
   use an edge-to-edge transcript viewport within the system safe area, so its
@@ -1043,19 +1259,31 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   white canvas. Sign-in, device codes, Agent Key login and MFA share this
   treatment. Workspace tokens, dark auth styling and the existing faint brand
   halo remain unchanged.
-- Native pending attachment chips keep their width and text-scaled height through
-  waiting, upload, checking, ready and error states, with a 44pt remove target.
+- Native selected attachments share one horizontal row, with equal square tiles
+  sized to fit three within the actual composer viewport, including padding and
+  gaps. Images and first-page PDF thumbnails hide visible filenames; other files
+  and failed previews show a concise type and filename. All states retain the
+  same square frame. An inset circular remove action has a separate 44pt target.
+  Strong left/right fades appear only toward hidden content, with a localized
+  visible attachment range below the viewport only while it overflows. Range and
+  offset adapt to swipes, resizing and selection changes. Local preview validation
+  runs independently of the serialized upload queue. Full filenames and errors
+  remain accessible, including when visible text truncates.
   A thin bottom bar shows upload progress; waiting/checking gently pulse a short
   segment (static under Reduce Motion). Status text owns accessibility. Ready
-  chips show only the thumbnail/icon, filename and remove control, without a
-  tick or Ready label. Errors keep red text and remove the loader.
+  tiles omit the tick and Ready label. Errors keep red text and remove the loader,
+  preserving a usable local preview when uploading fails.
 - Chat Details, History and Working context are nested pages in the content slab.
   History shares the cursor-paged Recents browser, filtered to the current agent.
   Title edits, deletion and context reset retain dirty/critical-write guards.
   The agent/permissions/options and recipients/connections pickers remain task-local
   transient choices, alongside media preview and voice conversation.
 - Native permissions controls contain Full access, Auto and Ask every time only,
-  with the effective agent override shown read-only. Chat and agent settings use
+  with the effective agent override shown read-only. The composer's control is a
+  labelled dropdown with its chevron on ordinary devices. On iOS corner-sensor
+  windows it is a plain current-mode pill on the floating surface, in a 44pt
+  target with one tail-truncating line; VoiceOver reads "Permissions: {mode}"
+  with the hint "Changes the permission mode". Chat and agent settings use
   the server default without a native selector or per-turn override. Voice automatically uses an available server default, without a source selector. This is the user's deliberate native scope (2026-10-28).
   Voice, conversation mode and completion notices are chosen in Settings › Voice;
   the call screen has no voice/source pickers. The Voice menu selects the next-call voice without playable samples (user decision 2026-11-12). Voice composers never show pricing or tariffs, including connection, idle, minimized and help-popover states (user decision 2026-11-06, superseding V1). Pricing belongs in Settings › Voice. Hold to talk and Hands-free remain selectable through the compact header radio toggle: phone and radio glyphs, inactive icon only, active icon plus a wrapping label, and 44pt minimum targets. Mode changes animate the header width, switching instantly under Reduce Motion. The status/timer has its own full-width line, with elapsed time protected from status truncation. At accessibility text sizes the agent name moves below the top control row; the selected mode label fits within the remaining width. xAI shows only the forced Hold to talk option and cannot switch modes. Changes still save the existing voice preference (user decision 2026-11-06, U11). Hold to talk keeps a press-and-hold microphone, release-to-send instruction and halo in both expanded and minimized layouts; tapping the minimized row opens the mode switch. Resizing releases an existing hold without changing modes.

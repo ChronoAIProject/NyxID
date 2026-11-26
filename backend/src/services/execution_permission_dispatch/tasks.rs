@@ -615,15 +615,13 @@ pub(crate) fn filter_events<'a>(
                 root_kind: kind,
                 root_id: String::new(),
             });
-            let rows: Vec<Document> = db
+            let mut cursor = db
                 .collection::<Document>(name)
                 .find(doc! {"$or":filters})
                 .projection(doc! {"execution_task":1})
                 .session(&mut *session)
-                .await?
-                .stream(&mut *session)
-                .try_collect()
                 .await?;
+            let rows: Vec<Document> = crate::db::read_documents(&mut cursor, session).await?;
             for row in rows {
                 live.push(
                     bson::from_document::<TaskAdmission>(

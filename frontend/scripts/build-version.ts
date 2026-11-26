@@ -96,6 +96,7 @@ export function buildVersion(buildId: string, commit: string | null): Plugin {
       root = config.root;
       const defines = { ...config.define };
       delete defines.__BUILD_ID__;
+      delete defines.__BUILD_ARTIFACT_ID__;
       buildInputs = JSON.stringify({ env: config.env, defines });
     },
     buildEnd(error) {

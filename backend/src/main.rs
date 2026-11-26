@@ -21,10 +21,16 @@ mod handlers;
 mod login_cli;
 mod models;
 mod mw;
+#[cfg(test)]
+mod pool_starvation_tests;
 mod redaction;
 mod routes;
 mod services;
+mod shutdown_servers;
 mod ssh_cli;
+#[cfg(test)]
+#[cfg(unix)]
+mod startup_signal_tests;
 mod telemetry;
 mod telemetry_erasure_cli;
 mod turn_trace;
@@ -84,15 +90,78 @@ use services::push_service::{ApnsAuth, FcmAuth};
 use services::ssh_service::SshSessionManager;
 
 const BROKER_POLICY_REFRESH_INTERVAL_SECS: u64 = 5;
+// Three refresh intervals tolerate two missed polls without an unbounded bypass.
+const BROKER_POLICY_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(15);
+
+pub struct CachedBrokerPolicy {
+    policy: BrokerPolicy,
+    verified_at: tokio::time::Instant,
+    last_read_started_at: tokio::time::Instant,
+    pending_reset: Option<(i64, tokio::time::Instant)>,
+    reset_read_started_at: Option<tokio::time::Instant>,
+    stale_reported: std::sync::atomic::AtomicBool,
+}
+
+impl CachedBrokerPolicy {
+    fn new(policy: BrokerPolicy, verified_at: tokio::time::Instant) -> Self {
+        Self {
+            policy,
+            verified_at,
+            last_read_started_at: verified_at,
+            pending_reset: None,
+            reset_read_started_at: None,
+            stale_reported: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn is_fresh(&self) -> bool {
+        let stale = self.verified_at.elapsed() >= BROKER_POLICY_MAX_AGE;
+        if stale
+            && !self
+                .stale_reported
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::error!(target: "nyxid::broker_policy", revision = self.policy.revision,
+                "Broker rollout policy snapshot became stale");
+        }
+        !stale
+    }
+
+    // Only an accepted refresh under the write lock may report recovery. A
+    // delayed reader that saw a fresh snapshot cannot undo a stale transition.
+    fn report_recovery_if_fresh(&self) {
+        if self.is_fresh()
+            && self
+                .stale_reported
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            tracing::info!(target: "nyxid::broker_policy", revision = self.policy.revision,
+                "Broker rollout policy snapshot recovered");
+        }
+    }
+}
+
+impl From<BrokerPolicy> for CachedBrokerPolicy {
+    fn from(policy: BrokerPolicy) -> Self {
+        Self::new(policy, tokio::time::Instant::now())
+    }
+}
 
 /// Shared application state available to all handlers via Axum's State extractor.
 #[derive(Clone)]
 pub struct AppState {
+    pub(crate) app_management_observations:
+        Arc<mw::app_management_observations::AppManagementObservations>,
+    pub(crate) refusal_throttle: Arc<mw::refusal_throttle::RefusalThrottle>,
+    pub shutdown: services::shutdown::Runtime,
+    pub(crate) jobs: Arc<services::job_health::Jobs>,
+    pub crash_reports: Arc<services::crash_report_export::CrashConfig>,
     #[cfg(test)]
     pub(crate) local_machine_platform: Option<Arc<crate::test_utils::LocalMachinePlatform>>,
     pub db: DbHandle,
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,
+    pub staging_qr: services::staging_qr::Peer,
     pub http_client: reqwest::Client,
     /// Pre-computed JWK for the JWKS endpoint
     pub jwk_json: serde_json::Value,
@@ -128,6 +197,10 @@ pub struct AppState {
     pub cluster_slot_manager: services::cluster_slot_service::RenewableSlotManager,
     /// Per-agent rate limiter keyed by API key ID
     pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
+    /// Self-serve account exports: three requests per person per hour.
+    pub account_export_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
+    /// Bound memory and MongoDB work for concurrent export builders.
+    pub account_export_semaphore: Arc<tokio::sync::Semaphore>,
     /// Parsed per-user limit for each platform-owned downstream credential.
     pub platform_user_rate_limit: mw::rate_limit::PlatformUserRateLimitPolicy,
     /// Per-user request and in-flight limiter for direct assistant streams.
@@ -176,9 +249,9 @@ pub struct AppState {
     pub public_mcp_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Effective broker rollout policy. Loaded from MongoDB at startup with
     /// env-derived `AppConfig` values as defaults, then refreshed by admin
-    /// settings writes. Enforcement reads this in-memory snapshot, never
-    /// MongoDB, so broker checks do not add per-request database work.
-    pub broker_policy: Arc<std::sync::RwLock<BrokerPolicy>>,
+    /// settings writes. Fresh or already-strict gates use the local snapshot;
+    /// a stale permissive gate requires one successful live read.
+    pub broker_policy: Arc<std::sync::RwLock<CachedBrokerPolicy>>,
     pub upload_retention: services::assistant_upload_retention::Cache,
     /// Server-side HMAC key used to derive `CliPairing.code_hash`.
     /// Lives in process memory only (never persisted), so a MongoDB
@@ -230,67 +303,159 @@ pub struct AppState {
 }
 
 impl AppState {
+    fn cached_broker_policy(&self) -> std::sync::RwLockReadGuard<'_, CachedBrokerPolicy> {
+        self.broker_policy.read().unwrap_or_else(|poisoned| {
+            tracing::error!("broker policy lock poisoned; checking snapshot age");
+            poisoned.into_inner()
+        })
+    }
+
+    /// Last observed settings for administrative display, not enforcement.
     pub fn broker_policy(&self) -> BrokerPolicy {
-        match self.broker_policy.read() {
-            Ok(policy) => *policy,
-            Err(poisoned) => {
-                tracing::error!("broker policy lock poisoned; using last available snapshot");
-                *poisoned.into_inner()
-            }
-        }
+        self.cached_broker_policy().policy
     }
 
-    /// Rejects revision rollbacks to preserve the last-known-good policy. An
-    /// intentional DB reset to a lower revision therefore requires a restart.
+    /// Ignore one older revision; confirm a reset with a second successful read.
     pub fn set_broker_policy_if_fresh(&self, policy: BrokerPolicy) -> bool {
-        match self.broker_policy.write() {
-            Ok(mut current) => {
-                if policy.revision < current.revision {
-                    return false;
-                }
-                if *current == policy {
-                    return false;
-                }
-                *current = policy;
-                true
+        self.set_broker_policy_verified_at(policy, tokio::time::Instant::now())
+    }
+
+    fn set_broker_policy_verified_at(
+        &self,
+        policy: BrokerPolicy,
+        verified_at: tokio::time::Instant,
+    ) -> bool {
+        let mut current = self.broker_policy.write().unwrap_or_else(|poisoned| {
+            tracing::error!("broker policy lock poisoned while updating; checking snapshot");
+            poisoned.into_inner()
+        });
+        current.is_fresh();
+        // A confirmed store reset invalidates every read begun before its
+        // confirming read, including a delayed response with a higher revision.
+        if current
+            .reset_read_started_at
+            .is_some_and(|reset| verified_at < reset)
+        {
+            return false;
+        }
+        if policy.revision < current.policy.revision {
+            // A read started before the newest observation cannot confirm a reset.
+            if verified_at < current.last_read_started_at {
+                return false;
             }
-            Err(poisoned) => {
-                tracing::error!("broker policy lock poisoned while updating; checking snapshot");
-                let mut current = poisoned.into_inner();
-                if policy.revision < current.revision {
-                    return false;
-                }
-                if *current == policy {
-                    return false;
-                }
-                *current = policy;
-                true
+            let confirmed = current
+                .pending_reset
+                .is_some_and(|(revision, finished_at)| {
+                    revision == policy.revision && verified_at >= finished_at
+                });
+            current.last_read_started_at = verified_at;
+            if !confirmed {
+                current.pending_reset = Some((policy.revision, tokio::time::Instant::now()));
+                return false;
+            }
+            current.reset_read_started_at = Some(verified_at);
+            tracing::warn!(target: "nyxid::broker_policy", previous_revision = current.policy.revision,
+                reset_revision = policy.revision, "Confirmed broker rollout policy revision reset");
+        }
+        current.last_read_started_at = current.last_read_started_at.max(verified_at);
+        current.pending_reset = None;
+        let changed = current.policy != policy;
+        current.policy = policy;
+        current.verified_at = if changed {
+            verified_at
+        } else {
+            current.verified_at.max(verified_at)
+        };
+        current.report_recovery_if_fresh();
+        changed
+    }
+
+    async fn refresh_broker_policy(&self) -> errors::AppResult<bool> {
+        self.cached_broker_policy().is_fresh();
+        let started_at = tokio::time::Instant::now();
+        match services::platform_settings_service::load_broker_policy(&self.db, &self.config).await
+        {
+            Ok(policy) => Ok(self.set_broker_policy_verified_at(policy, started_at)),
+            Err(error) => {
+                self.broker_policy
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .pending_reset = None;
+                self.cached_broker_policy().is_fresh();
+                Err(error)
             }
         }
     }
 
-    pub fn broker_require_sender_constraint(&self) -> bool {
-        self.broker_policy().broker_require_sender_constraint
+    async fn broker_requirement(
+        &self,
+        required: fn(&BrokerPolicy) -> bool,
+    ) -> errors::AppResult<bool> {
+        {
+            let cached = self.cached_broker_policy();
+            if cached.is_fresh() || required(&cached.policy) {
+                return Ok(required(&cached.policy));
+            }
+        }
+        // At most one inline load per decision. Concurrent callers may each read;
+        // the successful refresh makes subsequent decisions local again.
+        self.refresh_broker_policy()
+            .await
+            .map_err(|_| errors::AppError::OAuthAuthorityUnavailable)?;
+        let cached = self.cached_broker_policy();
+        if cached.is_fresh() || required(&cached.policy) {
+            Ok(required(&cached.policy))
+        } else {
+            // A rejected older revision or a read lasting beyond the age bound
+            // cannot authorize using the still-permissive cached value.
+            Err(errors::AppError::OAuthAuthorityUnavailable)
+        }
     }
 
-    pub fn broker_require_admin_capability(&self) -> bool {
-        self.broker_policy().broker_require_admin_capability
+    fn code_broker_requirements(&self) -> services::oauth_service::CodeBrokerRequirements {
+        use services::oauth_service::CodeBrokerRequirements;
+        let cached = self.cached_broker_policy();
+        let policy = &cached.policy;
+        if cached.is_fresh() {
+            CodeBrokerRequirements::known(
+                policy.broker_require_admin_capability,
+                policy.broker_require_sender_constraint,
+            )
+        } else {
+            CodeBrokerRequirements {
+                require_admin_capability: policy.broker_require_admin_capability.then_some(true),
+                require_sender_constraint: policy.broker_require_sender_constraint.then_some(true),
+            }
+        }
+    }
+
+    async fn refresh_code_broker_requirements(
+        &self,
+    ) -> services::oauth_service::CodeBrokerRequirements {
+        // The exchange polls this future only when an unknown gate matters to
+        // its loaded client. Failure leaves that gate unknown and the code unused.
+        let _ = self.refresh_broker_policy().await;
+        self.code_broker_requirements()
+    }
+
+    pub async fn broker_require_sender_constraint(&self) -> errors::AppResult<bool> {
+        self.broker_requirement(|policy| policy.broker_require_sender_constraint)
+            .await
+    }
+
+    pub async fn broker_require_admin_capability(&self) -> errors::AppResult<bool> {
+        self.broker_requirement(|policy| policy.broker_require_admin_capability)
+            .await
     }
 }
 
 fn spawn_broker_policy_refresh_task(state: AppState) {
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(
-                BROKER_POLICY_REFRESH_INTERVAL_SECS,
-            ))
-            .await;
-
-            match services::platform_settings_service::load_broker_policy(&state.db, &state.config)
-                .await
-            {
-                Ok(policy) => {
-                    if state.set_broker_policy_if_fresh(policy) {
+            match state.refresh_broker_policy().await {
+                Ok(changed) => {
+                    if changed {
+                        let policy = state.broker_policy();
                         tracing::info!(
                             broker_policy_revision = policy.revision,
                             broker_require_sender_constraint =
@@ -308,6 +473,10 @@ fn spawn_broker_policy_refresh_task(state: AppState) {
                     );
                 }
             }
+            tokio::time::sleep(std::time::Duration::from_secs(
+                BROKER_POLICY_REFRESH_INTERVAL_SECS,
+            ))
+            .await;
         }
     });
 }
@@ -390,19 +559,46 @@ fn main() {
         services::attachment_extraction::worker();
         return;
     }
-    server_main();
+    server_main(Cli::parse());
 }
 
-#[tokio::main]
-async fn server_main() {
+fn server_main(cli: Cli) {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Cannot start backend runtime: {error}");
+            std::process::exit(1);
+        }
+    };
+    runtime.block_on(server_run(cli));
+    if services::shutdown::process().is_draining() {
+        // Blocking parsers/password hashes cannot be aborted once running. They
+        // must not extend an explicitly bounded process shutdown.
+        runtime.shutdown_timeout(std::time::Duration::ZERO);
+    }
+}
+
+async fn server_run(cli: Cli) {
+    let startup_signals = if cli.command.is_none() && cli.promote_admin.is_none() {
+        Some(
+            services::shutdown::signals::Signals::new()
+                .expect("Cannot install shutdown signal handlers")
+                .watch_startup(),
+        )
+    } else {
+        None
+    };
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("entry").await;
     // Pick a rustls `CryptoProvider` explicitly before ANY TLS use.
     // Feature unification can compile multiple providers into the
     // backend (notably aws_lc_rs and ring), and rustls cannot
     // auto-select in that state. The CLI uses the same pattern; see
     // cli/src/main.rs for the canonical version.
     install_rustls_crypto_provider();
-
-    let cli = Cli::parse();
 
     // Load environment variables from .env file (if present)
     dotenvy::dotenv().ok();
@@ -441,6 +637,8 @@ async fn server_main() {
 
     // Load configuration
     let mut config = AppConfig::from_env();
+    services::proxy_destination::validate_configuration()
+        .expect("Invalid proxy destination configuration");
     config.validate_ssh_runtime_config();
     config.validate_cluster_runtime_config();
     if config.trusted_proxy_ips.is_empty() {
@@ -449,10 +647,26 @@ async fn server_main() {
         );
     }
 
-    // Connect to database
+    if let Some(signals) = &startup_signals
+        && signals.stop_requested("configuration_ready").await
+    {
+        return;
+    }
+
+    // Connect to database without indexes, migrations or application writes.
     let db = db::create_connection(&config)
         .await
         .expect("Failed to connect to database");
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("database_ready").await;
+    if let Some(signals) = &startup_signals
+        && signals.stop_requested("database_ready").await
+    {
+        return;
+    }
+    db::initialize(&db)
+        .await
+        .expect("Failed to initialize database");
     // Preparation reads the unchanged legacy bytes and bounded chain evidence.
     // It neither loads a signer nor starts normal server writers, so an older
     // weak signer can be exported before the strict JWT cutover.
@@ -498,19 +712,6 @@ async fn server_main() {
     services::assistant_action_receipts::init_action_fingerprint_hmac_key(action_fingerprint);
     services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger.clone());
     let billing_ledger_hmac_key = Arc::new(billing_ledger);
-    services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
-    services::billing::account_reconciliation::spawn(
-        db.clone(),
-        config.billing_enabled,
-        config.chain_verify_interval_secs,
-    );
-    services::chain_verify_service::spawn_chain_verify_worker(
-        db.clone(),
-        audit_chain_hmac_key.clone(),
-        billing_ledger_hmac_key.clone(),
-        config.chain_verify_interval_secs,
-    );
-
     // Handle CLI commands (exit without starting server)
     if let Some(email) = cli.promote_admin {
         services::role_service::seed_system_roles(&db)
@@ -536,6 +737,24 @@ async fn server_main() {
         }
         return;
     }
+
+    let jobs = Arc::new(services::job_health::Jobs::new(&config));
+    services::billing::exact_migration::spawn(db.clone(), config.billing_exact_cutover_drained);
+    services::billing::account_reconciliation::spawn(
+        db.clone(),
+        config.billing_enabled,
+        config.chain_verify_interval_secs,
+    );
+    services::chain_verify_service::spawn_chain_verify_worker(
+        db.clone(),
+        audit_chain_hmac_key.clone(),
+        billing_ledger_hmac_key.clone(),
+        config.chain_verify_interval_secs,
+        jobs.chain_verify.clone(),
+    );
+
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("after_workers").await;
 
     // Validate provider-specific encryption config before any seed calls that use it.
     config.validate_key_provider();
@@ -635,6 +854,10 @@ async fn server_main() {
         );
     }
 
+    services::proxy_destination::approve_existing_catalog(&db, audit_chain_hmac_key.as_slice())
+        .await
+        .expect("Failed to approve existing private catalog destinations");
+
     services::inference_service::backfill(&db)
         .await
         .expect("Failed to backfill inference metadata");
@@ -665,7 +888,7 @@ async fn server_main() {
     // unreachable URL never blocks startup.
     {
         let db = db.clone();
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             if let Err(error) =
                 services::catalog_spec_sync::sync_spec_backed_service_endpoints(&db).await
             {
@@ -706,6 +929,15 @@ async fn server_main() {
         "Platform role membership backfill complete"
     );
 
+    let approved = Box::pin(services::caller_token_approval::bootstrap(
+        &db,
+        audit_chain_hmac_key.as_slice(),
+    ))
+    .await
+    .expect("Failed to initialize catalog caller-token approvals");
+    for (service_id, slug) in approved {
+        tracing::info!(%service_id, %slug, "Approved existing catalog base destination for caller-token forwarding");
+    }
     // Run unified collection migration (idempotent, non-fatal)
     if let Err(e) = db::migrate_to_unified_collections(&db, &encryption_keys).await {
         tracing::warn!("Unified collection migration encountered errors: {e}");
@@ -809,38 +1041,31 @@ async fn server_main() {
     ));
     // Register before serving. Reuse the process generation, not node socket
     // heartbeats: a replica can enforce policy without owning any node sockets.
-    services::security_readiness_service::ensure_indexes(&db)
+    services::personal_erasure_service::ensure_startup_indexes(&db)
         .await
-        .expect("security replica indexes failed");
-    services::security_readiness_service::initialize(
-        services::security_readiness_service::Runtime {
-            identity: (*replica_identity).clone(),
-            config: config.security_rollout.clone(),
-            platform_policy_required: services::proxy_service::actor_addressed_policy_required(),
-        },
+        .expect("late startup indexes failed");
+    let readiness_runtime = services::security_readiness_service::Runtime::new(
+        (*replica_identity).clone(),
+        config.security_rollout.clone(),
+        services::proxy_service::actor_addressed_policy_required(),
     );
+    services::security_readiness_service::initialize(readiness_runtime.clone());
     services::security_readiness_service::observe_with_automation(
         &db,
-        &replica_identity,
-        &config.security_rollout,
-        services::proxy_service::actor_addressed_policy_required(),
+        &readiness_runtime,
         config.automation_continuation_v2_enabled,
     )
     .await
     .expect("security replica observation failed");
     let readiness_db = db.clone();
-    let readiness_identity = replica_identity.clone();
-    let readiness_config = config.security_rollout.clone();
     let automation_enabled = config.automation_continuation_v2_enabled;
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             interval.tick().await;
             if let Err(error) = services::security_readiness_service::observe_with_automation(
                 &readiness_db,
-                &readiness_identity,
-                &readiness_config,
-                services::proxy_service::actor_addressed_policy_required(),
+                &readiness_runtime,
                 automation_enabled,
             )
             .await
@@ -859,7 +1084,6 @@ async fn server_main() {
         db.clone(),
         node_ws_manager.clone(),
         replica_identity.clone(),
-        http_client.clone(),
         internal_auth,
         services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size),
         std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
@@ -946,12 +1170,12 @@ async fn server_main() {
             );
         }
     }
+    let broker_policy_verified_at = tokio::time::Instant::now();
     let broker_policy = services::platform_settings_service::load_broker_policy(&db, &config)
         .await
         .expect("Failed to load platform broker policy");
     let developer_webhook_dispatcher = Arc::new(
         services::developer_webhook_service::DeveloperWebhookDispatcher::new(
-            http_client.clone(),
             encryption_keys.clone(),
         ),
     );
@@ -982,7 +1206,19 @@ async fn server_main() {
 
     let execution_enrollment =
         crate::services::execution_permission_enrollment::snapshot::Cache::for_database(&db);
+    let crash_reports = Arc::new(
+        services::crash_report_export::CrashConfig::from_config(&config)
+            .expect("Invalid crash reporting configuration"),
+    );
+    let staging_qr = services::staging_qr::Peer::from_environment(&config)
+        .expect("Invalid staging QR configuration");
     let state = AppState {
+        jobs,
+        app_management_observations: Arc::default(),
+        staging_qr,
+        refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
+        shutdown: services::shutdown::process(),
+        crash_reports: crash_reports.clone(),
         #[cfg(test)]
         local_machine_platform: None,
         db: db.clone(),
@@ -1008,6 +1244,13 @@ async fn server_main() {
             db.clone(),
             "agent",
         )),
+        account_export_limiter: mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "account_export",
+            3,
+            3600,
+        ),
+        account_export_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         platform_user_rate_limit: mw::rate_limit::PlatformUserRateLimitPolicy::new(
             config.platform_service_rate_limit_per_second,
             config.platform_service_rate_limit_burst,
@@ -1136,7 +1379,10 @@ async fn server_main() {
             config.public_mcp_rate_limit_per_minute,
             60,
         ),
-        broker_policy: Arc::new(std::sync::RwLock::new(broker_policy)),
+        broker_policy: Arc::new(std::sync::RwLock::new(CachedBrokerPolicy::new(
+            broker_policy,
+            broker_policy_verified_at,
+        ))),
         upload_retention: Default::default(),
         cli_pairing_hmac_key,
         auth_device_hmac_key,
@@ -1161,9 +1407,29 @@ async fn server_main() {
         execution_enrollment,
     };
 
-    services::personal_erasure_service::ensure_indexes(&state.db)
-        .await
-        .expect("Personal erasure indexes");
+    services::shutdown::process().spawn_worker(services::crash_report_service::public_config::run(
+        db.clone(),
+        services::shutdown::process(),
+    ));
+    services::shutdown::process().spawn_worker(
+        services::crash_report_service::releases::run_manifest_refresh(
+            db.clone(),
+            Arc::new(config.clone()),
+            services::shutdown::process(),
+        ),
+    );
+    services::shutdown::process().spawn_worker(services::crash_report_export::worker::run(
+        db.clone(),
+        crash_reports,
+        services::shutdown::process(),
+    ));
+    state
+        .shutdown
+        .spawn_worker(services::node_credential_delivery::run_worker(
+            state.clone(),
+        ));
+    let _orphan_sweep_worker =
+        services::personal_erasure_orphan_sweep::jobs::spawn_worker(state.clone());
     let _personal_erasure_worker = services::personal_erasure_service::spawn_worker(state.clone());
     services::telemetry_erasure_service::spawn_worker(state.db.clone(), erasure_clients);
     let _usage_rollup_worker =
@@ -1171,6 +1437,7 @@ async fn server_main() {
     let _billing_reconcile_worker = services::billing::reconcile::spawn_reconcile_worker(
         state.billing.reconciler(),
         config.billing_reconcile_interval_secs,
+        state.jobs.billing_reconcile.clone(),
     );
     state.billing.spawn_refresh_worker();
     services::assistant_upload_retention::refresh(&state.db, &state.upload_retention)
@@ -1182,11 +1449,13 @@ async fn server_main() {
     spawn_broker_policy_refresh_task(state.clone());
 
     let lifecycle_cleanup_db = state.db.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) =
                 services::oracle_pool_service::cleanup_deleted_pools(&lifecycle_cleanup_db).await
             {
@@ -1195,11 +1464,13 @@ async fn server_main() {
         }
     });
     let login_cleanup_db = state.db.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) =
                 services::oracle_login_profile_service::purge_expired(&login_cleanup_db).await
             {
@@ -1242,28 +1513,30 @@ async fn server_main() {
     {
         let live = state.assistant_live.clone();
         let db = state.db.clone();
-        tokio::spawn(async move { live.run(db).await });
+        services::shutdown::process().spawn_worker(async move { live.run(db).await });
     }
 
     {
         let cache = state.execution_enrollment.clone();
         let db = state.db.clone();
-        tokio::spawn(async move { cache.run(db).await });
-        tokio::spawn(services::execution_permission_enrollment::jobs::run(
-            state.db.clone(),
-        ));
+        services::shutdown::process().spawn_worker(async move { cache.run(db).await });
+        services::shutdown::process().spawn_worker(
+            services::execution_permission_enrollment::jobs::run(state.db.clone()),
+        );
     }
 
     // Revoke abandoned Agent Key exchanges even when the CLI stops polling.
     if config.agent_key_login_sweep_interval_secs > 0 {
         let sweep_db = state.db.clone();
         let sweep_interval = config.agent_key_login_sweep_interval_secs;
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(sweep_interval));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if let Err(error) = services::auth_device_service::sweep_expired(&sweep_db).await {
                     tracing::error!(
                         error_code = error.error_code(),
@@ -1288,12 +1561,14 @@ async fn server_main() {
         let connect_link_expiry_db = state.db.clone();
         let connect_link_expiry_dispatcher = state.developer_webhook_dispatcher.clone();
         let connect_link_expiry_interval = config.connect_link_expiry_sweep_interval_secs;
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(connect_link_expiry_interval));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if let Err(error) = services::connect_link_service::expire_pending_app_links(
                     &connect_link_expiry_db,
                     &connect_link_expiry_dispatcher,
@@ -1310,11 +1585,13 @@ async fn server_main() {
     if config.connect_link_expiry_sweep_interval_secs > 0 {
         let bot_link_state = state.clone();
         let interval_secs = config.connect_link_expiry_sweep_interval_secs;
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if let Err(error) = services::channel_connect_link_service::sweep(
                     &bot_link_state.db,
                     &bot_link_state.encryption_keys,
@@ -1330,11 +1607,13 @@ async fn server_main() {
 
     // Budget holds must recover independently of external Telegram notice latency.
     let platform_budget_db = state.db.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) =
                 services::platform_inference_service::sweep_abandoned(&platform_budget_db).await
             {
@@ -1347,11 +1626,16 @@ async fn server_main() {
     });
 
     let platform_cleanup_state = state.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
+            if services::shutdown::process().is_draining() {
+                break;
+            }
             if let Err(error) =
                 handlers::platform_bots::sweep_cleanup(&platform_cleanup_state).await
             {
@@ -1359,6 +1643,9 @@ async fn server_main() {
                     error_code = error.error_code(),
                     "Platform conversion cleanup sweep failed"
                 );
+            }
+            if services::shutdown::process().is_draining() {
+                break;
             }
             if let Err(error) =
                 services::platform_provisioning_service::sweep(&platform_cleanup_state).await
@@ -1368,6 +1655,9 @@ async fn server_main() {
                     "Platform setup provisioning sweep failed"
                 );
             }
+            if services::shutdown::process().is_draining() {
+                break;
+            }
             if let Err(error) =
                 services::platform_setup_notice_service::sweep(&platform_cleanup_state).await
             {
@@ -1376,6 +1666,9 @@ async fn server_main() {
                     "Platform setup status notice sweep failed"
                 );
             }
+            if services::shutdown::process().is_draining() {
+                break;
+            }
             if let Err(error) =
                 services::platform_native_receipt_service::sweep(&platform_cleanup_state).await
             {
@@ -1383,6 +1676,9 @@ async fn server_main() {
                     error_code = error.error_code(),
                     "Native platform recovery sweep failed"
                 );
+            }
+            if services::shutdown::process().is_draining() {
+                break;
             }
             if let Err(error) =
                 services::platform_setup_service::expire(&platform_cleanup_state.db).await
@@ -1399,10 +1695,12 @@ async fn server_main() {
     // Sessions live up to 30 days (extended on every request via touch()).
     // Reaper runs every 5 minutes to clean up sessions idle longer than 30 days.
     let mcp_sessions_for_reaper = mcp_sessions.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
             if let Err(error) = mcp_sessions_for_reaper
                 .reap_expired(std::time::Duration::from_secs(
                     models::mcp_session::MCP_SESSION_MAX_IDLE_SECS,
@@ -1422,7 +1720,7 @@ async fn server_main() {
     let apns_for_expiry = state.apns_auth.clone();
     let telemetry_for_expiry = state.telemetry.clone();
     let expiry_interval_secs = config.approval_expiry_interval_secs;
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(expiry_interval_secs));
         // Prevent rapid-fire catch-up sweeps when a tick is delayed (e.g. under
@@ -1431,7 +1729,9 @@ async fn server_main() {
         // update_many() in expire_pending_requests.
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                break;
+            };
             if let Err(e) = services::approval_service::expire_pending_requests(
                 &db_for_expiry,
                 &config_for_expiry,
@@ -1460,7 +1760,7 @@ async fn server_main() {
         let refresh_interval = config.oauth_refresh_sweep_interval_secs;
         let refresh_window =
             chrono::Duration::seconds(config.oauth_refresh_sweep_window_secs.max(0));
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(refresh_interval));
             // Delay catch-up bursts under DB backpressure: a stacked sweep
@@ -1471,7 +1771,9 @@ async fn server_main() {
             // index creation / seeding for the connection pool.
             interval.tick().await;
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if let Err(e) = services::user_token_service::refresh_expiring_oauth_keys(
                     &refresh_db,
                     &refresh_keys,
@@ -1486,11 +1788,29 @@ async fn server_main() {
         });
     }
 
+    {
+        let meta_state = state.clone();
+        services::shutdown::process().spawn_worker(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(60));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                let Some(_work) = services::shutdown::process().tick(&mut ticks).await else {
+                    break;
+                };
+                if let Err(error) = services::channel_meta_service::sweep(&meta_state).await {
+                    tracing::warn!(
+                        error_code = error.error_code(),
+                        "Meta inbox lifecycle reconciliation deferred"
+                    );
+                }
+            }
+        });
+    }
+
     let discord_shutdown = tokio_util::sync::CancellationToken::new();
-    let discord_worker = tokio::spawn(services::discord_gateway::run(
-        state.clone(),
-        discord_shutdown.clone(),
-    ));
+    let discord_worker = services::shutdown::process().spawn_worker(
+        services::discord_gateway::run(state.clone(), discord_shutdown.clone()),
+    );
 
     {
         let poll_state = state.clone();
@@ -1499,12 +1819,15 @@ async fn server_main() {
         } else {
             60
         };
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
+            let job = &poll_state.jobs.channel_polls;
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             interval.tick().await;
             loop {
-                interval.tick().await;
+                let Some(_work) = job.tick(&poll_state.shutdown, &mut interval).await else {
+                    break;
+                };
                 if services::channel_billing_service::sweep(&poll_state)
                     .await
                     .is_err()
@@ -1514,7 +1837,8 @@ async fn server_main() {
                     );
                 }
                 if poll_state.config.channel_poll_interval_secs > 0
-                    && services::channel_poll_service::sweep(&poll_state)
+                    && job
+                        .observe(services::channel_poll_service::sweep(&poll_state))
                         .await
                         .is_err()
                 {
@@ -1526,11 +1850,13 @@ async fn server_main() {
 
     {
         let creation_state = state.clone();
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 let service = services::telegram_new_service::TelegramNewService {
                     manager_id: None,
                     db: &creation_state.db,
@@ -1560,7 +1886,9 @@ async fn server_main() {
         )
         .await
         {
-            Ok(()) => tracing::info!("Telegram webhook registered: {webhook_url}"),
+            Ok(()) => {
+                tracing::info!(host = %crate::services::url_validation::url_host_for_logs(webhook_url), "Telegram webhook registered")
+            }
             Err(e) => tracing::error!("Failed to register Telegram webhook: {e}"),
         }
 
@@ -1570,13 +1898,15 @@ async fn server_main() {
         let wh_token = bot_token.clone();
         let wh_url = webhook_url.clone();
         let wh_secret = webhook_secret.clone();
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             // Check every 5 minutes
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
             // Skip the first tick (we just registered above)
             interval.tick().await;
             loop {
-                interval.tick().await;
+                let Some(_work) = services::shutdown::process().tick(&mut interval).await else {
+                    break;
+                };
                 if !services::telegram_service::is_webhook_healthy(&wh_http, &wh_token, &wh_url)
                     .await
                 {
@@ -1595,7 +1925,7 @@ async fn server_main() {
     } else if config.telegram_bot_token.is_some() {
         // Development fallback: poll getUpdates when no webhook URL is configured
         let polling_state = state.clone();
-        tokio::spawn(async move {
+        services::shutdown::process().spawn_worker(async move {
             services::telegram_poller::run_polling_loop(polling_state).await;
         });
     }
@@ -1611,7 +1941,7 @@ async fn server_main() {
     let owner_lease_db = heartbeat_db.clone();
     let owner_lease_ws = heartbeat_ws.clone();
     let owner_lease_identity = heartbeat_identity.clone();
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(node_owner_lease_renew_secs));
         loop {
@@ -1625,7 +1955,7 @@ async fn server_main() {
             .await;
         }
     });
-    tokio::spawn(async move {
+    services::shutdown::process().spawn_worker(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(heartbeat_interval));
         loop {
@@ -1651,6 +1981,7 @@ async fn server_main() {
     // Build router — public OAuth routes get open CORS (per RFC 9207),
     // private API routes get restricted CORS (FRONTEND_URL only).
     services::service_history::relay::start(state.db.clone());
+    services::security_effect_service::start(state.db.clone(), state.encryption_keys.clone());
 
     let (public_oauth, private_api) = routes::build_router_with_state(state.clone());
 
@@ -1676,6 +2007,7 @@ async fn server_main() {
     // silently exempt those routes.
     let internal_node_dispatch = state.node_dispatch.clone();
     let public_backend_url = state.config.base_url.clone();
+    let shutdown_state = state.clone();
     let app = public_oauth
         .merge(private_api)
         .with_state(state)
@@ -1709,10 +2041,57 @@ async fn server_main() {
     // Wrap last so early middleware errors (including rate limits) receive
     // the same deployment-controlled policy as handler responses.
     let app = mw::security_headers::with_response_headers_for_origin(app, &public_backend_url)
-        .expect("BASE_URL must be a valid public HTTP(S) URL without credentials");
+        .expect("BASE_URL must be a valid public HTTP(S) URL without credentials")
+        .layer(axum_mw::from_fn_with_state(
+            shutdown_state.shutdown.clone(),
+            mw::shutdown::track,
+        ))
+        .layer(axum_mw::map_request(handlers::proxy::ingress::stamp));
 
     // Bind both listeners before serving. Internal routes never enter the
     // public router and therefore cannot be exposed by an ingress path rule.
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("before_listeners").await;
+    let (mut signals, startup_stop) = startup_signals
+        .expect("server mode has startup signal receivers")
+        .finish()
+        .await;
+    if let Some(received) = startup_stop {
+        tracing::info!(target: "nyxid::shutdown", signal = received.signal,
+            safe_point = "before_listeners", "Stopping startup without binding listeners");
+        if let Some(drain) = services::shutdown::drain::Drain::begin_startup(
+            &shutdown_state,
+            std::time::Duration::from_secs(config.shutdown_drain_timeout_secs),
+            received,
+        ) {
+            let finish = async {
+                let end = drain
+                    .wait(&shutdown_state, drain.work_deadline(), signals.next())
+                    .await;
+                let cleanup_deadline = drain
+                    .deadline
+                    .min(tokio::time::Instant::now() + drain.cleanup_reserve());
+                finish_shutdown(
+                    &shutdown_state,
+                    &drain,
+                    end,
+                    &discord_shutdown,
+                    cleanup_deadline,
+                )
+                .await;
+            };
+            tokio::select! {
+                biased;
+                () = finish => {},
+                never = drain.progress(&shutdown_state) => match never {},
+            }
+        } else {
+            // Preserve the configured zero-budget Discord cancellation path.
+            discord_shutdown.cancel();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), discord_worker).await;
+        }
+        return;
+    }
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = TcpListener::bind(&addr)
         .await
@@ -1720,13 +2099,24 @@ async fn server_main() {
     let internal_listener = TcpListener::bind(&config.internal_bind_addr)
         .await
         .expect("Failed to bind internal dispatch address");
+    #[cfg(all(test, unix))]
+    startup_signal_tests::listeners_bound();
+    let listeners_bound_at = chrono::Utc::now();
     let internal_body_limit =
         services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size);
     let internal_app = services::node_dispatch::internal_router(
         internal_node_dispatch,
         internal_body_limit,
         std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
-    );
+    )
+    .merge(handlers::health::worker_health_router(
+        shutdown_state.jobs.clone(),
+        shutdown_state.shutdown.clone(),
+    ))
+    .layer(axum_mw::from_fn_with_state(
+        shutdown_state.shutdown.clone(),
+        mw::shutdown::track,
+    ));
 
     tracing::info!("Listening on {addr}");
     tracing::info!(
@@ -1735,30 +2125,180 @@ async fn server_main() {
         "Internal replica listener started"
     );
 
-    let public_server = axum::serve(
-        downstream_disconnect::DisconnectAwareListener::new(listener),
-        downstream_disconnect::DisconnectAwareMakeService::new(app),
+    let mut servers = shutdown_servers::Servers::new(
+        shutdown_state.shutdown.clone(),
+        listener,
+        internal_listener,
+        app,
+        internal_app,
     );
-    let internal_server = axum::serve(internal_listener, internal_app);
-    tokio::select! {
-        result = public_server => result.expect("Public server error"),
-        result = internal_server => result.expect("Internal replica server error"),
-        _ = shutdown_signal() => {},
+    services::shutdown::startup::listeners_bound(&shutdown_state, listeners_bound_at);
+    #[cfg(all(test, unix))]
+    startup_signal_tests::at_step("serving").await;
+    let signal = tokio::select! {
+        () = servers.failed() => None,
+        signal = signals.next() => Some(signal),
+    };
+    if let Some(signal) = signal
+        && let Some(drain) = services::shutdown::drain::Drain::begin(
+            &shutdown_state,
+            std::time::Duration::from_secs(config.shutdown_drain_timeout_secs),
+            signal,
+        )
+    {
+        use services::shutdown::drain::End;
+        // Keep the configured timeout a hard exit budget. Short budgets reserve
+        // ten percent; ordinary budgets reserve at most five seconds.
+        let reserve = drain.cleanup_reserve();
+        let work_deadline = drain.work_deadline();
+        // A peer with a failed connect can distinguish a graceful handover of
+        // a legacy socket from a crash with an unstealable live lease.
+        let identity = shutdown_state.replica_identity.clone();
+        let db = shutdown_state.db.clone();
+        let announce = async move {
+            let _ = db.collection::<mongodb::bson::Document>(models::node::COLLECTION_NAME)
+                .update_many(mongodb::bson::doc! { "connection_owner.generation_id": &identity.generation_id, "connection_owner.instance_name": &identity.instance_name },
+                    mongodb::bson::doc! { "$set": { "connection_owner.handover_pending": true } }).await;
+        };
+        let finish = async {
+            tokio::pin!(announce);
+            let mut announced = false;
+            let end = loop {
+                let end = tokio::select! {
+                    () = &mut announce, if !announced => { announced = true; continue; }
+                    () = servers.failed() => End::ListenerFailure,
+                    end = drain.wait(&shutdown_state, work_deadline, signals.next()) => end,
+                };
+                if end != End::Idle {
+                    break end;
+                }
+                let idle = tokio::select! {
+                    biased;
+                    signal = signals.next() => break drain.second_signal(signal),
+                    () = tokio::time::sleep_until(work_deadline) => break End::Deadline,
+                    idle = servers.finish_idle() => idle,
+                };
+                if idle {
+                    break End::Idle;
+                }
+                servers.resume();
+            };
+            servers.quiesce();
+            let cleanup_deadline = drain.deadline.min(tokio::time::Instant::now() + reserve);
+            finish_shutdown(
+                &shutdown_state,
+                &drain,
+                end,
+                &discord_shutdown,
+                cleanup_deadline,
+            )
+            .await;
+        };
+        tokio::select! {
+            biased;
+            () = finish => {},
+            never = drain.progress(&shutdown_state) => match never {},
+        }
+        return;
     }
+    // Zero preserves the old signal path: no drain state, settlement or release
+    // pass, and the same bounded Discord cancellation before runtime teardown.
+    drop(servers);
     discord_shutdown.cancel();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), discord_worker).await;
 }
 
-async fn shutdown_signal() {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("install SIGTERM handler");
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+async fn finish_shutdown(
+    state: &AppState,
+    drain: &services::shutdown::drain::Drain,
+    end: services::shutdown::drain::End,
+    discord_shutdown: &tokio_util::sync::CancellationToken,
+    deadline: tokio::time::Instant,
+) {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let settle_deadline = tokio::time::Instant::now() + remaining * 2 / 3;
+    let release_deadline = deadline - remaining / 10;
+    state.shutdown.interrupt();
+    // Let the runners use their ordinary settlement and delivery path first.
+    let _ = tokio::time::timeout(remaining / 5, state.shutdown.idle()).await;
+    state.shutdown.stop();
+    discord_shutdown.cancel();
+    let stopped = tokio::time::timeout_at(settle_deadline, state.shutdown.execution_stopped())
+        .await
+        .is_ok();
+    if stopped {
+        if let Ok(Ok(rows)) = tokio::time::timeout_at(
+            settle_deadline,
+            services::shutdown::drain::settle_remaining(state),
+        )
+        .await
+        {
+            // The transaction already persisted terminal state. Existing hooks
+            // publish channel/group/trigger delivery, under the same bound.
+            let deliveries = async {
+                use futures::StreamExt;
+                futures::stream::iter(rows)
+                    .for_each_concurrent(16, |(row, error)| {
+                        handlers::assistant_team::after_turn_boxed(
+                            state.clone(),
+                            row,
+                            String::new(),
+                            Some(error),
+                        )
+                    })
+                    .await;
+            };
+            let _ = tokio::time::timeout_at(settle_deadline, deliveries).await;
+        }
+    } else {
+        tracing::warn!("Shutdown tasks did not stop before cleanup deadline");
     }
-    #[cfg(not(unix))]
-    let _ = tokio::signal::ctrl_c().await;
+    if stopped
+        && !matches!(
+            tokio::time::timeout_at(settle_deadline, services::shutdown::release::nodes(state))
+                .await,
+            Ok(Ok(_))
+        )
+    {
+        tracing::warn!("Shutdown node ownership release unavailable");
+    }
+    let nodes_stopped =
+        tokio::time::timeout_at(settle_deadline, state.shutdown.node_sockets_closed())
+            .await
+            .is_ok();
+    // Never free capacity under an executor which has not stopped.
+    let cleanup_stopped = stopped
+        && nodes_stopped
+        && tokio::time::timeout_at(settle_deadline, state.shutdown.tasks_stopped())
+            .await
+            .is_ok();
+    if cleanup_stopped {
+        let _ =
+            tokio::time::timeout_at(release_deadline, state.shutdown.close_completion_workers())
+                .await;
+    }
+    let mut releases = if cleanup_stopped {
+        services::shutdown::drain::release_owned(state, release_deadline).await
+    } else {
+        std::collections::BTreeMap::new()
+    };
+    // The node release path counts the winning write, including a socket
+    // teardown racing this coordinator's exact-fence release.
+    releases.insert("node_owners", 0);
+    // The observation writer is joined even if an unrelated completion task
+    // could not finish. Retiring it cannot transfer an external-effect claim.
+    if stopped {
+        let observation = tokio::time::timeout_at(
+            release_deadline,
+            services::shutdown::release::observation(&state.db, &state.replica_identity),
+        )
+        .await;
+        releases.insert(
+            "security_observation",
+            observation.ok().and_then(Result::ok).unwrap_or_default(),
+        );
+    }
+    drain.audit(state, end, releases, deadline).await;
 }
 
 /// Preserve each legacy domain, including its historical source-byte convention.
@@ -2040,6 +2580,447 @@ mod tests {
     //! time.
 
     use super::*;
+
+    #[tokio::test]
+    async fn round2_broker_background_refresh_starts_immediately() {
+        let (state, reads, _) = broker_round2_fixture().await;
+        spawn_broker_policy_refresh_task(state.clone());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while reads.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the first refresh must not wait five seconds");
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn round2_broker_freshness_logs_once_per_transition() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tracing::instrument::WithSubscriber;
+        struct Transitions(Arc<AtomicUsize>, Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Transitions {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if event.metadata().target() == "nyxid::broker_policy" {
+                    if *event.metadata().level() == tracing::Level::ERROR {
+                        self.0.fetch_add(1, Ordering::SeqCst);
+                    }
+                    if *event.metadata().level() == tracing::Level::INFO {
+                        self.1.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+        let stale = Arc::new(AtomicUsize::new(0));
+        let recovered = Arc::new(AtomicUsize::new(0));
+        let subscriber =
+            tracing_subscriber::registry().with(Transitions(stale.clone(), recovered.clone()));
+        let (state, _, _) = broker_round2_fixture().await;
+        let mut strict = state.broker_policy();
+        strict.broker_require_admin_capability = true;
+        strict.broker_require_sender_constraint = true;
+        state.set_broker_policy_if_fresh(strict);
+        async {
+            expire_broker_snapshot(&state);
+            for _ in 0..10 {
+                assert!(state.broker_require_admin_capability().await.unwrap());
+                assert!(state.broker_require_sender_constraint().await.unwrap());
+            }
+            state.set_broker_policy_if_fresh(strict);
+            for _ in 0..10 {
+                assert!(state.broker_require_admin_capability().await.unwrap());
+            }
+        }
+        .with_subscriber(subscriber)
+        .await;
+        assert_eq!(
+            stale.load(Ordering::SeqCst),
+            1,
+            "one error per stale transition"
+        );
+        assert_eq!(
+            recovered.load(Ordering::SeqCst),
+            1,
+            "one info per recovery transition"
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    async fn broker_round2_fixture() -> (AppState, Arc<std::sync::atomic::AtomicUsize>, String) {
+        use mongodb::{
+            event::{EventHandler, command::CommandEvent},
+            options::ClientOptions,
+        };
+        let db = test_utils::connect_transaction_test_database("broker_round2").await;
+        let app = format!("broker-round2-{}", uuid::Uuid::new_v4());
+        let mut options = ClientOptions::parse(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        options.app_name = Some(app.clone());
+        let reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = reads.clone();
+        options.command_event_handler = Some(EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event
+                && event.command.get_str("find") == Ok("platform_settings")
+            {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }));
+        let client = mongodb::Client::with_options(options).unwrap();
+        (
+            test_utils::test_app_state(client.database(db.name())),
+            reads,
+            app,
+        )
+    }
+
+    fn expire_broker_snapshot(state: &AppState) {
+        state.broker_policy.write().unwrap().verified_at =
+            tokio::time::Instant::now() - BROKER_POLICY_MAX_AGE;
+    }
+
+    pub(crate) static BROKER_FAILPOINT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn round2_stale_permissive_broker_read_failure_is_retryable() {
+        let _guard = BROKER_FAILPOINT.lock().await;
+        use mongodb::bson::doc;
+        let (state, reads, app) = broker_round2_fixture().await;
+        let mut high = state.broker_policy();
+        high.revision = 10;
+        state.set_broker_policy_if_fresh(high);
+        let mut low = high;
+        low.revision = 0;
+        assert!(!state.set_broker_policy_if_fresh(low));
+        expire_broker_snapshot(&state);
+        state
+            .db
+            .client()
+            .database("admin")
+            .run_command(doc! {
+                "configureFailPoint":"failCommand", "mode":{"times":2},
+                "data":{"failCommands":["find"],"appName":app,"errorCode":13}
+            })
+            .await
+            .unwrap();
+        let sender = state.broker_require_sender_constraint().await;
+        let admin = state.broker_require_admin_capability().await;
+        assert!(
+            matches!(sender, Err(errors::AppError::OAuthAuthorityUnavailable)),
+            "stale uncertainty must be retryable, got {sender:?}"
+        );
+        assert!(
+            matches!(admin, Err(errors::AppError::OAuthAuthorityUnavailable)),
+            "stale uncertainty must be retryable, got {admin:?}"
+        );
+        let error = sender.unwrap_err();
+        assert_eq!(error.error_code(), 12900);
+        assert_eq!(
+            error.status_code(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(
+            !state.set_broker_policy_if_fresh(low),
+            "failed loads interrupt reset confirmation"
+        );
+        assert_eq!(state.broker_policy(), high);
+        assert!(state.set_broker_policy_if_fresh(low));
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn round2_stale_permissive_broker_reads_once_and_recovers() {
+        let (state, reads, _) = broker_round2_fixture().await;
+        expire_broker_snapshot(&state);
+        assert!(
+            !state.broker_require_sender_constraint().await.unwrap(),
+            "a healthy permissive store must allow after its inline refresh"
+        );
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!state.broker_require_admin_capability().await.unwrap());
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn round2_fresh_and_stale_strict_broker_checks_are_local() {
+        let (state, reads, _) = broker_round2_fixture().await;
+        assert!(!state.broker_require_sender_constraint().await.unwrap());
+        assert!(!state.broker_require_admin_capability().await.unwrap());
+        let mut strict = state.broker_policy();
+        strict.broker_require_sender_constraint = true;
+        strict.broker_require_admin_capability = true;
+        state.set_broker_policy_if_fresh(strict);
+        expire_broker_snapshot(&state);
+        assert!(state.broker_require_sender_constraint().await.unwrap());
+        assert!(state.broker_require_admin_capability().await.unwrap());
+        assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn round2_ten_stale_broker_requests_do_at_most_ten_reads() {
+        let (state, reads, _) = broker_round2_fixture().await;
+        expire_broker_snapshot(&state);
+        let outcomes =
+            futures::future::join_all((0..10).map(|_| state.broker_require_sender_constraint()))
+                .await;
+        assert!(
+            outcomes.iter().all(|result| matches!(result, Ok(false))),
+            "{outcomes:?}"
+        );
+        let count = reads.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            (1..=10).contains(&count),
+            "{count} policy reads for ten requests"
+        );
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn round2_two_consecutive_lower_broker_revisions_follow_store_reset() {
+        let (state, _, _) = broker_round2_fixture().await;
+        let mut high = state.broker_policy();
+        high.revision = 10;
+        state.set_broker_policy_if_fresh(high);
+        expire_broker_snapshot(&state);
+        let age = state.cached_broker_policy().verified_at;
+        let mut low = high;
+        low.revision = 0;
+        assert!(!state.set_broker_policy_if_fresh(low));
+        assert_eq!(state.broker_policy(), high);
+        assert_eq!(
+            state.cached_broker_policy().verified_at,
+            age,
+            "one stray read does not renew freshness"
+        );
+        assert!(
+            state.set_broker_policy_if_fresh(low),
+            "the same lower revision twice confirms the store reset"
+        );
+        assert_eq!(state.broker_policy(), low);
+        assert!(state.cached_broker_policy().verified_at > age);
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn round3_confirmed_reset_rejects_delayed_pre_reset_higher_revision() {
+        let state = test_utils::test_app_state_no_db().await;
+        tokio::time::pause();
+        let mut high = state.broker_policy();
+        high.revision = 10;
+        state.set_broker_policy_if_fresh(high);
+        let normal_read_started = tokio::time::Instant::now();
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        state.set_broker_policy_if_fresh(high);
+        high.revision = 11;
+        assert!(
+            state.set_broker_policy_verified_at(high, normal_read_started),
+            "without a reset a higher revision still wins regardless of read start"
+        );
+        let mut low = high;
+        low.revision = 0;
+        assert!(!state.set_broker_policy_if_fresh(low));
+        let delayed_read_started = tokio::time::Instant::now();
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(state.set_broker_policy_if_fresh(low));
+        let reset_verified_at = state.cached_broker_policy().verified_at;
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(
+            !state.set_broker_policy_verified_at(high, delayed_read_started),
+            "a delayed pre-reset read must not undo the confirmed store reset"
+        );
+        assert_eq!(state.broker_policy(), low);
+        assert_eq!(
+            state.cached_broker_policy().verified_at,
+            reset_verified_at,
+            "an ignored pre-reset read must not renew freshness"
+        );
+        let post_reset_read_started = tokio::time::Instant::now();
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert!(!state.set_broker_policy_if_fresh(low));
+        high.revision = 12;
+        assert!(
+            state.set_broker_policy_verified_at(high, post_reset_read_started),
+            "a higher revision still wins when its read started after the reset"
+        );
+        assert_eq!(state.broker_policy(), high);
+        tokio::time::resume();
+    }
+
+    #[tokio::test]
+    async fn broker_reset_confirmation_rejects_overlapping_and_interrupted_reads() {
+        let (state, _, _) = broker_round2_fixture().await;
+        let mut high = state.broker_policy();
+        high.revision = 10;
+        state.set_broker_policy_if_fresh(high);
+        let old_start = tokio::time::Instant::now();
+        let mut low = high;
+        low.revision = 0;
+        assert!(!state.set_broker_policy_if_fresh(low));
+        assert!(!state.set_broker_policy_verified_at(low, old_start));
+        assert_eq!(state.broker_policy(), high);
+        state.set_broker_policy_if_fresh(high);
+        assert!(!state.set_broker_policy_if_fresh(low));
+        assert_eq!(state.broker_policy(), high);
+        assert!(state.set_broker_policy_if_fresh(low));
+        assert_eq!(state.broker_policy(), low);
+        state.db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn healthy_broker_refreshes_verify_equal_revisions_without_request_reads() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let commands = Arc::new(AtomicUsize::new(0));
+        let seen = commands.clone();
+        let db = test_utils::connect_transaction_test_database_with_command_handler(
+            "healthy_broker_policy",
+            mongodb::event::EventHandler::callback(move |event| {
+                if matches!(event, mongodb::event::command::CommandEvent::Started(_)) {
+                    seen.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        )
+        .await;
+        let state = test_utils::test_app_state(db.clone());
+        let policy = services::platform_settings_service::load_broker_policy(&db, &state.config)
+            .await
+            .unwrap();
+        state.set_broker_policy_if_fresh(policy);
+        tokio::time::pause();
+        let before = commands.load(Ordering::SeqCst);
+        for _ in 0..8 {
+            tokio::time::advance(std::time::Duration::from_secs(5)).await;
+            assert!(
+                !state.set_broker_policy_if_fresh(policy),
+                "unchanged successful refresh is not a policy change"
+            );
+            assert!(!state.broker_require_sender_constraint().await.unwrap());
+            assert!(!state.broker_require_admin_capability().await.unwrap());
+        }
+        assert_eq!(
+            commands.load(Ordering::SeqCst),
+            before,
+            "healthy enforcement stays entirely local"
+        );
+        tokio::time::advance(BROKER_POLICY_MAX_AGE).await;
+        let age = state.cached_broker_policy().verified_at;
+        let mut rollback = policy;
+        rollback.revision -= 1;
+        assert!(!state.set_broker_policy_if_fresh(rollback));
+        assert_eq!(
+            state.cached_broker_policy().verified_at,
+            age,
+            "a rollback cannot renew freshness"
+        );
+        state.set_broker_policy_if_fresh(policy);
+        assert!(!state.broker_require_sender_constraint().await.unwrap());
+        let mut newer = policy;
+        newer.revision += 1;
+        state.set_broker_policy_verified_at(
+            newer,
+            tokio::time::Instant::now() - BROKER_POLICY_MAX_AGE,
+        );
+        assert!(
+            !state.cached_broker_policy().is_fresh(),
+            "a delayed read retains its observation age"
+        );
+        assert_eq!(commands.load(Ordering::SeqCst), before);
+        tokio::time::resume();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn broker_policy_reload_failure_expires_only_the_unhealthy_replica() {
+        let _guard = BROKER_FAILPOINT.lock().await;
+        use mongodb::{bson::doc, options::ClientOptions};
+        use services::platform_settings_service as settings;
+        let db = test_utils::connect_transaction_test_database("broker_policy_age").await;
+        let mut options = ClientOptions::parse(std::env::var("NYXID_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        let app = format!("broker-stale-{}", uuid::Uuid::new_v4());
+        options.app_name = Some(app.clone());
+        let commands = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = commands.clone();
+        options.command_event_handler =
+            Some(mongodb::event::EventHandler::callback(move |event| {
+                if matches!(event, mongodb::event::command::CommandEvent::Started(_)) {
+                    recorded.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }));
+        let client = mongodb::Client::with_options(options).unwrap();
+        let a = test_utils::test_app_state(client.database(db.name()));
+        let b = test_utils::test_app_state(db.clone());
+        assert!(!Arc::ptr_eq(&a.broker_policy, &b.broker_policy));
+        let original = settings::load_broker_policy(&a.db, &a.config)
+            .await
+            .unwrap();
+        a.set_broker_policy_if_fresh(original);
+        let tightened = settings::update_broker_settings(
+            &b.db,
+            settings::BrokerSettingsPatch {
+                broker_require_sender_constraint: Some(Some(true)),
+                broker_require_admin_capability: Some(Some(true)),
+            },
+        )
+        .await
+        .unwrap();
+        b.set_broker_policy_if_fresh(BrokerPolicy::from_settings(&b.config, &tightened));
+        assert!(b.broker_require_sender_constraint().await.unwrap());
+        assert!(!a.broker_require_sender_constraint().await.unwrap());
+        db.client()
+            .database("admin")
+            .run_command(doc! {
+                "configureFailPoint":"failCommand", "mode":{"times":1},
+                "data":{"failCommands":["find"],"appName":&app,"errorCode":13},
+            })
+            .await
+            .unwrap();
+        let reload = settings::load_broker_policy(&a.db, &a.config).await;
+        assert!(reload.is_err(), "only A's policy reload is rejected");
+        assert!(
+            a.db.collection::<mongodb::bson::Document>("users")
+                .find_one(doc! {})
+                .await
+                .is_ok()
+        );
+        expire_broker_snapshot(&a);
+        db.client()
+            .database("admin")
+            .run_command(doc! {
+                "configureFailPoint":"failCommand", "mode":{"times":2},
+                "data":{"failCommands":["find"],"appName":&app,"errorCode":13},
+            })
+            .await
+            .unwrap();
+        let before = commands.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            a.broker_require_sender_constraint().await,
+            Err(errors::AppError::OAuthAuthorityUnavailable)
+        ));
+        assert!(matches!(
+            a.broker_require_admin_capability().await,
+            Err(errors::AppError::OAuthAuthorityUnavailable)
+        ));
+        assert_eq!(
+            commands.load(std::sync::atomic::Ordering::SeqCst),
+            before + 2
+        );
+        a.set_broker_policy_if_fresh(
+            settings::load_broker_policy(&a.db, &a.config)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(a.broker_policy(), b.broker_policy());
+        db.drop().await.unwrap();
+    }
 
     #[tokio::test]
     async fn hmac_preparation_exports_legacy_2048_pem_without_loading_a_signer() {

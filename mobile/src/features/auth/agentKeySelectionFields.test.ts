@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
+import { setAppTranslationLanguage, translateApp } from "../../i18n/appTranslation";
 import * as model from "./agentKeyLoginModel";
 import * as schema from "../../lib/api/agentKeyLoginSchema";
 import type {
@@ -119,7 +120,7 @@ function setupForm(
       const button = elements(harness.value()).find(
         (item) =>
           item.type === "PrimaryButton" &&
-          item.props.label === "Review permissions",
+          item.props.label === translateApp("Review permissions"),
       );
       assert.ok(button);
       button.props.onPress();
@@ -312,6 +313,13 @@ function setupLogin({ inSheet = false, mint = true } = {}) {
         },
       },
     },
+    "../../lib/api/mobileApi": { mobileApi: {} },
+    "../../lib/api/baseUrl": { getApiBaseUrl: () => "https://login.example.test/api/v1" },
+    "./useUncertainLoginPreview": { useUncertainLoginPreview: () => ({ reset() {} }) },
+    "./useLoginRequestResume": { useLoginRequestResume: () => {} },
+    "./useLoginRequestHandoff": { useLoginRequestHandoff: () => () => true },
+    "./useLoginPreviewCooldown": { useLoginPreviewCooldown: () => ({ coolingDown: false }) },
+    "./LoginRequestTerminalView": { LoginRequestTerminalView: "Terminal" },
     "./useMfaStepUp": { useMfaStepUp: () => ({ handle: async () => false, prompt: null }) },
     "./LoginCodeStatusView": { LoginCodeStatusView: "LoginCodeStatusView" },
     "./AuthSessionContext": {
@@ -335,6 +343,9 @@ function setupLogin({ inSheet = false, mint = true } = {}) {
       static override now() { return actionTime; }
     },
   });
+  harness.mock("./loginRequestResolver", harness.load(
+    fileURLToPath(new URL("./loginRequestResolver.ts", import.meta.url)),
+  ));
   const { AgentKeyLoginScreen } = harness.load(
     fileURLToPath(new URL("./AgentKeyLoginScreen.tsx", import.meta.url)),
   ) as { AgentKeyLoginScreen: (props: unknown) => Element };
@@ -521,4 +532,22 @@ test("terminal code entry and its scanner add no Back control inside a sheet", (
     }
     harness.unmount();
   }
+});
+
+
+test('M2622-04 default Agent Key draft reaches Review with canonical protocol scopes in every locale', () => {
+  try {
+    for (const language of ['en','zh-CN','zh-TW'] as const) {
+      setAppTranslationLanguage(language);
+      const form=setupForm();
+      try {
+        form.review();
+        assert.equal(form.reviewed.length,1,language);
+        assert.equal(form.reviewed[0]!.scopes,'read proxy',language);
+        assert.equal(form.reviewed[0]!.kind,'new');
+        assert.equal(form.reviewed[0]!.platform,'generic');
+        assert.equal(schema.newAgentKeySchema.safeParse(form.reviewed[0]).success,true);
+      } finally {form.harness.unmount();}
+    }
+  } finally {setAppTranslationLanguage('en');}
 });

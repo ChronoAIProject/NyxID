@@ -95,6 +95,8 @@ fn sample_card(
 
 fn chat(role: AgentRole, guest: bool, report_to: Option<&str>, with_nyxbot: bool) -> ChatAuthority {
     ChatAuthority {
+        key_version: 0,
+        voice_parent_conversation_id: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: None,

@@ -1579,8 +1579,9 @@ async fn collaboration_runtime_handoff_keeps_requester_and_reads_published_reply
     )
     .await
     .unwrap();
+    // Settlement already queued it; the legacy callback cannot spend another hop.
     assert!(
-        requests::handoff_ready(&f.state.db, &started.admission, &target.id)
+        !requests::handoff_ready(&f.state.db, &started.admission, &target.id)
             .await
             .unwrap()
     );
@@ -3049,6 +3050,7 @@ async fn collaboration_only_explicit_images_survive_private_thread_cleanup() {
     let mut items = Vec::new();
     for delivery in [true, false] {
         let mut image = image::AssistantAttachment {
+            chunks: 0,
             artifact: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             origin: "tool".into(),
@@ -3078,6 +3080,7 @@ async fn collaboration_only_explicit_images_survive_private_thread_cleanup() {
             chat_delivery: Some(delivery),
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: Some(false),
             pages: None,
         });
@@ -3243,6 +3246,64 @@ async fn collaboration_service_approval_resumes_its_request_and_cannot_outlive_d
         response.collaboration.unwrap()["your_request_ids"],
         serde_json::json!([binding.request_id])
     );
+    // Reject only this decision occurrence after the continuation and its fences.
+    let db = &f.state.db;
+    svc::security_effect_service::ensure_indexes(db)
+        .await
+        .unwrap();
+    let intents = crate::models::security_effect_intent::COLLECTION_NAME;
+    let groups = db.collection::<bson::Document>(GROUPS);
+    let before = groups
+        .find_one(doc! {"_id":&group.id})
+        .await
+        .unwrap()
+        .unwrap();
+    db.run_command(
+        doc! {"collMod":intents,"validator":{"event.event_type":{"$ne":"approval_decision"}}},
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        svc::approval_service::process_decision(
+            db,
+            &f.state.config,
+            &f.state.http_client,
+            None,
+            None,
+            &id,
+            true,
+            None,
+            None,
+            "web"
+        )
+        .await,
+        Err(crate::errors::AppError::DatabaseError(_))
+    ));
+    let after = groups
+        .find_one(doc! {"_id":&group.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        before.get("collaboration_fence"),
+        after.get("collaboration_fence")
+    );
+    assert!(
+        requests::pending(db, Some(&group.id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        svc::approval_service::get_request(db, &id)
+            .await
+            .unwrap()
+            .status,
+        "pending"
+    );
+    db.run_command(doc! {"collMod":intents,"validator":{}})
+        .await
+        .unwrap();
     let updated = svc::approval_service::process_decision(
         &f.state.db,
         &f.state.config,
@@ -3258,6 +3319,16 @@ async fn collaboration_service_approval_resumes_its_request_and_cannot_outlive_d
     .await
     .unwrap();
     assert_eq!(updated.status, "approved");
+    assert_eq!(
+        db.collection::<bson::Document>(intents)
+            .count_documents(
+                doc! {"event.event_type":"approval_decision","event.event_data.request_id":&id}
+            )
+            .await
+            .unwrap(),
+        1
+    );
+
     let pending = requests::pending(&f.state.db, Some(&group.id))
         .await
         .unwrap();
@@ -3418,6 +3489,7 @@ async fn collaboration_model_runtime_uses_requester_key_and_refuses_after_revoca
         "block",
         &mut String::new(),
         &mut None,
+        None,
     )
     .await
     .unwrap();
@@ -3451,7 +3523,8 @@ async fn collaboration_model_runtime_uses_requester_key_and_refuses_after_revoca
             &mut events,
             "block",
             &mut String::new(),
-            &mut None
+            &mut None,
+            None,
         )
         .await
         .is_err()
@@ -4163,4 +4236,230 @@ async fn notifications_follow_collaboration_departure_and_group_deletion() {
     probe(&f.state.db, &remaining, false).await;
     probe(&f.state.db, &unrelated, true).await;
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_collaboration_survives_crash_after_reply_settlement() {
+    let (f, target, group) = setup("wake_collaboration_crash").await;
+    let group = join(&f, &group, &f.member).await;
+    let source = specialist(&f, &f.member, "source").await;
+    let group = change(
+        &f,
+        &f.admin,
+        &group,
+        Change::AddAgent {
+            agent_id: source.id.clone(),
+            proposed_by: f.member.clone(),
+        },
+    )
+    .await
+    .group
+    .unwrap();
+    share(&f, &target, &[&f.member]).await;
+    let request = requests::enqueue_ready(
+        &f.state.db,
+        &f.member,
+        &group.id,
+        "Compare",
+        Some(std::slice::from_ref(&source.id)),
+    )
+    .await
+    .unwrap();
+    let started = runtime::begin_ready(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &group.id,
+        &request.id,
+        &source.id,
+    )
+    .await
+    .unwrap();
+    let row = &started.claim.conversation;
+    svc::assistant_nyxagent::finish_turn(
+        &f.state.db,
+        row,
+        &row.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &svc::assistant_nyxagent::TurnResult {
+            text: format!("@{} continue", target.id),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    // The process dies here: the handler's post-settlement hook never runs.
+    // The survivor's existing selector sees only durable pending requests.
+    let pending = requests::pending(&f.state.db, Some(&group.id))
+        .await
+        .unwrap();
+    assert!(
+        pending
+            .iter()
+            .any(|r| r.id == request.id && r.pending_agent_ids.contains(&target.id)),
+        "settled handoff must survive without its detached callback"
+    );
+    f.state.db.drop().await.unwrap();
+}
+
+async fn refused_settlement_handoff(case: &str) {
+    use crate::models::assistant_group::{
+        GroupMessage, GroupRequest, REQUESTS_COLLECTION_NAME as REQUESTS,
+    };
+    let (f, target, group) = setup(case).await;
+    let group = join(&f, &group, &f.member).await;
+    let source = specialist(&f, &f.member, "source").await;
+    let group = change(
+        &f,
+        &f.admin,
+        &group,
+        Change::AddAgent {
+            agent_id: source.id.clone(),
+            proposed_by: f.member.clone(),
+        },
+    )
+    .await
+    .group
+    .unwrap();
+    share(&f, &target, &[&f.member]).await;
+    let request = requests::enqueue_ready(
+        &f.state.db,
+        &f.member,
+        &group.id,
+        "Compare",
+        Some(std::slice::from_ref(&source.id)),
+    )
+    .await
+    .unwrap();
+    let hops = request.hops_remaining;
+    let started = runtime::begin_ready(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.member,
+        &group.id,
+        &request.id,
+        &source.id,
+    )
+    .await
+    .unwrap();
+    let row = &started.claim.conversation;
+    match case {
+        "wake_dropped_request" => {
+            f.state
+                .db
+                .collection::<bson::Document>(REQUESTS)
+                .update_one(doc! {"_id":&request.id}, doc! {"$set":{"dropped":true}})
+                .await
+                .unwrap();
+        }
+        "wake_revoked_slot" => {
+            f.state
+                .db
+                .collection::<bson::Document>(model::SLOTS)
+                .update_one(
+                    doc! {"_id":&started.admission.slot().id},
+                    doc! {"$set":{"revoked":true}},
+                )
+                .await
+                .unwrap();
+        }
+        "wake_changed_request" => {
+            f.state.db.collection::<bson::Document>(REQUESTS).update_one(doc!{"_id":&request.id},doc!{"$inc":{format!("collaboration.authorities.{}.revision",source.id):1_i64}}).await.unwrap();
+        }
+        "wake_changed_slot" => {
+            f.state
+                .db
+                .collection::<bson::Document>(model::SLOTS)
+                .update_one(
+                    doc! {"_id":&started.admission.slot().id},
+                    doc! {"$inc":{"authority.revision":1_i64}},
+                )
+                .await
+                .unwrap();
+        }
+        _ => unreachable!(),
+    }
+    let message = uuid::Uuid::new_v4().to_string();
+    let result = svc::assistant_nyxagent::TurnResult {
+        text: format!("@{} continue", target.id),
+        session_id: None,
+        response_id: None,
+        error: None,
+    };
+    for _ in 0..2 {
+        svc::assistant_nyxagent::finish_turn(
+            &f.state.db,
+            row,
+            &row.credential_api_key_id,
+            &message,
+            &result,
+        )
+        .await
+        .unwrap();
+    }
+    let public = f
+        .state
+        .db
+        .collection::<GroupMessage>(crate::models::assistant_group::MESSAGES_COLLECTION_NAME)
+        .count_documents(doc! {"group_id":&group.id,"agent_id":&source.id,"role":"agent"})
+        .await
+        .unwrap();
+    assert_eq!(public, 1, "handoff refusal must retain one public reply");
+    let request = f
+        .state
+        .db
+        .collection::<GroupRequest>(REQUESTS)
+        .find_one(doc! {"_id":&request.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(request.pending_agent_ids.is_empty());
+    assert_eq!(request.hops_remaining, hops);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .count_documents(doc! {"namespace":"assistant_group_handoffs"})
+            .await
+            .unwrap(),
+        0
+    );
+    // The execution reader must still refuse these invalidated bindings;
+    // settlement is verified independently from that admission authority.
+    assert!(matches!(
+        svc::assistant_nyxagent::get(&f.state.db, &row.user_id, &row.id).await,
+        Err(AppError::NotFound(_))
+    ));
+    let stored = f
+        .state
+        .db
+        .collection::<crate::models::assistant_conversation::AssistantConversation>(
+            crate::models::assistant_conversation::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&row.id,"user_id":&row.user_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.active_turn.is_none());
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn durable_wake_review_dropped_request_keeps_reply_without_handoff() {
+    refused_settlement_handoff("wake_dropped_request").await;
+}
+#[tokio::test]
+async fn durable_wake_review_revoked_slot_keeps_reply_without_handoff() {
+    refused_settlement_handoff("wake_revoked_slot").await;
+}
+#[tokio::test]
+async fn durable_wake_review_changed_slot_keeps_reply_without_handoff() {
+    refused_settlement_handoff("wake_changed_slot").await;
+}
+
+#[tokio::test]
+async fn durable_wake_review_changed_request_authority_keeps_reply_without_handoff() {
+    refused_settlement_handoff("wake_changed_request").await;
 }

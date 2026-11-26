@@ -20,6 +20,9 @@ async fn exercise_identity(
     social: bool,
     restricted: bool,
 ) {
+    use crate::services::billing::schedules::eligibility::tests::{
+        assert_login_credits, login_test_schedule,
+    };
     crate::test_utils::init_test_audit_chain_hmac_key();
     let Some(db) = connect_test_database("request_only_identity").await else {
         return;
@@ -67,6 +70,7 @@ async fn exercise_identity(
     } else {
         None
     };
+    let schedule = login_test_schedule(&db).await;
     let request = device::initiate_v2(
         &db,
         state.auth_device_hmac_key.as_slice(),
@@ -406,6 +410,7 @@ async fn exercise_identity(
         .find(|v| v.starts_with("nyx_session="))
         .map(|v| v.split(';').next().unwrap().to_string());
     assert_eq!(session_cookie.is_some(), keep);
+    assert_login_credits(&db, &schedule, &actor_id, keep).await;
     let signed: Value = signed.json().await.unwrap();
     assert_eq!(signed["verified"], true);
     assert_eq!(signed["mfa_required"], false);

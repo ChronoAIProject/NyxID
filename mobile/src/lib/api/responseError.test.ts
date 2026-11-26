@@ -9,10 +9,40 @@ import {
   CONNECTION_UNAVAILABLE,
 } from "./responseError";
 import { executeAuthenticatedRequest } from "./authenticatedTransport";
+import { resolveErrorMessage } from "./errorMessages";
+import { setAppTranslationLanguage, translateApp } from "../../i18n/appTranslation";
 
 const headers = new Headers({
   "x-request-id": "request-2275",
   "X-NyxID-Trace-Id": "trace-2275",
+});
+
+test("shared network errors follow the app language while server text and diagnostics remain verbatim", () => {
+  try {
+    for (const language of ["zh-CN", "zh-TW"] as const) {
+      setAppTranslationLanguage(language);
+      const unavailable = buildApiError(null, 503, headers);
+      assert.notEqual(unavailable.message, TEMPORARILY_UNAVAILABLE);
+      assert.match(unavailable.message, /NyxID/);
+      assert.equal(unavailable.errorKey, "invalid_error_response");
+      assert.equal(unavailable.statusCode, 503);
+      assert.equal(unavailable.requestId, "request-2275");
+      for (const status of [0, 400, 401, 429, 503]) {
+        assert.match(buildApiError(null, status).message, /[\u4e00-\u9fff]/);
+      }
+      assert.notEqual(
+        networkApiError(new Error("private URL")).message,
+        CONNECTION_UNAVAILABLE,
+      );
+      const message = "Server-owned details / 用户输入";
+      assert.equal(
+        buildApiError({ error: "bad_request", message }, 400).message,
+        message,
+      );
+    }
+  } finally {
+    setAppTranslationLanguage("en");
+  }
 });
 for (const [status, payload] of [
   [
@@ -164,4 +194,24 @@ test("retains MFA verification through the boundary without exposing the challen
       });
     });
   }
+});
+
+test('M2622-06 retained local ApiErrors format in the current locale without losing source or diagnostics', () => {
+  setAppTranslationLanguage('zh-CN');
+  const retained=[0,503,429,401,400].map(status=>buildApiError(null,status,{get:(key)=>key==='x-request-id'?'request-1':key==='X-NyxID-Trace-Id'?'trace-1':null}));
+  const server=buildApiError({error:'custom_provider_error',message:'Provider-owned detail'},503);
+  try {
+    for(const language of ['en','zh-CN','zh-TW','en'] as const) {
+      setAppTranslationLanguage(language);
+      for(const error of retained) {
+        const source=error.statusCode===0 ? CONNECTION_UNAVAILABLE : error.statusCode===503 ? TEMPORARILY_UNAVAILABLE : error.statusCode===429 ? 'Too many requests. Please wait a moment and try again.' : error.statusCode===401 ? 'Your session has expired. Please sign in again.' : "NyxID couldn't complete this request. Please try again.";
+        assert.equal(resolveErrorMessage(error),translateApp(source));
+        assert.equal(error.message,translateApp(source),'direct display consumers use current language');
+        assert.equal(error.sourceMessage,source);
+        assert.equal(error.requestId,'request-1');assert.equal(error.traceId,'trace-1');
+        assert.equal(error.errorKey,error.statusCode===0?'network_error':'invalid_error_response');
+      }
+      assert.equal(server.message,'Provider-owned detail');assert.equal(server.sourceMessage,undefined);
+    }
+  } finally {setAppTranslationLanguage('en');}
 });

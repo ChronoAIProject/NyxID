@@ -114,6 +114,15 @@ export const typeScale = {
     lineHeight: 16,
     fontWeight: "500" as const,
   },
+  // Group labels retain their visual case without changing localized copy.
+  groupLabel: {
+    fontFamily: fonts.body,
+    fontSize: 12,
+    lineHeight: 16,
+    fontWeight: "500" as const,
+    textTransform: "uppercase" as const,
+    letterSpacing: 1.5,
+  },
   // 12px regular — DetailRow value (web spec: text-[12px] font-medium)
   caption: {
     fontFamily: fonts.bodyRegular,

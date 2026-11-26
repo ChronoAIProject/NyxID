@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { hookHarness } from "./assistantHookTestHarness";
+import { sanitizeAssistantUploadName } from "../../../../shared/assistantUploadFilename";
 import {
   ATTACHMENT_SIZE_MESSAGE,
   MAX_ASSISTANT_ATTACHMENT_BYTES,
@@ -124,6 +127,142 @@ test("display names match server path, control character and Unicode normalizati
   assert.equal([...safeAttachmentName("𠮷".repeat(121))].length, 120);
   assert.equal(safeAttachmentName("note.tx🔥t"), "note.txt");
   assert.equal(isSupportedAttachment({ name: "note.tx🔥t" }), true);
+});
+
+test("picker and wire names preserve suffixes after normalized codepoint budgeting", () => {
+  for (const name of ["a".repeat(118) + ".pdf", "a".repeat(121) + ".pdf"]) {
+    assert.equal(isSupportedAttachment({ name }), true);
+    assert.equal(safeAttachmentName(name), "a".repeat(116) + ".pdf");
+    assert.equal(
+      decodeURIComponent(attachmentUploadHeaders(name)["X-Attachment-Name"]!),
+      safeAttachmentName(name),
+    );
+  }
+  for (const prefix of [
+    " ".repeat(120),
+    ".".repeat(120),
+    " .".repeat(120),
+    "🙂" + " ".repeat(120),
+  ]) {
+    assert.equal(safeAttachmentName(prefix + "a.pdf"), "a.pdf");
+    assert.equal(isSupportedAttachment({ name: prefix + "a.pdf" }), true);
+    assert.equal(
+      attachmentUploadHeaders(prefix + "a.pdf")["X-Attachment-Name"],
+      "a.pdf",
+    );
+  }
+});
+
+test("trailing padding is normalized before picker classification and actual API request headers", async () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  const sent: { bytes: Uint8Array; headers: Record<string, string> }[] = [];
+  const h = hookHarness({
+    "./http": {
+      requestBinaryJson: async (
+        _path: string,
+        body: Uint8Array,
+        options: { headers: Record<string, string> },
+      ) => {
+        sent.push({ bytes: body, headers: options.headers });
+        return {
+          id: "saved",
+          content_type: "text/plain",
+          label: "saved",
+          size: body.byteLength,
+        };
+      },
+    },
+  });
+  const { assistantUploadsApi } = h.load(
+    fileURLToPath(
+      new URL("../../lib/api/assistantUploadsApi.ts", import.meta.url),
+    ),
+  ) as typeof import("../../lib/api/assistantUploadsApi");
+  const cases: [string, string, string | undefined][] = [
+    [
+      "a".repeat(117) + ".v1.csv ",
+      "application/vnd.ms-excel",
+      "a".repeat(116) + ".csv",
+    ],
+    [
+      "a".repeat(117) + ".v1.csv. .🔥",
+      "application/vnd.ms-excel",
+      "a".repeat(116) + ".csv",
+    ],
+    ["Invoice.json. .", "application/json", "Invoice.json"],
+    ["Invoice.json. .🔥", "application/json", "Invoice.json"],
+    ["🧾.PDF.", "application/pdf", undefined],
+    ["🧾.PDF. .🔥", "application/pdf", undefined],
+    [".gitignore. .🔥", "text/plain", "gitignore"],
+    ["attachment. .", "application/pdf", "attachment"],
+  ];
+  for (const [name, mimeType, expected] of cases) {
+    assert.equal(isSupportedAttachment({ name, mimeType }), true);
+    assert.equal(sanitizeAssistantUploadName(name), expected);
+    assert.equal(safeAttachmentName(name), expected ?? "attachment");
+    assert.equal(
+      safeAttachmentName(safeAttachmentName(name)),
+      expected ?? "attachment",
+    );
+    if (expected !== undefined) {
+      assert.equal(sanitizeAssistantUploadName(expected), expected);
+      assert.deepEqual(
+        attachmentUploadHeaders(expected),
+        attachmentUploadHeaders(name),
+      );
+    }
+    sent.length = 0;
+    await assistantUploadsApi.upload(
+      { kind: "conversations", id: "nyxa-one" },
+      { name, mimeType },
+      bytes,
+    );
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.bytes, bytes);
+    assert.equal(
+      sent[0]?.headers["X-Attachment-Name"],
+      expected === undefined ? undefined : encodeURIComponent(expected),
+    );
+  }
+});
+
+test("unusable originals omit the name header while literal attachment stays original", () => {
+  for (const name of ["", "..", "🧾.PDF", "📷.jpg", "\n\r\0"]) {
+    assert.equal(safeAttachmentName(name), "attachment");
+    assert.deepEqual(attachmentUploadHeaders(name), {
+      "Content-Type": "application/octet-stream",
+    });
+  }
+  assert.equal(
+    attachmentUploadHeaders("attachment")["X-Attachment-Name"],
+    "attachment",
+  );
+  assert.equal(safeAttachmentName(".gitignore"), "gitignore");
+  assert.equal(
+    safeAttachmentName("Receipt.归档收据原始凭证"),
+    "Receipt.归档收据原始凭证",
+  );
+  assert.equal(
+    isSupportedAttachment({ name: "Receipt.归档收据原始凭证" }),
+    false,
+  );
+  assert.equal(
+    isSupportedAttachment({
+      name: "Receipt.归档收据原始凭证",
+      mimeType: "image/png",
+    }),
+    true,
+  );
+});
+
+test("Unicode name headers fit 1024 encoded bytes without losing the suffix", () => {
+  for (const name of ["报".repeat(118) + ".pdf", "𠮷".repeat(118) + ".pdf"]) {
+    assert.equal(isSupportedAttachment({ name }), true);
+    const encoded = attachmentUploadHeaders(name)["X-Attachment-Name"]!;
+    assert.ok(encoded.length <= 1024);
+    assert.ok(decodeURIComponent(encoded).endsWith(".pdf"));
+    assert.ok([...decodeURIComponent(encoded)].length <= 120);
+  }
 });
 
 test("attachment paths keep conversation/group and attachment identifiers scoped", () => {

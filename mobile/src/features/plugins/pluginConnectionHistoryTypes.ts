@@ -1,3 +1,5 @@
+import { localizedError } from "../../i18n/localizedError";
+import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
 
 const actorSchema = z.object({
@@ -49,9 +51,9 @@ export function parseConnectionHistory(
 ) {
   const page = connectionHistorySchema.parse(value);
   if (page.service_id !== serviceId)
-    throw new Error("History returned for a different connection.");
+    throw localizedError("History returned for a different connection.");
   if (page.next_cursor !== null && page.next_cursor === cursor)
-    throw new Error("History returned an invalid cursor.");
+    throw localizedError("History returned an invalid cursor.");
   return page;
 }
 
@@ -71,21 +73,21 @@ export function parseHistoryActions(
 ) {
   const page = historyActionsSchema.parse(value);
   if (version !== undefined && page.version !== version)
-    throw new Error("History filters changed. Reload the choices.");
+    throw localizedError("History filters changed. Reload the choices.");
   if (
     page.next_offset !== null &&
     (page.next_offset <= offset ||
       page.next_offset >= page.total ||
       page.next_offset > 1000)
   )
-    throw new Error("History filters returned invalid pagination.");
+    throw localizedError("History filters returned invalid pagination.");
   return page;
 }
 
 /** Match Web's metadata presentation; arbitrary objects must never be serialized. */
 export function historyValue(field: string, value: unknown): string {
-  if (value == null) return "Not recorded";
-  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (value == null) return translateApp("Not recorded");
+  if (typeof value === "boolean") return value ? translateApp("Yes") : translateApp("No");
   if (typeof value === "string" || typeof value === "number")
     return String(value);
   if (
@@ -93,7 +95,7 @@ export function historyValue(field: string, value: unknown): string {
     Array.isArray(value) &&
     value.every((item) => typeof item === "string")
   )
-    return value.length ? value.join(", ") : "No reviewed scopes";
+    return value.length ? value.join(", ") : translateApp("No reviewed scopes");
   if (
     (field === "default_request_headers" || field === "ws_frame_injections") &&
     typeof value === "object" &&
@@ -111,13 +113,13 @@ export function historyValue(field: string, value: unknown): string {
       return `${metadata.count} ${noun}${metadata.count === 1 ? "" : "s"}${items.length ? ` (${items.join(", ")})` : ""}`;
     }
   }
-  return "Changed";
+  return translateApp("Changed");
 }
 export function historyChange(
   change: ConnectionHistoryGroup["events"][number]["changes"][number],
 ) {
   return JSON.stringify(change.before) === JSON.stringify(change.after)
-    ? "Changed; values omitted"
+    ? translateApp("Changed; values omitted")
     : `${historyValue(change.field, change.before)} → ${historyValue(change.field, change.after)}`;
 }
 export function historySummary(group: ConnectionHistoryGroup) {
@@ -129,10 +131,10 @@ export function historySummary(group: ConnectionHistoryGroup) {
 }
 export function historyActor(actor: z.infer<typeof actorSchema>) {
   const kinds: Record<string, string> = {
-    api_key: "API key",
-    service_account: "Service account",
-    app: "Application",
-    system: "System",
+    api_key: translateApp("API key"),
+    service_account: translateApp("Service account"),
+    app: translateApp("Application"),
+    system: translateApp("System"),
   };
   return Object.hasOwn(kinds, actor.kind)
     ? `${actor.name} (${kinds[actor.kind]})`

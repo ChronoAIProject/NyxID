@@ -1,7 +1,7 @@
 # Assistant uploads
 
-Normative contract for human uploads to NyxAgent conversations, owner-posted
-group messages and verified owner Lark/Feishu media. This extends [08](08-nyxagent-engine.md) and
+Normative contract for human uploads, binary tool files, raw file uploads from
+NyxAgent conversations, owner-posted group messages and verified owner Lark/Feishu media. This extends [08](08-nyxagent-engine.md) and
 [09](09-nyxbot-orchestrator.md). Tool images are owner-readable and may also be fetched by the bound thread key
 during their producing live turn, including that same guest turn; see
 [Tool images](08-nyxagent-engine.md#tool-images). Their default retention is the
@@ -63,6 +63,179 @@ uploader even when a guest turn runs on the agent owner's key. The delete-after-
 turn policy recognizes that requester's collaboration execution and still
 expires images at settlement.
 
+## Binary tool files
+
+Successful binary service responses in a live, non-guest owner turn become
+encrypted attachments without a feature flag. NyxID selects the byte reader
+before consuming the response, using an explicitly binary, non-text content
+type. A candidate becomes a file if its bytes have a PDF signature, its body is
+not valid UTF-8, or its Content-Disposition identifies an `attachment` or supplies
+`filename`/`filename*`.
+Otherwise it keeps the exact existing text, including each transport's original
+charset and BOM handling. This preserves AWS JSON MIME types, JWT, JavaScript
+and JSON mislabeled as octet-stream. Missing content types, JSON, text and
+structured `+xml`/`+json` types retain the existing reader. PNG/JPEG/GIF/WebP content types always retain their existing
+reader, text and image behavior, including unverified or oversized responses.
+Other non-text images are opaque files with `application/octet-stream` metadata
+so legacy image readers ignore them. A raw upload operation declaring `image/*`
+refuses these opaque files because their stored type does not match the wildcard;
+an operation declaring `application/octet-stream` or `*/*` can accept them.
+Ordinary MCP callers retain their existing response representation. Non-file
+chat results, including every legacy-reader fallback, continue through the
+ordinary large-tool-result paging path; short retained-file handles do not need
+paging.
+
+Retention is limited to 20 MiB. A live turn has eight tool-image slots and
+eight separate tool-file slots, so up to sixteen tool metadata entries can be
+present; file rows never reduce image or screenshot capacity. Settlement,
+transcript, recovery and notification readers tolerate the larger metadata
+vector; image and channel readers filter file rows before applying image
+delivery limits. During a rolling deploy, replicas still on the previous
+release count every entry against one eight-slot limit. In a turn already
+holding eight or more files and images, an image or file handled by such a
+replica is reported as not retained, the existing outcome, until that replica
+is upgraded. Older replicas also page only PDF, DOCX and supported-extension
+text tool files. Candidate capture
+reserves twice the 20 MiB maximum in the shared byte budget before buffering.
+If the budget is full or Content-Length exceeds 20 MiB, NyxID uses the unchanged
+legacy response reader. If an unknown-length body crosses 20 MiB, NyxID releases
+the reservation, finishes using the legacy reader and creates no attachment.
+These fallbacks preserve the original text even for non-UTF-8 responses; they
+cannot safely assume a binary MIME identifies a file before reading it.
+An exhausted turn count returns an explicit `not_retained` metadata note without
+a partial row. Node replies apply the same classification and retention rules,
+with a reservation acquired after binary response headers are known. Text and
+legacy image replies keep their existing limits without a reservation. Complete
+node replies are already buffered by the WebSocket transport before their
+headers can be inspected and retain its frame limit.
+
+For retained binary files, the model receives `{attachment_id, name, type, size}` and instructions to
+use the handle with an upload operation or `nyx__attachment_read`; short UTF-8 files
+also preserve their inline text as described below. Raw binary bytes and base64
+never enter the model result. The safe, bounded name comes from UTF-8 RFC 5987
+`filename*`, then `filename`, then the operation identifier. Paths and control
+characters are removed. The name lives in `active_turn.attachments[].label`,
+alongside `chat_delivery: false`; the encrypted root retains `origin: tool`.
+Tool files up to **15 MiB** (15,728,640 bytes), inclusive, store their complete
+encrypted payload in the root, leaving one MiB of conservative headroom below
+MongoDB's 16 MiB document limit. Larger files, through the 20 MiB maximum, use
+4 MiB encrypted chunks and an encrypted empty root. The additive `chunks` field
+defaults to zero for existing roots. Chunk documents use the existing upload
+format and scope fields, without an origin or image metadata; root, chunks and
+turn slot commit atomically. Channel image delivery and
+image-input continuations ignore these file rows.
+
+PDF signatures take precedence over generic UTF-8 handling, including PDFs
+without Content-Disposition or with an unknown filename extension. Their initial
+result contains only the handle; reads use the bounded document extractor and
+preserve extracted page text and page labels. Malformed or encrypted PDFs return
+the existing unavailable-extraction result and remain forwardable as original
+bytes; their raw PDF syntax is never presented as extracted text.
+
+For a retained non-PDF file whose bytes are valid UTF-8 and whose decoded text is
+at most 8,000 characters, the legacy text is emitted first, followed by the handle and
+one upload/read hint. Larger UTF-8 files emit only the handle and can be paged
+with `nyx__attachment_read`. The read tool pages any valid-UTF-8 non-PDF tool file,
+regardless of filename extension; PDFs and non-UTF-8 files continue through the
+bounded PDF/DOCX/text extractor. If the shared byte budget is busy, reads wait at most
+100 ms and return a retryable `attachment_busy` result. Eligible discovery can
+also perform a catalog lookup and binary capture can spend up to 100 ms waiting
+for the shared budget. Retained-file usage is metered from the original downstream
+body bytes on both direct and node paths, independent of the model-facing handle.
+This matches legacy metering for ASCII and UTF-8 responses without BOM or charset
+conversion. Other files use their actual size rather than the decoded or
+replacement-character length.
+
+`nyx__attachment_read` runs the existing bounded subprocess extractor on demand
+for PDF, DOCX and supported text that did not take the generic UTF-8 path.
+Unsupported or malformed documents may still be forwarded as their original
+bytes; the read result explicitly reports
+unavailable extracted text. Reads and egress require the same owner, conversation,
+active key and credential, producing live turn, non-stopped state and retention
+authority, rechecked after extraction or decryption. Tool files cannot be read
+or uploaded by a later turn or a guest. User uploads retain their existing
+conversation and message fences. Tool files use `tool_image_days` retention,
+including its conversation-lifetime default, and the existing conversation,
+group and owner purge paths remove roots and all their chunks.
+
+## Raw file uploads from attachments
+
+Eligible live, non-guest owner chat keys see both `attachment_id` and the original
+base64 `body` for published, active, stored catalog operations whose request mode
+is Binary. This generic capability is always available and performs no feature-flag
+read; `assistant:attachment-writes` continues to gate only the separate managed
+Lark attachment/Base-write paths.
+This includes system overlays and Catalog-Manager-created catalog rows. The
+override applies only when rendering MCP discovery and search; stored endpoint
+contracts, contract digests, `/mcp/config`, exact descriptors and non-chat
+discovery keep their existing base64 schema. Optional capability lookup errors
+fall back to these unchanged schemas and never fail discovery. Candidate endpoint
+validation uses one batched query per discovery request. Ineligible callers and
+requests without candidate operations perform no capability reads.
+
+Supply exactly one of the two inputs. Use base64 `body` for content the assistant
+wrote itself, such as a note to save as `notes.txt`; use `attachment_id` to move an
+existing uploaded or downloaded file without reconstructing its bytes. Discovery
+expresses this choice with `oneOf`, and dispatch refuses both inputs together for
+eligible generic chat operations. Body-only calls retain the original byte parser
+and perform no attachment-capability lookups. When a declared parameter/body field
+owns `attachment_id`, or the caller is ineligible, NyxID preserves the original
+argument parser and never interprets that field as a file handle.
+
+NyxID resolves the handle through the ordinary upload egress rules, reserves
+twice the exact file size and materializes the bytes once. The declared binary
+request content type wins; a declared wildcard uses the attachment type only
+when it matches that wildcard. The model supplies every declared path, query
+and header parameter, including Zoho's `fileName`; NyxID does not infer them.
+For example, download an email attachment, upload its returned `attachment_id`
+with the required filename and account parameters, then use the provider's
+returned attachment token in the compose operation.
+
+Every `attachment_id` upload is a confirmation policy floor: Auto and Ask every time
+require an owner card; Full access executes with the existing automatic receipt.
+The card shows the safe filename, size, destination service/operation and declared
+parameters. Its binding covers attachment identity, method, path, query, headers,
+content type, endpoint contract and the SHA-256 of the exact outbound bytes.
+The final HTTP egress guard rechecks live authority, contract and
+metadata identity before a provider effect. Identity includes root/chunk IDs,
+ownership, conversation/turn, origin, size, MIME and chunk relationships; it
+excludes ciphertext and encryption versions so legitimate key rotation remains
+compatible. Authenticated decryption and the card-bound plaintext SHA-256 protect
+the single immutable materialized buffer. Capability validation runs once during
+preparation, then independently at egress. An eligible handle call
+whose live contract is invalid returns a clear file-upload refusal. Pre-dispatch
+failover shares the same buffer; a post-dispatch failure remains an unknown provider outcome
+and never triggers automatic resend. Audit records contain metadata only.
+
+This handle capability refuses guests, ordinary API keys, delegated/relay/service
+account callers, specialists outside their grants, mounted
+instance specifications, generic proxy calls, Raw/Multipart modes and async,
+durable or exact execution. Node-routed uploads are refused because the final
+HTTP attachment egress guard cannot fence node transport. Lark's separate
+managed multipart behavior and trusted projection remain unchanged.
+
+Generic raw attachment uploads require no feature flag. During a rolling deploy,
+an `attachment_id` call reaching an old replica fails with its existing
+base64-body-required error and succeeds once that replica is upgraded. Body-only
+uploads continue to work on both versions. Existing tool files keep the compatible
+`tool` origin and remain excluded from legacy image paths. The separate
+Lark/channel flag gates and rollback procedure below still apply to those features.
+Binary tool-file retention is ungated, so a rolling deployment can produce new
+rows before every replica is upgraded. Old replicas serve complete root files
+through 15 MiB normally and ignore the defaulted chunk metadata. For files above
+15 MiB, an old replica's owner download route decrypts the empty root and may
+return an empty file with HTTP 200 until that replica is upgraded. Old encrypted
+record/key-retirement verification rejects the new tool-file chunk relationships
+because its child lookup accepts only user-upload roots; its root size check
+also rejects an encrypted-empty root declaring the complete file size. Both
+limitations affect only files above the 15 MiB inline threshold: inline tool
+files create no children and pass the old root size check. New replicas assemble
+and validate the complete payload. This residual window also applies after a
+binary rollback; disabling Lark's write flag does not change already retained files,
+ungated tool-file capture or generic raw uploads. Existing root-filtered
+retention/list/image queries exclude child documents; existing scoped purge,
+root-and-child deletion and orphan sweeps remove them without leaving chunks.
+
 ## Inbound channel media
 
 The per-person `assistant:channel-media` flag defaults off. When enabled, verified
@@ -81,12 +254,42 @@ create uploads; their admitted turn receives the fixed note
 `attachments from guests are not shared with the assistant`. The opt-in guest scope below is the only exception. Media-bearing messages cannot answer
 approval cards or text decisions and do not enter duplicate-question coalescing.
 
+Lark/Feishu native file callbacks and public history retain the same existing
+raw `file_name`/`name` labels. A private per-message projection retains effective
+download names, including a usable secondary name when the raw primary is null
+or unusable; it is omitted from public response DTOs. Image and rich-post selectors additionally retain usable `file_name`,
+`name` or `filename` metadata. Effective names are sanitized at download/upload.
+When no usable selector name exists, the authenticated
+resource download honors bounded `Content-Disposition` names, preferring UTF-8
+`filename*` over `filename`. Named originals, including extensionless names and
+Unicode, retain their identity within the upload limit; long stems are shortened
+while keeping their suffix. Authenticated relay downloads provide an ASCII
+`filename` fallback and RFC 8187 `filename*` whenever that fallback differs from
+the sanitized original, including Unicode and ASCII parentheses. Canonical callbacks
+without names keep their existing shape; provider-response names are not written
+back to channel source metadata.
+
+Fetch results retain original names only. Authenticated relay responses can derive
+a nameless image's presentation suffix from a bounded PNG/JPEG/GIF/WebP signature.
+Retained names always wait for upload validation: a resource's declared
+MIME type cannot invent a name that masks the validated type. Base egress adds a
+known type's canonical suffix to missing or legacy generic names, including
+`attachment.pdf` for validated PDFs. Signature-derived download metadata never
+replaces full raster validation before assistant model input; opaque originals
+receive no invented extension. New human/Lark uploads distinguish missing names
+from original names, including the literal `attachment`, through optional stored
+provenance. Only ambiguous legacy placeholders receive legacy repair. Names whose
+stem is removed by sanitization (such as `🧾.PDF`) use a verified type fallback.
+Leading sanitized spaces/dots are removed before applying filename budgets,
+preserving a meaningful stem and suffix within the cap. Display suffixes are independent of the extractor's bounded format hint; long
+Unicode suffixes cannot prevent byte validation or become an empty text hint.
+
 ### Personal channel guest media
 
 The default-off `assistant:channel-guest-media` flag is evaluated for the linking
 person alongside `assistant:channel-media`. Enable it only after the fleet reports
-both `assistant:channel-media-v2` and `assistant:channel-guest-media` ready, with
-old workers drained. Stage A replicas do not advertise the guest capability.
+both `assistant:channel-media-v2` and `assistant:channel-guest-media` durably
+activated and serving-ready. Stage A replicas do not advertise the guest capability.
 This admits personal-agent guest media from authenticated relay selectors on
 Lark/Feishu, Discord, Slack, WhatsApp, X and Telegram, including relay-through-CMA.
 Native Discord/WhatsApp retrieval remains deferred to CMA#1402. Org-specialist
@@ -212,13 +415,12 @@ admission; no partially held reservation waits for a larger one.
 
 ### Channel rollout and rollback
 
-Upgrade **all NyxID replicas** and drain pre-release workers before enabling
-`assistant:channel-media`. The added Discord/Slack/WhatsApp/X path requires a
+Upgrade **all NyxID replicas** before enabling `assistant:channel-media`. The added
+Discord/Slack/WhatsApp/X path under that flag requires
 `assistant:channel-media-v2` serving readiness at admission and every fetch/recheck;
 legacy Lark/Feishu/Telegram owner paths do not acquire this new gate. With the
-existing flag already on, new adapters activate only after the complete roster
-advertises this capability and old workers are declared drained. Once that clean
-activation is recorded, supported roster overlaps retain media service even when
+existing flag already on, new adapters activate only after every live observation supports the capability and activation is recorded,
+without a roster/drain declaration. Once activation is recorded, supported roster overlaps retain media service even when
 strict `ready` is false. Hard serving blockers produce the unavailable-media note
 rather than a download. No new environment
 variable or guest-media authority is introduced in this stage.
@@ -314,7 +516,7 @@ names or content. An audit failure aborts the change.
 | `image_days` | 30 days | Integer 1–365 days, from first message binding |
 | `images_delete_after_turn` | false | Also expire sent user images once their first referencing turn settles |
 | `document_days` | 30 days | Integer 1–365 days, from first message binding; original bytes and extracted text expire together |
-| `tool_image_days` | null | null keeps tool images with the conversation; otherwise integer 1–365 days from creation |
+| `tool_image_days` | null | null keeps tool images and files with the conversation; otherwise integer 1–365 days from creation |
 
 Replicas refresh the policy snapshot every five seconds without restarting.
 Attachment downloads, agent image fetches, document paging, machine transfers and
@@ -329,7 +531,7 @@ failed and stopped turns all settle. Settlement records the first-use marker and
 when enabled, deletes those user images in the same transaction. Enabling the
 option later also expires images whose first turn already settled; abandoned
 turns are considered settled once their live lease ends. Documents and tool
-images do not follow this option.
+images and tool files do not follow this option.
 
 Cleanup runs every minute under a renewable cluster lease. Each pass examines at
 most 100 roots and 100 chunk records, saving cursors for the next pass. Deletion
@@ -357,7 +559,8 @@ untrusted data and every read is re-authorized against the active assistant
 turn.
 
 Use maintained, pure-Rust `lopdf` for PDF parsing/text and `zip` plus `quick-xml`
-for DOCX. They avoid external converters, shell commands and Office execution;
+for DOCX. Text extraction avoids external converters, shell commands and Office execution;
+the opt-in PDF image fallback below separately uses the packaged Poppler worker.
 DOCX extraction needs only bounded ZIP entries and WordprocessingML paragraphs.
 UTF-8 text, CSV and JSON receive bounded structural validation. Pin compatible
 versions in Cargo.lock. `lopdf` 0.38 is a compatible release in this workspace:
@@ -417,6 +620,99 @@ extractions persist their character count; only legacy rows need decryption to
 compute it and back-fill the count once. Unreadable legacy text leaves that upload’s
 coverage unavailable without hiding the draft. A complete scope declaration is the author's
 claim, not a server guarantee; reduced scope needs separate owner acceptance.
+
+### Scanned PDF pages
+
+PDF extraction classifies each page using non-whitespace characters, preserving
+page numbers, extracted text and sections. The additive `pdf` metadata reports
+`no_text`, `mixed` or `text`, `text_pages`, `image_pages`, `unread_pages` and a
+bounded reason. `text_pages` lists pages with text available for the read tool.
+`image_pages` lists page images included in requests that completed without an
+image-input rejection. This records input delivery. The model still needs to
+inspect the content. A mixed PDF only renders pages without text. Legacy PDFs
+are classified from their encrypted page spans.
+If the preparation deadline expires while those spans are being decrypted,
+classification remains `unknown` and the authorized parent's pages remain unread.
+
+Every request identifies the PDF images it carries and the pages accepted in
+prior requests in that turn. Tool-image continuations carry their own input.
+The encrypted subscriber checkpoint preserves those facts across stream
+reconnects and worker replacement. Cancellation or an incomplete response
+leaves unconfirmed pages unavailable. A later request cannot erase delivery
+confirmed in an earlier request. Old transcript claims without confirmation
+are displayed as unconfirmed. A shared group post displays the common PDF
+attachment. Each specialist's own thread and turn store its coverage.
+
+The default-off `assistant:pdf-vision` personal/org/global feature flag enables
+this fallback. Upgrade every API replica and encrypted-record migration worker
+before enabling it. The renderer adapter uses Debian Bookworm `poppler-utils`
+(`pdftoppm`) in the backend runtime image on both linux/amd64 and linux/arm64;
+CI test execution installs it explicitly. Native development may set the absolute
+`NYXID_PDF_RENDERER` path; the default is `/usr/bin/pdftoppm`. No shell, inherited
+credentials, remote converter, OCR service or automatic downloads are used.
+Missing dependencies produce an explicit unread-page outcome and metadata-only
+logs keyed by conversation, turn, parent attachment and page, never parser stderr
+or document content.
+
+At most eight pages per PDF are rendered at 2048 pixels on the long edge, JPEG
+quality 85, at most 2 MiB per encoded page. Ordinary images and derived pages share
+the upstream/model image-count, per-image and total-byte limits (ten images and
+16 MiB maximum for PDF planning). A page gets eight wall seconds and six CPU
+seconds; a PDF gets twenty wall seconds from parent authorization lookup through
+coverage/source loading and decryption, memory/worker waits, rendering and page
+persistence. An authorization timeout fails closed. A later preparation timeout
+keeps already staged pages and reports the remaining pages as unread; it does
+not consume image capacity for an unstaged page. Linux workers have a 128 MiB
+address-space limit. Before loading the PDF, each render operation reserves 160 MiB of the
+existing 192 MiB byte budget, covering the worker, source and encoded/encrypted
+buffers. Two worker slots are additionally bounded by that shared byte budget.
+Stop/future cancellation and deadlines kill the converter process group and
+reap the direct child. Attachment HTTP buffers retain their byte reservation
+until consumed or dropped.
+
+A derived `pdf_page` is one inline encrypted row with `parent_attachment_id`,
+`page` and `render_version`, never a payload chunk or another user attachment.
+It has no children. Parent/page/version are bound in contextual encryption and
+the migration adapter distinguishes it from chunks. Creation serializes with
+parent deletion and live-turn changes. Reads and platform-model image proofs
+resolve the parent PDF through the same thread Agent Key, live turn, document
+ACL and current document-retention policy, including policy shortening before
+cleanup. Group/channel guests cannot turn a forbidden document into an allowed
+image. Parent cleanup and owner/conversation erasure remove direct page rows.
+Derived rows reserve string values of the form `pdf/<render_version>/<page>`
+in the legacy sparse `(parent_attachment_id, chunk_index)` index. The source
+reader addresses numeric chunk indexes. Startup also keeps a partial unique
+page index and upgrades earlier derived rows in batches of 100 before restoring
+the old sparse index if absent. It preserves each page ID and encryption
+context. Before upgrading a fleet that ran the earlier draft renderer, disable
+the flag and let existing PDF turns settle. This prevents old writers from
+inserting new rows during conversion.
+
+An older server can restart on the same database and read the original
+attachment. Older encryption integrity and key-retirement code needs the
+upgraded page reader to verify derived rows. If that maintenance must run on an
+older binary, disable PDF vision and drain in-flight PDF turns before removing
+the derived cache. In the intended NyxID database, run the following in
+`mongosh`. The filter selects only derived page rows. Original uploads, numeric
+payload chunks, and transcript coverage remain available.
+
+```javascript
+const derived = { origin: "pdf_page" };
+while (true) {
+  const ids = db.assistant_attachments.find(derived, { _id: 1 })
+    .limit(100).toArray().map(({ _id }) => _id);
+  if (!ids.length) break;
+  db.assistant_attachments.deleteMany({ ...derived, _id: { $in: ids } });
+}
+```
+
+When upgraded servers re-enable the flag, a later turn can render fresh page
+rows from a retained source. Flag-off, text-only models, unsupported image
+capabilities, and renderer or image limits report the pages still unavailable.
+`nyx__attachment_read` retains its text pagination contract. A terminal text
+page has `complete: true` and `next_offset: null`. The `pdf` field reports
+visual coverage. Fully scanned files return the no-extracted-text
+result with their page numbers.
 
 ## Images and upstream compatibility
 
@@ -512,7 +808,7 @@ shared byte budget described above.
 - `DELETE` the corresponding attachment URL removes only an unbound upload;
   owner `GET` serves bytes with `nosniff` and sandbox CSP.
 - `GET /assistant-attachments/{uuid}/content` accepts only the bound thread Agent
-  Key and only user-upload images. Delegated account-read credentials are denied.
+  Key and bound user-upload images or derived PDF pages. Delegated account-read credentials are denied.
 
 Paths above are relative to `/api/v1`. Deploy NyxID and the separate NyxAgent
 image PR independently: missing capability metadata is a supported fallback.
@@ -633,8 +929,8 @@ They never submit another Sandbox execution. Recovery updates the saved outcome
 and association atomically. Missing/expired bytes cannot be recreated.
 
 Ship tolerant frontend readers first, then every API/async writer/worker and normal
-startup indexes. Configure the existing replica roster/drain readiness before
-enabling `assistant:generated-artifacts`; acquisition requires that capability.
+startup indexes. Observed support automatically records `assistant:generated-artifacts` before
+its flag can be enabled or acquisition can proceed; no roster/drain setup is required.
 Disabling hides generated rows/outcomes from history and active turns and disables
 both recovery transports. Admitted watches drain and retained owner GETs remain
 readable until expiry. Re-enabling restores exposure/recovery. Keep upgraded

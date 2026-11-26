@@ -42,13 +42,13 @@ pub(crate) async fn sweep_with_adapters(
             .await?
             .try_collect()
             .await?;
+        super::job_health::checkpoint(true);
         let adapter = adapter.as_ref();
         stream::iter(bots)
             .for_each_concurrent(8, |bot| async move {
-                if poll_bot(state, adapter, &bot.id, min_interval_secs)
-                    .await
-                    .is_err()
-                {
+                let result = poll_bot(state, adapter, &bot.id, min_interval_secs).await;
+                super::job_health::checkpoint(result.is_ok());
+                if result.is_err() {
                     tracing::warn!(bot_id = %bot.id, "Channel poll failed; continuing sweep");
                 }
             })
@@ -79,6 +79,9 @@ pub(crate) async fn poll_bot(
     bot_id: &str,
     min_interval_secs: u64,
 ) -> AppResult<()> {
+    let Some(_work) = state.shutdown.background() else {
+        return Ok(());
+    };
     let collection = state.db.collection::<ChannelBot>(COLLECTION_NAME);
     let mut filter = due_filter(adapter.platform_id(), min_interval_secs, Utc::now());
     filter.insert("_id", bot_id);
@@ -91,6 +94,13 @@ pub(crate) async fn poll_bot(
     else {
         return Ok(());
     };
+
+    let release = state.shutdown.register_release(super::shutdown::Release {
+        safe_after_stop: false,
+        db: state.db.clone(), collection: COLLECTION_NAME,
+        filter: doc! {"_id": &bot.id, "poll_lease_until": lease_until, "connection_id": &bot.connection_id},
+        update: doc! {"$set": {"poll_lease_until": null}},
+    });
 
     if super::channel_billing_service::require_webhooks(&state.config, &bot.platform).is_err()
         || (bot.platform == "x" && super::channel_adapters::x::webhook_events_enabled(&bot))
@@ -142,7 +152,7 @@ pub(crate) async fn poll_bot(
         }
         Ok(outcome)
     };
-    let work = tokio::time::timeout(Duration::from_secs(15 * 60), work);
+    let work = super::job_health::bounded_wait(Duration::from_secs(15 * 60), work);
     tokio::pin!(work);
     let mut renew = tokio::time::interval(Duration::from_secs(20));
     renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -155,7 +165,10 @@ pub(crate) async fn poll_bot(
                 match collection.update_one(doc! { "_id": &bot.id, "is_active": true, "status": "active", "connection_id": &bot.connection_id,
                     "poll_lease_until": { "$eq": lease_until, "$gt": bson::DateTime::now() } },
                     doc! { "$set": { "poll_lease_until": next } }).await {
-                    Ok(result) if result.modified_count == 1 => lease_until = next,
+                    Ok(result) if result.modified_count == 1 => {
+                        lease_until = next;
+                        release.update_filter(doc! {"_id": &bot.id, "poll_lease_until": lease_until, "connection_id": &bot.connection_id});
+                    },
                     _ => break Err(AppError::ChannelPlatformError("Channel polling lease was lost; retry later".to_string())),
                 }
             }
@@ -165,6 +178,7 @@ pub(crate) async fn poll_bot(
     // Every outcome releases only this claim; a reconnect or replacement claim fences the write.
     let fence = doc! { "_id": &bot.id, "poll_lease_until": lease_until, "connection_id": &bot.connection_id };
     let mut set = doc! { "last_polled_at": bson::DateTime::now(), "poll_lease_until": null };
+    let poll_succeeded = result.is_ok();
     let failure = match result {
         Ok(outcome) => {
             if let Some(notice) = outcome.notice {
@@ -226,10 +240,12 @@ pub(crate) async fn poll_bot(
         .await;
     let committed = committed?;
     released?;
-    if committed.modified_count > 0
-        && let Some((code, cause)) = failure
-    {
-        super::channel_credentials::audit_failure(&state.db, &bot, code, &cause).await;
+    release.completed();
+    if committed.modified_count > 0 {
+        super::job_health::checkpoint(poll_succeeded);
+        if let Some((code, cause)) = failure {
+            super::channel_credentials::audit_failure(&state.db, &bot, code, &cause).await;
+        }
     }
     Ok(())
 }

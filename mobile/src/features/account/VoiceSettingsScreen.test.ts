@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { translate } from "../../i18n/translate";
+import type { Language } from "../../i18n/language";
 import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 import type {
@@ -52,7 +54,8 @@ const saved: VoicePreferences = {
   notify_on_completion: true,
 };
 
-function setup(preferences: VoicePreferences = saved) {
+function setup(preferences: VoicePreferences = saved, ui: Language = "en") {
+  const dictation = { value: "automatic", label: "Chinese (China)" };
   let online = true;
   let reply: Promise<{ voice: VoicePreferences }> | undefined;
   const calls: VoicePreferences[] = [];
@@ -141,13 +144,24 @@ function setup(preferences: VoicePreferences = saved) {
       nativeVoiceEnvironment: () => environment,
     },
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => ({
+        language: ui,
+        t: (phrase: string, values?: Record<string, string | number>) =>
+          translate(ui, phrase, values),
+      }),
+    },
     "../assistant/voice/useDictationLanguage": {
+      AUTOMATIC_DICTATION_LANGUAGE: "automatic",
       useDictationLanguage: () => ({
-        value: "device",
+        ...dictation,
         options: [],
         choose() {},
       }),
     },
+  });
+  harness.mock("../assistant/voice/DictationLanguagePicker", {
+    DictationLanguagePicker: "DictationLanguagePicker",
   });
   const { VoiceSettingsScreen } = harness.load(
     fileURLToPath(new URL("./VoiceSettingsScreen.tsx", import.meta.url)),
@@ -172,6 +186,7 @@ function setup(preferences: VoicePreferences = saved) {
   };
   return {
     harness,
+    dictation,
     all,
     row,
     notify,
@@ -282,3 +297,39 @@ test("offline cached settings disable and guard every live voice preference call
   assert.ok(f.all().some((node) => /offline/.test(node.props.message ?? "")));
   f.harness.unmount();
 });
+
+for (const ui of ["en", "zh-CN", "zh-TW"] as const) {
+  test(`dictation row shows only the resolved label with automatic detail in ${ui}`, () => {
+    const f = setup(saved, ui);
+    const label =
+      ui === "en"
+        ? "Chinese (China)"
+        : ui === "zh-CN"
+          ? "中文（中国）"
+          : "中文（中國）";
+    f.dictation.label = label;
+    f.harness.render();
+    const automatic = f.row(translate(ui, "Language"));
+    assert.equal(automatic.props.value, label);
+    assert.equal(automatic.props.detail, translate(ui, "Device language"));
+    assert.ok(
+      f
+        .all()
+        .some(
+          (node) =>
+            node.props.footer ===
+            translate(
+              ui,
+              "This language is used for message dictation and crew voice dictation. Voice conversations use their own language preference. Words dictated into a message can be edited before sending.",
+            ),
+        ),
+    );
+    f.dictation.value = "ja-JP";
+    f.dictation.label = "日本語（日本）";
+    f.harness.render();
+    const chosen = f.row(translate(ui, "Language"));
+    assert.equal(chosen.props.value, "日本語（日本）");
+    assert.equal(chosen.props.detail, undefined);
+    f.harness.unmount();
+  });
+}

@@ -152,6 +152,7 @@ pub async fn issue_ssh_certificate(
         &user.email,
         &body.public_key,
         body.principal.trim(),
+        false,
     )
     .await?;
 
@@ -319,7 +320,7 @@ pub async fn ssh_tunnel_ws(
 
     // Keep session state off the upgrade and lease polling frames.
     Ok(ws
-        .on_upgrade(move |socket| {
+        .on_upgrade(state.shutdown.clone().upgrade_callback(move |socket| {
             Box::pin(async move {
                 let work = Box::pin(async {
                     handle_ssh_socket(
@@ -346,7 +347,7 @@ pub async fn ssh_tunnel_ws(
                     let _ = work.await;
                 }
             })
-        })
+        }))
         .into_response())
 }
 
@@ -492,20 +493,28 @@ async fn handle_ssh_socket(
         let _ = socket.close().await;
         return;
     }
-    let connect_target = format!("{}:{}", ssh_service.host, ssh_service.port);
     let mut tcp_stream = match tokio::time::timeout(
         Duration::from_secs(state.config.ssh_connect_timeout_secs),
-        tokio::net::TcpStream::connect(&connect_target),
+        async {
+            let peers =
+                ssh_service::resolve_direct_ssh_target(&ssh_service.host, ssh_service.port).await?;
+            tokio::net::TcpStream::connect(peers.as_slice()).await
+        },
     )
     .await
     {
         Ok(Ok(stream)) => stream,
         Ok(Err(error)) => {
             tracing::warn!(service_id = %service_id, error = %error, "SSH tunnel connect failed");
+            let (code, reason) = if error.kind() == std::io::ErrorKind::PermissionDenied {
+                (1008, "SSH destination is not permitted")
+            } else {
+                (1011, "Failed to connect downstream SSH target")
+            };
             let _ = socket
                 .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                    code: 1011,
-                    reason: "Failed to connect downstream SSH target".into(),
+                    code,
+                    reason: reason.into(),
                 })))
                 .await;
 
@@ -1286,17 +1295,8 @@ pub(crate) async fn authorize_ssh_access_for_connection(
     }
     ssh_service::ensure_ssh_service(&service)?;
 
-    // SSH services may be org-owned. Resolve the effective owner through the
-    // same membership-aware path the HTTP proxy uses, so SSH access stays
-    // consistent with proxy access. `find_effective_service_owner` applies the
-    // same role (`can_proxy`) and per-service scope filters, returning the
-    // effective owner for the resource owner or an in-scope, proxy-capable org
-    // member, and `None` otherwise. For a private (org- or personally-owned)
-    // service a `None` result means the caller has no claim on it, so we return
-    // NotFound rather than falling back to treating the caller as the owner.
-    // The service creator and public catalog services (visibility != "private")
-    // keep their existing access. NotFound (rather than Forbidden) avoids
-    // leaking the existence of a private service the caller cannot see.
+    // Select the connection for mode, scope, approvals and billing. Catalog
+    // authority is checked independently for its effective owner below.
     let effective_owner = if let Some(connection) = connection {
         let access = crate::services::org_service::resolve_owner_access(
             &state.db,
@@ -1325,24 +1325,7 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         )
         .await?
     };
-    let owner_for_resolution = match effective_owner.as_deref() {
-        Some(owner) => owner,
-        None => {
-            // No personal service and no authorized org membership grants
-            // access. Reject for a private (owned) service unless the caller
-            // is its creator -- a Direct owner who never provisioned a
-            // UserService also resolves to `None` here and must not be locked
-            // out of their own service. Public catalog services keep their
-            // open behaviour.
-            if service.visibility == "private"
-                && crate::services::ownership_transfer_service::catalog_owner(&service)
-                    != resolution_user_id
-            {
-                return Err(AppError::NotFound("SSH service not found".to_string()));
-            }
-            &resolution_user_id
-        }
-    };
+    let owner_for_resolution = effective_owner.as_deref().unwrap_or(&resolution_user_id);
     let mut auth_context = if let Some(connection) = connection {
         if connection.catalog_service_id.as_deref() != Some(service.id.as_str()) {
             return Err(AppError::Conflict("SSH catalog identity changed".into()));
@@ -1358,6 +1341,13 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         ssh_service::resolve_ssh_auth_context_for_owner(&state.db, owner_for_resolution, &service)
             .await?
     };
+    use crate::services::catalog_service::{CatalogUse, require_catalog_use};
+    let purpose = if auth_context.mode == SshAuthMode::Cert {
+        CatalogUse::SshCertificate
+    } else {
+        CatalogUse::Connection
+    };
+    require_catalog_use(&state.db, owner_for_resolution, &service, purpose).await?;
     let (approval_outcome, automatic) = approval_service::evaluate_for_chat(
         &state.db,
         &approval_owner_user_id,
@@ -1416,6 +1406,7 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         auth_user.api_key_id.as_deref(),
     )
     .await?;
+    request_operation.apply_connected_budget(timeout_secs);
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -1754,6 +1745,8 @@ mod tests {
             requires_user_credential: false,
             is_active: true,
             created_by: created_by.to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,
@@ -1836,6 +1829,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ssh_certificate_authority_requires_catalog_entitlement() {
+        use crate::models::downstream_service::COLLECTION_NAME as SERVICES;
+        use crate::models::user_service::{COLLECTION_NAME as CONNECTIONS, UserService};
+        use crate::test_utils::{
+            connect_transaction_test_database, set_test_approval_preference, test_app_state,
+            test_auth_user, test_user_service,
+        };
+
+        let db = connect_transaction_test_database("ssh_catalog_entitlement").await;
+        let actor = uuid::Uuid::new_v4().to_string();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let catalog = ssh_service_row(&service_id, &owner, "private");
+        db.collection::<DownstreamService>(SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        let mut connection = test_user_service(
+            "connection",
+            &actor,
+            "ssh-service",
+            "endpoint",
+            Some(&service_id),
+            None,
+        );
+        connection.service_type = "ssh".into();
+        connection.ssh_auth_mode = SshAuthMode::Cert;
+        db.collection::<UserService>(CONNECTIONS)
+            .insert_one(connection)
+            .await
+            .unwrap();
+        set_test_approval_preference(&db, &actor, false).await;
+        let state = test_app_state(db);
+        assert!(matches!(
+            super::authorize_ssh_access(&state, &test_auth_user(&actor), &service_id).await,
+            Err(crate::errors::AppError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn personal_ssh_alias_uses_current_org_connection_scope() {
+        use crate::models::org_membership::{OrgMembership, OrgRole};
+        use crate::models::user::{User, UserType};
+        use crate::models::user_service::UserService;
+        use crate::test_utils::{
+            connect_transaction_test_database, set_test_approval_preference, test_app_state,
+            test_auth_user, test_membership, test_user, test_user_service,
+        };
+
+        let db = connect_transaction_test_database("ssh_alias_org_scope").await;
+        let org = uuid::Uuid::new_v4().to_string();
+        let actor = uuid::Uuid::new_v4().to_string();
+        let catalog = ssh_service_row("catalog", &org, "private");
+        db.collection::<User>(crate::models::user::COLLECTION_NAME)
+            .insert_many([
+                test_user(&actor, UserType::Person),
+                test_user(&org, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let mut org_row = test_user_service(
+            "org-connection",
+            &org,
+            "org-ssh",
+            "org-endpoint",
+            Some(&catalog.id),
+            None,
+        );
+        org_row.service_type = "ssh".into();
+        org_row.ssh_auth_mode = SshAuthMode::Cert;
+        let mut personal = org_row.clone();
+        personal.id = "personal-connection".into();
+        personal.user_id.clone_from(&actor);
+        db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
+            .insert_many([org_row.clone(), personal])
+            .await
+            .unwrap();
+        let memberships =
+            db.collection::<OrgMembership>(crate::models::org_membership::COLLECTION_NAME);
+        let membership = test_membership(&org, &actor, OrgRole::Member, Some(vec![org_row.id]));
+        memberships.insert_one(&membership).await.unwrap();
+        set_test_approval_preference(&db, &actor, false).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&actor);
+        super::authorize_ssh_access(&state, &auth, &catalog.id)
+            .await
+            .unwrap();
+        memberships
+            .update_one(
+                mongodb::bson::doc! {"_id": &membership.id},
+                mongodb::bson::doc! {"$set": {"allowed_service_ids": []}},
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            super::authorize_ssh_access(&state, &auth, &catalog.id).await,
+            Err(crate::errors::AppError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn authorize_ssh_access_allows_service_creator() {
         use crate::models::downstream_service::COLLECTION_NAME as DOWNSTREAM_SERVICES;
         use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
@@ -1892,7 +1990,7 @@ mod tests {
             .await
             .expect("insert service-account owner");
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(ssh_service_row(&service_id, &catalog_author_id, "private"))
+            .insert_one(ssh_service_row(&service_id, &catalog_author_id, "public"))
             .await
             .expect("insert catalog SSH service");
         let mut user_service = test_user_service(

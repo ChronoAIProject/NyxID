@@ -92,6 +92,9 @@ async fn seed_sentinels(db: &mongodb::Database) {
 async fn insert_wallet(db: &mongodb::Database, owner: &str) -> BillingWallet {
     let now = Utc::now();
     let wallet = BillingWallet {
+        snapshot_generation: 0,
+        tax_generation: 0,
+        tax_guard_token: None,
         id: Uuid::new_v4().to_string(),
         owner_id: owner.into(),
         lago_customer_id: owner.into(),

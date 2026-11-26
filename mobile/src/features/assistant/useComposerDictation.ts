@@ -8,11 +8,15 @@ import {
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useWorkspaceAccessibility } from "../../lib/accessibility/workspaceAccessibility";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { deviceLanguages } from "../../i18n/deviceLanguages";
+import { languageLabel } from "./voice/dictationLanguage";
 import { volumeLevel } from "./voice/dictationLevel";
-import { dictationLocale } from "./voice/dictationLocale";
+import { recognitionLocales } from "./voice/recognitionLocales";
+import { resolveDictationLanguage } from "./voice/resolveDictationLanguage";
 import { savedDictationLanguage } from "./voice/dictationLanguage";
 import { waitForVoiceForeground } from "./voice/voicePermission";
 import { claimVoiceAudioSession } from "./voice/audioSessionOwnership";
+import { claimSystemStatusActivity } from "../../lib/systemStatusActivity";
 
 type Phase = "idle" | "permission" | "connecting" | "listening" | "stopping";
 
@@ -29,6 +33,10 @@ const START_TIMEOUT_MS = 8000;
 const STOP_TIMEOUT_MS = 8000;
 /** How long a new attempt waits for an aborted one's `end`. */
 const RELEASE_TIMEOUT_MS = 1500;
+/** Some Android services ignore silence intent extras and stop after ~4s.
+ * Restart only without a transcript after a no-speech error, inside one bounded attempt. */
+const ANDROID_INITIAL_SILENCE_MS = 15_000;
+const MAX_SILENCE_RESTARTS = 3;
 
 function permissionDeniedMessage() {
   return Platform.OS === "android"
@@ -36,7 +44,41 @@ function permissionDeniedMessage() {
     : DENIED;
 }
 
-function dictationError(code: ExpoSpeechRecognitionErrorCode) {
+/** Both prompt denial and native errors use the actual iOS permission pair. */
+async function deniedPermissionMessage(permissions: {
+  status: "granted" | "denied" | "undetermined";
+  granted: boolean;
+  restricted?: boolean;
+}): Promise<string | undefined> {
+  if (permissions.granted && !permissions.restricted) return undefined;
+  const restricted = () =>
+    Platform.OS === "ios"
+      ? "Speech recognition is restricted on this device in Screen Time. You can keep typing."
+      : "Speech recognition is restricted on this device. You can keep typing.";
+  if (permissions.restricted) return restricted();
+  if (Platform.OS !== "ios") return permissionDeniedMessage();
+  if (permissions.status !== "denied") return undefined;
+  try {
+    const [mic, speech] = await Promise.all([
+      Recognizer.getMicrophonePermissionsAsync(),
+      Recognizer.getSpeechRecognizerPermissionsAsync(),
+    ]);
+    if (speech.restricted) return restricted();
+    if (mic.status === "denied" && speech.status === "denied") return DENIED;
+    if (mic.status === "denied")
+      return "Allow microphone access in Settings to dictate. You can keep typing.";
+    if (speech.status === "denied")
+      return "Allow speech recognition access in Settings to dictate. You can keep typing.";
+    return undefined;
+  } catch {
+    // The combined response already establishes denial if individual reads fail.
+  }
+  return permissionDeniedMessage();
+}
+
+function dictationError(
+  code: ExpoSpeechRecognitionErrorCode | "too-many-requests",
+) {
   switch (code) {
     case "aborted":
       return undefined;
@@ -50,16 +92,17 @@ function dictationError(code: ExpoSpeechRecognitionErrorCode) {
         ? "Dictation isn't available in your selected language. Choose another language or keep typing."
         : "Dictation isn't available in your device's language. You can keep typing.";
     case "network":
-      return "Speech recognition needs a connection for your language. Check your connection and try again.";
+      return "Speech recognition couldn't continue. Check your connection and try again.";
     case "service-not-allowed":
       return Platform.OS === "android"
-        ? "Speech recognition isn't available right now. Check microphone access and your device's speech recognition service, then try again. You can keep typing."
-        : "Speech recognition isn't available right now. Check that Dictation is on in Settings › General › Keyboard, then try again.";
+        ? "Speech recognition is temporarily unavailable. Try again. If this continues, check your device's speech recognition service."
+        : "Speech recognition is temporarily unavailable. Try again. If this continues, check Siri & Dictation in Settings.";
     case "audio-capture":
       return "The microphone couldn't record. Close other apps using it and try again.";
     case "interrupted":
       return "Dictation was interrupted.";
     case "busy":
+    case "too-many-requests":
       return "Speech recognition is busy. Try again in a moment.";
     default:
       return "Dictation stopped unexpectedly. You can keep typing.";
@@ -86,12 +129,13 @@ function deactivate(owner: AudioOwner) {
     }
   });
 }
-function release(owner: AudioOwner) {
+function release(owner: AudioOwner, endCapture: () => void) {
   const done = new Promise<void>((resolve) => {
     const finish = () => {
       subscription.remove();
       clearTimeout(timer);
       deactivate(owner);
+      endCapture();
       if (releasing === done) releasing = undefined;
       resolve();
     };
@@ -105,27 +149,30 @@ function release(owner: AudioOwner) {
 /** The chosen dictation language when still supported, else the device's. */
 async function recognitionLanguage() {
   const chosen = await savedDictationLanguage();
-  let phone: string | undefined;
-  try {
-    phone = Intl.DateTimeFormat().resolvedOptions().locale;
-  } catch {
-    phone = undefined;
-  }
-  try {
-    const supported = (await Recognizer.getSupportedLocales({})).locales;
-    if (chosen && supported.includes(chosen)) return chosen;
-    return phone ? dictationLocale(phone, supported) : undefined;
-  } catch {
-    return chosen ?? phone;
-  }
-}
-
-function supportsOnDevice() {
-  try {
-    return Recognizer.supportsOnDeviceRecognition();
-  } catch {
-    return false;
-  }
+  const preferred = deviceLanguages();
+  const discovery = await recognitionLocales(Recognizer, Platform.OS);
+  const locales = discovery?.locales ?? [];
+  const installedLocales = discovery?.installedLocales ?? [];
+  const lang = resolveDictationLanguage(
+    chosen,
+    preferred,
+    locales,
+    Platform.OS,
+  );
+  return {
+    lang,
+    service: discovery.service,
+    canChooseLanguage: locales.length > 0 || Platform.OS === "android",
+    unsupported:
+      locales.length > 0 && !lang && (Platform.OS !== "android" || !!chosen),
+    selected: chosen ?? lang ?? preferred[0],
+    hasSavedChoice: !!chosen,
+    // The iOS JS capability APIs only inspect the default locale. Native code
+    // applies this request only if the selected recognizer supports it.
+    onDevice:
+      Platform.OS === "ios" ||
+      (!!lang && (installedLocales ?? []).includes(lang)),
+  };
 }
 
 function levelSource() {
@@ -163,7 +210,7 @@ export function useComposerDictation({
   /** Crew voice ends each utterance at native silence detection. */
   continuous?: boolean;
 }) {
-  const { t } = useAppLanguage();
+  const { t, language } = useAppLanguage();
   const focused = useIsFocused();
   const { sheetOpen } = useWorkspaceAccessibility();
   enabled = enabled && !sheetOpen;
@@ -172,6 +219,8 @@ export function useComposerDictation({
   const [caption, setCaption] = useState({ final: "", interim: "" });
   const [error, setError] = useState<string>();
   const [permissionDenied, setPermissionDenied] = useState(false);
+  const [chooseLanguage, setChooseLanguage] = useState(false);
+  const [recognitionLocale, setRecognitionLocale] = useState<string>();
   const [levels] = useState(levelSource);
   const current = useRef({
     scope,
@@ -193,6 +242,7 @@ export function useComposerDictation({
     setCaption({ final: "", interim: "" });
     setError(undefined);
     setPermissionDenied(false);
+    setChooseLanguage(false);
   }
   useEffect(() => {
     discard();
@@ -214,6 +264,7 @@ export function useComposerDictation({
       return;
     setError(undefined);
     setPermissionDenied(false);
+    setChooseLanguage(false);
     const controller = new AbortController();
     const identity = { scope, epoch };
     let permissionPrompt:
@@ -230,9 +281,25 @@ export function useComposerDictation({
     let interimText = "";
     let failure: string | undefined;
     let nativeStartedAt = 0;
+    let lastNativeStartedAt = 0;
+    let receivedResult = false;
+    let heardSpeech = false;
+    let silenceRestarts = 0;
+    let recoverableSilence = false;
+    let serverRetried = false;
+    let recovering: Promise<boolean> | undefined;
+    let restartSilent: (() => void) | undefined;
+    let retryWithServer: (() => void) | undefined;
     let subscriptions: { remove(): void }[] = [];
+    let releaseStatus: (() => void) | undefined;
+    const endCapture = () => {
+      releaseStatus?.();
+      releaseStatus = undefined;
+    };
     let permissionTimer: ReturnType<typeof setTimeout> | undefined;
     let startTimer: ReturnType<typeof setTimeout> | undefined;
+    let nativeEndTimer: ReturnType<typeof setTimeout> | undefined;
+    let silenceTimer: ReturnType<typeof setTimeout> | undefined;
     let stopTimer: ReturnType<typeof setTimeout> | undefined;
     const spoken = () =>
       [finalText.trim(), interimText.trim()].filter(Boolean).join(" ");
@@ -244,6 +311,14 @@ export function useComposerDictation({
       getAuthEpoch() === epoch &&
       current.current.enabled &&
       current.current.focused;
+    const canRestartSilence = () =>
+      Platform.OS === "android" &&
+      continuous &&
+      !stopping &&
+      !heardSpeech &&
+      !spoken() &&
+      silenceRestarts < MAX_SILENCE_RESTARTS &&
+      Date.now() - nativeStartedAt < ANDROID_INITIAL_SILENCE_MS;
     const detach = () => {
       for (const subscription of subscriptions) subscription.remove();
       subscriptions = [];
@@ -251,13 +326,18 @@ export function useComposerDictation({
       clearTimeout(permissionTimer);
       clearTimeout(startTimer);
       clearTimeout(stopTimer);
+      clearTimeout(silenceTimer);
+      clearTimeout(nativeEndTimer);
     };
     const cancel = () => {
       controller.abort();
       detach();
       if (native) {
         native = false;
-        release(audioOwner!);
+        release(audioOwner!, endCapture);
+      } else if (audioOwner) {
+        deactivate(audioOwner);
+        endCapture();
       }
     };
     /**
@@ -266,6 +346,7 @@ export function useComposerDictation({
      */
     const settle = () => {
       detach();
+      endCapture();
       operation.current = undefined;
       const text = spoken();
       setCaption({ final: "", interim: "" });
@@ -313,7 +394,7 @@ export function useComposerDictation({
         stopTimer = setTimeout(() => {
           if (!valid()) return;
           native = false;
-          release(audioOwner!);
+          release(audioOwner!, endCapture);
           settle();
         }, STOP_TIMEOUT_MS);
       },
@@ -344,14 +425,20 @@ export function useComposerDictation({
     setCaption({ final: "", interim: "" });
     setPhase("permission");
     try {
-      if (Platform.OS === "android" && !Recognizer.isRecognitionAvailable()) {
+      const available =
+        Platform.OS !== "android" || Recognizer.isRecognitionAvailable();
+      let result = await Recognizer.getPermissionsAsync();
+      if (!valid()) return;
+      if (AppState.currentState !== "active") throw new Error(START_FAILED);
+      if (!available) {
+        if (result.status === "denied" || result.restricted) {
+          setPermissionDenied(true);
+          throw new Error(permissionDeniedMessage());
+        }
         throw new Error(
           "This device doesn't have a speech recognition service available. You can keep typing.",
         );
       }
-      let result = await Recognizer.getPermissionsAsync();
-      if (!valid()) return;
-      if (AppState.currentState !== "active") throw new Error(START_FAILED);
       if (!result.granted) {
         permissionPrompt = {
           androidBackgroundAllowed: Platform.OS === "android",
@@ -370,14 +457,10 @@ export function useComposerDictation({
           permissionTimer = undefined;
           if (!valid()) return;
           if (!result.granted) {
-            setPermissionDenied(true);
-            throw new Error(
-              result.restricted
-                ? Platform.OS === "android"
-                  ? "Speech recognition is restricted on this device. You can keep typing."
-                  : "Speech recognition is restricted on this device in Screen Time. You can keep typing."
-                : permissionDeniedMessage(),
-            );
+            const denied = await deniedPermissionMessage(result);
+            if (!valid()) return;
+            setPermissionDenied(!!denied);
+            throw new Error(denied ?? START_FAILED);
           }
           try {
             await waitForVoiceForeground(AppState, controller.signal, valid, {
@@ -402,13 +485,29 @@ export function useComposerDictation({
         setPhase("idle");
         setError((previous) => previous ?? START_FAILED);
       }, START_TIMEOUT_MS);
-      const lang = await recognitionLanguage();
+      const recognition = await recognitionLanguage();
+      const { lang } = recognition;
       if (!valid()) return;
+      setRecognitionLocale(
+        lang ?? (recognition.unsupported ? recognition.selected : undefined),
+      );
+      if (recognition.unsupported) {
+        setChooseLanguage(true);
+        throw new Error(
+          recognition.hasSavedChoice
+            ? "Dictation isn't available in your selected language. Choose another language or keep typing."
+            : "Dictation isn't available in your device's language. Choose a language or keep typing.",
+        );
+      }
       await releasing;
       if (!valid()) return;
       const show = () =>
         setCaption({ final: finalText.trim(), interim: interimText.trim() });
       subscriptions = [
+        Recognizer.addListener("audiostart", () => {
+          if (valid()) releaseStatus ??= claimSystemStatusActivity();
+        }),
+        Recognizer.addListener("audioend", endCapture),
         Recognizer.addListener("start", () => {
           if (!valid()) return;
           clearTimeout(startTimer);
@@ -419,7 +518,9 @@ export function useComposerDictation({
           if (!valid()) return;
           // Each final segment is appended (the recognizer supplies spacing);
           // the interim tail is replaced until it settles.
+          receivedResult = true;
           const transcript = event.results[0]?.transcript ?? "";
+          heardSpeech ||= !!transcript.trim();
           if (event.isFinal) {
             finalText += transcript;
             interimText = "";
@@ -433,33 +534,212 @@ export function useComposerDictation({
           if (valid()) failure ??= NO_SPEECH;
         }),
         Recognizer.addListener("error", (event) => {
-          if (!valid()) return;
-          const message = dictationError(event.error);
-          if (!message || (message === NO_SPEECH && spoken())) return;
-          if (event.error === "not-allowed") setPermissionDenied(true);
-          failure = message;
-          if (continuous || message !== NO_SPEECH) setError(message);
+          if (!valid() || !native || recovering) return;
+          const silenceError =
+            event.error === "no-speech" || event.error === "speech-timeout";
+          if (silenceError && failure && failure !== NO_SPEECH) return;
+          if (
+            silenceError &&
+            (!failure || failure === NO_SPEECH) &&
+            canRestartSilence()
+          ) {
+            failure = NO_SPEECH;
+            recoverableSilence = true;
+            clearTimeout(nativeEndTimer);
+            nativeEndTimer = setTimeout(() => {
+              if (!valid() || !native) return;
+              native = false;
+              release(audioOwner!, endCapture);
+              failure ??= NO_SPEECH;
+              settle();
+            }, RELEASE_TIMEOUT_MS);
+            return;
+          }
+          if (!["service-not-allowed", "not-allowed"].includes(event.error)) {
+            const message =
+              event.error === "language-not-supported" &&
+              !recognition.canChooseLanguage
+                ? START_FAILED
+                : dictationError(event.error);
+            if (!message || (message === NO_SPEECH && spoken())) return;
+            if (
+              event.error === "language-not-supported" &&
+              recognition.canChooseLanguage
+            )
+              setChooseLanguage(true);
+            failure = message;
+            if (continuous || message !== NO_SPEECH) setError(message);
+            return;
+          }
+          const classify = async () => {
+            if (["service-not-allowed", "not-allowed"].includes(event.error)) {
+              try {
+                const permissions = await Recognizer.getPermissionsAsync();
+                if (!valid()) return false;
+                const denied = await deniedPermissionMessage(permissions);
+                if (!valid()) return false;
+                if (denied) {
+                  setPermissionDenied(true);
+                  failure = denied;
+                  setError(denied);
+                  return false;
+                }
+              } catch {
+                // A failed permission read is not evidence of denial.
+              }
+              if (
+                Platform.OS === "ios" &&
+                event.error === "service-not-allowed" &&
+                recognition.onDevice &&
+                !serverRetried &&
+                !receivedResult &&
+                !stopping
+              ) {
+                serverRetried = true;
+                return true;
+              }
+            }
+            if (!valid()) return false;
+            const message =
+              event.error === "language-not-supported" &&
+              !recognition.canChooseLanguage
+                ? START_FAILED
+                : dictationError(event.error);
+            if (!message || (message === NO_SPEECH && spoken())) return false;
+            if (
+              event.error === "language-not-supported" &&
+              recognition.canChooseLanguage
+            )
+              setChooseLanguage(true);
+            if (event.error === "not-allowed") setPermissionDenied(true);
+            failure = message;
+            if (continuous || message !== NO_SPEECH) setError(message);
+            return false;
+          };
+          // Permission reads can finish after native end. The end handler waits
+          // before deciding whether to settle or retry this same recording.
+          recovering = classify();
         }),
         Recognizer.addListener("end", () => {
-          if (!valid()) return;
+          if (!valid() || !native) return;
           native = false;
-          deactivate(audioOwner!);
-          settle();
+          clearTimeout(nativeEndTimer);
+          if (
+            !recovering &&
+            recoverableSilence &&
+            failure === NO_SPEECH &&
+            canRestartSilence()
+          ) {
+            if (
+              ANDROID_INITIAL_SILENCE_MS - (Date.now() - nativeStartedAt) <
+              1000
+            ) {
+              deactivate(audioOwner!);
+              settle();
+              return;
+            }
+            const duration = Date.now() - lastNativeStartedAt;
+            silenceRestarts++;
+            failure = undefined;
+            listening = false;
+            // Native end is the release boundary. Back off briefly, keeping
+            // this attempt cancellable and its locale/draft ownership intact.
+            silenceTimer = setTimeout(
+              () => {
+                if (!valid()) return;
+                if (
+                  ANDROID_INITIAL_SILENCE_MS - (Date.now() - nativeStartedAt) <
+                  1000
+                ) {
+                  failure = NO_SPEECH;
+                  deactivate(audioOwner!);
+                  settle();
+                } else restartSilent?.();
+              },
+              duration >= 2000 ? 250 : Math.max(250, 5000 - duration),
+            );
+            return;
+          }
+          const finish = (retry: boolean) => {
+            recovering = undefined;
+            if (!valid()) return;
+            if (retry && !stopping && !receivedResult) {
+              retryWithServer?.();
+              return;
+            }
+            deactivate(audioOwner!);
+            settle();
+          };
+          if (recovering) void recovering.then(finish);
+          else finish(false);
         }),
       ];
       native = true;
       audioOwner = claimVoiceAudioSession();
       nativeStartedAt = Date.now();
-      Recognizer.start({
-        ...(lang ? { lang } : {}),
-        interimResults: true,
-        continuous,
-        addsPunctuation: true,
-        maxAlternatives: 1,
-        iosTaskHint: "dictation",
-        requiresOnDeviceRecognition: supportsOnDevice(),
-        volumeChangeEventOptions: { enabled: true, intervalMillis: 90 },
-      });
+      const beginNative = (onDevice: boolean, silentRestart = false) => {
+        native = true;
+        listening = false;
+        recoverableSilence = false;
+        if (!silentRestart) setPhase("connecting");
+        clearTimeout(startTimer);
+        startTimer = setTimeout(() => {
+          if (!valid()) return;
+          cancel();
+          operation.current = undefined;
+          setPhase("idle");
+          setError(START_FAILED);
+        }, START_TIMEOUT_MS);
+        lastNativeStartedAt = Date.now();
+        Recognizer.start({
+          lang,
+          ...(Platform.OS === "android"
+            ? {
+                androidRecognitionServicePackage: recognition.service,
+                androidIntentOptions: {
+                  EXTRA_PREFER_OFFLINE: onDevice,
+                  ...(continuous && Number(Platform.Version) >= 33
+                    ? {
+                        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS:
+                          ANDROID_INITIAL_SILENCE_MS,
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+          interimResults: true,
+          continuous,
+          addsPunctuation: true,
+          maxAlternatives: 1,
+          iosTaskHint: "dictation",
+          // expo's Android requiresOnDevice flag selects a separate system
+          // service ahead of the explicit package. Keep discovery/start on the
+          // chosen provider, asking it to prefer offline instead.
+          requiresOnDeviceRecognition:
+            Platform.OS === "android" && recognition.service ? false : onDevice,
+          volumeChangeEventOptions: { enabled: true, intervalMillis: 90 },
+        });
+      };
+      restartSilent = () => {
+        try {
+          beginNative(recognition.onDevice, true);
+        } catch {
+          failure = START_FAILED;
+          native = false;
+          release(audioOwner!, endCapture);
+          settle();
+        }
+      };
+      retryWithServer = () => {
+        try {
+          beginNative(false);
+        } catch {
+          failure = START_FAILED;
+          deactivate(audioOwner!);
+          settle();
+        }
+      };
+      beginNative(recognition.onDevice);
     } catch (cause) {
       if (!valid()) return;
       cancel();
@@ -479,7 +759,23 @@ export function useComposerDictation({
     /** Settled words and the recognizer's still-changing tail, for display only. */
     final: caption.final,
     interim: caption.interim,
-    error: error ? t(error) : undefined,
+    error: error
+      ? chooseLanguage &&
+        error !==
+          "Dictation isn't available in your device's language. Choose a language or keep typing."
+        ? t(
+            "Dictation isn't available in {{language}}. Choose another language or keep typing.",
+            {
+              language: recognitionLocale
+                ? languageLabel(recognitionLocale, language)
+                : t("Device language"),
+            },
+          )
+        : t(error)
+      : undefined,
+    recognitionLocale,
+    chooseLanguage,
+    retry: start,
     permissionDenied,
     subscribeLevel: levels.subscribe,
     active: phase !== "idle",

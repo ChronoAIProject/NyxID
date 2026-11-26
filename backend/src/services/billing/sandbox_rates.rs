@@ -280,6 +280,9 @@ impl BillingService {
     /// Immutable codes make retries safe and retain historical provider charges.
     /// Admission still verifies the effective subscription, never just this marker.
     pub async fn retry_sandbox_rate_cards(&self) -> AppResult<u64> {
+        let Some(_work) = crate::services::shutdown::process().background() else {
+            return Ok(0);
+        };
         let Some(lago) = self.lago.as_deref().filter(|_| self.config.billing_enabled) else {
             return Ok(0);
         };
@@ -336,8 +339,15 @@ impl BillingService {
             .await?;
         let mut synced = 0;
         for card in cards {
-            let result: AppResult<()> = async {
+            if !super::reconcile::continue_reconcile() {
+                break;
+            }
+            let completed = super::plan_sync::run(&self.db, &card.plan_code, None, super::plan_sync::CacheWrite::Rate, async {
+            let result: AppResult<bool> = async {
                 for price in &card.prices {
+                    if !super::reconcile::continue_reconcile() {
+                        return Ok(false);
+                    }
                     super::taxes::sync_charge(
                         &self.db,
                         lago,
@@ -364,17 +374,15 @@ impl BillingService {
                         synced_at: Utc::now(),
                         retired_at: None,
                     };
-                    self.db
-                        .collection::<BillingRateCache>(
-                            crate::models::billing_rate_cache::COLLECTION_NAME,
-                        )
-                        .replace_one(doc! {"_id":&cache.id}, cache)
-                        .upsert(true)
-                        .await?;
+                    super::rate_cache::replace(&self.db, &cache).await?;
                 }
-                Ok(())
+                Ok(true)
             }
             .await;
+            if matches!(result, Ok(false)) || super::plan_sync::lost() {
+                // Partial cards stay pending; do not publish a partial sync.
+                return Ok(false);
+            }
             if let Err(error) = &result {
                 tracing::warn!(
                     rate_card_id = %card.id,
@@ -388,10 +396,12 @@ impl BillingService {
                 .collection::<Document>(COLLECTION_NAME)
                 .update_one(
                     doc! {"_id":&card.id},
-                    doc! {"$set":{"sync_status":if result.is_ok() {"synced"} else {"failed"}}},
+                    doc! {"$set":{"sync_status":if result.is_ok() {"synced"} else if matches!(result,Err(AppError::Conflict(_))) {"pending"} else {"failed"}}},
                 )
                 .await?;
-            if result.is_ok() {
+            Ok(result.is_ok())
+            }).await?;
+            if completed == Some(true) {
                 synced += 1;
             }
         }

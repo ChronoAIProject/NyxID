@@ -302,6 +302,83 @@ async fn verified_due_install_runs_exact_skills_command_and_retains_rollback() {
     assert_eq!(fs::read(root.join(".update-controller")).unwrap(), binary);
 }
 
+#[cfg(all(
+    any(target_os = "macos", all(target_os = "linux", target_env = "gnu")),
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
+#[tokio::test]
+async fn installs_attested_dist_archive_from_local_release() {
+    use crate::commands::{update, update_attestation::LocalReleaseFixture};
+    use base64::{Engine, engine::general_purpose::STANDARD};
+
+    struct LocalSource {
+        fixture: LocalReleaseFixture,
+        server: MockServer,
+        client: reqwest::Client,
+    }
+    impl ReleaseSource for LocalSource {
+        async fn latest(&self) -> Result<Option<update::GitHubRelease>> {
+            update::resolve_release_from(&self.client, &self.server.uri(), None).await
+        }
+
+        async fn verify(&self, archive: &Path, tag: &str) -> Result<()> {
+            self.fixture.verify(
+                &update::sha256_file_hex(archive)?,
+                &update::expected_workflow_identity(tag),
+            )
+        }
+    }
+
+    let source = LocalSource {
+        fixture: serde_json::from_slice(include_bytes!(
+            "../../../../tests/fixtures/sigstore/local-release.json"
+        ))
+        .unwrap(),
+        client: reqwest::Client::builder().no_proxy().build().unwrap(),
+        server: MockServer::start().await,
+    };
+    let name = update::asset_name_for_target(update::current_target()).unwrap();
+    let archive = STANDARD.decode(&source.fixture.archives[&name]).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let (root, active, mut policy) = installed_fixture(tmp.path());
+    Mock::given(path("/repos/ChronoAIProject/NyxID/releases/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tag_name": "v0.2.0",
+            "assets": [{"name": name, "browser_download_url": format!("{}/asset", source.server.uri())}]
+        })))
+        .expect(2)
+        .mount(&source.server)
+        .await;
+
+    let mut changed = archive.clone();
+    changed.push(0);
+    let mismatch = Mock::given(path("/asset"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(changed))
+        .expect(1)
+        .mount_as_scoped(&source.server)
+        .await;
+    let err = perform_update_using(&root, &mut policy, &source.client, &source)
+        .await
+        .unwrap_err();
+    assert!(format!("{err:#}").contains("Attestation subject digest mismatch"));
+    assert_eq!(fs::read(&active).unwrap(), b"old working binary");
+    drop(mismatch);
+
+    Mock::given(path("/asset"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(archive))
+        .expect(1)
+        .mount(&source.server)
+        .await;
+    perform_update_using(&root, &mut policy, &source.client, &source)
+        .await
+        .unwrap();
+    assert_eq!(fs::read_link(active).unwrap(), root.join("v0.2.0/nyxid"));
+    assert_eq!(
+        fs::read(root.join("v0.2.0/nyxid.skills-result")).unwrap(),
+        b"verified"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn failed_controller_refresh_retries_after_activation_without_redownload_or_repeating_skills()

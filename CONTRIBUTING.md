@@ -89,6 +89,18 @@ curl http://localhost:3001/health
 5. **Commit** using [conventional commit messages](#commit-messages)
 6. **Push** your branch and open a pull request against `dev`
 
+### Continuing work in another tab
+
+Git worktrees share commits and fetched branches. Each worktree has its own
+checked-out files, including uncommitted edits. When handing off a change that
+has been tested, commit the files that produced that result, push the branch,
+and include its remote branch and commit in the handoff.
+
+For a follow-up to an open PR, fetch the PR branch and start the new worktree
+at its latest commit. After the PR lands, start follow-ups from the updated
+`origin/dev`. Check the diff against the handoff commit before testing so the
+review covers just the intended addition.
+
 ### Branch Naming
 
 | Prefix      | Use Case                        |
@@ -361,27 +373,25 @@ Include:
 
 ### CI Checks
 
-Every pull request runs the following checks automatically via GitHub Actions. Jobs are gated on path filters so a PR only runs the suites whose files actually changed -- e.g. an SDK-only PR skips backend, CLI, and frontend jobs. **CI Pipeline** aggregates the required jobs and treats `success` and `skipped` as passing. Branch rules must require this status check to enforce the gate at merge time.
+Open feature and fix PRs against `dev`. Two required checks protect both branches.
+**CI Pipeline** collects the correctness jobs. **Main Merge Guard** accepts any
+head into `dev`. For PRs into `main`, it accepts this repository's `dev` branch,
+a dated release branch on `dev`'s history, or a hotfix from current `main`
+that carries no unreleased `dev` commits. See [Releasing to production](docs/DEPLOYMENT.md#releasing-to-production).
+GitHub runs the guard from the repository's default branch on `pull_request_target`,
+including when a PR changes its base branch.
 
-| Job | What it does | Triggers on |
-|-----|--------------|-------------|
-| **Rust Format** | `cargo fmt --all -- --check` -- ensures consistent formatting | any Rust change (backend, cli, mcp-demo, root Cargo files) |
-| **Rust Clippy** | `cargo clippy --workspace --all-targets -- -D warnings` -- catches common mistakes and enforces idioms | any Rust change |
-| **Backend Test** | `cargo nextest run -p nyxid -p nyxid-service-adapters` against a MongoDB 8.0 replica set -- handler, service, and integration tests | `backend/**` or shared workspace files |
-| **Backend Billing Smoke** | Runs the standalone billing route smoke test with its original Cargo feature set | backend changes |
-| **Backend Image Inputs** | Checks the release-profile GCP backend and its exact Docker input closure; linked KMS builds and real release image/publish builds retain codegen/link validation | backend changes |
-| **Coverage (Backend)** | Measures PR-head coverage and enforces the line threshold | backend changes |
-| **Coverage (Backend Base)** | Reuses an exact-commit, matching-recipe report for the informational PR delta; reports N/A if unavailable | backend PRs |
-| **CLI Test** | `cargo nextest run -p nyxid-cli` -- CLI + node-agent unit and integration tests | `cli/**` or shared workspace files |
-| **Rust Features** | Builds with `--features aws-kms`, `gcp-kms`, and both -- ensures KMS providers compile | `backend/**` or shared workspace files |
-| **Frontend** | `npm run lint`, `npm run test`, `npm run build` -- lint, test, and type-check | `frontend/**` or `.node-version` |
-| **CLI Wizard Bundle Freshness** | Re-hashes the wizard's source closure (from `cli/src/wizard/bundle-meta/index.manifest`) and fails if it no longer matches the committed hash. No npm install or vite rebuild in CI. See [CLI Wizard Bundle](#cli-wizard-bundle). | `frontend/**`, `cli/src/wizard/**`, or `.node-version` |
-| **SDK Build** | `npm run build` across all SDK packages -- ensures TypeScript compiles | `sdk/**` or `.node-version` |
-| **CodeQL (Rust)** | Analyzes production and mixed Rust files on PRs; generated `cfg(test)`-only files remain covered by full non-PR scans | Rust sources, Cargo files, toolchain/config or CodeQL changes; detection failure includes Rust |
-| **CodeQL (other languages)** | Analyzes Actions, JavaScript/TypeScript and Python | every PR |
-| **CI Pipeline** | Aggregator for all correctness checks above; the base coverage comparison is informational. Treats `skipped` as success. | always |
+| Gate | Checks |
+| --- | --- |
+| PR into `dev` | CI helper tests and workflow permissions. Changed paths select Rust formatting and library/binary Clippy, Google Permissions, CLI tests, wizard freshness, frontend lint/build and all frontend tests in five shards, Mobile, SDK, plugin validators and Oracle Worker Test. The Claude repository-size check runs on every PR. CI configuration changes select every fast check. |
+| Push to `dev` | Full suite across all paths, including all-targets Clippy, backend tests, coverage thresholds, KMS feature builds, Machine Container E2E, backend image inputs and the release image build. The frontend also builds its Docker inputs. Publish Dev Images finishes the running image pair and keeps one pending pair. After both images succeed, it advances staging in Git ancestry order, backend first, and verifies both commits. |
+| Release PR into `main` | Full suite across all paths, including PR coverage comparisons. Wait for the required checks and choose **Create a merge commit**. A push to `main` starts Publish Images. |
 
-A change under `Cargo.toml` / `Cargo.lock` re-runs both `Backend Test` and `CLI Test` because they share the workspace lock file. A change under `.github/workflows/**` or `.github/scripts/**` forces every job to run.
+A test-only Rust compile error or Clippy lint can first surface on the full
+`dev` push. Check that run on the commit in Actions when preparing a release.
+The release PR runs its own full gate before promotion. After `dev` becomes
+the default branch, GitHub closes issues linked with `Closes #N` when the
+feature PR merges into `dev`.
 
 CodeQL selects languages inside its workflow with an uncapped Git diff, so
 large PRs cannot skip Rust because of GitHub's 300-file workflow filter or
@@ -395,7 +405,7 @@ For this CI optimization, use the [GitHub Actions confirmation checklist](docs/C
 for the exact checks before merge and those requiring main, schedule or tagged
 release runs after merge.
 
-Wait for a green `CI Pipeline` before merging. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
+Wait for both required checks before merging. If a check fails, fix the issue locally and push -- the workflow re-runs automatically.
 
 Backend test and coverage builds use `CARGO_PROFILE_TEST_DEBUG=line-tables-only`
 for source locations without full variable/type debug information. Local
@@ -451,7 +461,7 @@ check evidence:
 
 ### Review Process
 
-- PRs target the `main` branch by default
+- Feature and fix PRs target `dev`. Release PRs promote the reviewed snapshot into `main`.
 - At least one approval is required before merge
 - All CI checks must pass (see above)
 - Security-sensitive changes require explicit security review
@@ -477,7 +487,19 @@ check evidence:
 
 ## Releases
 
-Releases are triggered by pushing a semver tag to `main`:
+To promote staging to production, run `scripts/cut-release.sh --dry-run` from
+your checkout with your own `gh` login. The preview shows the commit reported
+by both staging services, the UTC branch name and the PR contents. Run
+`scripts/cut-release.sh` to create the branch and open the PR into `main`.
+Later merges into `dev` leave the snapshot fixed while reviewers and CI check it.
+
+Use `--commit <sha>` to select a different commit on `dev` that has yet to reach
+`main`. To replace an open release, use `--supersede`. The script opens the new
+PR before closing the previous one with a link. Cuts on the same UTC date use
+`release/YYYY-MM-DD`, then `-2`, `-3` and so on. Land any release fixes on
+`dev` and cut a new snapshot so the release head stays on `dev`'s history.
+
+Pushing a semver tag to `main` triggers the tagged release workflow.
 
 ```bash
 git tag v0.2.0

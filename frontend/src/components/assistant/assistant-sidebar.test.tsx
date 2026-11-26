@@ -1,5 +1,6 @@
-import "@/i18n";
+import { appI18n } from "@/i18n";
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -7,11 +8,14 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SidebarRailContext } from "./sidebar-rail-context";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
 import type { AssistantAgent, AssistantGroup } from "@/schemas/assistant-nyxagent";
@@ -30,8 +34,8 @@ vi.mock("@/hooks/use-assistant-workspace", () => ({
 }));
 
 const accountMocks = vi.hoisted(() => ({ navigate: vi.fn(), logout: vi.fn(), nyxagent: false, panel: undefined as string | undefined, open: vi.fn() }));
-vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => ({ current: { panel: accountMocks.panel }, prepareMenuOpen: (...args: unknown[]) => () => accountMocks.open(...args) }) }));
 vi.mock("@/hooks/use-auth", () => ({ useLogout: () => ({ mutateAsync: accountMocks.logout }) }));
+vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => ({ current: { panel: accountMocks.panel }, prepareMenuOpen: (...args: unknown[]) => () => accountMocks.open(...args) }) }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: (flag: FeatureFlag) => {
   const enabled = useAuthStore((state) => userHasFeature(state.user, flag));
   return flag === FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW ? enabled : accountMocks.nyxagent;
@@ -133,12 +137,12 @@ function seedDraft(ownerUserId: string, text: string) {
 }
 
 beforeEach(() => {
-  accountMocks.navigate.mockReset();
-  accountMocks.logout.mockReset();
   accountMocks.nyxagent = false;
   accountMocks.panel = undefined;
   accountMocks.open.mockReset();
   localStorage.clear();
+  useAssistantPinsStore.getState().bindAccount(null);
+  useAssistantPinsStore.getState().bindAccount(USER.id);
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   useAuthStore.setState({
     user: USER,
@@ -149,8 +153,9 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  vi.restoreAllMocks();
   useAssistantDraftStore.getState().clear();
   useAuthStore.setState({
     user: null,
@@ -160,9 +165,78 @@ afterEach(() => {
     mfaToken: null,
   });
   localStorage.clear();
+  await appI18n.changeLanguage("en");
 });
 
 describe("AssistantSidebar conversation rows", () => {
+  it("keeps inactive drafts and selection when a chat is pinned, including after remount", async () => {
+    const user = userEvent.setup();
+    seedDraft(USER.id, "An unsent draft");
+    const view = renderSidebar(vi.fn(), [SECOND_CONVERSATION, CONVERSATION], SECOND_CONVERSATION.id);
+    await user.click(screen.getByLabelText("Options for Quarterly digest"));
+    await user.click(screen.getByRole("menuitem", { name: "Pin chat" }));
+    expect(screen.getByText("An unsent draft")).toBeVisible();
+    expect(screen.getByRole("button", { name: SECOND_CONVERSATION.title })).toHaveAttribute("aria-current", "page");
+    view.unmount();
+    renderSidebar(vi.fn(), [SECOND_CONVERSATION, CONVERSATION], SECOND_CONVERSATION.id);
+    expect(screen.getByLabelText("Pinned chat")).toBeVisible();
+    expect(screen.getByText("An unsent draft")).toBeVisible();
+  });
+
+  it("reports a save failure without changing order or navigating", async () => {
+    const user = userEvent.setup();
+    const { onSelect } = renderSidebar(vi.fn(), [CONVERSATION, SECOND_CONVERSATION]);
+    vi.spyOn(localStorage, "setItem").mockImplementation(() => { throw new Error("quota"); });
+    await user.click(screen.getByLabelText("Options for Rotate GitHub token"));
+    await user.click(screen.getByRole("menuitem", { name: "Pin chat" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Could not save pinned chats");
+    expect(screen.queryByLabelText("Pinned chat")).not.toBeInTheDocument();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("keeps a pin when deletion is a protected no-op or rejects (no-op: %s)", async (protectedNoop) => {
+    const user = userEvent.setup();
+    useAssistantPinsStore.getState().toggle(USER.id, CONVERSATION.id);
+    renderSidebar(protectedNoop ? vi.fn().mockResolvedValue(undefined) : vi.fn().mockRejectedValue(new Error("offline")));
+    await user.click(screen.getByLabelText("Options for Quarterly digest"));
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+    expect(useAssistantPinsStore.getState().ids).toEqual([CONVERSATION.id]);
+    expect(screen.getByRole("button", { name: CONVERSATION.title, hidden: true })).toBeInTheDocument();
+  });
+
+  it("hides pins on account change even when the old conversation data is still mounted", () => {
+    useAssistantPinsStore.getState().toggle(USER.id, CONVERSATION.id);
+    renderSidebar();
+    expect(screen.getByLabelText("Pinned chat")).toBeVisible();
+    act(() => useAuthStore.getState().setUser({ ...USER, id: "second-user" }));
+    expect(screen.queryByLabelText("Pinned chat")).not.toBeInTheDocument();
+    expect(useAssistantPinsStore.getState().ids).toEqual([]);
+  });
+
+  it("pins multiple chats without selecting them and restores ordinary order on unpin", async () => {
+    const user = userEvent.setup();
+    const third = { ...SECOND_CONVERSATION, id: "conv-3", title: "Oldest chat" };
+    const { onSelect } = renderSidebar(vi.fn(), [CONVERSATION, SECOND_CONVERSATION, third]);
+    const rowTitles = () => within(screen.getByRole("navigation", { name: "Agents and conversations" }))
+      .getAllByRole("button").filter((button) => !button.getAttribute("aria-label")?.startsWith("Options for"))
+      .map((button) => button.getAttribute("aria-label"));
+    await user.click(screen.getByLabelText("Options for Oldest chat"));
+    await user.click(screen.getByRole("menuitem", { name: "Pin chat" }));
+    await user.click(screen.getByLabelText("Options for Rotate GitHub token"));
+    await user.click(screen.getByRole("menuitem", { name: "Pin chat" }));
+    expect(rowTitles()).toEqual([SECOND_CONVERSATION.title, third.title, CONVERSATION.title]);
+    expect(screen.getByRole("button", { name: CONVERSATION.title })).toHaveAttribute("aria-current", "page");
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(screen.getAllByLabelText("Pinned chat")).toHaveLength(2);
+    await user.click(screen.getByLabelText("Options for Rotate GitHub token"));
+    await user.click(screen.getByRole("menuitem", { name: "Unpin chat" }));
+    expect(rowTitles()).toEqual([third.title, CONVERSATION.title, SECOND_CONVERSATION.title]);
+    await user.click(screen.getByLabelText("Options for Oldest chat"));
+    await user.click(screen.getByRole("menuitem", { name: "Unpin chat" }));
+    expect(rowTitles()).toEqual([CONVERSATION.title, SECOND_CONVERSATION.title, third.title]);
+  });
+
   it("surfaces a conversation-list failure without hiding cached rows", () => {
     renderSidebar(
       vi.fn(),
@@ -512,8 +586,9 @@ describe("NyxBot agents in the sidebar", () => {
 
   function renderAgents(
     model: Partial<SidebarAgents> = {},
-    options: { conversations?: readonly Conversation[]; groups?: SidebarGroups; rail?: boolean } = {},
+    options: { conversations?: readonly Conversation[]; groups?: SidebarGroups; rail?: boolean; activeConversationId?: string; onRename?: (id: string, title: string) => Promise<void> } = {},
   ) {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } });
     const handlers = {
       onSelectAgent: vi.fn(),
       onNewThread: vi.fn(),
@@ -521,15 +596,17 @@ describe("NyxBot agents in the sidebar", () => {
     };
     const onSelect = vi.fn();
     render(
+      <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <SidebarRailContext value={options.rail ?? false}>
         <AssistantSidebar
           conversations={options.conversations ?? []}
           groups={options.groups}
-          activeConversationId={thread.id}
+          activeConversationId={options.activeConversationId ?? thread.id}
           onNewChat={vi.fn()}
           onSelect={onSelect}
           onDelete={vi.fn()}
+          onRename={options.onRename}
           agents={{
             agents,
             selectedAgentId: "agent-nyxbot",
@@ -539,10 +616,245 @@ describe("NyxBot agents in the sidebar", () => {
           }}
         />
         </SidebarRailContext>
-      </TooltipProvider>,
+      </TooltipProvider>
+      </QueryClientProvider>,
     );
-    return { ...handlers, onSelect };
+    return { ...handlers, onSelect, queryClient };
   }
+
+  it.each(["pointer", "keyboard"])("keeps the channel Rename input focused after closing its menu with %s", async (interaction) => {
+    const user = userEvent.setup();
+    const row: Conversation = {
+      ...thread,
+      channel: { platform: "telegram", channel_agent_id: "topics", bot_label: "Topics bot", parent_chat_id: "engineering", parent_title: "Engineering group", thread_id: "1" },
+    };
+    const onRename = vi.fn().mockResolvedValue(undefined);
+    const { onSelect } = renderAgents({ threads: [row] }, { onRename });
+    const header = screen.getByRole("button", { name: "Topics bot on Telegram, 1 chat" });
+    const options = screen.getByRole("button", { name: `Options for ${row.title}` });
+    if (interaction === "keyboard") {
+      options.focus();
+      await user.keyboard("{Enter}{ArrowDown}{Enter}");
+    } else {
+      await user.click(options);
+      await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    }
+    const input = within(screen.getByRole("form", { name: "Rename chat" })).getByRole("textbox");
+    await waitFor(() => expect(input).toHaveFocus());
+    await user.keyboard("{End} renamed");
+    expect(input).toHaveValue(`${row.title} renamed`);
+    expect(header).not.toHaveFocus();
+    expect(onSelect).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onRename).toHaveBeenCalledExactlyOnceWith(row.id, `${row.title} renamed`));
+  });
+
+  it("shows channel source groups in the full mobile thread list, with unique generic titles", async () => {
+    const onBackToWorkspace = vi.fn();
+    const source = { platform: "lark", channel_agent_id: "lark-bot", bot_label: "NyxBot",
+      chat_kind: "group", parent_chat_id: "engineering", parent_title: "Engineering" };
+    const first = { ...thread, title: "Thread · 2026-11-02 10:16 UTC", created_at: "2026-11-02T10:16:12Z",
+      channel: { ...source, thread_id: "child-1", chat_id: "child-1" } };
+    const second = { ...first, id: "nyxa-second", created_at: "2026-11-02T10:16:45Z",
+      channel: { ...source, thread_id: "child-2", chat_id: "child-2" } };
+    const { onSelect } = renderAgents({ mobileThreadList: true, onBackToWorkspace,
+      threads: [first, second, { ...thread, id: "direct", channel: null }] });
+    const sourceButton = screen.getByRole("button", { name: "Engineering on Lark, 2 threads" });
+    expect(sourceButton).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("Lark · Bot: NyxBot")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Personal conversations" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Connected bot chats" })).toBeVisible();
+    expect(screen.queryByText("Channel chat")).not.toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Thread · .*10:16:45/ }));
+    expect(onSelect).toHaveBeenCalledWith(second.id);
+    await user.click(screen.getByRole("button", { name: "Back to workspace" }));
+    expect(onBackToWorkspace).toHaveBeenCalledOnce();
+    await user.type(screen.getByRole("searchbox", { name: "Search threads" }), "Engineering");
+    expect(screen.queryByRole("button", { name: "Morning briefing" })).not.toBeInTheDocument();
+    expect(sourceButton).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("searches every matching source thread beyond the initial five-row limit", async () => {
+    const rows = Array.from({ length: 8 }, (_, index) => ({ ...thread, id: `nyxa-source-${index}`, title: `Topic ${index}`,
+      channel: { platform: "lark", channel_agent_id: "lark-bot", bot_label: "Office", chat_kind: "group",
+        parent_chat_id: "engineering", parent_title: "Engineering", thread_id: `child-${index}` } }));
+    renderAgents({ mobileThreadList: true, onBackToWorkspace: vi.fn(), threads: rows });
+    await userEvent.setup().type(screen.getByRole("searchbox", { name: "Search threads" }), "Lark");
+    expect(screen.getAllByRole("button", { name: /^Topic \d$/ })).toHaveLength(8);
+    expect(screen.getByRole("button", { name: "Engineering on Lark, 8 threads" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps older unread, working and drafted source rows in the preview", () => {
+    const rows = Array.from({ length: 8 }, (_, index) => ({ ...thread, id: `nyxa-preview-${index}`, title: `Discussion ${index}`,
+      channel: { platform: "lark", channel_agent_id: "office", bot_label: "Office", parent_chat_id: "engineering",
+        parent_title: "Engineering", thread_id: `child-${index}` },
+      active_turn: index === 5 ? { turn_id: "running", started_at: at } : null }));
+    useAssistantDraftStore.getState().saveDraft(USER.id, `conv:${rows[6]!.id}`, "Finish this discussion");
+    renderAgents({ mobileThreadList: true, onBackToWorkspace: vi.fn(), threads: rows,
+      unreadThreadIds: new Set([rows[5]!.id]) });
+    expect(screen.getByRole("button", { name: "Engineering on Lark, 8 threads, working, unread" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Discussion 5, unread" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Discussion 6" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Discussion 7" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show 1 more" })).toBeVisible();
+  });
+
+  it("keeps pin and unpin destinations visible and returns focus to the moved row", async () => {
+    const rows = [thread.id, "nyxa-inactive"].map((id, index) => ({ ...thread, id, title: `Discussion ${index}`,
+      channel: { platform: "lark", channel_agent_id: "office", bot_label: "Office", parent_chat_id: "engineering",
+        parent_title: "Engineering", thread_id: `child-${index}` } }));
+    renderAgents({ mobileThreadList: true, onBackToWorkspace: vi.fn(), threads: rows });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Options for Discussion 1" }));
+    await user.click(screen.getByRole("menuitem", { name: "Pin chat" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Options for Discussion 1" })).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Discussion 1" })).toBeVisible();
+    const sourceHeaders = screen.getAllByRole("button", { name: "Engineering on Lark, 1 thread" });
+    expect(new Set(sourceHeaders.map((header) => header.getAttribute("data-channel-source"))).size).toBe(2);
+    await user.click(sourceHeaders[1]!);
+    await user.click(screen.getByRole("button", { name: "Options for Discussion 1" }));
+    await user.click(screen.getByRole("menuitem", { name: "Unpin chat" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Options for Discussion 1" })).toHaveFocus());
+    expect(screen.getByRole("button", { name: "Discussion 1" })).toBeVisible();
+  });
+
+  it("shows every source header even when earlier sources have more than five threads", () => {
+    const rows = Array.from({ length: 8 }, (_, index) => ({ ...thread, id: `nyxa-parent-${index}`, title: `Discussion ${index}`,
+      channel: { platform: "lark", channel_agent_id: "office", bot_label: "Office", parent_chat_id: `parent-${index}`,
+        parent_title: `Team ${index}`, thread_id: `child-${index}` } }));
+    renderAgents({ mobileThreadList: true, onBackToWorkspace: vi.fn(), threads: rows });
+    expect(screen.getByRole("button", { name: "Team 7 on Lark, 1 thread" })).toBeVisible();
+  });
+
+  it("keeps multiple pinned topics across two parent chats ahead of ordinary siblings", async () => {
+    const user = userEvent.setup();
+    const rows = ["Engineering", "Support"].flatMap((parent) => Array.from({ length: 4 }, (_, index) => ({
+      ...thread, id: `nyxa-${parent}-${index}`, title: `${parent} topic ${index}`,
+      channel: { platform: "telegram", channel_agent_id: "topics", bot_label: "Topics bot", parent_chat_id: parent, parent_title: `${parent} group`, thread_id: String(index) },
+    })));
+    for (const row of rows.filter((_, index) => index % 4 >= 2)) {
+      useAssistantPinsStore.getState().toggle(USER.id, row.id);
+    }
+    renderAgents({ threads: rows });
+    const header = screen.getByRole("button", { name: "Topics bot on Telegram, 8 chats" });
+    await user.click(header);
+    const group = within(header.parentElement!);
+    const orderedTitles = () => group.getAllByRole("button")
+      .map((button) => button.getAttribute("aria-label"))
+      .filter((label) => label?.startsWith("Options for "));
+    const pins = ["Engineering topic 2", "Engineering topic 3", "Support topic 2", "Support topic 3"];
+    expect(orderedTitles()).toEqual([...pins, "Engineering topic 0"].map((title) => `Options for ${title}`));
+    expect(group.getAllByLabelText("Pinned chat")).toHaveLength(4);
+    for (const title of pins) {
+      const parentGroup = group.getByRole("button", { name: title }).closest(".border-l")!.parentElement!;
+      expect(within(parentGroup).getByText(`${title.split(" ")[0]} group`)).toBeVisible();
+    }
+    await user.click(group.getByRole("button", { name: "Show 3 more" }));
+    expect(orderedTitles()).toEqual([...pins, "Engineering topic 0", "Engineering topic 1", "Support topic 0", "Support topic 1"]
+      .map((title) => `Options for ${title}`));
+  });
+
+  it("keeps channel pins inside their bot without changing bot order, counts or expansion", async () => {
+    const user = userEvent.setup();
+    const own = { ...thread, id: "nyxa-own", title: "Ordinary chat", channel: null };
+    const botChats = (bot: string) => Array.from({ length: 7 }, (_, index) => ({
+      ...thread, id: `nyxa-${bot}-${index}`, title: `${bot} chat ${index}`,
+      channel: { platform: "telegram", channel_agent_id: bot, bot_label: bot },
+    }));
+    const first = botChats("First bot");
+    const second = botChats("Second bot");
+    useAssistantPinsStore.getState().toggle(USER.id, "nyxa-other-agent");
+    const { onSelect } = renderAgents({ threads: [own, ...first, ...second] });
+    const firstHeader = screen.getByRole("button", { name: "First bot on Telegram, 7 chats" });
+    const secondHeader = screen.getByRole("button", { name: "Second bot on Telegram, 7 chats" });
+    await user.click(secondHeader);
+    await user.click(screen.getByRole("button", { name: "Show 2 more" }));
+    for (const index of [6, 5]) {
+      await user.click(screen.getByRole("button", { name: `Options for Second bot chat ${index}` }));
+      await user.click(screen.getByRole("menuitem", { name: "Pin chat" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: `Options for Second bot chat ${index}` })).toHaveFocus());
+    }
+    expect(firstHeader).toHaveAttribute("aria-expanded", "false");
+    expect(secondHeader).toHaveAttribute("aria-expanded", "true");
+    const list = screen.getByRole("group", { name: "Threads with NyxBot" });
+    const buttons = within(list).getAllByRole("button").filter((button) => !button.getAttribute("aria-label")?.startsWith("Options for"));
+    expect(buttons.slice(0, 5).map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Ordinary chat", "First bot on Telegram, 7 chats", "Second bot on Telegram, 7 chats", "Second bot chat 5", "Second bot chat 6",
+    ]);
+    expect(within(secondHeader.parentElement!).getAllByLabelText("Pinned chat")).toHaveLength(2);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(useAssistantPinsStore.getState().ids).toContain("nyxa-other-agent");
+    await user.click(screen.getByRole("button", { name: "Options for Second bot chat 5" }));
+    await user.click(screen.getByRole("menuitem", { name: "Unpin chat" }));
+    expect(within(secondHeader.parentElement!).getAllByRole("button")[1]).toHaveAccessibleName("Second bot chat 6");
+    await user.click(secondHeader);
+    await user.click(secondHeader);
+    expect(screen.getByRole("button", { name: "Second bot chat 6" })).toBeVisible();
+  });
+
+  it.each([true, false])("sorts rail pins before the eight-chat limit (selected agent: %s)", async (selected) => {
+    const user = userEvent.setup();
+    const rows = [...Array.from({ length: 9 }, (_, index) => ({ ...thread, id: `nyxa-${index}`, title: `Chat ${index}` })), thread];
+    useAssistantPinsStore.getState().toggle(USER.id, thread.id);
+    const { queryClient } = renderAgents({
+      threads: selected ? rows : [], selectedAgentId: selected ? "agent-nyxbot" : "agent-researcher",
+    }, { rail: true });
+    queryClient.setQueryData(nyxBotQueryKeys.threads(USER.id, "agent-nyxbot"), rows);
+    await user.click(screen.getByRole("button", { name: /^NyxBot/ }));
+    const list = within(screen.getByRole("list", { name: "NyxBot chats" }));
+    expect(list.getAllByRole("button")).toHaveLength(8);
+    expect(list.getAllByRole("button")[0]).toHaveAccessibleName(thread.title);
+    expect(list.getByRole("button", { name: thread.title })).toHaveAttribute("aria-current", "page");
+    expect(list.getByLabelText("Pinned chat")).toBeVisible();
+    expect(rows[0]?.title).toBe("Chat 0");
+  });
+
+  it.each([true, false])("keeps rail channel pins in their original scope slots (selected: %s)", async (selected) => {
+    const user = userEvent.setup();
+    const own = { ...thread, id: "nyxa-own", title: "Own", channel: null };
+    const botRows = (bot: string, count: number) => Array.from({ length: count }, (_, index) => ({
+      ...thread, id: `nyxa-${bot}-${index}`, title: `${bot} ${index}`,
+      channel: { platform: "telegram", channel_agent_id: bot, bot_label: bot },
+    }));
+    const first = botRows("First", 2);
+    const second = botRows("Second", 7);
+    const rows = [first[0]!, second[0]!, own, first[1]!, ...second.slice(1)];
+    useAssistantPinsStore.getState().toggle(USER.id, second[6]!.id);
+    const { queryClient } = renderAgents({ threads: selected ? rows : [], selectedAgentId: selected ? "agent-nyxbot" : "agent-researcher" }, { rail: true });
+    queryClient.setQueryData(nyxBotQueryKeys.threads(USER.id, "agent-nyxbot"), rows);
+    await user.click(screen.getByRole("button", { name: /^NyxBot/ }));
+    const list = within(screen.getByRole("list", { name: "NyxBot chats" }));
+    expect(list.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual([
+      "First 0", "Second 6", "Own", "First 1", "Second 0", "Second 1", "Second 2", "Second 3",
+    ]);
+    act(() => useAssistantPinsStore.getState().toggle(USER.id, second[6]!.id));
+    expect(list.getAllByRole("button").map((button) => button.getAttribute("aria-label"))).toEqual(rows.slice(0, 8).map((row) => row.title));
+  });
+
+  it("applies saved pins before Show more while keeping parent chat context", async () => {
+    const user = userEvent.setup();
+    const rows = Array.from({ length: 7 }, (_, index) => ({
+      ...thread, id: `nyxa-topic-${index}`, title: `Topic ${index}`,
+      channel: { platform: "telegram", channel_agent_id: "topics", bot_label: "Topics bot", parent_chat_id: "parent", parent_title: "Engineering group", thread_id: String(index) },
+    }));
+    useAssistantPinsStore.getState().toggle(USER.id, rows[6]!.id);
+    renderAgents({ threads: rows });
+    const header = screen.getByRole("button", { name: "Topics bot on Telegram, 7 chats" });
+    await user.click(header);
+    expect(screen.getAllByText("Engineering group")).toHaveLength(2);
+    for (const label of screen.getAllByText("Engineering group")) expect(label).toBeVisible();
+    const group = within(header.parentElement!);
+    expect(group.getAllByRole("button")[1]).toHaveAccessibleName("Topic 6");
+    expect(group.queryByRole("button", { name: "Topic 4" })).not.toBeInTheDocument();
+    expect(group.getByRole("button", { name: "Show 2 more" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Options for Topic 6" }));
+    await user.click(screen.getByRole("menuitem", { name: "Unpin chat" }));
+    expect(group.queryByRole("button", { name: "Topic 6" })).not.toBeInTheDocument();
+    expect(group.getAllByRole("button")[1]).toHaveAccessibleName("Topic 0");
+    await waitFor(() => expect(header).toHaveFocus());
+    expect(screen.getByText("Engineering group")).toBeVisible();
+  });
 
   it.each([null, { seq: 2, status: "completed", text: "Hello", created_at: at }])(
     "shows a newly created idle specialist with last reply %j",
@@ -615,6 +927,189 @@ describe("NyxBot agents in the sidebar", () => {
     expect(onNewThread).toHaveBeenCalledWith("agent-nyxbot");
     // Only the chats of earlier engines are listed under "Chats"; none here.
     expect(screen.queryByText("Chats")).not.toBeInTheDocument();
+  });
+
+  function regularThreads(count = 8): Conversation[] {
+    return Array.from({ length: count }, (_, index) => ({
+      ...thread,
+      id: `regular-${index}`,
+      title: `Regular chat ${index + 1}`,
+      last_message_at: new Date(Date.parse(at) - index * 1000).toISOString(),
+      channel: null,
+    }));
+  }
+
+  it("shows the five newest regular chats and keeps New chat available", async () => {
+    const chats = regularThreads();
+    const { onNewThread } = renderAgents({ threads: chats });
+    const group = screen.getByRole("group", { name: "Threads with NyxBot" });
+    expect(within(group).getAllByRole("button", { name: /^Regular chat/ }).map((row) => row.textContent))
+      .toEqual(chats.slice(0, 5).map((chat) => chat.title));
+    expect(within(group).getByRole("button", { name: "Show 3 more" })).toHaveAttribute("aria-expanded", "false");
+    await userEvent.setup().click(within(group).getByRole("button", { name: "New chat with NyxBot" }));
+    expect(onNewThread).toHaveBeenCalledWith("agent-nyxbot");
+  });
+
+  it("keeps every pinned regular chat visible while collapsed, including beyond the first five", () => {
+    const chats = regularThreads(10);
+    for (const chat of chats.slice(4)) {
+      useAssistantPinsStore.getState().toggle(USER.id, chat.id);
+    }
+    renderAgents({ threads: chats });
+    const group = screen.getByRole("group", { name: "Threads with NyxBot" });
+    expect(within(group).getAllByRole("button", { name: /^Regular chat/ }).map((row) => row.getAttribute("aria-label")))
+      .toEqual(chats.slice(4).map((chat) => chat.title));
+    expect(within(group).getAllByLabelText("Pinned chat")).toHaveLength(6);
+    expect(within(group).getByRole("button", { name: "Show 4 more" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("keeps an unread regular chat beyond the first five visible while collapsed", () => {
+    const chats = regularThreads();
+    renderAgents({ threads: chats, unreadThreadIds: new Set([chats[7]!.id]) });
+    const group = screen.getByRole("group", { name: "Threads with NyxBot" });
+    expect(within(group).getAllByRole("button", { name: /^Regular chat/ }).map((row) => row.getAttribute("aria-label")))
+      .toEqual([...chats.slice(0, 5).map((chat) => chat.title), "Regular chat 8, unread"]);
+    expect(within(group).getByRole("button", { name: "Regular chat 8, unread" }).querySelector("[data-unread-marker]"))
+      .toBeInTheDocument();
+    expect(within(group).getByRole("button", { name: "Show 2 more" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("keeps pinned regular chats first in their original order when expanded", async () => {
+    const chats = regularThreads();
+    useAssistantPinsStore.getState().toggle(USER.id, chats[7]!.id);
+    useAssistantPinsStore.getState().toggle(USER.id, chats[5]!.id);
+    renderAgents({ threads: chats });
+    const group = screen.getByRole("group", { name: "Threads with NyxBot" });
+    const visibleTitles = () => within(group).getAllByRole("button", { name: /^Regular chat/ })
+      .map((row) => row.getAttribute("aria-label"));
+    expect(visibleTitles()).toEqual([chats[5]!, chats[7]!, ...chats.slice(0, 3)].map((chat) => chat.title));
+    await userEvent.setup().click(within(group).getByRole("button", { name: "Show 3 more" }));
+    expect(visibleTitles()).toEqual([chats[5]!, chats[7]!, ...chats.filter((_, index) => index !== 5 && index !== 7)]
+      .map((chat) => chat.title));
+    expect(within(group).getByRole("button", { name: "Show fewer" })).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("keeps the open chat beyond the first five in its original position", () => {
+    const chats = regularThreads();
+    renderAgents({ threads: chats }, { activeConversationId: chats[7]!.id });
+    const group = screen.getByRole("group", { name: "Threads with NyxBot" });
+    expect(within(group).getAllByRole("button", { name: /^Regular chat/ }).map((row) => row.textContent))
+      .toEqual([...chats.slice(0, 5), chats[7]!].map((chat) => chat.title));
+    expect(within(group).getByRole("button", { name: "Regular chat 8" })).toBeVisible();
+    expect(within(group).getByRole("button", { name: "Show 2 more" })).toBeVisible();
+  });
+
+  it("keeps running and owner-drafted chats visible without changing their order", () => {
+    const chats = regularThreads(10);
+    chats[6] = { ...chats[6]!, active_turn: { turn_id: "running", started_at: at } };
+    useAssistantDraftStore.setState({ ownerUserId: USER.id, drafts: {
+      [`conv:${chats[8]!.id}`]: { text: "Unsent owner draft", updatedAt: 1 },
+      [`conv:${chats[9]!.id}`]: { text: " \n ", updatedAt: 1 },
+    } });
+    renderAgents({ threads: chats });
+    const group = screen.getByRole("group", { name: "Threads with NyxBot" });
+    expect(within(group).getAllByRole("button", { name: /^Regular chat/ }).map((row) => row.getAttribute("aria-label")))
+      .toEqual([...chats.slice(0, 5), chats[6]!, chats[8]!].map((chat) => chat.title));
+    expect(within(group).getByText("Unsent owner draft")).toBeVisible();
+    expect(within(group).getByRole("button", { name: "Show 3 more" })).toBeVisible();
+  });
+
+  it("does not retain chats for a previous owner's drafts", () => {
+    const chats = regularThreads(6);
+    useAssistantDraftStore.setState({ ownerUserId: "previous-user", drafts: {
+      [`conv:${chats[5]!.id}`]: { text: "Private old draft", updatedAt: 1 },
+    } });
+    renderAgents({ threads: chats });
+    expect(screen.queryByRole("button", { name: "Regular chat 6" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show 1 more" })).toBeVisible();
+  });
+
+  it("updates retained chats when an owner draft is saved or cleared", () => {
+    const chats = regularThreads(6);
+    renderAgents({ threads: chats });
+    expect(screen.queryByRole("button", { name: "Regular chat 6" })).not.toBeInTheDocument();
+    act(() => useAssistantDraftStore.getState().saveDraft(USER.id, `conv:${chats[5]!.id}`, "New draft"));
+    expect(screen.getByRole("button", { name: "Regular chat 6" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Show 1 more" })).not.toBeInTheDocument();
+    act(() => useAssistantDraftStore.getState().clearDraft(USER.id, `conv:${chats[5]!.id}`));
+    expect(screen.queryByRole("button", { name: "Regular chat 6" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show 1 more" })).toBeVisible();
+  });
+
+  it("keeps the same visible rows when an existing draft gains more text", () => {
+    const chats = regularThreads();
+    useAssistantDraftStore.getState().saveDraft(USER.id, `conv:${chats[6]!.id}`, "Draft");
+    renderAgents({ threads: chats });
+    const group = screen.getByRole("group", { name: "Threads with NyxBot" });
+    const visibleTitles = [...chats.slice(0, 5), chats[6]!].map((chat) => chat.title);
+    const visibleRows = () => within(group).getAllByRole("button", { name: /^Regular chat/ })
+      .map((row) => row.getAttribute("aria-label"));
+    expect(visibleRows()).toEqual(visibleTitles);
+    expect(within(group).getByRole("button", { name: "Show 2 more" })).toHaveAttribute("aria-expanded", "false");
+
+    act(() => useAssistantDraftStore.getState().saveDraft(USER.id, `conv:${chats[6]!.id}`, "Draft with more text"));
+
+    expect(visibleRows()).toEqual(visibleTitles);
+    expect(within(group).getByText("Draft with more text")).toBeVisible();
+    expect(within(group).getByRole("button", { name: "Show 2 more" })).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it.each([
+    ["en", "Show 1 more", "Show fewer"],
+    ["zh-CN", "再显示 1 个", "收起"],
+    ["zh-TW", "再顯示 1 個", "收合"],
+  ])("translates the whole regular-chat toggle phrase in %s", async (language, more, fewer) => {
+    await appI18n.changeLanguage(language);
+    renderAgents({ threads: regularThreads(6) });
+    const toggle = await screen.findByRole("button", { name: more });
+    await userEvent.setup().click(toggle);
+    expect(toggle).toHaveAccessibleName(fewer);
+  });
+
+  it("keeps channel chats at their own limit when regular chats expand", async () => {
+    const user = userEvent.setup();
+    const channels = Array.from({ length: 7 }, (_, index) => ({
+      ...thread, id: `channel-${index}`, title: `Channel chat ${index + 1}`,
+      channel: { platform: "telegram" as const, channel_agent_id: "c1", bot_label: "Support bot" },
+    }));
+    renderAgents({ threads: [...regularThreads(6), ...channels] });
+    await user.click(screen.getByRole("button", { name: "Support bot on Telegram, 7 chats" }));
+    expect(screen.getAllByRole("button", { name: /^Channel chat/ })).toHaveLength(5);
+    await user.click(screen.getByRole("button", { name: "Show 1 more" }));
+    expect(screen.getAllByRole("button", { name: /^Regular chat/ })).toHaveLength(6);
+    expect(screen.getAllByRole("button", { name: /^Channel chat/ })).toHaveLength(5);
+    await user.click(screen.getByRole("button", { name: "Show 2 more" }));
+    await user.click(screen.getByRole("button", { name: "Show fewer" }));
+    expect(screen.getAllByRole("button", { name: /^Regular chat/ })).toHaveLength(5);
+    expect(screen.getAllByRole("button", { name: /^Channel chat/ })).toHaveLength(7);
+  });
+
+  it("expands and collapses regular chats on the same focused toggle", async () => {
+    const user = userEvent.setup();
+    const chats = regularThreads();
+    renderAgents({ threads: chats });
+    const toggle = screen.getByRole("button", { name: "Show 3 more" });
+    expect(toggle).toHaveAttribute("data-keep-drawer-open", "");
+    const list = document.getElementById(toggle.getAttribute("aria-controls")!);
+    expect(list).toBeInTheDocument();
+    expect(within(list!).getAllByRole("button", { name: /^Regular chat/ })).toHaveLength(5);
+    toggle.focus();
+    await user.keyboard("{Enter}");
+    expect(toggle).toHaveAccessibleName("Show fewer");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle).toHaveFocus();
+    expect(within(list!).getAllByRole("button", { name: /^Regular chat/ })).toHaveLength(8);
+    await user.keyboard(" ");
+    expect(toggle).toHaveAccessibleName("Show 3 more");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveFocus();
+    expect(within(list!).getAllByRole("button", { name: /^Regular chat/ })).toHaveLength(5);
+  });
+
+  it.each([0, 5])("has no regular-chat toggle when all %i chats fit", (count) => {
+    renderAgents({ threads: regularThreads(count) });
+    expect(screen.queryByRole("button", { name: /^Show \d+ more$|^Show fewer$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New chat with NyxBot" })).toBeVisible();
   });
 
   it("groups a bot's chats in a collapsed section with more on request", async () => {
@@ -856,6 +1351,10 @@ describe("NyxBot agents in the sidebar", () => {
       onNewGroup: vi.fn(),
     };
     renderAgents({}, { groups });
+    await user.click(screen.getByRole("button", { name: "Options for Morning briefing" }));
+    await user.click(screen.getByRole("menuitem", { name: "Pin chat" }));
+    expect(screen.getByLabelText("Pinned chat")).toBeVisible();
+    expect(groups.onSelectGroup).not.toHaveBeenCalled();
     const crew = screen.getByRole("button", {
       name: "Launch crew, group with NyxBot, researcher, 1 working",
     });
@@ -929,12 +1428,11 @@ describe("NyxBot agents in the sidebar", () => {
     expect(document.querySelectorAll("[data-unread-marker]")).toHaveLength(0);
   });
 
-  it("invites a first group when there are none", async () => {
-    const user = userEvent.setup();
-    const onNewGroup = vi.fn();
-    renderAgents({}, { groups: { groups: [], onSelectGroup: vi.fn(), onNewGroup } });
-    await user.click(screen.getByRole("button", { name: "Chat with several agents at once" }));
-    expect(onNewGroup).toHaveBeenCalledOnce();
+  it("hides the crew section when there are no personal or organization crews", () => {
+    renderAgents({}, { groups: { groups: [], onSelectGroup: vi.fn(), onNewGroup: vi.fn() } });
+    expect(screen.queryByRole("region", { name: "Personal crews" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: /crews$/i })).not.toBeInTheDocument();
+    expect(screen.queryByText("Chat with several agents at once")).not.toBeInTheDocument();
   });
 
   it("offers no new thread for a destroyed agent", () => {
@@ -952,7 +1450,7 @@ describe("AssistantSidebar account menu", () => {
     expect(trigger).toHaveAttribute("data-keep-drawer-open", "");
     await userEvent.click(trigger);
     const menu = screen.getByRole("menu");
-    expect(within(menu).getByText("Reader")).toBeVisible();
+    expect(within(menu).queryByText("Reader")).not.toBeInTheDocument();
     expect(within(menu).getByText("reader@example.com")).toBeVisible();
     expect(
       within(menu).getByRole("menuitem", { name: "Settings" }),
@@ -964,17 +1462,18 @@ describe("AssistantSidebar account menu", () => {
       expect(item).not.toHaveAttribute("href");
       expect(item).not.toHaveAttribute("search");
     }
-    expect(
-      within(menu).getByRole("menuitem", {
-        name: "Notification settings (opens in Studio)",
-      }),
-    ).toHaveAttribute("data-to", "/approvals/settings");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Settings", "Billing", "Usage", "Open Studio", "Log out",
+    ]);
     expect(
       within(menu).getByRole("menuitem", { name: "Open Studio" }),
     ).toHaveAttribute("data-to", "/dashboard");
     expect(
       within(menu).queryByRole("menuitem", { name: "NyxBot settings" }),
     ).not.toBeInTheDocument();
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Log out" }));
+    expect(accountMocks.logout).toHaveBeenCalledOnce();
+    expect(accountMocks.navigate).toHaveBeenCalledWith({ to: "/login" });
   });
 
   it.each([false, undefined])(
@@ -995,33 +1494,6 @@ describe("AssistantSidebar account menu", () => {
       ).not.toBeInTheDocument();
     },
   );
-
-  it("links to NyxBot settings only in NyxAgent mode", async () => {
-    accountMocks.nyxagent = true;
-    renderSidebar();
-    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "NyxBot settings" }));
-    await waitFor(() => expect(accountMocks.open).toHaveBeenCalledWith("nyxbot", {}, expect.any(HTMLButtonElement), expect.any(Function)));
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-  });
-
-  it("waits for logout before navigating to login", async () => {
-    let finish: (() => void) | undefined;
-    accountMocks.logout.mockReturnValue(
-      new Promise<void>((resolve) => {
-        finish = resolve;
-      }),
-    );
-    renderSidebar();
-    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
-    expect(accountMocks.logout).toHaveBeenCalledOnce();
-    expect(accountMocks.navigate).not.toHaveBeenCalled();
-    finish?.();
-    await waitFor(() =>
-      expect(accountMocks.navigate).toHaveBeenCalledWith({ to: "/login" }),
-    );
-  });
 
   it.each(["settings", "billing", "nyxbot"] as const)(
     "marks the user row active in %s",

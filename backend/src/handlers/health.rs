@@ -1,5 +1,7 @@
 use axum::Json;
 use axum::extract::State;
+use axum::http::{StatusCode, header::CACHE_CONTROL};
+use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::AppState;
@@ -7,8 +9,8 @@ use crate::crypto::aes::EncryptionDecryptStats;
 use crate::errors::AppResult;
 use crate::services::feature_flag_service;
 
-/// GET /api/v1/admin/security-readiness. Process observations and an explicit
-/// serving roster are prerequisites, not an automatic rollout controller.
+/// GET /api/v1/admin/security-readiness. Observed support and durable activation,
+/// including the optional legacy roster/drain diagnostics.
 pub async fn security_readiness(
     State(state): State<AppState>,
     auth: crate::mw::auth::AuthUser,
@@ -52,19 +54,55 @@ pub struct EncryptionHealthResponse {
     pub decrypt_stats: EncryptionDecryptStats,
 }
 
+pub(crate) fn worker_health_router(
+    jobs: std::sync::Arc<crate::services::job_health::Jobs>,
+    shutdown: crate::services::shutdown::Runtime,
+) -> axum::Router {
+    #[derive(Serialize)]
+    struct WorkerHealth {
+        draining: bool,
+        jobs: std::collections::BTreeMap<&'static str, crate::services::job_health::JobStatus>,
+    }
+    axum::Router::new().route(
+        "/internal/v1/health/jobs",
+        axum::routing::get(move || async move {
+            (
+                [(CACHE_CONTROL, "no-store")],
+                Json(WorkerHealth {
+                    draining: shutdown.is_draining(),
+                    jobs: jobs.snapshot(),
+                }),
+            )
+        }),
+    )
+}
+
+/// GET /ready: preserve the drain-only, empty-body orchestration contract.
+pub async fn ready(State(state): State<AppState>) -> Response {
+    let status = if state.shutdown.is_draining() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+    (status, [(CACHE_CONTROL, "no-store")]).into_response()
+}
+
 /// GET /health
 ///
 /// Returns service health status. Used by load balancers and monitoring.
-pub async fn health_check(State(state): State<AppState>) -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        commit: reported_commit(std::env::var("NYXID_GIT_HASH").ok()),
-        encryption: EncryptionHealthResponse {
-            previous_key_configured: state.encryption_keys.has_previous(),
-            decrypt_stats: state.encryption_keys.decrypt_stats(),
-        },
-    })
+pub async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        [(CACHE_CONTROL, "no-store")],
+        Json(HealthResponse {
+            status: "ok".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            commit: reported_commit(std::env::var("NYXID_GIT_HASH").ok()),
+            encryption: EncryptionHealthResponse {
+                previous_key_configured: state.encryption_keys.has_previous(),
+                decrypt_stats: state.encryption_keys.decrypt_stats(),
+            },
+        }),
+    )
 }
 
 /// Container releases stamp this after compilation. Standalone binaries keep
@@ -87,6 +125,9 @@ pub struct PublicConfigResponse {
     /// Global `mobile:new-domains` admin flag. Mobile builds that embed both
     /// production domain sets read it from both API hosts at launch.
     pub mobile_new_domains: bool,
+    /// Process-local rollout discovery hint, independent of account permission.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub crash_diagnostics_offered: bool,
     /// Public PostHog ingest key for the frontend. Non-secret by design
     /// (PostHog ingest keys are write-only and project-scoped). Empty
     /// when telemetry is off. See docs/TELEMETRY.md §3.
@@ -170,6 +211,9 @@ pub async fn public_config(State(state): State<AppState>) -> AppResult<Json<Publ
         invite_code_required,
         email_auth_enabled: state.config.email_auth_enabled,
         mobile_new_domains,
+        crash_diagnostics_offered: crate::services::crash_report_service::public_config::offered(
+            &state.db,
+        ),
         telemetry_dsn,
         telemetry_host,
         telemetry_share_analytics,
@@ -199,6 +243,111 @@ pub async fn automation_continuations(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn assert_probe(
+        state: AppState,
+        path: &str,
+        expected_status: axum::http::StatusCode,
+    ) -> serde_json::Value {
+        assert_probe_headers(state, path, expected_status, &[]).await
+    }
+
+    async fn assert_probe_headers(
+        state: AppState,
+        path: &str,
+        expected_status: axum::http::StatusCode,
+        headers: &[(&str, &str)],
+    ) -> serde_json::Value {
+        use tower::ServiceExt;
+        let (_, router) = crate::routes::build_router_with_state(state.clone());
+        let app = router
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::mw::csrf::browser_csrf_middleware,
+            ))
+            .layer(axum::middleware::from_fn_with_state(
+                state.shutdown.clone(),
+                crate::mw::shutdown::track,
+            ))
+            .with_state(state);
+        let mut request = axum::http::Request::builder().uri(path);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = app
+            .oneshot(request.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected_status);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(!response.headers().contains_key("location"));
+        assert!(!response.headers().contains_key("www-authenticate"));
+        if path != "/ready" {
+            assert_eq!(response.headers()["content-type"], "application/json");
+        }
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        if path == "/ready" {
+            assert!(bytes.is_empty());
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_http_stays_database_independent_and_preserves_drain_contract() {
+        use axum::http::StatusCode;
+        let state = crate::test_utils::test_app_state_no_db().await;
+        assert_eq!(
+            assert_probe(state.clone(), "/health", StatusCode::OK).await["status"],
+            "ok"
+        );
+        assert_eq!(
+            assert_probe(state.clone(), "/ready", StatusCode::OK).await,
+            serde_json::Value::Null
+        );
+        state.shutdown.begin_drain();
+        // Probe routes keep their contracts even after ordinary work is stopped.
+        state.shutdown.stop();
+        assert_eq!(
+            assert_probe(state.clone(), "/health", StatusCode::OK).await["status"],
+            "ok"
+        );
+        assert_eq!(
+            assert_probe(state.clone(), "/ready", StatusCode::SERVICE_UNAVAILABLE).await,
+            serde_json::Value::Null
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_production_routes_ignore_missing_and_invalid_login_credentials() {
+        use axum::http::StatusCode;
+        let state = crate::test_utils::test_app_state_no_db().await;
+        for headers in [
+            vec![],
+            vec![("authorization", "Bearer invalid.expired.token")],
+            vec![("cookie", "nyx_session=expired; nyx_access_token=expired")],
+            vec![
+                ("authorization", "Bearer nyx_invalid_agent_key"),
+                ("x-api-key", "invalid"),
+            ],
+            vec![
+                ("origin", "https://untrusted.example"),
+                ("cookie", "nyx_session=expired"),
+            ],
+        ] {
+            assert_eq!(
+                assert_probe_headers(state.clone(), "/health", StatusCode::OK, &headers).await["status"],
+                "ok"
+            );
+            assert_eq!(
+                assert_probe_headers(state.clone(), "/ready", StatusCode::OK, &headers).await,
+                serde_json::Value::Null
+            );
+        }
+    }
 
     #[test]
     fn health_commit_prefers_runtime_stamp_and_preserves_standalone_fallback() {
@@ -278,6 +427,7 @@ mod tests {
             invite_code_required: true,
             email_auth_enabled: true,
             mobile_new_domains: true,
+            crash_diagnostics_offered: false,
             telemetry_dsn: None,
             telemetry_host: None,
             telemetry_share_analytics: false,
@@ -303,6 +453,7 @@ mod tests {
             invite_code_required: false,
             email_auth_enabled: false,
             mobile_new_domains: false,
+            crash_diagnostics_offered: false,
             telemetry_dsn: None,
             telemetry_host: None,
             telemetry_share_analytics: false,
@@ -313,6 +464,7 @@ mod tests {
         assert!(json.get("telemetry_host").is_none());
         // telemetry_share_analytics false => skipped (Not::not)
         assert!(json.get("telemetry_share_analytics").is_none());
+        assert!(json.get("crash_diagnostics_offered").is_none());
         // Mobile launches must distinguish an explicit off from an older backend.
         assert_eq!(json["mobile_new_domains"], false);
     }
@@ -328,6 +480,7 @@ mod tests {
             invite_code_required: false,
             email_auth_enabled: false,
             mobile_new_domains: false,
+            crash_diagnostics_offered: false,
             telemetry_dsn: Some("phc_test123".to_string()),
             telemetry_host: Some("https://us.i.posthog.com".to_string()),
             telemetry_share_analytics: true,
@@ -336,5 +489,110 @@ mod tests {
         assert_eq!(json["telemetry_dsn"], "phc_test123");
         assert_eq!(json["telemetry_host"], "https://us.i.posthog.com");
         assert_eq!(json["telemetry_share_analytics"], true);
+    }
+
+    #[tokio::test]
+    async fn public_config_crash_hint_omits_off_and_killed_includes_global_and_cohort_without_reads()
+     {
+        use crate::{
+            models::user::{COLLECTION_NAME as USERS, User, UserType},
+            services::{
+                crash_report_service::{FLAG, admin, public_config as hint},
+                feature_flag_service::{self as flags, FlagTarget},
+                security_readiness_service as readiness,
+            },
+            test_utils::*,
+        };
+        use mongodb::event::{EventHandler, command::CommandEvent};
+        use std::sync::{Arc, Mutex};
+
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let seen = commands.clone();
+        let db = connect_test_database_with_command_handler(
+            "crash_public_config_reads",
+            EventHandler::callback(move |event| {
+                if let CommandEvent::Started(event) = event {
+                    seen.lock().unwrap().push(event.command);
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&id, UserType::Person))
+            .await
+            .unwrap();
+        readiness::ready_test_replica(&db).await;
+        let state = test_app_state(db.clone());
+        for expected in [
+            admin::Rollout::Off,
+            admin::Rollout::Global,
+            admin::Rollout::Killed,
+            admin::Rollout::Cohort,
+        ] {
+            match expected {
+                admin::Rollout::Global | admin::Rollout::Killed => {
+                    flags::set_platform_override(
+                        &db,
+                        FLAG,
+                        &FlagTarget::Global,
+                        expected == admin::Rollout::Global,
+                        &id,
+                    )
+                    .await
+                    .unwrap();
+                }
+                admin::Rollout::Cohort => {
+                    flags::set_platform_override(
+                        &db,
+                        FLAG,
+                        &FlagTarget::User(id.clone()),
+                        true,
+                        &id,
+                    )
+                    .await
+                    .unwrap();
+                    flags::clear_platform_override(&db, FLAG, &FlagTarget::Global)
+                        .await
+                        .unwrap();
+                }
+                admin::Rollout::Off => {}
+            }
+            assert_eq!(admin::rollout(&db).await.unwrap(), expected);
+            commands.lock().unwrap().clear();
+            let value =
+                serde_json::to_value(public_config(State(state.clone())).await.unwrap().0).unwrap();
+            let offered = matches!(expected, admin::Rollout::Global | admin::Rollout::Cohort);
+            if offered {
+                assert_eq!(value["crash_diagnostics_offered"], true);
+            } else {
+                assert!(value.get("crash_diagnostics_offered").is_none());
+            }
+            assert_eq!(hint::offered(&db), offered);
+            let reads = commands.lock().unwrap().clone();
+            assert_eq!(
+                reads.len(),
+                2,
+                "only the existing public flag reads: {reads:?}"
+            );
+            for (command, key) in reads
+                .iter()
+                .zip(["auth:invitation-code", "mobile:new-domains"])
+            {
+                assert_eq!(
+                    command.get_str("find").unwrap(),
+                    crate::models::feature_flag_override::COLLECTION_NAME
+                );
+                assert_eq!(
+                    command
+                        .get_document("filter")
+                        .unwrap()
+                        .get_str("flag_key")
+                        .unwrap(),
+                    key
+                );
+            }
+        }
     }
 }

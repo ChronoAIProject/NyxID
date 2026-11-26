@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp } from "../i18n/appTranslation";
 import { useMemo } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Feather } from "@expo/vector-icons";
@@ -10,7 +12,8 @@ type OfflineBannerProps = {
   onRetry?: () => void;
 };
 
-export function OfflineBanner({ subtitle = "Showing cached data", onRetry }: OfflineBannerProps) {
+export function OfflineBanner({ subtitle = translateApp("Showing cached data"), onRetry }: OfflineBannerProps) {
+  useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
 
@@ -20,12 +23,12 @@ export function OfflineBanner({ subtitle = "Showing cached data", onRetry }: Off
         <Feather name="wifi-off" size={16} color={colors.dangerTone.text} />
       </View>
       <View style={styles.textWrap}>
-        <Text style={styles.title}>No connection</Text>
+        <Text style={styles.title}>{translateApp("No connection")}</Text>
         <Text style={styles.subtitle}>{subtitle}</Text>
       </View>
       {onRetry ? (
         <Pressable style={styles.retryBtn} onPress={onRetry}>
-          <Text style={styles.retryText}>Retry</Text>
+          <Text style={styles.retryText}>{translateApp("Retry")}</Text>
         </Pressable>
       ) : null}
     </View>

@@ -1,3 +1,4 @@
+use super::recovery_batch::{self, Failures};
 use crate::models::credits::Credits;
 use std::collections::HashSet;
 
@@ -15,7 +16,7 @@ use crate::models::credit_grant::{
 };
 use crate::models::credit_schedule::{
     COLLECTION_NAME as CREDIT_SCHEDULES, CreditExpiryPolicy, CreditSchedule, SchedulePeriod,
-    ScheduleRecurrence,
+    ScheduleRecurrence, ScheduleTiming,
 };
 use crate::models::credit_schedule_period::{
     COLLECTION_NAME as CREDIT_SCHEDULE_PERIODS, CreditSchedulePeriod, SchedulePeriodStatus,
@@ -24,7 +25,10 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 use super::grants::{MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN};
 
+pub mod eligibility;
 mod progress;
+pub mod recipients;
+pub mod seeding;
 
 pub const DISBURSEMENT_CHUNK: usize = 200;
 pub const MAX_RECIPIENTS_PER_TICK: usize = 5_000;
@@ -35,6 +39,8 @@ const MAX_SCHEDULES_PER_TICK: i64 = 500;
 pub struct CreateScheduleInput {
     pub amount_credits: i64,
     pub recurrence: ScheduleRecurrence,
+    #[serde(skip_serializing_if = "calendar_timing")]
+    pub timing: ScheduleTiming,
     pub expiry: CreditExpiryPolicy,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
@@ -84,6 +90,10 @@ pub struct DisbursementStats {
     pub budget_exhausted: bool,
 }
 
+fn calendar_timing(timing: &ScheduleTiming) -> bool {
+    *timing == ScheduleTiming::Calendar
+}
+
 pub async fn create_schedule(
     db: &mongodb::Database,
     input: CreateScheduleInput,
@@ -128,6 +138,7 @@ pub async fn create_schedule(
         amount_credits: amount.display_whole(),
         amount,
         recurrence: input.recurrence,
+        timing: input.timing,
         expiry: input.expiry,
         target_kind: input.target_kind,
         target_user_ids,
@@ -381,10 +392,11 @@ pub async fn disburse_due(
 ) -> AppResult<DisbursementStats> {
     super::exact_migration::require_ready(db).await?;
     let mut stats = DisbursementStats::default();
-    abandon_elapsed_periods(db, now, &mut stats).await?;
+    let mut failures = Failures::default();
+    abandon_elapsed_periods(db, now, &mut stats, &mut failures).await?;
     if budget == 0 {
         stats.budget_exhausted = true;
-        return Ok(stats);
+        return failures.finish(stats);
     }
 
     let in_flight_schedule_ids: Vec<String> = db
@@ -394,88 +406,118 @@ pub async fn disburse_due(
         .into_iter()
         .filter_map(|value| value.as_str().map(ToString::to_string))
         .collect();
-    let schedules: Vec<CreditSchedule> = db
-        .collection::<CreditSchedule>(CREDIT_SCHEDULES)
+    let schedules: Vec<bson::Document> = db
+        .collection::<bson::Document>(CREDIT_SCHEDULES)
         .find(doc! { "$or": [
             { "is_active": true },
             { "_id": { "$in": &in_flight_schedule_ids } },
         ] })
-        .sort(doc! { "_id": 1 })
-        .limit(MAX_SCHEDULES_PER_TICK)
+        .sort(doc! {"_id":1})
+        .limit(recovery_batch::limit(MAX_SCHEDULES_PER_TICK))
         .await?
         .try_collect()
         .await?;
 
     let mut remaining_budget = budget.min(MAX_RECIPIENTS_PER_TICK);
-    for schedule in schedules {
+    for raw in schedules {
+        if !super::reconcile::continue_reconcile() {
+            break;
+        }
         if remaining_budget == 0 {
             stats.budget_exhausted = true;
             break;
         }
-        stats.schedules_examined += 1;
-        let window = schedule_period(schedule.recurrence, now);
-        let claim = claim_period(db, &schedule, window, now, schedule.is_active).await?;
-        let mut period = match claim {
-            PeriodClaim::Acquired(period) => {
-                stats.periods_claimed += 1;
-                *period
-            }
-            PeriodClaim::Busy | PeriodClaim::Complete => continue,
-        };
-
-        loop {
-            if remaining_budget == 0 {
-                release_period_lease(db, &period.id, now).await?;
-                stats.budget_exhausted = true;
-                break;
-            }
-            let chunk_limit = DISBURSEMENT_CHUNK.min(remaining_budget);
-            let recipients = next_recipients(db, &period, chunk_limit).await?;
-            if recipients.is_empty() {
-                complete_period(db, &schedule.id, &period, now).await?;
-                stats.periods_completed += 1;
-                break;
-            }
-            let last_recipient = recipients.last().cloned().expect("chunk is non-empty");
-            let grants = grants_for_recipients(&schedule, &period, recipients, Utc::now());
-            let outcome = insert_grant_chunk(db, &grants).await?;
-            stats.recipients_examined += grants.len();
-            stats.grants_created += outcome.inserted_indices.len();
-            stats.already_disbursed += outcome.duplicate_count;
-            for index in outcome.inserted_indices {
-                let grant = &grants[index];
-                if super::ledger::record_grant_event(
-                    db,
-                    BillingLedgerEventType::GrantIssued,
-                    &grant.recipient_user_id,
-                    &grant.id,
-                    grant.amount,
-                    None,
-                    format!("grant-issued:{}", grant.id),
-                )
-                .await
-                {
-                    super::grants::mark_issued_ledgered(db, &grant.id, Utc::now()).await?;
-                    stats.grants_ledgered += 1;
+        failures
+            .unit(async {
+                let schedule: CreditSchedule = recovery_batch::decode(&raw)?;
+                stats.schedules_examined += 1;
+                if schedule.timing == ScheduleTiming::Recipient {
+                    recipients::disburse(db, &schedule, now, &mut remaining_budget, &mut stats)
+                        .await?;
+                    stats.budget_exhausted |= remaining_budget == 0;
+                    return Ok(());
                 }
-            }
-            advance_cursor(
-                db,
-                &schedule.id,
-                &period.id,
-                &last_recipient,
-                outcome.inserted_count,
-                now,
-            )
-            .await?;
-            period.cursor_user_id = Some(last_recipient);
-            period.disbursed_count = period
-                .disbursed_count
-                .saturating_add(outcome.inserted_count as u64);
-            remaining_budget -= grants.len();
-        }
+                let window = schedule_period(schedule.recurrence, now);
+                let claim = claim_period(db, &schedule, window, now, schedule.is_active).await?;
+                let mut period = match claim {
+                    PeriodClaim::Acquired(period) => {
+                        stats.periods_claimed += 1;
+                        *period
+                    }
+                    PeriodClaim::Busy | PeriodClaim::Complete => return Ok(()),
+                };
+
+                loop {
+                    if !super::reconcile::continue_reconcile() {
+                        // Period progress has no ownership token. Leave its existing
+                        // lease to expire rather than clear a successor's claim.
+                        return Ok(());
+                    }
+                    if remaining_budget == 0 {
+                        release_period_lease(db, &period.id, now).await?;
+                        stats.budget_exhausted = true;
+                        break;
+                    }
+                    let chunk_limit = DISBURSEMENT_CHUNK.min(remaining_budget);
+                    let recipients = next_recipients(db, &period, chunk_limit).await?;
+                    if !super::reconcile::continue_reconcile() {
+                        return Ok(());
+                    }
+                    if recipients.is_empty() {
+                        complete_period(db, &schedule.id, &period, now).await?;
+                        stats.periods_completed += 1;
+                        break;
+                    }
+                    let last_recipient = recipients.last().cloned().expect("chunk is non-empty");
+                    let grants = grants_for_recipients(&schedule, &period, recipients, Utc::now());
+                    let outcome = insert_grant_chunk(db, &grants).await?;
+                    stats.recipients_examined += grants.len();
+                    stats.grants_created += outcome.inserted_indices.len();
+                    stats.already_disbursed += outcome.duplicate_count;
+                    for index in outcome.inserted_indices {
+                        if !super::reconcile::continue_reconcile() {
+                            // Inserted grants remain unspendable until journal recovery.
+                            break;
+                        }
+                        let grant = &grants[index];
+                        if super::ledger::record_grant_event(
+                            db,
+                            BillingLedgerEventType::GrantIssued,
+                            &grant.recipient_user_id,
+                            &grant.id,
+                            grant.amount,
+                            None,
+                            format!("grant-issued:{}", grant.id),
+                        )
+                        .await
+                        {
+                            super::grants::mark_issued_ledgered(db, &grant.id, Utc::now()).await?;
+                            stats.grants_ledgered += 1;
+                        }
+                    }
+                    if !super::reconcile::continue_reconcile() {
+                        // Inserted grants are durable identities; replay of this chunk
+                        // is deduplicated. Do not publish progress after losing ownership.
+                        return Ok(());
+                    }
+                    // The claim's count predates this walk's fresh inserts.
+                    // Another issuer may already have counted these inserts.
+                    period.disbursed_count = period
+                        .disbursed_count
+                        .saturating_add(outcome.inserted_count as u64);
+                    let advanced =
+                        advance_cursor(db, &schedule.id, &period, &last_recipient, now).await?;
+                    if !advanced && outcome.inserted_count > 0 {
+                        progress::refresh_count(db, &period).await?;
+                    }
+                    period.cursor_user_id = Some(last_recipient);
+                    remaining_budget -= grants.len();
+                }
+                Ok(())
+            })
+            .await;
     }
-    Ok(stats)
+    failures.finish(stats)
 }
 
 pub fn schedule_period(recurrence: ScheduleRecurrence, now: DateTime<Utc>) -> SchedulePeriod {
@@ -746,17 +788,18 @@ pub(super) async fn insert_grant_chunk(
 async fn advance_cursor(
     db: &mongodb::Database,
     schedule_id: &str,
-    period_id: &str,
+    period: &CreditSchedulePeriod,
     cursor: &str,
-    inserted_count: usize,
     now: DateTime<Utc>,
-) -> AppResult<()> {
-    db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
+) -> AppResult<bool> {
+    let result = db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
         .update_one(
-            doc! { "_id": period_id, "status": "disbursing" },
+            doc! { "_id": &period.id, "status": "disbursing" },
             doc! {
-                "$max": { "cursor_user_id": cursor },
-                "$inc": { "disbursed_count": inserted_count as i64 },
+                "$max": {
+                    "cursor_user_id": cursor,
+                    "disbursed_count": period.disbursed_count as i64,
+                },
                 "$set": {
                     "lease_expires_at": bson::DateTime::from_chrono(now + Duration::seconds(PERIOD_LEASE_SECS)),
                     "updated_at": bson::DateTime::from_chrono(now),
@@ -768,16 +811,12 @@ async fn advance_cursor(
         .update_one(
             doc! { "_id": schedule_id },
             doc! { "$set": {
-                "last_period_start": period_id
-                    .rsplit_once(':')
-                    .and_then(|(_, millis)| millis.parse::<i64>().ok())
-                    .and_then(DateTime::from_timestamp_millis)
-                    .map_or(Bson::Null, |value| bson::DateTime::from_chrono(value).into()),
+                "last_period_start": bson::DateTime::from_chrono(period.period_start),
                 "last_disbursed_at": bson::DateTime::from_chrono(now),
             } },
         )
         .await?;
-    Ok(())
+    Ok(result.matched_count != 0)
 }
 
 async fn complete_period(
@@ -791,9 +830,8 @@ async fn complete_period(
     db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
         .update_one(
             doc! { "_id": &period.id, "status": "disbursing" },
-            doc! { "$set": {
+            doc! { "$max": { "disbursed_count": disbursed_count }, "$set": {
                 "status": "complete",
-                "disbursed_count": disbursed_count,
                 "lease_expires_at": Bson::Null,
                 "updated_at": bson::DateTime::from_chrono(now),
                 "completed_at": bson::DateTime::from_chrono(now),
@@ -830,49 +868,59 @@ async fn abandon_elapsed_periods(
     db: &mongodb::Database,
     now: DateTime<Utc>,
     stats: &mut DisbursementStats,
+    failures: &mut Failures,
 ) -> AppResult<()> {
-    let periods: Vec<CreditSchedulePeriod> = db
-        .collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
+    let periods: Vec<bson::Document> = db
+        .collection::<bson::Document>(CREDIT_SCHEDULE_PERIODS)
         .find(doc! {
             "status": "disbursing",
             "period_end": { "$lte": bson::DateTime::from_chrono(now) },
         })
-        .sort(doc! { "period_end": 1, "_id": 1 })
-        .limit(MAX_SCHEDULES_PER_TICK)
+        .sort(doc! {"period_end":1,"_id":1})
+        .limit(recovery_batch::limit(MAX_SCHEDULES_PER_TICK))
         .await?
         .try_collect()
         .await?;
-    for period in periods {
-        let disbursed_count =
-            progress::count_period_grants(db, &period.schedule_id, period.period_start).await?;
-        let result = db
-            .collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
-            .update_one(
-                doc! { "_id": &period.id, "status": "disbursing" },
-                doc! { "$set": {
-                    "status": "complete",
-                    "disbursed_count": disbursed_count,
-                    "lease_expires_at": Bson::Null,
-                    "updated_at": bson::DateTime::from_chrono(now),
-                    "completed_at": bson::DateTime::from_chrono(now),
-                } },
-            )
-            .await?;
-        if result.modified_count == 0 {
-            continue;
+    for raw in periods {
+        if !super::reconcile::continue_reconcile() {
+            break;
         }
-        db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
-            .update_one(
-                doc! { "_id": &period.schedule_id },
-                doc! { "$inc": { "skipped_periods": 1_i64 } },
-            )
-            .await?;
-        stats.periods_abandoned += 1;
-        tracing::warn!(
-            schedule_id = %period.schedule_id,
-            period_start = %period.period_start,
-            "abandoned incomplete elapsed credit schedule period"
-        );
+        failures
+            .unit(async {
+                let period: CreditSchedulePeriod = recovery_batch::decode(&raw)?;
+                let disbursed_count =
+                    progress::count_period_grants(db, &period.schedule_id, period.period_start)
+                        .await?;
+                let result = db
+                    .collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
+                    .update_one(
+                        doc! { "_id": &period.id, "status": "disbursing" },
+                        doc! { "$max": { "disbursed_count": disbursed_count }, "$set": {
+                            "status": "complete",
+                            "lease_expires_at": Bson::Null,
+                            "updated_at": bson::DateTime::from_chrono(now),
+                            "completed_at": bson::DateTime::from_chrono(now),
+                        } },
+                    )
+                    .await?;
+                if result.modified_count == 0 {
+                    return Ok(());
+                }
+                db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
+                    .update_one(
+                        doc! { "_id": &period.schedule_id },
+                        doc! { "$inc": { "skipped_periods": 1_i64 } },
+                    )
+                    .await?;
+                stats.periods_abandoned += 1;
+                tracing::warn!(
+                    schedule_id = %period.schedule_id,
+                    period_start = %period.period_start,
+                    "abandoned incomplete elapsed credit schedule period"
+                );
+                Ok(())
+            })
+            .await;
     }
     Ok(())
 }

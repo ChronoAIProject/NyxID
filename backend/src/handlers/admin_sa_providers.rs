@@ -10,7 +10,9 @@ use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, service_account_service, unified_key_service, user_token_service,
+    audit_service,
+    service_account_connection_audit::{self, Event},
+    service_account_service, unified_key_service, user_token_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -78,7 +80,7 @@ pub struct AdminSaOAuthInitiateResponse {
     pub authorization_url: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct AdminSaDeviceCodeInitiateResponse {
     pub user_code: String,
     pub verification_uri: String,
@@ -87,10 +89,15 @@ pub struct AdminSaDeviceCodeInitiateResponse {
     pub interval: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct AdminSaDeviceCodePollRequest {
     pub state: String,
 }
+
+crate::errors::redacted_debug!(
+    AdminSaDeviceCodeInitiateResponse,
+    AdminSaDeviceCodePollRequest,
+);
 
 #[derive(Debug, Serialize)]
 pub struct AdminSaDeviceCodePollResponse {
@@ -162,7 +169,13 @@ pub async fn connect_api_key_for_sa(
     }
 
     // Reuse existing service -- pass sa.id as user_id
-    user_token_service::store_api_key(
+    let audit = service_account_connection_audit::intent(
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+        &sa_id,
+        &provider_id,
+        Event::ApiKeyConnected,
+    )?;
+    user_token_service::store_api_key_with_audit(
         &state.db,
         &state.encryption_keys,
         &sa_id,
@@ -170,19 +183,9 @@ pub async fn connect_api_key_for_sa(
         &body.api_key,
         body.label.as_deref(),
         None, // service accounts don't use gateway URLs
+        Some(&audit),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.provider_connected",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-            "provider_id": &provider_id,
-            "token_type": "api_key",
-        })),
-    );
 
     Ok(Json(AdminSaProviderActionResponse {
         status: "connected".to_string(),
@@ -211,13 +214,21 @@ pub async fn disconnect_sa_provider(
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
 
     let audit_actor = audit_service::AuditActor::from_auth_user(&auth_user);
-    let result = unified_key_service::disconnect_credentials(
+    let audit = service_account_connection_audit::intent(
+        &audit_actor,
+        &sa_id,
+        &provider_id,
+        Event::ProviderDisconnected,
+    )?;
+    let result = unified_key_service::disconnect_credentials_with_audit(
         &state.db,
         &state.encryption_keys,
         &sa_id,
         &audit_actor,
         unified_key_service::DisconnectTarget::Provider(&provider_id),
         options,
+        None,
+        Some(&audit),
     )
     .await?;
     for event in &result.deleted_services {
@@ -232,16 +243,6 @@ pub async fn disconnect_sa_provider(
         )
         .await;
     }
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.provider_disconnected",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-            "provider_id": &provider_id,
-        })),
-    );
 
     Ok(Json(DisconnectSaProviderResponse {
         status: "disconnected".to_string(),
@@ -279,7 +280,13 @@ pub async fn initiate_oauth_for_sa(
     let admin_id = auth_user.user_id.to_string();
     let redirect_path = format!("/admin/service-accounts/{}", sa_id);
 
-    let auth_result = user_token_service::initiate_oauth_connect(
+    let audit = service_account_connection_audit::intent(
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+        &sa_id,
+        &provider_id,
+        Event::OAuthInitiated,
+    )?;
+    let auth_result = user_token_service::initiate_oauth_connect_with_audit(
         &state.db,
         &state.encryption_keys,
         &state.config.base_url,
@@ -292,18 +299,10 @@ pub async fn initiate_oauth_for_sa(
         None, // admin-on-behalf-of flow stays single-tenant per SA
         None, // not a hosted connect-link flow
         None, // legacy-routed flow; SA popup migration is out of scope
+        None,
+        Some(&audit),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.oauth_initiated",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-            "provider_id": &provider_id,
-        })),
-    );
 
     Ok(Json(AdminSaOAuthInitiateResponse {
         authorization_url: auth_result.authorization_url,
@@ -331,7 +330,13 @@ pub async fn initiate_device_code_for_sa(
 
     let admin_id = auth_user.user_id.to_string();
 
-    let result = user_token_service::request_device_code(
+    let audit = service_account_connection_audit::intent(
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+        &sa_id,
+        &provider_id,
+        Event::DeviceInitiated,
+    )?;
+    let result = user_token_service::request_device_code_with_audit(
         &state.db,
         &state.encryption_keys,
         &admin_id,
@@ -340,18 +345,9 @@ pub async fn initiate_device_code_for_sa(
         &[],
         None, // no scope_override: SA-connect picker is a later pass (NyxID#917)
         None, // admin-on-behalf-of flow stays single-tenant per SA
+        Some(&audit),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "admin.sa.device_code_initiated",
-        Some(serde_json::json!({
-            "target_sa_id": &sa_id,
-            "provider_id": &provider_id,
-        })),
-    );
 
     Ok(Json(AdminSaDeviceCodeInitiateResponse {
         user_code: result.user_code,
@@ -380,27 +376,21 @@ pub async fn poll_device_code_for_sa(
 
     let admin_id = auth_user.user_id.to_string();
 
-    let result = user_token_service::poll_device_code(
+    let audit = service_account_connection_audit::intent(
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+        &sa_id,
+        &provider_id,
+        Event::DeviceConnected,
+    )?;
+    let result = user_token_service::poll_device_code_with_audit(
         &state.db,
         &state.encryption_keys,
         &admin_id,
         &provider_id,
         &body.state,
+        Some((&sa_id, &audit)),
     )
     .await?;
-
-    if result.status == "complete" {
-        audit_service::log_for_user(
-            state.db.clone(),
-            &auth_user,
-            "admin.sa.provider_connected",
-            Some(serde_json::json!({
-                "target_sa_id": &sa_id,
-                "provider_id": &provider_id,
-                "token_type": "device_code",
-            })),
-        );
-    }
 
     Ok(Json(AdminSaDeviceCodePollResponse {
         status: result.status,

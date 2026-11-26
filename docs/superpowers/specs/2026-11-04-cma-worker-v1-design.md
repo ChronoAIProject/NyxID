@@ -45,7 +45,7 @@ The Agent lifecycle and older generic Sandbox command use different idempotency 
 - `assistant_cma_gateway` defines the typed `CmaGateway` boundary and production `CatalogCmaGateway`. The production adapter resolves the canonical active `cma` catalog entry, validates the personal owner and live catalog access, requires its supported signed-identity/HTTP configuration, pins service identity and execution fingerprint, and sends bounded requests without redirects. Upstream authorization loss becomes an unavailable observation; an explicit local owner mismatch remains forbidden.
 - `assistant_cma_sandbox_service` owns slot reservation, exact-byte Sandbox recovery storage, created-resource filtering and refresh, safe DTOs, local labels, lifecycle commands and confirmed retirement. It does not import or claim external resources.
 - `service_dispatch_registry` selects protection once for REST/MCP from the strictly resolved `ProxyTarget.catalog_slug`. Only after selecting protection does it canonicalize the admission path and prepare its effective headers. Ordinary services retain their existing global path-safety checks and forwarding semantics, including trailing slashes and legal percent encoding. Catalog connections carry the authoritative catalog ID and slug; missing or unreadable catalog records fail resolution. A private neutral admission binds the policy, authenticated actor, resource owner, UserService, credential connection, destination and parsed base URL. Every common HTTP wrapper verifies the admission against its current trusted caller and target, including calls without admission. Protected targets refuse missing/mismatched admission, missing callers and streamed request bodies; ordinary targets accept no admission or explicit `Unprotected` without a guard.
-- `assistant_cma_admission` implements `ServiceDispatchGuard` directly. Its `before_send` checks the final built request and persists dispatch state; `observe_response` records the receipt before later observation completes resource association. The registry owns policy selection and credential construction; the generic proxy knows neither CMA paths nor its permit type. Existing HTTP egress, billing, resource-proof and execution-permission fences remain independent. Local rejections, transport errors and failures after a received response retain their existing dispatch-stage classifications. Lifecycle creation, direct Sandbox creation and workspace Agent creation preserve their existing quota, same-key/body binding and recovery rules. Reads do not reserve capacity; writes require the supported personal context and NyxID-created parent when applicable.
+- `assistant_cma_admission` implements `ServiceDispatchGuard` directly. Its `before_send` checks the final built request and persists dispatch state; `observe_response` records the receipt before later observation completes resource association. The registry owns policy selection and credential construction; the generic proxy knows neither CMA paths nor its permit type. Existing HTTP egress, billing, resource-proof and execution-permission fences remain independent. Local rejections, transport errors and failures after a received response retain their existing dispatch-stage classifications. Lifecycle creation, direct Sandbox creation and workspace Agent creation preserve their existing quota, same-key/body binding and recovery rules. Reads do not reserve capacity; writes require the supported personal context and a NyxID-created parent, or the verified pre-tracking proxy exception below, when applicable.
 
 Ordinary CMA REST/MCP admission and final dispatch bind the resolved catalog service ID and exact actual base URL to the catalog deployment. They allow stable differences between the connection's identity configuration and the catalog's identity configuration, including the three identity include flags. The request still uses the resolved connection's identity configuration, and applicable generic approval/execution checks continue to compare that connection with its live authority. The gateway pins the complete catalog fingerprint within each operation, and creation confirmation/recovery compare the persisted catalog snapshot with the live catalog. Native catalog-snapshot checks retain that complete fingerprint comparison. No identity defaults, production configuration or creation retry windows change.
 
@@ -53,9 +53,130 @@ Concrete and universal MCP calls retain the typed provider outcome through async
 - `assistant_cma_agent_service` registers owner-authenticated observations and resolves exact local Agent references. It validates immutable parents/generations and exposes safe detail and Desktop capability projections. It does not choose, create, or delete an Agent itself.
 - `assistant_cma_tools` provides the native bridges. Its live grant/key/access-mode/input checks run at the actual gateway request boundary, including real paginated queries and attachment JSON.
 
-Creating an Agent with an existing Sandbox or Workspace verifies a NyxID-created parent for the same owner. Existing Agents do not prevent additional Agents within that environment. Configured CPU/memory is read from the exact pinned profile or verified owner runtime allocation. The first complete positive pair and its source are persisted for that creation identity; later lifecycle reads skip capacity enrichment and preserve the saved values through pause, revive and unavailable observations. Initial enrichment has at most eight reads and a two-second budget per call, not an overall management-request deadline. Missing or unverifiable capacity remains unknown without making resource management unavailable; values are resource specifications, not utilization or charges.
+Creating an Agent with an existing Sandbox or Workspace verifies a NyxID-created parent for the same owner, or uses the verified pre-tracking proxy exception below. Existing Agents do not prevent additional Agents within that environment. Configured CPU/memory is read from the exact pinned profile or verified owner runtime allocation. The first complete positive pair and its source are persisted for that creation identity; later lifecycle reads skip capacity enrichment and preserve the saved values through pause, revive and unavailable observations. Initial enrichment has at most eight reads and a two-second budget per call, not an overall management-request deadline. Missing or unverifiable capacity remains unknown without making resource management unavailable; values are resource specifications, not utilization or charges.
 
 A retirement intent closes new Agent/task admission. Known cleanup operations remain addressable, and CMA's state machine resolves accepted remote races.
+
+## Pre-existing Sandbox proxy compatibility (#2587)
+
+The proxy forwards supported operations on an untracked Sandbox only when an
+owner-authenticated CMA detail read proves the canonical Sandbox ID, explicit
+personal owner equal to the caller, and a valid `created_at` strictly before
+this deployment's fixed cutoff T. Workspace and Agent selectors resolve their
+parents through authenticated CMA reads. Missing, malformed, conflicting, future
+or boundary dates, a foreign/shared owner and unavailable evidence grant no
+exception. Post-cutoff untracked resources retain `404 Not found: Sandbox was
+not created through NyxID`. Existing personal-caller and transport restrictions
+remain; organization, service-account and guest callers gain no access.
+
+Startup creates one majority-durable `assistant_migrations` marker with
+`_id=cma-legacy-sandboxes-v1`. T is the earliest `created_at` among retained
+`assistant_cma_sandboxes` rows with `source=nyxbot`, including creation intents
+without a remote ID. If none exists, the atomic aggregation upsert evaluates
+MongoDB's `$$NOW` in the marker write. The marker records the rule that supplied
+T. Concurrent replicas preserve the winning marker; restart, deletion of managed
+records and catalog edits never advance it. There is no operator step, environment
+variable, request-time marker write or per-Sandbox memo. Missing or unreadable
+markers leave the exception closed on that replica.
+
+**Accepted exposure window:** the earliest retained record is only an upper
+bound on when tracking began. An external Sandbox created between the actual
+start and that first record can qualify. If no managed records remain, the
+window extends to marker creation. Each request still requires live ownership
+proof and consumes no managed allocation.
+
+This is pass-through without adoption. Legacy requests preserve their outbound
+body, headers and query and CMA's response. They need no NyxID managed-creation
+key and acquire no creation receipt, Sandbox/Agent reference or account slot.
+CMA can still require its own key, trust confirmation or funding; its refusal
+is forwarded unchanged. First-party management and NyxBot's resource listing
+remain tracked-only, including Desktop access. Ordinary async result watches
+keep their delivery behavior without creating a managed Agent reference.
+
+| Supported operation | Verified pre-existing parent |
+| --- | --- |
+| `POST /api/v1/agents` with `sandbox_id` or `workspace_id`; `POST /api/v1/workspaces/{id}/agents` | Forward all three selectors without managed creation/registration. |
+| Agent input/files, streamed responses, targeted controls/interrupt, stop/delete | Resolve the Agent's parent and forward. |
+| Sandbox Workspace creation (profile or inline), pause/revive, delete | Forward; no NyxID slot is changed. |
+| GET/HEAD/OPTIONS, including lifecycle/status reads | Existing behavior. |
+| New Sandbox; Agent creation without an existing parent | Existing managed admission. |
+| Other writes/launch/visitor routes | Existing unsupported-operation refusal. |
+
+The single code decision `legacy_runtime_enrollment_policy` is
+`AllowProspectiveBilling` (owner decision, 17 November 2026). It applies only
+after a provenance miss and successful legacy proof, to
+`OPERATIONS_THAT_CAN_CAUSE_RUNTIME_ENROLLMENT`: all three Agent creation selectors,
+Workspace creation, revive, Agent input, v1/v2 responses and text-replacement
+interrupt. Pause/delete, Agent stop/delete/file writes and targeted controls do
+not require that decision. An active-state read cannot substitute for it, because
+a concurrent pause could make the forwarded operation require revival.
+
+CMA's existing funding path bills the verified Sandbox's personal owner at the
+ordinary effective Sandbox rate card. There is no special legacy rate or new
+NyxID billing path. Forwarding can lead to a quote and first funded window when
+CMA next needs runtime; a quote alone does not charge. For a previously unfunded
+Sandbox, coverage begins prospectively, not at T or its original creation time.
+Earlier runtime is never charged retroactively. Existing cohort, wallet,
+subscription, allowance/grant/wallet funding, evidence and renewal rules remain
+in force. Pausing compute does not necessarily stop retained-disk charges.
+A queued Agent receipt can precede a later funding failure; ordinary proxy/model
+usage is independently metered. See `docs/CMA_BILLING.md`.
+
+### Provenance-miss cost
+
+These measured admission counts use the public CMA catalog with a personal
+owner and no additional RBAC or visibility queries. Each pair is **MongoDB
+commands / CMA GETs**. They exclude the forwarded operation itself and ordinary
+proxy authorization/billing. Every covered mutation appears below; controls
+include cancel, steer, approval decisions and text-replacement interrupt.
+
+| Operation on an untracked parent, valid key and no query | Before | Verified legacy | Added |
+| --- | --- | --- | --- |
+| Sandbox pause, revive, delete; Workspace creation (profile or inline) | 5 / 0 | 8 / 1 | 3 / 1 |
+| Agent creation selecting `sandbox_id` | 6 / 0 | 9 / 1 | 3 / 1 |
+| Agent creation selecting `workspace_id`; `POST /workspaces/{id}/agents` | 10 / 2 | 11 / 2 | 1 / 0 |
+| Agent input, files, stop, delete; v1/v2 responses; targeted responses, controls and interrupt | 7 / 1 | 10 / 2 | 3 / 1 |
+
+The added command is one majority marker read. Direct Sandbox and Agent forms
+also add the authenticated Sandbox GET and its two owner/catalog reads;
+Workspace forms retain the Sandbox evidence already read while resolving the
+Workspace. Each additional gateway resolution can add the existing RBAC and
+catalog-visibility queries when those policies apply: a new GET costs
+`2 + R + V` database commands, so the ordinary miss increment is
+`3 + R + V` for direct/Agent forms and `1` for Workspace forms.
+
+Keyless or query-carrying mutations previously stopped after **2 / 0**, before
+parent resolution. They now cost **8 / 1** for direct Sandbox selectors
+(including Agent creation by `sandbox_id`) and **10 / 2** for Workspace or
+Agent selectors: increases of **6 / 1** and **8 / 2**, respectively. These
+counts cover missing keys, queries with keys, and queries without keys.
+File writes already permit a missing key: without a query they retain the
+ordinary Agent row above; with a query they follow the former early-refusal
+case. Restored owner/catalog resolutions retain their ordinary conditional
+RBAC/visibility work.
+
+When a formerly early-refused request resolves to a tracked parent, it keeps
+its original managed validation error and performs no observation or write.
+It necessarily pays for bounded parent lookup (5 / 0 for direct selectors,
+7 / 1 for Agent selectors, 9 / 2 for Workspace selectors); it never reads the
+marker. The zero-added-work guarantee applies to **valid tracked requests**.
+Their ordered BSON commands and outbound request bytes are pinned against the
+base implementation, normalizing only per-run session/time/fixture identities,
+encrypted bytes and signed tokens. Non-CMA registry admission does no database,
+header-preparation or gateway work. CMA GET/HEAD/OPTIONS retain their existing
+behavior without provenance or marker reads.
+
+A forwarded legacy request then performs the existing final-send deployment
+check (2 database reads here, no CMA GET), with no managed dispatch transaction.
+Upstream responses are returned directly. Ordinary async watches may retain
+watch/session metadata; their existing registration preflight can verify indexes,
+but a missing managed parent ends registration before any Sandbox, Agent or
+creation-row write. These watch costs are separate from proxy admission.
+
+During a rolling deployment old replicas still refuse these legacy writes and
+new replicas forward them after proof. Requests can therefore alternate between
+refusal and forwarding until the fleet is upgraded. Rollback restores the old
+refusal; there are no adopted resource rows for an old binary to interpret.
 
 ## First-party HTTP surface
 

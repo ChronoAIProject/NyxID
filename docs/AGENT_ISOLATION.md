@@ -391,6 +391,8 @@ When `rate_limit_per_second` is `None` on the key, the per-agent check is a no-o
 
 ## Audit Attribution
 
+Owner/admin creation and deletion of an Agent Key credential binding commit a bounded, identifier-only audit intent with the binding and parent-key authority change. The existing relay appends that occurrence to the audit chain exactly once; proxy lookups, authentication and automatic binding cleanup retain their existing command paths.
+
 Every proxy and LLM gateway request logs `api_key_id` and `api_key_name` in the audit event. This enables:
 - Per-agent usage dashboards
 - Admin audit log filtering by API key

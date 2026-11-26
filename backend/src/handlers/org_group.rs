@@ -69,6 +69,7 @@ pub(crate) async fn post(
         )
         .await?;
     let request = GroupRequest {
+        org_use_revisions: Default::default(),
         execution_task: participating.then(|| crate::models::execution_permission::TaskAdmission {
             channel_source: None,
             version: 1,
@@ -116,6 +117,10 @@ pub(crate) async fn post(
 }
 
 pub(crate) async fn advance(state: &AppState, group: &AssistantGroup) {
+    advance_inner(state, group, false).await;
+}
+
+pub(crate) async fn advance_inner(state: &AppState, group: &AssistantGroup, background: bool) {
     let result: AppResult<()> = Box::pin(async {
         let requests = groups::pending_requests(&state.db, &group.id).await?;
         for request in requests {
@@ -130,6 +135,14 @@ pub(crate) async fn advance(state: &AppState, group: &AssistantGroup) {
                 Err(e) => return Err(e),
             };
             for agent_id in &request.pending_agent_ids {
+                let _claim = if background {
+                    let Some(work) = state.shutdown.background() else {
+                        return Ok(());
+                    };
+                    Some(work)
+                } else {
+                    None
+                };
                 if personal::member_thread(&state.db, &access.actor, &group.id, agent_id)
                     .await?
                     .is_some_and(|r| engine::live_turn(&r, Utc::now()).is_some())
@@ -176,6 +189,20 @@ async fn run_member(
     let agent = groups::resolve_agents(&state.db, &access.group.user_id, &[agent_id.into()])
         .await?
         .remove(0);
+    if !access
+        .org
+        .as_ref()
+        .is_some_and(|s| s.permits_agent(&access.actor, &agent))
+        || request
+            .org_use_revisions
+            .get(agent_id)
+            .copied()
+            .unwrap_or(0)
+            != agent.org_use_revision
+    {
+        groups::remove_pending_agent(&state.db, &request.id, agent_id).await?;
+        return Ok(true);
+    }
     let thread = Box::pin(groups::member_thread(
         &state.db,
         &state.encryption_keys,
@@ -200,6 +227,7 @@ async fn run_member(
         execution_enrollment: request.execution_task.is_some(),
         execution_parent: None,
         channel_context: None,
+        capacity: None,
         owner_instruction_source: None,
         media_event_ids: Vec::new(),
         channel_uploads: Vec::new(),
@@ -304,6 +332,17 @@ pub(crate) async fn member_settled(
                 &access.group.member_agent_ids,
             )
             .await?;
+            let agents: Vec<_> = agents
+                .into_iter()
+                .filter(|a| {
+                    access
+                        .org
+                        .as_ref()
+                        .is_some_and(|s| s.permits_agent(&access.actor, a))
+                        && request.org_use_revisions.get(&a.id).copied().unwrap_or(0)
+                            == a.org_use_revision
+                })
+                .collect();
             let per_hour =
                 crate::services::assistant_settings_service::get(&state.db, &access.actor)
                     .await?
@@ -355,5 +394,5 @@ pub(crate) async fn member_settled(
     if result.is_err() {
         tracing::debug!("Organization group reply deferred");
     }
-    Box::pin(advance(state, &access.group)).await;
+    Box::pin(advance_inner(state, &access.group, true)).await;
 }

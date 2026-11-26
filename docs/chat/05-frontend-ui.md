@@ -11,6 +11,75 @@ permission to use every listed specialist. The conversation header identifies
 the agent being addressed and offers Working context and Details controls.
 Delegation and specialist replies appear in the conversation's activity cards.
 
+The desktop thread column groups channel conversations by their source chat,
+with the platform and bot connection on the group's secondary line. Each source
+has one level of conversation rows; it does not add another bot tree. Sources
+open by default, and searching by thread title, chat name, bot label
+or platform exposes every matching row. Missing chat names use a platform/kind
+fallback, while opaque bot and parent IDs keep distinct sources separate.
+Pins retain their existing order within each bot, including separate pinned
+and ordinary partitions with the parent context repeated when necessary.
+Every source retains its header. Each previews five ordinary rows and always
+includes pinned, unread, working, drafted and selected rows; Show more expands
+only that source. Source status summarizes all of its rows. Pin/unpin opens the
+receiving source and restores focus to the visible row or its exact source header.
+
+On phones, Open chats opens a full-screen navigation view. A selected agent's
+thread list uses the same source groups as desktop; Back to workspace shows the
+agent roster. Browsing another agent loads its threads without navigating away
+from the conversation. Selecting a thread navigates and closes the drawer;
+opening it again restores the current conversation's agent and selection.
+Workspace pages open the roster rather than a fallback agent list. Switching
+between the roster and thread list moves focus to the new view's Back control
+or the originating agent, without focusing the search keyboard.
+
+Channel child rows use a thread icon and their conversation title. Existing
+generic minute-resolution titles include creation-time seconds in a compact
+time label, formatted in the selected interface language and marked UTC. Only
+the exact default format whose minute matches conversation creation is recognized;
+channel defaults also have `title_source=user`. Other owner titles stay verbatim.
+Child-row date metadata shows creation date, and the full persisted title remains
+available on hover and in both rename editors. Persisted titles, conversations
+and reply routing are unchanged. An open
+child conversation identifies the platform and source chat in its header. These
+labels describe the conversation's origin, not its current follow status.
+
+At desktop widths of 1024px and above, the navigation lists agents only.
+Selecting an agent opens its threads in a separate, independently scrollable
+column within the content area. Selecting a conversation keeps that list open;
+selecting another agent replaces it with that agent's threads. Home, the close
+button, or Escape inside that column returns to the landing page. The desktop
+roster has no nested thread preview, Show more, or Show fewer controls.
+Its header identifies the individual agent, offers New chat
+and agent details, and searches thread titles and channel chat names locally.
+Pinned threads precede Today, Yesterday, Previous 7 days, and Earlier sections;
+channel conversations retain their bot and parent-chat grouping. Rows retain
+unread, running, draft, pin, rename, and confirmed-delete behavior. Agents appear
+in one flat roster. Navigation uses the existing sidebar surface, while the
+thread list and conversation share the existing content surface, with
+neutral selection highlights. Smaller screens keep threads
+inside the agent drawer; collapsed desktop navigation retains its chat popovers.
+
+The thread panel header shows Channels followed by compact platform-logo and
+count capsules below the agent identity and thread total. Only external channels
+appear; a list of app-only conversations has no channel summary. Logos have
+channel-name/count hover labels and accessible names. Compact conversation rows
+keep the title and external channel logo on one line, preserving the logo while
+the title truncates. Expanded rows place date/message count (or a draft) on the
+left and the external channel logo/name on the right. Ordinary app conversations
+have no source label, logo, or header badge. Linked bots and platform-managed
+personal chats use their saved platform, and search includes those channel names.
+The external channel badge remains visible in both the expanded conversation
+header and its compact pill.
+Thread rows use the same horizontal inset on both sides. The options menu
+overlays the right edge and fades the content beneath it when shown; it reserves
+no additional space. Personal conversations contain private app and platform-managed
+personal chats, grouped by date. Connected bot chats contain conversations from
+linked bots, grouped by their source chat. Both sections explain this distinction
+in a short caption. Source-group headers explicitly say Source chat above the
+external chat name and bot metadata, distinguishing the expandable container from
+the indented saved conversations inside it.
+
 In individual NyxBot and specialist threads, scrolling beyond 160px collapses
 the agent row into a compact pill at the upper right, with icon buttons for
 Working context and Details. Taller thread notices raise that threshold to
@@ -169,6 +238,69 @@ not override a newer reader selection.
 With `experimental:direct-chat-engine` enabled, a draft or `direct-*` route uses
 the in-memory Direct seam. Explicit `nyxid-chat-*` and `chatc-*` routes still use
 the canonical actor/history page. Direct conversations are not persisted.
+
+## 会话置顶 / Conversation pins
+
+浏览器侧栏的会话菜单提供「置顶会话」和「取消置顶」。同一列表支持多个置顶项，
+以中性图钉区分，保留标题、草稿、选中态及现有未读展示。NyxAgent 的置顶项排在
+所属 agent 的普通会话列表最前；channel chats 只在所属机器人分组内置顶，
+不移动机器人分组，也不改变其计数、展开状态或 parent chat 上下文。先按机器人分组，
+再将组内置顶主题排在所有普通主题之前；两部分分别保留 parent chat 标签。
+之后应用 Show more 上限；rail 保留 recent 顺序中的各 scope 原始槽位，只在同一
+普通会话或机器人 scope 的槽位间重排，再取前 8 项；没有置顶时原顺序完全不变。
+展开列表与折叠 rail 均先进行 O(n) 稳定分组，再应用已有展示上限；置顶和普通项
+各自保留原来的顺序，取消后回到正常位置。共享 transport 的列表顺序保持不变，
+进入 agent 时仍默认选择最新会话。置顶操作不导航、不执行已读操作。
+
+The browser conversation menu offers **Pin chat** and **Unpin chat**. Multiple
+pins lead their existing list with a neutral pin glyph, retaining titles,
+drafts, selection and existing unread presentation. NyxAgent pins lead their
+own agent's ordinary thread list. Channel chats pin only inside their own bot
+group; bot order, counts, expansion and parent chat context stay intact. Split
+groups before sorting within each list, then apply Show more limits. Within a
+bot, all pinned topics precede ordinary topics; each partition groups topics
+under their parent chat labels. Rail previews retain each scope’s original
+recent-list slots, reorder only within
+ordinary-chat or same-bot slots, then take eight rows. With no pins the original
+recent order is unchanged.
+Expanded lists and rail popovers use an O(n) stable partition before their
+existing display limits. Each partition retains its original order; unpinning
+restores normal placement. Transport ordering and the latest-thread default
+are unchanged. Pinning neither navigates nor marks a conversation read.
+
+只有置顶和取消置顶操作在菜单关闭后恢复行焦点；若取消置顶使该行移出 Show more
+预览，则焦点返回该机器人标题。重命名表单打开后，标题输入框保留焦点。
+
+Pin and unpin actions restore focus to the row after the menu closes. If an
+unpinned row leaves the Show more preview, focus returns to its bot header.
+Opening Rename keeps focus in the title input. Inline Rename actions keep the
+mobile drawer open so Save can submit before the form unmounts.
+
+置顶是本浏览器偏好，采用单一 `nyxid.assistant_pins` localStorage 记录，仅保存
+version、ownerUserId 和会话 ID，不保存标题、正文或访问权限。经确认的登录身份
+决定读取归属，刷新或重新进入 Chat 保留；登出、401 或切换账号会清除内存和持久化
+记录。存储结构使用 Zod 校验；失败以本地 load/save/clear 阶段标记记录（没有 HTTP
+请求或 Trace ID），侧栏展示本地化错误，写入失败不呈现为保存成功。删除成功后由
+实际 transport/API 删除路径清理对应 ID；失败或运行中拒绝删除保留置顶。不能用
+单个 agent 的局部加载列表修剪全账户 ID。记录只影响当前授权列表中已有的行。
+
+Pins are a browser-local preference in one `nyxid.assistant_pins` localStorage
+record containing only a version, owner ID and conversation IDs. Confirmed
+identity scopes restoration; reload and Chat re-entry retain pins. Sign-out,
+401 and account changes clear memory and storage. Zod validates stored data.
+Local load/save/clear error phases replace HTTP trace correlation for this
+storage-only operation; localized sidebar errors report failures, and failed
+writes never appear saved. Actual successful transport/API deletion removes
+the ID; failed or protected no-op deletion retains it. A partially loaded
+agent list must never prune account-wide IDs. Pins only decorate rows already
+present in the authorized list.
+
+本期不包含跨浏览器/跨设备同步、群聊置顶或服务器 API；Direct 会话本身仍只在内存
+中存在。清理浏览器数据会移除置顶。回滚前端提交即可停用功能；无服务端迁移。
+
+This does not add cross-browser/device sync, crew pins or a server API. Direct
+conversations themselves remain memory-only. Clearing browser data removes
+pins. Reverting the frontend change disables the feature without a migration.
 
 ## Thread states
 
@@ -457,6 +589,102 @@ is unavailable while a text-message connection is selected. Submission retains
 the leading `/service <UUID>` and actual newline; the server binds the choice
 to the admitted turn. Organization connections still require the existing action
 card in Auto and Ask every time.
+
+Composer 将明确不可执行的连接显示为不可用选项，通过 `aria-disabled` 和独立的
+screen reader 描述说明原因。该判断优先采用 routing classifier 明确不可用的结果，
+再检查后端 `execution_unavailable_reason`；`unverified`、可刷新的 OAuth access token
+和有 fallback 的离线节点仍可选择。Agent Details 与长期 grants 保持原有语义。
+
+The composer retains explicitly unavailable connections as unavailable choices
+exposed with `aria-disabled`, visible reasons and separate accessible descriptions.
+Its execution predicate first checks the routing classifier's hard-unavailable
+results, then the backend's `execution_unavailable_reason`. Unverified connections,
+refreshable OAuth access tokens and offline nodes with fallback remain selectable.
+Agent Details and durable grants keep their existing eligibility rules.
+
+选择只保存连接 ID；keys 刷新后，picker 和已选 chip 使用 live 数据。已选连接失效
+或从列表消失时，提示重新选择或移除，在清除编辑器、持久化草稿或附件前拒绝鼠标
+和键盘发送，不自动切换账号。异步 model 设置完成后、发送消息前，再次检查最新选择。
+服务端仍是最终执行授权的权威。回滚只需回退前端变更，无数据迁移。
+
+Selection stores only the connection ID; refreshed keys update both the picker
+and the selected chip. An unavailable or missing selected connection asks the
+owner to replace or remove it and refuses pointer/keyboard sends before clearing
+the editor, persisted draft or attachments, without switching accounts. The send
+path rechecks current selection after asynchronous model setup. Server admission
+remains authoritative. Rollback is a frontend revert with no data migration.
+
+不可用的选项仍可通过 Tab 聚焦；点击、Enter 及空格均不会选择它。打开选择器时
+刷新一次连接（已有请求时复用），刷新期间保留当前列表。凭证到期计时器同步更新
+选项和 chip；发送检查采用当前时间，即使后台页面延迟执行计时器也会拒绝已过期的
+非 OAuth 凭证，并立即更新显示。节点路由仍遵循原有 fallback 语义。后端节点原因
+通过固定模板本地化；未知状态统一显示节点不可用，不显示原始状态。节点名和其他
+未知后端原因仅作为文本显示。
+
+Unavailable options stay in the Tab order; click, Enter and Space leave them
+unselected. Opening the picker refreshes keys once, joining an existing fetch
+and keeping cached rows visible while it runs. One expiry timer updates the
+picker and chip at the next credential boundary. The send guard also checks
+wall time, refusing expired non-OAuth credentials and updating the display even
+if a background tab delayed the timer. Node routing retains the classifier's
+existing fallback semantics. Fixed templates localize backend node reasons;
+unknown statuses show a generic node-unavailable reason without the raw status.
+Node names and other unknown backend reasons remain literal text.
+
+打开选择器后的连接刷新尚未完成时，列表继续显示，但激活的选项进入“正在检查可用性”
+状态，向辅助技术暴露 busy 和原因描述。刷新成功后按最新缓存和当前时间重新检查：
+可用才完成选择并关闭；不可用则保留对话框和原因；错误则显示 Retry。关闭对话框、
+更换选项或导航会取消等待。已选连接刷新期间，发送在清空文本、草稿或附件前被拒绝，
+chip 和提示均显示检查状态；没有选择连接的发送及 steering 不受影响。每次 dispatch
+（包括 model 设置之后及恢复发送）均同步读取当前账号的查询缓存，避免 React 更新
+延迟漏过撤销。激活时也检查当前时间，到期凭证不关闭选择器。
+检查状态使用中性弱化文字。后台刷新仅更新可见文字，保留 live region 的上次结果，
+避免每次窗口聚焦都播报；只有因刷新而拒绝发送后才播报检查状态，并提示就绪后再次发送。
+离线时暂停的刷新同样属于检查状态：保留缓存列表，但等待恢复联网并完成刷新后才能
+选择或使用覆盖连接发送；重新打开选择器不会重复发起刷新。
+
+While the opening keys refresh is pending, cached rows stay visible and an
+activated option shows **Checking availability…**, exposed through busy state
+and an accessible description. Settlement rechecks the current cache and wall
+time: an available option is selected once and closes the dialog; an unavailable
+option keeps the dialog open with its reason; an error shows Retry. Closing,
+choosing another option or navigation cancels the hold. Sends with an override
+are refused before clearing text, drafts or uploads while keys are fetching;
+the chip and refusal toast show the checking state. Sends without an override
+and steering remain available. Every dispatch, including after model setup and
+recovery sends, reads the current actor's query cache synchronously. Activation
+also checks wall time, so an expired credential cannot close the picker.
+Checking uses neutral muted text. Background refreshes update the visual text
+while preserving the live region's last settled result, avoiding announcements
+on every window focus. Only a refused send announces checking and asks the owner
+to send again when the connection is ready.
+Refreshes paused while offline also count as checking: cached rows remain visible,
+but selection and override sends wait until the resumed refresh settles. Reopening
+the picker joins the paused refresh instead of starting another one.
+
+成功或已被服务端接纳的发送会消耗该消息的连接选择，即使后续响应流中断也不保留
+给下一条消息。已接纳的恢复发送同时消耗恢复提示，避免重复提交；接纳前明确拒绝
+仍保留选择、可编辑文本和原始附件以便重试。
+
+A fulfilled or admitted send consumes the one-message selection, including when
+the reply stream later fails. An admitted recovery send also consumes its notice
+and action, preventing another submission of that admitted text. A definite
+refusal before admission retains the choice, editable text and original uploads.
+
+Chip 始终提供文字按钮 **Change**（更改）和移除按钮，失效前后均可直接更换账号。
+这两个操作随 composer 一起锁定。精细指针设备在选择、关闭选择器或移除后，将焦点
+返回编辑器。粗指针设备不自动弹出键盘：成功选择后聚焦 Change；未选择就关闭时，
+若从 Change 打开则返回 Change，否则返回 **Add context**（添加上下文）按钮；移除后
+也聚焦 Add context。锁定时关闭选择器，解锁后不自动重新打开。
+
+The chip always offers a visible **Change** text button and a Remove action, so
+replacing an account uses the same control before and after invalidation. Both
+actions lock with the composer. On fine pointers, selection, closing the picker
+and removal return focus to the editor. On coarse pointers, selection focuses
+Change; closing without a selection returns to Change if it opened the picker,
+otherwise to **Add context**; removal also focuses Add context. These controls
+preserve focus without raising the keyboard. A lock closes the picker without
+reopening it on unlock.
 
 The composer stays in one row while empty or while its text fits alongside the
 controls. It expands only when text wraps or contains a newline, then collapses

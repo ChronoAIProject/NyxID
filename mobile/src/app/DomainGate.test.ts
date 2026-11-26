@@ -23,7 +23,7 @@ function domainModule(dual = true) {
 function mountWithBootstrap(deps: DomainBootstrapDeps) {
   const domains = domainModule();
   const bootstrap = loadTestModule<typeof import("../lib/domainBootstrap")>("../domainBootstrap.ts", {
-    require: (name: string) => name === "./domains" ? domains : {},
+    require: (name: string) => name === "./domains" ? domains : name === "./publicConfigHints" ? { cachePublicConfigHints: () => {} } : {},
     setTimeout, clearTimeout, AbortController,
   });
   const h = hookHarness<unknown>({
@@ -42,7 +42,7 @@ for (const unmountEarly of [false, true]) {
     const reply = deferred<Response>();
     const calls: string[] = [];
     const bootstrap = loadTestModule<typeof import("../lib/domainBootstrap")>("../domainBootstrap.ts", {
-      require: (name: string) => name === "./domains" ? domains : {},
+      require: (name: string) => name === "./domains" ? domains : name === "./publicConfigHints" ? { cachePublicConfigHints: () => {} } : {},
       setTimeout, clearTimeout, AbortController,
     });
     const h = hookHarness<unknown>({

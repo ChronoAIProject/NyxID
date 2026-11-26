@@ -559,6 +559,13 @@ pub async fn require_service_update_authority(
     body: &UpdateServiceRequest,
 ) -> AppResult<Option<CatalogAuthority>> {
     use crate::models::downstream_service::OfferingKind;
+    if body.approve_caller_token_destination.is_some() {
+        super::login_client_context::require_first_party_human(auth_user)?;
+    }
+    if body.approve_caller_token_destination.is_some() || body.approve_private_destination.is_some()
+    {
+        super::services_helpers::require_admin(state, auth_user).await?;
+    }
     if service.offering_kind == OfferingKind::Tool {
         let authority = require_tool_writer(state, auth_user, Some(service)).await?;
         if authority == CatalogAuthority::ToolsManager {
@@ -585,6 +592,8 @@ pub fn check_service_update(body: &UpdateServiceRequest) -> AppResult<()> {
 
 fn service_update_denied_fields(body: &UpdateServiceRequest) -> Vec<&'static str> {
     let UpdateServiceRequest {
+        approve_caller_token_destination,
+        approve_private_destination,
         auth_scheme: _,
         service_category,
         offering_kind,
@@ -638,12 +647,16 @@ fn service_update_denied_fields(body: &UpdateServiceRequest) -> Vec<&'static str
         proxy_operation_policy,
     } = body;
     [
+        approve_caller_token_destination
+            .as_ref()
+            .map(|_| "approve_caller_token_destination"),
         service_category.as_ref().map(|_| "service_category"),
         offering_kind
             .as_ref()
             .filter(|kind| **kind == crate::models::downstream_service::OfferingKind::Tool)
             .map(|_| "offering_kind"),
         import_source.as_ref().map(|_| "import_source"),
+        approve_private_destination.map(|_| "approve_private_destination"),
         destination_targets.as_ref().map(|_| "destination_targets"),
         visibility.as_ref().map(|_| "visibility"),
         identity_propagation_mode
@@ -829,6 +842,22 @@ fn forbid_tool_fields(fields: Vec<&'static str>) -> AppResult<()> {
 #[cfg(test)]
 mod authorization_nonce_tests {
     use super::*;
+
+    #[test]
+    fn proxy_destination_approval_requires_platform_admin() {
+        let update: UpdateServiceRequest = serde_json::from_value(serde_json::json!({
+            "approve_private_destination": true
+        }))
+        .unwrap();
+        assert!(matches!(
+            check_service_update(&update),
+            Err(AppError::Forbidden(_))
+        ));
+        assert!(matches!(
+            check_tool_update(&update),
+            Err(AppError::Forbidden(_))
+        ));
+    }
 
     #[test]
     fn introspection_trust_is_admin_only_for_catalog_and_tools_managers() {

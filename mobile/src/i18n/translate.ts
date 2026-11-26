@@ -1,5 +1,5 @@
-import simplified from "./locales/zh-CN.json";
-import traditional from "./locales/zh-TW.json";
+import simplified from "./locales/zh-CN";
+import traditional from "./locales/zh-TW";
 import type { Language } from "./language";
 
 export type TranslationValues = Record<string, string | number>;

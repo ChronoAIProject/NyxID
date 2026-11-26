@@ -426,6 +426,19 @@ pub async fn list_catalog(
     .await
 }
 
+/// A public discovery entry whose slug may be included in diagnostic metadata.
+/// Mirrors `list_catalog_all`; `shutdown_public_catalog_listing_parity` checks
+/// the real discovery response. Explicit owners are excluded even though public
+/// owned rows can be listed. Creator attribution does not affect discovery.
+pub(crate) fn is_public_unowned_discovery_entry(service: &DownstreamService) -> bool {
+    service.visibility == "public"
+        && service.owner_user_id.is_none()
+        && service.is_active
+        && matches!(service.service_category.as_str(), "connection" | "internal")
+        && !(service.service_category == "internal" && service.slug.starts_with("platform-"))
+        && !super::platform_key_service::model_only(service)
+}
+
 /// List ALL active catalog entries for discovery (includes system services without auth).
 /// Enforces visibility: private services only visible to their creator.
 pub async fn list_catalog_all(
@@ -668,6 +681,109 @@ pub(crate) async fn enforce_catalog_read_access(
         return Err(AppError::NotFound("Catalog entry not found".to_string()));
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CatalogUse {
+    Connection,
+    SshCertificate,
+}
+
+/// Authorize against the current catalog owner or a live grant. Membership
+/// scopes name the owner's concrete connections, including on a slug lookup.
+pub(crate) fn require_catalog_use<'a>(
+    db: &'a mongodb::Database,
+    actor: &'a str,
+    service: &'a DownstreamService,
+    purpose: CatalogUse,
+) -> futures::future::BoxFuture<'a, AppResult<()>> {
+    Box::pin(async move {
+        let missing = || AppError::NotFound("Catalog entry not found".into());
+        if super::platform_key_service::model_only(service)
+            || super::retired_service_service::is_retired(service)
+        {
+            return Err(missing());
+        }
+        let owner = catalog_owner(service);
+        if actor == owner || (purpose == CatalogUse::Connection && service.visibility == "public") {
+            return Ok(());
+        }
+
+        let access = org_service::resolve_owner_access(db, actor, owner).await?;
+        let org_scope = match access {
+            org_service::OwnerAccess::AsOrgAdmin {
+                allowed_service_ids,
+                ..
+            } => Some((allowed_service_ids, true)),
+            org_service::OwnerAccess::AsOrgMember {
+                role,
+                allowed_service_ids,
+                ..
+            } if role.can_proxy() => Some((allowed_service_ids, false)),
+            _ => None,
+        };
+        if let Some((scope, admin)) = org_scope {
+            let active_org = db
+                .collection::<User>(USERS)
+                .count_documents(doc! {"_id":owner, "is_active":true})
+                .await?
+                != 0;
+            if active_org {
+                let rows = super::service_history::collection::<mongodb::bson::Document>(
+                    db,
+                    USER_SERVICES,
+                );
+                let owner_rows =
+                    doc! {"user_id":owner, "catalog_service_id":&service.id, "is_active":true};
+                let mut allowed = owner_rows.clone();
+                if let Some(ids) = &scope {
+                    allowed.insert("_id", doc! {"$in":ids});
+                }
+                if !admin {
+                    allowed.insert("admin_only", doc! {"$ne":true});
+                }
+                if rows
+                    .find_one(allowed)
+                    .projection(doc! {"_id":1})
+                    .await?
+                    .is_some()
+                    || (scope.is_none()
+                        && rows
+                            .find_one(owner_rows)
+                            .projection(doc! {"_id":1})
+                            .await?
+                            .is_none())
+                {
+                    return Ok(());
+                }
+            }
+        }
+        if service.platform_key.is_some() {
+            match super::platform_key_service::require(db, service, actor).await {
+                Ok(()) => return Ok(()),
+                Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if let Some(apps) = &service.developer_app_ids {
+            let ids: Vec<_> = apps.iter().map(String::as_str).collect();
+            if !super::unified_key_service::load_valid_app_consents(db, actor, &ids)
+                .await?
+                .is_empty()
+            {
+                return Ok(());
+            }
+        }
+        Err(missing())
+    })
+}
+
+pub(crate) async fn require_connection_access(
+    db: &mongodb::Database,
+    actor: &str,
+    service: &DownstreamService,
+) -> AppResult<()> {
+    require_catalog_use(db, actor, service, CatalogUse::Connection).await
 }
 
 /// Pure-function visibility decision for a single catalog entry.
@@ -1088,6 +1204,8 @@ mod tests {
             requires_user_credential: true,
             visibility: "public".to_string(),
             created_by: user_id.to_string(),
+            caller_token_approved_destinations: Default::default(),
+            approved_private_base_url: None,
             catalog_manager_created: false,
             tools_manager_created: false,
             icon_url: None,

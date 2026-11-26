@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { hookHarness } from "../../features/assistant/assistantHookTestHarness";
+import type { KeyboardViewportFrame } from "./KeyboardViewport";
 
 type Frame = { screenY: number; height: number };
 type Measure = (x: number, y: number, width: number, height: number) => void;
@@ -18,6 +19,13 @@ function setup(
   safeAreaTop = 0,
   platform = "android",
   safeAreaFrame = { y: 0, height: 852 },
+  initialWindowHeight = Math.max(
+    852,
+    initialKeyboard ? initialKeyboard.screenY + initialKeyboard.height : 0,
+  ),
+  inSheet = false,
+  androidContentBottom: number | null = null,
+  safeAreaBottom = 24,
 ) {
   const keyboardListeners = new Map<
     string,
@@ -25,15 +33,33 @@ function setup(
   >();
   let onDimensions: (() => void) | undefined;
   let metrics = initialKeyboard;
+  let windowHeight = initialWindowHeight;
+  let screenHeight = initialWindowHeight;
+  let state = "active";
+  let onApp: ((state: string) => void) | undefined;
+  const layouts: Array<() => void> = [];
   const measurements: Measure[] = [];
+  let animations = 0;
+  const viewports: (KeyboardViewportFrame | undefined)[] = [];
   const harness = hookHarness<Element>({
+    expo: { requireOptionalNativeModule: () => ({ contentBottom: () => androidContentBottom }) },
     "react-native": {
       View: "View",
       Platform: { OS: platform },
       StyleSheet: { create: (styles: unknown) => styles },
+      AppState: {
+        get currentState() {
+          return state;
+        },
+        addEventListener: (_event: string, callback: (state: string) => void) => {
+          onApp = callback;
+          return { remove: () => { onApp = undefined; } };
+        },
+      },
       Keyboard: {
+        isVisible: () => !!metrics,
         metrics: () => metrics,
-        scheduleLayoutAnimation: () => {},
+        scheduleLayoutAnimation: () => { animations++; },
         addListener: (
           name: string,
           callback: (event: { endCoordinates: Frame }) => void,
@@ -43,6 +69,10 @@ function setup(
         },
       },
       Dimensions: {
+        get: (name: string) => {
+          assert.ok(name === "window" || name === "screen");
+          return { height: name === "screen" ? screenHeight : windowHeight };
+        },
         addEventListener: (_name: string, callback: () => void) => {
           onDimensions = callback;
           return { remove: () => (onDimensions = undefined) };
@@ -52,20 +82,32 @@ function setup(
     "react/jsx-runtime": {
       jsx: (_type: unknown, props: unknown) => ({ props }),
     },
+    "../../app/WorkspaceHeader": { useWorkspaceSheet: () => inSheet ? {} : null },
     "react-native-safe-area-context": {
       useSafeAreaFrame: () => safeAreaFrame,
       useSafeAreaInsets: () => ({
         top: safeAreaTop,
-        bottom: 24,
+        bottom: safeAreaBottom,
         left: 0,
         right: 0,
       }),
     },
+  }, {
+    requestAnimationFrame: (callback: () => void) => {
+      layouts.push(callback);
+      return layouts.length;
+    },
+    cancelAnimationFrame: () => {},
   });
   const { KeyboardViewport } = harness.load(
     fileURLToPath(new URL("./KeyboardViewport.tsx", import.meta.url)),
   ) as { KeyboardViewport: (props: object) => Element };
-  const element = harness.mount(() => KeyboardViewport({}));
+  const element = harness.mount(() =>
+    KeyboardViewport({
+      onViewportChange: (frame: KeyboardViewportFrame | undefined) =>
+        viewports.push(frame),
+    }),
+  );
   element.props.ref.current = {
     measureInWindow: (callback) => measurements.push(callback),
   };
@@ -73,10 +115,18 @@ function setup(
     harness,
     measurements,
     keyboardListeners,
+    animations: () => animations,
+    provider: (frame: typeof safeAreaFrame) => { safeAreaFrame = frame; harness.render(); },
     bottom: () => harness.flush().props.style[1].paddingBottom,
+    viewport: () => {
+      const frame = viewports.at(-1);
+      return frame ? { ...frame } : undefined;
+    },
     layout: () => harness.value().props.onLayout(),
     show: (frame: Frame) => {
       metrics = frame;
+      windowHeight = Math.max(windowHeight, frame.screenY + frame.height);
+      screenHeight = Math.max(screenHeight, frame.screenY + frame.height);
       keyboardListeners.get("keyboardDidShow")!({ endCoordinates: frame });
     },
     hide: () => {
@@ -90,6 +140,16 @@ function setup(
       onDimensions!();
     },
     hasDimensionListener: () => Boolean(onDimensions),
+    app: (next: string, frame = metrics) => {
+      metrics = frame;
+      state = next;
+      onApp!(next);
+    },
+    metrics: (frame: Frame | undefined) => { metrics = frame; },
+    windowHeight: (height: number) => { windowHeight = height; },
+    settledLayout: () => {
+      for (const layout of layouts.splice(0)) layout();
+    },
   };
 }
 
@@ -126,6 +186,50 @@ test("an already resized window consumes no additional inset with a status bar",
   );
   env.harness.unmount();
 });
+
+for (const [viewHeight, expectedOverlap] of [[482, 35], [447, 0]] as const) {
+  test(`Android IME-resized window retains its keyboard and reserves ${expectedOverlap}pt of remaining overlap`, () => {
+    const env = setup(undefined, 24, "android", { y: 0, height: 914 }, 914);
+    const frame = { screenY: 563, height: 351 };
+    env.windowHeight(563);
+    env.metrics(frame);
+    env.keyboardListeners.get("keyboardDidShow")!({ endCoordinates: frame });
+    assert.equal(env.measurements.length, 1, "screen coordinates remain valid after native resize");
+    env.measurements.shift()!(0, 92, 411, viewHeight);
+    assert.equal(env.bottom(), expectedOverlap);
+    assert.deepEqual(env.viewport(), { y: 92, height: viewHeight - expectedOverlap });
+    env.resize();
+    env.measurements.shift()!(0, 92, 411, viewHeight);
+    assert.equal(env.bottom(), expectedOverlap, "resize events cannot erase the IME frame");
+    env.hide();
+    assert.equal(env.bottom(), 0);
+    env.harness.unmount();
+  });
+}
+
+for (const reportedTop of [895.99, 896, 920, 920.01]) {
+  test(`Android keeps the IME inset when the visible display frame ends at ${reportedTop}`, () => {
+    const env = setup(undefined, 24, "android", { y: 0, height: 920 }, 920, false, 896, 0);
+    const frame = { screenY: reportedTop, height: 336 };
+    env.metrics(frame);
+    env.keyboardListeners.get("keyboardDidShow")!({ endCoordinates: frame });
+    assert.equal(env.measurements.length, 1);
+    env.measurements.shift()!(0, 0, 411, 872);
+    assert.equal(env.bottom(), 336);
+    assert.deepEqual(env.viewport(), { y: 0, height: 536 });
+
+    // The native resize can arrive after the show event with the same metrics.
+    env.windowHeight(560);
+    env.resize();
+    env.measurements.shift()!(0, 0, 411, 536);
+    assert.equal(env.bottom(), 0);
+    assert.deepEqual(env.viewport(), { y: 0, height: 536 });
+
+    env.hide();
+    assert.equal(env.viewport(), undefined);
+    env.harness.unmount();
+  });
+}
 
 test("a newer resized layout wins over a pending pre-resize measurement", () => {
   const env = setup();
@@ -200,20 +304,23 @@ for (const [windowHeight, sheetHeight, keyboardHeight] of [
   [667, 637, 258],
   [956, 894, 328],
 ]) {
-  test(`iOS ${windowHeight}pt native sheet keeps the entire toolbar above the keyboard`, () => {
-    const env = setup(undefined, 0, "ios", { y: 0, height: sheetHeight! });
+  test(`iOS ${windowHeight}pt partially resized sheet reserves its actual window overlap`, () => {
+    const env = setup(
+      undefined, 0, "ios", { y: 0, height: sheetHeight! }, windowHeight,
+    );
+    const expected = sheetHeight! - (windowHeight! - keyboardHeight!);
     env.show({
       screenY: windowHeight! - keyboardHeight!,
       height: keyboardHeight!,
     });
     env.measurements.shift()!(0, 44, 375, sheetHeight! - 44);
-    assert.equal(env.bottom(), keyboardHeight);
+    assert.equal(env.bottom(), expected);
     env.layout();
     env.measurements.shift()!(0, 44, 375, sheetHeight! - 44);
     assert.equal(
       env.bottom(),
-      keyboardHeight,
-      "the sheet offset is applied once",
+      expected,
+      "the provider's shorter frame must not re-anchor the keyboard",
     );
     env.harness.unmount();
   });
@@ -226,3 +333,260 @@ test("an iOS drawer with an existing safe-area origin does not add that origin t
   assert.equal(env.bottom(), 266);
   env.harness.unmount();
 });
+
+test("foreground third-party keyboard frames cannot create huge, stale or duplicate page insets", () => {
+  const env = setup({ screenY: 552, height: 300 }, 0, "ios");
+  env.layout();
+  env.measurements.shift()!(0, 92, 393, 760);
+  assert.equal(env.bottom(), 300);
+  env.app("background");
+  assert.equal(env.bottom(), 0);
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: -1200, height: 2052 },
+  });
+  assert.equal(env.bottom(), 0);
+  assert.equal(env.measurements.length, 0);
+  env.app("active", { screenY: 552, height: 300 });
+  env.measurements.shift()!(0, 92, 393, 760);
+  assert.equal(env.bottom(), 300);
+  // A stale did frame must match an actually superseded will frame. An unseen
+  // did-only final frame is valid for third-party keyboards.
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: 200, height: 652 },
+  });
+  env.measurements.shift()!(0, 92, 393, 760);
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: 552, height: 300 },
+  });
+  env.measurements.shift()!(0, 92, 393, 760);
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: 0, height: 1500 },
+  });
+  env.keyboardListeners.get("keyboardDidShow")!({
+    endCoordinates: { screenY: 200, height: 652 },
+  });
+  assert.equal(env.measurements.length, 1, "stale did remeasures the accepted frame");
+  env.measurements.shift()!(0, 92, 393, 760);
+  assert.equal(env.bottom(), 300);
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: 600, height: 252 },
+  });
+  env.measurements.shift()!(0, 92, 393, 760);
+  assert.equal(env.bottom(), 252);
+  env.keyboardListeners.get("keyboardDidShow")!({
+    endCoordinates: { screenY: 200, height: 652 },
+  });
+  env.measurements.shift()!(0, 92, 393, 760);
+  assert.equal(env.bottom(), 252);
+  env.metrics({ screenY: 200, height: 652 });
+  env.settledLayout();
+  env.measurements.shift()!(0, 92, 393, 760);
+  assert.equal(env.bottom(), 252);
+  env.layout();
+  env.measurements.shift()!(0, 92, 393, 508);
+  assert.equal(env.bottom(), 0);
+  env.harness.unmount();
+});
+
+test("iOS inactive system overlays preserve the visible keyboard inset through active remeasurement", () => {
+  const env = setup({ screenY: 552, height: 300 }, 0, "ios");
+  env.layout();
+  env.measurements.shift()!(0, 92, 393, 760);
+  assert.equal(env.bottom(), 300);
+  env.app("inactive");
+  assert.equal(env.bottom(), 300);
+  assert.equal(env.measurements.length, 0);
+  env.app("active");
+  assert.equal(env.bottom(), 300);
+  env.measurements.shift()!(0, 92, 393, 760);
+  env.settledLayout();
+  env.measurements.shift()!(0, 92, 393, 760);
+  assert.equal(env.bottom(), 300);
+  env.harness.unmount();
+});
+
+test("iOS background to inactive rehosting ignores oversized frames and active retains exactly the valid overlap", () => {
+  const env = setup({ screenY: 552, height: 300 }, 0, "ios");
+  env.layout();
+  env.measurements.shift()!(0, 92, 393, 760);
+  env.app("background");
+  assert.equal(env.bottom(), 0);
+  env.app("inactive");
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: -100, height: 1600 },
+  });
+  assert.equal(env.measurements.length, 0);
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: 600, height: 252 },
+  });
+  env.measurements.shift()!(0, 92, 393, 760);
+  assert.equal(env.bottom(), 252);
+  env.app("active", { screenY: 100, height: 752 });
+  assert.equal(env.bottom(), 252);
+  env.measurements.shift()!(0, 92, 393, 760);
+  env.settledLayout();
+  env.measurements.shift()!(0, 92, 393, 760);
+  assert.equal(env.bottom(), 252);
+  env.harness.unmount();
+});
+
+for (const vector of [
+  {
+    name: "V1 iPhone sheet, English keyboard",
+    view: { y: 174, height: 377 },
+    keyboard: { screenY: 551, height: 301 },
+    provider: { y: 70, height: 481 },
+    windowHeight: 852,
+    overlap: 0,
+    viewport: { y: 174, height: 377 },
+  },
+  {
+    name: "V2 iPhone sheet, tall third-party keyboard",
+    view: { y: 174, height: 283 },
+    keyboard: { screenY: 457, height: 395 },
+    provider: { y: 70, height: 387 },
+    windowHeight: 852,
+    overlap: 0,
+    viewport: { y: 174, height: 283 },
+  },
+  {
+    name: "V3 iPad formSheet, system keyboard",
+    view: { y: 161, height: 320 },
+    keyboard: { screenY: 526, height: 498 },
+    provider: { y: 57, height: 424 },
+    windowHeight: 1024,
+    overlap: 0,
+    viewport: { y: 161, height: 320 },
+  },
+  {
+    name: "V4 full-screen page, root provider",
+    view: { y: 120, height: 698 },
+    keyboard: { screenY: 551, height: 301 },
+    provider: { y: 0, height: 852 },
+    windowHeight: 852,
+    overlap: 267,
+    viewport: { y: 120, height: 431 },
+  },
+]) {
+  test(`${vector.name} measures overlap and visible viewport in window coordinates`, () => {
+    const env = setup(
+      undefined,
+      0,
+      "ios",
+      vector.provider,
+      vector.windowHeight,
+    );
+    env.show(vector.keyboard);
+    env.measurements.shift()!(0, vector.view.y, 393, vector.view.height);
+    assert.equal(env.bottom(), vector.overlap);
+    assert.deepEqual(env.viewport(), vector.viewport);
+    env.layout();
+    env.measurements.shift()!(0, vector.view.y, 393, vector.view.height);
+    assert.equal(
+      env.bottom(),
+      vector.overlap,
+      "remeasurement cannot reserve the keyboard twice",
+    );
+    assert.deepEqual(env.viewport(), vector.viewport);
+    env.harness.unmount();
+  });
+}
+
+test("iPad windowed page uses the current root window and preserves its converted keyboard frame", () => {
+  const env = setup(undefined, 0, "ios", { y: 0, height: 700 }, 700);
+  env.show({ screenY: 484, height: 216 });
+  env.measurements.shift()!(0, 80, 600, 586);
+  assert.equal(env.bottom(), 182);
+  assert.deepEqual(env.viewport(), { y: 80, height: 404 });
+  env.resize();
+  env.measurements.shift()!(0, 80, 600, 586);
+  assert.equal(env.bottom(), 182);
+  assert.deepEqual(env.viewport(), { y: 80, height: 404 });
+  env.harness.unmount();
+});
+
+for (const trigger of [
+  "keyboardDidShow",
+  "keyboardDidChangeFrame",
+  "provider",
+] as const) {
+  test(`fixed-height iPad sheet remeasures its lifted position after ${trigger}`, () => {
+    const env = setup(undefined, 0, "ios", { y: 304, height: 860 }, 1366, true);
+    const frame = { screenY: 1017, height: 349 };
+    env.keyboardListeners.get("keyboardWillChangeFrame")!({
+      endCoordinates: frame,
+    });
+    env.measurements.shift()!(0, 364, 720, 800);
+    assert.equal(env.bottom(), 0, "pre-lift overlap is not committed");
+    if (trigger === "provider") env.provider({ y: 157, height: 860 });
+    else env.keyboardListeners.get(trigger)!({ endCoordinates: frame });
+    env.measurements.shift()!(0, 217, 720, 800);
+    assert.equal(env.bottom(), 0);
+    assert.deepEqual(env.viewport(), { y: 217, height: 800 });
+    assert.equal(env.animations(), 0);
+    env.harness.unmount();
+  });
+}
+
+test("V1 phone sheet never applies transient padding or reveal bounds before its keyboard lift", () => {
+  const env = setup(undefined, 0, "ios", { y: 70, height: 782 }, 852, true);
+  const frame = { screenY: 551, height: 301 };
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: frame,
+  });
+  env.measurements.shift()!(0, 174, 393, 644);
+  assert.equal(env.bottom(), 0);
+  assert.equal(
+    env.viewport(),
+    undefined,
+    "do not reveal against pre-lift bounds",
+  );
+  env.provider({ y: 70, height: 481 });
+  env.measurements.shift()!(0, 174, 393, 377);
+  assert.equal(env.bottom(), 0);
+  env.keyboardListeners.get("keyboardDidShow")!({ endCoordinates: frame });
+  env.measurements.shift()!(0, 174, 393, 377);
+  assert.equal(env.bottom(), 0);
+  assert.deepEqual(env.viewport(), { y: 174, height: 377 });
+  assert.equal(env.animations(), 0);
+  env.harness.unmount();
+});
+
+test("full-screen will-change keeps the native keyboard animation and overlap", () => {
+  const env = setup(undefined, 0, "ios");
+  env.keyboardListeners.get("keyboardWillChangeFrame")!({
+    endCoordinates: { screenY: 551, height: 301 },
+  });
+  env.measurements.shift()!(0, 120, 393, 698);
+  assert.equal(env.bottom(), 267);
+  assert.equal(env.animations(), 1);
+  env.harness.unmount();
+});
+
+for (const trigger of [
+  "keyboardDidShow",
+  "keyboardDidChangeFrame",
+  "onLayout",
+]) {
+  test(`sheet ${trigger} releases a will-frame hold even when the did frame is invalid`, () => {
+    const env = setup(undefined, 0, "ios", { y: 0, height: 852 }, 852, true);
+    env.keyboardListeners.get("keyboardWillChangeFrame")!({
+      endCoordinates: { screenY: 551, height: 301 },
+    });
+    env.measurements.shift()!(0, 120, 393, 698);
+    assert.equal(env.bottom(), 0, "will-frame overlap waits for native layout");
+    if (trigger === "onLayout") env.layout();
+    else
+      env.keyboardListeners.get(trigger)!({
+        endCoordinates: { screenY: -100, height: 1500 },
+      });
+    env.measurements.shift()!(0, 120, 393, 698);
+    assert.equal(
+      env.bottom(),
+      267,
+      "the next valid measurement uses the accepted keyboard frame",
+    );
+    assert.deepEqual(env.viewport(), { y: 120, height: 431 });
+    env.harness.unmount();
+  });
+}

@@ -18,12 +18,45 @@ for HTTP response shapes.
   must be drained before eight-character v2 issuance. Both readers remain.
   Normalize case, separators and I/L→1, O→0, U→V. Ambiguous retained matches in
   either collection fail closed. Reservations survive insertion failures until TTL.
-- Browser-owned QR login uses the server-returned `verification_uri_complete`, built from configured
-  `FRONTEND_URL` and `/login/device?user_code=…`. The installed scanner fixture
-  accepts trusted host/query payloads with eight-character codes. A QR identifies
-  a request; scanning/signing in never approves it. No new browser handoff or
-  deep-link scheme is introduced. CLI-originated links omit the code: the human
-  copies the separately displayed `user_code` into the approval page.
+- Only `/login` → Continue with the NyxID app (including the `/login` MFA app
+  option) opts into the optional server-returned `app_verification_uri` for QR
+  payloads. It is built from origin-only HTTPS `BASE_URL` and
+  `/login/device?user_code=…` only when Apple or Android identity is configured
+  and frontend/API origins differ. Configuration does not prove OS association.
+  On coarse-pointer devices, only tapping the ready, live QR button opens the
+  shared “Open NyxID app?” confirmation. Cancel/Escape/Close return focus to the
+  QR. Only the affirmative link opens the selected URL in a new tab with no
+  referrer, preserving the original tab's private poll. No automatic opening runs
+  on request creation, regeneration, mount, polling or resume. The dialog binds
+  the exact request object and URL; tap/confirmation recheck the original deadline.
+  Close, expiry, terminal state, replacement or eligibility loss retire it.
+  Fine-pointer `/login` keeps a plain native QR for external scanning. Every
+  non-opted-in consumer, including `/login/device`, `/login/agent-key` request-bound
+  verification and onboarding, uses `verification_uri_complete` with no web
+  handoff. External scans remain OS-dependent. There is no installation detection
+  or universal handoff guarantee. Verified iOS/Android links can load the public
+  preview without a camera; approval still requires an authenticated, explicit
+  decision. The app asks the user to return to the original browser, which
+  finishes through its private poll and cookie session.
+  When the OS leaves the link in the browser, the backend redirects to the fixed
+  `FRONTEND_URL` approval page, forwarding only the validated public code.
+  Older responses and HTTP development use `verification_uri_complete` for a plain
+  QR with no tap target. The original browser must collect the approved delivery
+  within the existing 60-second post-approval window, including when that window
+  extends beyond the original QR deadline. At QR expiry, the browser hides the
+  QR/tap/manual-code controls and checks private delivery. No new poll starts at or
+  after the original deadline plus 60 seconds. An already in-flight read may finish
+  for up to 10 more seconds, solely to receive an existing response; this does not
+  extend server approval or delivery deadlines. An error after the poll-start
+  cutoff ends collection without retrying. A hung read is discarded at the finite
+  response deadline; close, regeneration and unmount fence local adoption sooner.
+  Restricted handoffs retain their own strict expiry. Visibility/pageshow resume
+  polls promptly after the minimum interval, preserving slowdown/rate-limit backoff.
+  The installed scanner accepts trusted frontend/API host payloads. A QR identifies
+  a request; opening/scanning/signing in never approves it. No poll secret, token,
+  or arbitrary return URL is included. CLI-originated links still omit the code:
+  the human copies the separately displayed `user_code` into the approval page.
+  See the [app-link runbook](../mobile/docs/APP_LINKS.md) for association setup.
 - Step 1 shows the actual preview/code. Signed-in approvers acknowledge “This is my request — continue”; signed-out approvers verify inline after choosing browser persistence.
   Step 2 offers full account or restricted access only when `supports_grant_choice`
   permits it. Step 3 shows requested filters, matching keys and the actual grant,
@@ -31,8 +64,12 @@ for HTTP response shapes.
   The approving account is visible and can be signed out.
   Existing and new keys share one authorization card with the key, owner and
   login expiry above service rows. Each row shows its selected accounts and
-  extra-access count; expand it to inspect permissions or choose a connection
-  for a new key. Missing accounts are labelled “Choose account” in that row.
+  extra-access count. Service rows start expanded so permissions and connection
+  choices are immediately available, and each row can still be collapsed.
+  Connection choices and selected-account summaries show Personal or the owning
+  organization, including shared services available to ordinary organization
+  members. New Key names can be edited directly in the main review card.
+  Missing accounts are labelled “Choose account” in that row.
   “Customize” contains requested filters and secondary key settings. Selection
   and review use the same rows; there is no separate review appended below the
   editor. Current/future resource authority remains visible when details are
@@ -47,6 +84,27 @@ for HTTP response shapes.
   credentials are not silently installed as browser sessions. The existing v2
   browser-poll login-code result is a separate explicit exchange, not a scoped
   browser session.
+
+## Mobile request review
+
+The mobile review groups the login code and expiry, reported device, client and
+platform, request time, requester address, location, network and reported timezone
+in one card above the actions. Staging environment labels and negative
+origin/timezone signals stay visible. Hardware, locale and raw user agent are
+available under More details within the same card. Code matching and the full
+account access explanation precede the explicit approval and rejection actions.
+Expanding details never approves a request; a new request starts with the details collapsed. A foreground
+refresh of the same request preserves the current disclosure state.
+
+## Production iOS approvals for staging
+
+The production iOS scanner accepts account sign-in QRs from `https://staging.nyxid.ai` and `https://staging-api.nyxid.ai` for users with the production feature flag `auth:staging-qr-login`. The user reviews the request and chooses Approve or Reject on the existing device-login screen. Staging requires an existing active personal account with the same verified email as the active production account. Both environments enforce MFA for accounts with MFA enabled. The resulting session belongs to the staging user. The flag covers camera scans of `/login/device` for account access. Restricted Agent Key issuance uses its existing environment-specific flow.
+
+1. Deploy the backend changes to staging with `BASE_URL=https://staging-api.nyxid.ai` and `STAGING_QR_PRODUCTION_PUBLIC_KEY_PATH` pointing to a mounted copy of the production JWT public PEM. Staging keeps its own JWT keypair. Refresh the mounted public key and restart staging when rotating the production signer.
+2. Deploy the backend to production and distribute the updated iOS app. The feature flag defaults off.
+3. In production Admin → Feature flags, enable `auth:staging-qr-login` for the intended users. To verify, initiate a staging web sign-in, scan its QR in the production app, and approve. The initiating staging browser receives the staging account. Disabling the flag blocks subsequent staging previews and decisions, including approval of an already previewed request.
+
+The phone sends a staging scan to the production API using its ordinary session. Production signs a 20-second assertion for a fixed staging endpoint. Each decision binds the reviewed staging request ID, the action and both account IDs. Staging validates the assertion with its pinned public key and uses its own device-login transaction and private poll for delivery. Production session credentials stay on the production side.
 
 ## Requester hints in `/login/device` and `/login/agent-key`
 

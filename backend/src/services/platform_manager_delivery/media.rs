@@ -22,10 +22,25 @@ pub(super) async fn send_saved(
     row: &Delivery,
     claim: &str,
     body: &str,
-    identity: &dyn ManagerIdentityProducer,
-    public: Option<&dyn PublicTurnProducer>,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    public: Option<Arc<dyn PublicTurnProducer>>,
     token: &str,
     api: &super::super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<String> {
+    send_saved_inner(state, row, claim, body, identity, public, token, api, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_saved_inner(
+    state: &AppState,
+    row: &Delivery,
+    claim: &str,
+    body: &str,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    public: Option<Arc<dyn PublicTurnProducer>>,
+    token: &str,
+    api: &super::super::telegram_new_api::TelegramApi<'_>,
+    only: Option<&crate::models::nyxbot_image_delivery::NyxbotImageDelivery>,
 ) -> AppResult<String> {
     let DeliveryReference::Reply {
         reply_id,
@@ -56,10 +71,22 @@ pub(super) async fn send_saved(
         &chat,
         &reply,
     );
+    if only.is_some_and(|image| {
+        image.user_id != *owner
+            || image.conversation_id != *conversation_id
+            || image.audience_key != audience
+            || !message
+                .attachments
+                .iter()
+                .any(|a| a.id == image.attachment_id)
+    }) {
+        return Err(refused());
+    }
     let adapter =
         crate::services::channel_adapters::telegram::TelegramAdapter::for_api_base(api.base_url);
     let deliveries = state.db.collection::<bson::Document>(COLLECTION_NAME);
-    if let Some(saved) = deliveries.find_one(doc! {"_id":&row.id}).await?
+    if only.is_none()
+        && let Some(saved) = deliveries.find_one(doc! {"_id":&row.id}).await?
         && let Ok(missing) = saved.get_i64("multipart_media_missing")
     {
         return Ok(failure_note(
@@ -104,11 +131,23 @@ pub(super) async fn send_saved(
         .take(crate::services::assistant_nyxagent::MAX_TURN_ATTACHMENTS)
         .enumerate()
     {
+        if only.is_some_and(|image| image.attachment_id != attachment.id) {
+            continue;
+        }
         if uncertain {
             missing += 1;
             continue;
         }
-        if !revalidate_part(state, row, claim, body, identity, public).await? {
+        if !validate_media(
+            state,
+            row,
+            only.is_none().then_some(claim),
+            body,
+            identity.as_ref(),
+            public.as_deref(),
+        )
+        .await?
+        {
             missing += 1;
             continue;
         }
@@ -142,7 +181,7 @@ pub(super) async fn send_saved(
         let acquired = if let Some(outcome) = legacy {
             claims::ImageClaim::Legacy(outcome)
         } else {
-            claims::claim_for_turn(
+            claims::prepare_for_turn(
                 &state.db,
                 owner,
                 conversation_id,
@@ -150,6 +189,9 @@ pub(super) async fn send_saved(
                 &profile.channel_bot_id,
                 &attachment.id,
                 &audience,
+                &crate::models::image_preparation::Route::Manager {
+                    delivery_id: row.id.clone(),
+                },
             )
             .await?
         };
@@ -181,6 +223,8 @@ pub(super) async fn send_saved(
                 continue;
             }
         };
+        #[cfg(test)]
+        crate::services::durable_wake_tests::after("manager_image_preparation_claimed").await;
         let loaded = async {
             if !claims::source_exists(&state.db, owner, conversation_id, turn_id, &attachment.id)
                 .await?
@@ -209,8 +253,20 @@ pub(super) async fn send_saved(
             Err(_) => (ImageDeliveryState::Failed, Some("unavailable")),
             Ok((mime, bytes)) => {
                 let admission = async {
-                    pace_part(state, row, claim).await?;
-                    revalidate_part(state, row, claim, body, identity, public).await
+                    if only.is_none() {
+                        pace_part(state, row, claim).await?;
+                    } else if !part_rate_available(state, row).await? {
+                        return Err(AppError::RateLimited);
+                    }
+                    validate_media(
+                        state,
+                        row,
+                        only.is_none().then_some(claim),
+                        body,
+                        identity.as_ref(),
+                        public.as_deref(),
+                    )
+                    .await
                 }
                 .await;
                 match admission {
@@ -258,14 +314,26 @@ pub(super) async fn send_saved(
                 };
                 let result = tokio::time::timeout(
                     std::time::Duration::from_secs(35),
-                    adapter.send_reply(api.http, &credentials, &chat, &reply),
+                    crate::services::channel_image_preparation::with_effect(
+                        media_guard(
+                            state,
+                            row,
+                            only.is_none().then_some(claim),
+                            body,
+                            identity.clone(),
+                            public.clone(),
+                            &id,
+                            &attempt,
+                        ),
+                        adapter.send_reply(api.http, &credentials, &chat, &reply),
+                    ),
                 )
                 .await;
                 match result {
                     Ok(Ok(Some(_))) => (ImageDeliveryState::Sent, None),
                     Ok(Err(error)) if error.retry_after_seconds().is_some() => {
                         if matches!(
-                            claims::release(&state.db, &id, &attempt).await?,
+                            claims::release_refused(&state.db, &id, &attempt).await?,
                             claims::ImageCompletion::Recorded
                         ) {
                             return Err(error);
@@ -295,14 +363,15 @@ pub(super) async fn send_saved(
             missing += 1;
         }
     }
-    if deliveries
-        .update_one(
-            doc! {"_id":&row.id,"state":"dispatching","claim_id":claim},
-            doc! {"$set":{"multipart_media_missing":missing}},
-        )
-        .await?
-        .matched_count
-        != 1
+    if only.is_none()
+        && deliveries
+            .update_one(
+                doc! {"_id":&row.id,"state":"dispatching","claim_id":claim},
+                doc! {"$set":{"multipart_media_missing":missing}},
+            )
+            .await?
+            .matched_count
+            != 1
     {
         return Err(super::super::channel_text_delivery::unconfirmed());
     }
@@ -322,4 +391,197 @@ fn failure_note(missing: i64, frontend: &str, conversation_id: &str) -> String {
             conversation_url(frontend, conversation_id)
         )
     }
+}
+
+async fn validate_media(
+    state: &AppState,
+    row: &Delivery,
+    claim: Option<&str>,
+    body: &str,
+    identity: &dyn ManagerIdentityProducer,
+    public: Option<&dyn PublicTurnProducer>,
+) -> AppResult<bool> {
+    if let Some(claim) = claim {
+        return revalidate_part(state, row, claim, body, identity, public).await;
+    }
+    let mut session = state.db.client().start_session().await?;
+    let result = session
+        .start_transaction()
+        .and_run(
+            (state, row, body, identity, public),
+            |session, (state, row, body, identity, public)| {
+                Box::pin(async move {
+                    let result: AppResult<bool> = async {
+                        if state
+                            .db
+                            .collection::<bson::Document>(COLLECTION_NAME)
+                            .find_one(doc! {
+                                "_id":&row.id,"state":{"$ne":"refused"},
+                                "$expr":{"$gt":["$expires_at","$$NOW"]},
+                            })
+                            .session(&mut *session)
+                            .await?
+                            .is_none()
+                        {
+                            return Ok(false);
+                        }
+                        Ok(
+                            validate_in_session(state, *identity, *public, session, row, body)
+                                .await?
+                                .is_some(),
+                        )
+                    }
+                    .await;
+                    tx::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(tx::map_transaction_error);
+    match result {
+        Err(AppError::Conflict(_) | AppError::NotFound(_) | AppError::Forbidden(_)) => Ok(false),
+        other => other,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn media_guard(
+    state: &AppState,
+    row: &Delivery,
+    claim: Option<&str>,
+    body: &str,
+    identity: Arc<dyn ManagerIdentityProducer>,
+    public: Option<Arc<dyn PublicTurnProducer>>,
+    id: &str,
+    attempt: &str,
+) -> crate::services::channel_platform::PostEffectGuard {
+    let state = state.clone();
+    let row = row.clone();
+    let claim = claim.map(str::to_owned);
+    let body = Arc::new(Zeroizing::new(body.to_owned()));
+    let id = id.to_owned();
+    let attempt = attempt.to_owned();
+    Arc::new(move || {
+        let state = state.clone();
+        let row = row.clone();
+        let claim = claim.clone();
+        let body = body.clone();
+        let identity = identity.clone();
+        let public = public.clone();
+        let id = id.clone();
+        let attempt = attempt.clone();
+        Box::pin(async move {
+            if !validate_media(
+                &state,
+                &row,
+                claim.as_deref(),
+                body.as_str(),
+                identity.as_ref(),
+                public.as_deref(),
+            )
+            .await?
+            {
+                return Err(refused());
+            }
+            crate::services::channel_image_preparation::before_effect(&state.db, &id, &attempt)
+                .await
+        })
+    })
+}
+
+pub(super) async fn recover(
+    state: &AppState,
+    image: &crate::models::nyxbot_image_delivery::NyxbotImageDelivery,
+    api: &super::super::telegram_new_api::TelegramApi<'_>,
+) -> AppResult<()> {
+    let Some(crate::models::image_preparation::Preparation {
+        route: crate::models::image_preparation::Route::Manager { delivery_id },
+        ..
+    }) = image.preparation.as_deref()
+    else {
+        return Err(refused());
+    };
+    let row = state
+        .db
+        .collection::<Delivery>(COLLECTION_NAME)
+        .find_one(doc! {"_id":delivery_id})
+        .await?
+        .ok_or_else(refused)?;
+    let DeliveryReference::Reply { reply_id, .. } = &row.reference else {
+        return Err(refused());
+    };
+    let message = state
+        .db
+        .collection::<AssistantMessage>(MESSAGES)
+        .find_one(doc! {"_id":reply_id})
+        .await?
+        .ok_or_else(refused)?;
+    let body = Zeroizing::new(render_personal(state, &message, None).await?);
+    let identity = super::super::platform_personal_binding_service::producer(state.clone());
+    if !validate_media(state, &row, None, &body, identity.as_ref(), None).await? {
+        return Err(refused());
+    }
+    let mut session = state.db.client().start_session().await?;
+    let material = session
+        .start_transaction()
+        .and_run(
+            (state, &row, &body, &identity),
+            |session, (state, row, body, identity)| {
+                Box::pin(async move {
+                    let result: AppResult<_> = async {
+                        let observation =
+                            validate_in_session(state, identity.as_ref(), None, session, row, body)
+                                .await?
+                                .ok_or_else(refused)?;
+                        capture_material_in_session(
+                            state,
+                            session,
+                            row,
+                            "attachment-recovery",
+                            &observation,
+                            None,
+                        )
+                        .await
+                    }
+                    .await;
+                    tx::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(tx::map_transaction_error)?;
+    let CapturedSend::Ready(CapturedMaterial::Telegram(credential)) = material else {
+        return Err(refused());
+    };
+    let values = super::super::platform_credential_service::decrypt_platform_snapshot(
+        &state.encryption_keys,
+        Some(&credential),
+    )
+    .await?;
+    let token = values
+        .get(super::super::channel_adapters::telegram_new::MANAGER_TOKEN)
+        .ok_or_else(refused)?;
+    if token
+        .split(':')
+        .next()
+        .and_then(|id| id.parse::<i64>().ok())
+        .map(|id| id.to_string())
+        .as_deref()
+        != Some(&row.manager_bot_id)
+    {
+        return Err(refused());
+    }
+    send_saved_inner(
+        state,
+        &row,
+        "",
+        &body,
+        identity,
+        None,
+        token,
+        api,
+        Some(image),
+    )
+    .await?;
+    Ok(())
 }

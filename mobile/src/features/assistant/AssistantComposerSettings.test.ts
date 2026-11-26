@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
-import { COMPOSER_ACCESS_DESCRIPTION } from "./composerSettings";
+import { QueryClient, QueryObserver, environmentManager, onlineManager } from "@tanstack/query-core";
+import { buildApiError } from "../../lib/api/responseError";
+import { COMPOSER_ACCESS_DESCRIPTION, composerSettingsRecoveryInterval, scheduleComposerSettingsRecovery } from "./composerSettings";
 
 type Element = { type: unknown; props: Record<string, any> };
 const nodes = (n: any): Element[] =>
   n?.props ? [n, ...[n.props.children].flat(Infinity).flatMap(nodes)] : [];
 const plain = (v: any) => JSON.parse(JSON.stringify(v));
-function setup(theme = "light") {
+function setup(theme = "light", cornerWindow = false) {
   let epoch = 1;
   let available = true;
   const calls: unknown[][] = [];
@@ -31,6 +33,9 @@ function setup(theme = "light") {
     },
   };
   const h = hookHarness<Element>({
+    "../../components/workspace/WorkspaceLayoutContext": {
+      WorkspaceCornerSensorContext: { value: cornerWindow },
+    },
     "react/jsx-runtime": {
       Fragment: "Fragment",
       jsx: (type: unknown, props: any) => ({ type, props }),
@@ -42,7 +47,7 @@ function setup(theme = "light") {
       ScrollView: "ScrollView",
       View: "View",
       ActivityIndicator: "Spinner",
-      StyleSheet: { absoluteFill: { position: "absolute" } },
+      StyleSheet: { absoluteFill: { position: "absolute" }, hairlineWidth: 0.5, },
     },
     "lucide-react-native": {
       Check: "Check",
@@ -54,7 +59,13 @@ function setup(theme = "light") {
       useTheme: () => ({
         preference: theme,
         mode: theme === "system" ? "dark" : theme,
-        colors: { card: "surface", sheetScrim: "scrim" },
+        colors: {
+          card: "surface",
+          sheetScrim: "scrim",
+          composerBg: "composer",
+          composerBorder: "composer-border",
+          shadowColor: "shadow",
+        },
       }),
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
@@ -88,6 +99,9 @@ function setup(theme = "light") {
       },
     },
   });
+  h.mock("./useComposerSettingsQuery", h.load(
+    fileURLToPath(new URL("./useComposerSettingsQuery.ts", import.meta.url)),
+  ));
   const C = h.load(
     fileURLToPath(new URL("./AssistantComposerSettings.tsx", import.meta.url)),
   ).AssistantComposerSettings as (props: any) => Element;
@@ -124,6 +138,130 @@ function setup(theme = "light") {
     },
   };
 }
+
+test("the Duo mode chip is a plain pill with the current mode only: no chevron, same picker, hint and 44pt target", async () => {
+  for (const theme of ["light", "dark"]) {
+    const x = setup(theme, true);
+    const trigger = x.find("Permissions: Auto");
+    const inside = nodes(trigger);
+    assert.equal(inside.some((n) => n.type === "ChevronDown"), false,);
+    assert.equal(trigger.props.accessibilityHint, "Changes the permission mode",);
+    const style = (pressed: boolean) => trigger.props.style({ pressed });
+    assert.equal(style(false).minHeight, 44);
+    assert.equal(style(false).minWidth, 44);
+    assert.equal(style(false).opacity, 1);
+    assert.ok(style(true).opacity < 1, "pressed state");
+    const pill = inside.find((n) => n.props.testID === "composer-access-mode-pill",)!;
+    const pillStyle = Object.assign({}, ...[pill.props.style].flat());
+    // The floating surface the header controls and the composer use.
+    assert.equal(pillStyle.backgroundColor, "composer");
+    assert.equal(pillStyle.borderColor, "composer-border");
+    assert.equal(pillStyle.borderWidth, 0.5);
+    assert.equal(pillStyle.shadowRadius, theme === "light" ? 10 : undefined);
+    assert.equal(pillStyle.borderRadius, 15);
+    const label = inside.find((n) => n.type === "Label")!;
+    assert.equal(label.props.children, "Auto");
+    assert.equal(label.props.numberOfLines, 1);
+    assert.equal(label.props.ellipsizeMode, "tail");
+    // Same existing picker, opened by the same press.
+    x.open();
+    x.h.unmount();
+  }
+  const { setAppTranslationLanguage, translateApp } = await import(
+    "../../i18n/appTranslation"
+  );
+  try {
+    for (const language of ["zh-CN", "zh-TW"] as const) {
+      setAppTranslationLanguage(language);
+      assert.notEqual(
+        translateApp("Changes the permission mode"),
+        "Changes the permission mode",
+        language,
+      );
+    }
+  } finally {
+    setAppTranslationLanguage("en");
+  }
+});
+
+test("the Duo pill keeps every current mode and the base explicit-retry policy", () => {
+  const x = setup("light", true);
+  for (const [mode, label] of [
+    ["autopilot", "Full access"],
+    ["nyxmode", "Auto"],
+    ["ask_every_time", "Ask every time"],
+  ] as const) {
+    x.settings.data = { access_mode: mode };
+    x.h.render();
+    const trigger = x.find(`Permissions: ${label}`);
+    const visible = nodes(trigger).find((n) => n.type === "Label")!;
+    assert.equal(visible.props.children, label, mode);
+    assert.equal(
+      trigger.props.accessibilityHint,
+      "Changes the permission mode",
+    );
+  }
+  const query = x.queries.at(-1);
+  assert.equal(query.retry, false);
+  assert.equal(query.enabled({ state: { status: "error" } }), false);
+  x.h.unmount();
+});
+
+test("offline cold start recovers permissions after the first connected GET still fails", { timeout: 10_000 }, async (t) => {
+  const x = setup();
+  const options = x.queries.at(-1);
+  const wasServer = environmentManager.isServer();
+  environmentManager.setIsServer(() => false);
+  const client = new QueryClient();
+  const originalOnline = onlineManager.isOnline();
+  onlineManager.setOnline(false);
+  client.mount();
+  let attempts = 0;
+  const observer = new QueryObserver(client, {
+    ...options,
+    queryFn: async () => {
+      if (++attempts === 1) throw buildApiError(null, 0);
+      return { access_mode: "nyxmode" };
+    },
+  });
+  const done = deferred<void>();
+  const unsubscribe = observer.subscribe((result) => {
+    if (result.isSuccess) done.resolve();
+    if (result.isError) {
+      const query = client.getQueryCache().find({ queryKey: options.queryKey })!;
+      const delay = composerSettingsRecoveryInterval(query);
+      if (delay !== false)
+        scheduleComposerSettingsRecovery(result.errorUpdatedAt, delay,
+          () => void observer.refetch({ cancelRefetch: false }));
+    }
+  });
+  t.after(() => {
+    unsubscribe();
+    client.unmount();
+    client.clear();
+    onlineManager.setOnline(originalOnline);
+    environmentManager.setIsServer(() => wasServer);
+    x.h.unmount();
+  });
+  assert.equal(observer.getCurrentResult().fetchStatus, "paused");
+  assert.equal(attempts, 0);
+  onlineManager.setOnline(true);
+  await done.promise;
+  assert.deepEqual(observer.getCurrentResult().data, { access_mode: "nyxmode" });
+  assert.equal(attempts, 2);
+  assert.equal(composerSettingsRecoveryInterval(client.getQueryCache().find({ queryKey: options.queryKey })!), false);
+});
+
+test("permission recovery backs off on network or gateway failures and leaves other errors for manual retry", () => {
+  for (const [code, expected] of [[0, 5000], [503, 5000], [403, false], [429, 5000]] as const) {
+    assert.equal(composerSettingsRecoveryInterval({
+      state: { status: "error", error: buildApiError(null, code), errorUpdateCount: 1 },
+    }), expected);
+  }
+  assert.equal(composerSettingsRecoveryInterval({
+    state: { status: "error", error: buildApiError(null, 0), errorUpdateCount: 10 },
+  }), 30_000);
+});
 
 test("native settings expose only permissions and the three descriptions, with no discovery or model transport", () => {
   const x = setup();
@@ -256,7 +394,7 @@ test("settings write failures retain authoritative mode and expose the error", a
 
 test("permissions automatically close after a confirmed write in every appearance", async () => {
   for (const theme of ["light", "dark", "system"]) {
-    const x = setup(theme);
+    const x = setup(theme, true);
     x.open();
     const wait = deferred<any>();
     x.writeMode(() => wait.promise);
@@ -409,4 +547,22 @@ test("access-mode API posts only validated owner access_mode to the existing set
   ]);
   await assert.rejects(api.updateAccessMode("invalid"));
   assert.equal(calls.length, 2);
+});
+
+test("P9 ordinary composer retains the labelled chevron trigger and base read policy", () => {
+  const x = setup();
+  const trigger = x.find("Permissions: Auto");
+  assert.equal(
+    nodes(trigger).some((n) => n.type === "ChevronDown"),
+    true,
+  );
+  assert.equal(trigger.props.style.minHeight, 44);
+  assert.equal(trigger.props.style.maxWidth, 180);
+  assert.equal(
+    nodes(trigger).find((n) => n.type === "Label")!.props.maxFontSizeMultiplier,
+    1.3,
+  );
+  assert.equal(x.queries.at(-1).retry, false);
+  assert.equal(x.queries.at(-1).refetchOnReconnect, undefined);
+  x.h.unmount();
 });

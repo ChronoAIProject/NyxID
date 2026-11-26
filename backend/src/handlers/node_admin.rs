@@ -250,6 +250,8 @@ pub struct TransferNodeResponse {
 
 #[derive(Debug, Serialize)]
 pub struct PendingCredentialInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<&'static str>,
     pub id: String,
     pub node_id: String,
     pub service_slug: String,
@@ -281,6 +283,8 @@ pub struct PendingCredentialListResponse {
 /// field name, target URL, label, public-key material, and ciphertext state.
 #[derive(Debug, Serialize)]
 pub struct PendingCredentialAuthorizationEvidenceResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<&'static str>,
     pub id: String,
     pub node_id: String,
     pub owner_user_id: String,
@@ -295,6 +299,8 @@ pub struct PendingCredentialAuthorizationEvidenceResponse {
 
 #[derive(Debug, Serialize)]
 pub struct PendingCredentialPubkeyResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<&'static str>,
     pub pending_id: String,
     pub node_id: String,
     pub service_slug: String,
@@ -307,6 +313,8 @@ pub struct PendingCredentialPubkeyResponse {
 
 #[derive(Debug, Serialize)]
 pub struct PendingCredentialCiphertextResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<&'static str>,
     pub delivery_status: String,
     pub remote_state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -315,6 +323,8 @@ pub struct PendingCredentialCiphertextResponse {
 
 #[derive(Debug, Serialize)]
 pub struct FanOutTargetInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<&'static str>,
     pub node_id: String,
     pub generation: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -329,6 +339,7 @@ pub struct FanOutTargetInfo {
 
 #[derive(Debug, Serialize)]
 pub struct FanOutPendingCredentialResponse {
+    pub expires_at: String,
     pub fanout_id: String,
     pub fan_out_revision: i64,
     pub target_count: usize,
@@ -346,6 +357,8 @@ pub struct FanOutPendingCredentialResponse {
 
 #[derive(Debug, Serialize)]
 pub struct FanOutPendingCredentialPubkeyTarget {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<&'static str>,
     pub node_id: String,
     pub generation: i64,
     pub version: String,
@@ -514,9 +527,13 @@ fn transfer_audit_event_data(
     )
 }
 
+use node_pending_credential_service::DELIVERY_UNKNOWN;
+
 fn pending_credential_info(pending: NodePendingCredential) -> PendingCredentialInfo {
     let remote_state = pending_remote_state(&pending);
     PendingCredentialInfo {
+        message: node_pending_credential_service::delivery_unknown(&pending)
+            .then_some(DELIVERY_UNKNOWN),
         id: pending.id,
         node_id: pending.node_id,
         service_slug: pending.service_slug,
@@ -550,6 +567,9 @@ fn remote_state_name(state: &RemoteCryptoState) -> &'static str {
 }
 
 fn pending_remote_state(pending: &NodePendingCredential) -> Option<String> {
+    if node_pending_credential_service::delivery_unknown(pending) {
+        return Some("delivery_unknown".into());
+    }
     pending
         .remote_state
         .as_ref()
@@ -574,6 +594,8 @@ fn pending_pubkey_response(
     let remote_state = pending_remote_state(&pending);
 
     Ok(PendingCredentialPubkeyResponse {
+        message: node_pending_credential_service::delivery_unknown(&pending)
+            .then_some(DELIVERY_UNKNOWN),
         pending_id: pending.id,
         node_id: pending.node_id,
         service_slug: pending.service_slug,
@@ -588,6 +610,11 @@ fn fan_out_target_info(
     target: &node_pending_credential_service::FanOutTargetStatus,
 ) -> FanOutTargetInfo {
     FanOutTargetInfo {
+        message: matches!(
+            target.delivery_status,
+            Some(node_pending_credential_service::FanOutDeliveryStatus::Unknown)
+        )
+        .then_some(DELIVERY_UNKNOWN),
         node_id: target.node_id.clone(),
         generation: target.generation,
         remote_state: target
@@ -608,6 +635,7 @@ fn fan_out_pending_response(
 ) -> FanOutPendingCredentialResponse {
     let remote_state = pending_remote_state(&result.pending);
     FanOutPendingCredentialResponse {
+        expires_at: result.pending.expires_at.to_rfc3339(),
         fanout_id: result.pending.id,
         fan_out_revision: result.pending.fan_out_revision,
         target_count: result.targets.len(),
@@ -622,28 +650,7 @@ fn fan_out_pending_response(
 }
 
 fn fan_out_status_response(pending: NodePendingCredential) -> FanOutPendingCredentialResponse {
-    let targets = pending
-        .fan_out_nodes
-        .iter()
-        .map(
-            |target| node_pending_credential_service::FanOutTargetStatus {
-                node_id: target.node_id.clone(),
-                generation: target.generation,
-                remote_state: target.remote_state.clone(),
-                error_code: target.error_code,
-                error_kind: target.error_kind.clone(),
-                delivery_status: match target.remote_state {
-                    Some(RemoteCryptoState::CiphertextReceived) => {
-                        Some(node_pending_credential_service::FanOutDeliveryStatus::Sent)
-                    }
-                    Some(RemoteCryptoState::CiphertextQueued) => {
-                        Some(node_pending_credential_service::FanOutDeliveryStatus::Queued)
-                    }
-                    _ => None,
-                },
-            },
-        )
-        .collect::<Vec<_>>();
+    let targets = node_pending_credential_service::fan_out_statuses(&pending);
     fan_out_pending_response(
         node_pending_credential_service::FanOutPendingCredentialResult { pending, targets },
     )
@@ -654,7 +661,7 @@ fn fan_out_pubkeys_response(
     integrity_verification_opt_out: bool,
 ) -> FanOutPendingCredentialPubkeysResponse {
     FanOutPendingCredentialPubkeysResponse {
-        fanout_id: pending.id,
+        fanout_id: pending.id.clone(),
         fan_out_revision: pending.fan_out_revision,
         target_count: pending.fan_out_nodes.len(),
         integrity_verification_opt_out,
@@ -662,6 +669,11 @@ fn fan_out_pubkeys_response(
             .fan_out_nodes
             .iter()
             .map(|target| FanOutPendingCredentialPubkeyTarget {
+                message: node_pending_credential_service::target_delivery_unknown(
+                    &pending,
+                    &target.node_id,
+                )
+                .then_some(DELIVERY_UNKNOWN),
                 node_id: target.node_id.clone(),
                 generation: target.generation,
                 version: target.crypto.version.clone(),
@@ -775,7 +787,7 @@ async fn send_pending_ciphertext_to_node(
     state: &AppState,
     node_id: &str,
     pending: &NodePendingCredential,
-) -> AppResult<()> {
+) -> Result<(), crate::services::node_ws_manager::NodeProxyFailure> {
     let crypto = pending.crypto.as_ref().ok_or_else(|| {
         AppError::Internal("pending credential ciphertext missing crypto bundle".to_string())
     })?;
@@ -807,7 +819,7 @@ async fn send_fan_out_ciphertext_to_node(
     state: &AppState,
     pending: &NodePendingCredential,
     target: &FanOutNodeState,
-) -> AppResult<()> {
+) -> Result<(), crate::services::node_ws_manager::NodeProxyFailure> {
     let admin_pubkey = target.crypto.admin_pubkey.as_deref().ok_or_else(|| {
         AppError::Internal("fan-out pending credential missing admin_pubkey".to_string())
     })?;
@@ -818,9 +830,7 @@ async fn send_fan_out_ciphertext_to_node(
         AppError::Internal("fan-out pending credential missing ciphertext".to_string())
     })?;
     if ciphertext.len() > node_pending_credential_service::MAX_CIPHERTEXT_SIZE {
-        return Err(AppError::PendingCredentialCiphertextTooLarge(
-            ciphertext.len(),
-        ));
+        return Err(AppError::PendingCredentialCiphertextTooLarge(ciphertext.len()).into());
     }
     let ciphertext_b64 =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(ciphertext.as_slice());
@@ -853,7 +863,21 @@ fn pending_ciphertext_sent_response(
         StatusCode::ACCEPTED,
         Json(PendingCredentialCiphertextResponse {
             delivery_status: "sent".to_string(),
+            message: None,
             remote_state: pending_ciphertext_state(pending, "ciphertext_received"),
+            error_code: None,
+        }),
+    )
+}
+
+fn pending_ciphertext_unknown_response() -> (StatusCode, Json<PendingCredentialCiphertextResponse>)
+{
+    (
+        StatusCode::ACCEPTED,
+        Json(PendingCredentialCiphertextResponse {
+            delivery_status: "unknown".into(),
+            remote_state: "delivery_unknown".into(),
+            message: Some(DELIVERY_UNKNOWN),
             error_code: None,
         }),
     )
@@ -866,6 +890,7 @@ fn pending_ciphertext_queued_response(
         StatusCode::ACCEPTED,
         Json(PendingCredentialCiphertextResponse {
             delivery_status: "queued".to_string(),
+            message: None,
             remote_state: pending_ciphertext_state(pending, "ciphertext_queued"),
             error_code: Some(PENDING_CREDENTIAL_NODE_OFFLINE_CODE),
         }),
@@ -1441,6 +1466,7 @@ pub async fn get_fan_out_pending_credential(
         &state.db,
         &user_id_str,
         &fanout_id,
+        true,
     )
     .await?;
 
@@ -1458,6 +1484,7 @@ pub async fn get_fan_out_pending_credential_pubkeys(
         &state.db,
         &user_id_str,
         &fanout_id,
+        false,
     )
     .await?;
     let opt_out = node_pending_credential_service::owner_integrity_verification_opt_out(
@@ -1484,6 +1511,7 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
             &state.db,
             &user_id_str,
             &fanout_id,
+            false,
         )
         .await?;
     let now = chrono::Utc::now();
@@ -1504,7 +1532,7 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
             online_node_ids.insert(item.node_id.clone());
         }
     }
-    input.online_node_ids = online_node_ids;
+    input.online_node_ids = online_node_ids.clone();
 
     let outcome = node_pending_credential_service::store_fan_out_ciphertexts_revision_guard(
         &state.db,
@@ -1523,15 +1551,20 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
     );
     log_fan_out_ciphertext_audit(&state, &auth_user, &outcome.pending, &outcome.targets);
 
-    let mut latest_pending = outcome.pending.clone();
-    for target in outcome.pending.fan_out_nodes.iter().filter(|target| {
-        matches!(
-            target.remote_state,
-            Some(RemoteCryptoState::CiphertextReceived)
-        )
-    }) {
+    for target in outcome
+        .pending
+        .fan_out_nodes
+        .iter()
+        .filter(|target| online_node_ids.contains(&target.node_id))
+    {
         match send_fan_out_ciphertext_to_node(&state, &outcome.pending, target).await {
             Ok(()) => {
+                node_pending_credential_service::confirm_ciphertext_forwarded(
+                    &state.db,
+                    &outcome.pending,
+                    &target.node_id,
+                )
+                .await?;
                 log_rci_for_pending_fan_out_target(
                     &state,
                     &auth_user,
@@ -1542,25 +1575,35 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
                     },
                 );
             }
-            Err(err) => {
+            Err(failure) if failure.dispatched => {
+                node_pending_credential_service::record_unknown_forward(
+                    &state.db,
+                    &outcome.pending,
+                    &target.node_id,
+                )
+                .await?;
+            }
+            Err(failure) => {
+                let err = failure.error;
                 tracing::warn!(
                     node_id = %target.node_id,
                     fanout_id = %outcome.pending.id,
                     error = %err,
                     "Failed to send fan-out pending credential ciphertext; queueing for retry"
                 );
-                latest_pending =
-                    node_pending_credential_service::mark_fan_out_ciphertext_queued_after_send_failure(
-                        &state.db,
-                        &target.node_id,
-                        &outcome.pending.id,
-                        chrono::Utc::now(),
-                    )
-                    .await?;
+                node_pending_credential_service::mark_fan_out_ciphertext_queued_after_send_failure(
+                    &state.db,
+                    &target.node_id,
+                    &outcome.pending,
+                    chrono::Utc::now(),
+                )
+                .await?;
             }
         }
     }
 
+    let latest_pending =
+        node_pending_credential_service::status_after_submit(&state.db, &fanout_id).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(FanOutPendingCredentialCiphertextResponse {
@@ -1649,6 +1692,7 @@ pub async fn get_pending_credential_authorization(
     )
     .await?;
     Ok(Json(PendingCredentialAuthorizationEvidenceResponse {
+        message: authority.delivery_unknown.then_some(DELIVERY_UNKNOWN),
         id: authority.id,
         node_id: authority.node_id,
         owner_user_id: authority.owner_user_id,
@@ -1821,6 +1865,15 @@ pub async fn post_pending_credential_ciphertext(
             );
             Ok(pending_ciphertext_queued_response(&pending))
         }
+        node_pending_credential_service::StorePendingCiphertextOutcome::AlreadySubmitted(
+            pending,
+        ) => Ok(
+            if node_pending_credential_service::delivery_unknown(&pending) {
+                pending_ciphertext_unknown_response()
+            } else {
+                pending_ciphertext_sent_response(&pending)
+            },
+        ),
         node_pending_credential_service::StorePendingCiphertextOutcome::StoredForOnlineNode(
             pending,
         ) => {
@@ -1838,6 +1891,10 @@ pub async fn post_pending_credential_ciphertext(
             );
             match send_pending_ciphertext_to_node(&state, &node_id, &pending).await {
                 Ok(()) => {
+                    node_pending_credential_service::confirm_ciphertext_forwarded(
+                        &state.db, &pending, &node_id,
+                    )
+                    .await?;
                     log_rci_for_pending_user(
                         &state,
                         &auth_user,
@@ -1848,7 +1905,29 @@ pub async fn post_pending_credential_ciphertext(
                     );
                     Ok(pending_ciphertext_sent_response(&pending))
                 }
-                Err(err) => {
+                Err(failure) if failure.dispatched => {
+                    if node_pending_credential_service::record_unknown_forward(
+                        &state.db, &pending, &node_id,
+                    )
+                    .await?
+                    {
+                        Ok(pending_ciphertext_unknown_response())
+                    } else {
+                        // The decrypt result can settle while the private reply is being read.
+                        let latest = node_pending_credential_service::status_after_submit(
+                            &state.db,
+                            &pending.id,
+                        )
+                        .await?;
+                        if node_pending_credential_service::delivery_unknown(&latest) {
+                            Ok(pending_ciphertext_unknown_response())
+                        } else {
+                            Ok(pending_ciphertext_sent_response(&latest))
+                        }
+                    }
+                }
+                Err(failure) => {
+                    let err = failure.error;
                     tracing::warn!(
                         node_id = %node_id,
                         pending_id = %pending.id,
@@ -1859,7 +1938,7 @@ pub async fn post_pending_credential_ciphertext(
                     node_pending_credential_service::mark_pending_ciphertext_queued_after_send_failure(
                         &state.db,
                         &node_id,
-                        &pending.id,
+                        &pending,
                         chrono::Utc::now(),
                     )
                     .await?;
@@ -3691,19 +3770,25 @@ mod tests {
         state.config.release_integrity_manifest_url = None;
         let app = api_app_preserving_config(state);
 
-        let (status, body) = route_json(
-            app,
-            Method::POST,
-            format!(
-                "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
-                node.id, pending.id
-            ),
-            &token,
-            Some(ciphertext_request(vec![1, 2, 3])),
-        )
-        .await;
+        let (status, body) =
+            crate::services::oauth_token_authority_service::with_fixture_read_budget(route_json(
+                app,
+                Method::POST,
+                format!(
+                    "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
+                    node.id, pending.id
+                ),
+                &token,
+                Some(ciphertext_request(vec![1, 2, 3])),
+            ))
+            .await;
 
-        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "route error {}",
+            body["error"]
+        );
         assert_eq!(body["error_code"], 1008);
         assert_eq!(body["error"], "validation_error");
         assert!(
@@ -3945,6 +4030,161 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn lost_enrollment_reply_exposes_unknown_and_never_requeues_the_ciphertext() {
+        use crate::services::node_owner_service::{self, ReplicaIdentity};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let (db, _state, app, token, node, pending) =
+            pending_route_fixture("pending_route_lost_reply", "lost-reply", "openclaw", true).await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let identity = ReplicaIdentity::new(
+            "old-owner".into(),
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let forward = {
+            let (started, resume, calls) = (started.clone(), resume.clone(), calls.clone());
+            axum::routing::post(move || async move {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    started.notify_one();
+                    resume.notified().await;
+                }
+                "truncated"
+            })
+        };
+        let owner = tokio::spawn(async move {
+            axum::serve(listener, axum::Router::new().fallback(forward))
+                .await
+                .unwrap();
+        });
+        node_owner_service::claim(
+            &db,
+            &node.id,
+            &identity,
+            "socket",
+            std::time::Duration::from_secs(90),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        db.collection::<Node>(NODES).update_one(doc!{"_id": &node.id},
+            doc!{"$set":{"connection_owner.remote_credential_crypto_v1":true,"connection_owner.capabilities_resolved":true}}).await.unwrap();
+        let path = format!(
+            "/api/v1/nodes/{}/credentials/pending/{}/ciphertext",
+            node.id, pending.id
+        );
+        let submit = async || {
+            route_json(
+                app.clone(),
+                Method::POST,
+                path.clone(),
+                &token,
+                Some(ciphertext_request(vec![1, 2, 3])),
+            )
+            .await
+        };
+        let poll_in_flight = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+                .await
+                .unwrap();
+            let (status, body) = route_json(
+                app.clone(),
+                Method::GET,
+                format!(
+                    "/api/v1/nodes/{}/credentials/pending?include_history=true",
+                    node.id
+                ),
+                &token,
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            let info = &body["pending_credentials"][0];
+            assert_eq!(info["remote_state"], "ciphertext_received");
+            assert!(info["message"].is_null());
+            resume.notify_one();
+        };
+        let (first, ()) = tokio::join!(submit(), poll_in_flight);
+        for (status, body) in [first, submit().await] {
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["delivery_status"], "unknown");
+            assert_eq!(body["remote_state"], "delivery_unknown");
+            assert_eq!(body["message"], DELIVERY_UNKNOWN);
+        }
+        let now = chrono::Utc::now();
+        let row = load_pending(&db, &pending.id).await;
+        assert_eq!(
+            pending_credential_info(row.clone()).message,
+            Some(DELIVERY_UNKNOWN)
+        );
+        assert!(
+            node_pending_credential_service::list_deliverable_queued_ciphertexts_for_node(
+                &db, &node.id, 10, now
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            node_pending_credential_service::list_deliverable_queued_ciphertexts_for_node(
+                &db,
+                &node.id,
+                10,
+                row.expires_at
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        let mut expired = row.clone();
+        expired.id = uuid::Uuid::new_v4().to_string();
+        expired.expires_at = now - chrono::TimeDelta::seconds(1);
+        db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+            .insert_one(&expired)
+            .await
+            .unwrap();
+        let (status, history) = route_json(
+            app.clone(),
+            Method::GET,
+            format!(
+                "/api/v1/nodes/{}/credentials/pending?include_history=true",
+                node.id
+            ),
+            &token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let expired_info = history["pending_credentials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|info| info["id"] == expired.id)
+            .unwrap();
+        assert_eq!(expired_info["remote_state"], "delivery_unknown");
+        assert_eq!(expired_info["message"], DELIVERY_UNKNOWN);
+        let settled = node_pending_credential_service::record_pending_credential_decrypt_result(
+            &db,
+            &node.id,
+            &pending.id,
+            node_pending_credential_service::PendingCredentialDecryptOutcome::Ok,
+            now,
+        )
+        .await
+        .unwrap();
+        let info = pending_credential_info(settled);
+        assert!(info.message.is_none());
+        assert_eq!(info.remote_state.as_deref(), Some("consumed"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        owner.abort();
+        let _ = owner.await;
     }
 
     #[tokio::test]
@@ -6049,6 +6289,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };
@@ -6092,6 +6334,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };
@@ -6107,6 +6351,7 @@ mod tests {
     #[test]
     fn pending_credential_info_serialization_skips_none_fields() {
         let info = PendingCredentialInfo {
+            message: None,
             id: "pc-1".to_string(),
             node_id: "node-1".to_string(),
             service_slug: "openai".to_string(),
@@ -6139,6 +6384,7 @@ mod tests {
     #[test]
     fn pending_credential_info_serialization_includes_optional_fields() {
         let info = PendingCredentialInfo {
+            message: None,
             id: "pc-2".to_string(),
             node_id: "node-1".to_string(),
             service_slug: "anthropic".to_string(),
@@ -6190,6 +6436,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: false,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };
@@ -6239,6 +6487,8 @@ mod tests {
             ciphertext_queued_at: None,
             ciphertext_expires_at: None,
             is_active: true,
+            unconfirmed_nodes: Vec::new(),
+            unknown_delivery_nodes: Vec::new(),
             fan_out_nodes: Vec::new(),
             fan_out_revision: 0,
         };

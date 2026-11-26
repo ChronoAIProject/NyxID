@@ -108,7 +108,7 @@ async fn due(state: &AppState, id: &str) {
         .unwrap();
 }
 
-async fn native_discord_identity(
+pub(super) async fn native_discord_identity(
     state: &AppState,
     row: &NyxbotChannel,
 ) -> (
@@ -152,7 +152,7 @@ async fn native_discord_identity(
     )
 }
 
-async fn complete_native_drain(state: &AppState, row: &NyxbotChannel) {
+pub(super) async fn complete_native_drain(state: &AppState, row: &NyxbotChannel) {
     use crate::services::{
         discord_gateway::transport::relay_allowed,
         nyxbot_gateway_release_service::settle_native_drains,
@@ -247,6 +247,8 @@ async fn org_gateway_refusal_leaves_relay_route_keys_and_settings_unchanged() {
     assert_eq!(after.link_code_hash, before.link_code_hash);
     assert_eq!(after.link_code_expires_at, before.link_code_expires_at);
     assert!(after.pending_agent_api_key_id.is_none() && after.pending_route_api_key_id.is_none());
+    assert!(after.agent_key_ciphertext.is_none());
+    assert!(after.secret_context_versions.is_empty());
     assert!(after.gateway_fallback_at.is_some());
     assert_eq!(
         route(&state, &after).await.agent_api_key_id,
@@ -326,6 +328,7 @@ async fn flag_off_returns_personal_and_org_bots_after_their_active_answer() {
         assert_eq!(off.owner_sender_ids, before.owner_sender_ids);
         assert_eq!(off.private_chats, before.private_chats);
         assert!(off.agent_api_key_id.is_none() && off.agent_key_ciphertext.is_none());
+        assert!(off.secret_context_versions.is_empty());
         assert!(off.gateway_channel_id.is_none() && off.binding_id.is_none());
         let owner = org.as_deref().unwrap_or(OWNER);
         let route = route(&state, &off).await;
@@ -348,6 +351,138 @@ async fn flag_off_returns_personal_and_org_bots_after_their_active_answer() {
 }
 
 #[tokio::test]
+async fn direct_callback_redelivery_uses_the_current_key_after_a_transport_swap() {
+    use crate::models::channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage};
+    use crate::services::{
+        channel_adapters, channel_platform::InboundMessage, channel_retry_ingress,
+    };
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let (mut state, _, agent) = setup("relay_key_swap").await;
+    let first = MockServer::start().await;
+    let _first_origin = crate::services::resource_adapter::register_test_origin(&first.uri());
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&first)
+        .await;
+    state.config.base_url = first.uri();
+    let before = linked(&state, None, "aurinko").await;
+    assert_eq!(before.transport, "direct");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    state.config.base_url = format!("http://{}", listener.local_addr().unwrap());
+    let (_, gateway) = mock_gateway(&mut state, Arc::new(AtomicBool::new(false))).await;
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/nyxbot/relay/{id}",
+            axum::routing::post(relay_callback),
+        )
+        .with_state(state.clone());
+    let relay = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let id = Uuid::new_v4().to_string();
+    let inbound = InboundMessage {
+        platform_message_id: "mail-1".into(),
+        conversation_id: "mail-thread".into(),
+        conversation_type: "private".into(),
+        sender_platform_id: "sender@example.test".into(),
+        sender_display_name: None,
+        content_type: "text".into(),
+        text: None,
+        attachments: vec![],
+        embedded_attachments: vec![],
+        embedded_attachments_omitted: 0,
+        reply_to_platform_message_id: None,
+        thread_id: Some("mail-thread".into()),
+        raw_data: json!({}),
+    };
+    let bot = channel_bot_service::get_bot(&state.db, &before.channel_bot_id)
+        .await
+        .unwrap();
+    let adapter =
+        channel_adapters::resolve_adapter("aurinko", &state.token_exchange_cache).unwrap();
+    let context = channel_retry_ingress::IngressContext {
+        db: &state.db,
+        config: &state.config,
+        jwt_keys: &state.jwt_keys,
+        encryption_keys: &state.encryption_keys,
+        rate_limiter: &state.per_channel_event_limiter,
+    };
+    let deliver = || {
+        Box::pin(channel_retry_ingress::deliver(
+            &context,
+            &bot,
+            adapter.as_ref(),
+            &inbound,
+            &id,
+        ))
+    };
+    let messages = state.db.collection::<ChannelMessage>(MESSAGES);
+    let source = || messages.find_one(doc! {"_id": &id});
+    assert!(matches!(
+        deliver().await,
+        Err(AppError::ChannelRelayFailed(_))
+    ));
+    let pending = source().await.unwrap().unwrap();
+    assert_eq!(
+        pending.agent_api_key_id.as_ref(),
+        Some(&before.route_api_key_id)
+    );
+    assert_eq!(pending.callback_status.as_deref(), Some("failed"));
+    let original = first.received_requests().await.unwrap().pop().unwrap();
+
+    let flag = gateway_flag("aurinko").unwrap();
+    let target = FlagTarget::User(OWNER.into());
+    set_platform_override(&state.db, flag, &target, true, OWNER)
+        .await
+        .unwrap();
+    switch_to_gateway(&state).await.unwrap();
+    assert_eq!(
+        load_channel(&state, OWNER, &before.id)
+            .await
+            .unwrap()
+            .transport,
+        "gateway"
+    );
+    set_platform_override(&state.db, flag, &target, false, OWNER)
+        .await
+        .unwrap();
+    switch_to_gateway(&state).await.unwrap();
+    let after = load_channel(&state, OWNER, &before.id).await.unwrap();
+    assert_eq!(after.transport, "direct");
+    assert_eq!(after.route_id, before.route_id);
+    assert_ne!(after.route_api_key_id, before.route_api_key_id);
+
+    let stale = relay_callback(
+        State(state.clone()),
+        Path(after.id.clone()),
+        original.headers,
+        original.body.into(),
+    )
+    .await;
+    assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
+    let problem: Value = serde_json::from_str(&body_text(stale).await).unwrap();
+    assert_eq!(problem["code"], "invalid_callback");
+    let events = state.db.collection::<NyxbotEvent>(EVENTS);
+    let count = || events.count_documents(doc! {"channel_id": &after.id});
+    assert_eq!(count().await.unwrap(), 0);
+
+    let (_guard, done) = watch_relay_callback(&after.id, &id);
+    deliver().await.unwrap();
+    done.await.unwrap();
+    let delivered = source().await.unwrap().unwrap();
+    assert_eq!(
+        delivered.agent_api_key_id.as_ref(),
+        Some(&after.route_api_key_id)
+    );
+    assert_eq!(delivered.callback_status.as_deref(), Some("delivered"));
+    assert_eq!(count().await.unwrap(), 1);
+    relay.abort();
+    gateway.abort();
+    agent.abort();
+}
+
+#[tokio::test]
 async fn org_gateway_provider_endpoints_reject_live_admin_loss_before_any_delivery() {
     for endpoint in 0..6 {
         let (mut state, agent_calls, agent) = setup("nyxbot_org_gateway_revoke").await;
@@ -357,12 +492,7 @@ async fn org_gateway_provider_endpoints_reject_live_admin_loss_before_any_delive
         // Initial connect must use the same ownership split as migration.
         let row = linked(&state, Some(&org), "lark").await;
         assert_eq!(row.transport, "gateway");
-        let raw = state
-            .encryption_keys
-            .decrypt(row.agent_key_ciphertext.as_ref().unwrap())
-            .await
-            .unwrap();
-        let raw = String::from_utf8(raw.to_vec()).unwrap();
+        let raw = decrypt_agent_key(&state, &row).await.unwrap().unwrap();
         state
             .db
             .collection::<OrgMembership>(MEMBERSHIPS)
@@ -606,6 +736,31 @@ async fn pending_org_return_waits_for_stale_cleanup_before_retrying() {
     assert!(recovered.pending_route_api_key_id.is_none());
     inactive_key(&state, &org, &pending.id).await;
     inactive_key(&state, &org, &row.route_api_key_id).await;
+    // A newly queued retirement can be ahead of MongoDB time. Complete its
+    // captured obligation before asserting remote cleanup, as a later pass does.
+    let releases = state
+        .db
+        .collection::<crate::models::nyxbot_gateway_release::NyxbotGatewayRelease>(
+            crate::models::nyxbot_gateway_release::COLLECTION_NAME,
+        );
+    releases
+        .update_many(
+            doc! {"channel_id": &row.id, "state": "due"},
+            doc! {"$set": {"next_attempt_at": bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    let mut due = releases
+        .find(doc! {"channel_id": &row.id, "state": "due"})
+        .await
+        .unwrap();
+    while let Some(obligation) = due.try_next().await.unwrap() {
+        let claimed = releases::claim(&state.db, Some(&obligation.id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(releases::execute(&state, claimed).await.unwrap());
+    }
     assert!(calls.lock().await.iter().any(|c| c.0 == "DELETE"));
     gateway.abort();
     agent.abort();
@@ -829,12 +984,7 @@ async fn discord_transport_round_trip_drains_ingress_and_refusal_restores_relay(
             "accepted gateway ownership must retire the old relay resume cursor"
         );
         if !refused {
-            let raw = state
-                .encryption_keys
-                .decrypt(on.agent_key_ciphertext.as_ref().unwrap())
-                .await
-                .unwrap();
-            let raw = Zeroizing::new(String::from_utf8(raw.to_vec()).unwrap());
+            let raw = decrypt_agent_key(&state, &on).await.unwrap().unwrap();
             let ensured = put_conversation(
                 State(state.clone()),
                 Path((on.binding_id.clone().unwrap(), PARTITION.into())),
@@ -881,6 +1031,43 @@ async fn discord_transport_round_trip_drains_ingress_and_refusal_restores_relay(
                 PARTITION
             );
         }
+        // A transport switch can return with the remote release queued for the worker.
+        use crate::models::nyxbot_gateway_release::{
+            COLLECTION_NAME, NyxbotGatewayRelease, ReleaseState,
+        };
+        let releases = state.db.collection::<NyxbotGatewayRelease>(COLLECTION_NAME);
+        let release = releases
+            .find_one(doc! {
+                "channel_id": &before.id, "state": {"$in":["due","settled"]},
+                "record_id":{"$type":"string"}, "native_drain_for":null,
+            })
+            .await
+            .unwrap()
+            .expect("remote release for the Discord channel");
+        if release.state == ReleaseState::Due {
+            releases
+                .update_one(
+                    doc! {"_id":&release.id, "state":"due"},
+                    doc! {"$set":{"next_attempt_at":bson::DateTime::from_millis(0)}},
+                )
+                .await
+                .unwrap();
+            crate::services::nyxbot_gateway_release_service::sweep(&state)
+                .await
+                .unwrap();
+        }
+        let settled = releases
+            .find_one(doc! {"_id":&release.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            settled.resolution.as_deref(),
+            Some("released"),
+            "release {:?}, last error {:?}",
+            settled.state,
+            settled.last_error
+        );
         assert!(calls.lock().await.iter().any(|c| c.0 == "DELETE"));
         complete_native_drain(&state, &before).await;
         gateway.abort();
@@ -955,6 +1142,7 @@ async fn discord_definitive_create_refusal_restores_relay_after_bounded_drain() 
     );
     assert!(requests.iter().all(|r| r.method.as_str() != "DELETE"));
     complete_native_drain(&state, &before).await;
+    assert_relay_receives(&state, &before).await;
     agent.abort();
 }
 
@@ -1120,4 +1308,247 @@ async fn notification_unread_chat_rows_survive_gateway_and_relay_swaps() {
 #[tokio::test]
 async fn notification_unread_chat_rows_survive_gateway_fallback() {
     unread_activity_survives_transport_move(true, true).await;
+}
+
+#[tokio::test]
+async fn discord_2323_preflight_refusal_does_not_pause_working_relay() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    for status in [200, 503] {
+        let (mut state, _, agent) = setup("discord_preflight_refusal").await;
+        let row = linked(&state, None, "discord").await;
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        let server = MockServer::start().await;
+        state.config.jwt_issuer = "http://localhost:3001".into();
+        let mut svc = crate::models::downstream_service::test_helpers::dummy_service();
+        svc.id = Uuid::new_v4().to_string();
+        svc.slug = "cmaeg".into();
+        svc.base_url = server.uri();
+        svc.requires_user_credential = false;
+        state
+            .db
+            .collection::<DownstreamService>(SERVICES)
+            .insert_one(svc)
+            .await
+            .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/channel-capabilities"))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(
+                    json!({"relay_authoring":{"native_discord_writes_enabled":false}}),
+                ),
+            )
+            .mount(&server)
+            .await;
+        for _ in 0..2 {
+            assert_eq!(
+                move_to_gateway(&state, &row).await,
+                Err("gateway_native_unavailable")
+            );
+            assert!(
+                crate::services::discord_gateway::transport::relay_allowed(
+                    &state.db,
+                    &row.channel_bot_id
+                )
+                .await
+                .unwrap()
+            );
+            assert_eq!(
+                state
+                    .db
+                    .collection::<bson::Document>(
+                        crate::models::nyxbot_gateway_release::COLLECTION_NAME
+                    )
+                    .count_documents(doc! {"channel_bot_id":&row.channel_bot_id})
+                    .await
+                    .unwrap(),
+                0
+            );
+            let after = load_channel(&state, OWNER, &row.id).await.unwrap();
+            assert_eq!(after.route_api_key_id, row.route_api_key_id);
+            assert!(after.pending_agent_api_key_id.is_none());
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.method == "GET")
+        );
+        assert_relay_receives(&state, &row).await;
+        agent.abort();
+        state.db.drop().await.unwrap();
+    }
+}
+
+async fn assert_relay_receives(state: &AppState, row: &NyxbotChannel) {
+    use crate::services::{coordination_service::LeaseStore, discord_gateway::Fence};
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    let lease = LeaseStore::acquire(
+        &state.db,
+        &format!("discord-gateway:{}", bot.id),
+        &crate::models::coordination::CoordinationHolder {
+            instance_id: "recovered".into(),
+            generation_id: Uuid::new_v4().to_string(),
+        },
+        Duration::from_secs(30),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let fence = Fence { bot, lease };
+    assert!(fence.current(&state.db).await.unwrap());
+    fence.record_inbound(&state.db).await.unwrap();
+    let observed = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        observed.diagnostics.last_inbound_source.as_deref(),
+        Some("discord_gateway")
+    );
+    assert!(observed.diagnostics.last_inbound_at.is_some());
+    assert!(LeaseStore::release(&state.db, &fence.lease).await.unwrap());
+}
+
+#[tokio::test]
+async fn discord_2323_create_503_recovers_record_and_relay_without_repeating_create() {
+    use wiremock::{
+        Mock, MockServer, Request, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let (mut state, _, agent) = setup("discord_create_503_recovery").await;
+    let row = linked(&state, None, "discord").await;
+    let (_discord, _guard) = native_discord_identity(&state, &row).await;
+    let server = MockServer::start().await;
+    state.config.jwt_issuer = "http://localhost:3001".into();
+    let mut svc = crate::models::downstream_service::test_helpers::dummy_service();
+    svc.id = Uuid::new_v4().to_string();
+    svc.slug = "cmaeg".into();
+    svc.base_url = server.uri();
+    svc.requires_user_credential = false;
+    state
+        .db
+        .collection::<DownstreamService>(SERVICES)
+        .insert_one(svc)
+        .await
+        .unwrap();
+    Mock::given(method("GET")).and(path("/channel-capabilities"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"relay_authoring":{
+            "native_discord_writes_enabled":true,"native_discord_auto_activation_enabled":true,"multi_consumer_writes_enabled":true}})))
+        .mount(&server).await;
+    let captured = Arc::new(std::sync::Mutex::new(Value::Null));
+    let written = captured.clone();
+    Mock::given(method("POST"))
+        .and(path("/channels"))
+        .respond_with(move |r: &Request| {
+            *written.lock().unwrap() = serde_json::from_slice(&r.body).unwrap();
+            ResponseTemplate::new(503)
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let read = captured.clone();
+    Mock::given(method("GET")).and(wiremock::matchers::path_regex("^/channel-records/"))
+        .respond_with(move |_:&Request| {
+            let body=read.lock().unwrap();
+            let record=body["record_id"].as_str().unwrap();
+            ResponseTemplate::new(200).set_body_json(json!({"record_id":record,"channel_id":"cmaeg1.ch.remote","version":1,
+                "provider":{"slug":"nyxbot","binding_id":format!("bnd_{}",Uuid::parse_str(record).unwrap().simple())},
+                "definition":{"owner":{"kind":"human","subject":OWNER},"sources":[{"type":"discord","bot_id":"100"}]}}))
+        }).mount(&server).await;
+    Mock::given(method("DELETE"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        move_to_gateway(&state, &row).await,
+        Err("gateway_unavailable")
+    );
+    let after = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(after.transport, "direct");
+    assert_eq!(after.route_api_key_id, row.route_api_key_id);
+    let release = state
+        .db
+        .collection::<bson::Document>(crate::models::nyxbot_gateway_release::COLLECTION_NAME)
+        .find_one(doc! {"channel_id":&row.id,"native_drain_for":bson::Bson::Null})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(release.get_str("resolution"), Ok("released"));
+    complete_native_drain(&state, &row).await;
+    assert_relay_receives(&state, &row).await;
+    releases::sweep(&state).await.unwrap();
+    server.verify().await;
+    agent.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[path = "nyxbot_mixed_channel_keys.rs"]
+mod mixed_keys;
+
+#[tokio::test]
+async fn gateway_release_and_channel_key_rewrap_preserve_the_winning_retirement() {
+    for migrate_first in [false, true] {
+        let (mut state, _, upstream) = setup("channel_key_retirement").await;
+        let org = add_org(&state).await;
+        state.config.contextual_record_writes = false;
+        state.encryption_keys = Arc::new(crate::crypto::aes::EncryptionKeys::from_config(
+            &state.config,
+        ));
+        let (_, gateway) = mock_gateway(&mut state, Arc::new(AtomicBool::new(false))).await;
+        set_flag(&state, FlagTarget::User(OWNER.into()), true).await;
+        let row = Box::pin(linked(&state, Some(&org), "lark")).await;
+        assert_eq!(row.transport, "gateway");
+        let filter = doc! {"_id":&row.id};
+        let rows = state.db.collection::<bson::Document>(CHANNELS);
+        let source = rows.find_one(filter.clone()).await.unwrap().unwrap();
+        let keys = crate::test_utils::test_encryption_keys();
+        if migrate_first {
+            assert!(
+                channel_key::migrate(&state.db, &keys, &source)
+                    .await
+                    .unwrap()
+            );
+            let rebound = load_channel(&state, OWNER, &row.id).await.unwrap();
+            let opened = channel_key::open(&keys, &rebound).await.unwrap().unwrap();
+            assert_eq!(
+                sha256_hex(opened.as_bytes()),
+                key_service::get_api_key(
+                    &state.db,
+                    OWNER,
+                    row.agent_api_key_id.as_deref().unwrap()
+                )
+                .await
+                .unwrap()
+                .key_hash
+            );
+        }
+        Box::pin(disconnect(&state, OWNER, &row.id)).await.unwrap();
+        let retired = rows.find_one(filter.clone()).await.unwrap().unwrap();
+        assert_eq!(retired.get_str("status"), Ok("disconnected"));
+        assert!(!retired.contains_key(channel_key::FIELD));
+        assert!(
+            retired
+                .get_document("secret_context_versions")
+                .ok()
+                .is_none_or(|map| !map.contains_key(channel_key::FIELD))
+        );
+        assert!(
+            !channel_key::migrate(&state.db, &keys, &source)
+                .await
+                .unwrap()
+        );
+        assert!(retired == rows.find_one(filter).await.unwrap().unwrap());
+        inactive_key(&state, &org, &row.route_api_key_id).await;
+        inactive_key(&state, OWNER, row.agent_api_key_id.as_deref().unwrap()).await;
+        gateway.abort();
+        upstream.abort();
+    }
 }

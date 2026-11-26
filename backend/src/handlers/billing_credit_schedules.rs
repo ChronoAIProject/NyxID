@@ -14,7 +14,9 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::models::billing_target::{BillingServiceScope, BillingTargetKind};
-use crate::models::credit_schedule::{CreditExpiryPolicy, CreditSchedule, ScheduleRecurrence};
+use crate::models::credit_schedule::{
+    CreditExpiryPolicy, CreditSchedule, ScheduleRecurrence, ScheduleTiming,
+};
 use crate::models::credit_schedule_period::{
     COLLECTION_NAME as CREDIT_SCHEDULE_PERIODS, CreditSchedulePeriod, SchedulePeriodStatus,
 };
@@ -33,6 +35,8 @@ pub struct CreateCreditScheduleRequest {
     #[serde(default)]
     pub amount_credits: i64,
     pub recurrence: ScheduleRecurrence,
+    #[serde(default)]
+    pub timing: ScheduleTiming,
     pub expiry: CreditExpiryPolicy,
     pub target_kind: BillingTargetKind,
     #[serde(default)]
@@ -101,6 +105,7 @@ pub struct CreditScheduleResponse {
     pub amount_micros: i64,
     pub amount: String,
     pub recurrence: ScheduleRecurrence,
+    pub timing: ScheduleTiming,
     pub expiry: CreditExpiryPolicy,
     pub target_kind: BillingTargetKind,
     pub target_user_ids: Vec<String>,
@@ -125,6 +130,72 @@ pub struct CreditScheduleListResponse {
     pub schedules: Vec<CreditScheduleResponse>,
 }
 
+#[derive(Debug, Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SeedCreditScheduleRequest {
+    pub expected_updated_at: Option<DateTime<Utc>>,
+    pub period_start: Option<DateTime<Utc>>,
+    pub after_user_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SeedCreditScheduleResponse {
+    pub period_start: DateTime<Utc>,
+    pub created_count: usize,
+    pub existing_count: usize,
+    pub pending_activation_count: usize,
+    pub next_user_id: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/admin/credits/schedules/{schedule_id}/seed",
+    tag = "Admin Credits",
+    params(("schedule_id" = String, Path)),
+    request_body = SeedCreditScheduleRequest,
+    responses((status = 200, body = SeedCreditScheduleResponse)),
+    security(("bearer_auth" = []))
+)]
+pub async fn seed_schedule(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(schedule_id): Path<String>,
+    Json(body): Json<SeedCreditScheduleRequest>,
+) -> AppResult<Json<SeedCreditScheduleResponse>> {
+    require_admin(&state, &auth_user).await?;
+    let result = billing::schedules::seeding::seed_missing(
+        &state.db,
+        &schedule_id,
+        billing::schedules::seeding::SeedScheduleInput {
+            actor: Some(audit_service::AuditActor::from_auth_user(&auth_user)),
+            expected_updated_at: body.expected_updated_at,
+            period_start: body.period_start,
+            after_user_id: body.after_user_id,
+        },
+        Utc::now(),
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "billing.credit_schedule.seeded",
+        Some(serde_json::json!({
+            "schedule_id": schedule_id,
+            "period_start": result.period_start,
+            "created_count": result.created_count,
+            "existing_count": result.existing_count,
+            "pending_activation_count": result.pending_activation_count,
+        })),
+    );
+    Ok(Json(SeedCreditScheduleResponse {
+        period_start: result.period_start,
+        created_count: result.created_count,
+        existing_count: result.existing_count,
+        pending_activation_count: result.pending_activation_count,
+        next_user_id: result.next_user_id,
+    }))
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/admin/credits/schedules",
@@ -139,8 +210,15 @@ pub async fn create_schedule(
     Json(body): Json<CreateCreditScheduleRequest>,
 ) -> AppResult<Json<CreditScheduleResponse>> {
     require_admin(&state, &auth_user).await?;
-    if !body.service_limits.is_empty() {
+    if !body.service_limits.is_empty() || body.timing == ScheduleTiming::Recipient {
         super::billing_credits::require_allocation_capability(&state)?;
+    }
+    if body.timing == ScheduleTiming::Recipient {
+        crate::services::security_readiness_service::require_serving(
+            &state.db,
+            billing::schedules::recipients::READINESS,
+        )
+        .await?;
     }
     let schedule = billing::schedules::create_schedule(
         &state.db,
@@ -150,6 +228,7 @@ pub async fn create_schedule(
             request_id: body.request_id,
             amount_credits: body.amount_credits,
             recurrence: body.recurrence,
+            timing: body.timing,
             expiry: body.expiry,
             target_kind: body.target_kind,
             target_user_ids: body.target_user_ids,
@@ -168,6 +247,8 @@ pub async fn create_schedule(
         "billing.credit_schedule.created",
         Some(serde_json::json!({ "schedule_id": schedule.id,
             "target_kind": schedule.target_kind,
+            "timing": schedule.timing,
+            "recurrence": schedule.recurrence,
             "target_user_count": schedule.target_user_ids.len(),
             "target_org_count": schedule.target_org_ids.len(),
             "target_group_count": schedule.target_group_ids.len(),
@@ -218,6 +299,26 @@ pub async fn update_schedule(
     if body.service_limits.is_some() {
         super::billing_credits::require_allocation_capability(&state)?;
     }
+    if body.is_active == Some(true) {
+        // Resuming is authoring: an older replica would walk a recipient
+        // schedule as calendar periods and issue a second grant set.
+        let recipient_schedule = state
+            .db
+            .collection::<CreditSchedule>(crate::models::credit_schedule::COLLECTION_NAME)
+            .find_one(doc! { "_id": &schedule_id, "timing": "recipient" })
+            .await?
+            .is_some();
+        // Gate every request that can enable recipient issuance. A concurrent
+        // pause may happen before the service loads its own CAS snapshot.
+        if recipient_schedule {
+            super::billing_credits::require_allocation_capability(&state)?;
+            crate::services::security_readiness_service::require_serving(
+                &state.db,
+                billing::schedules::recipients::READINESS,
+            )
+            .await?;
+        }
+    }
     let schedule = billing::schedules::update_schedule(
         &state.db,
         &schedule_id,
@@ -244,6 +345,8 @@ pub async fn update_schedule(
         Some(serde_json::json!({
             "schedule_id": schedule.id,
             "target_kind": schedule.target_kind,
+            "timing": schedule.timing,
+            "recurrence": schedule.recurrence,
             "target_user_count": schedule.target_user_ids.len(),
             "target_org_count": schedule.target_org_ids.len(),
             "target_group_count": schedule.target_group_ids.len(),
@@ -310,6 +413,7 @@ fn schedule_response(
             .map(super::billing_credits::ServiceLimitResponse::from)
             .collect(),
         recurrence: schedule.recurrence,
+        timing: schedule.timing,
         expiry: schedule.expiry,
         target_kind: schedule.target_kind,
         target_user_ids: schedule.target_user_ids,
@@ -432,6 +536,7 @@ mod tests {
             request_id: None,
             amount_credits: 10,
             recurrence: ScheduleRecurrence::Monthly,
+            timing: crate::models::credit_schedule::ScheduleTiming::Calendar,
             expiry: CreditExpiryPolicy::EndOfPeriod,
             target_kind,
             target_user_ids: targets,
@@ -441,6 +546,223 @@ mod tests {
             service_refs: Vec::new(),
             reason: Some("Monthly credits".to_string()),
         }
+    }
+
+    #[tokio::test]
+    async fn recipient_schedules_require_the_new_fleet_readiness_even_with_allocations_enabled() {
+        let (mut state, admin, _, _) = setup("schedule_recipient_readiness").await.unwrap();
+        state.config.billing_allocations_enabled = true;
+        for allocation_route in [false, true] {
+            let mut body = create_request(BillingTargetKind::AllUsers, vec![]);
+            body.timing = ScheduleTiming::Recipient;
+            let result = if allocation_route {
+                allocate_recurring(State(state.clone()), test_auth_user(&admin), Json(body)).await
+            } else {
+                create_schedule(State(state.clone()), test_auth_user(&admin), Json(body)).await
+            };
+            assert!(matches!(
+                result,
+                Err(AppError::SecurityReadinessUnavailable)
+            ));
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<CreditSchedule>(crate::models::credit_schedule::COLLECTION_NAME)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        let mut body = create_request(BillingTargetKind::AllUsers, vec![]);
+        body.timing = ScheduleTiming::Recipient;
+        let Json(schedule) =
+            allocate_recurring(State(state.clone()), test_auth_user(&admin), Json(body))
+                .await
+                .unwrap();
+        assert_eq!(schedule.timing, ScheduleTiming::Recipient);
+        // A concurrently serving legacy process must close authoring again.
+        state
+            .db
+            .collection::<bson::Document>("security_replicas")
+            .insert_one(doc! { "_id": "old-worker", "generation_id": "old-worker",
+            "instance_name": "old-worker", "protocol": 1, "capabilities": [],
+            "expected_replicas": ["test-backend"], "drained": true,
+            "platform_policy_required": false, "observed_at": bson::DateTime::now() })
+            .await
+            .unwrap();
+        let mut body = create_request(BillingTargetKind::AllUsers, vec![]);
+        body.timing = ScheduleTiming::Recipient;
+        assert!(matches!(
+            create_schedule(State(state), test_auth_user(&admin), Json(body)).await,
+            Err(AppError::SecurityReadinessUnavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn resuming_a_recipient_schedule_requires_the_fleet_readiness_again() {
+        let Some((mut state, admin, _, _)) = setup("schedule_recipient_resume").await else {
+            return;
+        };
+        state.config.billing_allocations_enabled = true;
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        let mut body = create_request(BillingTargetKind::AllUsers, vec![]);
+        body.timing = ScheduleTiming::Recipient;
+        let Json(schedule) =
+            create_schedule(State(state.clone()), test_auth_user(&admin), Json(body))
+                .await
+                .unwrap();
+        let toggle = |is_active| UpdateCreditScheduleRequest {
+            is_active: Some(is_active),
+            ..Default::default()
+        };
+        let Json(paused) = update_schedule(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Path(schedule.id.clone()),
+            Json(toggle(false)),
+        )
+        .await
+        .unwrap();
+        assert!(!paused.is_active);
+        // A legacy process rejoins while the schedule is paused.
+        state
+            .db
+            .collection::<bson::Document>("security_replicas")
+            .insert_one(doc! { "_id": "old-worker", "generation_id": "old-worker",
+            "instance_name": "old-worker", "protocol": 1, "capabilities": [],
+            "expected_replicas": ["test-backend"], "drained": true,
+            "platform_policy_required": false, "observed_at": bson::DateTime::now() })
+            .await
+            .unwrap();
+        assert!(matches!(
+            update_schedule(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Path(schedule.id.clone()),
+                Json(toggle(true)),
+            )
+            .await,
+            Err(AppError::SecurityReadinessUnavailable)
+        ));
+        let stored = state
+            .db
+            .collection::<CreditSchedule>(crate::models::credit_schedule::COLLECTION_NAME)
+            .find_one(doc! { "_id": &schedule.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.is_active);
+        // Pausing and sparse edits remain available while the fleet is mixed.
+        let Json(repaused) = update_schedule(
+            State(state),
+            test_auth_user(&admin),
+            Path(schedule.id),
+            Json(toggle(false)),
+        )
+        .await
+        .unwrap();
+        assert!(!repaused.is_active);
+    }
+
+    #[tokio::test]
+    async fn enabling_an_active_recipient_schedule_still_requires_authoring_readiness() {
+        let (mut state, admin, _, _) = setup("schedule_active_enable_readiness").await.unwrap();
+        state.config.billing_allocations_enabled = true;
+        crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+        let mut body = create_request(BillingTargetKind::AllUsers, vec![]);
+        body.timing = ScheduleTiming::Recipient;
+        let Json(schedule) =
+            create_schedule(State(state.clone()), test_auth_user(&admin), Json(body))
+                .await
+                .unwrap();
+        let enable = || UpdateCreditScheduleRequest {
+            is_active: Some(true),
+            ..Default::default()
+        };
+        // Even an apparently redundant enable can race a concurrent pause.
+        state.config.billing_allocations_enabled = false;
+        assert!(
+            update_schedule(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Path(schedule.id.clone()),
+                Json(enable())
+            )
+            .await
+            .is_err()
+        );
+        state.config.billing_allocations_enabled = true;
+        state
+            .db
+            .collection::<bson::Document>("security_replicas")
+            .insert_one(doc! { "_id": "old-worker", "generation_id": "old-worker",
+            "instance_name": "old-worker", "protocol": 1, "capabilities": [],
+            "expected_replicas": ["test-backend"], "drained": true,
+            "platform_policy_required": false, "observed_at": bson::DateTime::now() })
+            .await
+            .unwrap();
+        assert!(matches!(
+            update_schedule(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Path(schedule.id.clone()),
+                Json(enable())
+            )
+            .await,
+            Err(AppError::SecurityReadinessUnavailable)
+        ));
+        let stored = state
+            .db
+            .collection::<CreditSchedule>(crate::models::credit_schedule::COLLECTION_NAME)
+            .find_one(doc! { "_id": &schedule.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.is_active);
+    }
+
+    #[tokio::test]
+    async fn seeding_is_admin_only_and_retries_do_not_refill_existing_grants() {
+        let Some((state, admin_id, operator_id, _)) = setup("schedule_handler_seed").await else {
+            return;
+        };
+        let Json(schedule) = create_schedule(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Json(create_request(BillingTargetKind::AllUsers, vec![])),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            seed_schedule(
+                State(state.clone()),
+                test_auth_user(&operator_id),
+                Path(schedule.id.clone()),
+                Json(SeedCreditScheduleRequest::default()),
+            )
+            .await,
+            Err(AppError::Forbidden(_))
+        ));
+        let Json(first) = seed_schedule(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Path(schedule.id.clone()),
+            Json(SeedCreditScheduleRequest::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.created_count, 3);
+        let Json(retry) = seed_schedule(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(schedule.id),
+            Json(SeedCreditScheduleRequest::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!((retry.created_count, retry.existing_count), (0, 3));
     }
 
     #[tokio::test]

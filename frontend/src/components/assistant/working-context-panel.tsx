@@ -1,9 +1,13 @@
+import { LANGUAGES } from "@/i18n/language";
+import type { CardLanguageChoice } from "@/lib/assistant/card-language";
+import { validCardLanguageChoice } from "./card-language";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { useContext, useState } from "react";
+import { useContext, useId, useState } from "react";
 import { ChatHeaderCompactContext } from "./chat-header-context";
 import { NotebookText } from "lucide-react";
+import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { useAssistantContext, useResetAssistantContext } from "@/hooks/use-assistant-context";
@@ -13,15 +17,34 @@ function labels(actions: readonly { readonly label: string }[] | undefined): str
   return actions?.length ? actions.map((action) => action.label).join(", ") : "None";
 }
 
+function CardLanguageSelect({ choice, onChange }: {
+  choice: CardLanguageChoice;
+  onChange: (value: CardLanguageChoice) => void;
+}) {
+  useUiTranslation();
+  const id = useId();
+  return <div className="flex flex-col gap-1">
+    <Label htmlFor={id}>{translateUi("Approval card language")}</Label>
+    <select id={id} className="rounded-md border border-border bg-background px-2 py-1.5" value={choice}
+      onChange={event => onChange(validCardLanguageChoice(event.target.value))}>
+      <option value="auto">{translateUi("Follow conversation")}</option>
+      <option value="app">{translateUi("Use app language")}</option>
+      {LANGUAGES.map(({ code, label }) => <option key={code} value={code} lang={code}>{label}</option>)}
+    </select>
+  </div>;
+}
+
 /** Inspect or reset what the assistant will resume from. `onReset` refreshes
  * the transcript so the reset note appears; `onManageMemory` opens the
  * agent's memory notes (only offered when the thread's agent is known). */
 export function WorkingContextPanel({
   conversationId,
+  cardLanguage,
   onManageMemory,
   onReset,
 }: {
   readonly conversationId: string;
+  readonly cardLanguage?: { choice: CardLanguageChoice; onChange: (value: CardLanguageChoice) => void };
   readonly onManageMemory?: (agentId: string) => void;
   readonly onReset?: () => void;
 }) {
@@ -49,6 +72,7 @@ export function WorkingContextPanel({
           <SheetTitle>{translateUi("Working context")}</SheetTitle>
         </SheetHeader>
         <div className="mt-4 space-y-2 text-13 text-text-tertiary">
+          {cardLanguage && <CardLanguageSelect {...cardLanguage} />}
           {query.isPending ? <p>{translateUi("Loading working context…")}</p> : null}
           {query.isError ? (
             <p role="alert" className="text-destructive">{translateUi("Unable to load the working context.")}{" "}

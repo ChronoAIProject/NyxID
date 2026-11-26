@@ -1,3 +1,6 @@
+import { localizedToast } from "../../i18n/localizedToast";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
@@ -48,7 +51,7 @@ import { NyxBotPushSwitches } from "./NyxBotPushSwitches";
 class PushRegisterError extends Error {
   constructor(
     public readonly reason:
-      "permission_denied" | "token_unavailable" | "register_failed",
+      | "permission_denied" | "token_unavailable" | "register_failed",
     message: string,
   ) {
     super(message);
@@ -56,24 +59,24 @@ class PushRegisterError extends Error {
   }
 }
 
-const APPROVAL_MODES = [
-  ["writes_only", "Writes only (default)"],
-  ["all", "All requests"],
-  ["off", "Off"],
-] as const;
-
 /** Settings › Notifications: delivery channels and the approval default. */
 export function NotificationSettingsScreen(
   _props: SheetScreenProps<"NotificationSettings">,
 ) {
+  useAppLanguage();
+  const approvalModes = [
+    ["writes_only", translateApp("Writes only (default)")],
+    ["all", translateApp("All requests")],
+    ["off", translateApp("Off")],
+  ] as const;
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
   const queryClient = useQueryClient();
   const { isConnected, recheckConnection } = useNetworkStatus();
   const isOffline = !isConnected;
   const [toast, setToast] = useState<ToastState | null>(null);
-  const showToast = (message: string, kind: ToastKind) =>
-    setToast({ message, kind });
+  const showToast = (message: () => string, kind: ToastKind) =>
+    setToast(localizedToast(() => ({ message: message(), kind })));
   useEffect(() => {
     if (!toast) return;
     const timer = setTimeout(() => setToast(null), 2400);
@@ -102,10 +105,10 @@ export function NotificationSettingsScreen(
       void queryClient.invalidateQueries({
         queryKey: ["account", "notificationSettings"],
       });
-      showToast("Notification settings updated", "success");
+      showToast(() => (translateApp("Notification settings updated")), "success");
     },
     onError: (error) => {
-      showToast(resolveErrorMessage(error), "error");
+      showToast(() => (resolveErrorMessage(error)), "error");
       void refetchNotifSettings();
     },
   });
@@ -119,8 +122,9 @@ export function NotificationSettingsScreen(
   const saveNyxBotPush = (next: NotificationPushPreferences) => {
     pushPreferenceMutation.mutate(next, {
       onSuccess: () =>
-        showToast("NyxBot notification settings updated", "success"),
-      onError: (error) => showToast(resolveErrorMessage(error), "error"),
+        showToast(
+          () => (translateApp("NyxBot notification settings updated")), "success"),
+      onError: (error) => showToast(() => (resolveErrorMessage(error)), "error"),
     });
   };
 
@@ -136,18 +140,22 @@ export function NotificationSettingsScreen(
         if (result.reason === "permission_denied") {
           throw new PushRegisterError(
             "permission_denied",
-            "Notification permission is off for NyxID.",
+            translateApp("Notification permission is off for NyxID."),
           );
         }
         if (result.reason === "token_unavailable") {
           throw new PushRegisterError(
             "token_unavailable",
-            "This device can't get a push token. Try a real device or reinstall.",
+            translateApp(
+              "This device can't get a push token. Try a real device or reinstall.",
+            ),
           );
         }
         throw new PushRegisterError(
           "register_failed",
-          "Couldn't register this device. Check your connection and try again.",
+          translateApp(
+            "Couldn't register this device. Check your connection and try again.",
+          ),
         );
       }
       return result;
@@ -156,7 +164,7 @@ export function NotificationSettingsScreen(
       void queryClient.invalidateQueries({
         queryKey: ["account", "notificationSettings"],
       });
-      showToast("Push enabled on this device", "success");
+      showToast(() => (translateApp("Push enabled on this device")), "success");
     },
     onError: (error) => {
       if (
@@ -167,16 +175,18 @@ export function NotificationSettingsScreen(
         // on iOS (and Android). Guarded by an Alert so the user opts in
         // instead of being yanked out of the app on a tap.
         Alert.alert(
-          "Enable Notifications",
-          "Push notifications are off for NyxID. Open Settings to enable them?",
+          translateApp("Enable Notifications"),
+          translateApp(
+            "Push notifications are off for NyxID. Open Settings to enable them?",
+          ),
           [
-            { text: "Not now", style: "cancel" },
+            { text: translateApp("Not now"), style: "cancel" },
             {
-              text: "Open Settings",
+              text: translateApp("Open Settings"),
               onPress: () => {
                 Linking.openSettings().catch(() => {
                   showToast(
-                    "Couldn't open Settings — open it manually.",
+                    () => (translateApp("Couldn't open Settings — open it manually.")),
                     "error",
                   );
                 });
@@ -186,7 +196,7 @@ export function NotificationSettingsScreen(
         );
         return;
       }
-      showToast(resolveErrorMessage(error), "error");
+      showToast(() => (resolveErrorMessage(error)), "error");
     },
   });
 
@@ -196,10 +206,10 @@ export function NotificationSettingsScreen(
       void queryClient.invalidateQueries({
         queryKey: ["account", "notificationSettings"],
       });
-      showToast("Telegram disconnected", "success");
+      showToast(() => (translateApp("Telegram disconnected")), "success");
     },
     onError: (error) => {
-      showToast(resolveErrorMessage(error), "error");
+      showToast(() => (resolveErrorMessage(error)), "error");
     },
   });
 
@@ -219,7 +229,7 @@ export function NotificationSettingsScreen(
     void queryClient.invalidateQueries({
       queryKey: ["account", "notificationSettings"],
     });
-    showToast("Telegram connected!", "success");
+    showToast(() => (translateApp("Telegram connected!")), "success");
   };
 
   // Helper: emit `ui.mobile_preference_toggled` only after a settings
@@ -253,12 +263,14 @@ export function NotificationSettingsScreen(
       isLastChannel("push") && notifSettings?.approval_required;
     const message = willUseWebApproval
       ? approvalDeliveryWarning(notifSettings)
-      : "You will no longer receive push notifications for approval requests.";
+      : translateApp(
+          "You will no longer receive push notifications for approval requests.",
+        );
 
-    Alert.alert("Disable Push Notifications", message, [
-      { text: "Cancel", style: "cancel" },
+    Alert.alert(translateApp("Disable Push Notifications"), message, [
+      { text: translateApp("Cancel"), style: "cancel" },
       {
-        text: "Disable",
+        text: translateApp("Disable"),
         style: "destructive",
         onPress: () => {
           // Emit only on mutation success so a failed update (offline /
@@ -286,13 +298,17 @@ export function NotificationSettingsScreen(
     const willUseWebApproval =
       isLastChannel("telegram") && notifSettings?.approval_required;
     const message = willUseWebApproval
-      ? `This disconnects Telegram. ${approvalDeliveryWarning(notifSettings)}`
-      : "This will disconnect your Telegram account and stop all Telegram notifications.";
+      ? translateApp("This disconnects Telegram. {{approvalDeliveryWarning}}", {
+          approvalDeliveryWarning: approvalDeliveryWarning(notifSettings),
+        })
+      : translateApp(
+          "This will disconnect your Telegram account and stop all Telegram notifications.",
+        );
 
-    Alert.alert("Disable Telegram", message, [
-      { text: "Cancel", style: "cancel" },
+    Alert.alert(translateApp("Disable Telegram"), message, [
+      { text: translateApp("Cancel"), style: "cancel" },
       {
-        text: "Disable",
+        text: translateApp("Disable"),
         style: "destructive",
         onPress: async () => {
           // Disable notifications in one call, then disconnect. Only emit after BOTH land -- the earlier design
@@ -346,39 +362,44 @@ export function NotificationSettingsScreen(
       <SettingsPage>
         {isOffline && (
           <OfflineBanner
-            subtitle="Notification settings need a connection"
+            subtitle={translateApp("Notification settings need a connection")}
             onRetry={async () => {
               const online = await recheckConnection();
               if (online) void refetchNotifSettings();
               else
-                showToast("Still offline — will retry when connected", "error");
+                showToast(
+                  () => (translateApp("Still offline — will retry when connected")), "error");
             }}
           />
         )}
         {isOffline ? (
-          <Text style={styles.note}>Requires network connection</Text>
+          <Text style={styles.note}>
+            {translateApp("Requires network connection")}
+          </Text>
         ) : isNotifLoading || (!notifSettings && !isNotifError) ? (
           <SkeletonRows
             rows={2}
             title
-            accessibilityLabel="Loading notification settings"
+            accessibilityLabel={translateApp("Loading notification settings")}
           />
         ) : !notifSettings ? (
           // No error UI yet: a failed first load keeps its old placeholder.
-          <Text style={styles.note}>Loading...</Text>
+          <Text style={styles.note}>{translateApp("Loading...")}</Text>
         ) : (
           <>
             <SettingsGroup
-              title="Delivery"
-              footer="Approval requests and task results arrive on these channels."
+              title={translateApp("Delivery")}
+              footer={translateApp(
+                "Approval requests and task results arrive on these channels.",
+              )}
             >
               <SettingsRow
                 icon={Bell}
-                label="Push Notifications"
+                label={translateApp("Push Notifications")}
                 accessory={
                   notifSettings.push_device_count > 0 ? (
                     <Switch
-                      accessibilityLabel="Push Notifications"
+                      accessibilityLabel={translateApp("Push Notifications")}
                       value={notifSettings.push_enabled}
                       onValueChange={handleTogglePush}
                       disabled={notifMutation.isPending}
@@ -393,8 +414,8 @@ export function NotificationSettingsScreen(
                     >
                       <Text style={styles.pillText}>
                         {pushRegisterMutation.isPending
-                          ? "Enabling…"
-                          : "Enable on this device"}
+                          ? translateApp("Enabling…")
+                          : translateApp("Enable on this device")}
                       </Text>
                     </Pressable>
                   )
@@ -403,11 +424,11 @@ export function NotificationSettingsScreen(
               {notifSettings.telegram_connected ? (
                 <SettingsRow
                   icon={Send}
-                  label="Telegram"
-                  detail={`@${notifSettings.telegram_username ?? "linked"}`}
+                  label={"Telegram"}
+                  detail={translateApp("@{{name}}", { name: notifSettings.telegram_username ?? translateApp("linked") })}
                   accessory={
                     <Switch
-                      accessibilityLabel="Telegram"
+                      accessibilityLabel={"Telegram"}
                       value={notifSettings.telegram_enabled}
                       onValueChange={handleToggleTelegram}
                       disabled={notifMutation.isPending}
@@ -418,8 +439,8 @@ export function NotificationSettingsScreen(
               ) : (
                 <SettingsRow
                   icon={Send}
-                  label="Telegram"
-                  value="Link account"
+                  label={"Telegram"}
+                  value={translateApp("Link account")}
                   onPress={() => {
                     capture({
                       name: "ui.mobile_dialog_opened",
@@ -444,25 +465,29 @@ export function NotificationSettingsScreen(
               />
             ) : null}
             <SettingsGroup
-              title="Approval requests"
+              title={translateApp("Approval requests")}
               inset={false}
               footer={
                 <View style={styles.footer}>
                   <Text style={styles.hint}>
-                    Per-service and organization policies still apply.
+                    {translateApp(
+                      "Per-service and organization policies still apply.",
+                    )}
                   </Text>
                   <Text style={styles.hint}>
                     {notifSettings.approval_required
                       ? approvalDeliveryWarning(notifSettings)
-                      : "Push or Telegram delivers requests when approval protection is on."}
+                      : translateApp(
+                          "Push or Telegram delivers requests when approval protection is on.",
+                        )}
                   </Text>
                 </View>
               }
             >
               <SettingsMenuRow
-                label="Request approval for"
+                label={translateApp("Request approval for")}
                 value={selectedApprovalMode}
-                options={APPROVAL_MODES.map(([value, label]) => ({
+                options={approvalModes.map(([value, label]) => ({
                   value,
                   label,
                 }))}

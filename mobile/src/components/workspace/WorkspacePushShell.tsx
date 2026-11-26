@@ -1,6 +1,10 @@
+import { Platform } from "react-native";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import {
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -13,6 +17,7 @@ import {
   useWindowDimensions,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import Animated, {
   cancelAnimation,
@@ -33,6 +38,34 @@ import {
   SIDEBAR_EDGE_WIDTH,
   workspaceSidebarLayout,
 } from "./workspacePushState";
+import {
+  FLOATING_TRAILING_INSET,
+  workspaceCornerSensor,
+  workspaceQuickRailAvailable,
+  workspaceQuickRailFrame,
+  workspaceStatusCluster,
+} from "./workspaceLayout";
+import {
+  WorkspaceCornerSensorContext,
+  WorkspaceQuickRailContext,
+} from "./WorkspaceLayoutContext";
+import { useQuickRailHidden } from "./workspaceQuickRailPreference";
+import {
+  WorkspaceFloatingInsetContext,
+  WorkspaceRailMotionContext,
+} from "./workspaceFloatingInset";
+import {
+  SLAB_MOTION_DURATION,
+  SLAB_MOTION_EASING,
+  sidebarInset,
+} from "./workspaceSlabTransitions";
+import { chatComposerFocus } from "../../features/assistant/chatComposerFocus";
+import {
+  WorkspaceColumnHeaderContext,
+  type WorkspaceColumnHeaderControls,
+} from "./workspaceColumnHeader";
+import { useWorkspaceStatusOffset } from "./useWorkspaceStatusOffset";
+import { WorkspaceKeyboardFocusBoundary } from "./WorkspaceKeyboardFocusBoundary";
 
 export type WorkspaceContentTransitionHandle = {
   fadeOut: (onHidden: () => void) => void;
@@ -53,13 +86,60 @@ type Props = {
   onDismiss: () => void;
   initialFocusTarget: () => number | null;
   sidebar: ReactNode;
+  /** The Duo's rail (folded or unfolded, beside its status column); it
+   * receives the Full screen action, whether full screen is on (which hides
+   * its grouped shortcuts capsule; it stays mounted so its glass can dissolve
+   * itself) and the focused chat's bar controls, which full screen moves into
+   * the column. */
+  quickRail?: (
+    fullScreen: boolean,
+    onToggleFullScreen: () => void,
+    header: WorkspaceColumnHeaderControls | null,
+  ) => ReactNode;
+  /** Wide windows: the persistent sidebar is hidden and content takes the full width. */
+  sidebarCollapsed?: boolean;
+  /** The saved sidebar choice has loaded; later changes animate, the restore does not. */
+  sidebarRestored?: boolean;
   children: ReactNode;
 };
 
 /** Keep the navigator mounted while switching between push and side-by-side. */
 export function WorkspacePushShell(props: Props) {
+  useAppLanguage();
   const { colors } = useTheme();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const windowMetrics = { platform: Platform.OS, width, height, rightInset: insets.right, };
+  const [quickRailHidden, setQuickRailHidden] = useQuickRailHidden();
+  const quickRailAvailable =
+    props.enabled &&
+    Boolean(props.quickRail) &&
+    workspaceQuickRailAvailable(windowMetrics);
+  const fullScreen = quickRailAvailable && quickRailHidden;
+  const cornerSensor = workspaceCornerSensor(windowMetrics);
+  // This posture's measured cluster (folded or unfolded): the rail starts
+  // just below it.
+  const cluster = workspaceStatusCluster(windowMetrics);
+  const statusOffset = useWorkspaceStatusOffset(
+    quickRailAvailable, width, height, insets.top,
+  );
+  // The focused chat's bar controls (registered while it is focused): full
+  // screen moves them into the column below the restore capsule.
+  const [columnHeader, setColumnHeader] = useState<{
+    owner: symbol;
+    controls: WorkspaceColumnHeaderControls;
+  } | null>(null);
+  const registerColumnHeader = useMemo(
+    () => (owner: symbol, controls: WorkspaceColumnHeaderControls | null) =>
+      setColumnHeader((current) =>
+        controls
+          ? { owner, controls }
+          : current?.owner === owner
+            ? null
+            : current,
+      ),
+    [],
+  );
   const layout = workspaceSidebarLayout(width);
   const persistent = props.enabled && layout.persistent;
   const persistentNow = useRef(persistent);
@@ -77,6 +157,15 @@ export function WorkspacePushShell(props: Props) {
   const programmatic = useSharedValue(false);
   const dragActive = useSharedValue(false);
   const transition = useSharedValue(0);
+  const sidebarCollapsed = persistent && cornerSensor && Boolean(props.sidebarCollapsed);
+  // 1 = persistent sidebar shown, 0 = hidden (content full width).
+  const sidebarShown = useSharedValue(sidebarCollapsed ? 0 : 1);
+  // 0 = rail mode, 1 = full screen: one UI-thread clock for the content's
+  // inset, the grouped capsule's fade and the status column's edge fade.
+  const fullScreenProgress = useSharedValue(fullScreen ? 1 : 0);
+  // Only a person's toggle animates; restoring the saved choice applies at once.
+  const animateRail = useRef(false);
+  const sidebarWasRestored = useRef(Boolean(props.sidebarRestored));
   const endpoint = useRef<string | undefined>(undefined);
   const generation = useRef(0);
   const dragging = useRef(false);
@@ -93,6 +182,53 @@ export function WorkspacePushShell(props: Props) {
     contentOpacity.value =
       hidden && fadeIn && !reduced ? withTiming(1, { duration: 180 }) : 1;
   }
+  function toggleFullScreen() {
+    // The saved choice persists per device; the content takes (or returns)
+    // the rail column in one smooth UI-thread transition.
+    animateRail.current = true;
+    setQuickRailHidden(!quickRailHidden);
+  }
+  const slabTiming = {
+    duration: SLAB_MOTION_DURATION,
+    easing: Easing.bezier(...SLAB_MOTION_EASING),
+  };
+  useEffect(() => {
+    const target = fullScreen ? 1 : 0;
+    // Reduce Motion swaps at once.
+    if (animateRail.current && !reduced)
+      fullScreenProgress.value = withTiming(target, slabTiming);
+    else {
+      cancelAnimation(fullScreenProgress);
+      fullScreenProgress.value = target;
+    }
+    animateRail.current = false;
+  }, [fullScreen, reduced]);
+  const railMotion = useMemo(
+    () =>
+      quickRailAvailable
+        ? {
+            inset: FLOATING_TRAILING_INSET,
+            fullScreen,
+            progress: fullScreenProgress,
+          }
+        : null,
+    [
+      quickRailAvailable,
+      fullScreen,
+      fullScreenProgress
+    ],
+  );
+  useEffect(() => {
+    const target = sidebarCollapsed ? 0 : 1;
+    if (sidebarWasRestored.current && persistent && !reduced)
+      sidebarShown.value = withTiming(target, slabTiming);
+    else {
+      cancelAnimation(sidebarShown);
+      sidebarShown.value = target;
+    }
+    sidebarWasRestored.current = Boolean(props.sidebarRestored);
+  }, [sidebarCollapsed, persistent, reduced, props.sidebarRestored]);
+
   if (!props.presented || props.visible) acknowledgedClosed.current = false;
   useLayoutEffect(() => {
     workspaceFocus.setModalActive(
@@ -350,8 +486,19 @@ export function WorkspacePushShell(props: Props) {
     });
   const slabStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: persistent ? 0 : offset.value }],
-    borderTopLeftRadius: persistent || offset.value > 0 ? 16 : 0,
-    borderBottomLeftRadius: persistent || offset.value > 0 ? 16 : 0,
+    // Wide windows: the slab's left edge follows the sidebar as it hides or
+    // shows, so content width changes smoothly with it.
+    marginLeft: persistent ? sidebarInset(openWidth, sidebarShown.value) : 0,
+    borderTopLeftRadius: persistent
+      ? 16 * sidebarShown.value
+      : offset.value > 0
+        ? 16
+        : 0,
+    borderBottomLeftRadius: persistent
+      ? 16 * sidebarShown.value
+      : offset.value > 0
+        ? 16
+        : 0,
     shadowOpacity: !persistent && offset.value > 0 ? 0.2 : 0,
   }));
   const clipStyle = useAnimatedStyle(() => ({
@@ -361,7 +508,9 @@ export function WorkspacePushShell(props: Props) {
   }));
   const active = props.enabled && !persistent && props.presented;
   const sidebarInteractive =
-    props.enabled && (persistent || settledOpen) && !props.obscured;
+    props.enabled &&
+    (persistent ? !sidebarCollapsed : settledOpen) &&
+    !props.obscured;
   const sidebarModal = !persistent && sidebarInteractive;
   return (
     <View
@@ -384,7 +533,16 @@ export function WorkspacePushShell(props: Props) {
             sidebarInteractive ? "auto" : "no-hide-descendants"
           }
           pointerEvents={sidebarInteractive ? "auto" : "none"}
-          style={[styles.sidebar, { width: openWidth }]}
+          style={[
+            styles.sidebar,
+            { width: openWidth },
+            // Android's Tab search includes pressable children of a touch- and
+            // accessibility-hidden View. Hide the parked drawer at the native
+            // view level too, keeping its React state through the next reveal.
+            Platform.OS === "android" && !persistent && !props.presented && !visible
+              ? styles.parkedSidebar
+              : undefined,
+          ]}
         >
           {props.sidebar}
         </View>
@@ -396,7 +554,6 @@ export function WorkspacePushShell(props: Props) {
           {
             backgroundColor: colors.bg,
             shadowColor: colors.shadowColor,
-            marginLeft: persistent ? openWidth : 0,
           },
           slabStyle,
         ]}
@@ -410,7 +567,42 @@ export function WorkspacePushShell(props: Props) {
           }
           style={[styles.content, clipStyle]}
         >
-          {props.children}
+          <WorkspaceKeyboardFocusBoundary
+            blocked={active}
+            testID="workspace-slab-body"
+            style={styles.content}
+            // Observes every touch in the slab (pages, headers, rail, sheets)
+            // without claiming it: one that began outside a focused chat
+            // composer blurs it when it ends.
+            onTouchStart={
+              cornerSensor ? chatComposerFocus.workspaceTouchStart : undefined
+            }
+            onTouchEnd={
+              cornerSensor ? chatComposerFocus.workspaceTouchEnd : undefined
+            }
+          >
+            <WorkspaceCornerSensorContext.Provider value={cornerSensor}>
+              {/* The header keeps the same controls in rail mode and full
+                  screen: on the Duo (folded or unfolded, narrow or beside
+                  the persistent sidebar) the rail carries New chat,
+                  Notifications, Scan QR, Recent chats and Settings. */}
+              <WorkspaceQuickRailContext.Provider value={quickRailAvailable}>
+                {/* Rail mode: content keeps clear of the rail column. Full
+                    screen: it runs to the 12pt margin (animated). */}
+                <WorkspaceRailMotionContext.Provider value={railMotion}>
+                  <WorkspaceFloatingInsetContext.Provider
+                    value={railMotion && !fullScreen ? railMotion.inset : 0}
+                  >
+                    <WorkspaceColumnHeaderContext.Provider
+                      value={registerColumnHeader}
+                    >
+                      {props.children}
+                    </WorkspaceColumnHeaderContext.Provider>
+                  </WorkspaceFloatingInsetContext.Provider>
+                </WorkspaceRailMotionContext.Provider>
+              </WorkspaceQuickRailContext.Provider>
+            </WorkspaceCornerSensorContext.Provider>
+          </WorkspaceKeyboardFocusBoundary>
         </Animated.View>
         {props.enabled &&
         !props.obscured &&
@@ -425,19 +617,55 @@ export function WorkspacePushShell(props: Props) {
                   : "workspace-sidebar-reveal-edge"
               }
               accessible={active}
+              focusable={active}
+              accessibilityElementsHidden={!active}
+              importantForAccessibility={active ? "yes" : "no-hide-descendants"}
               accessibilityRole={active ? "button" : undefined}
-              accessibilityLabel={active ? "Close navigation" : undefined}
+              accessibilityLabel={
+                active ? translateApp("Close navigation") : undefined
+              }
               onPress={active ? () => props.onOpenChange(false) : undefined}
               style={active ? StyleSheet.absoluteFill : styles.edge}
             />
           </GestureDetector>
         ) : null}
       </Animated.View>
+      {quickRailAvailable ? (
+        // Outside the sliding slab: the rail stays fixed on the status
+        // column while the folded drawer slides the page aside (it sits
+        // over the slab's visible edge). The slab spans the window's right
+        // edge in every posture, so the same right-anchored frame applies.
+        // It observes touches like the slab body so a tap on it still
+        // blurs a focused composer.
+        <WorkspaceRailMotionContext.Provider value={railMotion}>
+          <View
+            testID="workspace-quick-rail"
+            pointerEvents="box-none"
+            onTouchStart={
+              cornerSensor ? chatComposerFocus.workspaceTouchStart : undefined
+            }
+            onTouchEnd={
+              cornerSensor ? chatComposerFocus.workspaceTouchEnd : undefined
+            }
+            style={[
+              styles.quickRailHost,
+              workspaceQuickRailFrame(insets.top, insets.bottom, cluster, statusOffset),
+            ]}
+          >
+            {props.quickRail!(
+              fullScreen,
+              toggleFullScreen,
+              columnHeader?.controls ?? null,
+            )}
+          </View>
+        </WorkspaceRailMotionContext.Provider>
+      ) : null}
     </View>
   );
 }
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: "hidden" },
+  parkedSidebar: { display: "none" },
   edge: {
     position: "absolute",
     left: 0,
@@ -446,6 +674,9 @@ const styles = StyleSheet.create({
     width: SIDEBAR_EDGE_WIDTH,
   },
   sidebar: { position: "absolute", top: 0, bottom: 0, left: 0 },
+  // The rail sits in the strip the body keeps clear while it is shown,
+  // centered on the status cluster's column.
+  quickRailHost: { position: "absolute", alignItems: "center" },
   slab: {
     flex: 1,
     shadowOffset: { width: -3, height: 0 },
@@ -453,4 +684,5 @@ const styles = StyleSheet.create({
     elevation: 2,
   },
   content: { flex: 1, overflow: "hidden" },
+
 });

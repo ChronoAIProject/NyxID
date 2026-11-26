@@ -16,6 +16,8 @@ pub(super) struct AttemptContext {
     /// Set before completion settles; a renew failing after this is expected.
     pub settling: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub status: std::sync::Arc<std::sync::atomic::AtomicU16>,
+    /// A pool deadline or lost response cannot authorize a second use.
+    pub single_node_dispatch: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub node_dispatched: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub retry_after: std::sync::Arc<std::sync::Mutex<Option<std::time::Duration>>>,
 }
@@ -301,6 +303,7 @@ struct Completion {
     response_len: i64,
     captured: Option<Vec<u8>>,
     events: llm_usage_service::BoundedUsageEvents,
+    checkpoints: crate::services::billing::usage_checkpoint::StreamCheckpoints,
     extracted_usage: Option<llm_usage_service::ReportedLlmUsage>,
     usage_extracted: bool,
     heartbeat: Option<tokio::task::JoinHandle<()>>,
@@ -313,10 +316,23 @@ struct Completion {
 }
 
 impl Completion {
-    fn observe(&mut self, bytes: &[u8]) {
+    async fn observe(&mut self, bytes: &[u8]) {
         self.response_len = self.response_len.saturating_add(bytes.len() as i64);
         if self.sse {
-            self.events.push(bytes);
+            if self.checkpoints.is_enabled() {
+                for event in self.events.push_observed(bytes, true) {
+                    match event {
+                        Ok((kind, value)) => {
+                            self.checkpoints
+                                .observe_value(kind.as_deref(), &value)
+                                .await
+                        }
+                        Err(_) => self.checkpoints.invalidate().await,
+                    }
+                }
+            } else {
+                self.events.push(bytes);
+            }
         } else if let Some(captured) = self.captured.as_mut() {
             if captured.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES {
                 captured.extend_from_slice(bytes);
@@ -430,7 +446,7 @@ impl Completion {
             // ticket's durable sequence/revision fences still order this write.
             let db = self.db.clone();
             let ticket = self.context.ticket.clone();
-            tokio::spawn(async move {
+            crate::services::shutdown::process().spawn_cleanup(async move {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     service_pool_health_service::record_success(&db, &ticket),
@@ -498,6 +514,7 @@ impl Drop for Completion {
             response_len: self.response_len,
             captured: self.captured.take(),
             events: std::mem::take(&mut self.events),
+            checkpoints: std::mem::take(&mut self.checkpoints),
             extracted_usage: self.extracted_usage.clone(),
             usage_extracted: self.usage_extracted,
             heartbeat: None,
@@ -509,7 +526,7 @@ impl Drop for Completion {
             observability: self.observability.clone(),
         };
         self.completed = true;
-        crate::turn_trace::spawn(async move {
+        crate::turn_trace::spawn_cleanup(async move {
             if let Err(error) =
                 Box::pin(completion.finish(completion.context.cancellation_cause())).await
             {
@@ -546,7 +563,7 @@ pub(super) async fn direct_response(
     let mut builder = Response::builder().status(status);
     for (name, value) in response.headers() {
         if let Some(value) =
-            forwarded_response_header_value(name.as_str(), value.as_bytes(), sse, location)
+            forwarded_response_header_value(status, name.as_str(), value.as_bytes(), sse, location)
         {
             builder = builder.header(name, value);
         }
@@ -629,11 +646,22 @@ pub(super) async fn response_body(
             ),
         );
     }
+    let checkpoints = state.billing.stream_checkpoints(
+        &metered,
+        sse && status.is_success()
+            && crate::services::billing::usage_checkpoint::supports_path(
+                context
+                    .prepared_chat
+                    .as_ref()
+                    .map_or(path, |prepared| &prepared.path),
+            ),
+    );
     let mut completion = Completion {
         db: state.db.clone(),
         billing: state.billing.clone(),
         auth: auth.clone(),
         context,
+        checkpoints,
         metered,
         path: path.into(),
         status,
@@ -667,7 +695,7 @@ pub(super) async fn response_body(
     let heartbeat_cancel = cancellation.clone();
     let lease_lost = completion.context.lease_lost.clone();
     let settling = completion.context.settling.clone();
-    completion.heartbeat = Some(tokio::spawn(async move {
+    completion.heartbeat = Some(crate::services::shutdown::process().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             tokio::select! {
@@ -701,7 +729,7 @@ pub(super) async fn response_body(
                 until_client_disconnect(&token, tokio::time::timeout(idle, upstream.next())).await;
             match next {
                 Ok(Ok(Some(Ok(bytes)))) => {
-                    completion.observe(&bytes);
+                    completion.observe(&bytes).await;
                     let chunks = match adapter
                         .as_mut()
                         .map_or_else(|| Ok(vec![bytes.clone()]), |adapter| adapter.push(&bytes))
@@ -831,10 +859,13 @@ pub(super) async fn node_response(
             (status, headers, Body::from_stream(stream))
         }
     };
+    let http_status =
+        StatusCode::from_u16(status).map_err(|error| AppError::Internal(error.to_string()))?;
     let is_sse = node_is_sse_headers(&headers);
-    let mut builder = Response::builder().status(status);
+    let mut builder = Response::builder().status(http_status);
     for (name, value) in headers {
         if let Some(value) = forwarded_response_header_value(
+            http_status,
             &name.to_ascii_lowercase(),
             value.as_bytes(),
             is_sse,
@@ -943,6 +974,7 @@ mod tests {
             settling: Default::default(),
             timed_out: Default::default(),
             status: Default::default(),
+            single_node_dispatch: Default::default(),
             node_dispatched: Default::default(),
             retry_after: Default::default(),
         };
@@ -951,6 +983,7 @@ mod tests {
             billing: state.billing.clone(),
             auth,
             context,
+            checkpoints: state.billing.stream_checkpoints(&metered, false),
             metered,
             path: "chat/completions".into(),
             status: StatusCode::TOO_MANY_REQUESTS,
@@ -975,10 +1008,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn usage_checkpoint_survives_process_death_before_finalization() {
+        use crate::models::credits::Credits;
+        let (db, mut completion, _) = completion_fixture("usage_checkpoint_crash").await;
+        let owner = completion.auth.user_id.to_string();
+        let request = completion.context.request_id.clone();
+        db.collection::<UsageMeterRow>("usage_meter")
+            .delete_many(doc! {})
+            .await
+            .unwrap();
+        crate::billing_integration_tests::create_usage_index(&db).await;
+        db.collection::<crate::models::billing_rate_cache::BillingRateCache>("billing_rate_cache")
+            .insert_one(crate::billing_integration_tests::rate(
+                "platform_tokens",
+                chrono::Utc::now(),
+            ))
+            .await
+            .unwrap();
+        let billing = std::sync::Arc::new(crate::billing_integration_tests::billing_service(
+            &db,
+            std::sync::Arc::new(
+                crate::billing_integration_tests::FakeLago::with_wallet_balance(
+                    Credits::from_whole(100),
+                ),
+            ),
+            0,
+        ));
+        billing.ensure_wallet(&owner).await.unwrap();
+        let mut route = completion.metered.route.clone().unwrap();
+        route.service_platform_billable = true;
+        completion.metered = billing.open(&route).await.unwrap();
+        billing.mark_forwarded(&completion.metered).await.unwrap();
+        completion.billing = billing;
+        completion.status = StatusCode::OK;
+        completion.checkpoints = completion
+            .billing
+            .stream_checkpoints(&completion.metered, true);
+        // A killed process cannot run Drop cleanup. Stop at an acknowledged
+        // report boundary, before any of the normal finalization is polled.
+        completion.spawn_cleanup_on_drop = false;
+        let arrived = tokio::sync::Notify::new();
+        {
+            let read = async {
+                completion.observe(b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n").await;
+                arrived.notify_one();
+                std::future::pending::<()>().await;
+            };
+            tokio::pin!(read);
+            tokio::select! {
+                () = arrived.notified() => {},
+                () = &mut read => panic!("reader must stay before finalization"),
+            }
+        }
+        drop(completion);
+        for _ in 0..2 {
+            crate::services::billing::pool_attempt::recover_expired(
+                &db,
+                chrono::Utc::now() + chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+            crate::services::billing::reservation::recover_retryable_settlements_at(
+                &db,
+                chrono::Utc::now() + chrono::Duration::hours(1),
+            )
+            .await
+            .unwrap();
+        }
+        let row = db
+            .collection::<UsageMeterRow>("usage_meter")
+            .find_one(doc! {"billing_request_id":request})
+            .await
+            .unwrap()
+            .unwrap();
+        let wallet = db
+            .collection::<crate::models::billing_wallet::BillingWallet>("billing_wallet")
+            .find_one(doc! {"owner_id":owner})
+            .await
+            .unwrap()
+            .unwrap();
+        db.drop().await.unwrap();
+        assert_eq!(
+            row.quantity,
+            Some(3),
+            "reported usage must survive the lost executor"
+        );
+        assert!(row.released);
+        assert_eq!(wallet.reserved_credits, Credits::ZERO);
+        assert_eq!(wallet.pending_lago_debits, Credits::from_whole(3));
+    }
+
+    #[tokio::test]
     async fn pool_reported_sse_usage_survives_cancellation_before_settlement_acknowledgment() {
         let (db, mut completion, finalization) = completion_fixture("pool_cancel_settlement").await;
         let request_id = completion.context.request_id.clone();
-        completion.observe(b"data: {\"model\":\"gpt-5.5\",\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n");
+        completion.observe(b"data: {\"model\":\"gpt-5.5\",\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n").await;
         {
             let finish = completion.finish_inner(PoolCompletionCause::Complete);
             tokio::pin!(finish);

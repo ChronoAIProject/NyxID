@@ -224,6 +224,7 @@ pub(super) async fn enqueue_with_uploads_ready(
                 }
                 let participating = access.execution_enrolled && svc::execution_permission_enrollment::live_enabled(db, actor, Some(session)).await?;
                 let request = GroupRequest {
+        org_use_revisions: Default::default(),
                     execution_task: participating.then(|| crate::models::execution_permission::TaskAdmission {
                         channel_source: None,
                         version:1, task:crate::models::execution_permission::TaskRef {root_kind:crate::models::execution_permission::TaskRootKind::GroupRequest,root_id:id.clone()},
@@ -384,36 +385,188 @@ pub(super) async fn handoff_ready(
         return Ok(false);
     }
     let mut session = db.client().start_session().await?;
-    session.start_transaction().read_concern(mongodb::options::ReadConcern::snapshot()).and_run((db.clone(), source.clone(), target.to_owned(), settings), |session, context| {let (db, source, target, settings)=&*context;let target=target.as_str();Box::pin(async move {
-        let result: AppResult<bool> = async {
-            let group = read_group(db,&source.actor,&source.slot.group_id,session).await?;
-            let access = identity::for_group(db,&source.actor,group,session).await?;
-            if access.membership_revision() != source.membership_revision {return Err(stale());}
-            if !access.group.member_agent_ids.iter().any(|id| id == target) || source.slot.agent_id == target {return Ok(false);}
-            let request = db.collection::<GroupRequest>(REQUESTS).find_one(doc! {"_id":&source.request_id,"group_id":&source.slot.group_id,"actor_user_id":&source.actor,"dropped":{"$ne":true},"collaboration.version":1,"collaboration.admitted_agent_ids":&source.slot.agent_id}).session(&mut *session).await?.ok_or_else(missing)?;
-            let binding = request.collaboration.as_ref().ok_or_else(missing)?;
-            // Deduplicate across concurrent agents and repeated callbacks; a retry
-            // cannot refill the chain or replace its original lane binding.
-            if request.hops_remaining <= 0 || binding.authorities.contains_key(target) || binding.refused_agent_ids.iter().any(|id| id == target) {return Ok(false);}
-            if access.agent(&source.slot.agent_id).and_then(AgentIdentity::authority) != Some(&source.slot.authority) {return Err(missing());}
-            identity::fence(db,&access,&source.slot.agent_id,session).await?;
-            fence_group(db,&access.group,session).await?;
-            let Some(authority) = access.agent(target).and_then(AgentIdentity::authority) else {
-                append(db,&access.group,&source.actor,REFUSAL,&source.request_id,Some(target),&[],session).await?;
-                db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":&source.request_id},doc! {"$addToSet":{"collaboration.refused_agent_ids":target}}).session(session).await?;
-                // Remember the denied target, without inventing an authority or
-                // consuming a handoff. No model call can follow this notice.
-                return Ok(false);
-            };
-            identity::fence(db,&access,target,session).await?;
-            if !svc::coordination_service::RateWindowStore::admit_in_session(db,"assistant_group_handoffs",&source.actor,settings.max_group_handoffs_per_hour as u64,std::time::Duration::from_secs(3600),session).await? {return Ok(false);}
-            if db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":&source.request_id,"hops_remaining":{"$gt":0}},doc! {
-                "$inc":{"hops_remaining":-1},"$addToSet":{"pending_agent_ids":target},"$set":{format!("collaboration.authorities.{target}"):bson::to_bson(authority).map_err(|e| AppError::Internal(e.to_string()))?}
-            }).session(session).await?.matched_count != 1 {return Err(stale());}
-            Ok(true)
-        }.await;
-        transactions::transaction_result(result)
-    })}).await.map_err(transactions::map_transaction_error)
+    session
+        .start_transaction()
+        .read_concern(mongodb::options::ReadConcern::snapshot())
+        .and_run(
+            (db.clone(), source.clone(), target.to_owned(), settings),
+            |session, context| {
+                let (db, source, target, settings) = &*context;
+                let target = target.as_str();
+                Box::pin(async move {
+                    let result: AppResult<bool> = async {
+                        handoff_in_session(
+                            db,
+                            source,
+                            target,
+                            settings.max_group_handoffs_per_hour as u64,
+                            session,
+                        )
+                        .await
+                    }
+                    .await;
+                    transactions::transaction_result(result)
+                })
+            },
+        )
+        .await
+        .map_err(transactions::map_transaction_error)
+}
+
+pub(super) async fn handoff_in_session(
+    db: &Database,
+    source: &Admission,
+    target: &str,
+    per_hour: u64,
+    session: &mut ClientSession,
+) -> AppResult<bool> {
+    if per_hour == 0 {
+        return Ok(false);
+    }
+    let group = read_group(db, &source.actor, &source.slot.group_id, session).await?;
+    let access = identity::for_group(db, &source.actor, group, session).await?;
+    if access.membership_revision() != source.membership_revision {
+        return Err(stale());
+    }
+    if !access.group.member_agent_ids.iter().any(|id| id == target)
+        || source.slot.agent_id == target
+    {
+        return Ok(false);
+    }
+    let request = db.collection::<GroupRequest>(REQUESTS).find_one(doc! {"_id":&source.request_id,"group_id":&source.slot.group_id,"actor_user_id":&source.actor,"dropped":{"$ne":true},"collaboration.version":1,"collaboration.admitted_agent_ids":&source.slot.agent_id}).session(&mut *session).await?.ok_or_else(missing)?;
+    let binding = request.collaboration.as_ref().ok_or_else(missing)?;
+    if binding.membership_revision != source.membership_revision
+        || binding.authorities.get(&source.slot.agent_id) != Some(&source.slot.authority)
+    {
+        return Err(missing());
+    }
+    // Deduplicate across concurrent agents and repeated callbacks; a retry
+    // cannot refill the chain or replace its original lane binding.
+    if request.hops_remaining <= 0
+        || binding.authorities.contains_key(target)
+        || binding.refused_agent_ids.iter().any(|id| id == target)
+    {
+        return Ok(false);
+    }
+    if access
+        .agent(&source.slot.agent_id)
+        .and_then(AgentIdentity::authority)
+        != Some(&source.slot.authority)
+    {
+        return Err(missing());
+    }
+    identity::fence(db, &access, &source.slot.agent_id, session).await?;
+    fence_group(db, &access.group, session).await?;
+    let Some(authority) = access.agent(target).and_then(AgentIdentity::authority) else {
+        append(
+            db,
+            &access.group,
+            &source.actor,
+            REFUSAL,
+            &source.request_id,
+            Some(target),
+            &[],
+            session,
+        )
+        .await?;
+        db.collection::<GroupRequest>(REQUESTS)
+            .update_one(
+                doc! {"_id":&source.request_id},
+                doc! {"$addToSet":{"collaboration.refused_agent_ids":target}},
+            )
+            .session(session)
+            .await?;
+        // Remember the denied target, without inventing an authority or
+        // consuming a handoff. No model call can follow this notice.
+        return Ok(false);
+    };
+    identity::fence(db, &access, target, session).await?;
+    let authority = bson::to_bson(authority)
+        .map_err(|_| AppError::Internal("Invalid handoff authority".into()))?;
+    if !svc::coordination_service::RateWindowStore::admit_in_session(
+        db,
+        "assistant_group_handoffs",
+        &source.actor,
+        per_hour,
+        std::time::Duration::from_secs(3600),
+        session,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    if db.collection::<GroupRequest>(REQUESTS).update_one(doc! {"_id":&source.request_id,"hops_remaining":{"$gt":0}},doc! {
+                "$inc":{"hops_remaining":-1},"$addToSet":{"pending_agent_ids":target},"$set":{format!("collaboration.authorities.{target}"):authority}
+            }).session(session).await?.matched_count != 1 {
+        return Err(AppError::DatabaseError(mongodb::error::Error::custom("Handoff transaction lost its request fence")));
+    }
+    Ok(true)
+}
+
+/// Called with the public reply's settlement transaction. The ordinary pending
+/// request queue then survives a lost post-settlement callback.
+pub(super) async fn handoffs_for_reply(
+    db: &Database,
+    b: &model::ExecutionBinding,
+    access: &identity::RequestAccess,
+    text: &str,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    use svc::assistant_wake_service::publication::settlement_result;
+    let roster: Vec<_> = access.agents.values().map(|a| a.agent.clone()).collect();
+    let Some(mentions) =
+        settlement_result(people::resolve(text, &access.participants, &roster, false))?
+    else {
+        return Ok(());
+    };
+    let targets = svc::assistant_group_service::mentions(&mentions.agent_text, &roster);
+    if targets.is_empty() {
+        return Ok(());
+    }
+    if settlement_result(require_rollout(db).await)?.is_none() {
+        return Ok(());
+    }
+    let Some(slot) = db
+        .collection::<model::ExecutionSlot>(model::SLOTS)
+        .find_one(doc! {"_id":&b.slot_id,"revoked":false})
+        .session(&mut *session)
+        .await?
+    else {
+        return Ok(());
+    };
+    if slot.authority != b.authority || slot.membership_revision != b.membership_revision {
+        return Ok(());
+    }
+    let source = Admission {
+        execution_enrolled: access.execution_enrolled,
+        slot,
+        actor: b.original_requester_id.clone(),
+        request_id: b.request_id.clone(),
+        membership_revision: b.membership_revision,
+    };
+    let settings = db
+        .collection::<crate::models::assistant_settings::AssistantSettings>(
+            crate::models::assistant_settings::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id":&source.actor})
+        .session(&mut *session)
+        .await?
+        .unwrap_or_else(|| {
+            crate::models::assistant_settings::AssistantSettings::defaults(&source.actor)
+        });
+    for target in targets {
+        settlement_result(
+            handoff_in_session(
+                db,
+                &source,
+                &target,
+                settings.max_group_handoffs_per_hour.max(0) as u64,
+                session,
+            )
+            .await,
+        )?;
+    }
+    Ok(())
 }
 
 /// Cancellation belongs to the original requester and remains available during
@@ -481,6 +634,9 @@ pub async fn pending(db: &Database, group: Option<&str>) -> AppResult<Vec<GroupR
     Ok(db
         .collection::<GroupRequest>(REQUESTS)
         .find(filter)
+        .hint(mongodb::options::Hint::Name(
+            svc::assistant_wake_service::COLLAB_PENDING_INDEX.into(),
+        ))
         .sort(doc! {"created_at":1})
         .limit(100)
         .await?

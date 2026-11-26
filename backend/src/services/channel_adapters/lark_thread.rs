@@ -211,7 +211,10 @@ impl LarkFamilyAdapter {
             require_media_success(&value, self.display_name())?;
             value
         } else {
-            let value = support::json(request).await?;
+            let value = {
+                crate::services::channel_turn_preparation::effect().await?;
+                support::json(request).await?
+            };
             if value["code"] != 0 {
                 return Err(threads::unavailable());
             }
@@ -299,6 +302,7 @@ impl LarkFamilyAdapter {
             support::push(
                 &mut history,
                 ThreadHistoryMessage {
+                    truncated_original_bytes: None,
                     message_id: id,
                     sender_id: sender.into(),
                     sender_kind: kind,

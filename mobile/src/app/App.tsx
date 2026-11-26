@@ -1,3 +1,8 @@
+import { useDiagnosticsNotice } from "../lib/crashReporting/useDiagnosticsNotice";
+import { newAssistantChatParams } from "./assistantChatParams";
+import { workspaceCornerSensor } from "../components/workspace/workspaceLayout";
+import { useAppLanguage } from "../i18n/LanguageProvider";
+import { translateApp } from "../i18n/appTranslation";
 import { LanguageProvider } from "../i18n/LanguageProvider";
 import "react-native-gesture-handler";
 import { useForegroundNotificationToast } from "./useForegroundNotificationToast";
@@ -12,12 +17,15 @@ import {
   WorkspacePushShell,
 } from "../components/workspace/WorkspacePushShell";
 import { workspaceFocus } from "../lib/accessibility/workspaceFocus";
+import { getAuthAccountId, subscribeAuthAccount } from "../lib/auth/authAccount";
+import { getAuthEpoch } from "../lib/auth/authEpoch";
 import { StatusBar } from "expo-status-bar";
 import * as Notifications from "expo-notifications";
 import * as SplashScreen from "expo-splash-screen";
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -34,9 +42,11 @@ import {
   ActivityIndicator,
   AppState,
   findNodeHandle,
+  Keyboard,
   StyleSheet,
   Text,
   useWindowDimensions,
+  Platform,
   View,
 } from "react-native";
 import {
@@ -74,15 +84,18 @@ import { AppNavigator, RootStackParamList } from "./AppNavigator";
 import { appLinking, notificationLinkConfig } from "./linking";
 import {
   isWorkspaceSidebarRoot,
+  openScannerSheetAction,
   openWorkspaceSheetAction,
   workspaceDestinationMatches,
   workspaceContentIdentity,
   workspaceNavigateAction,
 } from "./navigationHierarchy";
-import type {
-  WorkspaceNavigationGuardChange,
-  WorkspaceEdgeBackChange,
+import {
+  WorkspaceSidebarToggleContext,
+  type WorkspaceNavigationGuardChange,
+  type WorkspaceEdgeBackChange,
 } from "./WorkspaceHeader";
+import { useSidebarOpen } from "../components/workspace/workspaceSidebarPreference";
 import {
   consumePendingPushSyncSignal,
   initializeNotificationRuntime,
@@ -103,6 +116,8 @@ import {
   WorkspaceDrawer,
   type WorkspaceRoute,
 } from "../components/workspace/WorkspaceDrawer";
+import { WorkspaceQuickRail } from "../components/workspace/WorkspaceQuickRail";
+import type { QuickAccessItem } from "../lib/api/quickAccessSchema";
 import { notificationsApi } from "../lib/api/notificationsApi";
 import { createNotificationPushController } from "../lib/notifications/notificationPushController";
 import { ChatLayoutProvider } from "../features/display/ChatLayoutContext";
@@ -171,6 +186,15 @@ function getActiveRouteName(
 }
 
 export default function App() {
+  return (
+    <LanguageProvider>
+      <AppContent />
+    </LanguageProvider>
+  );
+}
+
+function AppContent() {
+  useAppLanguage();
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
   const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(
     undefined,
@@ -207,6 +231,11 @@ export default function App() {
       }
       setNavigationGuardRevision((value) => value + 1);
     },
+    [],
+  );
+
+  const isNavigationBlocked = useCallback(
+    () => criticalNavigationGuards.current.size > 0,
     [],
   );
 
@@ -394,7 +423,7 @@ export default function App() {
       <View style={appLoadingStyles.container}>
         <StatusBar style="light" />
         <ActivityIndicator size="large" color="#9775fa" />
-        <Text style={appLoadingStyles.text}>Loading...</Text>
+        <Text style={appLoadingStyles.text}>{translateApp("Loading...")}</Text>
       </View>
     );
   }
@@ -405,28 +434,25 @@ export default function App() {
         <SafeAreaProvider>
           <QueryClientProvider client={queryClient}>
             <ThemeProvider>
-              <LanguageProvider>
-                <ChatLayoutProvider>
-                  <MobileConsentProvider>
-                    <AuthSessionProvider>
-                      <ThemedAppShell
-                        navigationRef={navigationRef}
-                        currentRouteName={currentRouteName}
-                        setCurrentRouteName={setCurrentRouteName}
-                        flushPendingNotificationNavigation={
-                          flushPendingNotificationNavigation
-                        }
-                        onNavigationGuardChange={onNavigationGuardChange}
-                        navigationBlocked={
-                          criticalNavigationGuards.current.size > 0
-                        }
-                        pushToast={pushToast}
-                        pushToastKey={pushToastKey}
-                      />
-                    </AuthSessionProvider>
-                  </MobileConsentProvider>
-                </ChatLayoutProvider>
-              </LanguageProvider>
+              <ChatLayoutProvider>
+                <MobileConsentProvider>
+                  <AuthSessionProvider>
+                    <ThemedAppShell
+                      navigationRef={navigationRef}
+                      currentRouteName={currentRouteName}
+                      setCurrentRouteName={setCurrentRouteName}
+                      flushPendingNotificationNavigation={
+                        flushPendingNotificationNavigation
+                      }
+                      onNavigationGuardChange={onNavigationGuardChange}
+                      navigationBlocked={isNavigationBlocked()}
+                      isNavigationBlocked={isNavigationBlocked}
+                      pushToast={pushToast}
+                      pushToastKey={pushToastKey}
+                    />
+                  </AuthSessionProvider>
+                </MobileConsentProvider>
+              </ChatLayoutProvider>
             </ThemeProvider>
           </QueryClientProvider>
         </SafeAreaProvider>
@@ -441,7 +467,8 @@ function ThemedAppShell({
   setCurrentRouteName,
   flushPendingNotificationNavigation,
   onNavigationGuardChange,
-  navigationBlocked = false,
+  navigationBlocked,
+  isNavigationBlocked,
   pushToast,
   pushToastKey,
 }: {
@@ -452,18 +479,40 @@ function ThemedAppShell({
   setCurrentRouteName: (name: string | undefined) => void;
   flushPendingNotificationNavigation: () => void;
   onNavigationGuardChange: WorkspaceNavigationGuardChange;
-  navigationBlocked?: boolean;
+  navigationBlocked: boolean;
+  isNavigationBlocked: () => boolean;
   pushToast: ToastState | null;
   pushToastKey: number;
 }) {
+  useAppLanguage();
   const { mode } = useTheme();
   const insets = useSafeAreaInsets();
   const { isAuthenticated } = useAuthSession();
-  const { width } = useWindowDimensions();
+  const sessionEpoch = getAuthEpoch();
+  const { width, height } = useWindowDimensions();
+  const cornerWindow = workspaceCornerSensor({
+    platform: Platform.OS,
+    width,
+    height,
+    rightInset: insets.right,
+  });
   const persistentSidebar =
     isAuthenticated && workspaceSidebarLayout(width).persistent;
+  const reviewDiagnostics = useCallback(() => {
+    if (navigationRef.isReady()) {
+      navigationRef.navigate("WorkspaceSheet", { screen: "PrivacySettings" });
+    }
+  }, [navigationRef]);
+  useDiagnosticsNotice(isAuthenticated, reviewDiagnostics);
+  // Wide windows: the persistent sidebar is closed by default (content full
+  // width); Menu opens or hides it and the choice is saved per device,
+  // independent of the Duo's full screen. (`sidebarOpen` below is the
+  // overlay drawer's accessibility state.)
+  const [persistentSidebarOpen, setPersistentSidebarOpen, sidebarRestored] =
+    useSidebarOpen();
+  const sidebarCollapsed = cornerWindow && !persistentSidebarOpen;
   const authenticatedNow = useRef(isAuthenticated);
-  authenticatedNow.current = isAuthenticated;
+  authenticatedNow.current = isAuthenticated && getAuthAccountId() !== null;
   const edgeBacks = useRef(new Map<symbol, () => void>());
   const [edgeBackRevision, setEdgeBackRevision] = useState(0);
   const onEdgeBackChange = useCallback<WorkspaceEdgeBackChange>((id, back) => {
@@ -473,6 +522,9 @@ function ThemedAppShell({
   }, []);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerPresented, setDrawerPresented] = useState(false);
+  // Read by navigation callbacks that may come from an older render.
+  const drawerPresentedNow = useRef(drawerPresented);
+  drawerPresentedNow.current = drawerPresented;
   const sidebarFocus = useRef<View>(null);
   const drawerOrigin =
     useRef<ReturnType<typeof workspaceFocus.capture>>(undefined);
@@ -506,24 +558,35 @@ function ThemedAppShell({
     },
     [],
   );
-  const priorSheet = useRef<{ open: boolean; content: string }>({
+  const priorSheet = useRef<{ open: boolean; content: string; tracked: boolean; }>({
     open: false,
     content: "",
+    tracked: false,
   });
   const [currentChat, setCurrentChat] = useState<WorkspaceChatTarget>();
   const [accessibility, setAccessibility] = useState<WorkspaceAccessibility>({
     sheetOpen: false,
   });
+  const sidebarOpen = !persistentSidebar && drawerPresented;
+  const workspaceAccessibility = useMemo(
+    () => ({ ...accessibility, sidebarOpen }),
+    [accessibility, sidebarOpen],
+  );
   const trackCurrentRoute = () => {
     const state = navigationRef.getRootState();
     const next = workspaceAccessibilityState(state);
     const content = workspaceContentIdentity(state);
     if (
+      authenticatedNow.current &&
       !persistentSidebar &&
       ((pendingDrawerNavigation.current &&
         !didNavigate.current &&
         workspaceDestinationMatches(state, pendingDrawerNavigation.current)) ||
-        (priorSheet.current.open &&
+        // Only a presented sidebar waits to close after a sheet's destination;
+        // with none, nothing would ever dismiss and clear this selection.
+        (drawerPresentedNow.current &&
+          priorSheet.current.tracked &&
+          priorSheet.current.open &&
           !next.sheetOpen &&
           content !== priorSheet.current.content))
     ) {
@@ -534,24 +597,59 @@ function ThemedAppShell({
         setDrawerOpen(false);
       }
     }
-    priorSheet.current = { open: next.sheetOpen, content };
+    priorSheet.current = {
+      open: next.sheetOpen,
+      content,
+      tracked: authenticatedNow.current,
+    };
     workspaceFocus.context(next.primaryKey, next.sheetOpen);
     setAccessibility(next);
-    setCurrentRouteName(getActiveRouteName(navigationRef.getRootState()));
-    setCurrentChat(activeWorkspaceChatTarget(navigationRef.getCurrentRoute()));
+    setCurrentRouteName(getActiveRouteName(state));
+    setCurrentChat(
+      authenticatedNow.current
+        ? activeWorkspaceChatTarget(navigationRef.getCurrentRoute())
+        : undefined,
+    );
   };
+  const resetWorkspaceSession = useCallback(() => {
+    authenticatedNow.current = isAuthenticated && getAuthAccountId() !== null;
+    cancelSelection();
+    paintedPage.current = null;
+    didNavigate.current = false;
+    const state = navigationRef.isReady()
+      ? navigationRef.getRootState()
+      : undefined;
+    const next = state
+      ? workspaceAccessibilityState(state)
+      : { sheetOpen: false };
+    priorSheet.current = {
+      open: next.sheetOpen,
+      content: workspaceContentIdentity(state),
+      // A retained sheet belongs to the old session until this one tracks it.
+      tracked: false,
+    };
+    drawerOrigin.current = undefined;
+    pendingMenuFocus.current = undefined;
+    setDrawerOpen(false);
+    setDrawerPresented(false);
+    setCurrentChat(undefined);
+    setCurrentRouteName(
+      authenticatedNow.current ? getActiveRouteName(state) : undefined,
+    );
+    setAccessibility(next);
+    workspaceFocus.context(next.primaryKey, next.sheetOpen);
+  }, [
+    cancelSelection,
+    navigationRef,
+    setCurrentRouteName,
+    isAuthenticated
+  ]);
   useEffect(() => {
-    if (!isAuthenticated) {
-      cancelSelection();
-      paintedPage.current = null;
-      didNavigate.current = false;
-      drawerOrigin.current = undefined;
-      pendingMenuFocus.current = undefined;
-      setDrawerOpen(false);
-      setDrawerPresented(false);
-      workspaceFocus.context(undefined, false);
-    }
-  }, [isAuthenticated]);
+    resetWorkspaceSession();
+    // Account admission also covers a direct account switch or batched
+    // sign-out/sign-in that never renders isAuthenticated=false.
+    return subscribeAuthAccount(resetWorkspaceSession);
+  }, [isAuthenticated, resetWorkspaceSession]);
   useEffect(() => {
     // Resizing changes the presentation, never the navigator or its drafts.
     // Fence a pending compact animation before exposing both tablet columns.
@@ -580,11 +678,16 @@ function ThemedAppShell({
       !authenticatedNow.current ||
       !navigationRef.isReady() ||
       !action ||
-      navigationBlocked ||
-      pendingDrawerNavigation.current ||
-      didNavigate.current
+      isNavigationBlocked()
     )
       return;
+    if (!persistentSidebar && !drawerPresentedNow.current) {
+      // The folded Duo's quick rail: no open sidebar to swap beneath or close,
+      // so dispatch directly; native before-remove guards still apply.
+      navigationRef.dispatch(action);
+      return;
+    }
+    if (pendingDrawerNavigation.current || didNavigate.current) return;
     if (persistentSidebar) {
       // Native before-remove guards still own dirty editors and pending writes.
       navigationRef.dispatch(action);
@@ -604,11 +707,12 @@ function ThemedAppShell({
         setDrawerOpen(false);
       }, 2000);
       const dispatch = () => {
-        if (
-          authenticatedNow.current &&
-          pendingDrawerNavigation.current === action
-        )
-          navigationRef.dispatch(action);
+        if (pendingDrawerNavigation.current !== action) return;
+        if (!authenticatedNow.current || isNavigationBlocked()) {
+          cancelSelection();
+          return;
+        }
+        navigationRef.dispatch(action);
       };
       if (contentTransition.current)
         contentTransition.current.fadeOut(dispatch);
@@ -628,7 +732,7 @@ function ThemedAppShell({
     if (
       !authenticatedNow.current ||
       !navigationRef.isReady() ||
-      navigationBlocked
+      isNavigationBlocked()
     )
       return;
     if (route === "Assistant") return openChatFromDrawer({ kind: "home" });
@@ -650,16 +754,44 @@ function ThemedAppShell({
   };
 
   function revealSidebar() {
-    if (!isAuthenticated || accessibility.sheetOpen || navigationBlocked)
+    if (
+      !authenticatedNow.current ||
+      accessibility.sheetOpen ||
+      isNavigationBlocked()
+    )
       return;
+    Keyboard.dismiss();
     pendingMenuFocus.current = undefined;
     if (!drawerPresented)
       drawerOrigin.current = workspaceFocus.capture(accessibility.primaryKey);
     setDrawerPresented(true);
   }
+  function toggleSidebar() {
+    if (
+      !authenticatedNow.current ||
+      accessibility.sheetOpen ||
+      isNavigationBlocked()
+    )
+      return;
+    const showing = !persistentSidebarOpen;
+    setPersistentSidebarOpen(showing);
+    if (showing) {
+      Keyboard.dismiss();
+      workspaceFocus.releaseDrawer("persistent-workspace-sidebar");
+      workspaceFocus.focusDrawerOnce("persistent-workspace-sidebar", () =>
+        findNodeHandle(sidebarFocus.current),
+      );
+    }
+  }
   function changeSidebar(open: boolean) {
     if (persistentSidebar) {
-      if (open && !accessibility.sheetOpen && !navigationBlocked) {
+      if (
+        open &&
+        authenticatedNow.current &&
+        !accessibility.sheetOpen &&
+        !isNavigationBlocked()
+      ) {
+        Keyboard.dismiss();
         workspaceFocus.releaseDrawer("persistent-workspace-sidebar");
         workspaceFocus.focusDrawerOnce("persistent-workspace-sidebar", () =>
           findNodeHandle(sidebarFocus.current),
@@ -669,9 +801,9 @@ function ThemedAppShell({
     }
     if (open) {
       if (
-        !isAuthenticated ||
+        !authenticatedNow.current ||
         accessibility.sheetOpen ||
-        navigationBlocked ||
+        isNavigationBlocked() ||
         pendingDrawerNavigation.current ||
         didNavigate.current
       )
@@ -681,6 +813,75 @@ function ThemedAppShell({
     setDrawerOpen(open);
   }
 
+  const openQuickAction = (action: "scanner" | "terminal" | "recents") => {
+    if (
+      !authenticatedNow.current ||
+      !navigationRef.isReady() ||
+      isNavigationBlocked()
+    )
+      return;
+    navigationRef.dispatch(
+      action === "scanner"
+        ? openScannerSheetAction()
+        : action === "recents"
+          ? openWorkspaceSheetAction("RecentChats")
+          : openWorkspaceSheetAction("AgentKeyLogin", { mint: true }),
+    );
+  };
+  // The Duo rail's quick-access entries open exactly what the side menu's
+  // matching row opens; a pinned agent or crew opens its chat.
+  const openQuickAccess = (item: QuickAccessItem) => {
+    const open = (action: NavigationAction) => selectDestination(action);
+    if (item.kind === "agent")
+      return openChatFromDrawer({ kind: "agent", agentId: item.id });
+    if (item.kind === "crew")
+      return openChatFromDrawer({ kind: "group", groupId: item.id });
+    switch (item.id) {
+      case "new_chat":
+        // Compose keeps the viewed agent, like the side menu's Chat button.
+        return openChatFromDrawer({
+          kind: "new",
+          params: newAssistantChatParams(
+            currentChat?.kind === "agent" ? currentChat.agentId : undefined,
+          ),
+        });
+      case "notifications":
+        return navigateFromDrawer("Notifications");
+      case "scan_qr":
+        return openQuickAction("scanner");
+      case "terminal_login_code":
+        return openQuickAction("terminal");
+      case "recent_chats":
+        return openQuickAction("recents");
+      case "automations":
+        return navigateFromDrawer("Automations");
+      case "machines":
+        return navigateFromDrawer("Machines");
+      case "plugins":
+        return navigateFromDrawer("Plugins");
+      case "activity":
+        return navigateFromDrawer("Activity");
+      case "settings":
+        return navigateFromDrawer("AccountSettings");
+      case "create_agent":
+      case "agents":
+      case "crews":
+        if (!navigationRef.isReady()) return;
+        return open(
+          item.id === "create_agent"
+            ? workspaceNavigateAction(
+                "AgentCreate",
+                undefined,
+                navigationRef.getRootState(),
+              )
+            : workspaceNavigateAction(
+                "Agents",
+                { tab: item.id === "crews" ? "groups" : "agents" },
+                navigationRef.getRootState(),
+              ),
+        );
+    }
+  };
   const renderWorkspace = (children: ReactNode) => (
     <WorkspacePushShell
       contentTransition={contentTransition}
@@ -700,6 +901,8 @@ function ThemedAppShell({
           : undefined
       }
       onOpenChange={changeSidebar}
+      sidebarCollapsed={sidebarCollapsed}
+      sidebarRestored={sidebarRestored}
       onRevealStart={revealSidebar}
       onDismiss={onDrawerDismiss}
       initialFocusTarget={() => findNodeHandle(sidebarFocus.current)}
@@ -707,6 +910,7 @@ function ThemedAppShell({
         isAuthenticated ? (
           <WorkspaceDrawer
             visible={persistentSidebar || drawerPresented}
+            disabled={navigationBlocked}
             initialFocusRef={sidebarFocus}
             currentRoute={currentRouteName}
             currentChat={currentChat}
@@ -733,21 +937,7 @@ function ThemedAppShell({
             }}
             onNavigate={navigateFromDrawer}
             onHome={() => navigateFromDrawer("Assistant")}
-            onQuickAction={(action) => {
-              if (
-                !authenticatedNow.current ||
-                !navigationRef.isReady() ||
-                navigationBlocked
-              )
-                return;
-              navigationRef.dispatch(
-                action === "scanner"
-                  ? openWorkspaceSheetAction("DeviceLogin", {
-                      start_scanner: true,
-                    })
-                  : openWorkspaceSheetAction("AgentKeyLogin", { mint: true }),
-              );
-            }}
+            onQuickAction={openQuickAction}
             onBrowse={(name) => {
               if (navigationRef.isReady())
                 selectDestination(
@@ -760,6 +950,18 @@ function ThemedAppShell({
             }}
           />
         ) : null
+      }
+      quickRail={
+        isAuthenticated
+          ? (fullScreen, onToggleFullScreen, header) => (
+              <WorkspaceQuickRail
+                fullScreen={fullScreen}
+                onToggleFullScreen={onToggleFullScreen}
+                header={header}
+                onOpen={openQuickAccess}
+              />
+            )
+          : undefined
       }
     >
       <View collapsable={false} accessible={false} style={appRootStyles.fill}>
@@ -782,15 +984,24 @@ function ThemedAppShell({
         }}
       >
         <StatusBar style={mode === "dark" ? "light" : "dark"} />
-        <WorkspaceAccessibilityContext.Provider value={accessibility}>
+        <WorkspaceAccessibilityContext.Provider
+          value={workspaceAccessibility}
+        >
+          <WorkspaceSidebarToggleContext.Provider
+            value={{ persistent: persistentSidebar && cornerWindow, collapsed: sidebarCollapsed, }}
+          >
           <AppNavigator
-            onOpenMenu={() => changeSidebar(true)}
+            onOpenMenu={() =>
+              persistentSidebar && cornerWindow ? toggleSidebar() : changeSidebar(!drawerOpen)
+            }
             onNavigationGuardChange={onNavigationGuardChange}
             onEdgeBackChange={onEdgeBackChange}
             onNavigationCancelled={() => {
               cancelSelection();
             }}
             onWorkspacePagePainted={(identity) => {
+              if (!authenticatedNow.current || sessionEpoch !== getAuthEpoch())
+                return;
               paintedPage.current = identity;
               if (
                 authenticatedNow.current &&
@@ -805,13 +1016,19 @@ function ThemedAppShell({
             suppressWorkspaceAnimation={persistentSidebar || drawerPresented}
             renderWorkspace={renderWorkspace}
           />
+          </WorkspaceSidebarToggleContext.Provider>
         </WorkspaceAccessibilityContext.Provider>
       </NavigationContainer>
       {/* ToastOverlay anchors to `top: 0` of its parent and relies on the
           screen's SafeAreaView for inset. Mounted globally it has no such
-          parent, so give it explicit bounds below the notch. */}
+          parent, so give it explicit bounds inside the safe area: below the
+          notch, and left of a corner status column (the Duo's cluster and
+          rail). */}
       <View
-        style={[pushToastStyles.overlay, { top: insets.top }]}
+        style={[
+          pushToastStyles.overlay,
+          { top: insets.top, left: insets.left, right: insets.right },
+        ]}
         pointerEvents="box-none"
       >
         <ToastOverlay key={pushToastKey} toast={pushToast} duration={6000} />

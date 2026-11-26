@@ -2,13 +2,17 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use mongodb::bson::{self, doc};
-use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+use mongodb::options::ReturnDocument;
 use rand::Rng;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::invite_code::{COLLECTION_NAME, InviteCode, InviteCodeUsage};
 use crate::models::user::COLLECTION_NAME as USERS_COLLECTION;
+
+use crate::services::audit_service::AuditActor;
+
+mod audit;
 
 /// Minimal user projection used to enrich invite code usage entries in admin
 /// responses. Built from the `users` collection via a single batch lookup.
@@ -104,14 +108,13 @@ fn is_duplicate_key_error(e: &mongodb::error::Error) -> bool {
 /// Retries on unique-index collision (extremely unlikely in practice but
 /// possible in principle, and we never want to surface a raw DB error to the
 /// admin for this branch).
-pub async fn create_invite_code(
+pub async fn create_invite_code_as(
     db: &mongodb::Database,
     created_by: &str,
     max_uses: i32,
     note: Option<&str>,
+    actor: &AuditActor,
 ) -> AppResult<InviteCode> {
-    let collection = db.collection::<InviteCode>(COLLECTION_NAME);
-
     for attempt in 0..CODE_INSERT_MAX_ATTEMPTS {
         let now = Utc::now();
         let invite = InviteCode {
@@ -125,19 +128,19 @@ pub async fn create_invite_code(
             created_at: now,
             updated_at: now,
             usages: Vec::new(),
+            reservations: Vec::new(),
         };
 
-        match collection.insert_one(&invite).await {
+        match audit::create(db, &invite, actor).await {
             Ok(_) => return Ok(invite),
-            Err(e) if is_duplicate_key_error(&e) => {
+            Err(AppError::DatabaseError(e)) if is_duplicate_key_error(&e) => {
                 tracing::warn!(
                     attempt = attempt + 1,
-                    code = %invite.code,
                     "Invite code generation collision, retrying"
                 );
                 continue;
             }
-            Err(e) => return Err(AppError::DatabaseError(e)),
+            Err(e) => return Err(e),
         }
     }
 
@@ -146,140 +149,156 @@ pub async fn create_invite_code(
     ))
 }
 
-/// Atomically reserve one slot on an invite code.
-///
-/// Returns `Ok(invite_code_id)` on success. On failure, returns one of four
-/// distinct errors so the registration UI can show an actionable message:
-///   * `AppError::InviteCodeInvalid` — no code matches (never existed, or typo).
-///   * `AppError::InviteCodeDeactivated` — the admin disabled this code.
-///   * `AppError::InviteCodeAlreadyRedeemed` — this email already consumed a slot.
-///   * `AppError::InviteCodeExhausted` — the code has reached `max_uses`.
-///
-/// Implementation: the atomic `find_one_and_update` runs first so the happy
-/// path is a single round-trip. The filter includes `"usages.email": {$ne:
-/// normalized_email}` so a second reservation for the same identity is
-/// rejected atomically. Missing/legacy `email` fields on existing usages are
-/// treated as not-equal by MongoDB's `$ne` semantics, so old records never
-/// block new redemptions (forward-only).
-///
-/// Only when the update matched nothing do we fall back to a `find_one`
-/// diagnostic lookup to determine *why* it missed. This keeps the hot path
-/// fast while still giving the user a specific error.
-///
-/// This only touches `used_count`; the caller is responsible for recording
-/// the usage (via `record_usage`) once the downstream user creation succeeds,
-/// and releasing (via `release_reservation`) if it fails.
+/// Five minutes covers password hashing and the local signup writes. Social
+/// provider I/O finishes before reservation. Expiry makes an abandoned slot
+/// reclaimable by the next attempt; no background task is needed for capacity.
+const RESERVATION_TTL_MS: i64 = 5 * 60 * 1_000;
+
+/// Opaque authority for one signup, distinct from the invite's identity.
+#[derive(Clone, Debug)]
+pub struct InviteReservation {
+    pub invite_code_id: String,
+    reservation_id: String,
+}
+
+fn reservations_expiring(expired: bool) -> bson::Document {
+    let comparison = if expired { "$lte" } else { "$gt" };
+    doc! {"$filter": {
+        "input": {"$ifNull": ["$reservations", []]}, "as": "r",
+        "cond": {comparison: ["$$r.expires_at", "$$NOW"]},
+    }}
+}
+
+fn used_after_reclaim() -> bson::Document {
+    // Legacy increments are never inferred from usages or refunded. Only a
+    // pending reservation created by this protocol can return its own slot.
+    doc! {"$subtract": ["$used_count", {"$size": reservations_expiring(true)}]}
+}
+
+/// Atomically reclaim expired reservations and reserve one available slot.
+/// The happy path remains one command. Server time decides expiry; old usages
+/// and unowned legacy increments are treated as committed capacity.
 pub async fn reserve_invite_code(
     db: &mongodb::Database,
     code: &str,
     email: &str,
-) -> AppResult<String> {
+) -> AppResult<InviteReservation> {
     let normalized = normalize_code(code);
     let normalized_email = normalize_email(email);
-    let now = bson::DateTime::from_chrono(Utc::now());
-
-    let options = FindOneAndUpdateOptions::builder()
-        .return_document(ReturnDocument::After)
-        .build();
-
+    let reservation_id = Uuid::new_v4().to_string();
+    let live = reservations_expiring(false);
     let collection = db.collection::<InviteCode>(COLLECTION_NAME);
-
     let result = collection
         .find_one_and_update(
             doc! {
-                "code": &normalized,
-                "is_active": true,
-                "$expr": { "$lt": ["$used_count", "$max_uses"] },
-                "usages.email": { "$ne": &normalized_email },
+                "code": &normalized, "is_active": true,
+                "usages.email": {"$ne": &normalized_email},
+                "$expr": {"$and": [
+                    {"$lt": [used_after_reclaim(), "$max_uses"]},
+                    {"$not": [{"$in": [
+                        {"$literal": &normalized_email},
+                        {"$map": {"input": &live, "as": "r", "in": "$$r.email"}},
+                    ]}]},
+                ]},
             },
-            doc! {
-                "$inc": { "used_count": 1 },
-                "$set": { "updated_at": now },
-            },
+            vec![doc! {"$set": {
+                "used_count": {"$add": [used_after_reclaim(), 1]},
+                "reservations": {"$concatArrays": [live, [{
+                    "id": {"$literal": &reservation_id},
+                    "email": {"$literal": &normalized_email},
+                    "expires_at": {"$add": ["$$NOW", RESERVATION_TTL_MS]},
+                }]]},
+                "updated_at": "$$NOW",
+            }}],
         )
-        .with_options(options)
+        .return_document(ReturnDocument::After)
         .await?;
-
     if let Some(invite) = result {
-        return Ok(invite.id);
+        return Ok(InviteReservation {
+            invite_code_id: invite.id,
+            reservation_id,
+        });
     }
 
-    // Diagnose why the reservation failed. Ordering is intentional:
-    //   1. Deactivated — admin-disabled takes precedence over everything.
-    //   2. AlreadyRedeemed — per-identity enforcement (email in usages).
-    //   3. Exhausted — all slots consumed.
-    //   4. Invalid — race window (see below) or code never existed.
-    match collection.find_one(doc! { "code": &normalized }).await? {
+    // Diagnose from the same server-clock projection, without changing a row
+    // on a rejected request. Preserve deactivated/email/exhausted precedence.
+    use futures::TryStreamExt;
+    let diagnostic = collection.aggregate([
+        doc! {"$match": {"code": &normalized}},
+        doc! {"$set": {"used_count": used_after_reclaim(), "reservations": reservations_expiring(false)}},
+    ]).await?.try_next().await?;
+    let invite: Option<InviteCode> = diagnostic
+        .map(bson::from_document)
+        .transpose()
+        .map_err(|_| AppError::Internal("Invite code could not be read".into()))?;
+    match invite {
         None => Err(AppError::InviteCodeInvalid),
         Some(invite) if !invite.is_active => Err(AppError::InviteCodeDeactivated),
         Some(invite)
             if invite
                 .usages
                 .iter()
-                .any(|u| u.email.as_deref() == Some(normalized_email.as_str())) =>
+                .any(|u| u.email.as_deref() == Some(normalized_email.as_str()))
+                || invite
+                    .reservations
+                    .iter()
+                    .any(|r| r.email == normalized_email) =>
         {
             Err(AppError::InviteCodeAlreadyRedeemed)
         }
         Some(invite) if invite.used_count >= invite.max_uses => Err(AppError::InviteCodeExhausted),
-        // Race: the code became valid between the update miss and the
-        // diagnostic read (e.g. `release_reservation` landed in between).
-        // Surface as "invalid" rather than silently retrying; the user can
-        // resubmit and succeed on the next attempt.
         Some(_) => Err(AppError::InviteCodeInvalid),
     }
 }
 
-/// Record which user redeemed a previously-reserved invite code.
-///
-/// Best-effort append to the `usages` array. Failures are logged but do not
-/// propagate: the user has already been successfully created, and the atomic
-/// reservation still accurately reflects that one slot was consumed.
-///
-/// `email` is normalized (trimmed + lowercased) before storage so the
-/// per-identity deduplication filter in `reserve_invite_code` finds it.
-pub async fn record_usage(
+/// Account insertion and redemption have one commit point. A reservation past
+/// expiry may still commit until reclaimed: both paths write the invite, so
+/// only one can remove the exact pending identity. Later releases are no-ops.
+pub(super) async fn commit_signup(
     db: &mongodb::Database,
-    invite_code_id: &str,
-    user_id: &str,
-    email: &str,
-) {
+    reservation: &InviteReservation,
+    user: &crate::models::user::User,
+) -> AppResult<()> {
+    let context = (db, reservation, user);
+    super::transaction_service::run_db_only(db, &context, |session, &(db, reservation, user)| {
+        Box::pin(commit_signup_in_session(db, session, reservation, user))
+    })
+    .await
+}
+
+async fn commit_signup_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    reservation: &InviteReservation,
+    user: &crate::models::user::User,
+) -> AppResult<()> {
+    let email = normalize_email(&user.email);
     let usage = InviteCodeUsage {
-        user_id: user_id.to_string(),
+        user_id: user.id.clone(),
         used_at: Utc::now(),
-        email: Some(normalize_email(email)),
+        email: Some(email.clone()),
     };
-    let usage_bson = match bson::to_bson(&usage) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                invite_code_id = %invite_code_id,
-                "Failed to serialize invite code usage"
-            );
-            return;
-        }
-    };
-
-    let now = bson::DateTime::from_chrono(Utc::now());
-
-    if let Err(e) = db
+    let usage = bson::to_bson(&usage)
+        .map_err(|_| AppError::Internal("Invite usage could not be serialized".into()))?;
+    let result = db
         .collection::<InviteCode>(COLLECTION_NAME)
         .update_one(
-            doc! { "_id": invite_code_id },
-            doc! {
-                "$push": { "usages": usage_bson },
-                "$set": { "updated_at": now },
-            },
+            doc! {"_id": &reservation.invite_code_id,
+            "reservations": {"$elemMatch": {"id": &reservation.reservation_id, "email": &email}},
+            "usages.email": {"$ne": &email}},
+            doc! {"$pull": {"reservations": {"id": &reservation.reservation_id}},
+            "$push": {"usages": usage}, "$currentDate": {"updated_at": true}},
         )
-        .await
-    {
-        tracing::error!(
-            error = %e,
-            invite_code_id = %invite_code_id,
-            user_id = %user_id,
-            "Failed to record invite code usage"
-        );
+        .session(&mut *session)
+        .await?;
+    if result.matched_count != 1 {
+        return Err(AppError::InviteCodeInvalid);
     }
+    db.collection::<crate::models::user::User>(USERS_COLLECTION)
+        .insert_one(user)
+        .session(session)
+        .await?;
+    Ok(())
 }
 
 /// Minimal projection of an invite code used by the telemetry layer to
@@ -323,33 +342,20 @@ pub async fn fetch_telemetry_meta(
     }
 }
 
-/// Release a previously-reserved slot, decrementing `used_count`.
-///
-/// Used to compensate when `reserve_invite_code` has succeeded but the
-/// downstream user creation fails (or silently no-ops for email enumeration
-/// protection). Best-effort: errors are logged but not surfaced to the caller
-/// because the user-facing request has already failed for an unrelated reason.
-pub async fn release_reservation(db: &mongodb::Database, invite_code_id: &str) {
-    let now = bson::DateTime::from_chrono(Utc::now());
-
-    if let Err(e) = db
-        .collection::<InviteCode>(COLLECTION_NAME)
-        .update_one(
-            doc! {
-                "_id": invite_code_id,
-                "used_count": { "$gt": 0 },
-            },
-            doc! {
-                "$inc": { "used_count": -1 },
-                "$set": { "updated_at": now },
-            },
-        )
-        .await
-    {
+/// Release only this pending signup. Safe to repeat, including after a commit,
+/// lazy reclaim, or an uncertain transaction outcome. Failure leaves the durable
+/// reservation available for expiry-based reclaim on the next signup attempt.
+pub async fn release_reservation(db: &mongodb::Database, reservation: &InviteReservation) {
+    if let Err(error) = db.collection::<InviteCode>(COLLECTION_NAME).update_one(
+        doc! {"_id": &reservation.invite_code_id, "reservations.id": &reservation.reservation_id},
+        doc! {"$inc": {"used_count": -1},
+            "$pull": {"reservations": {"id": &reservation.reservation_id}},
+            "$currentDate": {"updated_at": true}},
+    ).await {
         tracing::error!(
-            error = %e,
-            invite_code_id = %invite_code_id,
-            "Failed to release invite code reservation"
+            error_code = AppError::DatabaseError(error).error_code(),
+            invite_code_id = %reservation.invite_code_id,
+            "Failed to release invite code reservation; expiry will reclaim it"
         );
     }
 }
@@ -407,6 +413,23 @@ pub async fn fetch_usage_users(
         .collect())
 }
 
+/// Read-only capacity at MongoDB's statement time. Pending identities/emails
+/// stay out of the admin read result; the stored aggregate is unchanged.
+fn admin_projection() -> bson::Document {
+    doc! {
+        "_id": 1,
+        "code": 1,
+        "max_uses": 1,
+        "used_count": used_after_reclaim(),
+        "created_by": 1,
+        "note": 1,
+        "is_active": 1,
+        "created_at": 1,
+        "updated_at": 1,
+        "usages": 1,
+    }
+}
+
 /// List all invite codes (admin) together with a lookup map of the users
 /// referenced by any `usages` entry. See [`fetch_usage_users`] for the user
 /// resolution strategy.
@@ -415,8 +438,11 @@ pub async fn list_invite_codes(db: &mongodb::Database) -> AppResult<InviteCodesW
 
     let cursor = db
         .collection::<InviteCode>(COLLECTION_NAME)
-        .find(doc! {})
-        .sort(doc! { "created_at": -1 })
+        .aggregate([
+            doc! { "$sort": { "created_at": -1 } },
+            doc! { "$project": admin_projection() },
+        ])
+        .with_type::<InviteCode>()
         .await?;
 
     let codes: Vec<InviteCode> = cursor.try_collect().await?;
@@ -432,10 +458,11 @@ pub async fn list_invite_codes(db: &mongodb::Database) -> AppResult<InviteCodesW
 /// `None` both clear it (stored as `null` on the document). Returns the
 /// freshly-updated `InviteCode` so the handler can render it back to the
 /// admin without an extra read.
-pub async fn update_invite_code_note(
+pub async fn update_invite_code_note_as(
     db: &mongodb::Database,
     id: &str,
     note: Option<String>,
+    actor: &AuditActor,
 ) -> AppResult<InviteCode> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
@@ -444,44 +471,30 @@ pub async fn update_invite_code_note(
         Some(text) => bson::Bson::String(text.to_string()),
     };
 
-    let options = FindOneAndUpdateOptions::builder()
-        .return_document(ReturnDocument::After)
-        .build();
-
-    let updated = db
-        .collection::<InviteCode>(COLLECTION_NAME)
-        .find_one_and_update(
-            doc! { "_id": id },
-            doc! {
-                "$set": {
-                    "note": note_bson,
-                    "updated_at": now,
-                },
-            },
-        )
-        .with_options(options)
-        .await?;
-
-    updated.ok_or_else(|| AppError::NotFound("Invite code not found".to_string()))
+    audit::update(
+        db,
+        id,
+        doc! {"$set":{"note":note_bson,"updated_at":now}},
+        actor,
+    )
+    .await
 }
 
 /// Deactivate an invite code by ID.
-pub async fn deactivate_invite_code(db: &mongodb::Database, id: &str) -> AppResult<()> {
+pub async fn deactivate_invite_code_as(
+    db: &mongodb::Database,
+    id: &str,
+    actor: &AuditActor,
+) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
 
-    let result = db
-        .collection::<InviteCode>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": id },
-            doc! { "$set": { "is_active": false, "updated_at": now } },
-        )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("Invite code not found".to_string()));
-    }
-
-    Ok(())
+    audit::deactivate(
+        db,
+        id,
+        doc! {"$set":{"is_active":false,"updated_at":now}},
+        actor,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -580,7 +593,16 @@ mod tests {
             .unwrap();
 
         // Record the usage so the email is persisted on the document.
-        record_usage(&db, &id, "user-1", "alice@example.com").await;
+        crate::services::auth_service::register_user(
+            &db,
+            "alice@example.com",
+            &crate::crypto::token::generate_random_token(),
+            None,
+            Some(&id),
+            true,
+        )
+        .await
+        .unwrap();
 
         // Second reservation for the same email (case-insensitive) is rejected.
         let err = reserve_invite_code(&db, &code.code, "Alice@Example.COM")
@@ -605,7 +627,16 @@ mod tests {
         let id1 = reserve_invite_code(&db, &code.code, "alice@example.com")
             .await
             .unwrap();
-        record_usage(&db, &id1, "user-1", "alice@example.com").await;
+        crate::services::auth_service::register_user(
+            &db,
+            "alice@example.com",
+            &crate::crypto::token::generate_random_token(),
+            None,
+            Some(&id1),
+            true,
+        )
+        .await
+        .unwrap();
 
         // Different email on the same code — should succeed.
         let result = reserve_invite_code(&db, &code.code, "bob@example.com").await;
@@ -669,7 +700,16 @@ mod tests {
         let id = reserve_invite_code(&db, &code.code, "eve@example.com")
             .await
             .unwrap();
-        record_usage(&db, &id, "user-eve", "eve@example.com").await;
+        crate::services::auth_service::register_user(
+            &db,
+            "eve@example.com",
+            &crate::crypto::token::generate_random_token(),
+            None,
+            Some(&id),
+            true,
+        )
+        .await
+        .unwrap();
 
         // Now deactivate the code.
         deactivate_invite_code(&db, &code.id).await.unwrap();
@@ -682,5 +722,38 @@ mod tests {
             matches!(err, crate::errors::AppError::InviteCodeDeactivated),
             "deactivated must take precedence over already-redeemed; got: {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+#[path = "invite_reservation_tests.rs"]
+mod durability_tests;
+
+#[cfg(test)]
+mod audit_tests;
+
+// Existing fixtures go through the same preparation and source transaction.
+#[cfg(test)]
+pub async fn create_invite_code(
+    db: &mongodb::Database,
+    created_by: &str,
+    max_uses: i32,
+    note: Option<&str>,
+) -> AppResult<InviteCode> {
+    create_invite_code_as(db, created_by, max_uses, note, &fixture_actor(created_by)).await
+}
+
+#[cfg(test)]
+pub async fn deactivate_invite_code(db: &mongodb::Database, id: &str) -> AppResult<()> {
+    deactivate_invite_code_as(db, id, &fixture_actor(&Uuid::nil().to_string())).await
+}
+#[cfg(test)]
+fn fixture_actor(user_id: &str) -> AuditActor {
+    AuditActor {
+        user_id: user_id.to_owned(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
     }
 }

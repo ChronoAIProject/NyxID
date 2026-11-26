@@ -199,12 +199,36 @@ fn media_beyond_the_attachment_bound_are_noted_once() {
 }
 
 #[test]
+fn rich_post_selectors_keep_original_image_and_file_names_when_supplied() {
+    let post = json!({"content":[[
+        {"tag":"img","image_key":"image","file_name":"收据.png"},
+        {"tag":"media","file_key":"file","name":"Original receipt"},
+        {"tag":"img","image_key":"unnamed"},
+        {"tag":"img","image_key":"invalid","file_name":"x\rname"},
+    ]]});
+    let parsed = parse_post(&post, &[], None).unwrap();
+    let names: Vec<_> = parsed
+        .attachments
+        .iter()
+        .map(|item| item.filename.as_deref())
+        .collect();
+    assert_eq!(
+        names,
+        [Some("收据.png"), Some("Original receipt"), None, None]
+    );
+}
+
+#[test]
 fn oversized_posts_are_truncated_on_a_char_boundary() {
     let text = "文".repeat(14_000);
     let post = json!({"title": "title", "content": [[{"tag": "text", "text": text}], [{"tag": "text", "text": "lost"}]]});
     let flattened = parse_post(&post, &[], None).unwrap();
     assert!(flattened.text.len() <= MAX_TEXT_BYTES);
     assert!(flattened.text.ends_with(MARKER));
+    assert_eq!(
+        flattened.truncated_original_bytes,
+        Some("title\n".len() + text.len() + "\nlost".len())
+    );
     assert!(flattened.text.starts_with("title\n文文"));
     assert!(!flattened.text.contains("lost"));
     // Exactly at the budget, nothing is cut.

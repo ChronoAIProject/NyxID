@@ -319,6 +319,7 @@ pub async fn ssh_exec(
                     &service_id,
                     &user_id,
                     &principal,
+                    false,
                 )
                 .await?,
             )
@@ -335,7 +336,10 @@ pub async fn ssh_exec(
         let mut last_error = None;
         let mut last_error_message = None;
 
-        for node_id in &all_node_ids {
+        let mut nodes = all_node_ids.iter().peekable();
+        let mut retry = None;
+        let mut waited = false;
+        while let Some(node_id) = retry.take().or_else(|| nodes.next()) {
             if let Some(chat) = auth_user.assistant_chat.as_deref() {
                 if !node_routing_service::is_node_id_dispatchable(
                     &state.db,
@@ -567,12 +571,23 @@ pub async fn ssh_exec(
                     }
                     return Ok(Json(response).into_response());
                 }
-                Err(error @ AppError::RateLimited) => return Err(error),
-                Err(error) => {
-                    if auth_user.assistant_chat.is_some() {
-                        state.billing.fail(&metered, "ssh_outcome_unknown").await?;
-                        return Err(error);
+                Err(failure) => {
+                    if matches!(failure.error, AppError::RateLimited) {
+                        return Err(failure.error);
                     }
+                    let dispatched = failure.dispatched;
+                    if !waited
+                        && nodes.peek().is_none()
+                        && let Some(handover) = &failure.handover
+                        && handover
+                            .wait(&state.db, &state.node_ws_manager, node_id)
+                            .await
+                    {
+                        retry = Some(node_id);
+                        waited = true;
+                        continue;
+                    }
+                    let error = failure.into_ssh_error();
                     if auth_context.mode == SshAuthMode::NodeKey {
                         let error_message = error.to_string();
                         record_node_ssh_metric_error(
@@ -621,6 +636,10 @@ pub async fn ssh_exec(
                             None,
                             None,
                         );
+                        return Err(error);
+                    }
+                    if dispatched {
+                        state.billing.fail(&metered, "ssh_outcome_unknown").await?;
                         return Err(error);
                     }
                     tracing::warn!(
@@ -695,7 +714,7 @@ pub(crate) fn truncate_output(bytes: &[u8]) -> String {
 }
 
 fn record_node_ssh_metric_success(db: mongodb::Database, node_id: String, duration_ms: u64) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         if let Err(error) =
             node_metrics_service::record_success(db, node_id.clone(), duration_ms).await
         {
@@ -709,7 +728,7 @@ fn record_node_ssh_metric_success(db: mongodb::Database, node_id: String, durati
 }
 
 fn record_node_ssh_metric_error(db: mongodb::Database, node_id: String, error_message: String) {
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         if let Err(error) =
             node_metrics_service::record_error(db, node_id.clone(), error_message).await
         {
@@ -723,12 +742,17 @@ fn record_node_ssh_metric_error(db: mongodb::Database, node_id: String, error_me
 }
 
 /// Truncate command for audit logging (avoid storing giant payloads).
+/// Cuts at the last UTF-8 character boundary at or below 1024 bytes.
 pub(crate) fn truncate_for_audit(command: &str) -> &str {
-    if command.len() > 1024 {
-        &command[..1024]
-    } else {
-        command
+    const MAX_BYTES: usize = 1024;
+    if command.len() <= MAX_BYTES {
+        return command;
     }
+    let mut end = MAX_BYTES;
+    while !command.is_char_boundary(end) {
+        end -= 1;
+    }
+    &command[..end]
 }
 
 /// Redact command secrets before audit logging, then apply the audit length cap.
@@ -853,6 +877,21 @@ mod tests {
 
         let big: String = "x".repeat(2000);
         assert_eq!(truncate_for_audit(&big).len(), 1024);
+    }
+
+    #[test]
+    fn truncate_for_audit_keeps_multibyte_characters_whole() {
+        // A three-byte character spans bytes 1023..1026, across the cap.
+        let command = format!("{}\u{2081}{}", "x".repeat(1023), "y".repeat(100));
+        assert_eq!(truncate_for_audit(&command), "x".repeat(1023));
+
+        let wide: String = "\u{4e2d}".repeat(500);
+        let truncated = truncate_for_audit(&wide);
+        assert_eq!(truncated.len(), 1023);
+        assert!(wide.starts_with(truncated));
+
+        let redacted = redact_command_for_audit(&command);
+        assert_eq!(redacted, "x".repeat(1023));
     }
 
     #[test]

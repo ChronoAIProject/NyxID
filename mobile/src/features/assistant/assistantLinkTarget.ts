@@ -1,3 +1,5 @@
+import { bareAutolinkTarget } from "./autolinkPunctuation";
+import { translateApp } from "../../i18n/appTranslation";
 const ACCOUNT_KEYS = new Set([
   "panel",
   "panelTab",
@@ -27,7 +29,9 @@ export type AssistantLinkTarget =
 export function assistantLinkTarget(
   href: string,
   frontendUrls: string | readonly string[],
+  bareAutolink = false,
 ): AssistantLinkTarget | null {
+  if (bareAutolink) href = bareAutolinkTarget(href);
   try {
     const origins = (
       typeof frontendUrls === "string" ? [frontendUrls] : frontendUrls
@@ -101,10 +105,10 @@ export function assistantLinkLabel(
   label: string,
 ): string {
   if (target?.kind === "channel")
-    return `Continue on the web${label.trim() && !label.startsWith("http") ? ` · ${label.trim()}` : ""}`;
+    return (label.trim() && !label.startsWith("http") ? translateApp("Continue on the web · {{label}}", { label: label.trim()}) : translateApp("Continue on the web"));
   if (target?.kind !== "connect" && target?.kind !== "service") return label;
   const trimmed = label.trim();
   return /^connect\b/i.test(trimmed)
     ? trimmed
-    : `Connect ${!trimmed || trimmed.startsWith("http") ? "service" : trimmed}`;
+    : (!trimmed || trimmed.startsWith("http") ? translateApp("Connect service") : translateApp("Connect {{service}}", { service: trimmed}));
 }

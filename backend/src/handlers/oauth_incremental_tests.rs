@@ -202,6 +202,10 @@ async fn consent_delivery_native_get_and_post_remain_script_free() {
         f.params.requested_service_ids.clear();
         f.params.resource.clear();
         f.params.redirect_uri = destination.into();
+        f.state.db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(
+            doc! {"_id": &f.client_id},
+            doc! {"$addToSet": {"redirect_uris": destination}},
+        ).await.unwrap();
         let token = f.request().await.unwrap();
         let response = Box::pin(delivery_route(
             &f,
@@ -337,13 +341,14 @@ async fn ordinary_two_devices_keep_old_claims_through_no_op_and_broadening() {
         .await
         .unwrap();
     let refresh = device_a.refresh_token.unwrap();
-    token_service::refresh_tokens(
+    token_service::refresh_tokens_for_client(
         &f.state.db,
         &f.state.config,
         &f.state.jwt_keys,
         &refresh,
         None,
         None,
+        crate::services::token_service::RefreshClient::Identified(&f.client_id, None),
     )
     .await
     .unwrap();
@@ -373,13 +378,14 @@ async fn ordinary_two_devices_keep_old_claims_through_no_op_and_broadening() {
     crate::services::oauth_token_authority_service::validate_claims(&f.state.db, &a_claims)
         .await
         .unwrap();
-    token_service::refresh_tokens(
+    token_service::refresh_tokens_for_client(
         &f.state.db,
         &f.state.config,
         &f.state.jwt_keys,
         &refresh,
         None,
         None,
+        crate::services::token_service::RefreshClient::Identified(&f.client_id, None),
     )
     .await
     .unwrap();
@@ -398,13 +404,14 @@ async fn ordinary_two_devices_keep_old_claims_through_no_op_and_broadening() {
             .is_err()
     );
     assert!(
-        token_service::refresh_tokens(
+        token_service::refresh_tokens_for_client(
             &f.state.db,
             &f.state.config,
             &f.state.jwt_keys,
             &refresh,
             None,
-            None
+            None,
+            crate::services::token_service::RefreshClient::Identified(&f.client_id, None),
         )
         .await
         .is_err()

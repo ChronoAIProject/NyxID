@@ -207,6 +207,7 @@ mod tests {
     }
     fn target(catalog: &DownstreamService) -> ProxyTarget {
         ProxyTarget {
+            catalog_is_public: false,
             catalog_slug: Some(catalog.slug.clone()),
             execution_request: None,
             execution_permission: None,
@@ -218,7 +219,7 @@ mod tests {
             auth_key_name: "Authorization".into(),
             credential: zeroize::Zeroizing::new(String::new()),
             service: catalog.clone(),
-            catalog_default_headers: vec![],
+            catalog_default_headers: Default::default(),
             user_service_default_headers: vec![],
             ws_frame_injections: vec![],
             connection_id: None,
@@ -355,7 +356,7 @@ mod tests {
         target.auth_method = "none".into();
         for capability in [None, Some(&route)] {
             proxy::forward_request_with_resource_proof(
-                proxy::no_redirect_http_client(),
+                proxy::Redirects::Return,
                 &target,
                 reqwest::Method::GET,
                 path,

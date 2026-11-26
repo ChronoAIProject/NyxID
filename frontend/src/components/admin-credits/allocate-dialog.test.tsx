@@ -82,6 +82,57 @@ beforeEach(() => {
   api.lookupFailed = false;
   api.post.mockResolvedValue(issued);
 });
+
+it("preserves typed input and timing when recipient capability changes mid-edit", async () => {
+  const { rerender, client, props } = setup({
+    recipientSchedules: true,
+    initialRecurrence: "monthly",
+  });
+  fireEvent.change(screen.getByLabelText("Credits per recipient"), {
+    target: { value: "123" },
+  });
+  await recipient();
+  rerender(
+    <QueryClientProvider client={client}>
+      <AllocateDialog {...props} recipientSchedules={false} />
+    </QueryClientProvider>,
+  );
+  expect(screen.getByLabelText("Credits per recipient")).toHaveValue("123");
+  expect(
+    screen.getByRole("combobox", { name: "Renewal cycle" }),
+  ).toHaveTextContent("From when each recipient joins");
+  expect(
+    screen.getByRole("button", { name: "Allocate credits" }),
+  ).toBeDisabled();
+  rerender(
+    <QueryClientProvider client={client}>
+      <AllocateDialog {...props} recipientSchedules />
+    </QueryClientProvider>,
+  );
+  expect(screen.getByLabelText("Credits per recipient")).toHaveValue("123");
+  expect(
+    screen.getByRole("combobox", { name: "Renewal cycle" }),
+  ).toHaveTextContent("From when each recipient joins");
+});
+
+it("keeps the calendar selection when the capability arrives after opening", () => {
+  const { rerender, client, props } = setup({
+    recipientSchedules: false,
+    initialRecurrence: "monthly",
+  });
+  fireEvent.change(screen.getByLabelText("Credits per recipient"), {
+    target: { value: "321" },
+  });
+  rerender(
+    <QueryClientProvider client={client}>
+      <AllocateDialog {...props} recipientSchedules />
+    </QueryClientProvider>,
+  );
+  expect(screen.getByLabelText("Credits per recipient")).toHaveValue("321");
+  expect(
+    screen.getByRole("combobox", { name: "Renewal cycle" }),
+  ).toHaveTextContent("Calendar periods (UTC)");
+});
 it("requires an explicit recipient and issues exact shared caps through the live hook", async () => {
   const { invalidate } = setup();
   expect(
@@ -240,4 +291,52 @@ it("reuses the request UUID after ambiguous retry and guards pending close and s
   expect(props.onOpenChange).not.toHaveBeenCalled();
   finish(issued);
   await waitFor(() => expect(props.onOpenChange).toHaveBeenCalledWith(false));
+});
+
+it("defaults capable recurring allocations to recipient cycles and preserves calendar choice", async () => {
+  setup({ recipientSchedules: true, initialRecurrence: "monthly" });
+  expect(
+    screen.getByRole("combobox", { name: "Renewal cycle" }),
+  ).toHaveTextContent("From when each recipient joins");
+  expect(
+    screen.getByText(/New members can receive their full first allocation when they join/),
+  ).toBeInTheDocument();
+  await recipient();
+  fireEvent.change(screen.getByLabelText("Credits per recipient"), {
+    target: { value: "100" },
+  });
+  api.post.mockRejectedValue(new Error("temporary failure"));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Allocate credits" }),
+  );
+  await waitFor(() =>
+    expect(api.post).toHaveBeenCalledWith(
+      "/admin/credits/allocations/schedules",
+      expect.objectContaining({
+        timing: "recipient",
+        recurrence: "monthly",
+        amount: "100",
+      }),
+    ),
+  );
+  await choose("Renewal cycle", "Calendar periods (UTC)");
+  await userEvent.click(
+    screen.getByRole("button", { name: "Allocate credits" }),
+  );
+  await waitFor(() =>
+    expect(api.post).toHaveBeenLastCalledWith(
+      "/admin/credits/allocations/schedules",
+      expect.objectContaining({ timing: "calendar" }),
+    ),
+  );
+  await choose("Repeat allocation", "One time");
+  await userEvent.click(
+    screen.getByRole("button", { name: "Allocate credits" }),
+  );
+  await waitFor(() =>
+    expect(api.post).toHaveBeenLastCalledWith(
+      "/admin/credits/allocations",
+      expect.not.objectContaining({ timing: expect.anything() }),
+    ),
+  );
 });

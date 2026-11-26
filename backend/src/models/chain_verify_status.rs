@@ -23,6 +23,9 @@ pub struct ChainVerifyStatus {
     #[serde(rename = "_id")]
     pub id: String,
     pub outcome: ChainVerifyOutcome,
+    /// Publication identity for optimistic concurrency; old writers omit it.
+    #[serde(default)]
+    pub revision: Option<String>,
     /// Next seq the rolling walk resumes from. The sweep verifies the
     /// chain in bounded chunks and wraps back to 1 after reaching the
     /// head, so old regions are continuously re-verified.

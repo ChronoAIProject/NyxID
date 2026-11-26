@@ -26,7 +26,11 @@ pub(crate) fn owned(connection: &UserService) -> bool {
         && connection.catalog_service_id.is_some()
 }
 
-fn linked(connection: &UserService, endpoint: &UserEndpoint, catalog: &DownstreamService) -> bool {
+pub(super) fn linked(
+    connection: &UserService,
+    endpoint: &UserEndpoint,
+    catalog: &DownstreamService,
+) -> bool {
     owned(connection)
         && catalog.service_type == "http"
         && endpoint.id == connection.endpoint_id
@@ -278,7 +282,7 @@ tokio::task_local! {
 pub(crate) fn spawn_reconcile(db: Database, catalog: Option<String>) {
     #[cfg(test)]
     let pause = BACKGROUND_PAUSE.try_with(Clone::clone).ok();
-    tokio::spawn(async move {
+    crate::services::shutdown::process().spawn(async move {
         #[cfg(test)]
         if let Some((entered, release)) = pause {
             entered.notify_one();

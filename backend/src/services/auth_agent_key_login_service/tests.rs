@@ -200,6 +200,147 @@ async fn start(db: &Database) -> RequestOutput {
     .unwrap()
 }
 
+#[tokio::test]
+async fn agent_key_admission_refuses_accepted_account_erasure() {
+    let (db, actor, key, _) = fixture("agent_key_erasure_admission").await;
+    super::super::personal_erasure_service::ensure_indexes(&db)
+        .await
+        .unwrap();
+    let pending = start(&db).await;
+    let approved = start(&db).await;
+    accept(&db, &actor, &key, &approved).await;
+    let child_filter = doc! {"user_id": &actor};
+    let children = db.collection::<ApiKeyCredential>(CREDENTIALS);
+    assert_eq!(
+        children
+            .count_documents(child_filter.clone())
+            .await
+            .unwrap(),
+        1
+    );
+    let mut new_key = key.clone();
+    new_key.id = Uuid::new_v4().to_string();
+    new_key.key_hash = hash_token(&credentials::generate_secret());
+    super::super::api_key_mutation_service::insert_one_for_actor(&db, &new_key, Some(&actor), None)
+        .await
+        .unwrap();
+    let org = Uuid::new_v4().to_string();
+    db.collection::<User>(USERS)
+        .insert_one(test_user(&org, UserType::Org))
+        .await
+        .unwrap();
+    let mut org_key = new_key.clone();
+    org_key.user_id = org.clone();
+    org_key.id = Uuid::new_v4().to_string();
+    org_key.key_hash = hash_token(&credentials::generate_secret());
+    super::super::api_key_mutation_service::insert_one_for_actor(&db, &org_key, Some(&actor), None)
+        .await
+        .unwrap();
+    let existing_org_key = org_key.id.clone();
+    org_key.id = Uuid::new_v4().to_string();
+    org_key.key_hash = hash_token(&credentials::generate_secret());
+    new_key.id = Uuid::new_v4().to_string();
+    new_key.key_hash = hash_token(&credentials::generate_secret());
+
+    let approved_row = find_by_user_code(&db, HMAC_KEY, &approved.user_code)
+        .await
+        .unwrap();
+    assert_eq!(approved_row.status, Status::Approved);
+    assert!(approved_row.mfa_policy_revision.is_none());
+    let prepared = std::sync::Arc::new(tokio::sync::Notify::new());
+    let resume = std::sync::Arc::new(tokio::sync::Notify::new());
+    let encryption = test_encryption_keys();
+    let delivery = BEFORE_DELIVERY_CLAIM.scope(
+        (prepared.clone(), resume.clone()),
+        poll(&db, &encryption, HMAC_KEY, &approved.device_code),
+    );
+    let erasure = async {
+        prepared.notified().await;
+        super::super::personal_erasure_service::accept(&db, &actor, &actor, None)
+            .await
+            .unwrap();
+        resume.notify_one();
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(delivery, erasure)
+    })
+    .await
+    .expect("delivery preparation and erasure acceptance");
+    assert!(matches!(
+        result,
+        Err(AppError::Conflict(ref reason))
+            if reason == "Account erasure has closed this owner's write admission"
+    ));
+    let after = find_by_user_code(&db, HMAC_KEY, &approved.user_code)
+        .await
+        .unwrap();
+    assert_eq!(after.status, Status::Approved);
+    assert!(after.delivered_at.is_none());
+    assert_eq!(
+        after.delivery_credential_encrypted,
+        approved_row.delivery_credential_encrypted
+    );
+    assert!(matches!(
+        super::super::api_key_mutation_service::insert_one_for_actor(
+            &db,
+            &new_key,
+            Some(&actor),
+            None
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    assert!(matches!(
+        super::super::api_key_mutation_service::insert_one_for_actor(
+            &db,
+            &org_key,
+            Some(&actor),
+            None
+        )
+        .await,
+        Err(AppError::Conflict(_))
+    ));
+    assert_eq!(
+        db.collection::<ApiKey>(API_KEYS)
+            .find_one(doc! {"user_id": &org, "is_active": true})
+            .await
+            .unwrap()
+            .expect("prior organization key persists")
+            .id,
+        existing_org_key
+    );
+    assert_eq!(
+        db.collection::<ApiKey>(API_KEYS)
+            .count_documents(doc! {"user_id": &org})
+            .await
+            .unwrap(),
+        1
+    );
+    let denied = approve(
+        &db,
+        &test_encryption_keys(),
+        HMAC_KEY,
+        &actor,
+        &pending.user_code,
+        Selection::Existing {
+            permission_snapshot: None,
+            api_key_id: key.id,
+        },
+        None,
+        None,
+    )
+    .await;
+    assert!(denied.is_err());
+    assert!(
+        db.collection::<ApiKey>(API_KEYS)
+            .find_one(doc! {"_id": &new_key.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(children.count_documents(child_filter).await.unwrap(), 1);
+}
+
 async fn accept(db: &Database, actor: &str, key: &ApiKey, request: &RequestOutput) {
     approve(
         db,
@@ -1028,6 +1169,73 @@ fn new_child_default_is_finite_clamped_and_stored_none_is_unchanged() {
     assert!(resolve(None, Some(now - Duration::seconds(1)), now).is_err());
     assert!(credentials::validate_stored_credential_expiry(None, None, now).is_ok());
     assert!(credentials::validate_stored_credential_expiry(Some(short_parent), None, now).is_ok());
+}
+
+#[tokio::test]
+async fn login_options_show_shared_service_organization_to_members_without_key_admin_access() {
+    let (db, actor, mut key, _) = fixture("login_options_connection_owners").await;
+    let org = Uuid::new_v4().to_string();
+    let mut owner = test_user(&org, UserType::Org);
+    owner.display_name = Some("Engineering".into());
+    db.collection::<User>(USERS)
+        .insert_one(owner)
+        .await
+        .unwrap();
+    db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+        .insert_one(test_membership(&org, &actor, OrgRole::Member, None))
+        .await
+        .unwrap();
+    let service_id = Uuid::new_v4().to_string();
+    let service = crate::test_utils::test_user_service(
+        &service_id,
+        &org,
+        "shared-service",
+        "endpoint",
+        None,
+        None,
+    );
+    db.collection::<UserService>(SERVICES)
+        .insert_one(service)
+        .await
+        .unwrap();
+
+    let options = options_for_actor(&db, &actor).await.unwrap();
+    assert!(options.orgs.is_empty());
+    let shared = options
+        .services
+        .iter()
+        .find(|s| s.id == service_id)
+        .unwrap();
+    assert_eq!(shared.owner_id, org);
+    assert_eq!(shared.owner_name.as_deref(), Some("Engineering"));
+    assert_eq!(
+        serde_json::to_value(shared).unwrap()["owner_name"],
+        "Engineering"
+    );
+
+    db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+        .update_one(
+            doc! {"org_user_id": &org, "member_user_id": &actor},
+            doc! {"$set": {"role": "viewer"}},
+        )
+        .await
+        .unwrap();
+    let viewer = options_for_actor(&db, &actor).await.unwrap();
+    assert!(viewer.services.iter().all(|s| s.id != service_id));
+    assert!(viewer.connections.iter().all(|c| c.id != service_id));
+
+    // A key that still lists the lost connection names its organization (one
+    // batched owner read) so the approver sees which access no longer works.
+    key.allowed_service_ids = vec![service_id.clone()];
+    let summary = key_summary(&db, &key, false).await.unwrap();
+    let listed = summary
+        .allowed_services
+        .iter()
+        .find(|s| s.id == service_id)
+        .unwrap();
+    assert_eq!(listed.owner_id, org);
+    assert_eq!(listed.owner_name.as_deref(), Some("Engineering"));
+    db.drop().await.unwrap();
 }
 
 #[tokio::test]

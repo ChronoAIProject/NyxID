@@ -75,6 +75,8 @@ async fn model_tariff_partial_lago_failure_keeps_active_revision_and_retries_who
             .as_deref(),
         Some(active.id.as_str())
     );
+    // Advance the fixture to the next pass after the uncertain plan lease expires.
+    crate::services::billing::plan_writers_tests::expire_plan_lease(&db, "standard").await;
     lago.fail_sync_at.store(0, Ordering::SeqCst);
     assert_eq!(
         model_tariffs::retry_pending(&db, &lago, "standard")

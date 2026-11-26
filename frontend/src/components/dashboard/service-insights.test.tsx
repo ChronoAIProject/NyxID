@@ -23,6 +23,7 @@ import {
 import { configuredBilling } from "@/lib/service-insights-compat";
 import { appI18n } from "@/i18n";
 import { api } from "@/lib/api-client";
+import { billingRow } from "@/test/billing-fixture";
 import { ServiceConnectionTable } from "./service-connection-table";
 
 vi.mock("@tanstack/react-router", () => ({
@@ -191,6 +192,27 @@ afterEach(async () => {
 });
 
 describe("service card billing and caller details", () => {
+  it("includes retained and permanent rows in the Last 90 days call count", async () => {
+    const recent = billingRow({ service_slug: connection.slug, events: 2, api_key_id: "key", api_key_name: "Recent agent", detail_retained: true });
+    const older = billingRow({ service_slug: connection.slug, events: 3, detail_retained: false });
+    vi.spyOn(api, "get").mockImplementation(async (path) => {
+      if (!String(path).startsWith("/billing/usage")) return {};
+      const isLong = String(path).includes("period=90d");
+      return {
+        owner_id: "person", period: isLong ? "90d" : "30d", rows: isLong ? [recent, older] : [recent],
+        totals: { quantity: 0, requests: 0, bytes: 0, events: isLong ? 5 : 2 },
+        billing: { charging_enabled: true, lago_configured: true, source: "usage_meter", rates_are_approximate: true },
+      };
+    });
+    mount();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Billing for Team OpenAI" }));
+    const panel = screen.getByRole("region", { name: "Usage history" });
+    await user.click(within(panel).getByRole("combobox", { name: "Usage period" }));
+    await user.click(screen.getByRole("option", { name: "Last 90 days" }));
+    await waitFor(() => expect(within(panel).getByText("Calls").nextElementSibling?.textContent).toBe("5"));
+    expect(within(panel).queryByText("You, signed in")).not.toBeInTheDocument();
+  });
   it("keeps billing classification and supplied names intact in Chinese", async () => {
     for (const [language, partial] of [
       ["zh-CN", "部分报告了计费信息"],

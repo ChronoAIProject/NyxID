@@ -10,10 +10,13 @@ import { cn } from "@/lib/utils";
 /** Title metadata stays editable while the conversation runs. */
 export function ThreadTitle({
   title,
+  displayTitle,
   onRename,
   heading = false,
 }: {
   readonly title: string;
+  /** A presentation label; the editor always starts from the persisted title. */
+  readonly displayTitle?: string;
   readonly onRename: (title: string) => Promise<void>;
   /** Shown as the page's heading rather than a muted label. */
   readonly heading?: boolean;
@@ -27,11 +30,12 @@ export function ThreadTitle({
       <button
         type="button"
         aria-label={translateUi("Rename chat")}
+        data-thread-title={heading ? "" : undefined}
         title={title}
         className={cn(
           "group flex min-w-0 max-w-full items-center gap-2 text-left",
           heading
-            ? "type-card-title text-foreground"
+            ? "px-0 py-1 type-card-title text-foreground"
             : "text-14 text-muted-foreground hover:text-foreground",
         )}
         onClick={() => {
@@ -40,7 +44,7 @@ export function ThreadTitle({
           setEditing(true);
         }}
       >
-        <span className="truncate">{title}</span>
+        <span className="truncate">{displayTitle ?? title}</span>
         <PencilLine
           aria-hidden
           className={cn(

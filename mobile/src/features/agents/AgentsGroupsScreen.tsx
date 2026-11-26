@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { Pressable, StyleSheet, View } from "react-native";
 import { Plus } from "lucide-react-native";
 import { SegmentControl } from "../../components/SegmentControl";
@@ -23,13 +25,14 @@ export function AgentsGroupsScreen({
   onCreateGroup: () => void;
   onCreateAgent: () => void;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const { isConnected } = useNetworkStatus();
   const tabs = (
     <View style={styles.tabRow}>
       <View style={styles.fill}>
         <SegmentControl
-          segments={[{ label: "Agents" }, { label: "Crews" }]}
+          segments={[{ label: translateApp("Agents") }, { label: translateApp("Crews") }]}
           activeIndex={tab === "agents" ? 0 : 1}
           onPress={(index) => onTabChange(index === 0 ? "agents" : "groups")}
           style={styles.tabs}
@@ -37,7 +40,9 @@ export function AgentsGroupsScreen({
       </View>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={tab === "agents" ? "New agent" : "New crew"}
+        accessibilityLabel={tab === "agents" ? translateApp("New agent")
+            : translateApp("New crew")
+        }
         accessibilityState={{ disabled: !isConnected }}
         disabled={!isConnected}
         onPress={tab === "agents" ? onCreateAgent : onCreateGroup}
@@ -56,8 +61,10 @@ export function AgentsGroupsScreen({
   if (tab === "groups") {
     return (
       <WorkspacePage
-        title="Crews"
-        subtitle="Bring your agents together in one conversation"
+        title={translateApp("Crews")}
+        subtitle={translateApp(
+          "Bring your agents together in one conversation",
+        )}
       >
         {tabs}
         <GroupsList onOpenGroup={onOpenGroup} onCreate={onCreateGroup} />

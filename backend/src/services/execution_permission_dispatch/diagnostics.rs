@@ -104,9 +104,10 @@ impl Stage {
                     _ => "authority_unavailable",
                 },
             ),
-            ApprovalRequired { .. } | ApprovalFailed { .. } => {
+            ApprovalRequired { .. } => {
                 Decision::new("requestable_gap", "permission_review_required")
             }
+            ApprovalFailed { .. } => Decision::new("hard_denial", "proposal_not_live"),
             ClientDisconnected => Decision::new("operational_error", "admission_abandoned"),
             _ if error.status_code().is_server_error() => {
                 Decision::new("operational_error", "dependency_unavailable")
@@ -157,6 +158,15 @@ impl Observation {
             .unwrap_or_else(|e| e.into_inner())
             .decision = Some(decision);
     }
+    pub(super) fn replay(&self, status: &str, effect_state: &str) {
+        if effect_state == "unknown" {
+            self.decide(Decision::failure(
+                contract::EvaluationError::OutcomeUncertain,
+            ));
+        } else if status == "approved" {
+            self.decide(Decision::new("hard_denial", "occurrence_already_reviewed"));
+        }
+    }
     pub(super) fn finish<T>(&self, context: &RequestContext, result: &AppResult<T>) {
         let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         let decision = match result {
@@ -170,14 +180,7 @@ impl Observation {
                 {
                     decision
                 }
-                Some(decision)
-                    if matches!(
-                        error,
-                        AppError::ApprovalRequired { .. } | AppError::ApprovalFailed { .. }
-                    ) =>
-                {
-                    decision
-                }
+                Some(decision) if matches!(error, AppError::ApprovalRequired { .. }) => decision,
                 _ => pending.stage.error(error),
             },
         };

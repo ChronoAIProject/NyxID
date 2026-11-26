@@ -84,7 +84,20 @@ pub async fn issue(
     sa_id: &str,
     actor_id: &str,
     input: IssueCurationGrant,
+    actor: Option<&super::audit_service::AuditActor>,
 ) -> AppResult<ServiceAccount> {
+    prepare_issue(db, sa_id, actor_id, input, actor)
+        .await?
+        .apply()
+        .await
+}
+async fn prepare_issue(
+    db: &Database,
+    sa_id: &str,
+    actor_id: &str,
+    input: IssueCurationGrant,
+    actor: Option<&super::audit_service::AuditActor>,
+) -> AppResult<Mutation> {
     if input.service_ids.is_empty()
         || input.service_ids.len() > 100
         || input.max_writes < 1
@@ -162,23 +175,113 @@ pub async fn issue(
         window_started_at: now,
         writes_used: 0,
     };
-    db.collection::<ServiceAccount>(ACCOUNTS).find_one_and_update(
-        doc! {"_id": sa_id, "purpose": {"$ne": "catalog_editor"}, "allowed_scopes": &sa.allowed_scopes, "owner_user_id": bson::to_bson(&sa.owner_user_id).map_err(|e| AppError::Internal(e.to_string()))?},
-        doc! {"$set": {"purpose": "curation", "platform_protected": true,
-            "curation_grant": bson::to_bson(&grant).map_err(|e| AppError::Internal(e.to_string()))?, "updated_at": bson::DateTime::from_chrono(now)}})
-        .return_document(mongodb::options::ReturnDocument::After).await?
-        .ok_or_else(|| AppError::Conflict("Service account changed; reload before issuing grant".into()))
+    Ok(Mutation {
+        db: db.clone(),
+        sa_id: sa_id.into(),
+        filter: doc! {"_id": sa_id, "purpose": {"$ne": "catalog_editor"}, "allowed_scopes": &sa.allowed_scopes, "owner_user_id": bson::to_bson(&sa.owner_user_id).map_err(|e| AppError::Internal(e.to_string()))?},
+        update: doc! {"$set": {"purpose": "curation", "platform_protected": true,
+        "curation_grant": bson::to_bson(&grant).map_err(|e| AppError::Internal(e.to_string()))?, "updated_at": bson::DateTime::from_chrono(now)}},
+        revoked_at: None,
+        actor: actor.cloned(),
+    })
 }
 
-pub async fn revoke(db: &Database, sa_id: &str) -> AppResult<ServiceAccount> {
+pub async fn revoke(
+    db: &Database,
+    sa_id: &str,
+    actor: Option<&super::audit_service::AuditActor>,
+) -> AppResult<ServiceAccount> {
+    prepare_revoke(db, sa_id, actor).await?.apply().await
+}
+async fn prepare_revoke(
+    db: &Database,
+    sa_id: &str,
+    actor: Option<&super::audit_service::AuditActor>,
+) -> AppResult<Mutation> {
     let sa = super::service_account_service::get_service_account(db, sa_id).await?;
     if sa.purpose == ServiceAccountPurpose::CatalogEditor {
         return Err(AppError::Forbidden(
             "Catalog editors use role permissions; legacy grant removal is unavailable".into(),
         ));
     }
-    db.collection::<ServiceAccount>(ACCOUNTS).find_one_and_update(doc! {"_id": sa_id, "purpose": {"$ne": "catalog_editor"}},
-        doc! {"$unset": {"curation_grant": ""}, "$set": {"updated_at": bson::DateTime::from_chrono(Utc::now())}})
-        .return_document(mongodb::options::ReturnDocument::After).await?
-        .ok_or_else(|| AppError::ServiceAccountNotFound(sa_id.into()))
+    let now = bson::DateTime::from_chrono(Utc::now()).to_chrono();
+    Ok(Mutation {
+        db: db.clone(),
+        sa_id: sa_id.into(),
+        filter: doc! {"_id": sa_id, "purpose": {"$ne": "catalog_editor"}},
+        update: doc! {"$unset": {"curation_grant": ""}, "$set": {"updated_at": bson::DateTime::from_chrono(now)}},
+        revoked_at: Some(now),
+        actor: actor.cloned(),
+    })
 }
+
+struct Mutation {
+    db: Database,
+    sa_id: String,
+    filter: bson::Document,
+    update: bson::Document,
+    revoked_at: Option<DateTime<Utc>>,
+    actor: Option<super::audit_service::AuditActor>,
+}
+impl Mutation {
+    async fn apply(&self) -> AppResult<ServiceAccount> {
+        if self.actor.is_none() {
+            return self.write(None).await.map(|(sa, _)| sa);
+        }
+        super::transaction_service::run_db_only(&self.db, self, |tx, source| {
+            Box::pin(mutate_in_session(tx, source))
+        })
+        .await
+    }
+    async fn write(
+        &self,
+        session: Option<&mut mongodb::ClientSession>,
+    ) -> AppResult<(ServiceAccount, bool)> {
+        let collection = self.db.collection::<ServiceAccount>(ACCOUNTS);
+        let mut write = collection
+            .find_one_and_update(self.filter.clone(), self.update.clone())
+            .return_document(if self.revoked_at.is_some() {
+                mongodb::options::ReturnDocument::Before
+            } else {
+                mongodb::options::ReturnDocument::After
+            });
+        if let Some(session) = session {
+            write = write.session(session);
+        }
+        let mut sa = write.await?.ok_or_else(|| {
+            if self.revoked_at.is_some() {
+                AppError::ServiceAccountNotFound(self.sa_id.clone())
+            } else {
+                AppError::Conflict("Service account changed; reload before issuing grant".into())
+            }
+        })?;
+        // Every issuance has a fresh grant UUID, so a matched issuance changed the grant.
+        let changed = if let Some(now) = self.revoked_at {
+            let changed = sa.curation_grant.take().is_some();
+            sa.updated_at = now;
+            changed
+        } else {
+            true
+        };
+        Ok((sa, changed))
+    }
+}
+async fn mutate_in_session(
+    tx: &mut mongodb::ClientSession,
+    source: &Mutation,
+) -> AppResult<ServiceAccount> {
+    let (sa, changed) = source.write(Some(&mut *tx)).await?;
+    if changed && let Some(actor) = &source.actor {
+        let intent = super::service_account_grant_audit::curation(
+            actor,
+            &sa.id,
+            sa.curation_grant.as_ref().map(|g| g.id.as_str()),
+        )?;
+        super::security_effect_service::enqueue_in_session(&source.db, tx, &[intent]).await?;
+    }
+    Ok(sa)
+}
+
+#[cfg(test)]
+#[path = "service_account_grant_audit_tests.rs"]
+mod audit_tests;

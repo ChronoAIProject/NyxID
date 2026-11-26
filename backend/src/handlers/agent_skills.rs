@@ -9,6 +9,7 @@ use crate::{
         },
         assistant_acknowledgement_service::{self as acks, ChatAuthority},
         assistant_team_service as team,
+        proxy_destination::INTERNAL_CALLER,
     },
 };
 
@@ -38,6 +39,7 @@ pub(crate) struct OrnnSkillPublication;
 /// where policy would ask, the check is skipped (publication validates later).
 #[derive(Clone, Copy)]
 pub(crate) struct OrnnSkillPreflight;
+#[derive(Clone)]
 pub(crate) struct Reader<'a> {
     pub(crate) state: &'a AppState,
     pub(crate) person: &'a str,
@@ -87,6 +89,12 @@ impl OrnnReader for OwnerReader {
     }
 }
 
+#[derive(Clone)]
+enum PublicationRequest {
+    ReviewedVersion,
+    Upload(skills::PublicationDispatch),
+}
+
 struct OrnnFetch<'a> {
     state: &'a AppState,
     person: &'a str,
@@ -96,6 +104,7 @@ struct OrnnFetch<'a> {
     chat: Option<std::sync::Arc<ChatAuthority>>,
     method: http::Method,
     body: Body,
+    publication_request: Option<PublicationRequest>,
     bound_skill_read: bool,
     owner_access: Option<(
         std::sync::Arc<crate::services::org_agent_service::RequestAccess>,
@@ -105,19 +114,55 @@ struct OrnnFetch<'a> {
 #[async_trait::async_trait]
 impl skills::OrnnReader for Reader<'_> {
     async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
-        self.classified_request(http::Method::GET, path, Vec::new(), false, None)
+        self.classified_request(http::Method::GET, path, Vec::new(), false, None, None)
             .await
             .into_app_result()
     }
 
     async fn request(&self, method: http::Method, path: &str, body: Vec<u8>) -> AppResult<Vec<u8>> {
-        self.classified_request(method, path, body, false, None)
+        self.classified_request(method, path, body, false, None, None)
             .await
             .into_app_result()
     }
 
     async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
-        self.classified_request(method, path, body, false, None)
+        self.classified_request(method, path, body, false, None, None)
+            .await
+    }
+
+    async fn version_by_name(&self, name: &str, version: &str, as_owner: bool) -> OrnnOutcome {
+        let Some(path) = skills::publication_version_path(name, version) else {
+            return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::InvalidPath);
+        };
+        self.for_publication(as_owner)
+            .classified_request(
+                http::Method::GET,
+                &path,
+                Vec::new(),
+                false,
+                None,
+                Some(PublicationRequest::ReviewedVersion),
+            )
+            .await
+    }
+
+    async fn publish(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+        dispatch: skills::PublicationDispatch,
+        as_owner: bool,
+    ) -> OrnnOutcome {
+        self.for_publication(as_owner)
+            .classified_request(
+                method,
+                path,
+                body,
+                false,
+                None,
+                Some(PublicationRequest::Upload(dispatch)),
+            )
             .await
     }
 
@@ -127,6 +172,17 @@ impl skills::OrnnReader for Reader<'_> {
         path: &str,
         body: Vec<u8>,
     ) -> OrnnOutcome {
+        self.for_publication(true)
+            .classified_request(method, path, body, false, None, None)
+            .await
+    }
+}
+
+impl Reader<'_> {
+    fn for_publication(&self, as_owner: bool) -> Reader<'_> {
+        if !as_owner {
+            return self.clone();
+        }
         Reader {
             state: self.state,
             person: self.person,
@@ -134,12 +190,8 @@ impl skills::OrnnReader for Reader<'_> {
             scopes: None,
             chat: None,
         }
-        .classified_request(method, path, body, false, None)
-        .await
     }
-}
 
-impl Reader<'_> {
     fn bound_skill<'a>(
         &'a self,
         agent: &'a crate::models::assistant_agent::AssistantAgent,
@@ -160,6 +212,7 @@ impl Reader<'_> {
             std::sync::Arc<crate::services::org_agent_service::RequestAccess>,
             crate::models::assistant_agent::AssistantAgent,
         )>,
+        publication_request: Option<PublicationRequest>,
     ) -> OrnnOutcome {
         // A proxy request is a substantial state machine. Poll it as its own
         // task so nested native MCP dispatch does not accumulate its debug
@@ -170,24 +223,46 @@ impl Reader<'_> {
         let thread_key = self.thread_key.map(str::to_owned);
         let scopes = self.scopes.cloned().unwrap_or_default();
         let chat = self.chat.clone();
-        let task = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            Box::pin(fetch_ornn_classified(OrnnFetch {
-                state: &state,
-                person: &person,
-                path: &path,
-                thread_key,
-                scopes,
-                chat,
-                method,
-                body: Body::from(body),
-                bound_skill_read,
-                owner_access,
-            }))
-            .await
-        }));
-        match tokio::time::timeout(std::time::Duration::from_secs(30), task).await {
-            Ok(Ok(outcome)) => outcome,
-            _ => OrnnOutcome::Uncertain,
+        let dispatch = match &publication_request {
+            Some(PublicationRequest::Upload(dispatch)) => Some(dispatch.clone()),
+            _ => None,
+        };
+        let mut task = tokio_util::task::AbortOnDropHandle::new(
+            crate::services::shutdown::process().spawn(async move {
+                Box::pin(fetch_ornn_classified(OrnnFetch {
+                    state: &state,
+                    person: &person,
+                    path: &path,
+                    thread_key,
+                    scopes,
+                    chat,
+                    method,
+                    body: Body::from(body),
+                    bound_skill_read,
+                    owner_access,
+                    publication_request,
+                }))
+                .await
+            }),
+        );
+        let outcome =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), &mut task).await {
+                Ok(Ok(outcome)) => outcome,
+                Ok(Err(_)) => OrnnOutcome::Uncertain,
+                Err(_) => {
+                    task.abort();
+                    // A task polling on another thread can still reach the transport
+                    // until cancellation finishes. Only then can we certify no send.
+                    let _ = task.await;
+                    OrnnOutcome::Uncertain
+                }
+            };
+        if dispatch.is_some_and(|dispatch| !dispatch.may_have_sent()) {
+            OrnnOutcome::LocalError(AppError::Conflict(
+                "NyxID refused publication before dispatch".into(),
+            ))
+        } else {
+            outcome
         }
     }
 }
@@ -235,6 +310,7 @@ impl AgentOwnerReader<'_> {
                 body,
                 bound,
                 access.map(|access| (access, self.agent.clone())),
+                None,
             )
             .await
     }
@@ -325,9 +401,14 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
         body,
         bound_skill_read,
         owner_access,
+        publication_request,
     } = request;
     let publication = method != http::Method::GET;
-    if !ornn_operation_allowed(&method, path, publication) {
+    let reviewed_version = matches!(
+        publication_request,
+        Some(PublicationRequest::ReviewedVersion)
+    );
+    if !ornn_operation_allowed(&method, path, publication, reviewed_version) {
         if bound_skill_read {
             audit_skill_read_refusal(state, person, "operation_restriction");
         }
@@ -442,18 +523,26 @@ async fn fetch_ornn_classified(request: OrnnFetch<'_>) -> OrnnOutcome {
             request.extensions_mut().insert(OrnnSkillPreflight);
         }
     }
+    let reviewed_write = matches!(publication_request, Some(PublicationRequest::Upload(_)));
+    if let Some(PublicationRequest::Upload(dispatch)) = publication_request {
+        request.extensions_mut().insert(dispatch);
+    }
     let mut slug = String::new();
-    let response = match Box::pin(super::proxy::proxy_request_inner(
+    let proxy_request = Box::pin(super::proxy::proxy_request_inner(
         state,
         &auth,
         &service.id,
         path.split('?').next().unwrap_or(path),
         request,
         &mut slug,
-    ))
-    .await
+    ));
+    let response = match INTERNAL_CALLER
+        .scope("agent_skill_ornn", proxy_request)
+        .await
     {
         Ok(response) => response,
+        // The caller separately proves a refusal while the fence is still available.
+        Err(_) if reviewed_write => return OrnnOutcome::ProxyError,
         Err(error @ AppError::SkillRead(_)) => return OrnnOutcome::LocalError(error),
         Err(AppError::CredentialUnavailable(_) | AppError::NotFound(_)) if via.is_some() => {
             return OrnnOutcome::LocalError(AppError::SkillRead(
@@ -559,7 +648,12 @@ pub(crate) fn raw_skill_publication(method: &http::Method, path: &str) -> bool {
 /// package and then read back the exact metadata needed for integrity and
 /// reconciliation; it cannot invoke sharing, permissions, deletion, or an
 /// arbitrary Ornn route.
-pub(crate) fn ornn_operation_allowed(method: &http::Method, path: &str, publication: bool) -> bool {
+fn ornn_operation_allowed(
+    method: &http::Method,
+    path: &str,
+    publication: bool,
+    reviewed_version: bool,
+) -> bool {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
     let segments: Vec<_> = route.trim_start_matches('/').split('/').collect();
     if method == http::Method::GET {
@@ -579,7 +673,15 @@ pub(crate) fn ornn_operation_allowed(method: &http::Method, path: &str, publicat
                 && segments[0] == "api"
                 && segments[1] == "v1"
                 && segments[2] == "skills"
-                && segments[3].parse::<uuid::Uuid>().is_ok()
+                && (segments[3].parse::<uuid::Uuid>().is_ok()
+                    || (reviewed_version
+                        && query
+                            .strip_prefix("version=")
+                            .and_then(|version| {
+                                skills::publication_version_path(segments[3], version)
+                            })
+                            .as_deref()
+                            == Some(path)))
                 && version_query)
             || (segments.len() == 5
                 && segments[0] == "api"
@@ -750,7 +852,7 @@ pub(crate) async fn preload_for_turn(
     if !crate::services::agent_skill_preload::enabled(agent, row.guest_turn) {
         return Ok(String::new());
     }
-    let chat = acks::for_key(&state.db, &row.user_id, Some(&row.credential_api_key_id))
+    let chat = acks::chat_for_conversation(&state.db, row)
         .await?
         .filter(|chat| {
             chat.turn_live
@@ -1461,6 +1563,8 @@ mod tests {
         guest: bool,
     ) -> ChatAuthority {
         ChatAuthority {
+            key_version: 0,
+            voice_parent_conversation_id: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
@@ -1830,18 +1934,19 @@ mod tests {
         }));
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
-                let count = f
+                let live_request = f
                     .state
                     .db
                     .collection::<mongodb::bson::Document>(
                         crate::models::approval_request::COLLECTION_NAME,
                     )
-                    .count_documents(
-                        doc! {"user_id": &f.owner, "service_id": &service.id, "status": "pending"},
-                    )
+                    .find_one(doc! {
+                        "_id": {"$ne": pending.get_str("_id").unwrap()},
+                        "user_id": &f.owner, "service_id": &service.id, "status": "pending",
+                    })
                     .await
                     .unwrap();
-                if count >= 2 {
+                if live_request.is_some() {
                     break;
                 }
                 assert!(

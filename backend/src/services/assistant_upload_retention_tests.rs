@@ -58,11 +58,14 @@ async fn root(
     let id = Uuid::new_v4().to_string();
     let now = Utc::now() - age;
     let extracted = super::super::attachment_extraction::Extracted {
+        pdf: None,
         content_type: mime.into(),
         text: "private extracted text".into(),
         sections: Vec::new(),
     };
     let row = AssistantUpload {
+        filename_is_original: None,
+        pdf: None,
         source: None,
         content_sha256: None,
         secret_context_versions: Default::default(),
@@ -269,6 +272,140 @@ async fn pending_image_and_tool_retention_use_distinct_clocks() {
         Err(AppError::AssistantAttachmentExpired)
     ));
 }
+
+async fn tool_file_chunk(state: &AppState, owner: &str, thread: &str, parent: &str) {
+    state.db.collection::<Document>(ATTACHMENTS).insert_one(doc! {
+        "_id": Uuid::new_v4().to_string(), "user_id":owner,
+        "conversation_id":thread, "group_id":bson::Bson::Null,
+        "parent_attachment_id":parent, "chunk_index":0_i64,
+        "data_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]},
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn tool_file_retention_and_purge_share_tool_image_policy() {
+    let (state, owner, thread) = fixture().await;
+    let id = tool_image(&state, &owner, &thread, "files", Duration::days(2)).await;
+    state
+        .db
+        .collection::<Document>(ATTACHMENTS)
+        .update_one(
+            doc! {"_id":&id},
+            doc! {"$set":{"content_type":"application/pdf","chunks":1}},
+        )
+        .await
+        .unwrap();
+    tool_file_chunk(&state, &owner, &thread, &id).await;
+    let filter = doc! {"_id":&id,"user_id":&owner,"conversation_id":&thread};
+    policy(
+        &state,
+        &owner,
+        Policy {
+            document_days: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    require_available(&state.db, filter.clone()).await.unwrap();
+    policy(
+        &state,
+        &owner,
+        Policy {
+            tool_image_days: Some(1),
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(matches!(
+        require_available(&state.db, filter).await,
+        Err(AppError::AssistantAttachmentExpired)
+    ));
+    assert_eq!(sweep(&state.db).await.unwrap(), 1);
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(ATTACHMENTS)
+            .count_documents(doc! {"$or":[{"_id":&id},{"parent_attachment_id":&id}]})
+            .await
+            .unwrap(),
+        0
+    );
+    let live = tool_image(&state, &owner, &thread, "files", Duration::zero()).await;
+    state
+        .db
+        .collection::<Document>(ATTACHMENTS)
+        .update_one(
+            doc! {"_id":&live},
+            doc! {"$set":{"content_type":"application/pdf","chunks":1}},
+        )
+        .await
+        .unwrap();
+    tool_file_chunk(&state, &owner, &thread, &live).await;
+    engine::delete(&state.db, &owner, &thread).await.unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(ATTACHMENTS)
+            .count_documents(doc! {"user_id":owner})
+            .await
+            .unwrap(),
+        0
+    );
+    state.db.drop().await.unwrap();
+}
+#[tokio::test]
+async fn tool_file_group_and_owner_purge_remove_non_image_roots_and_chunks() {
+    use crate::services::assistant_group_service as groups;
+    let (state, owner, thread) = fixture().await;
+    let agent = team::ensure_nyxbot(&state.db, &owner).await.unwrap();
+    let group = groups::create(&state.db, &owner, "Files", &[agent.id], "user")
+        .await
+        .unwrap();
+    state
+        .db
+        .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .update_one(doc! {"_id":&thread}, doc! {"$set":{"group_id":&group.id}})
+        .await
+        .unwrap();
+    for (conversation, group_purge) in [(thread.as_str(), true), ("personal-file-thread", false)] {
+        let id = tool_image(&state, &owner, conversation, "files", Duration::zero()).await;
+        state
+            .db
+            .collection::<Document>(ATTACHMENTS)
+            .update_one(
+                doc! {"_id":&id},
+                doc! {"$set":{"content_type":"application/pdf","chunks":1}},
+            )
+            .await
+            .unwrap();
+        tool_file_chunk(&state, &owner, conversation, &id).await;
+        if group_purge {
+            Box::pin(groups::delete(&state.db, &owner, &group.id))
+                .await
+                .unwrap();
+        } else {
+            crate::test_utils::accept_and_process_erasure_with_state(
+                &state,
+                &owner,
+                &owner,
+                Some(crate::services::admin_user_service::ACCOUNT_DELETION_POLICY_VERSION),
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            state
+                .db
+                .collection::<Document>(ATTACHMENTS)
+                .count_documents(doc! {"$or":[{"_id":&id},{"parent_attachment_id":&id}]})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    state.db.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn sweep_deletes_root_chunks_and_text_preserves_scoped_placeholder_and_is_idempotent() {
     let (state, owner, thread) = fixture().await;
@@ -354,6 +491,79 @@ async fn sweep_deletes_root_chunks_and_text_preserves_scoped_placeholder_and_is_
         0
     );
 }
+
+#[tokio::test]
+async fn cancelling_upload_deletion_during_get_more_preserves_chunks() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use tokio::sync::Notify;
+
+    let _guard = crate::tests::BROKER_FAILPOINT.lock().await;
+    let fixture = connect_transaction_test_database("upload_drop_get_more").await;
+    let mut options =
+        mongodb::options::ClientOptions::parse(crate::test_utils::selected_test_database_uri())
+            .await
+            .unwrap();
+    options.app_name = Some(fixture.name().to_owned());
+    let started = std::sync::Arc::new(Notify::new());
+    let seen = started.clone();
+    options.command_event_handler = Some(EventHandler::callback(move |event| {
+        if let CommandEvent::Started(command) = event
+            && command.command_name == "getMore"
+            && command.command.get_str("collection") == Ok(ATTACHMENTS)
+        {
+            seen.notify_one();
+        }
+    }));
+    let client = mongodb::Client::with_options(options).unwrap();
+    let db = client.database(fixture.name());
+    let root = doc! { "_id": "root", "origin": "user_upload" };
+    let uploads = db.collection::<Document>(ATTACHMENTS);
+    uploads.insert_one(&root).await.unwrap();
+    uploads
+        .insert_many((0..101).map(|id| {
+            doc! {
+                "_id": id.to_string(), "parent_attachment_id": "root",
+            }
+        }))
+        .await
+        .unwrap();
+
+    let mut session = client.start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let admin = fixture.client().database("admin");
+    admin
+        .run_command(doc! {
+            "configureFailPoint": "failCommand", "mode": {"times": 1},
+            "data": {"failCommands": ["getMore"], "appName": fixture.name(),
+                "blockConnection": true, "blockTimeMS": 1000},
+        })
+        .await
+        .unwrap();
+    tokio::select! {
+        biased;
+        () = started.notified() => {},
+        result = delete_root(&db, &mut session, &root) => panic!("deletion finished before cancellation: {result:?}"),
+    }
+    admin
+        .run_command(doc! {"configureFailPoint":"failCommand","mode":"off"})
+        .await
+        .unwrap();
+    session.abort_transaction().await.unwrap();
+    assert_eq!(
+        uploads
+            .count_documents(doc! {})
+            .session(&mut session)
+            .await
+            .unwrap(),
+        102
+    );
+    session.start_transaction().await.unwrap();
+    delete_root(&db, &mut session, &root).await.unwrap();
+    session.commit_transaction().await.unwrap();
+    assert_eq!(uploads.count_documents(doc! {}).await.unwrap(), 0);
+    fixture.drop().await.unwrap();
+}
+
 #[tokio::test]
 async fn sweep_stale_lease_and_stale_policy_cannot_delete() {
     let (state, owner, thread) = fixture().await;
@@ -883,6 +1093,7 @@ async fn machine_preview_retention_shortens_immediately_and_sweep_is_fenced() {
         turn_id: Uuid::new_v4().to_string(),
         content_type: "text/plain".into(),
         size: 7,
+        chunks: 0,
         data_encrypted: state.encryption_keys.encrypt(b"preview").await.unwrap(),
         created_at: Utc::now() - Duration::days(2),
     };
@@ -1249,3 +1460,51 @@ async fn image_claim_cursor_round_trips_the_lease_checkpoint_across_pages_and_ho
 
 #[path = "assistant_group_image_cleanup_tests.rs"]
 mod group_image_cleanup;
+
+#[tokio::test]
+async fn pdf_derived_pages_inherit_document_expiry_and_are_purged_with_root() {
+    let (state, owner, thread) = fixture().await;
+    let id = root(
+        &state,
+        &owner,
+        &thread,
+        "application/pdf",
+        true,
+        Duration::days(2),
+    )
+    .await;
+    let child = Uuid::new_v4().to_string();
+    state.db.collection::<Document>(ATTACHMENTS).insert_one(doc!{"_id":&child,"origin":"pdf_page","parent_attachment_id":&id,"user_id":&owner,"conversation_id":&thread,"content_type":"image/jpeg","created_at":bson::DateTime::now(),"data_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1,2,3]}}).await.unwrap();
+    policy(
+        &state,
+        &owner,
+        Policy {
+            document_days: 1,
+            image_days: 365,
+            tool_image_days: None,
+            ..Policy::default()
+        },
+    )
+    .await;
+    assert!(matches!(
+        require_available(&state.db, doc! {"_id":&child}).await,
+        Err(AppError::AssistantAttachmentExpired)
+    ));
+    assert_eq!(sweep(&state.db).await.unwrap(), 1);
+    assert_eq!(
+        state
+            .db
+            .collection::<Document>(ATTACHMENTS)
+            .count_documents(doc! {"$or":[{"_id":&id},{"parent_attachment_id":&id}]})
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(
+        require_available(&state.db, doc! {"_id":&child})
+            .await
+            .is_err()
+    );
+    assert_eq!(sweep(&state.db).await.unwrap(), 0);
+    state.db.drop().await.unwrap();
+}

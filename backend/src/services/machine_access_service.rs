@@ -23,6 +23,11 @@ use nyxid_machine::{
     context::{self, Choice, Mode},
 };
 
+pub(crate) const RENEWAL_LEASE: &str = "machine-authority-renewal";
+pub(crate) const DISPATCH_LEASE: &str = "machine-authority-dispatch";
+pub(crate) const MIGRATION_LEASE: &str = "machine-authority-migration";
+pub(crate) const EXTERNAL_CLEANUP_LEASE: &str = "machine-external-source-cleanup";
+
 pub const FLAG: &str = "assistant:machine-capabilities";
 pub const CONTEXT_FLAG: &str = "assistant:machine-contexts";
 /// Leaves room for the maximum 64 local jobs plus concurrent short operations.
@@ -162,6 +167,8 @@ async fn ensure_separation_cutover(db: &Database) -> AppResult<()> {
                 }
                 return Ok(());
             }
+            #[cfg(test)]
+            super::startup_seed_tests::missing(&db, "machine", model::SEPARATION_CUTOVER).await;
             db.collection::<Document>(SETTINGS).insert_one(doc! {
                 "_id":model::SEPARATION_CUTOVER,"created_at":bson::DateTime::now(),"snapshot_version":1,
             }).session(&mut *session).await?;
@@ -219,14 +226,12 @@ async fn compatibility_capabilities(
         .iter()
         .flat_map(|node| [node.id.clone(), format!("{}:{actor}", node.user_id)])
         .collect();
-    let snapshots: Vec<Document> = db
+    let mut cursor = db
         .collection::<Document>(model::SEPARATION_COMPATIBILITY)
         .find(doc! {"_id":{"$in":ids}})
         .session(&mut *session)
-        .await?
-        .stream(&mut *session)
-        .try_collect()
         .await?;
+    let snapshots: Vec<Document> = crate::db::read_documents(&mut cursor, session).await?;
     let rows: std::collections::BTreeMap<&str, &Document> = snapshots
         .iter()
         .filter_map(|row| row.get_str("_id").ok().map(|id| (id, row)))
@@ -346,7 +351,7 @@ pub async fn migrate_in_session(
             let mut owners = super::machine_service::usable_owners(db, &agent.user_id).await?;
             // A delayed migration must not inherit organizations joined after
             // the cutover. Live ACL checks still apply on every execution.
-            let memberships: Vec<Document> = db
+            let mut cursor = db
                 .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
                 .find(
                     doc! {"member_user_id": &agent.user_id, "org_user_id": {"$in": &owners},
@@ -354,10 +359,9 @@ pub async fn migrate_in_session(
                 )
                 .projection(doc! {"org_user_id": 1})
                 .session(&mut *session)
-                .await?
-                .stream(&mut *session)
-                .try_collect()
                 .await?;
+            let memberships: Vec<Document> =
+                crate::db::read_documents(&mut cursor, session).await?;
             owners.retain(|owner| {
                 owner == &agent.user_id
                     || memberships
@@ -389,7 +393,7 @@ pub async fn migrate_in_session(
         loop {
             let mut batch = Vec::with_capacity(100);
             while batch.len() < 100 {
-                match nodes.stream(&mut *session).try_next().await? {
+                match crate::db::next_document(&mut nodes, session).await? {
                     Some(node) => batch.push(node),
                     None => break,
                 }
@@ -557,9 +561,10 @@ async fn legacy_nyxbot_assignments(
             // Re-read the authorized batch in this transaction. Discovery's
             // batched projection never becomes one database lookup per node.
             let ids: Vec<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
-            let live_nodes: Vec<Node> = db.collection::<Node>(NODES)
+            let mut cursor = db.collection::<Node>(NODES)
                 .find(doc! {"_id":{"$in":ids},"is_active":true,"user_id":{"$in":&owners}})
-                .session(&mut *session).await?.stream(&mut *session).try_collect().await?;
+                .session(&mut *session).await?;
+            let live_nodes: Vec<Node> = crate::db::read_documents(&mut cursor, session).await?;
             let compatibility = compatibility_capabilities(&db,&actor,&live_nodes,session).await?;
             for node in &live_nodes {
                 if !policy.assignments.contains_key(&node.id)
@@ -990,7 +995,7 @@ pub async fn configure(
         let result=Box::pin(async {
             let mut agent=db.collection::<AssistantAgent>(AGENTS).find_one(doc!{"_id":&agent_id,"destroyed_at":bson::Bson::Null})
                 .session(&mut *session).await?.ok_or_else(refused)?;
-            Box::pin(super::org_agent_service::require_maintain(&db, &actor, &agent)).await?;
+            Box::pin(super::org_agent_service::fence_maintenance(&db,session,&actor,&agent)).await?;
             if !super::org_service::resolve_owner_access(&db,&actor,&node.user_id).await?.can_write() {return Err(refused());}
             if actor != agent.user_id {
                 let fenced = db.collection::<Document>(crate::models::user::COLLECTION_NAME).update_one(doc! {"_id": &agent.user_id, "is_active": true},doc! {"$inc": {"agent_team_fence":1}}).session(&mut *session).await?;
@@ -1090,6 +1095,7 @@ pub fn admit<'a>(
             capabilities: access.capabilities,
         });
         let lease = model::Lease {
+            key_version: chat.key_version,
             id: authority.lease_id.clone(),
             node_id: node.id.clone(),
             api_key_id: chat.api_key_id.clone(),
@@ -1182,10 +1188,12 @@ pub(super) async fn fence_renewal_in_session(
 /// Keep renewal independent of the requesting HTTP connection for background
 /// jobs. Authentication is rebuilt from MongoDB on every renewal.
 pub(super) async fn renew_one(state: &crate::AppState, mut lease: model::Lease) -> AppResult<()> {
-    let chat = super::assistant_acknowledgement_service::for_key(
+    let chat = super::assistant_acknowledgement_service::chat_for_key_version(
         &state.db,
         &lease.authority.actor_id,
         Some(&lease.api_key_id),
+        lease.key_version,
+        None,
     )
     .await?
     .ok_or_else(refused)?;
@@ -1519,10 +1527,7 @@ pub(super) async fn revoke_one(state: &crate::AppState, row: Document) -> AppRes
 async fn renew_leases(state: &crate::AppState) -> AppResult<()> {
     use super::coordination_service::{LeaseStore, cluster_lease_runtime};
     let runtime = cluster_lease_runtime();
-    let Some(token) = runtime
-        .acquire(&state.db, "machine-authority-renewal")
-        .await?
-    else {
+    let Some(token) = runtime.acquire(&state.db, RENEWAL_LEASE).await? else {
         return Ok(());
     };
     let task = Box::pin(async {
@@ -1575,10 +1580,7 @@ async fn renew_leases(state: &crate::AppState) -> AppResult<()> {
 async fn tick(state: &crate::AppState) -> AppResult<()> {
     use super::coordination_service::{LeaseStore, cluster_lease_runtime};
     let runtime = cluster_lease_runtime();
-    let Some(token) = runtime
-        .acquire(&state.db, "machine-authority-dispatch")
-        .await?
-    else {
+    let Some(token) = runtime.acquire(&state.db, DISPATCH_LEASE).await? else {
         return Ok(());
     };
     let task = Box::pin(async {
@@ -1593,6 +1595,9 @@ async fn tick(state: &crate::AppState) -> AppResult<()> {
             .await?;
         futures::stream::iter(rows)
             .for_each_concurrent(32, |row| async move {
+                let Some(_work) = state.shutdown.background() else {
+                    return;
+                };
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(500),
                     Box::pin(revoke_one(state, row)),
@@ -1609,10 +1614,7 @@ async fn tick(state: &crate::AppState) -> AppResult<()> {
 async fn migrate_pending(state: &crate::AppState) -> AppResult<()> {
     use super::coordination_service::{LeaseStore, cluster_lease_runtime};
     let runtime = cluster_lease_runtime();
-    let Some(token) = runtime
-        .acquire(&state.db, "machine-authority-migration")
-        .await?
-    else {
+    let Some(token) = runtime.acquire(&state.db, MIGRATION_LEASE).await? else {
         return Ok(());
     };
     let result = runtime
@@ -1630,6 +1632,9 @@ async fn migrate_pending(state: &crate::AppState) -> AppResult<()> {
                     .try_collect()
                     .await?;
                 for agent in agents {
+                    let Some(_work) = state.shutdown.background() else {
+                        break;
+                    };
                     let _ =
                         Box::pin(policy(&state.db, agent.get_str("_id").unwrap_or_default())).await;
                 }
@@ -1647,10 +1652,7 @@ async fn sweep_external_sources(
 ) -> AppResult<()> {
     use super::coordination_service::{LeaseStore, cluster_lease_runtime};
     let runtime = cluster_lease_runtime();
-    let Some(token) = runtime
-        .acquire(&state.db, "machine-external-source-cleanup")
-        .await?
-    else {
+    let Some(token) = runtime.acquire(&state.db, EXTERNAL_CLEANUP_LEASE).await? else {
         return Ok(());
     };
     let after = cursor.clone();
@@ -1690,6 +1692,9 @@ async fn watch_revocations(state: crate::AppState) {
                 .await?;
             while let Some(event) = events.try_next().await? {
                 if let Some(row) = event.full_document {
+                    let Some(_work) = state.shutdown.background() else {
+                        return Ok(());
+                    };
                     let _ = tokio::time::timeout(
                         std::time::Duration::from_millis(500),
                         Box::pin(revoke_one(&state, row)),
@@ -1708,9 +1713,12 @@ async fn watch_revocations(state: crate::AppState) {
 }
 
 pub fn spawn(state: crate::AppState) {
-    tokio::spawn(Box::pin(watch_revocations(state.clone())));
+    state
+        .shutdown
+        .clone()
+        .spawn_worker(Box::pin(watch_revocations(state.clone())));
     let renewal_state = state.clone();
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(RENEW_INTERVAL_SECS));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -1727,20 +1735,24 @@ pub fn spawn(state: crate::AppState) {
         }
     });
     let migration_state = state.clone();
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
-            timer.tick().await;
+            let Some(_work) = migration_state.shutdown.tick(&mut timer).await else {
+                break;
+            };
             let _ = Box::pin(migrate_pending(&migration_state)).await;
         }
     });
     let source_state = state.clone();
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut cursor = None;
         let mut timer = tokio::time::interval(std::time::Duration::from_secs(10));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            timer.tick().await;
+            let Some(_work) = source_state.shutdown.tick(&mut timer).await else {
+                break;
+            };
             if Box::pin(sweep_external_sources(&source_state, &mut cursor))
                 .await
                 .is_err()
@@ -1751,11 +1763,13 @@ pub fn spawn(state: crate::AppState) {
             }
         }
     });
-    tokio::spawn(async move {
+    state.shutdown.clone().spawn_worker(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            interval.tick().await;
+            let Some(_work) = state.shutdown.tick(&mut interval).await else {
+                break;
+            };
             if Box::pin(tick(&state)).await.is_err() {
                 tracing::warn!("Machine authority reconciliation deferred; leases fail closed");
             }

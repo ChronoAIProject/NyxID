@@ -67,10 +67,11 @@ pub async fn post(
         group.clone(),
         text.to_owned(),
         recipients.clone(),
+        roster,
         work.clone(),
         settings.max_group_handoffs,
     );
-    let message = super::super::transaction_service::run_db_only(db, &ctx, |session, (db, chat, snapshot, text, recipients, work, hops)| {
+    let message = super::super::transaction_service::run_db_only(db, &ctx, |session, (db, chat, snapshot, text, recipients, roster, work, hops)| {
         Box::pin(async move {
             let run = continuation::register_in_session(db, &chat.user_id, &chat.conversation_id, chat.turn_id.as_deref().ok_or(AppError::AssistantTurnRequired)?, work, recipients.len() as u32, session).await?;
             let mut group = db.collection::<AssistantGroup>(GROUPS).find_one_and_update(doc! {"_id": &snapshot.id, "user_id": &chat.user_id, "member_agent_ids": &snapshot.member_agent_ids}, doc! {"$inc": {"message_count": 1_i64}, "$set": {"updated_at": date(Utc::now()), "last_message_at": date(Utc::now())}}).return_document(ReturnDocument::After).session(&mut *session).await?.ok_or_else(|| AppError::Conflict("Group changed".into()))?;
@@ -85,7 +86,7 @@ pub async fn post(
             };
             let request = group.followers[index].automation.as_mut().expect("bound follower");
             if request.dispatches.len() + recipients.len() > continuation::DISPATCH_LIMIT as usize { return Err(AppError::Conflict("automation_dispatch_limit".into())); }
-            for agent in recipients { request.dispatches.push(Dispatch {id: Uuid::new_v4().to_string(), agent_id: agent.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
+            for agent in recipients { request.dispatches.push(Dispatch {org_use_revision:roster.iter().find(|a| &a.id == agent).ok_or(AppError::AssistantTurnRequired)?.org_use_revision, id: Uuid::new_v4().to_string(), agent_id: agent.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
             let request_id = request.id.clone();
             let message = message(&group, &request_id, "agent", Some(&chat.agent_id), Some(&chat.agent_name), text, recipients);
             db.collection::<GroupMessage>(MESSAGES).insert_one(&message).session(&mut *session).await?;
@@ -155,13 +156,19 @@ pub fn queued(group: &AssistantGroup) -> Vec<(AutomationWork, String)> {
         .collect()
 }
 
-/// Queued dispatch survives pool/busy refusal. Only committed turn admission
-/// changes it to running, including successors from cards and async events.
+pub enum Admission {
+    Dispatch,
+    Continuation,
+}
+
+/// Admit a fresh queued dispatch or advance its existing thread from a
+/// selected event or allowed card. A delayed dispatcher cannot replace it.
 pub async fn admit(
     db: &Database,
     row: &AssistantConversation,
     work: &AutomationWork,
     turn: &str,
+    admission: Admission,
     session: &mut ClientSession,
 ) -> AppResult<()> {
     let group_id = row
@@ -178,14 +185,26 @@ pub async fn admit(
         .followers
         .iter_mut()
         .filter_map(|f| f.automation.as_mut())
-        .filter(|r| r.work.run_id == work.run_id)
+        .filter(|r| {
+            r.work.run_id == work.run_id
+                && r.work.coordinator_thread_id == work.coordinator_thread_id
+                && r.work.confirmation_policy == work.confirmation_policy
+        })
         .flat_map(|r| r.dispatches.iter_mut())
         .find(|d| {
             d.id == work.work_id
                 && d.agent_id == row.agent_id.as_deref().unwrap_or_default()
-                && matches!(d.state.as_str(), "queued" | "running")
+                && match admission {
+                    Admission::Dispatch => d.state == "queued",
+                    Admission::Continuation => {
+                        d.state == "running" && d.thread_id.as_deref() == Some(row.id.as_str())
+                    }
+                }
         })
         .ok_or(AppError::AssistantTurnRequired)?;
+    if dispatch.org_use_revision != row.org_use_revision {
+        return Err(AppError::AssistantTurnRequired);
+    }
     dispatch.state = "running".into();
     dispatch.thread_id = Some(row.id.clone());
     dispatch.turn_id = Some(turn.into());
@@ -236,35 +255,38 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
         for dispatch in request.dispatches.iter().filter(|d| d.state != "settled") {
             let reply = if let (Some(thread), Some(turn)) = (&dispatch.thread_id, &dispatch.turn_id)
             {
-                db.collection::<AssistantMessage>(REPLIES).find_one(doc! {"user_id": &group.user_id, "conversation_id": thread, "turn_id": turn, "role": "assistant"}).await?
+                db.collection::<AssistantMessage>(REPLIES)
+                    .find_one(doc! {"user_id": &group.user_id, "conversation_id": thread, "turn_id": turn, "role": "assistant"})
+                    .await?
             } else {
                 None
             };
-            let unavailable = !roster.iter().any(|a| a.id == dispatch.agent_id);
-            let lost = if reply.is_none()
+            #[cfg(test)]
+            super::super::durable_wake_tests::after("automation_group_member_read").await;
+            let unavailable = !roster.iter().any(|a| {
+                a.id == dispatch.agent_id && a.org_use_revision == dispatch.org_use_revision
+            });
+            let suspected_loss = if reply.is_none()
+                && !unavailable
                 && let (Some(thread), Some(turn)) = (&dispatch.thread_id, &dispatch.turn_id)
             {
                 db.collection::<AssistantConversation>(THREADS)
-                    .find_one(doc! {"_id": thread, "user_id": &group.user_id})
+                    .find_one(doc! {"_id": thread, "user_id": &group.user_id, "active_turn.turn_id": turn})
                     .await?
                     .as_ref()
                     .is_none_or(|row| {
-                        super::super::assistant_nyxagent::live_turn(row, Utc::now())
-                            .is_none_or(|live| &live.turn_id != turn)
+                        !super::super::assistant_turn_restart::awaiting_reply(row, turn)
                     })
             } else {
                 false
             };
-            if reply.is_none() && !unavailable && !lost {
+            if reply.is_none() && !unavailable && !suspected_loss {
                 continue;
             }
-            let failure = if unavailable {
-                Some("member_unavailable".to_owned())
-            } else if lost {
-                Some("turn_lost".to_owned())
-            } else {
-                None
-            };
+            #[cfg(test)]
+            if suspected_loss {
+                super::super::durable_wake_tests::after("automation_group_loss_observed").await;
+            }
             let ctx = (
                 db.clone(),
                 group.id.clone(),
@@ -274,16 +296,53 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
                 reply,
                 roster.clone(),
                 settings.max_group_handoffs_per_hour,
-                failure,
+                unavailable,
+                suspected_loss,
             );
-            super::super::transaction_service::run_db_only(db, &ctx, |session, (db, id, owner, request_id, dispatch, reply, roster, hourly, failure)| {
+            super::super::transaction_service::run_db_only(db, &ctx, |session, (db, id, owner, request_id, dispatch, reply, roster, hourly, unavailable, suspected_loss)| {
                 Box::pin(async move {
                     let mut group = db.collection::<AssistantGroup>(GROUPS).find_one(doc! {"_id": id, "user_id": owner}).session(&mut *session).await?.ok_or_else(|| AppError::NotFound("Group deleted".into()))?;
                     let Some(fi) = group.followers.iter().position(|f| f.automation.as_ref().is_some_and(|r| &r.id == request_id)) else { return Ok(()); };
                     let mut request = group.followers[fi].automation.clone().expect("request");
-                    let Some(di) = request.dispatches.iter().position(|d| d.id == dispatch.id && d.state != "settled" && d.turn_id == dispatch.turn_id) else { return Ok(()); };
-                    let text = reply.as_ref().map(|m| m.text.as_str()).unwrap_or("Group member unavailable");
-                    let mut error = reply.as_ref().and_then(|m| m.error_code.as_deref()).or(failure.as_deref());
+                    let Some(di) = request.dispatches.iter().position(|d| d.id == dispatch.id && d.state != "settled" && d.thread_id == dispatch.thread_id && d.turn_id == dispatch.turn_id) else { return Ok(()); };
+                    let mut saved_reply = None;
+                    if *suspected_loss
+                        && let (Some(thread), Some(turn)) = (&dispatch.thread_id, &dispatch.turn_id)
+                    {
+                        let threads = db.collection::<AssistantConversation>(THREADS);
+                        let active = doc! {"_id": thread, "user_id": owner, "active_turn.turn_id": turn};
+                        let current = threads.find_one(active.clone()).session(&mut *session).await?;
+                        if current.as_ref().is_some_and(|row| {
+                            super::super::assistant_turn_restart::awaiting_reply(row, turn)
+                        }) {
+                            return Ok(());
+                        }
+                        // A cleared active turn and its reply commit together.
+                        saved_reply = db.collection::<AssistantMessage>(REPLIES)
+                            .find_one(doc! {"user_id": owner, "conversation_id": thread, "turn_id": turn, "role": "assistant"})
+                            .session(&mut *session).await?;
+                        if saved_reply.is_none() && current.is_some() {
+                            // Serialize with concurrent lease renewal or finish,
+                            // and prevent this expired turn from renewing after loss.
+                            let stopped = threads.update_one(active, doc! {
+                                "$set": {"active_turn.stop_requested": true},
+                                "$inc": {"automation_handoff_version": 1_i64},
+                            }).session(&mut *session).await?;
+                            if stopped.matched_count != 1 {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    let reply = reply.as_ref().or(saved_reply.as_ref());
+                    let text = reply.map(|m| m.text.as_str()).unwrap_or("Group member unavailable");
+                    let failure = if *unavailable {
+                        Some("member_unavailable")
+                    } else if *suspected_loss && reply.is_none() {
+                        Some("turn_lost")
+                    } else {
+                        None
+                    };
+                    let mut error = reply.and_then(|m| m.error_code.as_deref()).or(failure);
                     if error.is_none() && let Some(thread) = dispatch.thread_id.as_ref() {
                         let mut work = request.work.clone(); work.role = "group".into(); work.work_id = dispatch.id.clone();
                         if continuation::work_pending(db, owner, thread, &work, session).await? { return Ok(()); }
@@ -306,7 +365,7 @@ pub async fn recover(db: &Database, group: &AssistantGroup) -> AppResult<()> {
                     }
                     db.collection::<Document>(RUNS).update_one(doc! {"_id": &run.id}, doc! {"$inc": {"coordinator.dispatches": accepted.len() as i64}}).session(&mut *session).await?;
                     request.dispatches[di].state = "settled".into();
-                    for id in &accepted { request.dispatches.push(Dispatch {id: Uuid::new_v4().to_string(), agent_id: id.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
+                    for id in &accepted { request.dispatches.push(Dispatch {org_use_revision:roster.iter().find(|a| &a.id == id).ok_or(AppError::AssistantTurnRequired)?.org_use_revision, id: Uuid::new_v4().to_string(), agent_id: id.clone(), state: "queued".into(), thread_id: None, turn_id: None}); }
                     group.message_count += 1;
                     let name = roster.iter().find(|a| a.id == dispatch.agent_id).map(|a| a.name.as_str()).unwrap_or("unavailable member");
                     let text = if let Some(error) = error {format!("{name} failed ({error}).")} else if refused.is_empty() {text.into()} else {format!("{text}\nNyxID: handoffs refused by automation/group limits: {}", refused.join(", "))};

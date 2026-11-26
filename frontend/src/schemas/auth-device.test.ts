@@ -203,6 +203,26 @@ describe("browser device-code schemas", () => {
       pollWebResponseSchema.safeParse({ access_token: "secret" }).success,
     ).toBe(false);
   });
+
+  it("preserves HTTPS app links and discards invalid optional links without losing the challenge", () => {
+    const response = {
+      device_code: "nyx_adc_test",
+      user_code: "ABCD-EFGH",
+      verification_uri: "https://id.example/login/device",
+      verification_uri_complete: "https://id.example/login/device?user_code=ABCD-EFGH",
+      expires_in: 600,
+      interval: 5,
+    };
+    const appLink = "https://api.example/login/device?user_code=ABCD-EFGH";
+    expect(requestResponseSchema.parse({ ...response, app_verification_uri: appLink }).app_verification_uri).toBe(appLink);
+    expect(requestResponseSchema.parse(response).app_verification_uri).toBeUndefined();
+    for (const invalid of ["javascript:alert(1)", "nyxid://login/device", "http://api.example/login/device", "not-a-url", "https://", null, 42]) {
+      const parsed = requestResponseSchema.parse({ ...response, app_verification_uri: invalid });
+      expect(parsed.app_verification_uri).toBeUndefined();
+      expect(parsed.device_code).toBe(response.device_code);
+      expect(parsed.verification_uri_complete).toBe(response.verification_uri_complete);
+    }
+  });
 });
 
 describe("formatAuthDeviceUserCodeInput", () => {

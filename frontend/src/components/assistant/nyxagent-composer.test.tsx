@@ -1,13 +1,20 @@
+vi.mock("@/hooks/use-keys", async (original) => {
+  const hooks = await original<typeof import("@/hooks/use-keys")>();
+  return { ...hooks, useKeys: () => ({ ...hooks.useKeys(), refetch: vi.fn() }) };
+});
 vi.mock("./composer-editor", () => import("./composer-editor.test-support"));
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { markAdmitted } from "@/lib/assistant/send-admission";
 import { NyxAgentComposer } from "./nyxagent-composer";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { nyxAgentConversationSchema } from "@/schemas/assistant-nyxagent";
 import { ApiError } from "@/lib/api-client";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { ChatMessageBubble } from "./chat-message";
+import userEvent from "@testing-library/user-event";
+import type { KeyInfo } from "@/types/keys";
 
 const conversation = nyxAgentConversationSchema.parse({
   id: `nyxa-${"1".repeat(32)}`, title: "Thread", model: "nyxagent/chat", created_at: "2026-10-01T00:00:00Z",
@@ -23,7 +30,7 @@ const props = () => ({
 function mount(initial = props()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const view = render(<QueryClientProvider client={client}><NyxAgentComposer {...initial} /></QueryClientProvider>);
-  return { ...view, props: initial, rerenderProps: (next: typeof initial) => view.rerender(<QueryClientProvider client={client}><NyxAgentComposer {...next} /></QueryClientProvider>) };
+  return { ...view, client, props: initial, rerenderProps: (next: typeof initial) => view.rerender(<QueryClientProvider client={client}><NyxAgentComposer {...next} /></QueryClientProvider>) };
 }
 async function send(text = "Focus on the latest results") {
   await waitFor(() => expect(screen.getByRole("textbox")).toBeEnabled());
@@ -103,6 +110,27 @@ describe("NyxAgent web steering", () => {
     render(<ChatMessageBubble message={{ id: "steer", role: "user", content: "Guidance", timestamp: 1, status: "complete", steering: accepted }} />);
     expect(screen.getByRole("note")).toHaveTextContent("Steering · Guidance applied to this reply.");
   });
+  it("guards the explicit send-as-new-message action after a selected connection becomes unavailable", async () => {
+    vi.mocked(nyxAgentTransport.steer).mockRejectedValue(refused(409, "no_active_turn"));
+    const view = mount();
+    await send();
+    await screen.findByRole("button", { name: "Send as new message" });
+    const key = { id: "work", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+    act(() => view.client.setQueryData(["keys", "list", undefined], [key]));
+    view.rerenderProps({ ...view.props, active: false, sending: false, conversation: { ...conversation, active_turn: null } });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Add context" }));
+    await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+    await user.click(screen.getByRole("button", { name: /Work account/ }));
+    act(() => view.client.setQueryData(["keys", "list", undefined], [{ ...key, credential_missing: true }]));
+    await waitFor(() => expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Credential missing"));
+    await user.click(screen.getByRole("button", { name: "Send as new message" }));
+    expect(view.props.onSend).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Send as new message" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Remove connection for this message" }));
+    await user.click(screen.getByRole("button", { name: "Send as new message" }));
+    expect(view.props.onSend).toHaveBeenCalledExactlyOnceWith("Focus on the latest results");
+  });
 });
 
 it("includes the combined settings menu inside the composer", () => {
@@ -110,4 +138,63 @@ it("includes the combined settings menu inside the composer", () => {
   expect(view.container.querySelector("[data-composer-footer]")).toContainElement(
     screen.getByRole("button", { name: /Thinking and permissions/ }),
   );
+});
+
+it("still steers an active turn when its retained connection chip is unavailable", async () => {
+  const view = mount({ ...props(), active: false, sending: false });
+  const key = { id: "work", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+  act(() => view.client.setQueryData(["keys", "list", undefined], [key]));
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Add context" }));
+  await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+  await user.click(screen.getByRole("button", { name: /Work account/ }));
+  act(() => view.client.setQueryData(["keys", "list", undefined], [{ ...key, credential_missing: true }]));
+  view.rerenderProps({ ...view.props, active: true, sending: true });
+  await send("Keep steering");
+  await waitFor(() => expect(nyxAgentTransport.steer).toHaveBeenCalledWith(conversation.id, "Keep steering", "turn-1", expect.any(String)));
+  expect(view.props.onSend).not.toHaveBeenCalled();
+});
+
+it.each([true, false])("A2: recovery consumes only an admitted rejection (admitted=%s)", async (admitted) => {
+  vi.mocked(nyxAgentTransport.steer).mockRejectedValue(refused(409, "no_active_turn"));
+  const view = mount();
+  await send("Recover this message");
+  await screen.findByRole("button", { name: "Send as new message" });
+  const key = { id: "work", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+  act(() => view.client.setQueryData(["keys", "list", undefined], [key]));
+  view.rerenderProps({ ...view.props, active: false, sending: false, conversation: { ...conversation, active_turn: null } });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Add context" }));
+  await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+  await user.click(screen.getByRole("button", { name: /Work account/ }));
+  const failure = new Error("interrupted");
+  view.props.onSend.mockRejectedValueOnce(admitted ? markAdmitted(failure) : failure);
+  await user.click(screen.getByRole("button", { name: "Send as new message" }));
+  expect(view.props.onSend).toHaveBeenCalledExactlyOnceWith("/service work\nRecover this message");
+  if (admitted) {
+    expect(screen.queryByRole("button", { name: "Send as new message" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Connection for this message" })).not.toBeInTheDocument();
+  } else {
+    expect(screen.getByRole("button", { name: "Send as new message" })).toBeEnabled();
+    expect(screen.getByRole("group", { name: "Connection for this message" })).toHaveTextContent("Work account");
+  }
+});
+
+it("A1: recovery reads a synchronous cache revocation before dispatch", async () => {
+  vi.mocked(nyxAgentTransport.steer).mockRejectedValue(refused(409, "no_active_turn"));
+  const view = mount(); await send();
+  await screen.findByRole("button", { name: "Send as new message" });
+  const key = { id: "work", label: "Work account", slug: "work", is_active: true, status: "active" } as KeyInfo;
+  act(() => view.client.setQueryData(["keys", "list", undefined], [key]));
+  view.rerenderProps({ ...view.props, active: false, sending: false, conversation: { ...conversation, active_turn: null } });
+  const user = userEvent.setup();
+  await user.click(screen.getByRole("button", { name: "Add context" }));
+  await user.click(screen.getByRole("menuitem", { name: "Use a connection" }));
+  await user.click(screen.getByRole("button", { name: /Work account/ }));
+  act(() => {
+    view.client.setQueryData(["keys", "list", undefined], [{ ...key, credential_missing: true }]);
+    fireEvent.click(screen.getByRole("button", { name: "Send as new message" }));
+  });
+  expect(view.props.onSend).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Send as new message" })).toBeEnabled();
 });

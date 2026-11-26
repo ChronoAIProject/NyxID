@@ -11,6 +11,7 @@ function readOnlyPage() {
   if (search || hash) return false;
   return pathname === "/" || pathname === "/dashboard" ||
     pathname === "/privacy" || pathname === "/terms" ||
+    pathname === "/data-deletion" ||
     pathname === "/docs" || pathname.startsWith("/docs/") ||
     pathname === "/blog" || pathname.startsWith("/blog/");
 }

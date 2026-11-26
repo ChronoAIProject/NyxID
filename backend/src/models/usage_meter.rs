@@ -113,6 +113,9 @@ crate::exact_credit_model! {
     ]
     #[derive(Clone, Debug, Default, Serialize, ToSchema, PartialEq, Eq)]
     pub struct UsageFunding {
+        /// Original admission estimate; never a final usage quantity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub reserved_quantity: Option<i64>,
         /// Legacy rows without a reservation must never consume benefits.
         #[serde(default)]
         pub wallet_only: bool,
@@ -241,8 +244,34 @@ pub struct MachineUsageAttribution {
     pub principal_kind: String,
 }
 
+/// Projection for snapshot hold reconciliation; never inserted as a meter row.
+#[derive(Clone, Debug, Deserialize)]
+pub(crate) struct UsageHold {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub billing_owner_id: String,
+    #[serde(default, with = "crate::models::credits::whole")]
+    pub reserved_credits: Credits,
+    #[serde(default)]
+    pub funding: Option<UsageFunding>,
+}
+
+/// Existing recovery marker; absent on measured usage and ordinary requests.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct StuckRequestExit {
+    pub policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_id: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub ended_at: DateTime<Utc>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageMeterRow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stuck_request_exit: Option<StuckRequestExit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_tariff: Option<Box<crate::models::platform_model_tariff::ModelMeterBinding>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -309,6 +338,13 @@ pub struct UsageMeterRow {
     /// Crash-recoverable final quantities for all platform components.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_platform_usage: Option<crate::models::service_billing::PlatformUsage>,
+    /// Interim numeric evidence is invisible to final-quantity recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore, value_type = Object)]
+    pub usage_checkpoint: Option<Box<crate::models::usage_checkpoint::UsageCheckpoint>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore, value_type = Object)]
+    pub realtime_session: Option<Box<crate::models::realtime_session::RealtimeSession>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_attempt: Option<PoolAttemptAccounting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

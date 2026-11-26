@@ -39,8 +39,15 @@ fn hostname(value: Option<String>) -> Option<String> {
 }
 
 pub fn instance() -> &'static EngineWorkerInstance {
+    #[cfg(test)]
+    if let Ok(instance) = TEST_WORKER.try_with(|worker| *worker) {
+        return instance;
+    }
     &WORKER
 }
+
+#[cfg(test)]
+tokio::task_local! { pub(crate) static TEST_WORKER: &'static EngineWorkerInstance; }
 
 pub fn initialize() {
     install_panic_hook();

@@ -74,7 +74,7 @@ Requests about “my account” require the owner's personal connection. Discove
 
 `assistant:hosted-connect-intent-v1` activates the additive stored lock; preview displays it and completion/resume cannot switch it. Non-assistant and legacy links retain their override behavior. Plugins uses the same hosted modal under the human session and offers **Connect your own** on org-only Added cards. **Manage** and **Advanced setup** remain available; SSH/custom/node setup stays in Advanced. Named and unnamed `settings_link add_service` return structured connect guidance, identifying a catalog first when unnamed. Specialist keys cannot create links: the owner asks NyxBot to perform setup, sending a hosted link when supported, and grants the specialist separately. A specialist's refusal includes only existing connections within its effective connection grants, including auto/platform rows exactly when authentication permits them. Org-agent keys remain owned by the acting member, but their effective connection IDs are restricted to the agent organization's rows. Non-hosted `connect_own` offers report `no_separate_account` with one-step guidance. Guests receive no added inventory.
 
-See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md) for the required reader/UI-first deployment and drained-writer activation. The table below describes the activated rule for covered org connections; the excluded model transport contract remains as described in its section.
+See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md) for reader/UI compatibility and automatic activation from observed writer support; no readiness roster/drain declaration is required. The table below describes the activated rule for covered org connections; the excluded model transport contract remains as described in its section.
 
 ## Existing permission modes
 
@@ -83,6 +83,12 @@ See [security rollout readiness](SECURITY_ROLLOUT_READINESS.md) for the required
 | Full access (`autopilot`) | Trusted owner selection this turn or an exact single-use org card | Existing bypass behavior and successful-effect receipts |
 | Auto (`nyxmode`) | Trusted owner selection this turn or an exact single-use org card, including reads | Existing sensitive/destructive classification |
 | Ask every time (`ask_every_time`) | Trusted owner selection this turn or an exact single-use org card, including reads | Existing change/sensitive/destructive classification |
+
+A Sheets append with `insertDataOption=INSERT_ROWS` satisfies NyxID's compiled
+append-only contract. Auto treats it as a change and a deny-destructive rule
+allows it. Omitting that option, overwriting cells, clearing values or editing
+the sheet structure is destructive. Ask every time and independent write
+approval policies still apply to matching appends.
 
 Organization ownership comes from the resolved effective owner and authoritative
 User type, never a model flag or an unrelated catalog creator. Public Person-owned

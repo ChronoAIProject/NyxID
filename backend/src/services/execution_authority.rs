@@ -15,7 +15,7 @@ use crate::models::default_request_header::ResolvedDefaultRequestHeader as Defau
 use crate::models::downstream_service::ProxyOperationPolicy;
 use crate::services::mcp_service;
 use crate::services::provider_token_exchange_service;
-use crate::services::proxy_service::UserServiceResolution;
+use crate::services::proxy_service::{CatalogHeaderBinding, UserServiceResolution};
 use zeroize::Zeroizing;
 
 pub const LEGACY_CONTRACT_VERSION: &str = "nyxid-exact-execution-authority.v1";
@@ -64,7 +64,7 @@ impl std::fmt::Debug for HeaderProjection {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct DefaultHeadersProjection {
-    pub catalog: Vec<HeaderProjection>,
+    catalog: CatalogHeaderBinding<Vec<HeaderProjection>>,
     pub user_service: Vec<HeaderProjection>,
 }
 
@@ -149,7 +149,7 @@ pub fn build_projection(
             custom_user_agent: service.custom_user_agent.clone(),
         },
         default_headers: DefaultHeadersProjection {
-            catalog: project_headers(&target.catalog_default_headers),
+            catalog: target.catalog_header_binding(project_headers),
             user_service: project_headers(&target.user_service_default_headers),
         },
         proxy_operation_policy: service.proxy_operation_policy.clone(),
@@ -279,12 +279,12 @@ mod tests {
                 custom_user_agent: None,
             },
             default_headers: DefaultHeadersProjection {
-                catalog: vec![HeaderProjection {
+                catalog: CatalogHeaderBinding::Applied(vec![HeaderProjection {
                     name: "X-Example".to_string(),
                     value: "one".to_string().into(),
                     overridable: false,
                     sensitive: false,
-                }],
+                }]),
                 user_service: Vec::new(),
             },
             proxy_operation_policy: None,
@@ -293,6 +293,13 @@ mod tests {
                 configured_fallback_node_ids: vec!["node-b".to_string(), "node-a".to_string()],
             },
         }
+    }
+
+    fn sample_header(projection: &mut ExecutionAuthorityProjection) -> &mut HeaderProjection {
+        let CatalogHeaderBinding::Applied(headers) = &mut projection.default_headers.catalog else {
+            panic!("sample projection applies its catalog headers");
+        };
+        &mut headers[0]
     }
 
     #[test]
@@ -314,14 +321,14 @@ mod tests {
     fn header_debug_redacts_nested_values_without_changing_approval_serialization() {
         let mut projection = sample_projection();
         let secret = "distinctive-sensitive-header-secret-7c9e";
-        projection.default_headers.catalog[0].value = secret.to_owned().into();
+        sample_header(&mut projection).value = secret.to_owned().into();
         // Redact every value, including a mislabelled sensitive header.
-        projection.default_headers.catalog[0].sensitive = false;
+        sample_header(&mut projection).sensitive = false;
         assert!(!format!("{projection:?}").contains(secret));
         assert!(serde_json::to_string(&projection).unwrap().contains(secret));
         let original_v1 = legacy_digest(&projection);
         let original_v2 = digest(&projection);
-        projection.default_headers.catalog[0].value = "changed".to_owned().into();
+        sample_header(&mut projection).value = "changed".to_owned().into();
         assert_ne!(original_v1, legacy_digest(&projection));
         assert_ne!(original_v2, digest(&projection));
     }
@@ -329,7 +336,7 @@ mod tests {
     #[test]
     fn streamed_secret_hash_matches_frozen_canonical_bytes_and_clears_tree() {
         let mut projection = sample_projection();
-        projection.default_headers.catalog[0].value = "distinctive-header-α-\"\n".to_owned().into();
+        sample_header(&mut projection).value = "distinctive-header-α-\"\n".to_owned().into();
         assert_eq!(
             digest(&projection),
             mcp_service::canonical_sha256(serde_json::to_value(&projection).unwrap())
@@ -444,7 +451,7 @@ mod tests {
     #[test]
     fn header_value_participates_in_the_digest() {
         let mut changed = sample_projection();
-        changed.default_headers.catalog[0].value = "two".to_string().into();
+        sample_header(&mut changed).value = "two".to_string().into();
         assert_ne!(digest(&sample_projection()), digest(&changed));
     }
 

@@ -30,6 +30,7 @@ async fn channel_link_telegram_worker_reserves_callback_without_browser_polling(
         COLLECTION_NAME as LINKS, ChannelConnectLink, LinkStatus,
     };
     let (state, actor, server) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     let created = links::create(
         &state.db,
         &state.encryption_keys,
@@ -459,7 +460,8 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
     assert_eq!(
         super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &result)
             .await
-            .unwrap(),
+            .unwrap()
+            .as_str(),
         CHILD
     );
     let response = serde_json::to_string(&crate::handlers::telegram_new::RequestResponse::from(
@@ -620,6 +622,9 @@ async fn telegram_new_failed_webhook_resumes_same_saved_bot_after_expiry() {
     let saved = super::channel_bot_service::get_bot(&state.db, &ready.id)
         .await
         .unwrap();
+    for field in ["bot_token_encrypted", "webhook_secret_encrypted"] {
+        assert_eq!(saved.secret_context_versions.get(field), Some(&3));
+    }
     assert_eq!(saved.status, "pending");
     state.db.collection::<TelegramBotRequest>(REQUESTS).update_one(doc! {"_id": &ready.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::hours(1))}}).await.unwrap();
     assert_eq!(
@@ -2738,6 +2743,7 @@ async fn telegram_new_manager_channel_filters_setup_and_authenticates_before_rou
 #[tokio::test]
 async fn telegram_new_manager_channel_acknowledges_before_callback_and_routes_only_selected_chat() {
     let (state, actor, server) = fixture().await;
+    let _delivery_origin = crate::services::resource_adapter::register_test_origin(&server.uri());
     let channel = register_manager_channel(&state, &actor, &server).await;
     let agent_id = uuid::Uuid::new_v4().to_string();
     state.db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME).insert_one(doc! {
@@ -3031,3 +3037,33 @@ async fn platform_onboarding_native_command_errors_reply_safely_and_provider_fai
 
 #[path = "telegram_new_delivery_tests.rs"]
 mod delivery_tests;
+
+pub(crate) async fn mixed_telegram_record(
+    keys: std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+) -> bson::Document {
+    let (mut state, actor, server) = fixture().await;
+    state.encryption_keys = keys;
+    let pending = waiting_consent(&state, &actor, &server).await;
+    let ready = approve(&state, &actor, &server, &pending.id, 700).await;
+    provider_connection(&server, &ready.id, 200).await;
+    let base = server.uri();
+    service(&state, &base)
+        .connect(&actor, &ready.id, 900, ready.revision)
+        .await
+        .unwrap();
+    let row = state
+        .db
+        .collection::<bson::Document>(BOTS)
+        .find_one(doc! {"_id": &ready.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let sent = server.received_requests().await.unwrap();
+    let hook: Value = sent
+        .iter()
+        .find(|r| r.url.path() == format!("/bot{CHILD}/setWebhook"))
+        .unwrap()
+        .body_json()
+        .unwrap();
+    doc! {"row":row,"expected":{"bot_token_encrypted":CHILD,"webhook_secret_encrypted":hook["secret_token"].as_str().unwrap()}}
+}

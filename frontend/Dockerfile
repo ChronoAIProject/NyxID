@@ -26,11 +26,18 @@ COPY cli/resources/machine-container/seccomp.json /build/cli/resources/machine-c
 # restart backend, done.
 
 ARG NYXID_GIT_HASH
+ARG CRASH_ARTIFACT_ID
+ENV CRASH_ARTIFACT_ID=${CRASH_ARTIFACT_ID}
 ARG SOURCE_DATE_EPOCH
+ARG VITE_MOBILE_APP_URL
 ENV SOURCE_COMMIT=${NYXID_GIT_HASH}
 ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
 
-RUN npm run build
+COPY tools/crash-artifacts/ /build/tools/crash-artifacts/
+# Optional JSON secret: build-only CRASH_ARTIFACTS_SENTRY_* configuration.
+RUN --mount=type=secret,id=crash_artifacts_sentry \
+    if [ -s /run/secrets/crash_artifacts_sentry ]; then npm ci --prefix /build/tools/crash-artifacts; fi \
+    && node /build/tools/crash-artifacts/build-web.mjs
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM nginxinc/nginx-unprivileged:1.27-alpine
@@ -47,6 +54,8 @@ RUN apk add --no-cache python3 \
     && chown 101:101 /etc/nginx/nyxid/generated
 COPY frontend/nginx.conf.template /etc/nginx/nyxid/default.conf.template
 COPY frontend/scripts/render-nginx.py /etc/nginx/nyxid/render-nginx.py
+COPY frontend/scripts/frontend-readiness.py /etc/nginx/nyxid/frontend-readiness.py
+RUN python3 /etc/nginx/nyxid/frontend-readiness.py --inventory
 COPY --chmod=755 frontend/scripts/nginx-policy-entrypoint.sh /docker-entrypoint.d/40-nyxid-policy.sh
 COPY frontend/nginx-default.conf /etc/nginx/conf.d/default.conf
 USER 101

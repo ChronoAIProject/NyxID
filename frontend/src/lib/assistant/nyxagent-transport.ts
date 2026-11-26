@@ -1,5 +1,6 @@
 import { translateUi } from "@/i18n/use-ui-translation";
 import { parseHistoryResponse } from "@/schemas/assistant-history-compat";
+import { useAssistantPinsStore } from "@/stores/assistant-pins-store";
 import { settledInterruptedTurn } from "./interrupted-turn";
 import { assistantTitleLanguage } from "@/lib/assistant/title-language";
 import { formatCapacityWait } from "./capacity-wait";
@@ -93,6 +94,7 @@ function toolCalls(
       startedAt: Date.parse(activity.started_at),
       finishedAt: activity.ended_at ? Date.parse(activity.ended_at) : undefined,
       failure: activity.failure,
+      ...(activity.memory_recovery ? { memoryRecovery: activity.memory_recovery } : {}),
       decision: activity.decision,
     })),
   };
@@ -110,6 +112,7 @@ function images(
   return {
     images: attachments.map((attachment) => ({
       id: attachment.id,
+      ...(attachment.pdf ? { pdf: attachment.pdf } : {}),
       expired: attachment.expired,
       endpoint: `${path(conversationId)}/attachments/${encodeURIComponent(attachment.id)}`,
       contentType: attachment.content_type,
@@ -144,6 +147,7 @@ export function storedError(code: string | null, capacityWaitMs?: number | null,
     return "The previous operation may have taken effect. Check its result before trying again.";
   }
   if (code === "credential_invalid") return "The assistant credential could not be accepted.";
+  if (code === "credential_revoked") return translateUi("NyxID rejected the assistant credential during this turn. Review completed actions before retrying.");
   if (code === "model_not_configured") return "This assistant profile is unavailable. Choose another model in the model selector.";
   if (code === "model_unavailable") return "The selected model is unavailable. Choose another model in the model selector.";
   if (code === "model_policy_denied") return translateUi("An approval policy denies this model call. Review the model service's Deny rules in Approval settings; for organization policy, ask its administrator.");
@@ -317,11 +321,14 @@ export class NyxAgentTransport {
     return this.live.get(id)?.conversation ?? this.histories.get(id)?.conversation ?? this.index.get(id);
   }
 
-  /** Drop every cached thread of an agent that was deleted permanently. */
+  /** Drop locally held conversations when an agent is removed or access ends. */
   forgetAgent(agentId: string) {
     this.mutationRevision += 1;
     for (const row of this.getConversations(agentId)) {
       this.rowRevisions.set(row.id, (this.rowRevisions.get(row.id) ?? 0) + 1);
+      this.live.get(row.id)?.controller.abort();
+      this.live.delete(row.id);
+      this.decisionViews.delete(row.id);
       this.index.delete(row.id);
       this.histories.delete(row.id);
       this.consumedRetries.delete(row.id);
@@ -583,6 +590,7 @@ export class NyxAgentTransport {
     const generation = this.identity();
     await assistantJson(path(id), { method: "DELETE" });
     this.current(generation);
+    if (this.owner) useAssistantPinsStore.getState().remove(this.owner, id);
     this.mutationRevision += 1;
     this.rowRevisions.set(id, (this.rowRevisions.get(id) ?? 0) + 1);
     this.index.delete(id);
@@ -678,8 +686,10 @@ export class NyxAgentTransport {
         errorCode: message.error_code,
         ...toolCalls(message.activities, id),
         ...images(id, message.attachments),
+        voice: message.voice,
         via: message.via ?? (message.platform_origin ? "telegram" : null),
         activityTotal: message.activity_total,
+        continuedAfterRestart: message.continued_after_restart,
         steering: message.steering,
         continuation_of: message.continuation_of,
         origin: message.origin,
@@ -696,7 +706,7 @@ export class NyxAgentTransport {
     const polledTurn = history?.conversation.active_turn;
     const liveActivity =
       polledTurn && (!liveTurnId || polledTurn.turn_id === liveTurnId)
-        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total }
+        ? { ...toolCalls(polledTurn.activities, id), ...images(id, polledTurn.attachments), activityTotal: polledTurn.activity_total, continuedAfterRestart: polledTurn.continued_after_restart }
         : {};
     const settledImages = new Map(
       (history?.messages ?? []).map((message) => [message.id, images(id, message.attachments)]),
@@ -751,6 +761,7 @@ export class NyxAgentTransport {
           } : undefined,
           steering: settled?.steering,
           continuation_of: settled?.continuation_of ?? message.continuation_of,
+          voice: settled?.voice,
           via: settled?.via ?? (settled?.platform_origin ? "telegram" : null),
           turnId: settled?.turn_id ?? (streaming ? live.state.activeTurn?.turnId ?? conversation?.active_turn?.turn_id : undefined),
           content: message.blocks.map((block) => block.text).join("\n\n"),

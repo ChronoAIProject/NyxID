@@ -359,7 +359,7 @@ pub async fn register(
     // we reserve one slot up front. When it is disabled (public launch),
     // any invite code the client sent is ignored and registration proceeds
     // without reserving anything.
-    let invite_code_id = if feature_flag_service::invitation_code_required(&state.db).await? {
+    let invite_reservation = if feature_flag_service::invitation_code_required(&state.db).await? {
         let raw_code = body
             .invite_code
             .as_deref()
@@ -406,19 +406,13 @@ pub async fn register(
         &body.email,
         &body.password,
         body.display_name.as_deref(),
-        invite_code_id.as_deref(),
+        invite_reservation.as_ref(),
         state.config.auto_verify_email,
     )
     .await;
 
     let result = match register_result {
-        Ok(r) if r.actually_created => {
-            if let Some(ref code_id) = invite_code_id {
-                invite_code_service::record_usage(&state.db, code_id, &r.user_id, &body.email)
-                    .await;
-            }
-            r
-        }
+        Ok(r) if r.actually_created => r,
         // The two arms below silently no-op the invite-code accounting:
         // `Ok(_)` is the email-enumeration-protection fake-success branch
         // (no real user was created); `Err(_)` is a downstream failure.
@@ -429,7 +423,7 @@ pub async fn register(
             // prevent enumeration. The invite code slot (if any) was never
             // actually used, so release it before returning the fake
             // result to the caller.
-            if let Some(ref code_id) = invite_code_id {
+            if let Some(ref code_id) = invite_reservation {
                 invite_code_service::release_reservation(&state.db, code_id).await;
             }
             r
@@ -437,12 +431,16 @@ pub async fn register(
         Err(e) => {
             // Registration failed for another reason (hash, DB write, etc).
             // Release any reservation before surfacing the error.
-            if let Some(ref code_id) = invite_code_id {
+            if let Some(ref code_id) = invite_reservation {
                 invite_code_service::release_reservation(&state.db, code_id).await;
             }
             return Err(e);
         }
     };
+
+    let invite_code_id = invite_reservation
+        .as_ref()
+        .map(|r| r.invite_code_id.as_str());
 
     audit_service::log_async(
         state.db.clone(),
@@ -468,7 +466,7 @@ pub async fn register(
     // `result.actually_created` is false there and no real user exists.
     // Emitting would inflate signup counts with phantom users.
     if result.actually_created {
-        let invite_code_id_hash = invite_code_id.as_deref().map(hash_short_id);
+        let invite_code_id_hash = invite_code_id.map(hash_short_id);
         let source = if invite_code_id.is_some() {
             "invite_code".to_string()
         } else {
@@ -496,7 +494,7 @@ pub async fn register(
         // counts only successful conversions. Metadata is best-effort:
         // a missing fetch result drops the event rather than fabricating
         // placeholder ids.
-        if let Some(ref code_id) = invite_code_id
+        if let Some(code_id) = invite_code_id
             && let Some(meta) = invite_code_service::fetch_telemetry_meta(&state.db, code_id).await
         {
             let days = (chrono::Utc::now() - meta.created_at).num_days().max(0) as u64;
@@ -729,6 +727,10 @@ pub(crate) async fn finish_password_login(
                 let factor = completion.commit().await?;
                 crate::services::mfa_service::notify_recovery_use(&state, &user.id, factor);
             }
+            crate::services::billing::schedules::eligibility::after_human_login(
+                &state.db, &user.id,
+            )
+            .await;
 
             audit_service::log_async(
                 state.db.clone(),
@@ -821,6 +823,10 @@ pub(crate) async fn finish_password_login(
                 crate::services::transaction_service::commit(&mut transaction).await?;
                 prepared.tokens
             };
+            crate::services::billing::schedules::eligibility::after_human_login(
+                &state.db, &user.id,
+            )
+            .await;
             audit_service::log_async(
                 state.db.clone(),
                 Some(user.id.clone()),
@@ -1294,6 +1300,8 @@ pub async fn cli_token(
     )
     .await?;
 
+    crate::services::billing::schedules::eligibility::after_human_login(&state.db, &user_id_str)
+        .await;
     Ok(Json(CliTokenResponse {
         access_token: tokens.access_token,
         refresh_token: tokens.refresh_token,

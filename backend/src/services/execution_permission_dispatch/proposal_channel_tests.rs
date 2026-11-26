@@ -4,9 +4,16 @@ use crate::models::{
     execution_permission_channel::{COLLECTION_NAME as DELIVERIES, Delivery},
     nyxbot_channel::{ChannelTurnDelivery, NyxbotEvent},
 };
-use crate::services::execution_permission_channel as channel;
+use crate::services::{
+    execution_permission_channel as channel,
+    security_readiness_service::refresh_test_replica_heartbeat,
+};
+use serde_json::Value;
 
-async fn channel_turn(name: &str, native: bool) -> (Fixture, AssistantConversation, String) {
+pub(super) async fn channel_turn(
+    name: &str,
+    native: bool,
+) -> (Fixture, AssistantConversation, String) {
     channel_turn_transport(name, if native { "native" } else { "gateway" }).await
 }
 async fn channel_turn_transport(
@@ -70,6 +77,8 @@ async fn channel_turn_transport(
         platform: if native { "discord" } else { "telegram" }.into(),
     };
     let delivery = ChannelTurnDelivery {
+        restart_owner_verified: false,
+        notice_language: None,
         execution_source_bound: false,
         execution_owner_verified: true,
         sender_kind: Some(crate::models::channel_thread::ThreadSenderKind::Human),
@@ -85,6 +94,7 @@ async fn channel_turn_transport(
         stream_deadline: Utc::now() + chrono::Duration::seconds(570),
         checked_at: Utc::now(),
         claim_id: None,
+        target_context_version: None,
         target_ciphertext: None,
         target_expires_at: None,
     };
@@ -115,9 +125,9 @@ async fn channel_turn_transport(
         .unwrap();
     db.collection::<Document>("nyxbot_events").update_one(doc!{"_id":&event},doc!{"$set":{"event_context_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
     if native {
-        db.collection::<Document>("nyxbot_gateway_responses").insert_one(doc!{"_id":Uuid::new_v4().to_string(),"response_id":"original-response","user_id":&f.owner,"channel_id":&id,"binding_id":"bound","partition":"original-chat","event_key":&event,"request_hash":"hash","conversation_id":&previous.id,"terminal":false,"revision":1_i64,"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1]},"created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(24))}).await.unwrap();
+        native_response(&f, &id, &event, "original-response", &previous.id).await;
     }
-    if transport == "direct" {
+    if !native {
         let token = f
             .state
             .encryption_keys
@@ -126,6 +136,22 @@ async fn channel_turn_transport(
             .unwrap();
         db.collection::<Document>("channel_bots").update_one(doc!{"_id":&bot},doc!{"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token}}}).await.unwrap();
         db.collection::<Document>("channel_messages").insert_one(doc!{"_id":"original-provider-event","conversation_id":&route,"channel_bot_id":&bot,"user_id":&f.owner,"direction":"inbound","platform":"telegram","platform_conversation_id":"200","platform_message_id":"500","sender_platform_id":"7","agent_api_key_id":&f.key,"content_type":"text","thread_id":"77","created_at":now}).await.unwrap();
+    }
+    if !native {
+        db.collection::<Document>("nyxbot_events")
+            .update_one(
+                doc! {"_id":&event},
+                doc! {"$set":{"relay_message_id":"original-provider-event"}},
+            )
+            .await
+            .unwrap();
+        db.collection::<Document>("nyxbot_threads")
+            .update_one(
+                doc! {"_id":&thread},
+                doc! {"$set":{"platform_chat_id":"200","platform_thread_id":"77"}},
+            )
+            .await
+            .unwrap();
     }
     let request = engine::TurnRequest {
         conversation_id: Some(previous.id.clone()),
@@ -142,6 +168,7 @@ async fn channel_turn_transport(
     start.execution_enrollment = true;
     start.channel_event_id = Some(event.clone());
     start.reply_channel = Some(origin);
+    refresh_test_replica_heartbeat(db).await;
     let row = engine::begin_turn(db, &f.owner, start, &f.state.encryption_keys)
         .await
         .unwrap();
@@ -169,6 +196,7 @@ async fn channel_proposal(f: &Fixture) -> ApprovalRequest {
         .unwrap()
 }
 async fn approve(f: &Fixture, request: &ApprovalRequest, choice: &str) {
+    refresh_test_replica_heartbeat(&f.state.db).await;
     let response = crate::handlers::approvals::decide_execution_request(
         axum::extract::State(f.state.clone()),
         test_utils::test_auth_user(&f.owner),
@@ -227,7 +255,8 @@ async fn migration_channel_review_resume_and_result_occurrence_keep_original_sou
             &f.state.db,
             &f.owner,
             &row.id,
-            "yes"
+            "yes",
+            None,
         )
         .await
         .unwrap()
@@ -469,6 +498,24 @@ fn migration_channel_source_is_additive_and_redacted() {
     assert!(!debug.contains("secret-source") && !debug.contains("secret-key"));
 }
 
+async fn native_response(
+    f: &Fixture,
+    channel: &str,
+    event: &str,
+    response: &str,
+    conversation: &str,
+) {
+    f.state.db.collection::<Document>("nyxbot_gateway_responses").insert_one(doc! {
+        "_id": Uuid::new_v4().to_string(), "response_id": response, "user_id": &f.owner,
+        "channel_id": channel, "binding_id": "bound", "partition": "original-chat",
+        "event_key": event, "request_hash": "hash", "conversation_id": conversation,
+        "terminal": false, "revision": 1_i64,
+        "payload_ciphertext": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+        "created_at": bson::DateTime::now(),
+        "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::hours(24)),
+    }).await.unwrap();
+}
+
 async fn another_channel_turn(
     f: &Fixture,
     row: &AssistantConversation,
@@ -489,7 +536,28 @@ async fn another_channel_turn(
     event.status = "running".into();
     event.created_at = Utc::now();
     let id = event.id.clone();
-    let origin = event.delivery.as_ref().unwrap().origin.clone();
+    let delivery = event.delivery.as_mut().unwrap();
+    delivery.execution_source_bound = false;
+    if delivery.origin.native_event_id.is_some() {
+        delivery.origin.native_event_id = Some(id.clone());
+        native_response(f, &event.channel_id, &id, &event.event_id, &row.id).await;
+    }
+    if let Some(relay_id) = &mut event.relay_message_id {
+        let messages = f.state.db.collection::<Document>("channel_messages");
+        let mut inbound = messages
+            .find_one(doc! {"_id": &*relay_id})
+            .await
+            .unwrap()
+            .unwrap();
+        relay_id.clone_from(&event.event_id);
+        inbound.insert("_id", &event.event_id);
+        inbound.insert(
+            "platform_message_id",
+            Uuid::new_v4().as_fields().0.to_string(),
+        );
+        messages.insert_one(inbound).await.unwrap();
+    }
+    let origin = delivery.origin.clone();
     f.state
         .db
         .collection::<NyxbotEvent>("nyxbot_events")
@@ -594,6 +662,7 @@ async fn migration_channel_readiness_loss_after_review_never_downgrades() {
 }
 
 async fn result_ready(f: &Fixture, row: &AssistantConversation) -> Delivery {
+    refresh_test_replica_heartbeat(&f.state.db).await;
     assert_eq!(write_call(f).await.0, StatusCode::FORBIDDEN);
     let request = channel_proposal(f).await;
     approve(f, &request, "operation").await;
@@ -631,71 +700,61 @@ async fn gateway(f: &Fixture, native: bool, outcome: &str) -> wiremock::MockServ
     server
 }
 #[tokio::test]
-async fn migration_channel_result_transport_claims_once_and_retains_original_event() {
-    for native in [false, true] {
-        for outcome in ["confirmed", "rejected", "unknown"] {
-            let (f, row, event) = channel_turn("migration_channel_result_send", native).await;
-            let server = gateway(&f, native, outcome).await;
-            let d = result_ready(&f, &row).await;
-            let before = f
-                .state
-                .db
-                .collection::<Document>("nyxbot_events")
-                .find_one(doc! {"_id":&event})
-                .await
-                .unwrap()
-                .unwrap();
-            // Newer chat traffic cannot redirect a retained occurrence.
-            f.state
-                .db
-                .collection::<Document>("nyxbot_threads")
-                .update_many(doc! {}, doc! {"$set":{"last_message_id":"newer-source"}})
-                .await
-                .unwrap();
-            let (a, b) = tokio::join!(
-                crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id),
-                crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
-            );
-            a.unwrap();
-            b.unwrap();
+async fn migration_channel_native_result_claims_once_and_retains_original_event() {
+    for outcome in ["confirmed", "rejected", "unknown"] {
+        let (f, row, event) = channel_turn("migration_channel_result_send", true).await;
+        let server = gateway(&f, true, outcome).await;
+        let d = result_ready(&f, &row).await;
+        let before = f
+            .state
+            .db
+            .collection::<Document>("nyxbot_events")
+            .find_one(doc! {"_id":&event})
+            .await
+            .unwrap()
+            .unwrap();
+        // Newer chat traffic cannot redirect a retained occurrence.
+        f.state
+            .db
+            .collection::<Document>("nyxbot_threads")
+            .update_many(doc! {}, doc! {"$set":{"last_message_id":"newer-source"}})
+            .await
+            .unwrap();
+        let (a, b) = tokio::join!(
+            crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id),
             crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
-                .await
-                .unwrap();
-            let sends = server.received_requests().await.unwrap();
-            assert_eq!(
-                sends.len(),
-                1,
-                "native={native}, {}",
-                delivery(&f).await.state
-            );
-            assert_eq!(delivery(&f).await.state, outcome);
-            assert_eq!(
-                sends[0]
-                    .headers
-                    .get("idempotency-key")
-                    .unwrap()
-                    .to_str()
-                    .unwrap(),
-                if native {
-                    format!("{}:0", d.id)
-                } else {
-                    d.id.clone()
-                }
-            );
-            assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
-            let after = f
-                .state
-                .db
-                .collection::<Document>("nyxbot_events")
-                .find_one(doc! {"_id":&event})
-                .await
+        );
+        a.unwrap();
+        b.unwrap();
+        crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
+            .await
+            .unwrap();
+        let sends = server.received_requests().await.unwrap();
+        assert_eq!(sends.len(), 1, "native, {}", delivery(&f).await.state);
+        assert_eq!(delivery(&f).await.state, outcome);
+        assert_eq!(
+            sends[0]
+                .headers
+                .get("idempotency-key")
                 .unwrap()
-                .unwrap();
-            assert_eq!(before.get("delivery"), after.get("delivery"));
-            f.cleanup().await;
-        }
+                .to_str()
+                .unwrap(),
+            format!("{}:0", d.id)
+        );
+        assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+        let after = f
+            .state
+            .db
+            .collection::<Document>("nyxbot_events")
+            .find_one(doc! {"_id":&event})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.get("delivery"), after.get("delivery"));
+        f.cleanup().await;
     }
 }
+
 #[tokio::test]
 async fn migration_channel_result_source_drift_withholds_stored_answer() {
     for mutation in [
@@ -870,7 +929,8 @@ async fn migration_channel_policy_restoration_does_not_restore_old_review() {
 #[tokio::test]
 async fn migration_channel_readback_is_separately_authorized_and_counted() {
     let (f, row, _) = channel_turn("migration_channel_readback", false).await;
-    let server = gateway(&f, false, "confirmed").await;
+    let gateway = gateway(&f, false, "confirmed").await;
+    let server = local_result_platform(&f, "confirmed").await;
     write_call(&f).await;
     let request = channel_proposal(&f).await;
     approve(&f, &request, "operation").await;
@@ -940,6 +1000,7 @@ async fn migration_channel_readback_is_separately_authorized_and_counted() {
             .unwrap();
     }
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert!(gateway.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
 }
 
@@ -1022,7 +1083,8 @@ async fn migration_channel_delegation_retains_audience_and_refuses_guest_descend
 #[tokio::test]
 async fn migration_channel_silent_initial_answer_retains_only_its_bound_reply_source() {
     let (f, row, event) = channel_turn("migration_channel_silent", false).await;
-    let server = gateway(&f, false, "confirmed").await;
+    let gateway = gateway(&f, false, "confirmed").await;
+    let server = local_result_platform(&f, "confirmed").await;
     write_call(&f).await;
     let request = channel_proposal(&f).await;
     finish(&f, &row, "").await;
@@ -1101,6 +1163,7 @@ async fn migration_channel_silent_initial_answer_retains_only_its_bound_reply_so
         .unwrap()
         .unwrap();
     assert!(cleared.get("event_context_ciphertext").is_none());
+    assert!(gateway.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
 }
 
@@ -1108,16 +1171,7 @@ async fn migration_channel_silent_initial_answer_retains_only_its_bound_reply_so
 async fn migration_channel_gateway_sealed_target_outlives_event_window_without_retargeting() {
     let (f, row, _) = channel_turn_transport("migration_channel_sealed_target", "sealed").await;
     let server = gateway(&f, false, "confirmed").await;
-    wiremock::Mock::given(wiremock::matchers::method("POST"))
-        .and(wiremock::matchers::path(
-            "/reply-targets/original-target/messages",
-        ))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200)
-                .set_body_json(json!({"delivery":{"outcome":"confirmed"}})),
-        )
-        .mount(&server)
-        .await;
+    let platform = local_result_platform(&f, "confirmed").await;
     let d = result_ready(&f, &row).await;
     assert!(d.task.hard_deadline > Utc::now() + chrono::Duration::hours(20));
     f.state
@@ -1129,21 +1183,11 @@ async fn migration_channel_gateway_sealed_target_outlives_event_window_without_r
     crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
         .await
         .unwrap();
-    let sent = server.received_requests().await.unwrap();
+    assert!(server.received_requests().await.unwrap().is_empty());
+    let sent = platform.received_requests().await.unwrap();
     assert_eq!(sent.len(), 1);
-    assert_eq!(
-        sent[0].url.path(),
-        "/reply-targets/original-target/messages"
-    );
-    assert_eq!(
-        sent[0]
-            .headers
-            .get("idempotency-key")
-            .unwrap()
-            .to_str()
-            .unwrap(),
-        d.id
-    );
+    let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+    assert_eq!(body["reply_to_message_id"], 500);
     assert_eq!(delivery(&f).await.state, "confirmed");
     f.cleanup().await;
 }
@@ -1183,11 +1227,13 @@ async fn migration_channel_nonretainable_effect_never_falls_back_to_private_or_l
 async fn migration_channel_gateway_server_failure_is_unknown_and_never_sent_twice() {
     for native in [false, true] {
         let (f, row, _) = channel_turn("migration_channel_gateway_5xx", native).await;
-        let server = gateway(&f, native, "confirmed").await;
+        let gateway = gateway(&f, native, "confirmed").await;
+        let local = local_result_platform(&f, "confirmed").await;
+        let server = if native { &gateway } else { &local };
         server.reset().await;
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .respond_with(wiremock::ResponseTemplate::new(503))
-            .mount(&server)
+            .mount(server)
             .await;
         let d = result_ready(&f, &row).await;
         crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
@@ -1199,6 +1245,9 @@ async fn migration_channel_gateway_server_failure_is_unknown_and_never_sent_twic
         assert_eq!(delivery(&f).await.state, "unknown", "native={native}");
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+        if !native {
+            assert!(gateway.received_requests().await.unwrap().is_empty());
+        }
         f.cleanup().await;
     }
 }
@@ -1209,9 +1258,10 @@ async fn sheet_call(
     range: &str,
     body: Option<&serde_json::Value>,
 ) -> (StatusCode, String) {
-    let path = format!(
-        "/proxy/s/execution-fixture/v4/spreadsheets/book/values/{range}?valueInputOption=RAW"
-    );
+    let mut path = format!("/proxy/s/execution-fixture/v4/spreadsheets/book/values/{range}");
+    if method == "PUT" {
+        path.push_str("?valueInputOption=RAW");
+    }
     let mut builder = Request::builder()
         .method(method)
         .uri(path)
@@ -1238,11 +1288,12 @@ async fn sheet_call(
 #[tokio::test]
 async fn migration_channel_sheets_range_inputs_review_readback_and_exact_original_reply() {
     for transport in ["direct", "gateway", "native"] {
-        let (f, row, _) =
+        let (f, row, event) =
             channel_turn_transport("migration_channel_sheets_inputs", transport).await;
         let native = transport == "native";
         let mut direct_bot = None;
-        let relay = if transport == "direct" {
+        let gateway = gateway(&f, native, "confirmed").await;
+        let relay = if !native {
             let bot = f
                 .state
                 .db
@@ -1267,8 +1318,29 @@ async fn migration_channel_sheets_range_inputs_review_readback_and_exact_origina
             direct_bot = Some(bot);
             server
         } else {
-            gateway(&f, native, "confirmed").await
+            gateway
         };
+        let range_path = "/v4/spreadsheets/book/values/Sheet1!A1:B2";
+        let cells = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let written = cells.clone();
+        f.server.reset().await;
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::path(range_path))
+            .and(wiremock::matchers::query_param("valueInputOption", "RAW"))
+            .respond_with(move |request: &wiremock::Request| {
+                *written.lock().unwrap() = Some(request.body_json::<Value>().unwrap());
+                wiremock::ResponseTemplate::new(200).set_body_json(json!({"updatedCells":4}))
+            })
+            .mount(&f.server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(range_path))
+            .respond_with(move |_: &wiremock::Request| match &*cells.lock().unwrap() {
+                Some(stored) => wiremock::ResponseTemplate::new(200).set_body_json(stored),
+                None => wiremock::ResponseTemplate::new(404),
+            })
+            .mount(&f.server)
+            .await;
         let values = json!({"range":"Sheet1!A1:B2","majorDimension":"ROWS","values":[["Type","Amount"],["Receipt",12]]});
         let (status, error) = sheet_call(&f, "PUT", "Sheet1!A1:B2", Some(&values)).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
@@ -1317,11 +1389,11 @@ async fn migration_channel_sheets_range_inputs_review_readback_and_exact_origina
             .await
             .unwrap()
             .unwrap();
-        approve(&f, &read, "operation").await;
+        approve(&f, &read, "persistent").await;
         finish(&f, &resumed, "Write complete; readback needs review").await;
         let next = event_turn(&f, &row).await;
         let result = resume(&f, &next).await;
-        assert!(result.contains("HTTP 200"), "{result}");
+        assert!(result.contains(&values.to_string()), "{result}");
         let sent = f.server.received_requests().await.unwrap();
         assert_eq!(sent.len(), 2);
         assert_eq!(sent[0].method.as_str(), "PUT");
@@ -1331,6 +1403,8 @@ async fn migration_channel_sheets_range_inputs_review_readback_and_exact_origina
         );
         assert_eq!(sent[0].url.query(), Some("valueInputOption=RAW"));
         assert_eq!(sent[1].method.as_str(), "GET");
+        assert_eq!(sent[1].url.query(), None);
+        assert_eq!(count(&f, "approval_requests").await, 2);
         // A changed range is outside the reviewed persistent contract.
         assert_eq!(
             sheet_call(&f, "PUT", "Sheet2!A1:B2", Some(&values)).await.0,
@@ -1388,6 +1462,21 @@ async fn migration_channel_sheets_range_inputs_review_readback_and_exact_origina
                 .unwrap()
                 .remove(&bot);
         }
+        let fresh = another_channel_turn(&f, &row, &event).await;
+        let prior_requests = count(&f, "approval_requests").await;
+        let (status, body) = sheet_call(&f, "PUT", "Sheet1!A1:B2", Some(&values)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = sheet_call(&f, "GET", "Sheet1!A1:B2", None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), values);
+        let sent = f.server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 4);
+        assert_eq!(sent[2].method.as_str(), "PUT");
+        assert_eq!(sent[3].method.as_str(), "GET");
+        assert_eq!(count(&f, "approval_requests").await, prior_requests);
+        assert_eq!(count(&f, "assistant_acknowledgements").await, 0);
+        assert_eq!(count(&f, "assistant_agent_consents").await, 0);
+        finish(&f, &fresh, &body).await;
         f.cleanup().await;
     }
 }
@@ -1395,7 +1484,8 @@ async fn migration_channel_sheets_range_inputs_review_readback_and_exact_origina
 #[tokio::test]
 async fn migration_channel_multiple_decisions_coalesce_into_one_result_occurrence() {
     let (f, row, _) = channel_turn("migration_channel_coalesced_results", false).await;
-    let server = gateway(&f, false, "confirmed").await;
+    let gateway = gateway(&f, false, "confirmed").await;
+    let server = local_result_platform(&f, "confirmed").await;
     assert_eq!(write_call(&f).await.0, StatusCode::FORBIDDEN);
     let response = f
         .router()
@@ -1445,6 +1535,7 @@ async fn migration_channel_multiple_decisions_coalesce_into_one_result_occurrenc
     assert_eq!(delivery(&f).await.state, "confirmed");
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
     assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
+    assert!(gateway.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
 }
 
@@ -1612,5 +1703,544 @@ async fn migration_channel_conversation_deletion_removes_receipt_and_reply_mater
     assert!(delivery.target_expires_at.is_none());
     assert_eq!(delivery.state, original_state);
     assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+    f.cleanup().await;
+}
+
+async fn local_result_platform(f: &Fixture, outcome: &str) -> wiremock::MockServer {
+    let bot = f
+        .state
+        .db
+        .collection::<Document>("nyxbot_channels")
+        .find_one(doc! {})
+        .await
+        .unwrap()
+        .unwrap()
+        .get_str("channel_bot_id")
+        .unwrap()
+        .to_owned();
+    let server = wiremock::MockServer::start().await;
+    let response = match outcome {
+        "rejected" => wiremock::ResponseTemplate::new(400)
+            .set_body_json(json!({"ok":false,"error_code":400,"description":"refused"})),
+        "unknown" => wiremock::ResponseTemplate::new(200).set_body_string("{incomplete"),
+        _ => wiremock::ResponseTemplate::new(200)
+            .set_body_json(json!({"ok":true,"result":{"message_id":501}})),
+    };
+    wiremock::Mock::given(wiremock::matchers::path("/bottest-token/sendMessage"))
+        .respond_with(response)
+        .mount(&server)
+        .await;
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .insert(
+            bot,
+            std::sync::Arc::new(
+                crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(
+                    &server.uri(),
+                ),
+            ),
+        );
+    server
+}
+
+#[tokio::test]
+async fn supplemental_permission_result_uses_original_relay_or_refuses_missing_source() {
+    Box::pin(async {
+        for outcome in ["confirmed", "rejected", "unknown", "missing"] {
+            let (f,row,event) = channel_turn("supplemental_permission_result",false).await;
+            let gateway = gateway(&f,false,"confirmed").await;
+            let platform = local_result_platform(&f,outcome).await;
+            let d = result_ready(&f,&row).await;
+            let before = f.state.db.collection::<Document>("nyxbot_events").find_one(doc!{"_id":&event}).await.unwrap().unwrap();
+            if outcome=="missing" { f.state.db.collection::<Document>("channel_messages").delete_one(doc!{"_id":"original-provider-event"}).await.unwrap(); }
+            f.state.db.collection::<Document>("nyxbot_threads").update_many(doc!{},doc!{"$set":{"last_relay_message_id":"newer-source","last_message_id":"newer-source"}}).await.unwrap();
+            let (a,b)=tokio::join!(crate::handlers::nyxbot::execution_delivery::process(&f.state,&d.id),crate::handlers::nyxbot::execution_delivery::process(&f.state,&d.id));
+            a.unwrap();b.unwrap();
+            crate::handlers::nyxbot::execution_delivery::process(&f.state,&d.id).await.unwrap();
+            assert_eq!(delivery(&f).await.state,if outcome=="missing" {"refused"} else {outcome});
+            let requests=platform.received_requests().await.unwrap();
+            assert_eq!(requests.len(),usize::from(outcome!="missing"));
+            if let Some(request)=requests.first() { let body:Value=serde_json::from_slice(&request.body).unwrap();assert_eq!(body["reply_to_message_id"],500);assert_eq!(body["message_thread_id"],77); }
+            assert!(gateway.received_requests().await.unwrap().is_empty());
+            let after = f.state.db.collection::<Document>("nyxbot_events").find_one(doc!{"_id":&event}).await.unwrap().unwrap();
+            assert_eq!(before.get("delivery"),after.get("delivery"));
+            let audits:Vec<Document>=f.state.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME).find(doc!{"event_type":"nyxbot_channel_supplemental_delivery"}).await.unwrap().try_collect().await.unwrap();
+            assert_eq!(audits.len(),1);
+            if outcome=="missing" {assert_eq!(audits[0].get_document("event_data").unwrap().get_str("reason"),Ok("missing_anchor"));}
+            f.cleanup().await;
+        }
+    }).await;
+}
+
+#[tokio::test]
+async fn supplemental_permission_retry_errors_do_not_audit_until_success() {
+    for failure in [
+        crate::handlers::nyxbot::execution_delivery::TestProcessFailure::Preparation,
+        crate::handlers::nyxbot::execution_delivery::TestProcessFailure::Claim,
+    ] {
+        let (f, row, _) = channel_turn_transport("supplemental_permission_retry", "gateway").await;
+        let _platform = local_result_platform(&f, "confirmed").await;
+        let occurrence = result_ready(&f, &row).await;
+        let error = crate::handlers::nyxbot::execution_delivery::process_with_test_failure(
+            &f.state,
+            &occurrence.id,
+            failure,
+        )
+        .await
+        .expect_err("injected retryable failure");
+        assert!(error.error_code() > 0);
+        assert_eq!(
+            f.state
+                .db
+                .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type":"nyxbot_channel_supplemental_delivery"})
+                .await
+                .unwrap(),
+            0
+        );
+        f.state
+            .db
+            .collection::<Document>(DELIVERIES)
+            .update_one(
+                doc! {"_id":&occurrence.id},
+                doc! {"$set":{"state":"pending"},"$unset":{"claim_id":"","lease_expires_at":""}},
+            )
+            .await
+            .unwrap();
+        crate::handlers::nyxbot::execution_delivery::process(&f.state, &occurrence.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            f.state
+                .db
+                .collection::<Document>(crate::models::audit_log::COLLECTION_NAME)
+                .count_documents(doc! {"event_type":"nyxbot_channel_supplemental_delivery"})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(delivery(&f).await.state, "confirmed");
+        f.cleanup().await;
+    }
+}
+
+async fn preparation_crash_survivor_delivers_once(transport: &str) {
+    let (f, row, _) = channel_turn_transport("result_preparation_crash", transport).await;
+    let server = if transport == "native" {
+        gateway(&f, true, "confirmed").await
+    } else {
+        local_result_platform(&f, "confirmed").await
+    };
+    let d = result_ready(&f, &row).await;
+    crate::services::durable_wake_tests::drop_after(
+        "execution_result_transport_preparation",
+        crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id),
+    )
+    .await;
+    assert!(server.received_requests().await.unwrap().is_empty());
+    f.state
+        .db
+        .collection::<Document>(DELIVERIES)
+        .update_one(
+            doc! {"_id":&d.id},
+            doc! {"$set":{"lease_expires_at":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+    for id in channel::deliveries::due(&f.state.db).await.unwrap() {
+        crate::handlers::nyxbot::execution_delivery::process(&f.state, &id)
+            .await
+            .unwrap();
+    }
+    crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "{transport}: survivor must deliver a result lost during preparation once"
+    );
+    assert_eq!(delivery(&f).await.state, "confirmed");
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn execution_result_direct_preparation_crash_survivor_delivers_once() {
+    preparation_crash_survivor_delivers_once("direct").await;
+}
+#[tokio::test]
+async fn execution_result_relay_preparation_crash_survivor_delivers_once() {
+    preparation_crash_survivor_delivers_once("gateway").await;
+}
+#[tokio::test]
+async fn execution_result_native_preparation_crash_survivor_delivers_once() {
+    preparation_crash_survivor_delivers_once("native").await;
+}
+#[tokio::test]
+async fn execution_result_sealed_preparation_crash_survivor_delivers_once() {
+    preparation_crash_survivor_delivers_once("sealed").await;
+}
+
+#[tokio::test]
+async fn permission_result_claim_binds_the_completed_continuation() {
+    let (fixture, original, _) = channel_turn_transport("permission_result_claim", "direct").await;
+    let platform = local_result_platform(&fixture, "confirmed").await;
+    let expected = result_ready(&fixture, &original).await;
+    assert_ne!(
+        expected.turn_id,
+        original.active_turn.as_ref().unwrap().turn_id
+    );
+    let process =
+        || crate::handlers::nyxbot::execution_delivery::process(&fixture.state, &expected.id);
+    crate::services::durable_wake_tests::resume_after(
+        "execution_result_dispatch_committed",
+        async { process().await.unwrap() },
+        async {
+            let claimed = delivery(&fixture).await;
+            assert_eq!(claimed.id, expected.id);
+            assert_eq!(claimed.turn_id, expected.turn_id);
+            assert_eq!(claimed.message_id, expected.message_id);
+            assert_eq!(claimed.occurrence_key, expected.occurrence_key);
+            assert!(claimed.claim_id.is_some());
+            assert_eq!(claimed.state, "dispatching");
+            process().await.unwrap();
+            assert!(platform.received_requests().await.unwrap().is_empty());
+        },
+    )
+    .await;
+    process().await.unwrap();
+    let completed = delivery(&fixture).await;
+    assert_eq!(completed.state, "confirmed");
+    assert_eq!(completed.preparation.unwrap().receipts.len(), 1);
+    assert_eq!(platform.received_requests().await.unwrap().len(), 1);
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn execution_result_normal_send_command_counts() {
+    for transport in ["direct", "native"] {
+        let (mut f, row, _) = channel_turn_transport("result_command_counts", transport).await;
+        let server = if transport == "native" {
+            gateway(&f, true, "confirmed").await
+        } else {
+            local_result_platform(&f, "confirmed").await
+        };
+        let d = result_ready(&f, &row).await;
+        let (db, commands) = crate::services::durable_wake_tests::monitored(&f.state.db).await;
+        f.state.db = db;
+        crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
+            .await
+            .unwrap();
+        let counts = crate::services::durable_wake_tests::take(&commands);
+        println!(
+            "EXECUTION_RESULT_COMMANDS {transport} total={} {counts:?}",
+            counts.values().sum::<usize>()
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(delivery(&f).await.state, "confirmed");
+        f.cleanup().await;
+    }
+}
+
+async fn expire_result(f: &Fixture, id: &str) {
+    f.state
+        .db
+        .collection::<Document>(DELIVERIES)
+        .update_one(
+            doc! {"_id":id},
+            doc! {"$set":{"lease_expires_at":bson::DateTime::from_millis(0)}},
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn execution_result_slow_original_is_fenced_and_two_survivors_send_once() {
+    let (f, row, _) = channel_turn_transport("result_claim_race", "direct").await;
+    let server = local_result_platform(&f, "confirmed").await;
+    let d = result_ready(&f, &row).await;
+    crate::services::durable_wake_tests::resume_after(
+        "execution_result_transport_preparation",
+        async {
+            let _ = crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id).await;
+        },
+        async {
+            expire_result(&f, &d.id).await;
+            let state = f.state.clone();
+            let id = d.id.clone();
+            state
+                .shutdown
+                .clone()
+                .spawn(async move {
+                    let (a, b) = tokio::join!(
+                        crate::handlers::nyxbot::execution_delivery::process(&state, &id),
+                        crate::handlers::nyxbot::execution_delivery::process(&state, &id)
+                    );
+                    a.unwrap();
+                    b.unwrap();
+                })
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(delivery(&f).await.state, "confirmed");
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn execution_result_confirmed_prefix_recovers_and_uncertain_boundaries_never_resend() {
+    for (site, prefix, recover) in [
+        ("execution_result_receipt_committed", 1, true),
+        ("execution_result_dispatch_committed", 0, false),
+        ("execution_result_accepted_before_receipt", 1, false),
+    ] {
+        let (f, row, _) = channel_turn_transport("result_prefix_crash", "direct").await;
+        let server = local_result_platform(&f, "confirmed").await;
+        let d = result_ready(&f, &row).await;
+        let text: String = (0..400)
+            .map(|i| format!("Saved result paragraph {i}.\n\n"))
+            .collect();
+        f.state
+            .db
+            .collection::<Document>("assistant_messages")
+            .update_one(doc! {"_id":&d.message_id}, doc! {"$set":{"text":&text}})
+            .await
+            .unwrap();
+        crate::services::durable_wake_tests::drop_after(
+            site,
+            crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id),
+        )
+        .await;
+        assert_eq!(server.received_requests().await.unwrap().len(), prefix);
+        expire_result(&f, &d.id).await;
+        let (a, b) = tokio::join!(
+            channel::deliveries::due(&f.state.db),
+            channel::deliveries::due(&f.state.db)
+        );
+        for id in a.unwrap().into_iter().chain(b.unwrap()) {
+            crate::handlers::nyxbot::execution_delivery::process(&f.state, &id)
+                .await
+                .unwrap();
+        }
+        let sent = server.received_requests().await.unwrap();
+        if recover {
+            assert!(sent.len() > 1);
+            assert_eq!(sent.iter().filter(|r| r.body == sent[0].body).count(), 1);
+            let actual: String = sent
+                .iter()
+                .map(|r| {
+                    serde_json::from_slice::<Value>(&r.body).unwrap()["text"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect();
+            // CommonMark rendering preserves every paragraph; no accepted prefix is repeated.
+            for i in 0..400 {
+                assert_eq!(
+                    actual
+                        .matches(&format!("Saved result paragraph {i}."))
+                        .count(),
+                    1
+                );
+            }
+        } else {
+            assert_eq!(sent.len(), prefix);
+        }
+        assert_eq!(
+            delivery(&f).await.state,
+            if recover { "confirmed" } else { "unknown" }
+        );
+        crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
+            .await
+            .unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), sent.len());
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn execution_result_rechecks_task_authority_between_confirmed_parts() {
+    let (f, row, _) = channel_turn_transport("result_between_parts", "direct").await;
+    let server = local_result_platform(&f, "confirmed").await;
+    let d = result_ready(&f, &row).await;
+    f.state
+        .db
+        .collection::<Document>("assistant_messages")
+        .update_one(
+            doc! {"_id":&d.message_id},
+            doc! {"$set":{"text":"Saved result paragraph.\n\n".repeat(600)}},
+        )
+        .await
+        .unwrap();
+    crate::services::durable_wake_tests::resume_after(
+        "execution_result_receipt_committed",
+        async {
+            crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
+                .await
+                .unwrap();
+        },
+        async {
+            f.state
+                .db
+                .collection::<Document>(tasks::collection(&d.task.task))
+                .update_one(
+                    doc! {"_id":&d.task.task.root_id},
+                    doc! {"$inc":{"execution_task.epoch":1_i64}},
+                )
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let saved = delivery(&f).await;
+    assert_eq!(saved.state, "refused");
+    assert_eq!(saved.preparation.unwrap().next, 1);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn execution_result_mixed_workers_promote_only_proven_unsent_and_use_database_time() {
+    for state in ["pending", "preparing", "dispatching"] {
+        let (f, row, _) = channel_turn_transport("result_mixed_workers", "direct").await;
+        let d = result_ready(&f, &row).await;
+        f.state.db.collection::<Document>(DELIVERIES).update_one(doc!{"_id":&d.id},
+            doc!{"$set":{"version":4,"state":state,"lease_expires_at":bson::DateTime::from_millis(0)}}).await.unwrap();
+        let leased = channel::deliveries::lease(&f.state.db, &d.id)
+            .await
+            .unwrap();
+        if state == "dispatching" {
+            assert!(leased.is_none());
+            assert!(
+                channel::deliveries::due(&f.state.db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let saved = delivery(&f).await;
+            assert_eq!(saved.state, "unknown");
+            assert_eq!(saved.version, 4);
+        } else {
+            let leased = leased.unwrap();
+            assert_eq!(leased.version, 5);
+            assert!(
+                channel::deliveries::lease(&f.state.db, &d.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let raw = f
+                .state
+                .db
+                .collection::<Document>(DELIVERIES)
+                .find_one(doc! {"_id":&d.id,
+                "$expr":{"$and":[{"$gt":["$lease_expires_at","$$NOW"]},
+                    {"$lte":["$lease_expires_at",{"$add":["$$NOW",180000]}]}]}})
+                .await
+                .unwrap();
+            assert!(raw.is_some());
+            // Exact predicate used by the old binary excludes a promoted row.
+            assert_eq!(
+                f.state
+                    .db
+                    .collection::<Document>(DELIVERIES)
+                    .update_one(
+                        doc! {"_id":&d.id,"version":4,"state":"preparing"},
+                        doc! {"$set":{"state":"dispatching"}}
+                    )
+                    .await
+                    .unwrap()
+                    .matched_count,
+                0
+            );
+            f.state
+                .db
+                .collection::<Document>(DELIVERIES)
+                .update_one(
+                    doc! {"_id":&d.id},
+                    doc! {"$set":{"lease_expires_at":"invalid"}},
+                )
+                .await
+                .unwrap();
+            assert!(
+                channel::deliveries::due(&f.state.db)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                channel::deliveries::lease(&f.state.db, &d.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn execution_result_idle_recovery_is_one_indexed_read() {
+    let (f, _, _) = channel_turn_transport("result_idle_commands", "direct").await;
+    channel::deliveries::ensure_indexes(&f.state.db)
+        .await
+        .unwrap();
+    let (db, commands) = crate::services::durable_wake_tests::monitored(&f.state.db).await;
+    assert!(channel::deliveries::due(&db).await.unwrap().is_empty());
+    let counts = crate::services::durable_wake_tests::take(&commands);
+    assert_eq!(counts.values().sum::<usize>(), 1);
+    assert_eq!(counts.get(&format!("aggregate:{DELIVERIES}")), Some(&1));
+    println!("EXECUTION_RESULT_IDLE_COMMANDS {counts:?}");
+    let explain = f
+        .state
+        .db
+        .run_command(doc! {"explain":{"aggregate":DELIVERIES,
+        "pipeline":channel::deliveries::due_pipeline(),"cursor":{}},"verbosity":"queryPlanner"})
+        .await
+        .unwrap();
+    let explain = serde_json::to_value(explain).unwrap();
+    let winning = explain
+        .pointer("/queryPlanner/winningPlan")
+        .or_else(|| explain.pointer("/stages/0/$cursor/queryPlanner/winningPlan"))
+        .unwrap();
+    let explained = serde_json::to_string(winning).unwrap();
+    assert!(!explained.contains("COLLSCAN"), "{explained}");
+    assert!(explained.contains("IXSCAN"), "{explained}");
+    println!("EXECUTION_RESULT_DUE_PLAN {explained}");
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn execution_result_unsupported_plan_retires_without_provider_effect_or_retry() {
+    let (f, row, _) = channel_turn_transport("result_invalid_plan", "direct").await;
+    let server = local_result_platform(&f, "confirmed").await;
+    let d = result_ready(&f, &row).await;
+    f.state
+        .db
+        .collection::<Document>("assistant_messages")
+        .update_one(
+            doc! {"_id":&d.message_id},
+            doc! {"$set":{"text":"Result paragraph.\n\n".repeat(20000)}},
+        )
+        .await
+        .unwrap();
+    crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
+        .await
+        .unwrap();
+    assert_eq!(delivery(&f).await.state, "refused");
+    assert!(
+        channel::deliveries::due(&f.state.db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
+        .await
+        .unwrap();
+    assert!(server.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
 }

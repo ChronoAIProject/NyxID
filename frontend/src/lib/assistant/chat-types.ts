@@ -19,6 +19,15 @@ export type ChatMessageStatus = ExtensibleString<
 export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
 export interface ChatMessage {
+  readonly voice?: {
+    readonly session_id: string;
+    readonly segment_id: string;
+    readonly sealed: boolean;
+    readonly complete: boolean;
+    readonly interrupted?: boolean;
+  } | null;
+  readonly voiceGroup?: readonly ChatMessage[];
+  readonly anchorId?: string;
   readonly artifactDelivery?: {readonly rejected?: readonly {readonly index: number; readonly filename: string; readonly reason: string}[]; readonly state: string; readonly count: number; readonly recoveryAvailable: boolean; readonly endpoint: string; readonly conversationId: string; readonly messageSeq: number};
   readonly actionOutcome?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["action_outcome"];
   readonly recovery?: import("@/schemas/assistant-nyxagent").NyxAgentHistory["messages"][number]["recovery"];
@@ -58,6 +67,7 @@ export interface ChatMessage {
   /** A user message written in a chat app: its platform. */
   readonly via?: string | null;
   readonly activityTotal?: number;
+  readonly continuedAfterRestart?: boolean;
   readonly turnStatus?: import("./turn-status").TurnStatus | null;
   /** Settled permission decisions and automatic receipts of this reply's turn. */
   readonly decisions?: readonly import("@/schemas/assistant-nyxagent").NyxAgentAcknowledgement[];
@@ -68,6 +78,7 @@ export interface ChatMessage {
 }
 
 export interface ChatImage {
+  readonly pdf?: import("@/schemas/assistant-nyxagent").NyxAgentAttachment["pdf"];
   readonly origin?: string;
   readonly filename?: string;
   readonly source?: string;

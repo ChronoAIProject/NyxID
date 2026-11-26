@@ -261,7 +261,9 @@ mod tests {
     #[tokio::test]
     async fn from_config_builds_correctly() {
         let config = crate::config::AppConfig {
+            crash_reporting: Default::default(),
             port: 3001,
+            shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),
@@ -338,6 +340,10 @@ mod tests {
             apns_key_id: None,
             apns_team_id: None,
             apns_topic: None,
+            android_app_package: None,
+            android_app_sha256_cert_fingerprints: Vec::new(),
+            mobile_app_return_schemes: Vec::new(),
+            mobile_social_redirect_uris: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,

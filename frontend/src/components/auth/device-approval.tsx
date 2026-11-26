@@ -460,7 +460,7 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
   return (
     <LoginDeviceShell>
       <div
-        className={`overflow-hidden rounded-xl border border-border bg-card ${terminal === "expired" ? "mx-auto w-full max-w-sm" : ""}`}
+        className={`overflow-clip rounded-xl border border-border bg-card ${terminal === "expired" ? "mx-auto w-full max-w-sm" : ""}`}
       >
         <div className="space-y-5 p-3 min-[360px]:p-5 sm:p-6">
           {terminal !== "expired" && (
@@ -911,7 +911,6 @@ function ApprovalRequest({ flow, query }: { flow: LoginFlow; query: string }) {
                               <LoginGrantReview
                                 key={chosen.key.id}
                                 apiKey={chosen.key}
-                                comparison={chosen.comparison}
                                 kind="existing"
                                 credentialExpiresAt={credentialExpiry}
                                 customize={

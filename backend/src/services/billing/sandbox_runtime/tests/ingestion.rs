@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::feature_flag_service::{self as flags, FlagTarget};
+use futures::TryStreamExt;
 
 async fn set_flag(f: &Fixture, target: FlagTarget, value: Option<bool>) {
     match value {
@@ -432,19 +433,30 @@ async fn retained_evidence_recovers_settlement_and_ambiguous_lago_delivery_once(
         doc! {"$set":{"updated_at":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(1))}};
     rows.update_many(doc! {}, age.clone()).await.unwrap();
     f.provider.available.store(false, Ordering::SeqCst);
-    let retry = f.billing.reconciler().run_once().await.unwrap();
+    let retry = f
+        .billing
+        .reconciler()
+        .run_once_failing_for_test(&["usage_push", "wallet_balances"])
+        .await;
     assert_eq!(retry.retried, 3);
     assert!(f.provider.events.lock().unwrap().is_empty());
     assert_eq!(wallet(&f).await.pending_lago_debits, pending);
     f.provider.available.store(true, Ordering::SeqCst);
     f.provider.lost_ack.store(true, Ordering::SeqCst);
     rows.update_many(doc! {}, age.clone()).await.unwrap();
-    let ambiguous = f.billing.reconciler().run_once().await.unwrap();
+    let ambiguous = f
+        .billing
+        .reconciler()
+        .run_once_failing_for_test(&["usage_push", "wallet_balances"])
+        .await;
     assert_eq!(ambiguous.pushed, 2);
     assert_eq!(ambiguous.retried, 1);
     assert_eq!(f.provider.events.lock().unwrap().len(), 3);
     rows.update_many(doc! {}, age).await.unwrap();
-    f.billing.reconciler().run_once().await.unwrap();
+    f.billing
+        .reconciler()
+        .run_once_failing_for_test(&["wallet_balances"])
+        .await;
     assert_eq!(
         rows.count_documents(doc! {"lago_acked":true})
             .await
@@ -458,7 +470,10 @@ async fn retained_evidence_recovers_settlement_and_ambiguous_lago_delivery_once(
         .finalize_sandbox_window(&f.producer, evidence(&window))
         .await
         .unwrap();
-    f.billing.reconciler().run_once().await.unwrap();
+    f.billing
+        .reconciler()
+        .run_once_failing_for_test(&["wallet_balances"])
+        .await;
     assert_eq!(f.provider.attempts.load(Ordering::SeqCst), 4);
 }
 
@@ -511,4 +526,91 @@ async fn concurrent_identical_admission_and_evidence_retries_converge() {
         "0.00002044".parse().unwrap()
     );
     assert_eq!(wallet(&f).await.reserved_credits, Credits::ZERO);
+}
+
+#[tokio::test]
+async fn acknowledged_usage_and_successful_balance_refresh_clear_pending_once() {
+    let f = fixture("sandbox_successful_balance_readback").await;
+    let funded = wallet(&f).await.balance_credits;
+    assert_eq!(funded, Credits::from_whole(10));
+    let input = request(&f, 2).await;
+    let window = elapsed(
+        &f,
+        f.billing
+            .reserve_sandbox_window(&f.producer, input)
+            .await
+            .unwrap(),
+    )
+    .await;
+    let proof = evidence(&window);
+    f.billing
+        .finalize_sandbox_window(&f.producer, proof.clone())
+        .await
+        .unwrap();
+    let charge: Credits = "0.00002044".parse().unwrap();
+    let before = wallet(&f).await;
+    assert_eq!(before.pending_lago_debits, charge);
+    assert_eq!(before.reserved_credits, Credits::ZERO);
+    let effective = funded.checked_sub(charge).unwrap();
+    assert_eq!(
+        before
+            .balance_credits
+            .checked_sub(before.pending_lago_debits)
+            .unwrap(),
+        effective
+    );
+    let ledger = f.db.collection::<Document>("billing_ledger");
+    let postings = ledger
+        .find(doc! {})
+        .sort(doc! {"seq":1})
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    f.provider.balance_readback.store(true, Ordering::SeqCst);
+    f.db.collection::<Document>(USAGE).update_many(doc! {}, doc! {"$set":{"updated_at":bson::DateTime::from_chrono(Utc::now()-Duration::minutes(1))}}).await.unwrap();
+    let stats = f.billing.reconciler().run_once().await.unwrap();
+    assert_eq!(stats.pushed, 3);
+    assert_eq!(stats.wallet_balance_refreshes, 1);
+    let after = wallet(&f).await;
+    assert_eq!(after.pending_lago_debits, Credits::ZERO);
+    assert_eq!(after.reserved_credits, Credits::ZERO);
+    assert_eq!(after.balance_credits, effective);
+    assert_eq!(f.provider.events.lock().unwrap().len(), 3);
+    assert_eq!(f.provider.attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        ledger
+            .find(doc! {})
+            .sort(doc! {"seq":1})
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap(),
+        postings
+    );
+    f.billing
+        .finalize_sandbox_window(&f.producer, proof)
+        .await
+        .unwrap();
+    let replay = f.billing.reconciler().run_once().await.unwrap();
+    assert_eq!(replay.pushed, 0);
+    let replay_wallet = wallet(&f).await;
+    assert_eq!(replay_wallet.balance_credits, effective);
+    assert_eq!(replay_wallet.pending_lago_debits, Credits::ZERO);
+    assert_eq!(replay_wallet.reserved_credits, Credits::ZERO);
+    assert_eq!(f.provider.events.lock().unwrap().len(), 3);
+    assert_eq!(f.provider.attempts.load(Ordering::SeqCst), 3);
+    assert_eq!(
+        ledger
+            .find(doc! {})
+            .sort(doc! {"seq":1})
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap(),
+        postings
+    );
 }

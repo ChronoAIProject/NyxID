@@ -375,6 +375,71 @@ until legacy pending requests have completed/been purged or a CMA migration adap
 has been deployed and verified. An inventory pass alone does not establish that
 these CMA rows have been converted.
 
+### Admin inspection of held account slots
+
+Use a first-party human platform-admin session; this procedure does not require
+the owner's optional CMA-management feature. Do not make a new creation attempt
+or edit MongoDB to investigate a held reservation.
+
+1. Find `cma_sandbox_slot_occupied` in the audit log. Its metadata identifies the
+   owner, reservation, catalog service and holding class. New refusals keep the
+   original HTTP 409/code 1004/message bytes; a separate transactional TTL claim
+   bounds these audits to one per owner/reservation/hour across upgraded replicas.
+   A process-local cache suppresses looping clients before database work; the
+   diagnostic never writes a reservation or creation document.
+2. List `GET /api/v1/admin/cma-sandbox-reservations`, optionally with `owner_id`,
+   admission `states`, and the returned `next_cursor` as `after`. Pages are at
+   most 100. Rows include legacy slot holders and their matching creation facts,
+   three revision/generation fences and known remote identities. No request
+   bytes, ciphertext, idempotency keys or request hashes are exposed.
+3. `POST .../{id}/inspect` uses only exact owner-authenticated CMA GETs for saved
+   identities. It cannot replay, create, pause, delete or retire anything. Local
+   writes are an admin-attributed audit only. No owner state, observation time,
+   recovery cooldown or revision changes, including on failed reads. `exists` reports
+   the ID and state; `proven_absent` cites durable `confirmed_not_created` evidence;
+   `unknown` gives a closed reason. The exact historical refusal subtype is not
+   retained in legacy rows and is therefore not claimed. `owner_retry_will_recover`
+   means the original dispatched Sandbox creation is still inside the 23-hour
+   window: the owner's next allocating create or original-request retry attempts
+   recovery automatically. No admin replay is needed, and an unavailable CMA
+   still leaves the slot held.
+4. If the row already has its live NyxID sandbox, the refusal is correct: create
+   Agents in that sandbox's workspace, or the owner retires it using the existing
+   owner route. The admin resolver will not free a live associated slot.
+5. For an unassociated row, `POST .../{id}/resolve` with `action: "associate"`,
+   the exact `remote_sandbox_id`, and the inspection's `generation`, `revision`
+   and `creation_revision` freshly checks CMA ownership/existence and binds it.
+   A saved Sandbox receipt or exact operation/Agent lineage must tie that resource
+   to this creation. Ownership alone is insufficient; `cma_creation_provenance_required`
+   refuses an arbitrary same-owner sandbox. For `action: "release"`, those
+   same fences and already durable non-creation proof are required; no evidence
+   text from the caller is trusted. The existing no-resource transition clears
+   recovery material atomically. Stale state requires another inspection; the
+   personal-owner erasure fence applies to every resolution state change.
+
+Inspection writes only `admin_cma_sandbox_reservation_inspected` under the admin
+actor; resolution couples `admin_cma_sandbox_reservation_resolved` to its state
+change transaction. The direct GET boundary uses owner authorization but bypasses
+proxy metering, billing, service-request activity and owner proxy rate limiting.
+Refused resolution attempts also produce a best-effort metadata-only audit.
+These operations do not change owner admission/replay/recovery behavior.
+
+An unknown creation with no remote receipt may remain unresolvable through GETs.
+The generic CMA command cache lasts 24 hours; NyxID bounds replay to 23 hours and
+admin inspection never replays. A 404, list omission, timeout, failed lifecycle or
+expired cache proves no absence. CMA would need an owner-authenticated lookup of
+the exact creation identity (owner, deployment, operation, original idempotency
+identity and request fingerprint) returning either the durable operation/resource
+receipt or authoritative never-created/no-pending-work evidence. Such negative
+evidence must fence late or concurrent admission under the same identity; an
+expired cache lookup alone is insufficient. Until that contract exists, record
+an explicit CMA protocol blocker and keep the slot occupied. See [API](../API.md#admin-cma-sandbox-reservations).
+
+The read contract was checked against CMA commit
+`259c26cf5be0837f0f8ee4d400380e7608fb0301`: `api/crates/layer1-public/src/rest/idempotency.rs`
+(retention and durable-ledger distinction), `agents.rs` (lifecycle reads by ID),
+and `sandboxes.rs` (Sandbox detail/list and mutation routes).
+
 ### Sandbox trust confirmation and stranded requests
 
 CMA's exact `409 trust_confirmation_required` problem for `POST /api/v1/sandboxes`
@@ -419,3 +484,45 @@ and authorization errors retain their usual responses. Such older uncertain requ
 authoritative CMA investigation, not a new identity or a local force-unlock.
 A rolling old replica may still leave a refusal unknown; an upgraded replica can
 recover it within that window. No schema or writer-cutover change is required.
+
+
+## Automatic reservation reconciliation
+
+A dedicated NyxID worker observes held NyxID-created reservations without owner
+activity or the optional management feature. It walks at most 16 rows per page
+using the `source, occupies_account_slot, _id` index, a renewable cluster lease
+and durable cursor. Pages run on a 30-second tick; a completed pass rests five
+minutes. Each row has a 15-second budget, and failures do not stop later rows.
+No ordinary proxy, MCP or turn request gains a read. The worker makes exact
+owner-authorized GETs only, without proxy metering, billing or request-rate use.
+
+Saved lifecycle/Agent/sandbox receipts use the existing deployment and identity
+checks to complete association and creation journaling. Confirmed journals and
+ordinary associated sandboxes cause no remote read. A retiring bound sandbox
+settles only when CMA returns `retired` for that exact identity. Generation,
+parent version, creation revision and erasure fences guard the local transaction;
+retirement releases the slot and clears recovery material without deleting any
+remote object. Admins may perform the same exact observation with
+`confirm_retirement`; inspect itself stays audit-only. A 404, list omission,
+failed operation, timeout or elapsed time never frees a slot.
+
+System-attributed `cma_sandbox_reservation_recovered` records settlement (atomic
+with retirement; best effort after the existing multistep receipt recovery).
+`cma_sandbox_reservation_recovery_deferred` reports fixed reason codes at most
+once per reservation/generation/reason per hour via an existing coordination
+claim. Neither event retains provider bodies, request material or credentials.
+Old replicas can continue reading and writing all rows: no new persisted enum
+value or sandbox/creation field is introduced. Repeated observation and races
+with owner recovery are safe under the existing fences.
+
+`operation_without_resource` is not a terminal non-creation result. CMA may
+have a sandbox internally while exposing no Agent in the public operation.
+Queued/running operations keep being observed; `waiting_for_connection` needs
+the owner to complete CMA's connection and retry the original request; a failed
+operation with no public resource stays held pending authoritative evidence.
+The inspector reports these distinctions and guidance. Checked against CMA
+`71dfed36f8806dcc68ba4ca1d73d6688e5935c9e`,
+`api/crates/cma/src/store/agent_lifecycle_writes.rs` (`record_sandbox`, `fail`,
+`resume_connection`) and `agent_lifecycle_operations.rs` (`view`). The missing
+creation identity/absence contract is tracked in ChronoAIProject/cma#2354;
+NyxID cannot safely force-release these rows.

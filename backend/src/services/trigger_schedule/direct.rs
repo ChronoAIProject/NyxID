@@ -32,6 +32,9 @@ pub async fn register_in_session(
     parent: &Parent,
     child: &mut AssistantConversation,
 ) -> AppResult<()> {
+    let source_owner_id = super::super::org_agent_service::ordinary_member_org(child)
+        .unwrap_or(&child.user_id)
+        .to_owned();
     let turn = child
         .active_turn
         .as_mut()
@@ -59,6 +62,8 @@ pub async fn register_in_session(
         confirmation_policy: parent.work.confirmation_policy,
     };
     let receipt = DirectHandoff {
+        source_owner_id: Some(source_owner_id),
+        org_use_revision: child.org_use_revision,
         id: work.work_id.clone(),
         user_id: owner.into(),
         run_id: run.id,
@@ -180,8 +185,7 @@ async fn recover_one(
         .session(&mut *session)
         .await?;
     if child.as_ref().is_some_and(|c| {
-        super::super::assistant_nyxagent::live_turn(c, Utc::now())
-            .is_some_and(|t| t.turn_id == receipt.child_turn_id)
+        super::super::assistant_turn_restart::awaiting_reply(c, &receipt.child_turn_id)
     }) {
         return Ok(());
     }
@@ -276,6 +280,8 @@ async fn publish(
             ),
             Some(&receipt.agent_id),
         );
+        event.source_owner_id.clone_from(&receipt.source_owner_id);
+        event.source_org_use_revision = receipt.org_use_revision;
         event.id = format!("automation-direct:{}", receipt.id);
         if error.is_none()
             && let Some(edge) = receipt.assignment.as_ref()

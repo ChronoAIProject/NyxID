@@ -1,3 +1,6 @@
+import { searchFieldContent, searchFieldInput } from "./searchFieldStyles";
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { useNativeSheetDismiss } from "./useNativeSheetDismiss";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
@@ -51,6 +54,7 @@ const signature = (value: readonly string[]) =>
 
 /** The enclosing form owns persistence; Apply commits only its local field. */
 export function WorkspaceSelectionField(props: SelectionProps) {
+  useAppLanguage();
   const theme = useTheme();
   const colors = props.surfaceColors ?? theme.colors;
   const [open, setOpen] = useState(false);
@@ -69,8 +73,8 @@ export function WorkspaceSelectionField(props: SelectionProps) {
   const summary =
     props.summary ??
     (selected.length
-      ? `${preview}${selected.length > 2 ? ` +${selected.length - 2} more` : ""}`
-      : (props.placeholder ?? "Choose"));
+      ? (selected.length > 2 ? translateApp("{{preview}} +{{count}} more", { preview: preview, count: selected.length - 2}) : preview)
+      : (props.placeholder ?? translateApp("Choose")));
   return (
     <View style={styles.stack}>
       <Label>{props.label}</Label>
@@ -125,7 +129,7 @@ export function WorkspaceSelectionSheet({
   maxSelected,
   scopeKey,
   description,
-  confirmLabel = "Apply",
+  confirmLabel,
   allowEmpty = multiple,
   children,
   surfaceColors,
@@ -135,6 +139,7 @@ export function WorkspaceSelectionSheet({
   onClose: () => void;
   keepOpenWhenDisabled?: boolean;
 }) {
+  useAppLanguage();
   const theme = useTheme();
   const colors = surfaceColors ?? theme.colors;
   const sheet = useNativeSheetDismiss(onClose);
@@ -167,7 +172,7 @@ export function WorkspaceSelectionSheet({
       .map((id) => ({
         value: id,
         label: id,
-        description: "Previously selected · unavailable",
+        description: translateApp("Previously selected · unavailable"),
       })),
   ];
   const search = query.trim().toLocaleLowerCase();
@@ -225,7 +230,9 @@ export function WorkspaceSelectionSheet({
               </Label>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`Cancel ${label}`}
+                accessibilityLabel={translateApp("Cancel {{label}}", {
+                  label: label,
+                })}
                 style={styles.iconButton}
                 onPress={close}
               >
@@ -245,8 +252,10 @@ export function WorkspaceSelectionSheet({
                 >
                   <Search size={18} color={colors.textMuted} />
                   <TextInput
-                    accessibilityLabel={`Search ${label}`}
-                    placeholder="Search options"
+                    accessibilityLabel={translateApp("Search {{title}}", {
+                      title: label,
+                    })}
+                    placeholder={translateApp("Search options")}
                     placeholderTextColor={colors.textMuted}
                     autoCapitalize="none"
                     autoCorrect={false}
@@ -259,7 +268,10 @@ export function WorkspaceSelectionSheet({
                   {!!query && (
                     <Pressable
                       accessibilityRole="button"
-                      accessibilityLabel={`Clear ${label} search`}
+                      accessibilityLabel={translateApp(
+                        "Clear {{title}} search",
+                        { title: label },
+                      )}
                       style={styles.iconButton}
                       onPress={() => setQuery("")}
                     >
@@ -274,7 +286,8 @@ export function WorkspaceSelectionSheet({
                         key={String(only)}
                         accessibilityRole="tab"
                         accessibilityLabel={
-                          only ? "Selected options" : "All options"
+                          only ? translateApp("Selected options")
+                            : translateApp("All options")
                         }
                         accessibilityState={{ selected: only === selectedOnly }}
                         onPress={() => setSelectedOnly(only)}
@@ -294,8 +307,12 @@ export function WorkspaceSelectionSheet({
                       >
                         <Label>
                           {only
-                            ? `Selected (${draft.length})`
-                            : `All (${rows.length})`}
+                            ? translateApp("Selected ({{count}})", {
+                                count: draft.length,
+                              })
+                            : translateApp("All ({{count}})", {
+                                count: rows.length,
+                              })}
                         </Label>
                       </Pressable>
                     ))}
@@ -322,10 +339,10 @@ export function WorkspaceSelectionSheet({
               ListEmptyComponent={
                 <Label muted>
                   {search
-                    ? "No matching options. Try another search."
+                    ? translateApp("No matching options. Try another search.")
                     : selectedOnly
-                      ? "No options selected. Choose from All."
-                      : "No options are available."}
+                      ? translateApp("No options selected. Choose from All.")
+                      : translateApp("No options are available.")}
                 </Label>
               }
               renderItem={({ item }) => {
@@ -402,28 +419,31 @@ export function WorkspaceSelectionSheet({
             <View style={[styles.footer, { borderColor: colors.border }]}>
               {overLimit && (
                 <Notice
-                  message={`Choose up to ${maxSelected} options.`}
+                  message={translateApp("Choose up to {{maxSelected}} options.", {
+                    maxSelected: maxSelected,
+                  })}
                   tone="error"
                 />
               )}
               {(invalidAddition || missingLocked) && (
                 <Notice
-                  message="Available options changed. Review your selection before applying."
+                  message={translateApp(
+                    "Available options changed. Review your selection before applying.",
+                  )}
                   tone="error"
                 />
               )}
               <View style={styles.footerRow}>
                 <Label muted style={styles.flex}>
-                  {draft.length} selected
-                  {maxSelected !== undefined ? ` · Up to ${maxSelected}` : ""}
+                  {(maxSelected !== undefined ? translateApp("{{count}} selected · Up to {{maxSelected}}", { count: draft.length, maxSelected: maxSelected }) : translateApp("{{count}} selected", { count: draft.length}))}
                 </Label>
                 {allowEmpty && !readOnly && (
                   <Pressable
                     accessibilityRole="button"
                     accessibilityLabel={
                       lockedIds.size
-                        ? "Clear optional choices"
-                        : "Clear selection"
+                        ? translateApp("Clear optional choices")
+                        : translateApp("Clear selection")
                     }
                     disabled={blocked || !clearable}
                     style={styles.clear}
@@ -436,17 +456,19 @@ export function WorkspaceSelectionSheet({
                   >
                     <Label muted>
                       {lockedIds.size
-                        ? "Clear optional choices"
-                        : "Clear selection"}
+                        ? translateApp("Clear optional choices")
+                        : translateApp("Clear selection")}
                     </Label>
                   </Pressable>
                 )}
               </View>
               {readOnly ? (
-                <Label muted>These choices are read only.</Label>
+                <Label muted>
+                  {translateApp("These choices are read only.")}
+                </Label>
               ) : (
                 <ActionButton
-                  label={confirmLabel}
+                  label={confirmLabel ?? translateApp("Apply")}
                   disabled={!canApply}
                   onPress={() => {
                     if (!canApply || applied.current) return;
@@ -499,23 +521,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   toolbar: { paddingHorizontal: 20, paddingTop: 16, gap: 12 },
-  searchBox: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingLeft: 12,
-  },
-  searchInput: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 44,
-    paddingVertical: 8,
-    paddingRight: 8,
-    fontFamily: fonts.bodyRegular,
-    fontSize: 14,
-  },
+  searchBox: { ...searchFieldContent, borderWidth: 1, borderRadius: 8 },
+  searchInput: searchFieldInput,
   tabs: { flexDirection: "row", gap: 8 },
   tab: {
     minHeight: 44,

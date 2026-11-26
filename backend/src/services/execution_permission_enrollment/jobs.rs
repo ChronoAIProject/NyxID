@@ -119,26 +119,44 @@ pub(super) async fn batch(db: &Database, job: &Job) -> AppResult<bool> {
 }
 
 pub async fn run(db: Database) {
+    let shutdown = crate::services::shutdown::process();
     loop {
+        let Some(_work) = shutdown.background() else {
+            break;
+        };
         if lifecycle::repair_due(&db).await.is_err() {
             tracing::warn!(
                 reason = "person_repair_failed",
                 "Execution enrollment repair delayed"
             );
         }
+        let Some(_claim) = shutdown.background() else {
+            break;
+        };
         match claim(&db).await {
             Ok(Some(job)) => {
+                let release = shutdown.register_release(crate::services::shutdown::Release {
+        safe_after_stop: true,
+                    db: db.clone(), collection: JOBS,
+                    filter: doc! {"_id": &job.id, "generation": &job.generation, "lease_token": &job.lease_token, "state": "running"},
+                    update: doc! {"$set": {"lease_until": null, "lease_token": null, "state": "pending"}},
+                });
                 if batch(&db, &job).await.is_err() {
                     // Never persist error text (which may contain database values).
-                    let _ = db.collection::<Job>(JOBS).update_one(lease(&job), doc! {
+                    let released = db.collection::<Job>(JOBS).update_one(lease(&job), doc! {
                         "$set":{"state":"pending","lease_token":null,"last_error":"reconcile_failed",
                             "lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::seconds(5)),"updated_at":bson::DateTime::now()}
                     }).await;
+                    if released.is_ok() {
+                        release.completed();
+                    }
                     tracing::warn!(
                         reason = "reconcile_failed",
                         "Execution enrollment reconciliation delayed"
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                } else {
+                    release.completed();
                 }
             }
             Ok(None) => tokio::time::sleep(std::time::Duration::from_secs(5)).await,
@@ -167,7 +185,8 @@ pub async fn progress(db: &Database) -> AppResult<Vec<Job>> {
 
 /// The org deletion cascade already removes its flag rows first. Delete member
 /// rows in bounded transactions, retaining repair receipts before their actor
-/// IDs disappear. No hint lookup can abort deletion; no population scan is needed.
+/// IDs disappear. Active admins stay for the final organization transaction.
+/// No hint lookup can abort deletion; no population scan is needed.
 pub(crate) async fn delete_org_memberships(db: &Database, org: &str) -> AppResult<()> {
     let mut deferred = false;
     loop {
@@ -179,33 +198,7 @@ pub(crate) async fn delete_org_memberships(db: &Database, org: &str) -> AppResul
             .write_concern(WriteConcern::majority())
             .and_run2(async move |session| {
                 transactions::transaction_result(
-                    async {
-                        let members: Vec<OrgMembership> = db
-                            .collection::<OrgMembership>(MEMBERSHIPS)
-                            .find(doc! {"org_user_id":&org})
-                            .sort(doc! {"member_user_id":1})
-                            .limit(BATCH)
-                            .session(&mut *session)
-                            .await?
-                            .stream(&mut *session)
-                            .try_collect()
-                            .await?;
-                        let ids: Vec<_> = members.iter().map(|m| &m.id).collect();
-                        db.collection::<OrgMembership>(MEMBERSHIPS)
-                            .delete_many(doc! {"_id":{"$in":ids}})
-                            .session(&mut *session)
-                            .await?;
-                        if !members.is_empty() {
-                            enqueue(&db, &org, session).await?;
-                        }
-                        // No hint reads in this multi-person transaction: even
-                        // bounded per-person timeouts could exhaust its lifetime.
-                        for member in &members {
-                            lifecycle::defer_person(&db, &member.member_user_id, session).await?;
-                        }
-                        Ok(members.len())
-                    }
-                    .await,
+                    delete_memberships_in_session(&db, &org, true, session).await,
                 )
             })
             .await
@@ -221,4 +214,47 @@ pub(crate) async fn delete_org_memberships(db: &Database, org: &str) -> AppResul
             .await?;
     }
     Ok(())
+}
+
+/// Early pages preserve every active admin, so competing deletion requests
+/// cannot remove each other's retry authority. The final org transaction removes
+/// those retained rows and writes the same person repair receipts atomically.
+pub(crate) async fn delete_memberships_in_session(
+    db: &Database,
+    org: &str,
+    keep_admins: bool,
+    tx: &mut ClientSession,
+) -> AppResult<usize> {
+    let mut filter = doc! {"org_user_id":org};
+    if keep_admins {
+        filter.insert(
+            "$or",
+            bson::bson!([
+                {"role":{"$ne":"admin"}}, {"revoked_at":{"$ne":null}}
+            ]),
+        );
+    }
+    let memberships = db.collection::<OrgMembership>(MEMBERSHIPS);
+    let mut query = memberships.find(filter).sort(doc! {"member_user_id":1});
+    if keep_admins {
+        query = query.limit(BATCH);
+    }
+    let members: Vec<OrgMembership> = query
+        .session(&mut *tx)
+        .await?
+        .stream(&mut *tx)
+        .try_collect()
+        .await?;
+    let ids: Vec<_> = members.iter().map(|m| &m.id).collect();
+    db.collection::<OrgMembership>(MEMBERSHIPS)
+        .delete_many(doc! {"_id":{"$in":ids}})
+        .session(&mut *tx)
+        .await?;
+    if !members.is_empty() {
+        enqueue(db, org, tx).await?;
+    }
+    for member in &members {
+        lifecycle::defer_person(db, &member.member_user_id, tx).await?;
+    }
+    Ok(members.len())
 }

@@ -60,6 +60,7 @@ function setup(
       useWorkspaceBack: () => {},
     },
     "../../components/ScreenContainer": { ScreenContainer: "ScreenContainer" },
+    "../../components/workspace/KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
     "../../components/PrimaryButton": { PrimaryButton: "PrimaryButton" },
     "../../components/settings/SettingsList": {},
     "../../components/workspace/WorkspaceSelectionField": {},
@@ -79,6 +80,14 @@ function setup(
     "./AuthSessionContext": {
       useAuthSession: () => ({ isAuthenticated: inSheet }),
     },
+    "./loginRequestResolver": { takeLoginRequest: () => null },
+    "./useUncertainLoginPreview": { useUncertainLoginPreview: () => ({ reset() {} }) },
+    "./useLoginRequestResume": { useLoginRequestResume: () => {} },
+    "./useLoginRequestHandoff": { useLoginRequestHandoff: () => () => {} },
+    "./useLoginPreviewCooldown": {
+      useLoginPreviewCooldown: () => ({ coolingDown: false }),
+    },
+    "./LoginRequestTerminalView": { LoginRequestTerminalView: "Terminal" },
     "./useMfaStepUp": {
       useMfaStepUp: () => ({ busy: false, prompt: mfa ? "MFA prompt" : null }),
     },

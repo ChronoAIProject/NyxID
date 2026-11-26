@@ -43,6 +43,10 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     db.collection::<Document>(CLAIMS)
         .create_indexes([
             IndexModel::builder()
+                .keys(doc! {"state":1,"preparation.version":1,"preparation.parked":1,"preparation.lease_until":1,"_id":1})
+                .options(IndexOptions::builder().name(super::channel_image_preparation::DUE_INDEX.to_owned()).build())
+                .build(),
+            IndexModel::builder()
                 .keys(doc! {"attachment_id": 1})
                 .build(),
             IndexModel::builder()
@@ -136,6 +140,7 @@ pub async fn read_legacy(
     Ok(result)
 }
 
+#[cfg(test)]
 pub async fn claim_for_turn(
     db: &Database,
     owner: &str,
@@ -148,7 +153,35 @@ pub async fn claim_for_turn(
     if let Some(outcome) = read_legacy(db, owner, conversation, turn, channel, attachment).await? {
         return Ok(ImageClaim::Legacy(outcome));
     }
-    claim_v2(db, owner, conversation, attachment, audience).await
+    claim_v2(db, owner, conversation, attachment, audience, None).await
+}
+
+/// Record the routing identifiers atomically with the recoverable claim. Old
+/// readers see Sending and cannot claim this preparation or change its token.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_for_turn(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    turn: &str,
+    channel: &str,
+    attachment: &str,
+    audience: &str,
+    route: &crate::models::image_preparation::Route,
+) -> AppResult<ImageClaim> {
+    if let Some(outcome) = read_legacy(db, owner, conversation, turn, channel, attachment).await? {
+        return Ok(ImageClaim::Legacy(outcome));
+    }
+    claim_v2(db, owner, conversation, attachment, audience, Some(route)).await
+}
+
+/// Candidate only; the claim CAS decides expiry with database time.
+pub fn can_prepare(row: &NyxbotImageDelivery) -> bool {
+    row.state == ImageDeliveryState::Pending
+        || (row.state == ImageDeliveryState::Sending
+            && row.preparation.as_ref().is_some_and(|p| {
+                p.version == 1 && matches!(p.phase.as_str(), "preparing" | "released")
+            }))
 }
 
 pub async fn read(
@@ -169,6 +202,7 @@ async fn claim_v2(
     conversation: &str,
     attachment: &str,
     audience: &str,
+    route: Option<&crate::models::image_preparation::Route>,
 ) -> AppResult<ImageClaim> {
     #[cfg(test)]
     if let Ok(pause) = CLAIM_ADMISSION_PAUSE.try_with(Clone::clone) {
@@ -187,6 +221,7 @@ async fn claim_v2(
         attempt: None,
         code: None,
         created_at: Utc::now(),
+        preparation: None,
     };
     let context = (db.clone(), row);
     let admitted = super::transaction_service::run_db_only(db, &context, |tx, (db, row)| {
@@ -219,13 +254,23 @@ async fn claim_v2(
         pause.release.notified().await;
     }
     let attempt = Uuid::new_v4().to_string();
-    match collection
-        .update_one(
-            doc! {"_id":&id,"state":"pending"},
-            doc! {"$set":{"state":"sending","attempt":&attempt}},
-        )
-        .await
-    {
+    let mut filter = doc! {"_id":&id,"state":"pending"};
+    let mut set = doc! {"state":"sending","attempt":{"$literal":&attempt}};
+    if let Some(route) = route {
+        let route = bson::to_bson(route).map_err(|_| super::channel_image_preparation::lost())?;
+        filter = doc! {"_id":&id,"$or":[
+            {"state":"pending","preparation":{"$eq":bson::Bson::Null}},
+            {"state":"sending","preparation.version":1,"preparation.phase":"preparing",
+             "preparation.route":&route,
+             "$expr":{"$lte":["$preparation.lease_until","$$NOW"]}},
+            {"state":"sending","preparation.version":1,"preparation.phase":"released"}
+        ]};
+        set.insert("preparation", doc! {
+            "version":1,"phase":"preparing","parked":false,"effects":0,"route":{"$literal":route},
+            "lease_until":{"$add":["$$NOW",super::channel_image_preparation::PREPARATION_SECS*1000]}
+        });
+    }
+    match collection.update_one(filter, vec![doc! {"$set":set}]).await {
         Ok(result) if result.matched_count == 1 => Ok(ImageClaim::Dispatch { id, attempt }),
         Ok(_) => Ok(match collection.find_one(doc! {"_id":id}).await {
             Ok(Some(row)) => ImageClaim::Existing(row),
@@ -244,7 +289,7 @@ pub async fn claim(
     attachment: &str,
     audience: &str,
 ) -> AppResult<ImageClaim> {
-    claim_v2(db, owner, conversation, attachment, audience).await
+    claim_v2(db, owner, conversation, attachment, audience, None).await
 }
 
 pub enum ImageCompletion {
@@ -286,19 +331,43 @@ pub async fn finish(
 /// Release only when no provider I/O started or the provider confirmed a rate refusal.
 /// An old attempt token cannot release a later sender's claim.
 pub async fn release(db: &Database, id: &str, attempt: &str) -> AppResult<ImageCompletion> {
+    release_inner(db, id, attempt, false).await
+}
+
+/// Only a documented refusal of the first provider request proves no effect;
+/// a refusal after an upload never permits that upload to be repeated.
+pub async fn release_refused(db: &Database, id: &str, attempt: &str) -> AppResult<ImageCompletion> {
+    release_inner(db, id, attempt, true).await
+}
+
+async fn release_inner(
+    db: &Database,
+    id: &str,
+    attempt: &str,
+    refused: bool,
+) -> AppResult<ImageCompletion> {
+    let mut alternatives = vec![
+        doc! {"preparation":bson::Bson::Null},
+        doc! {"preparation.version":1,"preparation.phase":{"$in":["preparing","released"]}},
+    ];
+    if refused {
+        alternatives.push(
+            doc! {"preparation.version":1,"preparation.phase":"sending","preparation.effects":1},
+        );
+    }
     let collection = db.collection::<NyxbotImageDelivery>(CLAIMS);
-    match collection
-        .update_one(
-            doc! {"_id": id, "state": "sending", "attempt": attempt},
-            doc! {
-                "$set": {"state": "pending"},
-                "$unset": {"attempt": "", "code": ""},
-            },
-        )
-        .await
-    {
+    match collection.update_one(
+        doc! {"_id":id,"state":"sending","attempt":attempt,"$or":alternatives},
+        vec![doc! {"$set":{
+            "state":{"$cond":[{"$eq":["$preparation.version",1]},"sending","pending"]},
+            "preparation":{"$cond":[{"$eq":["$preparation.version",1]},
+                {"$mergeObjects":["$preparation",{"phase":"released","parked":false,"lease_until":{"$add":["$$NOW",super::channel_image_preparation::RETRY_SECS*1000]}}]},"$$REMOVE"]},
+            "attempt":{"$cond":[{"$eq":["$preparation.version",1]},"$attempt","$$REMOVE"]},
+            "code":"$$REMOVE",
+        }}],
+    ).await {
         Ok(result) if result.matched_count == 1 => Ok(ImageCompletion::Recorded),
-        Ok(_) => Ok(match collection.find_one(doc! {"_id": id}).await {
+        Ok(_) => Ok(match collection.find_one(doc! {"_id":id}).await {
             Ok(Some(row)) => ImageCompletion::Existing(row),
             _ => ImageCompletion::Unknown,
         }),
@@ -324,9 +393,9 @@ pub async fn source_exists(
         .is_some())
 }
 
-pub async fn remove(db: &Database, id: &str) -> AppResult<()> {
+pub async fn remove(db: &Database, id: &str, attempt: &str) -> AppResult<()> {
     db.collection::<Document>(CLAIMS)
-        .delete_one(doc! {"_id":id})
+        .delete_one(doc! {"_id":id,"state":"sending","attempt":attempt})
         .await?;
     Ok(())
 }

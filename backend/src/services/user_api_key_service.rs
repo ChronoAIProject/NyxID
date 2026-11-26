@@ -2043,20 +2043,23 @@ pub async fn update_api_key(
 /// happened, `Ok(false)` when the status had already changed
 /// (callback won the race — leave the newly-authorized credential
 /// alone). Returns `NotFound` if the record does not exist at all.
-pub async fn revoke_api_key_if_pending(
-    db: &mongodb::Database,
-    user_id: &str,
-    key_id: &str,
-) -> AppResult<bool> {
-    Ok(claim_api_key_if_pending(db, user_id, key_id)
-        .await?
-        .is_some())
+#[cfg(test)]
+async fn revoke_api_key_if_pending(db: &Database, user_id: &str, key_id: &str) -> AppResult<bool> {
+    super::service_history::transaction::run(db, async |tx| {
+        super::api_key_mutation_service::transaction_result(
+            claim_api_key_if_pending(db, user_id, key_id, tx).await,
+        )
+    })
+    .await
+    .map(|claimed| claimed.is_some())
+    .map_err(super::api_key_mutation_service::map_transaction_error)
 }
 
-pub async fn claim_api_key_if_pending(
-    db: &mongodb::Database,
+pub(super) async fn claim_api_key_if_pending(
+    db: &Database,
     user_id: &str,
     key_id: &str,
+    tx: &mut super::service_history::transaction::Transaction,
 ) -> AppResult<Option<UserApiKey>> {
     // Verify the key exists and belongs to this user before the
     // conditional update, so `matched_count == 0` on the main
@@ -2064,6 +2067,7 @@ pub async fn claim_api_key_if_pending(
     // changed" (not "key doesn't exist").
     let existing = crate::services::service_history::collection::<UserApiKey>(db, COLLECTION_NAME)
         .find_one(doc! { "_id": key_id, "user_id": user_id })
+        .session(&mut *tx)
         .await?;
     if existing.is_none() {
         return Err(AppError::NotFound("API key not found".to_string()));
@@ -2097,6 +2101,7 @@ pub async fn claim_api_key_if_pending(
             },
         )
         .return_document(ReturnDocument::Before)
+        .session(tx)
         .await?;
 
     Ok(claimed)
@@ -3006,6 +3011,7 @@ mod tests {
             target_user_id: target_user_id.map(str::to_string),
             credential_user_id: None,
             redirect_path: None,
+            app_return_uri: None,
             flow_kind: None,
             attempt_nonce: None,
             connection_id: None,

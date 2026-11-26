@@ -11,7 +11,7 @@ use crate::services::{approval_service, audit_service, telegram_service};
 
 const TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval remains required and notifications will be attempted here. Pending requests can also be reviewed on the web.";
 const TELEGRAM_LINKED_APPROVAL_OFF_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval protection is off — enable it in NyxID notification settings when you want requests delivered here.";
-const TELEGRAM_POLLER_LEASE_NAME: &str = "telegram-poller";
+pub(crate) const TELEGRAM_POLLER_LEASE_NAME: &str = "telegram-poller";
 
 /// Run the Telegram long polling loop (development mode fallback).
 ///
@@ -34,7 +34,13 @@ pub async fn run_polling_loop(state: AppState) {
     );
 
     loop {
-        match runtime.acquire(&state.db, TELEGRAM_POLLER_LEASE_NAME).await {
+        let Some(_work) = state.shutdown.background() else {
+            return;
+        };
+        match runtime
+            .acquire_background(&state.db, TELEGRAM_POLLER_LEASE_NAME, &state.shutdown)
+            .await
+        {
             Ok(Some(lease)) => {
                 let result = runtime
                     .run_while_renewed(
@@ -61,7 +67,11 @@ pub async fn run_polling_loop(state: AppState) {
                 tracing::warn!(error = %error, "Failed to acquire Telegram polling lease");
             }
         }
-        tokio::time::sleep(runtime.contender_wait()).await;
+        drop(_work);
+        tokio::select! {
+            () = state.shutdown.intake_stopped() => return,
+            () = tokio::time::sleep(runtime.contender_wait()) => {},
+        }
     }
 }
 
@@ -86,14 +96,12 @@ async fn run_as_polling_leader(
     let poll_timeout_secs = u32::try_from(runtime.ttl.as_secs()).unwrap_or(u32::MAX);
 
     loop {
-        match telegram_service::get_updates(
-            &state.http_client,
-            bot_token,
-            offset,
-            poll_timeout_secs,
-        )
-        .await
-        {
+        let updates = tokio::select! {
+            biased;
+            () = state.shutdown.intake_stopped() => return Ok(()),
+            result = telegram_service::get_updates(&state.http_client, bot_token, offset, poll_timeout_secs) => result,
+        };
+        match updates {
             Ok(updates) => {
                 for update in updates {
                     let next_offset = update.update_id.saturating_add(1);
@@ -143,7 +151,7 @@ async fn handle_callback_query(
         }
     };
 
-    let request = match approval_service::get_request(&state.db, &request_id).await {
+    let decision = match approval_service::read_decision_request(&state.db, &request_id).await {
         Ok(r) => r,
         Err(crate::errors::AppError::NotFound(_)) => {
             answer_callback(state, &callback.id, "Request not found or expired").await;
@@ -166,6 +174,7 @@ async fn handle_callback_query(
         .map(|m| m.chat.id)
         .unwrap_or(callback.from.id);
 
+    let request = &decision.request;
     if !callback_can_decide(
         request.telegram_chat_id,
         chat_id,
@@ -186,18 +195,19 @@ async fn handle_callback_query(
     let decision_idempotency_key = format!("tg:{}:{}", callback.id, request_id);
 
     // Process the decision
-    match approval_service::process_decision(
+    match Box::pin(approval_service::process_decision_with_access(
         &state.db,
         &state.config,
         &state.http_client,
         state.fcm_auth.clone(),
         state.apns_auth.clone(),
-        &request_id,
+        decision,
         approved,
         None,
         Some(decision_idempotency_key.as_str()),
-        "telegram",
-    )
+        approval_service::DecisionSource::Telegram,
+        None,
+    ))
     .await
     {
         Ok(updated) => {
@@ -207,22 +217,6 @@ async fn handle_callback_query(
                 format!("Rejected access to {}", updated.service_name)
             };
             answer_callback(state, &callback.id, &text).await;
-
-            audit_service::log_async(
-                state.db.clone(),
-                Some(updated.user_id.clone()),
-                "approval_decision".to_string(),
-                Some(serde_json::json!({
-                    "request_id": request_id,
-                    "service_id": updated.service_id,
-                    "approved": approved,
-                    "channel": "telegram",
-                })),
-                None,
-                None,
-                None,
-                None,
-            );
         }
         Err(e) => {
             let callback_message = decision_callback_message(&e);

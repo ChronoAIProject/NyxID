@@ -64,6 +64,10 @@ export const requestResponseSchema = z.object({
   user_code: z.string().min(1),
   verification_uri: z.string().url(),
   verification_uri_complete: z.string().url(),
+  app_verification_uri: z.url({
+    protocol: /^https$/,
+    error: "App verification links require HTTPS",
+  }).optional().catch(undefined),
   expires_in: z.number().int().positive(),
   interval: z.number().int().positive(),
 });

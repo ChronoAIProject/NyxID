@@ -43,6 +43,13 @@ async fn two_replica_fixture_with_limit(
     internal_message_limit: usize,
 ) -> Option<ReplicaFixture> {
     let db = crate::test_utils::connect_test_database(prefix).await?;
+    replica_fixture_with_database(db, internal_message_limit).await
+}
+
+async fn replica_fixture_with_database(
+    db: mongodb::Database,
+    internal_message_limit: usize,
+) -> Option<ReplicaFixture> {
     crate::services::coordination_service::ensure_indexes(&db)
         .await
         .unwrap();
@@ -87,15 +94,10 @@ async fn two_replica_fixture_with_limit(
         Duration::from_secs(30),
         Duration::from_secs(60),
     );
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .build()
-        .unwrap();
     let owner_dispatch = Arc::new(NodeDispatch::new(
         db.clone(),
         owner_manager.clone(),
         owner_identity,
-        client.clone(),
         auth.clone(),
         internal_message_limit,
         Duration::from_secs(3),
@@ -104,7 +106,6 @@ async fn two_replica_fixture_with_limit(
         db.clone(),
         Arc::new(NodeWsManager::new(5, 100)),
         caller_identity,
-        client,
         auth,
         internal_message_limit,
         Duration::from_secs(3),
@@ -162,7 +163,7 @@ fn proxy_request(request_id: &str) -> NodeProxyRequest {
         service_slug: "service-slug".to_string(),
         base_url: "https://service.invalid".to_string(),
         method: "GET".to_string(),
-        path: "/v1/data".to_string(),
+        path: "/v1/data".into(),
         query: None,
         headers: vec![].into(),
         body: None,
@@ -220,6 +221,170 @@ async fn local_session_info_prefers_exact_socket_capabilities() {
     assert!(session.is_connected);
     assert!(session.capabilities_resolved);
     assert!(session.capabilities.remote_credential_crypto_v1);
+}
+
+#[tokio::test]
+async fn forwarding_to_a_legacy_owner_preserves_the_wire_and_requires_delivery_evidence() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let fixture = two_replica_fixture("handover_legacy_wire").await.unwrap();
+    let old = MockServer::start().await;
+    fixture
+        .db
+        .collection::<Node>(NODES)
+        .update_one(
+            doc! { "_id": &fixture.node_id },
+            doc! { "$set": { "connection_owner.internal_base_url": old.uri() } },
+        )
+        .await
+        .unwrap();
+    let path_to_proxy = format!("/internal/v1/nodes/{}/proxy", fixture.node_id);
+    for (reply, expected_dispatched) in [
+        // An old owner returns a bare conflict. Intermediaries can return one too.
+        (ResponseTemplate::new(409), Some(true)),
+        (
+            ResponseTemplate::new(502)
+                .insert_header("x-nyxid-dispatched", "false")
+                .set_body_json(serde_json::json!({"code":"node_offline","dispatched":true})),
+            Some(true),
+        ),
+        (
+            ResponseTemplate::new(502)
+                .insert_header("x-nyxid-dispatched", "false")
+                .set_body_json(serde_json::json!({"code":"node_offline","dispatched":false})),
+            Some(false),
+        ),
+        (
+            ResponseTemplate::new(200)
+                .insert_header("x-nyxid-proxy-kind", "complete")
+                .insert_header("x-nyxid-proxy-status", "201")
+                .insert_header("x-nyxid-proxy-headers", "W10=")
+                .set_body_string("done"),
+            None,
+        ),
+    ] {
+        let _mounted = Mock::given(method("POST"))
+            .and(path(path_to_proxy.as_str()))
+            .respond_with(reply)
+            .expect(1)
+            .mount_as_scoped(&old)
+            .await;
+        let result = fixture
+            .caller_dispatch
+            .send_proxy_request_classified(
+                &fixture.node_id,
+                proxy_request("mixed-fleet"),
+                None,
+                internal_node_dispatch_permit(),
+            )
+            .await;
+        match (result, expected_dispatched) {
+            (Err(failure), Some(expected)) => assert_eq!(failure.dispatched, expected),
+            (Ok(ProxyResponseType::Complete(response)), None) => {
+                assert_eq!(response.status, 201);
+                assert_eq!(response.body, b"done");
+            }
+            _ => panic!("unexpected legacy response disposition"),
+        }
+        let requests = old.received_requests().await.unwrap();
+        let envelope: serde_json::Value = requests.last().unwrap().body_json().unwrap();
+        assert_eq!(envelope["request"]["request_id"], "mixed-fleet");
+        assert_eq!(envelope["fence"]["node_id"], fixture.node_id);
+        assert!(envelope["fence"].get("retirement_hash_v1").is_none());
+    }
+}
+
+#[tokio::test]
+async fn owner_handover_counts_only_on_failed_transport() {
+    use mongodb::event::{EventHandler, command::CommandEvent};
+    use std::sync::Mutex;
+    let commands = Arc::new(Mutex::new(Vec::new()));
+    let recorded = commands.clone();
+    let db = crate::test_utils::connect_test_database_with_command_handler(
+        "handover_cost",
+        EventHandler::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                recorded.lock().unwrap().push(event.command_name);
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    let mut fixture = replica_fixture_with_database(db.clone(), 2 << 20)
+        .await
+        .unwrap();
+    commands.lock().unwrap().clear();
+    let dispatch = fixture.caller_dispatch.clone();
+    let call = async || {
+        dispatch
+            .send_proxy_request_classified(
+                &fixture.node_id,
+                proxy_request("cost"),
+                None,
+                internal_node_dispatch_permit(),
+            )
+            .await
+    };
+    let agent = async {
+        assert_eq!(
+            message_json(&next_outbound(&mut fixture.outbound).await)["request_id"],
+            "cost"
+        );
+        fixture.owner_manager.deliver_proxy_response(
+            &fixture.node_id,
+            NodeProxyResponse {
+                request_id: "cost".into(),
+                status: 200,
+                headers: vec![],
+                body: vec![],
+            },
+        );
+    };
+    let (result, ()) = tokio::join!(call(), agent);
+    assert!(result.is_ok());
+    let take = || std::mem::take(&mut *commands.lock().unwrap());
+    assert_eq!(take(), ["find", "findAndModify", "aggregate"]);
+    fixture.server_task.abort();
+    let _ = (&mut fixture.server_task).await;
+    for upgraded in [false, true] {
+        if upgraded {
+            db.collection::<Node>(NODES)
+                .update_one(
+                    doc! {"_id":&fixture.node_id},
+                    doc! {"$set":{"connection_owner.retirement_hash_v1":"test-hash"}},
+                )
+                .await
+                .unwrap();
+            take();
+        }
+        let Err(failure) = call().await else {
+            panic!("closed listener accepted a request");
+        };
+        assert!(!failure.dispatched);
+        let wait = failure.handover.unwrap();
+        let started = tokio::time::Instant::now();
+        assert!(
+            !wait
+                .wait(&db, dispatch.local_manager(), &fixture.node_id)
+                .await
+        );
+        let elapsed = started.elapsed();
+        let commands = take();
+        assert!(commands.iter().all(|name| name == "find"), "{commands:?}");
+        if upgraded {
+            assert!(elapsed >= Duration::from_millis(3900) && elapsed < Duration::from_secs(5));
+            assert!((3..=28).contains(&commands.len()), "{commands:?}");
+        } else {
+            assert!(elapsed < Duration::from_secs(1));
+            assert_eq!(commands.len(), 2);
+        }
+        println!(
+            "upgraded={upgraded}, failed send plus wait: {} finds in {elapsed:?}",
+            commands.len()
+        );
+    }
 }
 
 #[tokio::test]
@@ -618,7 +783,7 @@ async fn remote_ws_passthrough_forwards_text_binary_and_close() {
                     session_id: sent_session,
                     service_slug: "socket".to_string(),
                     base_url: "wss://socket.invalid".to_string(),
-                    path: "/events".to_string(),
+                    path: "/events".into(),
                     query: None,
                     headers: (vec![]).into(),
                     ws_frame_injections: vec![],
@@ -704,7 +869,7 @@ async fn remote_ws_passthrough_preserves_large_binary_frames() {
                     session_id: sent_session,
                     service_slug: "socket".to_string(),
                     base_url: "wss://socket.invalid".to_string(),
-                    path: "/events".to_string(),
+                    path: "/events".into(),
                     query: None,
                     headers: (vec![]).into(),
                     ws_frame_injections: vec![],
@@ -782,11 +947,12 @@ async fn remote_credential_ack_and_admin_disconnect_reach_owner() {
             .send_credential_update_and_wait(
                 &node_id,
                 &CredentialUpdateParams {
+                    version: None,
                     target_revision: None,
                     service_slug: "service".to_string(),
                     injection_method: "header".to_string(),
                     header_name: Some("Authorization".to_string()),
-                    header_value: Some("secret".to_string()),
+                    header_value: Some(zeroize::Zeroizing::new("secret".to_string())),
                     param_name: None,
                     param_value: None,
                     target_url: None,
@@ -970,7 +1136,11 @@ async fn machine_gateway_upload_streams_across_replicas_without_buffering() {
         for _ in 0..64 {yield Ok::<_,std::io::Error>(bytes::Bytes::from(vec![0x5a;65536]));}
     });
     let dispatch = fixture.caller_dispatch.clone();
-    let calling = tokio::spawn(async move { dispatch.proxy_upload(request, body).await });
+    let calling = tokio::spawn(async move {
+        dispatch
+            .proxy_upload(request.with_parameters_owner(), body)
+            .await
+    });
     let metadata = tokio::time::timeout(Duration::from_secs(5), fixture.outbound.recv())
         .await
         .unwrap()
@@ -1132,6 +1302,7 @@ async fn node_endpoint_2126_remote_metadata_ack_and_capability_fence() {
         .await
         .unwrap();
     let params = CredentialUpdateParams {
+        version: None,
         service_slug: "monitor".into(),
         injection_method: "target_url".into(),
         header_name: None,
@@ -1206,4 +1377,82 @@ async fn node_endpoint_2126_remote_metadata_ack_and_capability_fence() {
         CredentialAckOutcome::Ok,
     );
     task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn node_credential_order_2472_owner_routing_preserves_update_remove_generations_and_receipts()
+{
+    use crate::services::node_ws_manager::CredentialVersion;
+    let mut fixture = two_replica_fixture("ordered_delivery_routing")
+        .await
+        .expect("test MongoDB required");
+    let version = CredentialVersion {
+        credential_id: uuid::Uuid::new_v4().to_string(),
+        credential_generation: 3,
+    };
+    let value = Zeroizing::new(uuid::Uuid::new_v4().to_string());
+    let params = CredentialUpdateParams {
+        version: Some(version.clone()),
+        target_revision: None,
+        service_slug: "ordering-fixture".into(),
+        injection_method: "header".into(),
+        header_name: Some("Authorization".into()),
+        header_value: Some(value.clone()),
+        param_name: None,
+        param_value: None,
+        target_url: None,
+    };
+    let dispatch = fixture.caller_dispatch.clone();
+    let node = fixture.node_id.clone();
+    let owner = fixture.owner_manager.clone();
+    let (sent, ()) = tokio::join!(
+        dispatch.send_credential_update_and_wait(&node, &params, Duration::from_secs(3)),
+        async {
+            let frame = message_json(&next_outbound(&mut fixture.outbound).await);
+            assert!(frame["header_value"].as_str().unwrap() == value.as_str());
+            assert_eq!(frame["credential_generation"], 3);
+            assert!(frame["credential_id"].as_str().unwrap() == version.credential_id);
+            owner.deliver_credential_ack(
+                &node,
+                frame["request_id"].as_str().unwrap(),
+                CredentialAckOutcome::Versioned(version.clone()),
+            );
+        }
+    );
+    sent.unwrap();
+    let (sent, ()) = tokio::join!(
+        dispatch.send_credential_remove_versioned(
+            &node,
+            "ordering-fixture",
+            &version,
+            Duration::from_secs(3)
+        ),
+        async {
+            let frame = message_json(&next_outbound(&mut fixture.outbound).await);
+            assert_eq!(frame["type"], "credential_remove");
+            assert_eq!(frame["credential_generation"], 3);
+            assert!(frame["header_value"].is_null());
+            owner.deliver_credential_ack(
+                &node,
+                frame["request_id"].as_str().unwrap(),
+                CredentialAckOutcome::Versioned(version.clone()),
+            );
+        }
+    );
+    sent.unwrap();
+    // A correlated receipt for a lower held generation does not complete delivery.
+    let (sent, ()) = tokio::join!(
+        dispatch.send_credential_update_and_wait(&node, &params, Duration::from_secs(3)),
+        async {
+            let frame = message_json(&next_outbound(&mut fixture.outbound).await);
+            let mut older = version.clone();
+            older.credential_generation -= 1;
+            owner.deliver_credential_ack(
+                &node,
+                frame["request_id"].as_str().unwrap(),
+                CredentialAckOutcome::Versioned(older),
+            );
+        }
+    );
+    assert!(sent.is_err());
 }

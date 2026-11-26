@@ -1,3 +1,5 @@
+import { useAppLanguage } from "../../i18n/LanguageProvider";
+import { translateApp } from "../../i18n/appTranslation";
 import { activityPresentationStatus } from "./assistantHistoryCompat";
 import { activityDecisionPresentation } from "./assistantActivityDecision";
 import { ServiceIcon } from "../../components/ServiceIcon";
@@ -56,6 +58,7 @@ export function AssistantActivityDisclosure({
   /** Calls that raised a confirmation card, including cards still pending. */
   confirmationActivityIds?: ReadonlySet<string>;
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   const [open, setOpen] = useState(false);
   const [now, setNow] = useState(Date.now);
@@ -84,23 +87,31 @@ export function AssistantActivityDisclosure({
   const failed = activities.filter(
     (activity) => activityPresentationStatus(activityDecisionPresentation(activity.decision)?.status ?? activity.status, activity.failure?.kind) === "error" && !gated.has(activity.id),
   ).length;
-  const status = turnLabel === "Status unavailable" ? "unknown" : activities.some((activity) => activity.status === "running")
+  const status = turnLabel === translateApp("Status unavailable")
+      ? "unknown" : activities.some((activity) => activity.status === "running")
     ? "running"
     : failed || turnFailed
       ? "error"
       : !turnLabel && activities.some((activity) => activity.status === "unknown") ? "unknown" : "completed";
   const total = Math.max(activities.length, activityTotal ?? 0);
-  const count = `${total} ${total === 1 ? "action" : "actions"}`;
-  const label = turnLabel ?? (status === "running" ? "Working…" : status === "unknown" ? "Status unavailable" : "Completed");
+  const count = translateApp(
+    total === 1 ? "{{count}} action" : "{{count}} actions",
+    { count: total },
+  );
+  const label = turnLabel ?? (status === "running" ? translateApp("Working…")
+      : status === "unknown" ? translateApp("Status unavailable")
+        : translateApp("Completed"));
   const summary = [
     label,
     total ? count : "",
     ...decisionSummary(countDecisions(decisions, activities.flatMap((activity) => activity.decision ? [activity.decision] : []))),
     waited && metadata?.capacity_wait_ms
-      ? `waited ${formatCapacityWait(metadata.capacity_wait_ms)}`
+      ? translateApp("waited {{duration}}", {
+          duration: formatCapacityWait(metadata.capacity_wait_ms),
+        })
       : "",
-    failed ? `${failed} failed` : "",
-    delivery?.status === "failed" ? "delivery failed" : "",
+    failed ? translateApp("{{failed}} failed", {failed: failed }) : "",
+    delivery?.status === "failed" ? translateApp("delivery failed") : "",
   ]
     .filter(Boolean)
     .join(" · ");
@@ -110,8 +121,11 @@ export function AssistantActivityDisclosure({
     <View style={styles.container}>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`Turn details: ${summary}`}
-        accessibilityHint={open ? "Hide action details" : "Show action details"}
+        accessibilityLabel={translateApp("Turn details: {{summary}}", {summary: summary,
+        })}
+        accessibilityHint={open ? translateApp("Hide action details")
+            : translateApp("Show action details")
+        }
         accessibilityState={{ expanded: open }}
         hitSlop={{ top: 7, bottom: 7 }}
         onPress={() => {
@@ -130,10 +144,8 @@ export function AssistantActivityDisclosure({
           maxFontSizeMultiplier={1.3}
           style={styles.count}
         >
-          {summary}
-          {total > activities.length
-            ? ` · latest ${activities.length} of ${total} shown`
-            : ""}
+          {(total > activities.length
+            ? translateApp("{{summary}} · latest {{count}} of {{total}} shown", { summary: summary, count: activities.length, total: total }) : summary)}
         </Label>
         <View
           accessibilityElementsHidden
@@ -148,12 +160,15 @@ export function AssistantActivityDisclosure({
             const decision = activityDecisionPresentation(activity.decision);
             const confirmation = Boolean(decision && decision.status === "waiting") || gated.has(activity.id);
             const status = activityPresentationStatus(decision ? decision.status === "done" ? "completed" : decision.status === "error" ? "error" : "running" : activity.status, activity.failure?.kind);
-            const description = status === "skipped" ? toolFailureCopy(activity.failure, activity.label) : status === "unknown" ? "Activity details unavailable in this app version." : decision?.label ?? (confirmation
-              ? "Asked for your confirmation"
-              : describeToolActivity(
+            const description = status === "skipped" ? toolFailureCopy(activity.failure, activity.label) : status === "unknown" ? translateApp(
+                      "Activity details unavailable in this app version.",
+                    )
+                  : (decision?.label ?? (confirmation
+              ? translateApp("Asked for your confirmation")
+                      : describeToolActivity(
                   activity.label,
                   activity.status === "completed" ? "done" : activity.status,
-                ));
+                        )));
             const elapsed = elapsedLabel(
               activity.started_at,
               activity.status === "running"
@@ -166,7 +181,7 @@ export function AssistantActivityDisclosure({
                 key={activity.id}
                 accessible
                 accessibilityRole="text"
-                accessibilityLabel={`${description}, ${activity.label}, ${status === "skipped" ? "Skipped" : status === "unknown" ? "Status unavailable" : decision?.label ?? (confirmation ? "Confirmation requested" : activity.status === "error" ? "Failed" : activity.status === "completed" ? "Succeeded" : "Running")}${elapsed ? `, ${elapsed}` : ""}`}
+                accessibilityLabel={(status === "skipped" ? (elapsed ? translateApp("{{description}}, {{label}}, Skipped, {{elapsed}}", { description: description, label: activity.label, elapsed: elapsed }) : translateApp("{{description}}, {{label}}, Skipped", { description: description, label: activity.label })) : (status === "unknown" ? (elapsed ? translateApp("{{description}}, {{label}}, Status unavailable, {{elapsed}}", { description: description, label: activity.label, elapsed: elapsed }) : translateApp("{{description}}, {{label}}, Status unavailable", { description: description, label: activity.label })) : (elapsed ? translateApp("{{description}}, {{label}}, {{status}}, {{elapsed}}", { description: description, label: activity.label, status: decision?.label ?? (confirmation ? translateApp("Confirmation requested") : activity.status === "error" ? translateApp("Failed") : activity.status === "completed" ? translateApp("Succeeded") : translateApp("Running")), elapsed: elapsed}) : translateApp("{{description}}, {{label}}, {{status}}", { description: description, label: activity.label, status: decision?.label ?? (confirmation ? translateApp("Confirmation requested") : activity.status === "error" ? translateApp("Failed") : activity.status === "completed" ? translateApp("Succeeded") : translateApp("Running")) }))))}
                 style={styles.activity}
               >
                 <ActivityStatusIcon
@@ -199,13 +214,13 @@ export function AssistantActivityDisclosure({
                         {decisionTitle(row)}
                       </Label>
                     ))}
-                  {decision && status !== "skipped" && status !== "unknown" ? <Label muted style={styles.description}>{decision.detail}</Label> : status === "error" && !confirmation ? (
+                  {decision && status !== "skipped" && status !== "unknown" ? (
+                    <Label muted style={styles.description}>{decision.detail}</Label>
+                  ) : status === "error" && !confirmation ? (
                     <Label
                       style={[styles.description, { color: colors.danger }]}
                     >
-                      {toolFailureCopy(activity.failure, activity.label)} The assistant can
-                      continue after a failed step.
-                    </Label>
+                      {translateApp("{{label}} The assistant can continue after a failed step.", { label: toolFailureCopy(activity.failure, activity.label)})}</Label>
                   ) : null}
                 </View>
                 {/* The connected service, trailing so every row's text aligns;
@@ -234,12 +249,9 @@ export function AssistantActivityDisclosure({
           ))}
           {waited ? (
             <Label muted style={styles.description}>
-              {metadata?.attempts != null
-                ? `${metadata.attempts} attempts`
-                : ""}
-              {metadata?.capacity_wait_ms
-                ? ` · waited ${formatCapacityWait(metadata.capacity_wait_ms)} for capacity`
-                : ""}
+              {(metadata?.attempts != null
+                ? (metadata?.capacity_wait_ms
+                ? translateApp("{{count}} attempts · waited {{waitDuration}} for capacity", { count: metadata.attempts, waitDuration: formatCapacityWait(metadata.capacity_wait_ms) }) : translateApp("{{count}} attempts", { count: metadata.attempts })) : (metadata?.capacity_wait_ms ? translateApp("Waited {{duration}} for capacity", { duration: formatCapacityWait(metadata.capacity_wait_ms) }) : ""))}
             </Label>
           ) : null}
           {delivery ? <DeliveryNotice delivery={delivery} /> : null}
@@ -261,6 +273,7 @@ function ActivityStatusIcon({
 }: {
   status: Activity["status"] | "confirmation" | "skipped";
 }) {
+  useAppLanguage();
   const { colors } = useTheme();
   return (
     <View
@@ -292,6 +305,7 @@ function DeliveryNotice({
     NonNullable<AssistantMessage["turn_metadata"]>["channel_delivery"]
   >;
 }) {
+  useAppLanguage();
   return (
     <Label muted style={styles.description}>
       {deliveryText(delivery)}

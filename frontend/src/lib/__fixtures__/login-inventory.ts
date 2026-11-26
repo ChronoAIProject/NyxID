@@ -28,10 +28,12 @@ export function loginInventory(): LoginInventory {
       services,
       nodes: [],
       orgs: [],
+      personal_owner_id: "user",
     },
     connections: [
       {
         id: "svc",
+        owner_id: "user",
         label: "GitHub personal",
         slug: "my-github",
         catalog_service_slug: "github",

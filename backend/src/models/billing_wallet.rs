@@ -55,6 +55,19 @@ crate::exact_credit_model! {
         pub items: Vec<PurchasedCreditExpiryItem>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub lago_void_transaction_id: Option<String>,
+        /// Last attempted POST; uncertain dispatches wait 24h before retry.
+        #[serde(default)]
+        pub dispatch_attempts: i64,
+        /// Upgraded workers release this lease while the legacy deadline still
+        /// prevents old binaries from retrying an uncertain provider request.
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub processing_lease_until: Option<DateTime<Utc>>,
+        #[serde(default)]
+        pub processing_lease_token: Option<String>,
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub dispatch_started_at: Option<DateTime<Utc>>,
+        #[serde(default, with = "crate::models::bson_datetime::optional")]
+        pub unresolved_reported_at: Option<DateTime<Utc>>,
         #[serde(default)]
         pub wallet_balance_applied: bool,
         /// History totals and this marker commit together while the operation is
@@ -79,6 +92,16 @@ pub struct BillingWallet {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lago_subscription_id: Option<String>,
     pub plan_kind: PlanKind,
+    /// Provider-read fence; local reservation/settlement counters are separate.
+    #[serde(default)]
+    pub snapshot_generation: i64,
+    /// Orders owner tax invalidation independently of balance snapshots.
+    #[serde(default)]
+    pub tax_generation: i64,
+    /// A real write conflict for cold/changed-plan tax publication.
+    #[serde(default)]
+    #[schema(ignore)]
+    pub tax_guard_token: Option<String>,
     #[serde(default)]
     #[serde(with = "crate::models::credits::whole")]
     pub balance_credits: Credits,
@@ -149,6 +172,9 @@ mod tests {
     fn available_balance_subtracts_holds_and_pending_debits() {
         let now = Utc::now();
         let wallet = BillingWallet {
+            snapshot_generation: 0,
+            tax_generation: 0,
+            tax_guard_token: None,
             id: "wallet-1".to_string(),
             owner_id: "owner-1".to_string(),
             lago_customer_id: "owner-1".to_string(),

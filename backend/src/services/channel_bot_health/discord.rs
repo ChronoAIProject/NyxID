@@ -180,8 +180,8 @@ pub async fn load(db: &Database, bots: &[ChannelBot]) -> AppResult<HashMap<Strin
         .await
         .is_ok();
     let releases:Vec<Document>=db.collection(RELEASES).find(doc!{"channel_bot_id":{"$in":&ids},"$or":[
-        {"state":{"$ne":"settled"}},{"resolution":{"$nin":["released","missing","cancelled","not_created","confirmed_missing"]}}
-    ]}).projection(doc!{"channel_bot_id":1,"native_drain_for":1,"native_not_before":1,"state":1}).await?.try_collect().await?;
+        {"state":{"$ne":"settled"}},{"resolution":{"$nin":crate::services::nyxbot_gateway_release_service::accepted_resolutions_bson()}}
+    ]}).projection(doc!{"channel_bot_id":1,"native_drain_for":1,"native_not_before":1,"state":1,"last_error":1,"gateway_channel_id":1,"dispatch_started_at":1,"last_gateway_answer":1,"review_reason":1,"resolution":1}).await?.try_collect().await?;
     let leases:Vec<Document>=db.collection(LEASE_COLLECTION_NAME).find(doc!{"_id":{"$in":ids.iter().map(|id|format!("discord-gateway:{id}")).collect::<Vec<_>>()},"$expr":{"$gt":["$expires_at","$$NOW"]}}).projection(doc!{"_id":1}).await?.try_collect().await?;
     let mut result = HashMap::new();
     for bot in bots.iter().filter(|b| b.platform == "discord") {
@@ -213,16 +213,20 @@ pub async fn load(db: &Database, bots: &[ChannelBot]) -> AppResult<HashMap<Strin
             .iter()
             .any(|r| r.get_str("channel_bot_id") == Ok(&bot.id))
         {
-            Some(
-                if releases.iter().any(|r| {
-                    r.get_str("channel_bot_id") == Ok(&bot.id)
-                        && r.get_datetime("native_not_before").is_ok()
-                }) {
-                    "native_draining"
-                } else {
-                    "release_unresolved"
-                },
-            )
+            releases
+                .iter()
+                .filter(|r| r.get_str("channel_bot_id") == Ok(&bot.id))
+                .map(release_block_reason)
+                .min_by_key(|reason| match *reason {
+                    "preserved" => 0,
+                    "destination_changed" => 1,
+                    "owner_unavailable" => 2,
+                    "auth_refused" => 3,
+                    "identity_unconfirmed" | "changed_version" => 4,
+                    "create_outcome_unconfirmed" => 5,
+                    "release_unresolved" => 6,
+                    _ => 7,
+                })
         } else if channel.is_some_and(|c| c.transport != "direct") {
             Some("gateway_owned")
         } else {
@@ -236,11 +240,95 @@ pub async fn load(db: &Database, bots: &[ChannelBot]) -> AppResult<HashMap<Strin
     Ok(result)
 }
 
+fn release_block_reason(row: &Document) -> &'static str {
+    use crate::services::nyxbot_gateway_release_service::diagnostic_reason;
+    if row.get_str("state") == Ok("settled") {
+        return "preserved";
+    }
+    let current = diagnostic_reason(row.get_str("last_error").ok());
+    // A fresh not-found observation supersedes historical refusal evidence;
+    // it still cannot prove that an unacknowledged create never happened.
+    if current == "create_outcome_unconfirmed"
+        && row.get_str("gateway_channel_id").is_err()
+        && row.get_datetime("dispatch_started_at").is_ok()
+        && matches!(row.get_str("last_gateway_answer"), Err(_) | Ok("not_found"))
+    {
+        return "create_outcome_unconfirmed";
+    }
+    // Keep the original actionable reason through a transient re-observation.
+    let reason = if row.get_str("state") == Ok("review_required")
+        && matches!(current, "unavailable" | "unspecified")
+    {
+        row.get_str("review_reason")
+            .ok()
+            .map(|r| diagnostic_reason(Some(r)))
+            .filter(|r| *r != "unspecified")
+            .unwrap_or(current)
+    } else {
+        current
+    };
+    if matches!(
+        reason,
+        "preserved"
+            | "destination_changed"
+            | "owner_unavailable"
+            | "auth_refused"
+            | "identity_unconfirmed"
+            | "changed_version"
+    ) {
+        return reason;
+    }
+    if row.get_datetime("native_not_before").is_ok() {
+        "native_draining"
+    } else {
+        "release_unresolved"
+    }
+}
+
 pub fn advice(intake: &Intake) -> Option<super::Recommendation> {
     let (action, text) = match intake.code? {
         RELAY_BLOCKED if intake.block_reason == Some("readiness_unavailable") => (
             "contact_admin",
             "Discord relay is enabled, but fleet readiness is unavailable. An administrator must restore channel:discord-gateway readiness across the serving replicas before intake can resume.",
+        ),
+        RELAY_BLOCKED if intake.block_reason == Some("create_outcome_unconfirmed") => (
+            "contact_admin",
+            "The gateway reports this connection as missing and cannot yet confirm the record was never created. NyxID keeps checking automatically, up to one hour apart. Ask a platform administrator to review the release using the link to this bot’s NyxID page and verify with the gateway that the original request can no longer complete. Relay intake stays paused until cleanup is confirmed and the 90-second drain finishes, so a second Discord session cannot start.",
+        ),
+        RELAY_BLOCKED if intake.block_reason == Some("preserved") => (
+            "contact_admin",
+            "An administrator preserved the gateway record. NyxID will not delete it automatically. A platform administrator must arrange its removal at the gateway; NyxID keeps checking for confirmed absence before the safety drain and relay restart.",
+        ),
+        RELAY_BLOCKED if intake.block_reason == Some("destination_changed") => (
+            "contact_admin",
+            "The configured gateway destination no longer matches this release. A platform administrator must restore or reconcile the catalog destination. NyxID keeps checking, but cannot send cleanup to a different destination without matching authority.",
+        ),
+        RELAY_BLOCKED if intake.block_reason == Some("owner_unavailable") => (
+            "contact_admin",
+            "The release owner's account is unavailable. A platform administrator must restore the owner's authority or arrange gateway cleanup. NyxID keeps checking; relay intake remains paused until cleanup is confirmed and the safety drain finishes.",
+        ),
+        RELAY_BLOCKED if intake.block_reason == Some("auth_refused") => (
+            "contact_admin",
+            "The gateway refused NyxID's cleanup authority. A gateway administrator must restore creator authentication and permission for this owner. NyxID keeps checking; a native activation retry cannot bypass this refusal.",
+        ),
+        RELAY_BLOCKED
+            if matches!(
+                intake.block_reason,
+                Some("identity_unconfirmed" | "changed_version")
+            ) =>
+        {
+            (
+                "contact_admin",
+                "The gateway record's identity or version does not match the retained cleanup authority. A platform administrator must inspect the release and coordinate with the gateway administrator. NyxID keeps checking but will not delete a replacement record or start a second Discord session.",
+            )
+        }
+        RELAY_BLOCKED if intake.block_reason == Some("native_draining") => (
+            "contact_admin",
+            "NyxID is waiting for the 90-second safety drain after confirmed gateway cleanup. Discord relay intake resumes automatically after all retained releases are resolved.",
+        ),
+        RELAY_BLOCKED if intake.block_reason == Some("release_unresolved") => (
+            "contact_admin",
+            "NyxID is automatically rechecking the retained gateway release, with retries up to one hour apart. Relay intake resumes only after the gateway confirms cleanup and the 90-second safety drain finishes. Uncertain creation or deletion keeps intake paused; NyxID will not start a second Discord session.",
         ),
         RELAY_BLOCKED => (
             "contact_admin",

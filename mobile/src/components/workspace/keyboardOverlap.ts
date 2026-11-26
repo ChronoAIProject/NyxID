@@ -1,32 +1,49 @@
 export type KeyboardFrame = { screenY: number; height: number };
 
-/** Fabric modal measurements use the sheet's root, while keyboard events use
- * the presenting window. A bottom-anchored safe-area provider supplies the
- * root's actual bottom, including a drawer's existing origin.
- */
-export function keyboardInViewportWindow(
-  keyboard: KeyboardFrame,
-  safeAreaFrame: { y: number; height: number },
-): KeyboardFrame {
+export function visibleKeyboardFrame(
+  frame: KeyboardFrame | undefined,
+  windowHeight: number,
+  androidContentBottom?: number | null,
+): KeyboardFrame | undefined {
   if (
-    !Number.isFinite(safeAreaFrame.y) ||
-    !Number.isFinite(safeAreaFrame.height) ||
-    safeAreaFrame.height <= 0
+    !frame ||
+    !Number.isFinite(windowHeight) ||
+    windowHeight <= 0 ||
+    !Number.isFinite(frame.screenY) ||
+    !Number.isFinite(frame.height) ||
+    frame.height <= 0 ||
+    frame.height > windowHeight ||
+    frame.screenY < 0
   )
-    return keyboard;
+    return undefined;
+  // On Android 11+ RN reads the IME height above system bars separately
+  // from the visible display frame. The latter can still end behind the IME.
+  // A window already resized to the correct top needs no correction.
+  if (
+    androidContentBottom != null &&
+    androidContentBottom >= frame.height &&
+    androidContentBottom <= windowHeight + 1 &&
+    frame.screenY <= windowHeight + 1
+  ) {
+    return {
+      screenY: Math.min(frame.screenY, androidContentBottom - frame.height),
+      height: frame.height,
+    };
+  }
+  if (frame.screenY >= windowHeight) return undefined;
   return {
-    ...keyboard,
-    screenY: Math.min(
-      keyboard.screenY,
-      safeAreaFrame.y + safeAreaFrame.height - keyboard.height,
-    ),
+    screenY: frame.screenY,
+    height: Math.min(frame.height, windowHeight - frame.screenY),
   };
 }
 
-/** Only consume the part of this view that the visible keyboard actually covers. */
+/** Reserve the intersection in matching coordinates. Android reports IME
+ * height without its navigation bar, so its bottom also has to clear that gap.
+ * iOS retains intersection-only handling for floating/undocked keyboards. */
 export function keyboardOverlap(
   frame: { y: number; height: number },
   keyboard?: KeyboardFrame,
+  platform = "ios",
 ): number {
   if (
     !keyboard ||
@@ -39,8 +56,11 @@ export function keyboardOverlap(
   ) {
     return 0;
   }
-  return Math.min(
-    frame.height,
-    Math.max(0, frame.y + frame.height - keyboard.screenY),
-  );
+  const bottom = frame.y + frame.height;
+  if (bottom <= keyboard.screenY || frame.y >= keyboard.screenY + keyboard.height)
+    return 0;
+  return platform === "android"
+    ? Math.min(frame.height, bottom - keyboard.screenY)
+    : Math.min(bottom, keyboard.screenY + keyboard.height) -
+        Math.max(frame.y, keyboard.screenY);
 }

@@ -63,6 +63,50 @@ beforeEach(() => {
 });
 
 describe("account-bound device restrictions", () => {
+  it("same-account binding preserves pending work only when the stored choice is unchanged", async () => {
+    const store = await loadFreshStore();
+    store.getState().bindAccount("account-a");
+    store.getState().setConsent(false, 1, { markAsked: false });
+    const revision = store.getState().revision;
+    store.getState().bindAccount("account-a");
+    expect(store.getState().revision).toBe(revision);
+    localStorage.setItem("nyxid.telemetry_consent.v3.account-a", JSON.stringify({ enabled: false, asked: true }));
+    store.getState().bindAccount("account-a");
+    expect(store.getState().revision).toBeGreaterThan(revision);
+    const changed = store.getState().revision;
+    store.getState().bindAccount("account-b");
+    store.getState().bindAccount("account-a");
+    expect(store.getState().revision).toBeGreaterThan(changed);
+  });
+
+  it.each([false, true])("temporary denial preserves acknowledgement across reload (already answered=%s)", async (answered) => {
+    const store = await loadFreshStore();
+    store.getState().bindAccount("account-a");
+    if (answered) store.getState().setConsent(true);
+    store.getState().setConsent(false, 1, { markAsked: false });
+    expect(store.getState()).toMatchObject({ enabled: false, asked: answered });
+    vi.resetModules();
+    const reloaded = await loadFreshStore();
+    reloaded.getState().bindAccount("account-a");
+    expect(reloaded.getState()).toMatchObject({ enabled: false, asked: answered });
+  });
+
+  it("failed temporary denial does not invent an answer during rebind or storage sync", async () => {
+    const store = await loadFreshStore();
+    const { syncConsentStorage } = await import("./consent-store");
+    store.getState().bindAccount("account-a");
+    const blocked = vi.spyOn(localStorage, "setItem").mockImplementation(() => { throw new Error("blocked"); });
+    store.getState().setConsent(false, 1, { markAsked: false });
+    store.getState().bindAccount("account-b");
+    store.getState().bindAccount("account-a");
+    syncConsentStorage();
+    expect(store.getState()).toMatchObject({ enabled: false, asked: false, persistenceError: true });
+    blocked.mockRestore();
+    store.getState().setConsent(false);
+    syncConsentStorage();
+    expect(store.getState()).toMatchObject({ enabled: false, asked: true, persistenceError: false });
+  });
+
   it("defaults off and refuses an unbound opt-in", async () => {
     const store = await loadFreshStore();
     store.getState().setConsent(true);
@@ -90,7 +134,7 @@ describe("account-bound device restrictions", () => {
     store.getState().bindAccount("account-a");
     store.getState().setConsent(true);
     expect(JSON.parse(localStorage.getItem("nyxid.telemetry_consent.v3.account-a")!)).toEqual({
-      enabled: true, asked: true,
+      enabled: true, asked: true, policy: 1,
     });
     vi.resetModules();
     const reloaded = await loadFreshStore();
@@ -184,5 +228,11 @@ it("reports persistence failure, keeps account denial isolated, and clears error
   store.getState().bindAccount("a"); expect(store.getState().persistenceError).toBe(true);
   localStorage.setItem = original; store.getState().setConsent(false);
   expect(store.getState()).toMatchObject({ enabled: false, persistenceError: false });
-  expect(JSON.parse(localStorage.getItem("nyxid.telemetry_consent.v3.a")!)).toEqual({ enabled: false, asked: true });
+  expect(JSON.parse(localStorage.getItem("nyxid.telemetry_consent.v3.a")!)).toEqual({ enabled: false, asked: true, policy: 1 });
+});
+
+it("legacy bound choices read as policy one and updated acknowledgement survives reload", async () => {
+  localStorage.setItem("nyxid.telemetry_consent.v3.a", JSON.stringify({enabled:true,asked:true}));
+  let store=await loadFreshStore();store.getState().bindAccount("a");expect(store.getState().policy).toBe(1);
+  store.getState().setConsent(true,2);vi.resetModules();store=await loadFreshStore();store.getState().bindAccount("a");expect(store.getState().policy).toBe(2);
 });

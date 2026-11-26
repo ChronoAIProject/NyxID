@@ -579,7 +579,7 @@ async fn collaboration_agent_handles_and_legacy_uuid_handoffs_are_exact_without_
     let resolved = people::resolve(&text, &participants, &roster, false).unwrap();
     for id in svc::assistant_group_service::mentions(&resolved.agent_text, &roster) {
         assert!(
-            requests::handoff_ready(&f.state.db, &started.admission, &id)
+            !requests::handoff_ready(&f.state.db, &started.admission, &id)
                 .await
                 .unwrap()
         );

@@ -4,7 +4,6 @@ use mongodb::{
     bson::{self, doc},
     options::ReturnDocument,
 };
-use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::device_code::{generate_user_code, verify_poll_signature};
@@ -26,14 +25,30 @@ pub async fn poll(
     encryption_keys: &EncryptionKeys,
     input: DeviceCodePollInput,
 ) -> AppResult<DeviceCodePoll> {
+    // A storage-only rewrap may win the claim's exact-source comparison.
+    // Recheck the signed request and deadline against the winning row.
+    for _ in 0..3 {
+        if let Some(result) = poll_once(db, encryption_keys, &input).await? {
+            return Ok(result);
+        }
+    }
+    Err(AppError::DeviceCodeSlowDown)
+}
+
+async fn poll_once(
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
+    input: &DeviceCodePollInput,
+) -> AppResult<Option<DeviceCodePoll>> {
     let now = Utc::now();
     let collection = db.collection::<DeviceCode>(DEVICE_CODES);
-    let mut row = collection
-        .find_one(doc! {
-            "device_code_hash": hash_token(&input.device_code),
-        })
+    let source = db
+        .collection::<bson::Document>(DEVICE_CODES)
+        .find_one(doc! {"device_code_hash": hash_token(&input.device_code)})
         .await?
         .ok_or(AppError::DeviceCodeNotFound)?;
+    let mut row: DeviceCode =
+        bson::from_document(source.clone()).map_err(mongodb::error::Error::from)?;
 
     if row.status == DeviceCodeStatus::Delivered {
         return Err(AppError::DeviceCodeAlreadyDelivered);
@@ -42,7 +57,7 @@ pub async fn poll(
     if row.expires_at <= now || row.status == DeviceCodeStatus::Expired {
         collection
             .update_one(
-                doc! { "_id": &row.id },
+                crate::services::record_storage::exact_document_predicate(&source),
                 doc! { "$set": { "status": "expired" } },
             )
             .await?;
@@ -84,10 +99,10 @@ pub async fn poll(
     match row.status {
         DeviceCodeStatus::Pending => {
             let current_user_code = rotate_and_persist_pending_poll(db, &mut row, now).await?;
-            Ok(DeviceCodePoll::Pending {
+            Ok(Some(DeviceCodePoll::Pending {
                 current_user_code,
                 interval: DEVICE_CODE_POLL_INTERVAL_SECS,
-            })
+            }))
         }
         DeviceCodeStatus::Approved => {
             let key_id = row.issued_api_key_id.as_deref().ok_or_else(|| {
@@ -108,53 +123,25 @@ pub async fn poll(
                     ));
                 }
             };
-            let claimed = claim_approved_delivery(&collection, &row.id, now, input.timestamp)
-                .await?
-                .ok_or(AppError::DeviceCodeAlreadyDelivered)?;
-            let api_key = decrypt_delivery_secret(
-                encryption_keys,
-                claimed.delivery_api_key_encrypted.as_deref(),
-                "api key",
-            )
-            .await?;
-            let refresh_token = decrypt_delivery_secret(
-                encryption_keys,
-                claimed.delivery_refresh_token_encrypted.as_deref(),
-                "refresh token",
-            )
-            .await?;
-            let node_id = claimed.issued_node_id.clone().ok_or_else(|| {
+            let (api_key, refresh_token) = super::record::open_pair(encryption_keys, &row).await?;
+            let node_id = row.issued_node_id.ok_or_else(|| {
                 AppError::Internal("approved device code missing issued node id".to_string())
             })?;
-
-            Ok(DeviceCodePoll::Approved {
+            if !claim_approved_delivery(&collection, &source, Utc::now(), input.timestamp).await? {
+                return Ok(None);
+            }
+            Ok(Some(DeviceCodePoll::Approved {
                 api_key,
                 node_id,
                 refresh_token,
                 expires_in: DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS,
                 api_key_expires_at,
-            })
+            }))
         }
         DeviceCodeStatus::Denied => Err(AppError::Forbidden("Device code denied".to_string())),
         DeviceCodeStatus::Expired => Err(AppError::DeviceCodeExpired),
         DeviceCodeStatus::Delivered => Err(AppError::DeviceCodeAlreadyDelivered),
     }
-}
-
-async fn decrypt_delivery_secret(
-    encryption_keys: &EncryptionKeys,
-    encrypted: Option<&[u8]>,
-    label: &str,
-) -> AppResult<String> {
-    let encrypted = encrypted.ok_or_else(|| {
-        AppError::Internal(format!("approved device code missing delivery {label}"))
-    })?;
-    let plaintext = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
-    String::from_utf8(plaintext.to_vec()).map_err(|_| {
-        AppError::Internal(format!(
-            "approved device code delivery {label} is not valid UTF-8"
-        ))
-    })
 }
 
 fn verify_poll_timestamp(row: &DeviceCode, timestamp: i64, now: DateTime<Utc>) -> AppResult<()> {
@@ -258,17 +245,19 @@ async fn record_signature_failure(
 
 async fn claim_approved_delivery(
     collection: &Collection<DeviceCode>,
-    row_id: &str,
+    source: &bson::Document,
     now: DateTime<Utc>,
     timestamp: i64,
-) -> AppResult<Option<DeviceCode>> {
+) -> AppResult<bool> {
     let delivered_status = bson::to_bson(&DeviceCodeStatus::Delivered)
         .map_err(|e| AppError::Internal(format!("serialize device code status: {e}")))?;
     let delivery_expires_at = now + Duration::seconds(DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS);
 
+    let mut filter = crate::services::record_storage::exact_document_predicate(source);
+    filter.insert("expires_at", doc! {"$gt": bson::DateTime::from_chrono(now)});
     let claimed = collection
-        .find_one_and_update(
-            doc! { "_id": row_id, "status": "approved" },
+        .update_one(
+            filter,
             doc! {
                 "$set": {
                     "status": delivered_status,
@@ -281,13 +270,13 @@ async fn claim_approved_delivery(
                 "$unset": {
                     "delivery_api_key_encrypted": "",
                     "delivery_refresh_token_encrypted": "",
+                    super::record::VERSION: "",
                 },
             },
         )
-        .return_document(ReturnDocument::Before)
         .await?;
 
-    Ok(claimed)
+    Ok(claimed.matched_count == 1)
 }
 
 async fn persist_successful_poll(db: &Database, row: &DeviceCode) -> AppResult<()> {
@@ -742,6 +731,7 @@ mod tests {
                 doc! {
                     "$set": {
                         "status": "approved",
+                        "approved_by_user_id": "fixture-person",
                         "issued_node_id": "node-1",
                         "issued_api_key_id": "fixture-key",
                         "delivery_api_key_encrypted": bson::Binary {
@@ -774,9 +764,9 @@ mod tests {
         assert_eq!(
             poll_response,
             DeviceCodePoll::Approved {
-                api_key: "nyx_secret".to_string(),
+                api_key: "nyx_secret".to_string().into(),
                 node_id: "node-1".to_string(),
-                refresh_token: "refresh_secret".to_string(),
+                refresh_token: "refresh_secret".to_string().into(),
                 expires_in: DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS,
                 api_key_expires_at: Some("2099-01-01T00:00:00+00:00".into()),
             }
@@ -824,6 +814,7 @@ mod tests {
                 doc! {
                     "$set": {
                         "status": "approved",
+                        "approved_by_user_id": "fixture-person",
                         "issued_node_id": "node-1",
                         "issued_api_key_id": "fixture-key",
                         "delivery_api_key_encrypted": bson::Binary {

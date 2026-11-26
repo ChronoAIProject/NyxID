@@ -161,6 +161,7 @@ async fn voice_delegation_receipt_deadline_rejects_missing_incomplete_and_mismat
             let mut c = Coordinator::new();
             if let Some(complete) = complete {
                 let segment = Segment {
+                    interrupted: false,
                     fragments: Vec::new(),
                     id: Uuid::new_v4().to_string(),
                     speaker: Speaker::User,
@@ -383,6 +384,7 @@ async fn voice_2083_long_readback_stays_ordered_quoted_data_until_full_playback(
         );
         let end_ms = (index as i64 + 1) * 1_000;
         readback.observe_output(&Segment {
+            interrupted: false,
             fragments: Vec::new(),
             id: format!("part-{index}"),
             speaker: Speaker::Assistant,
@@ -470,7 +472,7 @@ async fn voice_2083_chinese_github_work_progress_idle_close_and_exact_result_del
         assert!(!receipt.text.contains("unless you speak"));
         let answer=format!("最近七天你提交的 issue：\n- [登录失败](https://github.com/example/project/issues/1)：已关闭，昨日修复。\n- [同步延迟](https://github.com/example/project/issues/2)：仍开放，正在审核，重试策略尚未解决。\n{}", "补充背景与已核实进展。".repeat(1500));
         Box::pin(engine::finish_turn(db,&running,&running.credential_api_key_id,&Uuid::new_v4().to_string(),&engine::TurnResult{text:answer.clone(),session_id:None,response_id:None,error:None})).await.unwrap();
-        let (a,b)=tokio::join!(voice::publish_completed_results(db),voice::publish_completed_results(db));
+        let (a,b)=tokio::join!(voice::publish_completed_results(&state),voice::publish_completed_results(&state));
         a.unwrap();b.unwrap();
         let result=db.collection::<AssistantMessage>(MESSAGES).find_one(doc!{"conversation_id":&thread.id,"turn_id":&r.turn_id,"role":"assistant","execution_pending":false}).await.unwrap().unwrap();
         assert_eq!(result.text,answer,"Never truncate the visible answer");
@@ -517,6 +519,7 @@ async fn voice_2083_progress_coalesces_latest_evidence_and_never_tool_errors_as_
         );
         active.heartbeat_at = Some(Utc::now());
         active.activities = vec![crate::models::assistant_conversation::TurnActivity {
+            memory_recovery: None,
             decision: None,
             id: "a".into(),
             label: "internal__tool".into(),
@@ -634,7 +637,7 @@ async fn voice_2083_terminal_refusals_publish_explanations_once_without_a_worker
                 )
                 .await
                 .unwrap();
-            voice::publish_completed_results(&state.db).await.unwrap();
+            voice::publish_completed_results(&state).await.unwrap();
             let saved = voice::get(&state.db, &call.user_id, &thread.id, &r.id)
                 .await
                 .unwrap();
@@ -1400,6 +1403,16 @@ async fn voice_loads_selected_bot_profile_and_service_guidance_for_all_clients()
         .await
         .unwrap();
     let original = initial_context(&state.db, &call).await.unwrap();
+    assert!(original.live.contains(APPROVAL_REPORTING));
+    for context in [None, Some(original.delegation.as_str())] {
+        let config = super::super::responses::configuration("test-model", context);
+        assert!(
+            config["responses"]["instructions"]
+                .as_str()
+                .unwrap()
+                .contains(APPROVAL_REPORTING)
+        );
+    }
     assert!(original.live.contains("Root display"));
     assert!(original.live.contains(root.persona.as_deref().unwrap()));
     for context in [&original.live, &original.delegation] {
@@ -1839,6 +1852,14 @@ async fn native_voice_tool_refusal_does_not_change_the_mcp_protocol_or_block_fol
         tokio::time::timeout(std::time::Duration::from_secs(3),async {
             while events.lock().await.len()<4 {tokio::task::yield_now().await;}
         }).await.unwrap();
+        let commands = events.lock().await;
+        let item = commands.iter().map(|command| &command["item"])
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == "native-call").unwrap();
+        let output: Value = serde_json::from_str(item["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output["tool"], "sandbox__submit_execution_handler");
+        assert_eq!(output["isError"], true);
+        assert_eq!(output["content"][0]["text"], "Invalid service arguments; no operation dispatched.");
+        drop(commands);
         native.close(&state).await;
         server.abort();
     }).await;
@@ -2157,7 +2178,7 @@ async fn native_voice_reply_failure_keeps_accepted_task_running_and_delivers_its
         ))
         .await
         .unwrap();
-        voice::publish_completed_results(&state.db).await.unwrap();
+        voice::publish_completed_results(&state).await.unwrap();
         let mut coordinator = Coordinator::new();
         for _ in 0..2 {
             assert!(
@@ -2304,5 +2325,377 @@ async fn native_voice_reconciliation_fails_closed_without_exact_terminal_evidenc
         assert!(revoked.recover_failure(&state, &mut call, &mut socket, &provider, &error).await.is_err());
         assert!(upstream.received_requests().await.unwrap().is_empty());
         server.abort();state.db.drop().await.unwrap();
+    }).await;
+}
+
+#[tokio::test]
+async fn task_link_real_pipeline_redacts_models_publishes_once_and_never_uses_reply_channel() {
+    Box::pin(async {
+        use crate::models::{
+            assistant_conversation::COLLECTION_NAME as THREADS,
+            assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
+        };
+        use axum::{
+            Extension, Json, Router,
+            body::Body,
+            http::{HeaderMap, Request},
+            response::{IntoResponse, Sse, sse::Event},
+            routing::post,
+        };
+        use std::sync::Arc;
+        use tower::ServiceExt;
+        let (state, visible, mut call) = super::super::tests::setup("voice_task_real_pipeline").await;
+        state.db.collection::<Document>(THREADS).update_one(doc!{"_id":&visible.id},doc!{"$set":{"reply_channel":{
+                "nyxbot_channel_id":Uuid::new_v4().to_string(),"partition":"owner-private-chat","platform":"telegram"
+            }}}).await.unwrap();
+        call = session::write(
+            &state.db,
+            &call,
+            doc! {"responses_model":"catalog-task-model","responses_reserved":true},
+        )
+        .await
+        .unwrap();
+        let captures = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let upstream_inputs = Arc::new(tokio::sync::Mutex::new(Vec::<Value>::new()));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let mcp = Router::new()
+            .route("/mcp", post(crate::handlers::mcp_transport::mcp_post))
+            .layer(Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp,
+                ),
+            ))
+            .with_state(state.clone());
+        let upstream = Router::new().route("/v1/responses",post({
+                let captures = captures.clone(); let inputs = upstream_inputs.clone(); let gate = gate.clone(); let frontend = state.config.frontend_url.clone();
+                move |headers:HeaderMap,Json(body):Json<Value>| {
+                    let captures=captures.clone();let inputs=inputs.clone();let gate=gate.clone();let mcp=mcp.clone();let frontend=frontend.clone();
+                    async move {
+                        inputs.lock().await.push(body);
+                        // The only stub is NyxAgent's model boundary. It uses the real
+                        // hidden conversation credential forwarded by normal egress.
+                        for _ in 0..2 {
+                            let request=Request::builder().method("POST").uri("/mcp")
+                                .header("x-api-key",headers.get("authorization").unwrap().to_str().unwrap().strip_prefix("Bearer ").unwrap())
+                                .header("content-type","application/json")
+                                .body(Body::from(json!({"jsonrpc":"2.0","id":"setup-link-call","method":"tools/call","params":{"name":"nyxid__channel_bot_setup_link","arguments":{"platform":"telegram","label":"Voice pipeline"}}}).to_string())).unwrap();
+                            let response=mcp.clone().oneshot(request).await.unwrap();
+                            let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+                            captures.lock().await.push(String::from_utf8(bytes.to_vec()).unwrap());
+                        }
+                        gate.acquire().await.unwrap().forget();
+                        let settings = crate::services::assistant_links::AssistantPage::Settings {
+                            tab: "privacy",
+                        }.url(&frontend);
+                        let text = format!(
+                            "The link is in chat. {frontend}/connect/bot/nyx_bxl_abc。 \
+                             {frontend}/connect/nyx_clk_x。 {frontend}/login/device?user_code=ABC。 \
+                             {frontend}/docs/cli {settings} NYX_CLIENT_ID nyx_config nyx_cert"
+                        );
+                        let sid = "1234567890abcdef1234567890abcdef";
+                        let response_id = format!("resp_{sid}_abcdef1234567890abcdef1234567890");
+                        let session_id = format!("conv_{sid}");
+                        let frames=vec![
+                            json!({"type":"response.created","sequence_number":0,"response":{"id":response_id,"conversation":{"id":session_id}}}),
+                            json!({"type":"response.completed","sequence_number":1,"response":{"id":response_id,"conversation":{"id":session_id},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]}}),
+                        ];
+                        Sse::new(futures::stream::iter(frames.into_iter().map(|frame|Ok::<_,std::convert::Infallible>(Event::default().data(frame.to_string()))))).into_response()
+                    }
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream_server = tokio::spawn(async move {
+            axum::serve(listener, upstream).await.unwrap();
+        });
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = engine::SERVICE_SLUG.into();
+        service.base_url = format!("http://{address}");
+        service.service_category = "internal".into();
+        service.auth_method = "none".into();
+        service.requires_user_credential = false;
+        service.forward_access_token = true;
+        service.inject_delegation_token = false;
+        service.credential_encrypted.clear();
+        state
+            .db
+            .collection(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(service)
+            .await
+            .unwrap();
+        let (mut socket, socket_server, events) = fixture_socket().await;
+        let mut native = native_state();
+        for event in [
+            native_created(),
+            native_item(json!({"request":"Create a Telegram channel connect link"})),
+            native_completed(),
+        ] {
+            native
+                .event(&state, &mut call, &mut socket, &event, false)
+                .await
+                .unwrap();
+        }
+        Box::pin(crate::handlers::assistant_voice::sweep(&state))
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while captures.lock().await.len() < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("real hidden worker must call MCP");
+        let published: Vec<AssistantMessage> = state
+            .db
+            .collection(MESSAGES)
+            .find(doc! {"conversation_id": &visible.id,
+                "turn_metadata.voice_link_publication": {"$exists": true}})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(published.len(), 2, "two executions mint two distinct links");
+        let mut exact_urls = std::collections::HashSet::new();
+        for row in &published {
+            let url = row
+                .text
+                .strip_prefix('<')
+                .and_then(|text| text.strip_suffix('>'))
+                .expect("a publication contains one bounded exact URL");
+            assert!(exact_urls.insert(url), "each execution publishes a fresh URL");
+            assert_eq!(row.text.matches(url).count(), 1, "exact URL appears once");
+            let prefix = format!("{}/connect/bot/", state.config.frontend_url);
+            let token = url.strip_prefix(&prefix).expect("frontend channel link");
+            let issued = crate::services::channel_connect_link_service::by_token(&state.db, token)
+                .await
+                .expect("published token must match an actual minted link exactly");
+            assert_eq!(issued.user_id, call.user_id);
+            assert_eq!(issued.platform, "telegram");
+            let metadata = row
+                .turn_metadata
+                .as_ref()
+                .unwrap()
+                .voice_link_publication
+                .as_ref()
+                .unwrap();
+            assert_eq!(metadata.links_in_chat, 1);
+            let publication = super::super::links::Publication {
+                user_id: call.user_id.clone(),
+                parent_id: visible.id.clone(),
+                conversation_id: metadata.conversation_id.clone(),
+                turn_id: metadata.turn_id.clone(),
+            };
+            let result = json!({"url": url, "isError": false});
+            // Replay the same presented link list without executing setup again.
+            for _ in 0..2 {
+                let replay = super::super::links::present(
+                    &state,
+                    &publication,
+                    &json!("setup-link-call").to_string(),
+                    result.clone(),
+                )
+                .await;
+                assert_eq!(replay["links_in_chat"], 1, "exact replay remains delivered");
+                let wire = replay.to_string();
+                assert!(!super::super::links::contains_url(&wire), "replay URL redacted");
+                assert!(!wire.contains("nyx_bcl_") && !wire.contains("nyx_clk_"),
+                    "replay tokens redacted");
+            }
+        }
+        assert_eq!(
+            state.db.collection::<AssistantMessage>(MESSAGES)
+                .count_documents(doc! {"conversation_id": &visible.id,
+                    "turn_metadata.voice_link_publication": {"$exists": true}})
+                .await.unwrap(),
+            2,
+            "identical presentations must not add publication rows"
+        );
+        session::close(&state.db, &call, "user_ended", true)
+            .await
+            .unwrap();
+        gate.add_permits(1);
+        let request = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                voice::publish_completed_results(&state).await.unwrap();
+                let request: VoiceRequest = state
+                    .db
+                    .collection(REQUESTS)
+                    .find_one(doc! {"session_id":&call.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if request.result_message_id.is_some() {
+                    break request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("worker settlement and publication");
+        let no_secrets = |text: &str| {
+            for secret in [
+                "nyx_bcl_",
+                "nyx_clk_",
+                "nyx_bxl",
+                "/connect/",
+                "/login/device",
+                "user_code=ABC",
+            ] {
+                assert!(!text.contains(secret), "private material must be absent");
+            }
+        };
+        let no_urls = |text: &str| {
+            no_secrets(text);
+            assert!(!super::super::links::contains_url(text));
+        };
+        {
+            let wires = captures.lock().await;
+            assert_eq!(wires.len(), 2, "two real MCP executions return two results");
+            for wire in wires.iter() {
+                no_urls(wire);
+                let envelope: Value = serde_json::from_str(wire).unwrap();
+                assert_eq!(envelope["result"]["links_in_chat"], 1, "{envelope}");
+            }
+        }
+        for body in upstream_inputs.lock().await.iter() {
+            no_urls(&body.to_string());
+        }
+        let rows: Vec<AssistantMessage> = state
+            .db
+            .collection(MESSAGES)
+            .find(doc! {"conversation_id":&visible.id})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        let links: Vec<_> = rows
+            .iter()
+            .filter(|row| super::super::links::publication_row(row))
+            .collect();
+        assert_eq!(links.len(), 2, "both fresh URLs remain published once");
+        for row in &links {
+            assert_eq!(published.iter().filter(|first| first.id == row.id).count(), 1);
+            assert_eq!(rows.iter().filter(|message| message.text == row.text).count(), 1,
+                "each exact link occupies one visible row");
+        }
+        let setup_link = state
+            .db
+            .collection::<crate::models::channel_connect_link::ChannelConnectLink>(
+                crate::models::channel_connect_link::COLLECTION_NAME,
+            )
+            .find_one(doc! {"user_id": &call.user_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(setup_link.platform, "telegram");
+        let copied = rows
+            .iter()
+            .find(|row| Some(&row.id) == request.result_message_id.as_ref())
+            .unwrap();
+        no_secrets(&copied.text);
+        assert_eq!(
+            request.state,
+            crate::models::assistant_voice::RequestState::Completed
+        );
+        assert_eq!(copied.status, "completed");
+        assert!(copied.error_code.is_none());
+        let docs = format!("{}/docs/cli", state.config.frontend_url);
+        let settings = crate::services::assistant_links::AssistantPage::Settings { tab: "privacy" }
+            .url(&state.config.frontend_url);
+        assert_eq!(
+            copied.text,
+            format!(
+                "The link is in chat. [link omitted]。 [link omitted]。 [link omitted]。 \
+                 {docs} {settings} NYX_CLIENT_ID nyx_config nyx_cert"
+            )
+        );
+        for identifier in ["NYX_CLIENT_ID", "nyx_config", "nyx_cert"] {
+            assert!(copied.text.contains(identifier));
+        }
+        assert_eq!(
+            copied.turn_metadata.as_ref().unwrap().links_in_chat,
+            Some(2)
+        );
+        let hidden = request.task_conversation_id.as_deref().unwrap();
+        assert_eq!(
+            super::super::links::published_count(
+                &state.db, &call.user_id, &visible.id, hidden,
+                &published[0].turn_metadata.as_ref().unwrap()
+                    .voice_link_publication.as_ref().unwrap().turn_id,
+            ).await.unwrap(),
+            2,
+            "durable speech facts count both fresh links"
+        );
+        let hidden_checkpoint = engine::checkpoint(&state.db, &call.user_id, hidden)
+            .await
+            .unwrap()
+            .expect("hidden worker writes a checkpoint");
+        let checkpoint_text = engine::checkpoint_line(&hidden_checkpoint, true);
+        no_secrets(&checkpoint_text);
+        assert!(checkpoint_text.contains(&docs));
+        assert!(checkpoint_text.contains(&settings));
+        engine::reset_context(&state.db, &call.user_id, hidden)
+            .await
+            .unwrap();
+        let hidden_history = engine::messages(&state.db, &call.user_id, hidden, 20, None)
+            .await
+            .unwrap();
+        let hidden_reply = hidden_history
+            .iter()
+            .find(|row| row.role == "assistant" && !row.execution_pending)
+            .expect("hidden settled reply");
+        assert_eq!(hidden_reply.text, copied.text);
+        no_secrets(&engine::bounded_recap(&hidden_history));
+        no_secrets(&engine::bounded_recap(&rows));
+        if let Some(checkpoint) = engine::checkpoint(&state.db, &call.user_id, &visible.id)
+            .await
+            .unwrap()
+        {
+            no_secrets(&engine::checkpoint_line(&checkpoint, true));
+        }
+        let summary = super::super::speech::summary_input(
+            &copied.text, &copied.status, None, None,
+            copied.turn_metadata.as_ref().unwrap().links_in_chat.unwrap(),
+        );
+        no_urls(&summary);
+        let summary: Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(summary["links_in_chat"], 2);
+        assert_eq!(summary["links_omitted"], 2);
+        assert_eq!(summary["links_visible_in_chat_reply"], 2);
+        // The actual Responses receipt/function output also contains no private URL.
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while events.lock().await.len() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        for event in events.lock().await.iter() {
+            no_urls(&event.to_string());
+        }
+        for collection in [
+            "channel_text_deliveries",
+            "channel_reply_deliveries",
+            "channel_messages",
+            "nyxbot_gateway_responses",
+            "nyxbot_events",
+        ] {
+            assert_eq!(
+                state
+                    .db
+                    .collection::<Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "{collection}"
+            );
+        }
+        upstream_server.abort();
+        socket_server.abort();
+        state.db.drop().await.unwrap();
     }).await;
 }

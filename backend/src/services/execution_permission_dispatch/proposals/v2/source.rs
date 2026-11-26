@@ -157,6 +157,7 @@ pub(in crate::services::execution_permission_dispatch) async fn existing(
         {
             return Err(conflict());
         }
+        context.observation.replay(&row.status, &p.state);
         return Err(pending(&row, &state.config.frontend_url));
     }
     Ok(())

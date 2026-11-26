@@ -13,6 +13,12 @@ use crate::errors::{AppError, AppResult};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 
+mod audit;
+#[cfg(test)]
+#[path = "service_account_service/audit_tests.rs"]
+mod audit_tests;
+use super::audit_service::AuditActor;
+
 #[cfg(test)]
 tokio::task_local! { pub(crate) static ISSUANCE_BARRIER: (std::sync::Arc<tokio::sync::Barrier>, std::sync::Arc<tokio::sync::Barrier>); }
 
@@ -89,6 +95,7 @@ pub async fn create_service_account_with_id(
         rate_limit_override,
         created_by,
         false,
+        None,
     )
     .await
 }
@@ -104,6 +111,7 @@ pub async fn create_service_account_with_authority(
     rate_limit_override: Option<u64>,
     created_by: &str,
     platform_admin: bool,
+    actor: Option<&AuditActor>,
 ) -> AppResult<(ServiceAccount, String)> {
     if name.is_empty() || name.len() > 100 {
         return Err(AppError::ValidationError(
@@ -186,6 +194,15 @@ pub async fn create_service_account_with_authority(
         last_authenticated_at: None,
     };
 
+    let intent = actor
+        .map(|actor| {
+            audit::Event::Created {
+                client_id: &sa.client_id,
+                name: &sa.name,
+            }
+            .intent(actor, &sa.id)
+        })
+        .transpose()?;
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
@@ -199,6 +216,14 @@ pub async fn create_service_account_with_authority(
             .insert_one(&sa)
             .session(&mut session)
             .await?;
+        if let Some(intent) = &intent {
+            super::security_effect_service::enqueue_in_session(
+                db,
+                &mut session,
+                std::slice::from_ref(intent),
+            )
+            .await?;
+        }
         Ok(())
     }
     .await;
@@ -292,6 +317,7 @@ pub async fn update_service_account(
     is_active: Option<bool>,
     platform_admin: bool,
     expected_access: Option<&ExpectedAccessState>,
+    actor: Option<&AuditActor>,
 ) -> AppResult<ServiceAccount> {
     // Verify it exists first
     let existing = get_service_account(db, sa_id).await?;
@@ -430,16 +456,17 @@ pub async fn update_service_account(
     if is_active == Some(false) {
         update.insert("$inc", doc! {"credential_generation": 1_i64});
     }
-    let result = db
-        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
-        .update_one(filter, update)
-        .await?;
-    if expected_access.is_some() && result.matched_count == 0 {
-        return Err(AppError::Conflict(
-            "Service account access changed; reload before applying catalog access".into(),
-        ));
+    let intent = actor
+        .map(|actor| audit::Event::Updated.intent(actor, sa_id))
+        .transpose()?;
+    audit::Mutation {
+        db: db.clone(),
+        filter,
+        update,
+        expected_access: expected_access.is_some(),
     }
-    require_managed_match(result.matched_count)?;
+    .apply(intent.as_ref())
+    .await?;
 
     get_service_account(db, sa_id).await
 }
@@ -450,29 +477,37 @@ pub async fn rotate_secret(
     db: &Database,
     sa_id: &str,
     platform_admin: bool,
+    actor: Option<&AuditActor>,
 ) -> AppResult<(ServiceAccount, String)> {
-    let _existing = get_service_account(db, sa_id).await?;
+    let existing = get_service_account(db, sa_id).await?;
 
     let raw_secret = generate_client_secret();
     let secret_hash = hash_token(&raw_secret);
     let secret_prefix = raw_secret[..8].to_string();
 
-    let result = db
-        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
-        .update_one(
-            management_filter(sa_id, platform_admin),
-            doc! {
-                "$inc": { "credential_generation": 1_i64 },
-                "$set": {
-                    "client_secret_hash": &secret_hash,
-                    "secret_prefix": &secret_prefix,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
-        )
-        .await?;
-
-    require_managed_match(result.matched_count)?;
+    let intent = actor
+        .map(|actor| {
+            audit::Event::Rotated {
+                client_id: &existing.client_id,
+            }
+            .intent(actor, sa_id)
+        })
+        .transpose()?;
+    audit::Mutation {
+        db: db.clone(),
+        filter: management_filter(sa_id, platform_admin),
+        update: doc! {
+            "$inc": { "credential_generation": 1_i64 },
+            "$set": {
+                "client_secret_hash": &secret_hash,
+                "secret_prefix": &secret_prefix,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }
+        },
+        expected_access: false,
+    }
+    .apply(intent.as_ref())
+    .await?;
     revoke_token_rows(db, sa_id).await?;
 
     let updated = get_service_account(db, sa_id).await?;
@@ -484,24 +519,27 @@ pub async fn delete_service_account(
     db: &Database,
     sa_id: &str,
     platform_admin: bool,
+    actor: Option<&AuditActor>,
 ) -> AppResult<()> {
     let _existing = get_service_account(db, sa_id).await?;
 
-    let result = db
-        .collection::<ServiceAccount>(SERVICE_ACCOUNTS)
-        .update_one(
-            management_filter(sa_id, platform_admin),
-            doc! {
-                "$inc": {"credential_generation": 1_i64},
-                "$set": {
-                    "is_active": false,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                }
-            },
-        )
-        .await?;
-
-    require_managed_match(result.matched_count)?;
+    let intent = actor
+        .map(|actor| audit::Event::Deleted.intent(actor, sa_id))
+        .transpose()?;
+    audit::Mutation {
+        db: db.clone(),
+        filter: management_filter(sa_id, platform_admin),
+        update: doc! {
+            "$inc": {"credential_generation": 1_i64},
+            "$set": {
+                "is_active": false,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }
+        },
+        expected_access: false,
+    }
+    .apply(intent.as_ref())
+    .await?;
     revoke_token_rows(db, sa_id).await?;
 
     Ok(())
@@ -527,22 +565,42 @@ fn require_managed_match(count: u64) -> AppResult<()> {
     }
 }
 
-pub async fn revoke_all_tokens(db: &Database, sa_id: &str, platform_admin: bool) -> AppResult<u64> {
-    let result = db.collection::<ServiceAccount>(SERVICE_ACCOUNTS).update_one(management_filter(sa_id, platform_admin),
-        doc! {"$inc": {"credential_generation": 1_i64}, "$set": {"updated_at": bson::DateTime::from_chrono(Utc::now())}}).await?;
-    require_managed_match(result.matched_count)?;
+pub async fn revoke_all_tokens(
+    db: &Database,
+    sa_id: &str,
+    platform_admin: bool,
+    actor: Option<&AuditActor>,
+) -> AppResult<u64> {
+    let source = audit::Mutation {
+        db: db.clone(),
+        filter: management_filter(sa_id, platform_admin),
+        update: doc! {"$inc": {"credential_generation": 1_i64}, "$set": {"updated_at": bson::DateTime::from_chrono(Utc::now())}},
+        expected_access: false,
+    };
+    if let Some(actor) = actor {
+        return audit::revoke(&source, sa_id, actor).await;
+    }
+    source.apply(None).await?;
     revoke_token_rows(db, sa_id).await
 }
 
 async fn revoke_token_rows(db: &Database, sa_id: &str) -> AppResult<u64> {
-    let result = db
-        .collection::<ServiceAccountToken>(SA_TOKENS)
-        .update_many(
-            doc! {"service_account_id": sa_id, "revoked": false},
-            doc! {"$set": {"revoked": true}},
-        )
-        .await?;
-    Ok(result.modified_count)
+    revoke_token_rows_in_session(db, sa_id, None).await
+}
+async fn revoke_token_rows_in_session(
+    db: &Database,
+    sa_id: &str,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<u64> {
+    let tokens = db.collection::<ServiceAccountToken>(SA_TOKENS);
+    let mut update = tokens.update_many(
+        doc! {"service_account_id":sa_id,"revoked":false},
+        doc! {"$set":{"revoked":true}},
+    );
+    if let Some(session) = session {
+        update = update.session(session);
+    }
+    Ok(update.await?.modified_count)
 }
 
 /// Authenticate via client credentials: validate client_id + client_secret,
@@ -949,6 +1007,7 @@ mod custom_scope_regression_tests {
             None,
             None,
             true,
+            None,
             None,
         )
         .await

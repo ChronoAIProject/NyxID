@@ -1002,8 +1002,8 @@ pub async fn decide_request(
 
     // Verify the caller can act on this request -- direct owner, named
     // recipient, or current admin of the owning org.
-    let request = approval_service::get_request(&state.db, &request_id).await?;
-    let group_access = ensure_caller_can_decide(&state.db, &request, &user_id).await?;
+    let decision = approval_service::read_decision_request(&state.db, &request_id).await?;
+    let group_access = ensure_caller_can_decide(&state.db, &decision.request, &user_id).await?;
 
     if let Some(duration_sec) = body.duration_sec
         && duration_sec <= 0
@@ -1019,26 +1019,16 @@ pub async fn decide_request(
         &state.http_client,
         state.fcm_auth.clone(),
         state.apns_auth.clone(),
-        &request_id,
+        decision,
         body.approved,
         body.duration_sec,
         idempotency_key,
-        "web",
+        approval_service::DecisionSource::Web(audit_service::AuditActor::from_auth_user(
+            &auth_user,
+        )),
         group_access.as_ref(),
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "approval_decision",
-        Some(serde_json::json!({
-            "request_id": request_id,
-            "service_id": updated.service_id,
-            "approved": body.approved,
-            "channel": "web",
-        })),
-    );
 
     // Telemetry: approval.decided. Only the web decision path is in scope
     // for this handler, so `decided_via = "web"`. `decision_ms` measures
@@ -1237,17 +1227,14 @@ pub async fn revoke_grant(
         .ok()
         .flatten();
 
-    approval_service::revoke_grant(&state.db, &owner_user_id, &grant_id).await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "approval_grant_revoked",
-        Some(serde_json::json!({
-            "grant_id": grant_id,
-            "owner_user_id": owner_user_id,
-        })),
-    );
+    approval_service::revoke_grant_with_audit(
+        &state.db,
+        &owner_user_id,
+        &grant_id,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+        approval_service::GrantRevokeSource::Web,
+    )
+    .await?;
 
     // Resolve a meaningful service_slug. Approval grants store `service_id`
     // as either a `UserService` UUID (custom per-user service) or a
@@ -1958,7 +1945,7 @@ pub async fn set_service_config(
     ensure_service_config_in_scope(&state.db, &access, &user_id, &target.effective_service_id)
         .await?;
 
-    let config = approval_service::set_service_approval_config(
+    let config = approval_service::set_config(
         &state.db,
         &user_id,
         &target.effective_service_id,
@@ -1967,24 +1954,12 @@ pub async fn set_service_config(
         body.approval_mode.as_ref(),
         body.rules.as_deref(),
         body.default_effect.as_ref(),
+        approval_service::ConfigAudit {
+            actor: audit_service::AuditActor::from_auth_user(&auth_user),
+            user_service_id: target.user_service_id.clone(),
+        },
     )
     .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "service_approval_config_set",
-        Some(serde_json::json!({
-            "service_id": target.effective_service_id,
-            "service_name": target.display_name,
-            "user_service_id": target.user_service_id,
-            "policy_owner_user_id": user_id,
-            "approval_required": config.approval_required,
-            "approval_mode": config.approval_mode.as_str(),
-            "approval_rule_count": config.rules.len(),
-            "default_effect": config.default_effect.as_ref().map(ApprovalEffect::as_str),
-        })),
-    );
 
     // Telemetry: approval.config_updated. Prefer the UserService slug for
     // display; fall back to the stored effective_service_id (catalog id or
@@ -2050,19 +2025,16 @@ pub async fn delete_service_config(
     // Per-service scope check, same as set_service_config.
     ensure_service_config_in_scope(&state.db, &access, &user_id, &effective_service_id).await?;
 
-    approval_service::delete_service_approval_config(&state.db, &user_id, &effective_service_id)
-        .await?;
-
-    audit_service::log_for_user(
-        state.db.clone(),
-        &auth_user,
-        "service_approval_config_deleted",
-        Some(serde_json::json!({
-            "service_id": effective_service_id,
-            "user_service_id": user_service_id,
-            "policy_owner_user_id": user_id,
-        })),
-    );
+    approval_service::delete_service_approval_config(
+        &state.db,
+        &user_id,
+        &effective_service_id,
+        approval_service::ConfigAudit {
+            actor: audit_service::AuditActor::from_auth_user(&auth_user),
+            user_service_id,
+        },
+    )
+    .await?;
 
     Ok(Json(MessageResponse {
         message: "Per-service approval config removed".to_string(),
@@ -2086,7 +2058,7 @@ pub async fn decide_execution_request(
         let conversation = p.conversation_id.clone();
         let wake_state = state.clone();
         let wake_owner = owner.clone();
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             super::assistant_team::wake(&wake_state, &wake_owner, &conversation).await;
         });
     }
@@ -2399,6 +2371,16 @@ mod tests {
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "pending");
         assert_eq!(json["expires_at"], "2025-01-01T00:05:00Z");
+    }
+
+    #[test]
+    fn approval_2874_cli_contract_deserializes_into_handler_request() {
+        let request: DecideRequest = serde_json::from_str(include_str!(
+            "../../../cli/tests/fixtures/approval-decision.json"
+        ))
+        .unwrap();
+        assert!(request.approved);
+        assert_eq!(request.duration_sec, None);
     }
 
     #[test]

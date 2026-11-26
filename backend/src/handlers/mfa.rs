@@ -343,6 +343,8 @@ pub async fn verify(
             );
             let factor = completion.commit().await?;
             mfa_service::notify_recovery_use(&state, user_id, factor);
+            crate::services::billing::schedules::eligibility::after_human_login(&state.db, user_id)
+                .await;
 
             audit_service::log_async(
                 state.db.clone(),
@@ -420,6 +422,8 @@ pub async fn verify(
                     .parse()
                     .map_err(|_| AppError::Internal("Cookie error".into()))?,
             );
+            crate::services::billing::schedules::eligibility::after_human_login(&state.db, user_id)
+                .await;
             audit_service::log_async(
                 state.db.clone(),
                 Some(user_id.to_string()),
@@ -603,7 +607,7 @@ mod tests {
         // Same shape as issued recovery codes; never a fixed credential.
         let recovery = crate::crypto::token::generate_random_token()[..32].to_string();
         let factor_id = uuid::Uuid::new_v4().to_string();
-        let secret_encrypted = crate::services::record_field_service::encrypt(
+        let secret_encrypted = crate::crypto::record_field::encrypt(
             &a.encryption_keys,
             MFA_FACTORS,
             &factor_id,

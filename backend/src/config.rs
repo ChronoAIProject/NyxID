@@ -1,9 +1,122 @@
 pub mod domain_aliases;
+pub mod mobile_app_links;
 
 use std::{
     env,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
 };
+
+/// Validated operator destination. Debug never exposes its authentication key.
+#[derive(Clone)]
+pub struct CrashDestinationConfig {
+    pub endpoint: url::Url,
+    pub auth: String,
+}
+impl std::fmt::Debug for CrashDestinationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CrashDestinationConfig([REDACTED])")
+    }
+}
+impl CrashDestinationConfig {
+    pub fn parse(dsn: &str) -> Result<Self, &'static str> {
+        Self::parse_inner(dsn, false)
+    }
+    #[cfg(test)]
+    pub(crate) fn for_test(dsn: &str) -> Result<Self, &'static str> {
+        Self::parse_inner(dsn, true)
+    }
+    fn parse_inner(dsn: &str, test_http: bool) -> Result<Self, &'static str> {
+        let mut endpoint = url::Url::parse(dsn).map_err(|_| "Invalid crash DSN")?;
+        let project = endpoint
+            .path()
+            .strip_prefix('/')
+            .ok_or("Invalid crash DSN")?
+            .to_owned();
+        let key = endpoint.username().to_owned();
+        if (endpoint.scheme() != "https"
+            && !(test_http
+                && endpoint.scheme() == "http"
+                && endpoint.host_str() == Some("127.0.0.1")))
+            || endpoint.host_str().is_none()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || project.is_empty()
+            || !project.bytes().all(|b| b.is_ascii_digit())
+            || key.is_empty()
+            || key.len() > 128
+            || !key.bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            return Err("Invalid crash DSN");
+        }
+        endpoint.set_username("").map_err(|_| "Invalid crash DSN")?;
+        endpoint.set_path(&format!("/api/{project}/envelope/"));
+        Ok(Self {
+            endpoint,
+            auth: format!("Sentry sentry_version=7,sentry_key={key}"),
+        })
+    }
+}
+#[derive(Clone, Debug)]
+pub struct CrashReportingConfig {
+    pub web: Option<CrashDestinationConfig>,
+    pub mobile: Option<CrashDestinationConfig>,
+    pub retention_days: u32,
+    pub export_interval_secs: u64,
+}
+impl Default for CrashReportingConfig {
+    fn default() -> Self {
+        Self {
+            web: None,
+            mobile: None,
+            retention_days: 30,
+            export_interval_secs: 10,
+        }
+    }
+}
+impl CrashReportingConfig {
+    fn load(
+        mut read: impl FnMut(&str) -> Result<String, env::VarError>,
+    ) -> Result<Self, &'static str> {
+        let mut value = |key| match read(key) {
+            Ok(v) if v.trim().is_empty() => Ok(None),
+            Ok(v) => Ok(Some(v)),
+            Err(env::VarError::NotPresent) => Ok(None),
+            Err(_) => Err("Invalid crash configuration"),
+        };
+        let web = value("CRASH_REPORTS_SENTRY_DSN_WEB")?;
+        let mobile = value("CRASH_REPORTS_SENTRY_DSN_MOBILE")?;
+        let retention = value("CRASH_REPORTS_RETENTION_DAYS")?;
+        let interval = value("CRASH_REPORTS_EXPORT_INTERVAL_SECS")?;
+        let retention_days = retention
+            .as_deref()
+            .unwrap_or("30")
+            .parse::<u32>()
+            .map_err(|_| "Invalid crash retention")?;
+        if !(1..=30).contains(&retention_days) {
+            return Err("Crash retention must be 1–30 days");
+        }
+        let export_interval_secs = interval
+            .as_deref()
+            .unwrap_or("10")
+            .parse::<u64>()
+            .map_err(|_| "Invalid crash export interval")?;
+        if export_interval_secs > 86400 {
+            return Err("Crash export interval exceeds one day");
+        }
+        let destination = |v: Option<String>| {
+            v.filter(|s| !s.is_empty())
+                .map(|s| CrashDestinationConfig::parse(&s))
+                .transpose()
+        };
+        Ok(Self {
+            web: destination(web)?,
+            mobile: destination(mobile)?,
+            retention_days,
+            export_interval_secs,
+        })
+    }
+}
 
 pub const DEFAULT_CHANNEL_MEDIA_MAX_BYTES: u64 = 20 * 1024 * 1024;
 
@@ -193,8 +306,11 @@ impl std::str::FromStr for TrustedProxyRange {
 /// Application configuration loaded from environment variables.
 #[derive(Clone)]
 pub struct AppConfig {
+    pub crash_reporting: CrashReportingConfig,
     /// Server port (default: 3001)
     pub port: u16,
+    /// Work-drain deadline after SIGTERM/ctrl-c; zero preserves immediate shutdown.
+    pub shutdown_drain_timeout_secs: u64,
     /// Base URL for the backend (e.g. https://auth.nyxid.dev)
     pub base_url: String,
     /// Operator-configured chrono-probe origin; unset disables monitoring integration.
@@ -370,7 +486,7 @@ pub struct AppConfig {
     /// telemetry is hard-off: `TelemetryClient::from_config` returns
     /// `None` and no events are captured.
     pub telemetry_dsn: Option<String>,
-    /// Telemetry ingest host (defaults to EU PostHog if unset).
+    /// Telemetry ingest host (defaults to the US PostHog endpoint if unset).
     pub telemetry_host: Option<String>,
     /// When true AND `telemetry_dsn` is empty, fall back to the
     /// compiled-in public share-back DSN. Self-hoster opt-in knob.
@@ -446,6 +562,14 @@ pub struct AppConfig {
 
     /// APNs topic (bundle ID of the iOS app, e.g. "dev.nyxid.app").
     pub apns_topic: Option<String>,
+
+    /// Public Android Digital Asset Links identity (optional).
+    pub android_app_package: Option<String>,
+    pub android_app_sha256_cert_fingerprints: Vec<String>,
+    /// Additional lowercase URL schemes accepted for mobile OAuth returns.
+    /// `nyxid` is always accepted implicitly.
+    pub mobile_app_return_schemes: Vec<String>,
+    pub mobile_social_redirect_uris: Vec<String>,
 
     /// Use APNs sandbox instead of production.
     /// Default: true in development, false otherwise.
@@ -1037,6 +1161,145 @@ fn parse_ip_ranges(setting: &str, raw: Option<String>) -> Vec<TrustedProxyRange>
     ips
 }
 
+pub(crate) const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 25;
+
+fn shutdown_drain_timeout(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS)
+}
+
+fn parse_android_package(raw: Option<&str>) -> Result<Option<String>, &'static str> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.split('.').count() < 2
+        || !value.split('.').all(|part| {
+            part.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+    {
+        return Err("expected an Android application package");
+    }
+    Ok(Some(value.into()))
+}
+
+fn parse_android_fingerprints(raw: Option<&str>) -> Result<Vec<String>, &'static str> {
+    let Some(raw) = raw.map(str::trim).filter(|raw| !raw.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let mut result = Vec::new();
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let bytes: Vec<_> = value.split(':').collect();
+        if bytes.len() != 32
+            || !bytes
+                .iter()
+                .all(|byte| byte.len() == 2 && byte.bytes().all(|c| c.is_ascii_hexdigit()))
+        {
+            return Err("expected comma-separated 32-byte colon-delimited SHA-256 fingerprints");
+        }
+        let normalized = value.to_ascii_uppercase();
+        if !result.contains(&normalized) {
+            result.push(normalized);
+        }
+    }
+    Ok(result)
+}
+
+fn parse_mobile_social_redirect_uris(raw: Option<&str>) -> Result<Vec<String>, &'static str> {
+    let mut uris = Vec::new();
+    for uri in raw
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        let invalid = "expected an exact mobile social callback URI";
+        let url = url::Url::parse(uri).map_err(|_| invalid)?;
+        if uri.len() > 512
+            || url.as_str() != uri
+            || url.host_str().is_none()
+            || uri.contains('@')
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(invalid);
+        }
+        if url.scheme() == "exp" {
+            if url.path() != "/--/auth/social/callback" {
+                return Err(invalid);
+            }
+        } else {
+            parse_mobile_app_return_schemes(Some(url.scheme()))?;
+            if uri != format!("{}://auth/social/callback", url.scheme()) {
+                return Err(invalid);
+            }
+        }
+        uris.push(uri.to_owned());
+    }
+    Ok(uris)
+}
+
+fn parse_mobile_app_return_schemes(raw: Option<&str>) -> Result<Vec<String>, &'static str> {
+    const RESERVED: &[&str] = &[
+        "http",
+        "https",
+        "ws",
+        "wss",
+        "ftp",
+        "file",
+        "data",
+        "javascript",
+        "vbscript",
+        "blob",
+        "about",
+        "intent",
+        "content",
+        "exp",
+        "exps",
+        "mailto",
+        "tel",
+        "sms",
+    ];
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut schemes = Vec::new();
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let value = value.to_ascii_lowercase();
+        if value.len() > 32
+            || !value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"+.-".contains(&byte)
+            })
+            || RESERVED.contains(&value.as_str())
+        {
+            return Err("expected non-web mobile URL schemes");
+        }
+        if !schemes.iter().any(|existing| existing == &value) {
+            schemes.push(value);
+        }
+    }
+    Ok(schemes)
+}
+
 impl AppConfig {
     /// Load configuration from environment variables.
     /// Panics on missing required variables to fail fast at startup.
@@ -1067,10 +1330,15 @@ impl AppConfig {
         .unwrap_or_else(|message| panic!("{message}"));
 
         Self {
+            crash_reporting: CrashReportingConfig::load(|key| env::var(key))
+                .unwrap_or_else(|message| panic!("{message}")),
             resource_request_proof_enabled: parse_bool_env("NYXID_RESOURCE_REQUEST_PROOF_ENABLED", false),
             auth_device_eight_char_codes: env::var("AUTH_DEVICE_EIGHT_CHAR_CODES")
                 .map(|v| v.parse::<bool>().expect("AUTH_DEVICE_EIGHT_CHAR_CODES must be true or false"))
                 .unwrap_or(true),
+            shutdown_drain_timeout_secs: shutdown_drain_timeout(
+                env::var("SHUTDOWN_DRAIN_TIMEOUT_SECS").ok().as_deref(),
+            ),
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1294,6 +1562,10 @@ impl AppConfig {
             apns_key_id: env::var("APNS_KEY_ID").ok().filter(|s| !s.is_empty()),
             apns_team_id: env::var("APNS_TEAM_ID").ok().filter(|s| !s.is_empty()),
             apns_topic: env::var("APNS_TOPIC").ok().filter(|s| !s.is_empty()),
+            android_app_package: parse_android_package(env::var("ANDROID_APP_PACKAGE").ok().as_deref()).expect("invalid ANDROID_APP_PACKAGE"),
+            android_app_sha256_cert_fingerprints: parse_android_fingerprints(env::var("ANDROID_APP_SHA256_CERT_FINGERPRINTS").ok().as_deref()).expect("invalid ANDROID_APP_SHA256_CERT_FINGERPRINTS"),
+            mobile_social_redirect_uris: parse_mobile_social_redirect_uris(env::var("MOBILE_SOCIAL_REDIRECT_URIS").ok().as_deref()).expect("invalid MOBILE_SOCIAL_REDIRECT_URIS"),
+            mobile_app_return_schemes: parse_mobile_app_return_schemes(env::var("MOBILE_APP_RETURN_SCHEMES").ok().as_deref()).expect("invalid MOBILE_APP_RETURN_SCHEMES"),
             apns_sandbox: env::var("APNS_SANDBOX")
                 .ok()
                 .map(|v| v == "true" || v == "1")
@@ -1872,6 +2144,72 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn crash_configuration_bounds_destinations_and_redacts_secrets() {
+        let load = |key: &str, value: &str| {
+            CrashReportingConfig::load(|name| {
+                if name == key {
+                    Ok(value.into())
+                } else {
+                    Err(env::VarError::NotPresent)
+                }
+            })
+        };
+        let default = CrashReportingConfig::load(|_| Err(env::VarError::NotPresent)).unwrap();
+        assert_eq!(default.retention_days, 30);
+        assert_eq!(default.export_interval_secs, 10);
+        for value in ["0", "31", "bad"] {
+            assert!(load("CRASH_REPORTS_RETENTION_DAYS", value).is_err());
+        }
+        for value in ["86401", "-1", "bad"] {
+            assert!(load("CRASH_REPORTS_EXPORT_INTERVAL_SECS", value).is_err());
+        }
+        assert_eq!(
+            load("CRASH_REPORTS_EXPORT_INTERVAL_SECS", "0")
+                .unwrap()
+                .export_interval_secs,
+            0
+        );
+        assert!(
+            load(
+                "CRASH_REPORTS_SENTRY_DSN_WEB",
+                "http://secret@example.test/1"
+            )
+            .is_err()
+        );
+        let config = load(
+            "CRASH_REPORTS_SENTRY_DSN_WEB",
+            "https://SECRETSENTINEL@example.test/1",
+        )
+        .unwrap();
+        assert!(!format!("{config:?}").contains("SECRETSENTINEL"));
+        assert!(
+            CrashReportingConfig::load(|_| Err(env::VarError::NotUnicode(
+                std::ffi::OsString::from("secret")
+            )))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn crash_configuration_empty_and_whitespace_values_use_defaults() {
+        for blank in ["", " ", "\t\n"] {
+            let config = CrashReportingConfig::load(|_| Ok(blank.into())).unwrap();
+            assert_eq!(config.retention_days, 30);
+            assert_eq!(config.export_interval_secs, 10);
+            assert!(config.web.is_none());
+            assert!(config.mobile.is_none());
+        }
+    }
+
+    #[test]
+    fn shutdown_default_fits_kubernetes_and_explicit_budgets_are_preserved() {
+        assert_eq!(shutdown_drain_timeout(None), 25);
+        assert_eq!(shutdown_drain_timeout(Some("invalid")), 25);
+        for budget in [0, 1, 10, 25, 30, 600, u64::MAX] {
+            assert_eq!(shutdown_drain_timeout(Some(&budget.to_string())), budget);
+        }
+    }
 
     #[test]
     fn internal_advertise_url_prefers_explicit_url() {
@@ -1948,7 +2286,9 @@ mod tests {
     /// Create a minimal AppConfig for testing pure methods.
     fn make_config(base_url: &str, environment: &str, encryption_key: &str) -> AppConfig {
         AppConfig {
+            crash_reporting: CrashReportingConfig::default(),
             port: 3001,
+            shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
             auth_device_eight_char_codes: true,
             resource_request_proof_enabled: false,
             base_url: base_url.to_string(),
@@ -2027,6 +2367,10 @@ mod tests {
             apns_key_id: None,
             apns_team_id: None,
             apns_topic: None,
+            android_app_package: None,
+            android_app_sha256_cert_fingerprints: Vec::new(),
+            mobile_app_return_schemes: Vec::new(),
+            mobile_social_redirect_uris: Vec::new(),
             apns_sandbox: true,
             key_provider: "local".to_string(),
             aws_kms_key_arn: None,
@@ -2537,5 +2881,112 @@ mod contextual_cutover_tests {
         }
         assert!(mode(Some("invalid"), Some("true"), Some("true")).is_err());
         assert_eq!(mode(Some("false"), Some("1"), Some("1")), Ok((false, true)));
+    }
+}
+
+#[cfg(test)]
+mod android_app_link_tests {
+    #[test]
+    fn android_app_link_identity_validation() {
+        use super::{parse_android_fingerprints, parse_android_package};
+        assert_eq!(parse_android_package(None).unwrap(), None);
+        assert_eq!(
+            parse_android_package(Some("fun.chronoai.nyxid"))
+                .unwrap()
+                .as_deref(),
+            Some("fun.chronoai.nyxid")
+        );
+        for invalid in ["package", "a..b", "a.-b", "a.1b", "a.b/path"] {
+            assert!(parse_android_package(Some(invalid)).is_err());
+        }
+        let lower = ["ab"; 32].join(":");
+        let fingerprints =
+            parse_android_fingerprints(Some(&format!(" {lower},{} ", lower.to_ascii_uppercase())))
+                .unwrap();
+        assert_eq!(fingerprints, vec![lower.to_ascii_uppercase()]);
+        assert!(parse_android_fingerprints(None).unwrap().is_empty());
+        for value in [
+            format!("{lower},"),
+            format!(",{lower}"),
+            format!(", {lower}, ,{},", lower.to_ascii_uppercase()),
+        ] {
+            assert_eq!(
+                parse_android_fingerprints(Some(&value)).unwrap(),
+                vec![lower.to_ascii_uppercase()]
+            );
+        }
+        assert!(parse_android_fingerprints(Some(", ,,")).unwrap().is_empty());
+        for invalid in [
+            "AA:BB",
+            "aa".repeat(32).as_str(),
+            &format!("{}:GG", ["AA"; 31].join(":")),
+        ] {
+            assert!(parse_android_fingerprints(Some(invalid)).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
+mod mobile_app_return_scheme_tests {
+    #[test]
+    fn mobile_social_redirect_configuration_accepts_canonical_callbacks() {
+        let parse = super::parse_mobile_social_redirect_uris;
+        let native = "custom-app://auth/social/callback";
+        let expo = "exp://127.0.0.1:8081/--/auth/social/callback";
+        assert_eq!(
+            parse(Some(&format!("{native}, {expo}"))).unwrap(),
+            [native, expo]
+        );
+        for value in [
+            "https://auth/social/callback",
+            "custom-app://auth/social/callback?",
+            "custom-app://user@auth/social/callback",
+            "custom-app://auth/social/callback#x",
+            "exp://localhost:8081/--/other",
+        ] {
+            assert!(parse(Some(value)).is_err());
+        }
+    }
+
+    use super::parse_mobile_app_return_schemes;
+
+    #[test]
+    fn mobile_return_schemes_validate_lowercase_custom_schemes() {
+        assert_eq!(
+            parse_mobile_app_return_schemes(Some(",acme-nyx,,ACME-NYX,")).unwrap(),
+            ["acme-nyx"]
+        );
+        for empty in ["", " ", ", ,,"] {
+            assert!(
+                parse_mobile_app_return_schemes(Some(empty))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        assert_eq!(
+            parse_mobile_app_return_schemes(Some(" acme-nyx,foo+bar,acme-nyx ")).unwrap(),
+            ["acme-nyx", "foo+bar"]
+        );
+        assert!(parse_mobile_app_return_schemes(None).unwrap().is_empty());
+        assert!(
+            parse_mobile_app_return_schemes(Some(" "))
+                .unwrap()
+                .is_empty()
+        );
+        for invalid in [
+            "HTTPS",
+            "1acme",
+            "acme_nyx",
+            "https",
+            "exp",
+            "javascript",
+            "acme nyx",
+            "abcdefghijklmnopqrstuvwxyzabcdefg",
+        ] {
+            assert!(
+                parse_mobile_app_return_schemes(Some(invalid)).is_err(),
+                "{invalid}"
+            );
+        }
     }
 }

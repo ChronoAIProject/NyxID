@@ -1,6 +1,7 @@
 pub mod access_denial;
 pub mod memory_write;
 pub mod refresh;
+mod refusal_throttle;
 pub mod skill_draft;
 pub mod skill_read;
 pub mod voice_start;
@@ -100,6 +101,7 @@ pub struct PoolAttemptSummary {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PoolAttemptTransportKind {
     Connect,
+    ResolutionUnavailable,
     Timeout,
     AfterDispatch,
     NodeUnsent,
@@ -153,6 +155,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Conflict: trigger_overlap_skip")]
+    TriggerOverlapSkip { blocking_run_id: String },
+
     #[error("A turn is already active in this conversation")]
     AssistantTurnActive,
     #[error("The voice request queue is full")]
@@ -170,6 +175,22 @@ pub enum AppError {
     MonitoringNotConfigured,
     #[error("The failed invocation is still releasing capacity; retry this diagnostic once.")]
     DiagnosticNotReady,
+    /// A protocol wait tagged only inside one maintenance unit. Request callers
+    /// retain the original error; the batch consumes this before reporting.
+    #[error("{source}")]
+    BillingRecoveryWaiting { source: Box<AppError> },
+    /// A maintenance batch finished its independent units with some failures.
+    /// Preserve the first source's stable code; quantities never enter this error.
+    #[error("Billing recovery has {failed_units} failing units")]
+    BillingRecoveryFailed {
+        failed_units: u64,
+        #[source]
+        source: Box<AppError>,
+    },
+    #[error("Crash reporting is unavailable")]
+    CrashReportingUnavailable,
+    #[error("Crash report consent is required")]
+    CrashReportConsentRequired,
     /// Response metadata, preserving the underlying error through handler layers.
     #[error("{source}")]
     InvocationDiagnostic {
@@ -197,6 +218,9 @@ pub enum AppError {
     )]
     AssistantModelAuthorityChanged,
 
+    #[error("Organization specialist access authoring is unavailable")]
+    OrgAgentAccessAuthoringUnavailable,
+
     #[error("Attachment expired per retention policy. Upload it again to continue.")]
     AssistantAttachmentExpired,
 
@@ -206,7 +230,7 @@ pub enum AppError {
     #[error("Rate limited")]
     RateLimited,
 
-    /// A confirmed provider refusal with a bounded retry delay; preserves 1005.
+    /// A rate-limit refusal with a bounded retry delay; preserves 1005.
     #[error("Rate limited")]
     RateLimitedWithRetry { retry_after: u64 },
 
@@ -894,6 +918,8 @@ impl AppError {
 
     pub(crate) fn status_code(&self) -> StatusCode {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.status_code(),
             Self::SkillRead(reason) => reason.legacy_error().status_code(),
             Self::MemoryWrite(reason) => reason.legacy_error().status_code(),
             Self::RefreshRefused { source, .. } => source.status_code(),
@@ -912,8 +938,12 @@ impl AppError {
             Self::Forbidden(_)
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => StatusCode::FORBIDDEN,
+            Self::CrashReportingUnavailable => StatusCode::NOT_FOUND,
+            Self::CrashReportConsentRequired => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
-            Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
+            Self::Conflict(_)
+            | Self::TriggerOverlapSkip { .. }
+            | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing | Self::DiagnosticNotReady => {
                 StatusCode::CONFLICT
             }
@@ -927,6 +957,7 @@ impl AppError {
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
             Self::AssistantModelAuthorityChanged => StatusCode::FORBIDDEN,
+            Self::OrgAgentAccessAuthoringUnavailable => StatusCode::FORBIDDEN,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -1130,6 +1161,9 @@ impl AppError {
             | Self::PlanEntitlementRequired(_)
             | Self::WalletSuspended => StatusCode::PAYMENT_REQUIRED,
             Self::AnonymousIncompatibleBilling(_) => StatusCode::BAD_REQUEST,
+            Self::PoolAttemptTransport(PoolAttemptTransportKind::ResolutionUnavailable) => {
+                StatusCode::BAD_GATEWAY
+            }
             Self::Internal(_) | Self::PoolAttemptTransport(_) | Self::DatabaseError(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -1138,6 +1172,8 @@ impl AppError {
 
     pub(crate) fn error_code(&self) -> u32 {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.error_code(),
             Self::MemoryWrite(memory_write::MemoryWriteReason::MemoryStorageError) => 1007,
             Self::SkillRead(reason) => reason.legacy_error().error_code(),
             Self::MemoryWrite(reason) => reason.legacy_error().error_code(),
@@ -1152,7 +1188,7 @@ impl AppError {
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
             Self::NotFound(_) => 1003,
-            Self::Conflict(_) => 1004,
+            Self::Conflict(_) | Self::TriggerOverlapSkip { .. } => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::ApprovalUnsupported => 12502,
@@ -1161,6 +1197,8 @@ impl AppError {
             Self::MonitoringUnavailable => 13300,
             Self::MonitoringNotConfigured => 13301,
             Self::DiagnosticNotReady => 13302,
+            Self::CrashReportingUnavailable => 13400,
+            Self::CrashReportConsentRequired => 13401,
             Self::ToolOperationNotPublished => 12700,
             Self::ManagedExecutionPending(_) => 12800,
             Self::ErasurePreparing => 12801,
@@ -1168,6 +1206,7 @@ impl AppError {
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
             Self::AssistantModelAuthorityChanged => 12104,
+            Self::OrgAgentAccessAuthoringUnavailable => 12105,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
@@ -1388,6 +1427,8 @@ impl AppError {
     /// Each variant maps to a standard OAuth error string — no string matching.
     pub(crate) fn oauth_error_code(&self) -> &'static str {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.oauth_error_code(),
             Self::RefreshRefused { source, .. } => source.oauth_error_code(),
             Self::MfaRequired { .. } => "mfa_required",
             Self::MfaStepUpRequired => "mfa_step_up_required",
@@ -1412,6 +1453,8 @@ impl AppError {
     /// HTTP status to use when emitting an RFC 6749 §5.2 error response.
     pub(crate) fn oauth_status(&self) -> StatusCode {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.oauth_status(),
             Self::RefreshRefused { source, .. } => source.oauth_status(),
             Self::OAuthAuthorityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Unauthorized(_)
@@ -1427,6 +1470,8 @@ impl AppError {
 
     pub(crate) fn error_key(&self) -> &str {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.error_key(),
             Self::SkillRead(reason) => reason.error_key(),
             Self::MemoryWrite(reason) => reason.error_key(),
             Self::RefreshRefused { source, .. } => source.error_key(),
@@ -1439,7 +1484,7 @@ impl AppError {
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
-            Self::Conflict(_) => "conflict",
+            Self::Conflict(_) | Self::TriggerOverlapSkip { .. } => "conflict",
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
@@ -1449,10 +1494,13 @@ impl AppError {
             Self::MonitoringUnavailable => "monitoring_unavailable",
             Self::MonitoringNotConfigured => "monitoring_not_configured",
             Self::DiagnosticNotReady => "diagnostic_not_ready",
+            Self::CrashReportingUnavailable => "crash_reporting_unavailable",
+            Self::CrashReportConsentRequired => "crash_report_consent_required",
             Self::ToolOperationNotPublished => "tool_operation_not_published",
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantModelUnavailable => "model_unavailable",
             Self::AssistantModelAuthorityChanged => "model_authority_changed",
+            Self::OrgAgentAccessAuthoringUnavailable => "org_agent_access_authoring_unavailable",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
@@ -1681,8 +1729,26 @@ impl AppError {
 }
 
 impl AppError {
+    pub(crate) fn quiet_rate_limit_response(retry_after: u64) -> Response {
+        let error = Self::RateLimitedWithRetry { retry_after };
+        let mut response = (error.status_code(), axum::Json(error.response_body())).into_response();
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_str(
+                &error
+                    .retry_after_seconds()
+                    .expect("rate limit delay")
+                    .to_string(),
+            )
+            .expect("bounded numeric retry delay"),
+        );
+        response
+    }
+
     pub fn retry_after_seconds(&self) -> Option<u64> {
         match self {
+            Self::BillingRecoveryFailed { source, .. }
+            | Self::BillingRecoveryWaiting { source } => source.retry_after_seconds(),
             Self::InvocationDiagnostic { source, .. } => source.retry_after_seconds(),
             Self::DiagnosticNotReady | Self::RateLimited => Some(1),
             Self::RateLimitedWithRetry { retry_after } => Some((*retry_after).clamp(1, 86400)),
@@ -1692,6 +1758,11 @@ impl AppError {
 
     /// The same client-safe payload for JSON responses and streaming errors.
     pub fn response_body(&self) -> ErrorResponse {
+        if let Self::BillingRecoveryFailed { source, .. }
+        | Self::BillingRecoveryWaiting { source } = self
+        {
+            return source.response_body();
+        }
         if let Self::InvocationDiagnostic { source, .. } = self {
             return source.response_body();
         }
@@ -1726,6 +1797,15 @@ impl AppError {
             _ => None,
         };
         let details = match &self {
+            AppError::ApprovalFailed {
+                reason,
+                request_id,
+                approve_url,
+            } => Some(crate::services::approval_service::wait_failure_details(
+                reason,
+                request_id,
+                approve_url,
+            )),
             AppError::MemoryWrite(reason) => {
                 Some(serde_json::json!({"reason": reason, "category": reason.category()}))
             }
@@ -3545,4 +3625,30 @@ fn error_debug_redacts_challenges_and_untrusted_message_details() {
         serde_json::to_value(response).unwrap()["session_token"],
         secret
     );
+}
+
+#[cfg(test)]
+mod crash_error_contract_tests {
+    use super::*;
+    #[test]
+    fn crash_error_codes_statuses_and_keys_are_stable() {
+        for (error, status, code, key) in [
+            (
+                AppError::CrashReportingUnavailable,
+                StatusCode::NOT_FOUND,
+                13400,
+                "crash_reporting_unavailable",
+            ),
+            (
+                AppError::CrashReportConsentRequired,
+                StatusCode::FORBIDDEN,
+                13401,
+                "crash_report_consent_required",
+            ),
+        ] {
+            assert_eq!(error.status_code(), status);
+            assert_eq!(error.error_code(), code);
+            assert_eq!(error.error_key(), key);
+        }
+    }
 }

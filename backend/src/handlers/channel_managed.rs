@@ -64,9 +64,15 @@ pub(crate) async fn limit(state: &AppState, auth: &AuthUser) -> AppResult<()> {
 
 pub async fn bootstrap(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
     Path(platform): Path<String>,
 ) -> AppResult<(HeaderMap, Json<BootstrapResponse>)> {
+    crate::services::channel_adapters::meta_managed::require_enrollment(
+        &state.db,
+        &auth.user_id.to_string(),
+        &platform,
+    )
+    .await?;
     let adapter = resolve_adapter(&platform, &state.token_exchange_cache)?;
     let mut response = BootstrapResponse {
         available: false,
@@ -153,7 +159,7 @@ pub async fn complete(
     {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let progress = channel_managed::ManagedProgress(Some(sender.clone()));
-        tokio::spawn(async move {
+        crate::services::shutdown::process().spawn(async move {
             let event = match complete_inner(&state, &auth, &platform, body, &progress).await {
                 Ok((_, Json(result))) => serde_json::json!({ "result": result }),
                 Err(error) => {

@@ -115,17 +115,12 @@ fn native_attachment_only_and_mixed_replies_deliver_the_exact_saved_thread_fallb
             let requests = j.server.received_requests().await.unwrap();
             let sent: Value = serde_json::from_slice(&requests.last().unwrap().body).unwrap();
             let body = sent["content"].as_str().unwrap();
-            let displayed: String = pulldown_cmark::Parser::new(body)
-                .filter_map(|event| match event {
-                    pulldown_cmark::Event::Text(text) | pulldown_cmark::Event::Code(text) => {
-                        Some(text.to_string())
-                    }
-                    _ => None,
-                })
-                .collect();
-            assert!(displayed.starts_with(text), "{body}");
+            let displayed = crate::services::channel_reply_plan::format_tests::discord_read(body);
+            assert!(displayed.text.starts_with(text), "{body}");
             assert!(
-                displayed.contains("This chat cannot receive these attachments."),
+                displayed
+                    .text
+                    .contains("This chat cannot receive these attachments."),
                 "{body}"
             );
             let expected_url = format!(
@@ -133,9 +128,10 @@ fn native_attachment_only_and_mixed_replies_deliver_the_exact_saved_thread_fallb
                 j.state.config.frontend_url.trim_end_matches('/'),
                 reply.turn.conversation_id
             );
-            assert!(pulldown_cmark::Parser::new(body).any(|event| matches!(event,
-                pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { dest_url, .. }) if dest_url.as_ref() == expected_url.as_str()
-            )), "Fallback must be a usable exact-thread link: {body}");
+            assert!(
+                displayed.urls.contains(&expected_url),
+                "Fallback must be a usable exact-thread link: {body}"
+            );
             assert!(
                 requests
                     .last()

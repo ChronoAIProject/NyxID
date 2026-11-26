@@ -171,7 +171,7 @@ function QuantityPanel({
           aria-label={
             empty
               ? translateUi("Empty quantity graph by {{value1}}: {{value2}}. No metrics selected.", { value1: dimensions[comparison].toLowerCase(), value2: visiblePoints.map((point) => point.name).join("; ") })
-              : translateUi("{{value1}} by {{value2}} for the selected period: {{value3}}", { value1: label, value2: dimensions[comparison].toLowerCase(), value3: visiblePoints.map((point) => `${point.name}: ${plottedSeries.map((item) => `${item.label} ${point.values[item.key] == null ? "not recorded" : number(point.values[item.key]!)}`).join(", ")}`).join("; ") })
+              : translateUi("{{value1}} by {{value2}} for the selected period: {{value3}}", { value1: label, value2: dimensions[comparison].toLowerCase(), value3: visiblePoints.map((point) => `${point.name}: ${plottedSeries.map((item) => `${item.label} ${point.values[item.key] == null ? translateUi("not recorded") : number(point.values[item.key]!)}`).join(", ")}`).join("; ") })
           }
         >
           <ChartContainer

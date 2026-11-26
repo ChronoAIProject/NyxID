@@ -7,7 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use futures::TryStreamExt;
 use hmac::{Hmac, Mac};
 use mongodb::bson::{self, Bson, Document, doc};
@@ -48,6 +48,7 @@ pub struct BillingUsageResponse {
     pub job_id: Option<String>,
     pub owner_id: String,
     pub period: String,
+    pub covers_from: DateTime<Utc>,
     pub rows: Vec<BillingUsageRow>,
     pub totals: BillingUsageTotals,
     pub billing: BillingReadOnlyBlock,
@@ -79,6 +80,7 @@ pub struct BillingUsageRow {
     pub bytes: i64,
     pub events: i64,
     pub lago_acked: bool,
+    pub detail_retained: bool,
     /// False for observability-only usage without a chargeable wallet,
     /// including owners outside rollout: no cost, never pushed to Lago.
     pub billable: bool,
@@ -246,7 +248,7 @@ pub struct InvoiceDownloadResponse {
     tag = "Billing",
     params(
         ("owner_id" = Option<String>, Query, description = "Organization owner; requires org admin"),
-        ("period" = Option<String>, Query, description = "Usage period: 24h, 7d, 30d, 90d, or all"),
+        ("period" = Option<String>, Query, description = "Usage period: 24h, 7d, 30d, 90d, or all; periods longer than 30 days align to whole UTC days and use permanent rollups; allowance quantity is reported only for rows with detail_retained: true"),
         ("bucket" = Option<String>, Query, description = "`day` splits rows by UTC day")
     ),
     responses(
@@ -288,7 +290,6 @@ pub async fn get_usage(
                 .map_err(|_| AppError::ValidationError("job_id must be a UUID".into()))
         })
         .transpose()?;
-    let since = period_start(&period);
     let by_day = match query.bucket.as_deref() {
         None => false,
         Some("day") => true,
@@ -298,16 +299,163 @@ pub async fn get_usage(
             ));
         }
     };
+    let requested_since = period_start(&period);
+    let long_period = matches!(period.as_str(), "90d" | "all");
+    let filtered_long = long_period && (machine_id.is_some() || job_id.is_some());
+    let boundary = usage_rollup_boundary(Utc::now());
+    let db = state.db.clone();
+    let (mut rows, use_rollups, since) = if long_period && !filtered_long {
+        let owner_for_read = owner_id.clone();
+        let period_for_read = period.clone();
+        let machine_for_read = machine_id.clone();
+        let job_for_read = job_id.clone();
+        let (result, _, _) = crate::services::admin_usage_service::with_rollup_read(
+            &state.db,
+            boundary,
+            move |context| {
+                let db = db.clone();
+                let owner_id = owner_for_read.clone();
+                let period = period_for_read.clone();
+                let machine_id = machine_for_read.clone();
+                let job_id = job_for_read.clone();
+                async move {
+                    read_usage_rows(
+                        &db,
+                        &owner_id,
+                        &period,
+                        requested_since,
+                        boundary,
+                        machine_id.as_deref(),
+                        job_id.as_deref(),
+                        by_day,
+                        context,
+                    )
+                    .await
+                }
+            },
+        )
+        .await?;
+        result
+    } else {
+        let context = crate::services::admin_usage_service::RollupReadContext {
+            use_snapshot: false,
+            folded_before: None,
+            daily_ready: false,
+            rollup_normalized: false,
+            fallback: false,
+        };
+        read_usage_rows(
+            &state.db,
+            &owner_id,
+            &period,
+            requested_since,
+            boundary,
+            machine_id.as_deref(),
+            job_id.as_deref(),
+            by_day,
+            context,
+        )
+        .await?
+    };
+
+    resolve_api_key_names(&state.db, &owner_id, &mut rows).await?;
+    let totals = BillingUsageTotals {
+        quantity: rows.iter().map(|row| row.quantity).sum(),
+        requests: rows.iter().map(|row| row.requests).sum(),
+        bytes: rows.iter().map(|row| row.bytes).sum(),
+        events: rows.iter().map(|row| row.events).sum(),
+        estimated_credits_micros: sum_optional(rows.iter().map(|row| row.estimated_credits))?
+            .map(Credits::display_micros),
+        estimated_credits: sum_optional(rows.iter().map(|row| row.estimated_credits))?,
+        wallet_credits_micros: sum_optional(rows.iter().map(|row| row.wallet_credits))?
+            .map(Credits::display_micros),
+        wallet_credits: sum_optional(rows.iter().map(|row| row.wallet_credits))?,
+        grant_credits_micros: sum_optional(rows.iter().map(|row| row.grant_credits))?
+            .map(Credits::display_micros),
+        grant_credits: sum_optional(rows.iter().map(|row| row.grant_credits))?,
+        allowance_credits_micros: sum_optional(rows.iter().map(|row| row.allowance_credits))?
+            .map(Credits::display_micros),
+        allowance_credits: sum_optional(rows.iter().map(|row| row.allowance_credits))?,
+        allowance_quantity: rows.iter().map(|row| row.allowance_quantity).sum(),
+    };
+
+    Ok(Json(BillingUsageResponse {
+        machine_id,
+        job_id,
+        owner_id,
+        period,
+        covers_from: if use_rollups {
+            since
+        } else if long_period {
+            boundary
+        } else {
+            requested_since
+        },
+        rows,
+        totals,
+        billing: BillingReadOnlyBlock {
+            charging_enabled: state.billing.billing_enabled() && state.billing.lago_configured(),
+            lago_configured: state.billing.lago_configured(),
+            source: "usage_meter".to_string(),
+            rates_are_approximate: true,
+        },
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn read_usage_rows(
+    db: &mongodb::Database,
+    owner_id: &str,
+    period: &str,
+    requested_since: DateTime<Utc>,
+    boundary: DateTime<Utc>,
+    machine_id: Option<&str>,
+    job_id: Option<&str>,
+    by_day: bool,
+    context: crate::services::admin_usage_service::RollupReadContext,
+) -> AppResult<(Vec<BillingUsageRow>, bool, DateTime<Utc>)> {
+    #[cfg(test)]
+    if context.use_snapshot
+        && TEST_USAGE_SNAPSHOT_EXPIRED
+            .try_with(|expired| *expired)
+            .unwrap_or(false)
+    {
+        let command: mongodb::error::CommandError =
+            bson::from_document(doc! {"code": 239}).unwrap();
+        return Err(AppError::DatabaseError(
+            mongodb::error::ErrorKind::Command(command).into(),
+        ));
+    }
+    let long_period = matches!(period, "90d" | "all");
+    let use_rollups =
+        long_period && context.daily_ready && machine_id.is_none() && job_id.is_none();
+    let since = if use_rollups {
+        utc_midnight_at_or_before(requested_since)
+    } else {
+        requested_since
+    };
     let mut match_doc = doc! {
-        "billing_owner_id": &owner_id,
+        "billing_owner_id": owner_id,
         "quantity": { "$ne": null },
         "created_at": { "$gte": bson::DateTime::from_chrono(since) },
         "status": { "$in": ["finalized", "dead_letter"] },
     };
-    if let Some(id) = &machine_id {
+    if use_rollups {
+        // Keep the owner and created_at equality/range prefix usable by the
+        // existing {billing_owner_id: 1, created_at: -1} index. The residual
+        // selects the retained tail and rows still awaiting their fold mark.
+        match_doc.insert(
+            "$and",
+            vec![doc! { "$or": [
+                { "created_at": { "$gte": bson::DateTime::from_chrono(boundary) } },
+                { "rollup_pending": { "$in": [true, null] } },
+            ] }],
+        );
+    }
+    if let Some(id) = machine_id {
         match_doc.insert("machine_usage.node_id", id);
     }
-    if let Some(id) = &job_id {
+    if let Some(id) = job_id {
         match_doc.insert("machine_usage.job_id", id);
     }
     match_doc.insert(
@@ -424,14 +572,15 @@ pub async fn get_usage(
         },
         doc! { "$sort": { "_id.service_slug": 1, "_id.layer": 1, "_id.metric": 1, "_id.day": 1 } },
     ];
-
-    let mut cursor = state
-        .db
-        .collection::<Document>(USAGE_METER)
-        .aggregate(pipeline)
-        .await?;
+    // Both aggregates must use one atClusterTime when a fold is active.
+    let mut snapshot = if context.use_snapshot {
+        Some(db.client().start_session().snapshot(true).await?)
+    } else {
+        None
+    };
+    let documents = usage_documents(db, USAGE_METER, pipeline, snapshot.as_mut()).await?;
     let mut rows = Vec::new();
-    while let Some(doc) = cursor.try_next().await? {
+    for doc in documents {
         let Some(id_doc) = doc.get_document("_id").ok() else {
             continue;
         };
@@ -448,7 +597,7 @@ pub async fn get_usage(
             &doc,
             billable,
             crate::services::billing::reservation::find_rate(
-                &state.db,
+                db,
                 &lago_metric_code,
                 model.as_deref(),
             ),
@@ -490,6 +639,7 @@ pub async fn get_usage(
             },
             events: doc_i64(&doc, "events").unwrap_or(0),
             lago_acked: id_doc.get_bool("lago_acked").unwrap_or(false),
+            detail_retained: true,
             billable,
             estimated_credits_micros: costs.total.map(Credits::display_micros),
             estimated_credits: costs.total,
@@ -508,43 +658,27 @@ pub async fn get_usage(
             day: id_doc.get_datetime("day").ok().map(|day| day.to_chrono()),
         });
     }
-
-    resolve_api_key_names(&state.db, &owner_id, &mut rows).await?;
-
-    let totals = BillingUsageTotals {
-        quantity: rows.iter().map(|row| row.quantity).sum(),
-        requests: rows.iter().map(|row| row.requests).sum(),
-        bytes: rows.iter().map(|row| row.bytes).sum(),
-        events: rows.iter().map(|row| row.events).sum(),
-        estimated_credits_micros: sum_optional(rows.iter().map(|row| row.estimated_credits))?
-            .map(Credits::display_micros),
-        estimated_credits: sum_optional(rows.iter().map(|row| row.estimated_credits))?,
-        wallet_credits_micros: sum_optional(rows.iter().map(|row| row.wallet_credits))?
-            .map(Credits::display_micros),
-        wallet_credits: sum_optional(rows.iter().map(|row| row.wallet_credits))?,
-        grant_credits_micros: sum_optional(rows.iter().map(|row| row.grant_credits))?
-            .map(Credits::display_micros),
-        grant_credits: sum_optional(rows.iter().map(|row| row.grant_credits))?,
-        allowance_credits_micros: sum_optional(rows.iter().map(|row| row.allowance_credits))?
-            .map(Credits::display_micros),
-        allowance_credits: sum_optional(rows.iter().map(|row| row.allowance_credits))?,
-        allowance_quantity: rows.iter().map(|row| row.allowance_quantity).sum(),
-    };
-
-    Ok(Json(BillingUsageResponse {
-        machine_id,
-        job_id,
-        owner_id,
-        period,
-        rows,
-        totals,
-        billing: BillingReadOnlyBlock {
-            charging_enabled: state.billing.billing_enabled() && state.billing.lago_configured(),
-            lago_configured: state.billing.lago_configured(),
-            source: "usage_meter".to_string(),
-            rates_are_approximate: true,
-        },
-    }))
+    #[cfg(test)]
+    if let Ok(Some((read, resume))) =
+        TEST_USAGE_READ_PAUSE.try_with(|pause| pause.borrow_mut().take())
+    {
+        read.notify_one();
+        resume.notified().await;
+    }
+    if use_rollups {
+        let mut older = aggregate_daily_usage(
+            db,
+            owner_id,
+            since,
+            boundary,
+            by_day,
+            context.rollup_normalized,
+            snapshot.as_mut(),
+        )
+        .await?;
+        rows.append(&mut older);
+    }
+    Ok((rows, use_rollups, since))
 }
 
 /// Reject wallet surfaces for owners outside the staged billing rollout.
@@ -1131,6 +1265,7 @@ pub async fn lago_webhook(
         lago.as_deref(),
         event_type,
         &payload,
+        state.config.billing_rate_cache_ttl_secs,
     )
     .await?;
 
@@ -1208,6 +1343,152 @@ fn period_start(period: &str) -> chrono::DateTime<Utc> {
         "all" => now - Duration::days(3650),
         _ => now - Duration::days(30),
     }
+}
+
+/// The first UTC midnight at or after now minus 29 days. Every raw row at or
+/// after this boundary still exists under the 30-day retention policy.
+fn usage_rollup_boundary(now: DateTime<Utc>) -> DateTime<Utc> {
+    let candidate = now - Duration::days(29);
+    let midnight = utc_midnight_at_or_before(candidate);
+    if midnight < candidate {
+        midnight + Duration::days(1)
+    } else {
+        midnight
+    }
+}
+
+fn utc_midnight_at_or_before(time: DateTime<Utc>) -> DateTime<Utc> {
+    NaiveDate::from_ymd_opt(time.year(), time.month(), time.day())
+        .expect("valid UTC date")
+        .and_hms_opt(0, 0, 0)
+        .expect("valid UTC midnight")
+        .and_utc()
+}
+
+async fn usage_documents(
+    db: &mongodb::Database,
+    collection: &str,
+    pipeline: Vec<Document>,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Vec<Document>> {
+    let collection = db.collection::<Document>(collection);
+    let aggregate = collection.aggregate(pipeline);
+    match session {
+        Some(session) => Ok(aggregate
+            .session(&mut *session)
+            .await?
+            .stream(session)
+            .try_collect()
+            .await?),
+        None => Ok(aggregate.await?.try_collect().await?),
+    }
+}
+
+async fn aggregate_daily_usage(
+    db: &mongodb::Database,
+    owner_id: &str,
+    since: DateTime<Utc>,
+    boundary: DateTime<Utc>,
+    by_day: bool,
+    rollup_normalized: bool,
+    session: Option<&mut mongodb::ClientSession>,
+) -> AppResult<Vec<BillingUsageRow>> {
+    let day_key = if by_day {
+        Bson::String("$day".into())
+    } else {
+        Bson::Null
+    };
+    let pipeline = vec![
+        doc! { "$match": { "owner": owner_id, "day": { "$gte": bson::DateTime::from_chrono(since), "$lt": bson::DateTime::from_chrono(boundary) } } },
+        // The admin tier reader selects exact mirrors after normalization and
+        // handles nested/legacy mirrors before the marker. Keep this user
+        // reader on that same expression so both tiers remain parity-safe.
+        doc! { "$set": {
+            "rollup_gross": crate::services::admin_usage_service::rollup_credit_expr("gross_cost", rollup_normalized),
+            "rollup_wallet": crate::services::admin_usage_service::rollup_credit_expr("wallet_cost", rollup_normalized),
+            "rollup_grant": crate::services::admin_usage_service::rollup_credit_expr("grant_cost", rollup_normalized),
+            "rollup_allowance": crate::services::admin_usage_service::rollup_credit_expr("allowance_cost", rollup_normalized),
+            "rollup_legacy_grant": crate::services::admin_usage_service::rollup_credit_expr("legacy_grant_cost", rollup_normalized),
+        } },
+        doc! { "$group": {
+            "_id": { "service_slug": "$service_slug", "service_id": "$service_id", "metric": "$metric", "lago_metric_code": "$code", "layer": "$layer", "model": "$model", "billable": "$billable", "day": day_key },
+            "quantity": { "$sum": "$quantity" }, "requests": { "$sum": "$requests" }, "events": { "$sum": "$events" },
+            "exact_rows": { "$sum": "$exact_cost_events" }, "legacy_quantity": { "$sum": "$legacy_quantity" }, "legacy_rows": { "$sum": "$legacy_cost_events" },
+            "legacy_allowance_quantity": { "$sum": "$legacy_allowance_quantity" }, "legacy_grant_micros": { "$sum": "$rollup_legacy_grant" },
+            "total_charge": { "$sum": "$rollup_gross" }, "wallet_funded": { "$sum": "$rollup_wallet" }, "grant_funded": { "$sum": "$rollup_grant" }, "allowance_funded": { "$sum": "$rollup_allowance" },
+            "prompt_tokens": { "$sum": "$prompt_tokens" }, "completion_tokens": { "$sum": "$completion_tokens" }, "cached_tokens": { "$sum": "$cached_tokens" }, "cache_creation_tokens": { "$sum": "$cache_creation_tokens" },
+        } },
+    ];
+    let documents = usage_documents(
+        db,
+        crate::models::usage_rollup_daily::COLLECTION_NAME,
+        pipeline,
+        session,
+    )
+    .await?;
+    let mut rows = Vec::new();
+    for doc in documents {
+        let id = doc
+            .get_document("_id")
+            .map_err(|_| AppError::Internal("Invalid daily usage key".into()))?;
+        let metric = id
+            .get_str("metric")
+            .ok()
+            .and_then(parse_metric)
+            .unwrap_or_default();
+        let billable = id.get_bool("billable").unwrap_or(false);
+        let pricing = legacy_pricing(
+            &doc,
+            billable,
+            crate::services::billing::reservation::find_rate(
+                db,
+                id.get_str("lago_metric_code").unwrap_or(""),
+                id.get_str("model").ok(),
+            ),
+        )
+        .await?;
+        let costs = usage_costs(&doc, billable, pricing)?;
+        rows.push(BillingUsageRow {
+            org_channel_guest: None,
+            machine_usage: None,
+            operation: None,
+            service_slug: id.get_str("service_slug").ok().map(ToString::to_string),
+            service_id: id.get_str("service_id").ok().map(ToString::to_string),
+            metric,
+            lago_metric_code: id.get_str("lago_metric_code").unwrap_or("").to_string(),
+            layer: id.get_str("layer").unwrap_or("platform").to_string(),
+            model: id.get_str("model").ok().map(ToString::to_string),
+            api_key_id: None,
+            api_key_name: None,
+            quantity: doc_i64(&doc, "quantity").unwrap_or(0),
+            requests: if metric == BillingMetric::Requests {
+                doc_i64(&doc, "quantity").unwrap_or(0)
+            } else {
+                0
+            },
+            bytes: if metric == BillingMetric::Bytes {
+                doc_i64(&doc, "quantity").unwrap_or(0)
+            } else {
+                0
+            },
+            events: doc_i64(&doc, "events").unwrap_or(0),
+            lago_acked: false,
+            detail_retained: false,
+            billable,
+            estimated_credits_micros: costs.total.map(Credits::display_micros),
+            estimated_credits: costs.total,
+            wallet_credits_micros: costs.wallet.map(Credits::display_micros),
+            wallet_credits: costs.wallet,
+            grant_credits_micros: costs.grant.map(Credits::display_micros),
+            grant_credits: costs.grant,
+            allowance_credits_micros: costs.allowance.map(Credits::display_micros),
+            allowance_credits: costs.allowance,
+            allowance_quantity: 0,
+            token_breakdown: usage_row_breakdown(&doc),
+            day: id.get_datetime("day").ok().map(|day| day.to_chrono()),
+        });
+    }
+    Ok(rows)
 }
 
 /// Fill `api_key_name` on usage rows with one batched lookup.
@@ -1498,4 +1779,21 @@ mod tests {
 
         assert_eq!(lago_event_type(&payload), Some("wallet.updated"));
     }
+
+    #[test]
+    fn long_usage_boundary_is_the_first_midnight_after_twenty_nine_days() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-17T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            usage_rollup_boundary(now).to_rfc3339(),
+            "2026-10-20T00:00:00+00:00"
+        );
+    }
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_USAGE_SNAPSHOT_EXPIRED: bool;
+    pub(crate) static TEST_USAGE_READ_PAUSE: std::cell::RefCell<Option<(std::sync::Arc<tokio::sync::Notify>, std::sync::Arc<tokio::sync::Notify>)>>;
 }

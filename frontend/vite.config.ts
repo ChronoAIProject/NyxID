@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import path from "path"
 import fs from "node:fs"
+import { buildArtifactId } from "./scripts/crash-build-identity.mjs"
 import https from "node:https"
 import { allDocPages } from "./src/features/docs/manifest"
 import { routingPreview } from "./dev/routing-preview"
@@ -110,7 +111,7 @@ interface DocFile {
 }
 
 // Public, indexable routes outside the docs tree.
-const STATIC_SITEMAP_ROUTES = ["/", "/docs", "/blog", "/privacy", "/terms"]
+const STATIC_SITEMAP_ROUTES = ["/", "/docs", "/blog", "/privacy", "/terms", "/data-deletion"]
 
 function docsSync(): Plugin {
   const srcDir = path.resolve(__dirname, "../docs/site")
@@ -262,6 +263,8 @@ function docsSync(): Plugin {
 // evaluation time is enough, since a new evaluation means a new build.
 const SOURCE_COMMIT = process.env.SOURCE_COMMIT || process.env.NYXID_GIT_HASH || null
 const BUILD_ID = SOURCE_COMMIT || Date.now().toString(36)
+const ARTIFACT_ID = buildArtifactId(process.env.CRASH_ARTIFACT_ID)
+const APP_VERSION = JSON.parse(fs.readFileSync(path.resolve(__dirname, "package.json"), "utf8")).version as string
 
 export default defineConfig({
   plugins: [
@@ -269,9 +272,12 @@ export default defineConfig({
     ...(process.env.NYXID_ROUTING_PREVIEW === "1" ? [routingPreview(backendUrl, expectedOrigin)] : []),
     telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(__dirname),
     buildVersion(BUILD_ID, SOURCE_COMMIT),
+    { name: "crash-build-identity", generateBundle() { this.emitFile({ type: "asset", fileName: "crash-build.json", source: JSON.stringify({ artifact_id: ARTIFACT_ID, app_version: APP_VERSION, app_build: BUILD_ID }) }); } },
   ],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
+    __BUILD_ARTIFACT_ID__: JSON.stringify(ARTIFACT_ID),
+    __APP_VERSION__: JSON.stringify(APP_VERSION),
     "import.meta.env.VITE_ROUTING_PREVIEW": JSON.stringify(process.env.NYXID_ROUTING_PREVIEW === "1" ? "1" : "0"),
   },
   resolve: {
@@ -281,6 +287,7 @@ export default defineConfig({
     ],
   },
   build: {
+    sourcemap: "hidden",
     rollupOptions: {
       output: {
         manualChunks(id) {
@@ -369,6 +376,7 @@ export default defineConfig({
         // Static legal / redirect stub pages — no branching logic.
         "src/pages/privacy.tsx",
         "src/pages/terms.tsx",
+        "src/pages/data-deletion.tsx",
         "src/pages/connections.tsx",
         "src/pages/services.tsx",
         "src/pages/providers-layout.tsx",

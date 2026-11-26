@@ -264,6 +264,14 @@ test("connection and catalog schemas retain optional health and permission capab
   );
 });
 
+test("unknown future SSH auth modes remain readable", () => {
+  const parsed = serviceConnectionSchema.parse({
+    ...connection,
+    ssh_auth_mode: "future_mode",
+  });
+  assert.equal(parsed.ssh_auth_mode, "future_mode");
+});
+
 test("service schemas retain database icon URLs and accept omitted or null icon metadata", () => {
   const connectionIcon = "/api/v1/keys/service-1/icon";
   const catalogIcon = "https://assets.example/catalog/github.svg";

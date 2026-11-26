@@ -48,7 +48,9 @@ pub async fn notice_in_session(
         .media_sent_at
         .unwrap_or(event.created_at)
         .format("%H:%M");
-    let quoted: String = event.text.chars().take(3000).collect();
+    let notice = event.channel_message.as_deref().unwrap_or(&event.text);
+    let (quoted, completeness) =
+        crate::services::channel_turn_context::bounded_message(notice, 3000, notice.len(), false);
     let reason = match reason {
         NoticeReason::Expired => "expired before it could be processed",
         NoticeReason::Revoked => "could no longer be processed",
@@ -60,7 +62,7 @@ pub async fn notice_in_session(
     messages.update_one(key,doc! {"$setOnInsert":{
         "_id":uuid::Uuid::new_v4().to_string(),"user_id":user,"conversation_id":conversation,
         "seq":seq,"turn_id":&event.id,"role":"assistant","text":text,"status":"completed",
-        "media_queue_notice_id":&event.id,"created_at":bson::DateTime::now(),
+        "media_queue_notice_id":&event.id,"quote_completeness":{"original_bytes":completeness.original_bytes as i64,"truncated":completeness.truncated},"created_at":bson::DateTime::now(),
     }}).upsert(true).session(&mut *session).await?;
     Ok(())
 }

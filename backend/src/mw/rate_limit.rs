@@ -186,7 +186,90 @@ pub struct PerKeyRateLimiter {
     window_secs: u64,
 }
 
+/// Single-use reservation for an export's fixed-window rate slot.
+pub struct RateReservation {
+    key: String,
+    reset_at: chrono::DateTime<chrono::Utc>,
+    #[cfg(test)]
+    memory_start: Option<Instant>,
+}
+
 impl PerKeyRateLimiter {
+    pub async fn reserve(&self, key: &str) -> Result<(Option<RateReservation>, u64), AppError> {
+        if let Some(db) = &self.db {
+            let admitted = RateWindowStore::admit(
+                db,
+                &self.namespace,
+                key,
+                u64::from(self.max_requests),
+                std::time::Duration::from_secs(self.window_secs),
+            )
+            .await?;
+            let retry = admitted
+                .reset_at
+                .signed_duration_since(chrono::Utc::now())
+                .num_seconds()
+                .max(1) as u64;
+            return Ok((
+                admitted.allowed.then(|| RateReservation {
+                    key: key.into(),
+                    reset_at: admitted.reset_at,
+                    #[cfg(test)]
+                    memory_start: None,
+                }),
+                retry,
+            ));
+        }
+        #[cfg(test)]
+        {
+            let now = Instant::now();
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let entry = state.entry(key.into()).or_insert((0, now));
+            if now.duration_since(entry.1).as_secs() >= self.window_secs {
+                *entry = (0, now);
+            }
+            if entry.0 >= self.max_requests {
+                return Ok((None, self.window_secs));
+            }
+            entry.0 += 1;
+            Ok((
+                Some(RateReservation {
+                    key: key.into(),
+                    reset_at: chrono::Utc::now(),
+                    memory_start: Some(entry.1),
+                }),
+                self.window_secs,
+            ))
+        }
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
+    pub async fn refund(&self, reservation: RateReservation) -> Result<(), AppError> {
+        if let Some(db) = &self.db {
+            return RateWindowStore::refund(
+                db,
+                &self.namespace,
+                &reservation.key,
+                reservation.reset_at,
+                std::time::Duration::from_secs(self.window_secs),
+            )
+            .await;
+        }
+        #[cfg(test)]
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(entry) = state.get_mut(&reservation.key)
+                && Some(entry.1) == reservation.memory_start
+            {
+                entry.0 = entry.0.saturating_sub(1);
+            }
+            Ok(())
+        }
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
     #[cfg(test)]
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
@@ -216,19 +299,28 @@ impl PerKeyRateLimiter {
     }
 
     pub async fn check_shared(&self, key: &str) -> Result<bool, AppError> {
+        Ok(self.check_shared_with_retry(key).await?.0)
+    }
+
+    pub async fn check_shared_with_retry(&self, key: &str) -> Result<(bool, u64), AppError> {
         if let Some(db) = self.db.as_ref() {
-            return Ok(RateWindowStore::admit(
+            let admission = RateWindowStore::admit(
                 db,
                 &self.namespace,
                 key,
                 u64::from(self.max_requests),
                 std::time::Duration::from_secs(self.window_secs),
             )
-            .await?
-            .allowed);
+            .await?;
+            let retry_after = (admission
+                .reset_at
+                .signed_duration_since(chrono::Utc::now())
+                .num_seconds()
+                .max(1)) as u64;
+            return Ok((admission.allowed, retry_after));
         }
         #[cfg(test)]
-        return Ok(self.check(key));
+        return Ok((self.check(key), self.window_secs));
         #[cfg(not(test))]
         unreachable!("production rate limiters always have a MongoDB backend")
     }
@@ -399,6 +491,7 @@ impl DirectChatRateLimiter {
             drop(state);
 
             Ok(DirectChatPermit {
+                settlement_only: false,
                 slot: None,
                 queued: None,
                 local_limiter: Some(self.clone()),
@@ -437,6 +530,7 @@ impl DirectChatRateLimiter {
                     .await?
                     .ok_or(AppError::RateLimited)?;
                 DirectChatPermit {
+                    settlement_only: false,
                     slot: None,
                     queued: Some(QueuePlace {
                         place,
@@ -491,11 +585,90 @@ impl DirectChatRateLimiter {
         unreachable!("production direct-chat limiters always have a MongoDB backend");
         #[cfg(test)]
         Ok(Some(DirectChatPermit {
+            settlement_only: false,
             slot: None,
             queued: None,
             local_limiter: None,
             user_id: String::new(),
         }))
+    }
+
+    pub(crate) async fn recover_owner_slot(
+        self: &Arc<Self>,
+        owner: &str,
+    ) -> Result<Option<DirectChatPermit>, AppError> {
+        self.try_acquire_pool(DIRECT_CHAT_NAMESPACE, owner, self.max_in_flight)
+            .await
+    }
+
+    pub(crate) async fn transfer_capacity(
+        &self,
+        session: &mut mongodb::ClientSession,
+        token: &crate::models::coordination::SlotToken,
+        owner: &str,
+        team_limit: Option<u32>,
+    ) -> Result<Option<crate::services::coordination_service::SlotGrant>, AppError> {
+        let (namespace, limit) = match team_limit {
+            Some(limit) => ("assistant_team", limit.max(1)),
+            None if token.namespace == DIRECT_CHAT_QUEUE_NAMESPACE => {
+                (DIRECT_CHAT_QUEUE_NAMESPACE, self.max_queued)
+            }
+            None => (DIRECT_CHAT_NAMESPACE, self.max_in_flight),
+        };
+        self.slot_manager
+            .as_ref()
+            .ok_or(AppError::AssistantTurnRequired)?
+            .transfer(session, token, namespace, owner, limit)
+            .await
+    }
+
+    pub(crate) async fn transfer_channel_capacity(
+        &self,
+        session: &mut mongodb::ClientSession,
+        token: &crate::models::coordination::SlotToken,
+        owner: &str,
+    ) -> Result<Option<crate::services::coordination_service::SlotGrant>, AppError> {
+        self.slot_manager
+            .as_ref()
+            .ok_or(AppError::AssistantTurnRequired)?
+            .transfer(
+                session,
+                token,
+                "assistant_channel",
+                owner,
+                crate::services::assistant_team_service::CHANNEL_TURNS_PER_OWNER,
+            )
+            .await
+    }
+
+    pub(crate) fn transferred_permit(
+        &self,
+        owner: &str,
+        grant: crate::services::coordination_service::SlotGrant,
+    ) -> DirectChatPermit {
+        let manager = self
+            .slot_manager
+            .as_ref()
+            .expect("transferred database slot");
+        let queued = grant.token.namespace == DIRECT_CHAT_QUEUE_NAMESPACE;
+        let place = manager.guard(grant);
+        if !queued {
+            return DirectChatPermit::running(place);
+        }
+        DirectChatPermit {
+            settlement_only: false,
+            slot: None,
+            queued: Some(QueuePlace {
+                place,
+                slot_manager: manager.clone(),
+                user_id: owner.to_owned(),
+                max_in_flight: self.max_in_flight,
+            }),
+            #[cfg(test)]
+            local_limiter: None,
+            #[cfg(test)]
+            user_id: String::new(),
+        }
     }
 
     #[cfg(test)]
@@ -518,6 +691,7 @@ impl DirectChatRateLimiter {
 }
 
 pub struct DirectChatPermit {
+    settlement_only: bool,
     slot: Option<RenewableSlotGuard>,
     queued: Option<QueuePlace>,
     #[cfg(test)]
@@ -540,8 +714,30 @@ struct QueuePlace {
 }
 
 impl DirectChatPermit {
+    pub(crate) fn settlement_only() -> Self {
+        Self {
+            settlement_only: true,
+            slot: None,
+            queued: None,
+            #[cfg(test)]
+            local_limiter: None,
+            #[cfg(test)]
+            user_id: String::new(),
+        }
+    }
+
+    pub(crate) fn can_execute(&self) -> bool {
+        !self.settlement_only
+    }
+    pub(crate) fn token(&self) -> Option<&crate::models::coordination::SlotToken> {
+        self.slot
+            .as_ref()
+            .or_else(|| self.queued.as_ref().map(|queue| &queue.place))
+            .map(RenewableSlotGuard::token)
+    }
     fn running(slot: RenewableSlotGuard) -> Self {
         Self {
+            settlement_only: false,
             slot: Some(slot),
             queued: None,
             #[cfg(test)]
@@ -566,7 +762,7 @@ impl DirectChatPermit {
         let slot_manager = queued.slot_manager.clone();
         let user_id = queued.user_id.clone();
         let limit = queued.max_in_flight;
-        Some(tokio::spawn(async move {
+        Some(crate::services::shutdown::process().spawn(async move {
             if !oldest.await? {
                 return Ok(None);
             }
@@ -1482,7 +1678,7 @@ fn extract_client_ip(request: &Request<Body>, trusted_proxies: &[TrustedProxyRan
 }
 
 /// Paths exempt from the general budgets (protected by their own controls).
-const RATE_LIMIT_EXEMPT_PATHS: &[&str] = &["/mcp", "/.well-known/", "/health"];
+const RATE_LIMIT_EXEMPT_PATHS: &[&str] = &["/mcp", "/.well-known/", "/health", "/ready"];
 const ASSISTANT_ACTIONS_EXEMPT_PATH: &str = "/api/v1/assistant/actions";
 
 fn is_rate_limit_exempt(path: &str) -> bool {
@@ -1568,7 +1764,7 @@ pub async fn rate_limit_middleware(
     // Check per-IP rate limit first
     if !per_ip_limiter.check_shared(client_ip).await? {
         tracing::warn!(
-            path = %path,
+            path = %crate::mw::request_trace::route_label(request.extensions()),
             ip = %client_ip,
             "Per-IP rate limit exceeded"
         );
@@ -1578,7 +1774,7 @@ pub async fn rate_limit_middleware(
     // Also check global rate limit as a safety net
     if !global_limiter.check_shared().await? {
         tracing::warn!(
-            path = %path,
+            path = %crate::mw::request_trace::route_label(request.extensions()),
             "Global rate limit exceeded"
         );
         return Err(AppError::RateLimited);
@@ -1600,8 +1796,13 @@ pub async fn device_code_rate_limit_middleware(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| *peer);
-    enforce_device_code_ip_rate_limit(&limiters, request.headers(), peer, request.uri().path())
-        .await?;
+    enforce_device_code_ip_rate_limit(
+        &limiters,
+        request.headers(),
+        peer,
+        crate::mw::request_trace::route_label(request.extensions()),
+    )
+    .await?;
 
     let (parts, body) = request.into_parts();
     let bytes = to_bytes(body, 64 * 1024)
@@ -1612,7 +1813,7 @@ pub async fn device_code_rate_limit_middleware(
         && !limiters.per_pubkey.check_shared(&pubkey).await?
     {
         tracing::warn!(
-            path = %parts.uri.path(),
+            path = %crate::mw::request_trace::route_label(&parts.extensions),
             device_pubkey = %hex::encode(pubkey),
             "Device-code per-pubkey rate limit exceeded"
         );
@@ -2107,10 +2308,15 @@ mod tests {
     #[test]
     fn assistant_actions_has_exact_path_rate_limit_exemption() {
         assert!(is_rate_limit_exempt("/health"));
+        assert!(is_rate_limit_exempt("/ready"));
         assert!(is_rate_limit_exempt("/.well-known/openid-configuration"));
         assert!(is_rate_limit_exempt("/mcp"));
         assert!(is_rate_limit_exempt("/api/v1/assistant/actions"));
         assert!(!is_rate_limit_exempt("/api/v1/assistant/actions/extra"));
+        assert!(!is_rate_limit_exempt(
+            "/api/v1/assistant/nyxagent/channels/preview"
+        ));
+        assert!(!is_rate_limit_exempt("/api/v1/assistant/nyxagent/channels"));
     }
 
     #[test]
@@ -2703,5 +2909,57 @@ mod tests {
         limiter.check("conv-2");
         limiter.check("conv-3");
         assert_eq!(limiter.active_conversations(), 3);
+    }
+}
+
+#[cfg(test)]
+mod export_reservation_tests {
+    use super::*;
+    use mongodb::bson::{self, Document};
+
+    #[tokio::test]
+    async fn export_reservations_bound_concurrency_and_refund_only_the_original_window() {
+        let db = crate::test_utils::connect_transaction_test_database("export_rate_refunds").await;
+        let limiter = Arc::new(PerKeyRateLimiter::with_db(
+            db.clone(),
+            "export-refunds",
+            3,
+            3600,
+        ));
+        let mut tasks = Vec::new();
+        for _ in 0..16 {
+            let limiter = limiter.clone();
+            tasks.push(tokio::spawn(async move {
+                limiter.reserve("person").await.unwrap().0
+            }));
+        }
+        let mut admitted = Vec::new();
+        for task in tasks {
+            if let Some(token) = task.await.unwrap() {
+                admitted.push(token);
+            }
+        }
+        assert_eq!(admitted.len(), 3);
+        limiter.refund(admitted.pop().unwrap()).await.unwrap();
+        assert!(limiter.reserve("person").await.unwrap().0.is_some());
+        assert!(limiter.reserve("person").await.unwrap().0.is_none());
+        // Simulate the next fixed window in the stored row. An old, slow
+        // request must never credit this window when its failure arrives late.
+        db.collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .update_many(
+                doc! {},
+                doc! {"$inc": {"count": 5}, "$set": {"window_start": bson::DateTime::now()}},
+            )
+            .await
+            .unwrap();
+        limiter.refund(admitted.pop().unwrap()).await.unwrap();
+        let stored = db
+            .collection::<Document>(crate::models::coordination::RATE_WINDOW_COLLECTION_NAME)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.get_i64("count"), Ok(8));
+        db.drop().await.unwrap();
     }
 }

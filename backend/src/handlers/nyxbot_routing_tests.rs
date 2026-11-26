@@ -9,6 +9,7 @@ pub(super) struct RoutingBehavior {
     pub unacknowledged: AtomicBool,
     pub wrong_version: AtomicBool,
     pub lose_response: AtomicBool,
+    pub pause_create: AtomicBool,
     pub pause: AtomicBool,
     pub arrived: tokio::sync::Notify,
     pub resume: tokio::sync::Notify,

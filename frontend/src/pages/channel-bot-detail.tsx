@@ -1,3 +1,4 @@
+import { ChannelBotHealthCard } from "@/components/channels/channel-bot-health-card";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -32,10 +33,12 @@ import {
   type UpdateChannelBotFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
-import { editableChannelFields, TELEGRAM_MANAGER_DELETION_NOTE } from "@/lib/channel-platforms";
+import { channelDeletionNote, editableChannelFields, isMetaInbox } from "@/lib/channel-platforms";
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
+import { ManagedMetaDetail } from "@/components/channels/managed-meta";
+import { MetaCustomerSetup } from "@/components/channels/meta-customer-setup";
 import { CredentialVerification, RouteReadiness } from "@/components/channels/bot-readiness";
 import { routeAgentIssue, verificationErrorMessage } from "@/lib/channel-readiness";
 import { PageHeader } from "@/components/shared/page-header";
@@ -97,8 +100,10 @@ import { toast } from "sonner";
 import type {
   ChannelBotDetail,
   ChannelConversationItem,
+  VerifyChannelBotResponse,
 } from "@/types/channels";
 import {
+  channelDeleteMessage,
   conversationTypeLabel,
   statusBadgeVariant,
   statusLabel,
@@ -660,7 +665,7 @@ function DeleteBotDialog({
       <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>{translateUi("Delete Channel Bot")}</DialogTitle>
-          <DialogDescription>{translateUi("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && translateUi(" {{deletionNote}}", { deletionNote: deletionNote })}
+          <DialogDescription>{translateUi("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && <> {translateUi(deletionNote)}</>}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -814,6 +819,10 @@ function EditBotNameDialog({
   );
 }
 
+function MetaVerificationHint() {
+  return <p role="status" className="text-13 text-muted-foreground">{translateUi("Run Verify Bot to check the inbox subscription. When it is active, send a customer message and confirm the reply in the same conversation.")}</p>;
+}
+
 function EditVerificationSection({
   bot,
 }: {
@@ -867,8 +876,10 @@ function EditVerificationSection({
             {errors[field.name] && <p className="text-13 text-destructive">{errors[field.name]?.message}</p>}
           </div>
         ))}
-        {bot.platform === "whatsapp" ? (
-          <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately. Run Verify Bot to check the saved credentials, then confirm a new message exchange with your agent.")}</p>
+        {(bot.platform === "whatsapp" || isMetaInbox(bot.platform)) ? (
+          <p className="text-13 text-muted-foreground">{isMetaInbox(bot.platform) && bot.status === "suspended"
+            ? translateUi("After saving, the inbox owner or organization admin can run {{command}} to resume and verify delivery. If the platform is suspended, ask a platform admin to resume it first. Then send a message and confirm its reply.", { command: `nyxid channel-bot delivery ${bot.id} --resume` })
+            : translateUi("Saving stores these credentials immediately. Run Verify Bot to check the saved credentials, then confirm a new message exchange with your agent.")}</p>
         ) : (bot.status === "pending" || bot.status === "pending_webhook") && (
           <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately (watch the Configured badges above). The bot stays pending until the platform delivers its first verified webhook, which changes its status to Active.")}</p>
         )}
@@ -1026,6 +1037,24 @@ export function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail 
   );
 }
 
+function verificationMessage(platform: string, result: VerifyChannelBotResponse): string {
+  const status = translateUi(statusLabel(result.status));
+  if (result.last_verification?.status === "verified" && (platform === "lark" || platform === "feishu")) {
+    return `${translateUi(LARK_VERIFY_SUCCESS)} ${translateUi("Bot status: {{status}}.", { status })}`;
+  }
+  if (result.verification_scope === "credentials_and_webhook") {
+    return translateUi("Credentials verified. Webhook setup checked. Bot status: {{status}}.", { status });
+  }
+  if (result.verification_scope === "credentials" || result.last_verification?.status === "verified") {
+    return translateUi("Credentials verified. Bot status: {{status}}.", { status });
+  }
+  if (result.verification_scope === "stored_credentials") {
+    return translateUi("Stored credentials read. Bot status: {{status}}.", { status });
+  }
+  // Older replicas may report Active for a manual webhook without checking ingress.
+  return translateUi("Check complete. See bot details for the current status.");
+}
+
 export function ChannelBotDetailPage() {
   useUiTranslation();
   const { getPlatform } = useChannelPlatformViews();
@@ -1036,7 +1065,6 @@ export function ChannelBotDetailPage() {
 
   const { data: bot, isLoading, error, refetch } = useChannelBot(botId);
   const activityTypes = getPlatform(bot?.platform ?? "").activities;
-  const activitySummary = useChannelActivities("bot", botId, activityTypes.length > 0);
 
   // The bot's owner is an org when `bot.user_id` doesn't match the
   // current user's id. We pass that org id (a user_id in the backend
@@ -1047,7 +1075,12 @@ export function ChannelBotDetailPage() {
     ? bot.user_id
     : null;
 
-  const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId });
+  const ownerOrg = ownerOrgId
+    ? (orgs ?? []).find((o) => o.id === ownerOrgId)
+    : undefined;
+  const memberReadOnly = ownerOrg?.your_role === "member";
+  const activitySummary = useChannelActivities("bot", botId, activityTypes.length > 0 && !memberReadOnly);
+  const { data: apiKeys } = useApiKeys({ orgId: ownerOrgId, enabled: Boolean(bot) && !memberReadOnly });
   const deleteMutation = useDeleteChannelBot();
   const verifyMutation = useVerifyChannelBot({ creditsOwnerId: bot?.user_id });
 
@@ -1061,9 +1094,6 @@ export function ChannelBotDetailPage() {
     (apiKeys ?? []).map((k) => [k.id, k.name]),
   );
 
-  const ownerOrg = ownerOrgId
-    ? (orgs ?? []).find((o) => o.id === ownerOrgId)
-    : undefined;
   const ownerLabel = ownerOrgId
     ? `Org: ${ownerOrg?.display_name ?? ownerOrgId}`
     : "Personal";
@@ -1071,11 +1101,9 @@ export function ChannelBotDetailPage() {
   async function handleDelete() {
     try {
       const result = await deleteMutation.mutateAsync(botId);
-      if (result?.webhook_cleanup === "failed") {
-        toast.warning(translateUi("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard."));
-      } else {
-        toast.success(translateUi("Bot deleted"));
-      }
+      const message = channelDeleteMessage(result);
+      if (result?.webhook_cleanup === "failed") toast.warning(message);
+      else toast.success(message);
       void navigate({ to: "/channel-bots" });
     } catch (err) {
       toast.error(
@@ -1091,11 +1119,9 @@ export function ChannelBotDetailPage() {
     setVerificationContext({ id: bot.id, updatedAt: bot.updated_at, previousCheckId: bot.last_verification?.id ?? null });
     try {
       const result = await verifyMutation.mutateAsync(botId);
-      if (result.last_verification?.status === "verified") toast.success(translateUi(bot.platform === "lark" || bot.platform === "feishu" ? LARK_VERIFY_SUCCESS : "WhatsApp credentials verified"));
-      else if (result.status === "failed" || result.status === "invalid") toast.error(translateErrorMessage("Bot verification failed"));
-      else if (bot.platform === "lark" || bot.platform === "feishu") toast.success(translateUi(LARK_VERIFY_SUCCESS));
-      else if (result.status === "active") toast.success(translateUi("Bot verified successfully"));
-      else toast.success(translateUi("Bot verification completed"));
+      const message = verificationMessage(bot.platform, result);
+      if (result.status === "failed" || result.status === "invalid") toast.error(translateErrorMessage(message));
+      else toast.success(message);
     } catch (err) {
       toast.error(
         translateErrorMessage(bot.platform === "whatsapp" ? verificationErrorMessage(err) : err instanceof ApiError ? err.message : "Failed to verify bot"),
@@ -1127,6 +1153,17 @@ export function ChannelBotDetailPage() {
       </div>
     );
   }
+
+  if (memberReadOnly) return <div className="space-y-8">
+    <PageHeader title={bot.label} description={translateUi("An organization admin can change these settings.")} />
+    <DetailSection title={translateUi("Details")}>
+      <DetailRow label={translateUi("Bot name")} value={bot.label} />
+      <DetailRow label={translateUi("Platform")} value={getPlatform(bot.platform).label} />
+      <DetailRow label={translateUi("Bot Username")} value={bot.platform_bot_username || "-"} />
+      <DetailRow label={translateUi("Status")} value={statusLabel(bot.status)} />
+    </DetailSection>
+    <ChannelBotHealthCard botId={bot.id} />
+  </div>;
 
   return (
     <div className="space-y-8">
@@ -1166,13 +1203,11 @@ export function ChannelBotDetailPage() {
         <div role="alert"><ErrorBanner message={bot.error} /></div>
       ) : verifyMutation.variables === botId && verifyMutation.isSuccess && (
         <p role="status" className="text-13 text-muted-foreground">
-          {bot.platform === "lark" || bot.platform === "feishu"
-            ? verifyMutation.data.last_verification?.status === "verified" ? LARK_VERIFY_SUCCESS : translateUi("Credential check finished. Review setup status below; callback and member verification are separate.")
-            : translateUi("Verification complete. Status: {{value1}}.", { value1: statusLabel(verifyMutation.data.status) })}
+          {verificationMessage(bot.platform, verifyMutation.data)}
         </p>
       ))}
 
-      {bot.status === "pending_webhook" && (bot.credential_source === "telegram_manager" ? <p role="status" className="text-13 text-muted-foreground">{translateUi("Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.")}</p> : bot.credential_source === "platform" ? <p role="status" className="text-13 text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? translateUi("Managed setup needs attention. Review the setup status below.") : translateUi("Waiting for the first verified inbound message.")}</p> : <WebhookSetupChecklist bot={bot} />)}
+      {bot.status === "pending_webhook" && (isMetaInbox(bot.platform) ? <MetaVerificationHint /> : bot.credential_source === "telegram_manager" ? <p role="status" className="text-13 text-muted-foreground">{translateUi("Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.")}</p> : bot.credential_source === "platform" ? <p role="status" className="text-13 text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? translateUi("Managed setup needs attention. Review the setup status below.") : translateUi("Waiting for the first verified inbound message.")}</p> : <WebhookSetupChecklist bot={bot} />)}
 
       {(bot.platform === "lark" || bot.platform === "feishu") && <LarkBotSetupStatus bot={bot} />}
 
@@ -1235,6 +1270,11 @@ export function ChannelBotDetailPage() {
       )}
       {(() => {
         if (bot.credential_source === "telegram_manager") return null;
+        if (isMetaInbox(bot.platform)) {
+          return bot.credential_source === "platform"
+            ? <ManagedMetaDetail bot={bot} orgId={ownerOrgId} />
+            : <><MetaCustomerSetup botId={bot.id} orgId={ownerOrgId} /><EditVerificationSection bot={bot} /></>;
+        }
         const flow = getPlatform(bot.platform).managedFlow;
         const ManagedDetail = flow ? MANAGED_FLOW_COMPONENTS[flow].Detail : undefined;
         return bot.credential_source !== "user" && bot.credential_source && ManagedDetail ? <ManagedDetail bot={bot} orgId={ownerOrgId} /> : editableChannelFields(getPlatform(bot.platform)).length > 0 && <EditVerificationSection bot={bot} />;
@@ -1267,7 +1307,7 @@ export function ChannelBotDetailPage() {
       />
       {/* Delete Confirmation */}
       <DeleteBotDialog
-        deletionNote={bot.credential_source === "telegram_manager" ? TELEGRAM_MANAGER_DELETION_NOTE : bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined}
+        deletionNote={channelDeletionNote(bot, getPlatform(bot.platform).deletionNote)}
         open={showDeleteDialog}
         onOpenChange={setShowDeleteDialog}
         onConfirm={() => void handleDelete()}
