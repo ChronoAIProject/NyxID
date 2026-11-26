@@ -65,19 +65,26 @@ export async function loadPublicPage(
     locale === "zh"
       ? await import("../website-a/generated/zh")
       : await import("../website-a/generated/en");
-  const Page = await module.loadPage(page ? route : "/404");
+  // The English home page uses the "light night" design (website-a/nyx-home).
+  const lightNightHome = locale === "en" && route === "/" && Boolean(page);
+  const Page = lightNightHome
+    ? (await import("../website-a/nyx-home/nyx-home-page")).default
+    : await module.loadPage(page ? route : "/404");
   return {
     Page,
     meta: {
       path: pathname,
       route,
       locale,
-      title: module.titles[route] ?? "Page not found",
-      description:
-        route.startsWith("/solutions/") &&
-        !websiteRelease.solutions[
-          route.slice(11) as keyof typeof websiteRelease.solutions
-        ]
+      title: lightNightHome
+        ? "The AI assistant that gets it done"
+        : (module.titles[route] ?? "Page not found"),
+      description: lightNightHome
+        ? "NyxBot is the AI assistant from NyxID. Ask it on Telegram, X or the NyxID app. It books the table, replies to the customer and sends the morning brief, under rules you set."
+        : route.startsWith("/solutions/") &&
+            !websiteRelease.solutions[
+              route.slice(11) as keyof typeof websiteRelease.solutions
+            ]
           ? `${module.descriptions[route]} ${locale === "zh" ? "暂未开放。" : "Not available yet."}`
           : route === "/integrations"
             ? locale === "zh"

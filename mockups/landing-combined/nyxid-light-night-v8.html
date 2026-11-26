@@ -1,0 +1,1704 @@
+<!doctype html>
+<html lang="en" data-type="software">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="page-type" content="software">
+<meta name="site-kind" content="software">
+<title>NyxID · The AI assistant that gets it done (v8)</title>
+<meta name="description" content="NyxBot is the AI assistant from NyxID. Ask it on Telegram, X or the NyxID app. It books the table, replies to the customer and sends the morning brief, under rules you set.">
+<meta name="theme-color" content="#FFFFFF">
+<meta property="og:title" content="NyxID · The AI assistant that gets it done">
+<meta property="og:description" content="Ask NyxBot in plain words. It does the steps in the apps you already use, and asks before anything risky.">
+<meta property="og:type" content="website">
+<!--
+  MOCKUP: "NyxID light night", version 3. Nav from nyxid-antimetal (split glass boxes, dark over ink sections).
+  1. Hero: the words left, the chrome NyxID N right (WebGL, from nyxid-chrome), requests falling as paper slips behind it.
+     Scrolling the pinned hero pulls every request into the N; an arc fills the ring as they go, and when the last one is in NyxBot says "Done!" in a chat bubble beside the N.
+  2. Then landing-1 v3 from "One request, from the ask to the done." on: the run scene (it slides up over the
+     hero as a rounded sheet, like every later section), control, apps, your agent, jobs, close. Markup, styles and scripts are
+     copied from landing-1 (:4330/landing-1/); the list section and the talk matrix are left out.
+  Stack: plain CSS, GSAP 3.13 (ScrollTrigger, SplitText, ScrambleText) and Lenis.
+  Luna Bistro, Sarah and every number in the pictures are made up.
+-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Mona+Sans:wdth,wght@75..125,200..900&display=swap" rel="stylesheet">
+<link rel="icon" href="assets/brand/nyxid-coloured-icon.svg">
+<script>
+/* set the mode before first paint: a saved choice wins, otherwise the system setting */
+(() => {
+  const d = document.documentElement;
+  d.classList.add('js');
+  let t = null;
+  try { t = localStorage.getItem('nyxid-theme'); } catch (e) { /* storage blocked: follow the system */ }
+  if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  d.dataset.theme = t;
+})();
+</script>
+<style>
+/* ---- base, type, buttons, nav, the run, control, apps, agent, jobs, close: landing-1 v3 styles.css ---- */
+:root{
+  --paper:#F3F3F0; --paper-2:#E8E8E4; --card:#FCFCFB;
+  --ink:#17171A; --ink-2:#222225; --ink-3:#2C2C30;
+  --body:#45444B; --faint:#74727A; --ghost:#B7B7B2;
+  --line:rgba(23,23,26,.13); --line-2:rgba(23,23,26,.26);
+  --violet:#9775FA; --violet-deep:#6541D8; --violet-fill:#7C5CE0; --lilac:#C9BBFE; --lilac-2:#E2DAFE;
+  --done:#0E8F63; --done-bright:#34D399; --done-soft:#DDF3E9;
+  --ask:#E2650B; --ask-bright:#FF8A1F; --ask-soft:#FFE8D4;
+  --stop:#C23B3B; --stop-bright:#F87171; --stop-soft:#F9DEDC;
+  /* dark panels (agent, close, outcome, phone) are their own surface, separate from the text colour */
+  --slab:#17171A; --slab-3:#2C2C30; --slab-fg:#F3F3F0;
+  --surface:#FFFFFF; --band:var(--lilac); --band-lede:#2E2A47;
+  --nav-glass:rgba(252,252,251,.68); --nav-line:rgba(23,23,26,.07); --hover:rgba(23,23,26,.05);
+  --hero-top:#FBFBF9; --ring:rgba(24,24,27,.12); --ring-2:rgba(24,24,27,.06);
+  --event-bg:#DCE8FD; --event-fg:#17408B; --tg-bg:#E3F3FF;
+  color-scheme:light;
+  --sans:"Mona Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,monospace;
+  --wrap:1240px; --gut:clamp(20px,4vw,56px);
+  --ease:cubic-bezier(.2,.7,.2,1); --spring:cubic-bezier(.34,1.4,.5,1);
+  --r-band:clamp(28px,4vw,56px);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+/* lenis.css (darkroomengineering/lenis, MIT) */
+html.lenis,html.lenis body{height:auto}
+.lenis.lenis-smooth{scroll-behavior:auto!important}
+.lenis.lenis-stopped{overflow:clip}
+.lenis [data-lenis-prevent]{overscroll-behavior:contain}
+.lenis.lenis-smooth iframe{pointer-events:none}
+html{-webkit-text-size-adjust:100%}
+body{background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:17px;line-height:1.5;-webkit-font-smoothing:antialiased;overflow-x:clip}
+img,svg,canvas{display:block;max-width:100%}
+a{color:inherit;text-decoration:none}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+ol,ul{list-style:none}
+.wrap{width:100%;max-width:calc(var(--wrap) + var(--gut)*2);margin:0 auto;padding:0 var(--gut)}
+.mono{font-family:var(--mono);font-size:12.5px;letter-spacing:.01em}
+.skip{position:absolute;left:16px;top:-80px;background:var(--ink);color:var(--paper);padding:12px 16px;border-radius:10px;z-index:100;font-weight:600}
+.skip:focus{top:12px}
+:focus-visible{outline:2px solid var(--violet-deep);outline-offset:3px;border-radius:8px}
+.on-ink :focus-visible{outline-color:var(--lilac)}
+
+/* type. One family, Mona Sans. Regular width says. Wide and heavy does. */
+h1,h2,h3{font-weight:500;letter-spacing:-.035em;line-height:1;text-wrap:balance}
+h3{font-weight:600}
+h1{font-size:clamp(44px,6.5vw,104px);letter-spacing:-.045em;line-height:.95}
+h2{font-size:clamp(34px,4.5vw,68px)}
+h3{font-size:clamp(20px,1.6vw,24px);letter-spacing:-.02em;line-height:1.15}
+h1 em,h2 em,.big em{font-style:normal;font-weight:800;font-stretch:125%;letter-spacing:-.04em;word-spacing:.06em}
+[data-split]{text-wrap:wrap}
+.lede{font-size:clamp(17px,1.35vw,20px);color:var(--body);max-width:46ch;text-wrap:pretty}
+.on-ink{color:var(--slab-fg)}
+.on-ink .lede{color:#C9C6CF}
+
+/* buttons and links */
+.btn{display:inline-flex;align-items:center;gap:10px;height:50px;padding:0 24px;border-radius:999px;background:var(--ink);color:var(--paper);font-weight:600;font-size:16px;white-space:nowrap;transition:transform .18s var(--ease),background .18s var(--ease),box-shadow .18s var(--ease)}
+.btn .arr{display:inline-block;transition:transform .2s var(--ease)}
+.btn:hover{transform:translateY(-2px);box-shadow:0 10px 22px -10px rgba(23,23,26,.55)}
+.btn:hover .arr{transform:translateX(4px)}
+.btn:active{transform:translateY(0) scale(.98);box-shadow:none}
+.btn-sm{height:40px;padding:0 16px;border-radius:12px;font-size:15px}
+.btn-lilac{background:var(--lilac);color:var(--ink)}
+.btn-lilac:hover{background:#D6CBFF;box-shadow:0 10px 26px -10px rgba(151,117,250,.8)}
+.link{position:relative;display:inline-flex;align-items:center;gap:8px;font-weight:600;font-size:16px;padding:12px 0}
+.link::after{content:"";position:absolute;left:0;right:0;bottom:9px;height:1.5px;background:currentColor;transform:scaleX(0);transform-origin:left;transition:transform .3s var(--ease)}
+.link:hover::after{transform:scaleX(1)}
+.link .arr{transition:transform .2s var(--ease)}
+.link:hover .arr{transform:translateX(4px)}
+
+/* nav: one floating bar that reads on every ground */
+.nav{position:fixed;top:0;left:0;right:0;z-index:60;pointer-events:none}
+.nav-bar{display:flex;align-items:center;gap:12px;padding-top:14px}
+.nav-box{pointer-events:auto;display:flex;align-items:center;height:54px;padding:0 8px;border-radius:14px;background:var(--nav-glass);border:1px solid var(--nav-line);-webkit-backdrop-filter:blur(14px) saturate(1.4);backdrop-filter:blur(14px) saturate(1.4);transition:background .3s,border-color .3s}
+.nav-logo{display:flex;align-items:center;padding:0 12px}
+.nav-logo img{height:21px;width:auto}
+.nav-r{margin-left:auto}
+.nav-links{display:flex;gap:2px}
+.nav-links a{display:inline-block;padding:9px 12px;border-radius:9px;font-size:15px;color:var(--body);white-space:nowrap;overflow:hidden;vertical-align:middle;transition:background .15s,color .15s}
+.nav-links a:hover{color:var(--ink);background:var(--hover)}
+.nav-sep{width:1px;height:20px;background:var(--line-2);margin:0 6px}
+.nav .btn{height:38px;padding:0 16px;font-size:14.5px;margin-left:4px}
+.nav .logo-light{display:none}
+/* dark glass over the ink sections */
+.nav.is-dark .nav-box{background:rgba(23,23,26,.72);border-color:rgba(255,255,255,.08)}
+.nav.is-dark .nav-links a{color:#BABAC1}
+.nav.is-dark .nav-links a:hover{color:#fff;background:rgba(255,255,255,.06)}
+.nav.is-dark .nav-sep{background:rgba(255,255,255,.15)}
+.nav.is-dark .btn{background:var(--slab-fg);color:var(--slab)}
+.nav.is-dark .logo-light{display:block}
+.nav.is-dark .logo-dark{display:none}
+@media (max-width:1080px){.nav-sep,.nav-links.main{display:none}}
+
+.chip-hl{position:absolute;inset:-1px;border-radius:999px;background:var(--paper);z-index:-1}
+.msg{display:grid;grid-template-columns:36px 1fr;gap:12px;padding:14px 16px;border-radius:18px 18px 18px 6px;background:var(--card);border:1px solid var(--line)}
+.msg-ic{width:36px;height:36px;border-radius:10px;background:var(--surface);border:1px solid var(--line);display:grid;place-items:center}
+.msg-ic img{width:20px;height:20px;object-fit:contain}
+.msg-who{font-size:13px;color:var(--faint);margin-bottom:2px}
+.msg-who b{color:var(--ink);font-weight:600}
+
+/* the ticket: what NyxBot hands back */
+.ticket-wrap{filter:drop-shadow(0 22px 28px rgba(0,0,0,.35))}
+.jobs .ticket-wrap{filter:drop-shadow(0 18px 24px rgba(23,23,26,.12))}
+.ticket{--z:9px;background:var(--surface);padding:16px 18px calc(16px + var(--z));border-radius:12px 12px 0 0;
+  -webkit-mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/calc(2*var(--z)) 100%;
+  mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/calc(2*var(--z)) 100%}
+.t-head{display:flex;justify-content:space-between;align-items:center;font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);padding-bottom:12px;border-bottom:1.5px dashed var(--line-2)}
+.t-lines{display:grid}
+.t-line{display:grid;grid-template-columns:26px 1fr auto;column-gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line)}
+.t-ic{width:26px;height:26px;display:grid;place-items:center}
+.t-ic img{max-width:22px;max-height:22px;object-fit:contain}
+.t-what{font-weight:600;font-size:15.5px;letter-spacing:-.01em;line-height:1.25}
+.t-detail{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-top:2px}
+.t-mark{width:22px;height:22px;border-radius:50%;background:var(--done);display:grid;place-items:center;color:#fff}
+.t-mark svg{width:12px;height:12px}
+.t-foot{display:flex;justify-content:space-between;align-items:baseline;padding-top:12px;font-family:var(--mono);font-size:12px;color:var(--faint)}
+.t-foot b{font-family:var(--sans);font-size:22px;font-weight:600;letter-spacing:-.03em;color:var(--ink)}
+.t-foot .ok{color:var(--done)}
+
+/* ---------- 3. one request, start to finish ---------- */
+.run{position:relative;z-index:2;margin-top:calc(var(--r-band)*-1)}
+.run-inner{min-height:100svh;display:grid;align-items:center;padding:clamp(88px,11vh,104px) 0 clamp(28px,4vh,44px);background:var(--paper-2);border-radius:var(--r-band) var(--r-band) 0 0;box-shadow:0 -30px 60px -40px rgba(23,23,26,.35)}
+.run-head{display:block}
+.run h2{font-size:clamp(30px,3.2vw,50px)}
+.run-head .lede{font-size:clamp(16px,1.2vw,18px)}
+/* the steps are a real sequence, so they keep their numbers; the bar above each fills as the run reaches it */
+.run-play{margin-top:clamp(24px,4vh,40px)}
+.chapters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:clamp(16px,2.4vw,36px)}
+.chapter{position:relative;display:grid;align-content:start;gap:4px;text-align:left;padding-top:14px;border-top:2px solid var(--line)}
+.chapter::before{content:"";position:absolute;left:0;top:-2px;width:100%;height:2px;background:var(--ink);transform:scaleX(0);transform-origin:left;transition:transform .45s var(--ease),background .3s}
+.chapter.is-past::before,.chapter.is-on::before{transform:scaleX(1)}
+.chapter.is-on::before{background:var(--violet-fill)}
+.chapter-n{font-family:var(--mono);font-size:12px;color:var(--faint)}
+.chapter-t{font-size:17px;font-weight:600;letter-spacing:-.02em;color:var(--faint);transition:color .3s}
+.chapter-p{font-size:14px;line-height:1.4;color:var(--faint);transition:color .3s}
+.chapter.is-on .chapter-t,.chapter.is-past .chapter-t,.chapter:hover .chapter-t{color:var(--ink)}
+.chapter.is-on .chapter-p{color:var(--body)}
+
+.stage{position:relative;margin-top:clamp(20px,3.4vh,34px);display:grid;grid-template-columns:minmax(0,1fr) 36px minmax(0,1.6fr) 36px minmax(0,1fr);align-items:start;padding:clamp(22px,2.4vw,34px);background:var(--card);border:1px solid var(--line);border-radius:28px}
+.col{display:grid;gap:12px;align-content:start}
+.col-l{font-size:13px;font-weight:500;color:var(--faint)}
+.wire{position:relative;align-self:start;margin-top:104px;height:2px;background:repeating-linear-gradient(90deg,var(--line-2) 0 4px,transparent 4px 8px)}
+.wire i{position:absolute;top:-3px;left:0;width:8px;height:8px;border-radius:50%;background:var(--violet-fill);opacity:0}
+.wire.is-live i{animation:wire 1.3s linear infinite}
+@keyframes wire{0%{left:-4px;opacity:0}15%{opacity:1}85%{opacity:1}100%{left:calc(100% - 4px);opacity:0}}
+.stage .msg{box-shadow:none;background:var(--surface);opacity:0;transform:translateY(12px) scale(.97);transform-origin:left bottom;transition:opacity .35s var(--ease),transform .5s var(--spring)}
+.stage .msg.is-in{opacity:1;transform:none}
+.stage .msg{grid-template-columns:28px 1fr;gap:10px;padding:12px 13px}
+.stage .msg-ic{width:28px;height:28px;border-radius:8px}
+.stage .msg-ic img{width:16px;height:16px}
+.stage .msg-text{font-size:14.5px}
+.ask-meta{font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+
+.plan{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:8px 18px 14px}
+.plan-row{display:grid;grid-template-columns:20px minmax(0,1fr) auto;column-gap:10px;row-gap:3px;align-items:center;padding:11px 0;border-bottom:1px solid var(--line);opacity:0;transform:translateY(8px);transition:opacity .35s var(--ease),transform .35s var(--ease)}
+.plan-row.is-in{opacity:1;transform:none}
+.plan-box{position:relative;width:20px;height:20px;border-radius:6px;border:1.5px solid var(--line-2);transition:background .25s,border-color .25s}
+.plan-box svg{position:absolute;inset:3px;width:11px;height:11px;color:#fff;opacity:0;transform:scale(.4);transition:opacity .2s,transform .3s var(--spring)}
+.plan-row.is-done .plan-box{background:var(--done);border-color:var(--done)}
+.plan-row.is-done .plan-box svg{opacity:1;transform:none}
+.plan-box{grid-row:1/3;align-self:start;margin-top:1px}
+.plan-what{grid-column:2;font-size:14.5px;font-weight:600;letter-spacing:-.01em;line-height:1.2}
+.plan-app{grid-column:2;font-family:var(--mono);font-size:11px;color:var(--faint);line-height:1.6}
+/* the rule switch on each step: Allow, Ask first, Block */
+.rs{grid-column:3;grid-row:1/3;position:relative;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));padding:3px;border-radius:999px;background:var(--paper-2);border:1px solid var(--line);opacity:0;transform:scale(.92);transition:opacity .3s,transform .4s var(--spring),box-shadow .3s}
+.plan-row.has-rule .rs{opacity:1;transform:none}
+.rs button{position:relative;z-index:1;height:28px;padding:0 10px;border-radius:999px;font-size:12.5px;font-weight:600;color:var(--body);white-space:nowrap;transition:color .2s}
+.rs button:hover{color:var(--ink)}
+.rs button[aria-checked="true"],.rs button[aria-checked="true"]:hover{color:#fff}
+.rs-thumb{position:absolute;top:3px;bottom:3px;left:3px;width:calc((100% - 6px)/3);border-radius:999px;background:#0E8F63;transition:transform .35s var(--spring),background .25s}
+.rs[data-v="ask"] .rs-thumb{transform:translateX(100%);background:#FF8A1F}
+/* white is too faint on bright orange, so the chosen Ask first label is dark */
+.rs[data-v="ask"] button[data-v="ask"][aria-checked="true"],.rs[data-v="ask"] button[data-v="ask"][aria-checked="true"]:hover{color:#2B1300}
+.rs[data-v="block"] .rs-thumb{transform:translateX(200%);background:#C23B3B}
+.plan-row.is-wait .rs{box-shadow:0 0 0 3px rgba(255,138,31,.4);animation:waitpulse 1.4s var(--ease) infinite}
+@keyframes waitpulse{50%{box-shadow:0 0 0 6px rgba(255,138,31,.14)}}
+/* what happened to each step */
+.st{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;font-family:var(--sans);font-size:11px;font-weight:600;vertical-align:1px}
+.st:empty{display:none}
+.st[data-s="wait"]{background:var(--ask-soft);color:var(--ask)}
+.st[data-s="ok"]{background:var(--lilac-2);color:var(--violet-deep)}
+.st[data-s="no"]{background:var(--stop-soft);color:var(--stop)}
+.st[data-s="skip"]{background:var(--paper-2);color:var(--faint)}
+.plan-row.is-no .plan-box{background:var(--stop);border-color:var(--stop)}
+.plan-row.is-no .plan-box svg{opacity:1;transform:none}
+.plan-row.is-skip .plan-box{border-style:dashed}
+.plan-row.is-no .plan-what,.plan-row.is-skip .plan-what{color:var(--faint);text-decoration:line-through}
+.rule-sum{padding-top:8px;font-size:13.5px;color:var(--body)}
+.rule-sum em{font-style:normal;font-weight:700;color:var(--ask)}
+.tg-b.is-none{margin-left:0;background:none;padding:2px 0;color:var(--faint);font-style:italic}
+.tg-b.is-none+.tg-m{display:none}
+.plan-foot{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:2px 12px;padding-top:10px;font-family:var(--mono);font-size:11.5px;color:var(--faint)}
+.plan-foot b{font-family:var(--sans);font-size:19px;font-weight:600;letter-spacing:-.03em;color:var(--ink)}
+.vault{display:flex;gap:8px;align-items:flex-start;font-size:13px;color:var(--body);line-height:1.35;opacity:0;transform:translateY(6px);transition:opacity .35s,transform .35s var(--ease)}
+.vault.is-in{opacity:1;transform:none}
+.vault svg{flex:none;width:15px;height:15px;margin-top:2px;color:var(--violet-deep)}
+
+.app{background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+.app-bar{display:flex;align-items:center;gap:8px;padding:9px 12px;border-bottom:1px solid var(--line);font-size:13px;font-weight:600}
+.app-bar img{width:16px;height:16px;object-fit:contain}
+.app-bar span{margin-left:auto;font-family:var(--mono);font-size:11px;font-weight:400;color:var(--faint)}
+.slots{display:grid;padding:6px 12px 10px}
+.slot{display:grid;grid-template-columns:44px 1fr;align-items:center;min-height:30px;border-bottom:1px dashed var(--line);font-family:var(--mono);font-size:11px;color:var(--faint)}
+.slot:last-child{border-bottom:0}
+.event{display:block;padding:6px 9px;margin:4px 0;border-radius:8px;background:var(--event-bg);color:var(--event-fg);font-family:var(--sans);font-size:12.5px;font-weight:600;line-height:1.2;transform-origin:left center;opacity:0;transform:scaleX(.2);transition:opacity .25s,transform .45s var(--spring)}
+.event small{display:block;font-weight:400;font-size:11.5px;max-height:0;overflow:hidden;opacity:0;transition:max-height .3s var(--ease),opacity .3s}
+.event.is-in{opacity:1;transform:none}
+.event.has-note small{max-height:20px;opacity:1}
+.tg{padding:12px}
+.tg-b{margin-left:auto;max-width:92%;padding:9px 12px;border-radius:14px 14px 4px 14px;background:var(--tg-bg);font-size:13px;line-height:1.35;opacity:0;transform:translateY(8px) scale(.96);transform-origin:right bottom;transition:opacity .3s,transform .45s var(--spring)}
+.tg-b.is-in{opacity:1;transform:none}
+.tg-m{display:block;text-align:right;margin-top:6px;font-family:var(--mono);font-size:10.5px;color:var(--faint);opacity:0;transition:opacity .3s .2s}
+.tg-b.is-in+.tg-m{opacity:1}
+
+/* the approval lands over the empty Telegram card, where the reply will go once you answer */
+.phone{position:absolute;right:clamp(18px,2vw,26px);bottom:clamp(18px,2vw,26px);width:min(310px,30%);transform:translateY(40%);opacity:0;visibility:hidden;padding:14px;border-radius:20px;background:var(--slab);color:var(--slab-fg);box-shadow:0 30px 60px -20px rgba(23,23,26,.6);transition:transform .55s var(--spring),opacity .3s var(--ease),visibility 0s .4s;z-index:3}
+.phone.is-in{transform:none;opacity:1;visibility:visible;transition:transform .55s var(--spring),opacity .3s var(--ease),visibility 0s}
+.phone-top{display:flex;align-items:center;gap:8px;font-size:12.5px;color:#B5B2BC;margin-bottom:6px}
+.phone-top img{width:16px;height:16px}
+.phone-top span{margin-left:auto}
+.phone p{font-size:14.5px;line-height:1.35}
+.phone-btns{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
+.phone-btns button{height:40px;border-radius:11px;font-weight:600;font-size:14.5px;transition:transform .15s var(--ease),filter .15s}
+.phone-btns button:hover{filter:brightness(1.12);transform:translateY(-1px)}
+.phone-btns button:active{transform:scale(.97)}
+.p-deny{background:rgba(248,113,113,.16);color:#FCA5A5}
+.p-ok{background:rgba(52,211,153,.18);color:#6EE7B7}
+.phone-note{margin-top:8px;font-size:12.5px;color:#B5B2BC;min-height:0}
+
+/* ---------- 5. apps hub ---------- */
+.apps{position:relative;background:var(--paper);border-radius:var(--r-band) var(--r-band) 0 0;margin-top:calc(var(--r-band)*-1);padding:clamp(104px,15vh,150px) 0 clamp(72px,10vh,120px)}
+.apps-head{max-width:900px}
+.apps-head .lede{margin-top:20px;max-width:56ch}
+.hub{position:relative;display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1.6fr);align-items:center;gap:clamp(40px,9vw,150px);margin-top:clamp(36px,6vh,64px)}
+.hub svg.hub-lines{position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none}
+.hub-lines path{fill:none;stroke:var(--line-2);stroke-width:1.5;transition:stroke .25s,stroke-width .25s}
+.hub-lines path.pulse{stroke:var(--violet-fill);stroke-width:2.5;stroke-linecap:round;stroke-dasharray:14 400;animation:pulse 3.2s linear infinite}
+.hub-lines path.is-hot{stroke:var(--violet-fill);stroke-width:2.5}
+@keyframes pulse{from{stroke-dashoffset:414}to{stroke-dashoffset:0}}
+.hub-col{position:relative;display:grid;gap:10px;z-index:1}
+.hub-col-l{font-size:13.5px;font-weight:500;color:var(--faint);margin-bottom:4px}
+.hub-in{grid-template-columns:1fr}
+.hub-out{grid-template-columns:repeat(2,minmax(0,1fr))}
+.hub-out .hub-col-l{grid-column:1/-1}
+.tile{display:flex;align-items:center;gap:12px;height:54px;padding:0 16px;border-radius:14px;background:var(--card);border:1px solid var(--line);font-size:15.5px;font-weight:600;letter-spacing:-.01em;transition:transform .2s var(--ease),border-color .2s,box-shadow .2s}
+.tile img{width:22px;height:22px;object-fit:contain;flex:none}
+.tile:hover{transform:translateY(-2px);border-color:var(--ink);box-shadow:0 12px 22px -16px rgba(23,23,26,.5)}
+.hub-core{position:relative;z-index:1;width:clamp(96px,10vw,132px);aspect-ratio:1;border-radius:30px;background:var(--slab);display:grid;place-items:center;box-shadow:0 26px 50px -24px rgba(23,23,26,.7)}
+.hub-core img{width:52%}
+.hub-core::after{content:"";position:absolute;inset:-10px;border-radius:38px;border:1.5px solid var(--violet);opacity:0;animation:ring 3.2s var(--ease) infinite}
+@keyframes ring{0%{opacity:.7;transform:scale(.92)}70%,100%{opacity:0;transform:scale(1.12)}}
+.apps-note{margin-top:clamp(28px,5vh,48px);padding-top:18px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:16px 40px;flex-wrap:wrap;align-items:center;font-size:16px;color:var(--body)}
+.apps-note b{color:var(--ink);font-weight:600}
+.apps-note .link{color:var(--ink)}
+
+/* ---------- 6. your own agent ---------- */
+.agent{position:relative;background:var(--slab);border-radius:var(--r-band) var(--r-band) 0 0;margin-top:0;padding:clamp(104px,15vh,150px) 0 calc(clamp(72px,10vh,120px) + var(--r-band))}
+.agent-grid{display:grid;grid-template-columns:minmax(0,6fr) minmax(0,6fr);gap:clamp(28px,5vw,80px);align-items:center}
+.agent .lede{margin-top:22px}
+.agent-who{display:flex;align-items:center;gap:10px;margin-top:28px;font-size:14.5px;color:#B5B2BC;flex-wrap:wrap}
+.agent-who span.chip{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 13px 0 10px;border-radius:999px;background:var(--slab-3);color:var(--slab-fg);font-weight:500}
+.agent-who img{width:18px;height:18px;object-fit:contain}
+.ic-ink{filter:invert(1) brightness(1.6)}
+.term{margin-top:26px;border-radius:16px;background:#0E0E10;border:1px solid rgba(255,255,255,.1);overflow:hidden}
+.term-tabs{display:flex;gap:2px;padding:6px 6px 0;border-bottom:1px solid rgba(255,255,255,.1)}
+.term-tabs button{height:34px;padding:0 14px;border-radius:9px 9px 0 0;font-size:13.5px;font-weight:500;color:#9E9BA6;transition:color .15s,background .15s}
+.term-tabs button:hover{color:var(--slab-fg)}
+.term-tabs button[aria-selected="true"]{background:rgba(255,255,255,.07);color:var(--slab-fg)}
+.term-copy{margin-left:auto;font-family:var(--mono);font-size:12px;color:#9E9BA6}
+.chapter,.tile,.job,.term-tabs button,.phone-btns button,.rs button{cursor:pointer}
+.term pre{padding:16px 18px 18px;font-family:var(--mono);font-size:13.5px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:#E8E6EE}
+.term pre i{font-style:normal;color:var(--lilac)}
+.term pre s{text-decoration:none;color:#77747F}
+
+.swap{position:relative;display:grid;gap:26px}
+/* the request flow: three labelled cards; violet is the agent's own NyxID key, white is the real key, green only means it worked */
+.flow{display:grid}
+.flow-card{padding:16px 18px;border-radius:18px;background:rgba(255,255,255,.035);border:1px solid rgba(255,255,255,.1);transition:border-color .35s,background .35s,box-shadow .35s}
+.flow-card.is-on{border-color:rgba(151,117,250,.75);background:rgba(151,117,250,.08);box-shadow:0 0 0 4px rgba(151,117,250,.12)}
+.fc-h{display:flex;align-items:center;gap:10px;font-size:15.5px}
+.fc-h b{font-weight:600;color:var(--slab-fg)}
+.fc-ic{flex:none;width:32px;height:32px;border-radius:10px;background:var(--slab-3);border:1px solid rgba(255,255,255,.1);display:grid;place-items:center}
+.fc-ic img{width:58%;height:58%;object-fit:contain}
+.core .fc-ic{background:var(--violet-fill);border-color:transparent}
+.fc-tag{margin-left:auto;font-size:12.5px;color:#A3A0AB}
+.fc-line{margin-top:10px;font-size:15px;color:#DAD7E0}
+.fc-key{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px;font-size:13.5px;color:#A3A0AB;transition:opacity .35s}
+.k-agent,.k-real{display:inline-flex;align-items:center;gap:7px;height:28px;padding:0 10px;border-radius:8px;font-family:var(--mono);font-size:12px;white-space:nowrap;transition:opacity .35s,transform .35s var(--ease)}
+.k-agent svg,.k-real svg{width:12px;height:12px;flex:none}
+.k-agent{background:rgba(151,117,250,.16);color:#D9CCFF;border:1px solid rgba(151,117,250,.45)}
+.k-real{background:#F3F3F0;color:#17171A;border:1px solid #fff}
+.fc-checks{display:grid;gap:7px;margin-top:12px}
+.fc-checks li{display:flex;align-items:center;gap:10px;font-size:14px;color:#C9C6CF}
+.fc-checks li i{flex:none;width:18px;height:18px;border-radius:50%;border:1.5px solid rgba(255,255,255,.25);display:grid;place-items:center;color:transparent;transition:background .25s,border-color .25s,color .25s}
+.fc-checks li svg{width:10px;height:10px}
+.fc-checks li:nth-child(2) i{transition-delay:.35s}
+.fc-checks li:nth-child(3) i{transition-delay:.7s}
+.flow.s2 .fc-checks li i{background:#22B07D;border-color:#22B07D;color:#fff}
+.fc-swap{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px dashed rgba(255,255,255,.16);font-size:13.5px;color:#A3A0AB}
+.fc-swap>svg{width:16px;height:16px;fill:none;stroke:#A3A0AB;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.fc-swap .k-real{opacity:0;transform:translateX(-6px)}
+.flow.s2 .fc-swap .k-agent{opacity:.45;text-decoration:line-through;transition-delay:1.05s}
+.flow.s2 .fc-swap .k-real{opacity:1;transform:none;transition-delay:1.15s}
+.flow-card.app .fc-key,.fc-done{opacity:0}
+.flow.s4 .flow-card.app .fc-key{opacity:1}
+.fc-done{display:flex;align-items:center;gap:10px;margin-top:10px;font-size:14.5px;font-weight:600;color:#8EF0C6;transition:opacity .35s .45s}
+.fc-done i{width:20px;height:20px;border-radius:50%;background:#22B07D;display:grid;place-items:center;color:#fff}
+.fc-done svg{width:11px;height:11px}
+.flow.s4 .fc-done{opacity:1}
+.flow-wire{position:relative;width:2px;height:30px;margin-left:34px;background:repeating-linear-gradient(rgba(255,255,255,.26) 0 4px,transparent 4px 8px)}
+.flow-wire i{position:absolute;left:-4px;top:0;width:10px;height:10px;border-radius:50%;background:var(--violet);opacity:0}
+.flow[data-step="1"] .flow-wire[data-w="1"] i,.flow[data-step="3"] .flow-wire[data-w="3"] i{animation:fdrop .75s var(--ease) forwards}
+@keyframes fdrop{0%{top:-5px;opacity:0}20%{opacity:1}100%{top:calc(100% - 5px);opacity:1}}
+.swap-facts{display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid rgba(255,255,255,.14)}
+.swap-facts div{padding:18px 18px 0 0;font-size:15px;color:#C9C6CF;line-height:1.4}
+.swap-facts div+div{padding-left:18px;border-left:1px solid rgba(255,255,255,.14)}
+.swap-facts b{display:block;color:var(--slab-fg);font-weight:600;margin-bottom:3px}
+
+/* ---------- 7. ready-made jobs ---------- */
+.jobs{position:relative;background:var(--paper-2);border-radius:var(--r-band) var(--r-band) 0 0;margin-top:calc(var(--r-band)*-1);padding:clamp(104px,15vh,150px) 0 clamp(110px,15vh,170px)}
+.jobs-head{display:flex;justify-content:space-between;align-items:end;gap:24px;flex-wrap:wrap}
+/* the rail: a swipeable row everywhere; on a desktop the section pins and scrolling down moves it sideways */
+.jobs-rail{margin-top:clamp(28px,4.5vh,48px);overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none;
+  margin-right:calc(var(--gut)*-1);padding:6px var(--gut) 26px 0}
+.jobs-rail::-webkit-scrollbar{display:none}
+.jobs-track{display:flex;gap:clamp(14px,1.6vw,22px);width:max-content;align-items:start}
+.jobs-track .job{flex:none;width:clamp(290px,27vw,370px);scroll-snap-align:start}
+.jobs-bar{height:2px;background:var(--line);border-radius:2px;overflow:hidden}
+.jobs-bar i{display:block;height:100%;background:var(--ink);transform-origin:left;transform:scaleX(var(--jp,.34))}
+.jobs.is-rail{min-height:100vh;display:grid;align-content:center;padding-block:clamp(88px,11vh,110px) clamp(48px,7vh,80px)}
+.jobs.is-rail .jobs-rail{overflow:visible;scroll-snap-type:none;margin-right:0;padding-right:0}
+.jobs.is-rail .jobs-track{will-change:transform}
+.jobs.is-rail .wrap{overflow:visible}
+.job{display:block;transition:transform .25s var(--ease)}
+.job:hover{transform:translateY(-4px)}
+.job .ticket{padding-top:20px}
+.job-from{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)}
+.job-from img{width:16px;height:16px;object-fit:contain}
+.job h3{margin:12px 0 6px}
+.job .job-desc{font-size:15px;color:var(--body);line-height:1.4;padding-bottom:14px;border-bottom:1.5px dashed var(--line-2)}
+.job .t-line{grid-template-columns:22px 1fr;padding:9px 0}
+.job .t-ic img{max-width:18px;max-height:18px}
+.job .t-what{font-size:14.5px;font-weight:500}
+.job-go{display:flex;justify-content:space-between;align-items:center;padding-top:14px;font-weight:600;font-size:15px}
+.job-go .arr{transition:transform .2s var(--ease)}
+.job:hover .job-go .arr{transform:translateX(5px)}
+
+/* ---------- 8. close and footer ---------- */
+.close{position:relative;background:var(--slab);border-radius:var(--r-band) var(--r-band) 0 0;margin-top:calc(var(--r-band)*-1);overflow:hidden}
+/* the background slot fills its section; landing-1 defined this in its hero styles, which this page leaves out */
+.bg-slot{position:absolute;inset:0;pointer-events:none}
+.bg-slot canvas{display:block;width:100%;height:100%}
+/* the close echoes the hero: the same grid and violet sky, the same ring, NyxID's N at its centre */
+.close .bg-slot{--cx:80%;--cy:46%}
+.close-sky{position:absolute;inset:0;background:radial-gradient(38% 52% at var(--cx) var(--cy),rgba(151,117,250,.2),transparent 70%),radial-gradient(45% 40% at 8% 100%,rgba(166,114,251,.07),transparent 70%)}
+.close-grid{position:absolute;inset:0;background:linear-gradient(rgba(255,255,255,.055) 1px,transparent 1px) 0 0/72px 72px,linear-gradient(90deg,rgba(255,255,255,.055) 1px,transparent 1px) 0 0/72px 72px;
+  -webkit-mask-image:radial-gradient(34% 56% at var(--cx) var(--cy),#000,transparent 78%);mask-image:radial-gradient(34% 56% at var(--cx) var(--cy),#000,transparent 78%)}
+.close-ring{position:absolute;left:var(--cx);top:var(--cy);width:min(60vh,38vw);aspect-ratio:1;transform:translate(-50%,-50%);overflow:visible}
+.close-ring .c{fill:none;stroke:rgba(255,255,255,.12);stroke-width:1;vector-effect:non-scaling-stroke}
+.close-ring .x{stroke:rgba(255,255,255,.05);stroke-width:1;vector-effect:non-scaling-stroke}
+.close-ring .t{fill:none;stroke:rgba(151,117,250,.5);stroke-width:5;stroke-dasharray:.35 3.6;vector-effect:non-scaling-stroke;transform-origin:50% 50%;animation:swirl 90s linear infinite}
+.close-mark{position:absolute;left:var(--cx);top:var(--cy);width:clamp(52px,5vw,76px);transform:translate(-50%,-50%);filter:drop-shadow(0 0 26px rgba(151,117,250,.55))}
+.close .bg-slot canvas{position:absolute;inset:0;image-rendering:pixelated;image-rendering:crisp-edges;
+  -webkit-mask-image:radial-gradient(48% 72% at var(--cx) var(--cy),#000 18%,transparent 76%);mask-image:radial-gradient(48% 72% at var(--cx) var(--cy),#000 18%,transparent 76%)}
+.close-in{position:relative;min-height:88svh;display:grid;align-content:center;justify-items:start;padding-block:clamp(110px,16vh,180px) clamp(64px,9vh,110px)}
+.big{font-size:clamp(48px,7.2vw,120px);font-weight:500;letter-spacing:-.05em;line-height:.92}
+.big em{color:var(--lilac)}
+/* the closing line stays in the left half, clear of the ring and the N on the right */
+.close .big{max-width:11ch}
+.close-cta{display:flex;align-items:center;gap:26px;flex-wrap:wrap;margin-top:clamp(28px,5vh,48px)}
+.foot{position:relative;border-top:1px solid rgba(255,255,255,.14);padding:28px 0 34px}
+.foot-grid{display:flex;justify-content:space-between;gap:20px 40px;flex-wrap:wrap;align-items:center;font-size:14.5px;color:#B5B2BC}
+.foot-grid img{height:22px;width:auto}
+.foot-links{display:flex;gap:6px 22px;flex-wrap:wrap}
+.foot-links a{padding:10px 0;transition:color .15s}
+.foot-links a:hover{color:var(--slab-fg)}
+.foot-fine{margin-top:14px;font-size:13px;color:#8D8A95}
+
+/* ---------- responsive ---------- */
+@media (max-width:1080px){
+  .stage{grid-template-columns:minmax(0,1fr) 28px minmax(0,1.25fr) 28px minmax(0,1fr)}
+}
+@media (max-width:959px){
+  .hero{padding-top:104px;align-content:start}
+  .hero-panel{margin:30px 0 0;padding:22px 16px 30px;border-radius:24px}
+  .demo{max-width:520px}
+  .hero-grid,.run-head,.agent-grid{grid-template-columns:minmax(0,1fr)}
+  .chapters{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .list{min-height:0;padding:80px 0 calc(72px + var(--r-band))}
+  .run-inner{min-height:0;padding:80px 0 72px}
+  .tally-n{font-size:clamp(120px,36vw,200px)}
+  .stage{grid-template-columns:minmax(0,1fr);gap:14px;min-height:0;padding-bottom:20px}
+  .wire{width:2px;height:22px;margin:0 0 0 24px;background:repeating-linear-gradient(var(--line-2) 0 4px,transparent 4px 8px)}
+  .wire i{display:none}
+  .phone{display:none}
+  .chapter .chapter-t{color:var(--ink)}
+  .chapter .chapter-p{color:var(--body)}
+  .hub{grid-template-columns:minmax(0,1fr);gap:22px}
+  .hub svg.hub-lines{display:none}
+  .hub-in{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .hub-in .hub-col-l{grid-column:1/-1}
+  .hub-core{justify-self:center;width:88px;border-radius:24px}
+  .jobs-track .job{width:min(82vw,340px)}
+  .close .bg-slot{--cx:50%;--cy:24%}
+}
+@media (max-width:560px){
+  body{font-size:16px}
+  .nav-login{display:none}
+  .btn{height:52px}
+  .hero-cta .btn,.close-cta .btn{width:100%;justify-content:center}
+  .hero-cta,.close-cta{gap:6px 26px}
+  .hero-facts{margin-top:26px}
+  .hub-out,.hub-in{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .tile{height:50px;padding:0 12px;gap:9px;font-size:14px;white-space:nowrap;overflow:hidden}
+  .swap-facts{grid-template-columns:1fr}
+  .swap-facts div+div{padding-left:0;border-left:0}
+  .fc-tag{display:none}
+  .todo-n{display:none}
+  .todo li{grid-template-columns:1fr}
+  .plan-row{grid-template-columns:20px minmax(0,1fr)}
+  .rs{grid-column:1/-1;grid-row:3;margin-top:6px}
+}
+
+@media (min-width:960px) and (max-height:820px){.chapter-p{display:none}}
+
+/* ---------- reduced motion: everything rests in its finished state ---------- */
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation:none!important;transition-duration:.01ms!important}
+  .hub-lines path.pulse{display:none}
+}
+.plan-what{grid-row:1}
+.plan-app{grid-row:2}
+
+
+/* SplitText line masks: room for descenders and the wide cut's side bearings */
+.ln-mask{padding:0 .06em .13em;margin:0 -.06em -.13em}
+@media (min-width:960px) and (max-height:820px){
+  .hero-panel{padding-top:92px;padding-bottom:20px}
+  .asks{margin-bottom:10px}
+  .drop{height:22px}
+  .hero-facts{margin-top:28px}
+}
+@media (max-width:560px){
+  .ask-chip{height:44px;padding:0 15px}
+  .asks{gap:8px}
+}
+
+/* ---------- 1. hero: the words left, the chrome N right, the requests falling into it ---------- */
+:root{
+  --p-rose:#EBC4CF; --p-butter:#F2D77A; --p-blue:#3E63B8; --p-slate:#8FA3BF; --p-forest:#3F5A4C; --p-grey:#E3E8EC; --p-clay:#C4654A;
+  --chrome:
+    radial-gradient(ellipse 38% 22% at 36% 20%,rgba(255,255,255,.98),rgba(255,255,255,0) 70%),
+    radial-gradient(ellipse 18% 30% at 90% 64%,rgba(124,92,224,.5),rgba(124,92,224,0) 70%),
+    linear-gradient(180deg,#FFFFFF 0%,#E4E6EA 26%,#B4B8C0 44%,#8E929B 47.5%,#1A1B20 48.5%,#26272D 53%,#5C5F68 60%,#B9BCC4 74%,#EEEFF2 88%,#C9CCD3 100%);
+}
+.hero{position:relative;isolation:isolate;min-height:100svh;display:grid;align-content:center;padding:104px 0 40px;overflow:hidden;background:linear-gradient(180deg,var(--hero-top) 0%,var(--paper) 72%)}
+@media (min-width:960px){.hero{height:100vh;min-height:620px}}
+/* a faint grid around the N */
+.hero::before{content:"";position:absolute;inset:0;z-index:-3;pointer-events:none;
+  background:linear-gradient(var(--line) 1px,transparent 1px) 0 0/72px 72px,linear-gradient(90deg,var(--line) 1px,transparent 1px) 0 0/72px 72px;opacity:.45;
+  -webkit-mask-image:radial-gradient(50% 62% at 72% 50%,#000,transparent 75%);mask-image:radial-gradient(50% 62% at 72% 50%,#000,transparent 75%)}
+/* the light sky: violet glows and one slow swirl */
+.sky{position:absolute;inset:0;z-index:-2;pointer-events:none;background:
+  radial-gradient(42% 46% at 72% 50%,rgba(151,117,250,.17),transparent 70%),
+  radial-gradient(40% 30% at 18% 100%,rgba(166,114,251,.07),transparent 70%)}
+.sky::after{content:"";position:absolute;left:72%;top:50%;width:90vmax;height:90vmax;margin:-45vmax 0 0 -45vmax;border-radius:50%;
+  background:conic-gradient(from 0deg,transparent 0 20%,rgba(196,181,253,.16) 26%,transparent 34% 58%,rgba(124,92,224,.12) 66%,transparent 76%);filter:blur(50px);animation:swirl 38s linear infinite}
+@keyframes swirl{to{transform:rotate(360deg)}}
+.hero.is-done .sky{background:
+  radial-gradient(42% 46% at 72% 50%,rgba(52,211,153,.14),transparent 70%),
+  radial-gradient(40% 30% at 18% 100%,rgba(166,114,251,.07),transparent 70%)}
+
+/* the falling requests: the paper slips of landing-2 */
+.rain{position:absolute;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
+.rain-slip{position:absolute;left:0;top:0;will-change:transform,opacity;line-height:1.14;font-stretch:84%;color:#17171A}
+.rain-slip>span{display:block;filter:drop-shadow(0 .5em .7em rgba(24,24,27,.18))}
+.shape{position:relative;display:block}
+.o-l{display:block;font-size:.76em;font-weight:600;opacity:.72;margin-bottom:.4em}
+.o-m{display:block;font-size:1.14em;font-weight:700;letter-spacing:-.01em}
+.o-s{display:block;font-size:.8em;margin-top:.35em;opacity:.78}
+.s-slip{width:12.4em;padding:1em 1.2em 1.1em;background:var(--p-rose);clip-path:polygon(0 .9em,.9em 0,calc(100% - .9em) 0,100% .9em,100% calc(100% - .9em),calc(100% - .9em) 100%,.9em 100%,0 calc(100% - .9em))}
+.s-sticky{width:9.2em;height:9.2em;padding:1.1em 1em;background:var(--p-butter);clip-path:polygon(0 0,100% 0,100% 76%,76% 100%,0 100%)}
+.s-sticky::after{content:"";position:absolute;right:0;bottom:0;width:24%;height:24%;background:#D2B450;clip-path:polygon(0 0,100% 0,0 100%)}
+.s-sticky .o-m{font-size:1.28em;line-height:1.1}
+.s-call{width:11.6em;padding:1em 1em 1.05em 3em;background:var(--p-slate);border-radius:1.3em;-webkit-mask:radial-gradient(circle .55em at 1.5em 50%,transparent 97%,#000);mask:radial-gradient(circle .55em at 1.5em 50%,transparent 97%,#000)}
+.s-receipt{--zz:.42em;width:8.8em;padding:1em .9em calc(1em + var(--zz));background:var(--p-grey);-webkit-mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/calc(2*var(--zz)) 100%;mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/calc(2*var(--zz)) 100%}
+.s-receipt .row{display:flex;justify-content:space-between;gap:.6em;font-size:.82em;padding:.22em 0;border-bottom:1px dashed rgba(22,35,61,.3)}
+.s-letter{width:12.4em;height:8.2em;padding:4.1em 1.1em .8em;background:var(--p-blue);color:#fff;border-radius:.5em;overflow:hidden}
+.s-letter svg{position:absolute;inset:0;width:100%;height:100%}
+.s-letter svg path{fill:none;stroke:rgba(255,255,255,.55);stroke-width:1.5;vector-effect:non-scaling-stroke}
+.s-letter .o-l{position:absolute;left:1.1em;top:.8em;opacity:1;margin:0}
+.s-letter .o-m,.s-letter .o-s{position:relative}
+.s-invoice{width:9.8em;padding:1.5em 1em 1.5em;background:var(--p-forest);color:#EAF1EB;-webkit-mask:radial-gradient(.5em at 50% 100%,#0000 96%,#000) 50% 100%/1em 100%;mask:radial-gradient(.5em at 50% 100%,#0000 96%,#000) 50% 100%/1em 100%}
+.s-cal{width:8.4em;background:#EDF1F4;border-radius:.7em;overflow:hidden;text-align:center}
+.s-cal .cal-top{display:block;background:var(--p-clay);color:#fff;font-size:.78em;font-weight:700;padding:.5em 0 .45em}
+.s-cal .cal-big{display:block;font-size:2.5em;font-weight:700;letter-spacing:-.04em;font-stretch:100%;line-height:1;padding:.28em 0 .06em}
+.s-cal .o-s{padding-bottom:.9em;margin:0}
+
+.hero-grid{position:relative;display:grid;grid-template-columns:minmax(0,5.6fr) minmax(0,6.4fr);gap:clamp(24px,3vw,48px);align-items:center}
+.hero-copy{position:relative;z-index:2;will-change:transform}
+.hero h1{font-size:clamp(46px,4.5vw,80px);line-height:.95;letter-spacing:-.05em}
+.hero h1 span{display:block}
+.hero h1 em{color:var(--violet-deep);transition:color .5s var(--ease)}
+.hero.is-done h1 em{color:var(--done)}
+.hero .lede{margin-top:26px;max-width:40ch}
+.hero-cta{display:flex;align-items:center;gap:26px;margin-top:32px;flex-wrap:wrap}
+.hero-facts{display:flex;gap:10px 24px;flex-wrap:wrap;align-items:center;margin-top:40px;padding-top:18px;border-top:1px solid var(--line);font-size:14.5px;color:var(--body)}
+.hero-facts span{display:inline-flex;align-items:center;gap:9px}
+.hero-facts img{width:18px;height:18px}
+.js .hero [data-in]{opacity:0;transform:translateY(18px)}
+.js .hero.is-in [data-in]{opacity:1;transform:none;transition:opacity .8s var(--ease),transform .9s var(--ease);transition-delay:calc(var(--d,0)*90ms + 100ms)}
+
+/* the N: chrome mark in its ring */
+.nstage{position:relative;justify-self:end;width:min(100%,660px,76vh);aspect-ratio:1;margin-right:-3%}
+.ring{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.ring .c{fill:none;stroke:var(--ring);stroke-width:1;vector-effect:non-scaling-stroke}
+.ring .x{stroke:var(--ring-2);stroke-width:1;vector-effect:non-scaling-stroke}
+.ring .t{fill:none;stroke:rgba(124,92,224,.45);stroke-width:5;stroke-dasharray:.35 3.6;vector-effect:non-scaling-stroke;transform-origin:50% 50%;transition:stroke .5s}
+.nstage.is-done .ring .t{stroke:rgba(14,143,99,.55)}
+.nmark{position:absolute;inset:9%;transform:scale(calc(1 + var(--p,0) * .08));will-change:transform}
+.nmark::before{content:"";position:absolute;inset:10%;border-radius:50%;background:radial-gradient(closest-side,rgba(151,117,250,.32),rgba(151,117,250,.07) 60%,transparent);filter:blur(14px);opacity:calc(.7 + var(--p,0) * .6);transition:background .5s}
+.nmark.is-gulp::before{animation:gulp .5s var(--ease)}
+@keyframes gulp{40%{transform:scale(1.16);opacity:1}}
+.nstage.is-done .nmark::before{background:radial-gradient(closest-side,rgba(52,211,153,.32),rgba(52,211,153,.07) 60%,transparent)}
+.nmark canvas{position:absolute;inset:0;width:100%;height:100%;opacity:0;transition:opacity .9s var(--ease)}
+.nmark.gl-on canvas{opacity:1}
+.nmark-fallback{position:absolute;inset:24%;background:var(--chrome);-webkit-mask:url(assets/brand/nyxid-icon-black.svg) center/contain no-repeat;mask:url(assets/brand/nyxid-icon-black.svg) center/contain no-repeat}
+.nmark.gl-on canvas + .nmark-fallback{display:none}
+/* progress: an arc fills the ring as each request goes in */
+/* no non-scaling-stroke here: it measures dashes in screen pixels and ignores pathLength */
+.ring .arc{fill:none;stroke:var(--violet-fill);stroke-width:.55;stroke-linecap:round;stroke-dasharray:100 100;stroke-dashoffset:calc(100 - var(--fill,0) * 100);transform:rotate(-90deg);transform-origin:50% 50%;transition:stroke .4s}
+.nstage.is-done .ring .arc{stroke:var(--done)}
+.ring .burst{fill:none;stroke:var(--done);stroke-width:2;vector-effect:non-scaling-stroke;transform-origin:50% 50%;opacity:0}
+.nstage.is-done .ring .burst{animation:burst 1.1s var(--ease) .15s}
+@keyframes burst{0%{opacity:.9;transform:scale(1)}100%{opacity:0;transform:scale(1.22)}}
+.n-count{position:absolute;left:0;right:0;top:-1%;text-align:center;font-family:var(--mono);font-size:13px;color:var(--faint);transition:color .4s}
+.n-count b{display:inline-block;min-width:2ch;font-weight:500;color:var(--violet-deep);transition:color .4s}
+.nstage.is-done .n-count,.nstage.is-done .n-count b{color:var(--done)}
+/* the payoff: NyxBot answers in a chat bubble beside the N, typing for a moment, then "Done!" */
+.done-chat{position:absolute;left:76%;top:15%;z-index:3;pointer-events:none;
+  opacity:0;transform:translateY(16px) scale(.6);transform-origin:0 100%;transition:opacity .2s var(--ease),transform .5s var(--spring)}
+.nstage.is-done .done-chat{opacity:1;transform:none}
+/* a chat bubble whose square corner points down at the N */
+.done-bubble{display:grid;place-items:center;min-width:84px;min-height:54px;padding:0 20px;border-radius:24px 24px 24px 7px;background:var(--surface);border:1px solid var(--line);box-shadow:0 1px 2px rgba(23,23,26,.06),0 26px 48px -24px rgba(23,23,26,.5)}
+.done-dots{display:flex;gap:6px}
+.done-dots i{width:9px;height:9px;border-radius:50%;background:var(--faint);animation:dotty .6s infinite}
+.done-dots i:nth-child(2){animation-delay:.1s}
+.done-dots i:nth-child(3){animation-delay:.2s}
+@keyframes dotty{0%,60%,100%{opacity:.3;transform:none}30%{opacity:1;transform:translateY(-3px)}}
+.done-say{display:none;align-items:center;gap:10px;font-size:clamp(20px,1.7vw,25px);font-weight:700;letter-spacing:-.035em;white-space:nowrap}
+.done-say i{width:24px;height:24px;border-radius:50%;background:var(--done);display:grid;place-items:center;color:#fff}
+.done-say svg{width:12px;height:12px}
+.done-chat.is-said .done-dots{display:none}
+.done-chat.is-said .done-say{display:flex;animation:say .35s var(--ease)}
+@keyframes say{from{opacity:0;transform:translateY(4px)}}
+:root[data-theme="dark"] .done-bubble{box-shadow:0 18px 34px -18px rgba(0,0,0,.9)}
+@media (max-width:560px){.done-chat{left:50%;top:auto;bottom:2%;transform-origin:50% 100%;translate:-50% 0}}
+
+@media (max-width:959px){
+  .hero{padding-top:104px}
+  .hero-grid{grid-template-columns:minmax(0,1fr)}
+  .nstage{justify-self:center;width:min(100%,460px);margin:12px 0 0}
+}
+@media (max-width:560px){
+  .hero h1{font-size:44px}
+  .hero-cta .btn{width:100%;justify-content:center}
+}
+@media (prefers-reduced-motion:reduce){
+  .js .hero [data-in]{opacity:1;transform:none}
+}
+
+/* ---------- day and night ----------
+   The page follows the system setting until someone presses the sun/moon button; that choice is kept.
+   The head script sets data-theme before first paint, so there is no flash of the wrong mode. */
+:root[data-theme="dark"]{
+  --paper:#0E0E10; --paper-2:#151518; --card:#1B1B1F; --surface:#222227;
+  --ink:#EDEDEF; --body:#B6B4BD; --faint:#8F8D97; --ghost:#55545B;
+  --line:rgba(255,255,255,.1); --line-2:rgba(255,255,255,.2);
+  --violet-deep:#A98DFF; --violet-fill:#8B6CF0; --lilac-2:#2D2550;
+  --done:#22B07D; --done-soft:#0F3528; --ask:#FF9A3C; --ask-soft:#3D2208; --stop:#F07272; --stop-soft:#3D1A1A;
+  --slab:#1B1922; --slab-3:#2B2933; --slab-fg:#EDEDEF;
+  --band:#211B38; --band-lede:#C9BFEF;
+  --nav-glass:rgba(20,20,23,.66); --nav-line:rgba(255,255,255,.08); --hover:rgba(255,255,255,.06);
+  --hero-top:#0A0A0C; --ring:rgba(255,255,255,.14); --ring-2:rgba(255,255,255,.07);
+  --event-bg:#1C2B4A; --event-fg:#B4CBFF; --tg-bg:#163246;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme]){
+  --paper:#0E0E10; --paper-2:#151518; --card:#1B1B1F; --surface:#222227;
+  --ink:#EDEDEF; --body:#B6B4BD; --faint:#8F8D97; --ghost:#55545B;
+  --line:rgba(255,255,255,.1); --line-2:rgba(255,255,255,.2);
+  --violet-deep:#A98DFF; --violet-fill:#8B6CF0; --lilac-2:#2D2550;
+  --done:#22B07D; --done-soft:#0F3528; --ask:#FF9A3C; --ask-soft:#3D2208; --stop:#F07272; --stop-soft:#3D1A1A;
+  --slab:#1B1922; --slab-3:#2B2933; --slab-fg:#EDEDEF;
+  --band:#211B38; --band-lede:#C9BFEF;
+  --nav-glass:rgba(20,20,23,.66); --nav-line:rgba(255,255,255,.08); --hover:rgba(255,255,255,.06);
+  --hero-top:#0A0A0C; --ring:rgba(255,255,255,.14); --ring-2:rgba(255,255,255,.07);
+  --event-bg:#1C2B4A; --event-fg:#B4CBFF; --tg-bg:#163246;
+  color-scheme:dark;
+}}
+/* the night ground has one more step of depth: the dark panels sit a shade above it and carry a hairline edge */
+:root[data-theme="dark"] :is(.agent,.close,.outcome,.hub-core){box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
+:root[data-theme="dark"] .phone{border:1px solid rgba(255,255,255,.1)}
+:root[data-theme="dark"] .run-inner{box-shadow:0 -30px 60px -30px rgba(0,0,0,.8)}
+:root[data-theme="dark"] .tile:hover{box-shadow:0 12px 22px -16px rgba(0,0,0,.9)}
+/* the rule switch keeps white text readable: solid thumbs, not the brighter night text greens and reds */
+/* black glyph logos turn white at night */
+:root[data-theme="dark"] img:is([src$="icons/x.svg"],[src$="icons/github.svg"],[src$="icons/notion.svg"]):not(.ic-ink){filter:invert(1) hue-rotate(180deg)}
+/* the nav logo has a light and a dark version */
+:root[data-theme="dark"] .nav .logo-dark{display:none}
+:root[data-theme="dark"] .nav .logo-light{display:block}
+/* the sky gets a deeper violet so the chrome N has something to reflect against */
+:root[data-theme="dark"] .sky{background:radial-gradient(42% 46% at 72% 50%,rgba(151,117,250,.22),transparent 70%),radial-gradient(40% 30% at 18% 100%,rgba(166,114,251,.1),transparent 70%)}
+:root[data-theme="dark"] .hero.is-done .sky{background:radial-gradient(42% 46% at 72% 50%,rgba(52,211,153,.16),transparent 70%),radial-gradient(40% 30% at 18% 100%,rgba(166,114,251,.1),transparent 70%)}
+:root[data-theme="dark"] .rain-slip>span{filter:drop-shadow(0 .5em .8em rgba(0,0,0,.55))}
+
+.theme-btn{display:grid;place-items:center;width:38px;height:38px;margin:0 2px;border-radius:50%;color:var(--body);transition:background .15s,color .15s,transform .18s var(--ease)}
+.theme-btn:hover{background:var(--hover);color:var(--ink)}
+.theme-btn:active{transform:scale(.92)}
+.theme-btn svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.theme-btn .sun{display:none}
+:root[data-theme="dark"] .theme-btn .sun{display:block}
+:root[data-theme="dark"] .theme-btn .moon{display:none}
+.nav.is-dark .theme-btn{color:#BABAC1}
+.nav.is-dark .theme-btn:hover{color:#fff;background:rgba(255,255,255,.06)}
+/* switching modes crossfades the whole page once */
+::view-transition-old(root),::view-transition-new(root){animation-duration:.4s;animation-timing-function:cubic-bezier(.2,.7,.2,1)}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="ck" viewBox="0 0 12 12"><path d="M2 6.4l2.6 2.6L10 3.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="hand" viewBox="0 0 12 12"><path d="M6 2.2v4.3M6 9.3v.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="no" viewBox="0 0 12 12"><path d="M3 3l6 6M9 3l-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="lock" viewBox="0 0 16 16"><path d="M4.5 7V5a3.5 3.5 0 017 0v2M3.5 7h9v6.5h-9z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></symbol>
+</svg>
+
+<template id="kinds">
+  <span data-k="call"><span class="shape s-call"><span class="o-l">Telegram</span><span class="o-m">Table for 4 at 7:30</span><span class="o-s">Sarah, one vegan</span></span></span>
+  <span data-k="cal"><span class="shape s-cal"><span class="cal-top">Every weekday</span><span class="cal-big">08:00</span><span class="o-s">Morning brief</span></span></span>
+  <span data-k="letter"><span class="shape s-letter"><svg viewBox="0 0 100 66" preserveAspectRatio="none"><path d="M0 0 L50 34 L100 0"/></svg><span class="o-l">X</span><span class="o-m">Open on Monday?</span><span class="o-s">A DM to answer</span></span></span>
+  <span data-k="sticky"><span class="shape s-sticky"><span class="o-m">Call Mr Tan back</span><span class="o-s">Missed call, 6:10 PM</span></span></span>
+  <span data-k="invoice"><span class="shape s-invoice"><span class="o-l">Stripe</span><span class="o-m">Refund $40</span><span class="o-s">Ask first</span></span></span>
+  <span data-k="slip"><span class="shape s-slip"><span class="o-l">Claude Code</span><span class="o-m">Open a pull request</span><span class="o-s">GitHub</span></span></span>
+  <span data-k="receipt"><span class="shape s-receipt"><span class="o-l">Google Sheets</span><span class="row"><span>Takings</span><b>Sat</b></span><span class="row"><span>Row</span><b>212</b></span><span class="row"><span>Rule</span><b>Allow</b></span></span></span>
+</template>
+
+<header class="nav" data-nav>
+  <div class="wrap nav-bar">
+    <div class="nav-box"><a class="nav-logo" href="#top" aria-label="NyxID home"><img class="logo-dark" src="assets/brand/nyxid-coloured-logo-dark.svg" alt="NyxID" width="75" height="21"><img class="logo-light" src="assets/brand/nyxid-coloured-logo.svg" alt="NyxID" width="75" height="21"></a></div>
+    <div class="nav-box nav-r">
+      <nav class="nav-links main" aria-label="Main"><a href="#run">How it works</a><a href="#agent">Your agent</a><a href="#apps">Apps</a><a href="#jobs">Solutions</a></nav>
+      <span class="nav-sep" aria-hidden="true"></span>
+      <nav class="nav-links" aria-label="Account"><a href="https://nyx.chrono-ai.fun/login">Log in</a></nav>
+      <button class="theme-btn" type="button" data-theme-toggle aria-label="Switch to night mode"><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 019.5 4a8 8 0 1010.5 10.5z"/></svg><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></svg></button>
+      <a class="btn" href="https://nyx.chrono-ai.fun/register">Get started</a>
+    </div>
+  </div>
+</header>
+
+
+<main id="main">
+
+<!-- ============ 1. HERO ============ -->
+<section class="hero" id="top" data-hero>
+  <div class="sky" aria-hidden="true"></div>
+  <div class="rain" data-rain aria-hidden="true"></div>
+  <div class="wrap hero-grid">
+    <div class="hero-copy">
+      <h1 data-in style="--d:0"><span>The AI assistant</span><span>that gets it <em>done.</em></span></h1>
+      <p class="lede" data-in style="--d:1">Ask NyxBot in plain words on Telegram, X or the NyxID app. It books the table, replies to the customer and sends the morning brief, under rules you set.</p>
+      <div class="hero-cta" data-in style="--d:2">
+        <a class="btn" href="https://nyx.chrono-ai.fun/register">Get started <span class="arr" aria-hidden="true">→</span></a>
+        <a class="link" href="https://github.com/ChronoAIProject/NyxID">Self-host with Docker <span class="arr" aria-hidden="true">→</span></a>
+      </div>
+      <p class="hero-facts" data-in style="--d:3"><span>Open source under Apache-2.0</span><span><img src="assets/icons/telegram.svg" alt="Telegram"><img src="assets/icons/x.svg" alt="X"><img src="assets/icons/whatsapp.svg" alt="WhatsApp"><img src="assets/icons/slack.svg" alt="Slack"><img src="assets/icons/discord.svg" alt="Discord">and the NyxID app</span></p>
+    </div>
+
+    <div class="nstage" data-nstage data-in style="--d:1" aria-hidden="true">
+      <svg class="ring" viewBox="0 0 100 100"><line class="x" x1="50" y1="2" x2="50" y2="98"/><line class="x" x1="2" y1="50" x2="98" y2="50"/><circle class="c" cx="50" cy="50" r="41"/><circle class="t" data-ticks cx="50" cy="50" r="45"/><circle class="arc" pathLength="100" cx="50" cy="50" r="45"/><circle class="burst" cx="50" cy="50" r="45"/></svg>
+      <div class="nmark" data-mark><canvas></canvas><div class="nmark-fallback"></div></div>
+      <p class="n-count"><b data-count>0</b> of 12 requests handled</p>
+      <div class="done-chat" data-done-chat><p class="done-bubble"><span class="done-dots"><i></i><i></i><i></i></span><span class="done-say"><i><svg><use href="#ck"/></svg></i>Done!</span></p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 2. HOW IT WORKS: one request, under the rules you set ============ -->
+<section class="run" id="run">
+  <div class="run-inner" data-run-inner>
+  <div class="wrap">
+    <div class="run-head">
+      <h2>One request, from the ask to <em>the done.</em></h2>
+    </div>
+    <div class="run-play" data-run-play>
+    <div class="chapters" data-chapters>
+      <button class="chapter is-on" type="button" data-ch="0"><span class="chapter-n">01</span><span class="chapter-t">You ask in plain words</span><span class="chapter-p">Telegram, X, WhatsApp, Slack, Discord or the NyxID app. Sarah writes at 11:42 PM, after closing.</span></button>
+      <button class="chapter" type="button" data-ch="1"><span class="chapter-n">02</span><span class="chapter-t">NyxBot plans the steps</span><span class="chapter-p">It reads the request and lists what has to happen, and in which app.</span></button>
+      <button class="chapter" type="button" data-ch="2"><span class="chapter-n">03</span><span class="chapter-t">Each step meets your rule</span><span class="chapter-p">Allow runs on its own. Ask first waits for your yes. Block is refused.</span></button>
+      <button class="chapter" type="button" data-ch="3"><span class="chapter-n">04</span><span class="chapter-t">Your apps do the work</span><span class="chapter-p">NyxID adds the login from its vault and logs the call. NyxBot never sees your password.</span></button>
+    </div>
+
+    <div class="stage" data-stage>
+      <div class="col">
+        <p class="col-l">The ask</p>
+        <div class="msg">
+          <span class="msg-ic"><img src="assets/icons/telegram.svg" alt="Telegram"></span>
+          <div>
+            <p class="msg-who"><b>Sarah</b></p>
+            <p class="msg-text">Table for 4 tomorrow at 7:30? One of us is vegan.</p>
+          </div>
+        </div>
+        <p class="ask-meta">Sat 11:42 PM, restaurant closed</p>
+      </div>
+
+      <div class="wire" data-wire="a" aria-hidden="true"><i></i></div>
+
+      <div class="col">
+        <p class="col-l">NyxBot's plan. Every step has your rule; switch one and watch what changes.</p>
+        <div class="plan">
+          <div class="plan-row" data-row data-act="free"><span class="plan-box"><svg><use href="#ck"/></svg></span><p class="plan-what">See free times</p><p class="plan-app">Google Calendar<span class="st" data-st></span></p><div class="rs" role="radiogroup" aria-label="Rule for See free times" data-v="allow"><span class="rs-thumb"></span><button type="button" role="radio" aria-checked="true" data-v="allow">Allow</button><button type="button" role="radio" aria-checked="false" data-v="ask">Ask first</button><button type="button" role="radio" aria-checked="false" data-v="block">Block</button></div></div>
+          <div class="plan-row" data-row data-act="book"><span class="plan-box"><svg><use href="#ck"/></svg></span><p class="plan-what">Create the booking</p><p class="plan-app">Google Calendar<span class="st" data-st></span></p><div class="rs" role="radiogroup" aria-label="Rule for Create the booking" data-v="ask"><span class="rs-thumb"></span><button type="button" role="radio" aria-checked="false" data-v="allow">Allow</button><button type="button" role="radio" aria-checked="true" data-v="ask">Ask first</button><button type="button" role="radio" aria-checked="false" data-v="block">Block</button></div></div>
+          <div class="plan-row" data-row data-act="note"><span class="plan-box"><svg><use href="#ck"/></svg></span><p class="plan-what">Add the allergy note</p><p class="plan-app">Google Calendar<span class="st" data-st></span></p><div class="rs" role="radiogroup" aria-label="Rule for Add the allergy note" data-v="allow"><span class="rs-thumb"></span><button type="button" role="radio" aria-checked="true" data-v="allow">Allow</button><button type="button" role="radio" aria-checked="false" data-v="ask">Ask first</button><button type="button" role="radio" aria-checked="false" data-v="block">Block</button></div></div>
+          <div class="plan-row" data-row data-act="reply"><span class="plan-box"><svg><use href="#ck"/></svg></span><p class="plan-what">Reply to Sarah</p><p class="plan-app">Telegram<span class="st" data-st></span></p><div class="rs" role="radiogroup" aria-label="Rule for Reply to Sarah" data-v="allow"><span class="rs-thumb"></span><button type="button" role="radio" aria-checked="true" data-v="allow">Allow</button><button type="button" role="radio" aria-checked="false" data-v="ask">Ask first</button><button type="button" role="radio" aria-checked="false" data-v="block">Block</button></div></div>
+          <div class="plan-foot"><span><b data-run-count>0</b> of 4 done</span><span data-run-state>waiting for a request</span></div>
+          <p class="rule-sum" data-rule-sum aria-live="polite"></p>
+        </div>
+        <p class="vault" data-vault><svg aria-hidden="true"><use href="#lock"/></svg>Google login added from the vault. NyxBot never sees it.</p>
+      </div>
+
+      <div class="wire" data-wire="b" aria-hidden="true"><i></i></div>
+
+      <div class="col">
+        <p class="col-l">Your apps</p>
+        <div class="app">
+          <div class="app-bar"><img src="assets/icons/google-calendar.svg" alt="">Google Calendar<span>Sun</span></div>
+          <div class="slots">
+            <div class="slot"><span>7:00</span><span></span></div>
+            <div class="slot"><span>7:30</span><span class="event" data-event>Sarah, table for 4<small>1 vegan</small></span></div>
+            <div class="slot"><span>8:00</span><span></span></div>
+          </div>
+        </div>
+        <div class="app">
+          <div class="app-bar"><img src="assets/icons/telegram.svg" alt="">Telegram<span>Sarah</span></div>
+          <div class="tg">
+            <p class="tg-b" data-reply></p>
+            <span class="tg-m">sent 11:42 PM</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="phone" data-phone role="group" aria-label="Approval request on your phone">
+        <p class="phone-top"><img src="assets/brand/nyxid-coloured-icon.svg" alt="">NyxID<span>now</span></p>
+        <p data-phone-say>NyxBot wants to create a booking: table for 4, Sun 7:30 PM, Sarah.</p>
+        <div class="phone-btns">
+          <button class="p-deny" type="button" data-deny>Deny</button>
+          <button class="p-ok" type="button" data-approve>Approve</button>
+        </div>
+        <p class="phone-note" data-phone-note aria-live="polite"></p>
+      </div>
+    </div>
+    </div>
+  </div>
+  </div>
+</section>
+
+<!-- ============ 5. APPS ============ -->
+<section class="apps" id="apps">
+  <div class="wrap">
+    <div class="apps-head">
+      <h2>Ask in a chat and the work lands <em>in your apps.</em></h2>
+      <p class="lede">NyxBot listens where you and your customers already write. It works in the apps your business already runs on. Each one connects through a <span style="white-space:nowrap">sign-in</span> link.</p>
+    </div>
+    <div class="hub" data-hub>
+      <svg class="hub-lines" aria-hidden="true"></svg>
+      <div class="hub-col hub-in">
+        <p class="hub-col-l">Ask from</p>
+        <span class="tile" data-node="in"><img src="assets/icons/telegram.svg" alt="">Telegram</span>
+        <span class="tile" data-node="in"><img src="assets/icons/x.svg" alt="">X</span>
+        <span class="tile" data-node="in"><img src="assets/icons/whatsapp.svg" alt="">WhatsApp</span>
+        <span class="tile" data-node="in"><img src="assets/icons/slack.svg" alt="">Slack</span>
+        <span class="tile" data-node="in"><img src="assets/icons/discord.svg" alt="">Discord</span>
+      </div>
+      <div class="hub-core" data-core><img src="assets/brand/nyxid-coloured-icon.svg" alt="NyxID"></div>
+      <div class="hub-col hub-out">
+        <p class="hub-col-l">It works in</p>
+        <span class="tile" data-node="out"><img src="assets/icons/google-calendar.svg" alt="">Google Calendar</span>
+        <span class="tile" data-node="out"><img src="assets/icons/gmail.svg" alt="">Gmail</span>
+        <span class="tile" data-node="out"><img src="assets/icons/google-sheets.svg" alt="">Google Sheets</span>
+        <span class="tile" data-node="out"><img src="assets/icons/google-drive.svg" alt="">Google Drive</span>
+        <span class="tile" data-node="out"><img src="assets/icons/notion.svg" alt="">Notion</span>
+        <span class="tile" data-node="out"><img src="assets/icons/stripe.svg" alt="">Stripe</span>
+        <span class="tile" data-node="out"><img src="assets/icons/twilio.svg" alt="">Twilio</span>
+        <span class="tile" data-node="out"><img src="assets/icons/github.svg" alt="">GitHub</span>
+      </div>
+    </div>
+    <div class="apps-note">
+      <p><b>Your app is missing?</b> Any REST API with an OpenAPI file becomes a tool NyxBot can use.</p>
+      <a class="link" href="https://nyx.chrono-ai.fun/docs">Read the docs <span class="arr" aria-hidden="true">→</span></a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 6. YOUR OWN AGENT ============ -->
+<section class="agent on-ink" id="agent">
+  <div class="wrap agent-grid">
+    <div>
+      <h2>Already use Claude Code or Cursor? <em>Connect it.</em></h2>
+      <p class="lede">Point any MCP client at NyxID and it can use the same apps. Each agent gets its own scoped key. NyxID adds the real login at the proxy, so the agent never holds it.</p>
+      <div class="agent-who">
+        <span class="chip"><img src="assets/icons/claude.svg" alt="">Claude Code</span>
+        <span class="chip"><img class="ic-ink" src="assets/icons/cursor.svg" alt="">Cursor</span>
+        <span class="chip"><img class="ic-ink" src="assets/icons/openai.svg" alt="">Codex</span>
+        <span class="chip"><img src="assets/icons/n8n.svg" alt="">n8n</span>
+      </div>
+      <div class="term">
+        <div class="term-tabs" role="tablist" aria-label="Setup command">
+          <button type="button" role="tab" aria-selected="true" data-term="claude">Claude Code</button>
+          <button type="button" role="tab" aria-selected="false" data-term="cursor">Cursor</button>
+          <button class="term-copy" type="button" data-copy>Copy</button>
+        </div>
+        <pre data-term-out><s>$</s> claude mcp add --transport http --scope user <i>nyxid</i> http://localhost:3001/mcp</pre>
+      </div>
+    </div>
+
+    <div class="swap">
+      <div class="flow" data-flow data-step="4" role="img" aria-label="Claude Code sends its own NyxID key. NyxID checks it, swaps in the real Stripe key from its vault, and Stripe creates the refund. The agent never holds the real key.">
+        <div class="flow-card" data-flow-at="0">
+          <p class="fc-h"><span class="fc-ic"><img src="assets/icons/claude.svg" alt=""></span><b>Claude Code</b><span class="fc-tag">your agent</span></p>
+          <p class="fc-line">Asks Stripe to refund $40</p>
+          <p class="fc-key">Sends <span class="k-agent"><svg aria-hidden="true"><use href="#lock"/></svg>nyxid_ag_7f3c</span>its own NyxID key</p>
+        </div>
+        <div class="flow-wire" data-w="1"><i></i></div>
+        <div class="flow-card core" data-flow-at="2">
+          <p class="fc-h"><span class="fc-ic"><img src="assets/brand/nyxid-icon-white.svg" alt=""></span><b>NyxID</b><span class="fc-tag">checks, then swaps the key</span></p>
+          <ul class="fc-checks">
+            <li><i><svg><use href="#ck"/></svg></i>The key belongs to this agent</li>
+            <li><i><svg><use href="#ck"/></svg></i>Stripe is in its scope</li>
+            <li><i><svg><use href="#ck"/></svg></i>Your rule for refunds is Allow</li>
+          </ul>
+          <p class="fc-swap">Swaps <span class="k-agent">nyxid_ag_7f3c</span><svg viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4"/></svg><span class="k-real"><svg aria-hidden="true"><use href="#lock"/></svg>real Stripe key</span>from its vault</p>
+        </div>
+        <div class="flow-wire" data-w="3"><i></i></div>
+        <div class="flow-card app" data-flow-at="4">
+          <p class="fc-h"><span class="fc-ic"><img src="assets/icons/stripe.svg" alt=""></span><b>Stripe</b><span class="fc-tag">the app</span></p>
+          <p class="fc-key">Receives <span class="k-real"><svg aria-hidden="true"><use href="#lock"/></svg>sk_live_••••4242</span>the real key, never seen by the agent</p>
+          <p class="fc-done"><i><svg><use href="#ck"/></svg></i>Refund of $40 created</p>
+        </div>
+      </div>
+      <div class="swap-facts">
+        <div><b>One scoped key per agent</b>Agent A reaches Slack and Gmail. Agent B reaches only your internal API.</div>
+        <div><b>Revoke one, keep the rest</b>End any agent's access without touching the login behind it.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 7. READY-MADE JOBS ============ -->
+<section class="jobs" id="jobs">
+  <div class="wrap">
+    <div class="jobs-head">
+      <h2>Start with a job that is <em>already written.</em></h2>
+      <a class="link" href="https://nyx.chrono-ai.fun/solutions">See every solution <span class="arr" aria-hidden="true">→</span></a>
+    </div>
+    <div class="jobs-rail" data-jobs-rail>
+    <div class="jobs-track" data-jobs-track>
+      <a class="job" href="https://nyx.chrono-ai.fun/solutions">
+        <div class="ticket-wrap"><div class="ticket">
+          <p class="job-from"><img src="assets/icons/telegram.svg" alt="">Starts from a Telegram message</p>
+          <h3>Front desk after closing</h3>
+          <p class="job-desc">Takes bookings and answers menu questions while the restaurant is shut.</p>
+          <ol class="t-lines">
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/google-calendar.svg" alt=""></span><p class="t-what">Checks free tables</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/google-calendar.svg" alt=""></span><p class="t-what">Creates the booking</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/telegram.svg" alt=""></span><p class="t-what">Replies to the customer</p></li>
+          </ol>
+          <p class="job-go">Use this job <span class="arr" aria-hidden="true">→</span></p>
+        </div></div>
+      </a>
+      <a class="job" href="https://nyx.chrono-ai.fun/solutions">
+        <div class="ticket-wrap"><div class="ticket">
+          <p class="job-from"><img src="assets/icons/google-calendar.svg" alt="">Starts every weekday at 8:00</p>
+          <h3>Morning brief</h3>
+          <p class="job-desc">Sends you today's bookings and the emails that need a reply.</p>
+          <ol class="t-lines">
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/google-calendar.svg" alt=""></span><p class="t-what">Reads today's bookings</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/gmail.svg" alt=""></span><p class="t-what">Finds emails waiting on you</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/telegram.svg" alt=""></span><p class="t-what">Sends the brief to your phone</p></li>
+          </ol>
+          <p class="job-go">Use this job <span class="arr" aria-hidden="true">→</span></p>
+        </div></div>
+      </a>
+      <a class="job" href="https://nyx.chrono-ai.fun/solutions">
+        <div class="ticket-wrap"><div class="ticket">
+          <p class="job-from"><img src="assets/icons/twilio.svg" alt="">Starts from a missed call</p>
+          <h3>Call-back</h3>
+          <p class="job-desc">Calls the customer back, confirms the order and tells you the result.</p>
+          <ol class="t-lines">
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/notion.svg" alt=""></span><p class="t-what">Looks up the order</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/twilio.svg" alt=""></span><p class="t-what">Calls the customer</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/notion.svg" alt=""></span><p class="t-what">Logs what was agreed</p></li>
+          </ol>
+          <p class="job-go">Use this job <span class="arr" aria-hidden="true">→</span></p>
+        </div></div>
+      </a>
+      <a class="job" href="https://nyx.chrono-ai.fun/solutions">
+        <div class="ticket-wrap"><div class="ticket">
+          <p class="job-from"><img src="assets/icons/x.svg" alt="">Starts from an X DM</p>
+          <h3>Answers DMs on X</h3>
+          <p class="job-desc">Replies to questions about hours and the menu, and passes anything else to you.</p>
+          <ol class="t-lines">
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/x.svg" alt=""></span><p class="t-what">Reads the message</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/google-calendar.svg" alt=""></span><p class="t-what">Checks today's hours</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/x.svg" alt=""></span><p class="t-what">Replies on X</p></li>
+          </ol>
+          <p class="job-go">Use this job <span class="arr" aria-hidden="true">→</span></p>
+        </div></div>
+      </a>
+      <a class="job" href="https://nyx.chrono-ai.fun/solutions">
+        <div class="ticket-wrap"><div class="ticket">
+          <p class="job-from"><img src="assets/icons/google-sheets.svg" alt="">Starts every Monday at 9:00</p>
+          <h3>Weekly takings</h3>
+          <p class="job-desc">Adds up last week's sales and sends you one line per day.</p>
+          <ol class="t-lines">
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/google-sheets.svg" alt=""></span><p class="t-what">Reads the sales sheet</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/google-sheets.svg" alt=""></span><p class="t-what">Totals each day</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/slack.svg" alt=""></span><p class="t-what">Posts the summary in Slack</p></li>
+          </ol>
+          <p class="job-go">Use this job <span class="arr" aria-hidden="true">→</span></p>
+        </div></div>
+      </a>
+      <a class="job" href="https://nyx.chrono-ai.fun/solutions">
+        <div class="ticket-wrap"><div class="ticket">
+          <p class="job-from"><img src="assets/icons/gmail.svg" alt="">Starts from a customer email</p>
+          <h3>Refund requests</h3>
+          <p class="job-desc">Finds the order, prepares the refund and waits for your yes before sending it.</p>
+          <ol class="t-lines">
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/stripe.svg" alt=""></span><p class="t-what">Finds the order</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/icons/stripe.svg" alt=""></span><p class="t-what">Prepares the refund</p></li>
+            <li class="t-line"><span class="t-ic"><img src="assets/brand/nyxid-coloured-icon.svg" alt=""></span><p class="t-what">Asks you first on your phone</p></li>
+          </ol>
+          <p class="job-go">Use this job <span class="arr" aria-hidden="true">→</span></p>
+        </div></div>
+      </a>
+    </div>
+    </div>
+    <div class="jobs-bar" aria-hidden="true"><i data-jobs-bar></i></div>
+  </div>
+</section>
+
+</main>
+
+<!-- ============ 8. CLOSE ============ -->
+<footer class="close on-ink" id="end">
+  <div class="bg-slot" data-slot="close" aria-hidden="true">
+    <div class="close-sky"></div><div class="close-grid"></div>
+    <canvas data-dither></canvas>
+    <svg class="close-ring" viewBox="0 0 100 100"><line class="x" x1="50" y1="2" x2="50" y2="98"/><line class="x" x1="2" y1="50" x2="98" y2="50"/><circle class="c" cx="50" cy="50" r="41"/><circle class="t" cx="50" cy="50" r="45"/></svg>
+    <img class="close-mark" src="assets/brand/nyxid-coloured-icon.svg" alt="">
+  </div>
+  <div class="wrap close-in" data-close>
+    <p class="big" data-split>Give NyxBot <em>one task</em> today.</p>
+    <div class="close-cta">
+      <a class="btn btn-lilac" href="https://nyx.chrono-ai.fun/register">Get started <span class="arr" aria-hidden="true">→</span></a>
+      <a class="link" href="https://github.com/ChronoAIProject/NyxID">Self-host with Docker <span class="arr" aria-hidden="true">→</span></a>
+    </div>
+  </div>
+  <div class="foot">
+    <div class="wrap">
+      <div class="foot-grid">
+        <img src="assets/brand/nyxid-coloured-logo.svg" alt="NyxID" width="78" height="22">
+        <nav class="foot-links" aria-label="Footer">
+          <a href="https://nyx.chrono-ai.fun/docs">Docs</a>
+          <a href="https://github.com/ChronoAIProject/NyxID">GitHub</a>
+          <a href="https://discord.gg/QMvcs8UQBW">Discord</a>
+          <a href="https://nyx.chrono-ai.fun/privacy">Privacy</a>
+          <a href="https://nyx.chrono-ai.fun/terms">Terms</a>
+        </nav>
+      </div>
+      <p class="foot-fine">Luna Bistro is a made-up example. Product names and logos are trademarks of their owners.</p>
+    </div>
+  </div>
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/gsap.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrollTrigger.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/SplitText.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/gsap@3.13.0/dist/ScrambleTextPlugin.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lenis@1.1.14/dist/lenis.min.js"></script>
+<script>
+/* NyxID light night v2. The hero is new; from the run scene on, the script is landing-1 v3's main.js
+   without the list section and the talk matrix. Without GSAP every section shows its finished state. */
+(() => {
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const setText = (el, t) => { if (el && el.textContent !== String(t)) el.textContent = t; };
+  const hasGsap = !!(window.gsap && window.ScrollTrigger);
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const Split = hasGsap && window.SplitText, Scramble = hasGsap && window.ScrambleTextPlugin;
+  let lenis = null;
+
+  /* ---------- smooth scroll ---------- */
+  if (hasGsap) {
+    gsap.registerPlugin(...[ScrollTrigger, Split, Scramble].filter(Boolean));
+    if (!reduce && window.Lenis) {
+      lenis = new Lenis({ lerp: 0.1, smoothWheel: true, wheelMultiplier: 1 });
+      lenis.on('scroll', ScrollTrigger.update);
+      gsap.ticker.add((t) => lenis.raf(t * 1000));
+      gsap.ticker.lagSmoothing(0);
+    }
+  }
+  const scrollToY = (y) => {
+    if (lenis) lenis.scrollTo(y, { duration: 0.9 });
+    else window.scrollTo({ top: y, behavior: reduce ? 'auto' : 'smooth' });
+  };
+  $$('a[href^="#"]').forEach((a) => a.addEventListener('click', (e) => {
+    const target = $(a.getAttribute('href'));
+    if (!target) return;
+    e.preventDefault();
+    const st = hasGsap && ScrollTrigger.getAll().find((s) => s.trigger === target && s.pin);
+    scrollToY(st ? st.start : target.getBoundingClientRect().top + scrollY);
+  }));
+
+  /* ---------- 1. hero: the chrome N, the falling requests, the done ---------- */
+  const hero = $('[data-hero]');
+  requestAnimationFrame(() => requestAnimationFrame(() => hero.classList.add('is-in')));
+  const nstage = $('[data-nstage]'), mark = $('[data-mark]'), canvas = $('canvas', mark);
+  const heroCopy = $('.hero-copy'), ticks = $('[data-ticks]'), countEl = $('[data-count]');
+  /* ap: how far the requests have gone into the N, 0 -> 1. The pinned scroll drives it on a desktop. */
+  let ap = 0;
+
+  /* the chrome NyxID mark: the logo extruded and raymarched, two liquid drops, a light studio */
+  const FRAG = `
+precision highp float;
+uniform vec2 uRes; uniform float uTime; uniform vec2 uMouse; uniform float uSpin;
+mat3 R;
+float smin(float a,float b,float k){float h=clamp(.5+.5*(b-a)/k,0.,1.);return mix(b,a,h)-k*h*(1.-h);}
+float sdTri(vec2 p,vec2 p0,vec2 p1,vec2 p2){
+  vec2 e0=p1-p0,e1=p2-p1,e2=p0-p2,v0=p-p0,v1=p-p1,v2=p-p2;
+  vec2 q0=v0-e0*clamp(dot(v0,e0)/dot(e0,e0),0.,1.);
+  vec2 q1=v1-e1*clamp(dot(v1,e1)/dot(e1,e1),0.,1.);
+  vec2 q2=v2-e2*clamp(dot(v2,e2)/dot(e2,e2),0.,1.);
+  float s=sign(e0.x*e2.y-e0.y*e2.x);
+  vec2 d=min(min(vec2(dot(q0,q0),s*(v0.x*e0.y-v0.y*e0.x)),vec2(dot(q1,q1),s*(v1.x*e1.y-v1.y*e1.x))),vec2(dot(q2,q2),s*(v2.x*e2.y-v2.y*e2.x)));
+  return -sqrt(d.x)*sign(d.y);
+}
+float mark(vec2 p){
+  float rc=p.x>0.?.41:.02;
+  vec2 q=abs(p)-vec2(1.-rc);
+  float d=min(max(q.x,q.y),0.)+length(max(q,0.))-rc;
+  d=max(d,-sdTri(p,vec2(-.332,1.3),vec2(-.332,-.14),vec2(.509,1.3)));
+  d=max(d,-sdTri(p,vec2(0.,.136),vec2(0.,-1.3),vec2(-.843,-1.3)));
+  return d;
+}
+float logo(vec3 p){
+  const float S=.66,H=.22,E=.09;
+  vec3 q=(R*p)/S;
+  vec2 w=vec2(mark(q.xy)+E,abs(q.z)-H+E);
+  return (min(max(w.x,w.y),0.)+length(max(w,0.))-E)*S;
+}
+float map(vec3 p){
+  vec3 c3=vec3(uMouse*.75,.36);
+  float a=uTime*.55;
+  vec3 c4=vec3(cos(a)*1.0,sin(a*1.7)*.25,sin(a)*.45);
+  float d=logo(p);
+  d=smin(d,length(p-c3)-.17,.25);
+  d=smin(d,length(p-c4)-.12,.25);
+  return d;
+}
+vec3 nrm(vec3 p){vec2 e=vec2(.0015,0.);return normalize(vec3(map(p+e.xyy)-map(p-e.xyy),map(p+e.yxy)-map(p-e.yxy),map(p+e.yyx)-map(p-e.yyx)));}
+vec3 env(vec3 r){
+  float y=r.y;
+  vec3 sky=mix(vec3(.82,.83,.87),vec3(1.),smoothstep(0.,.55,y));
+  vec3 gnd=mix(vec3(.12,.12,.14),vec3(.62,.63,.67),smoothstep(-.05,-.75,y));
+  vec3 col=y>0.?sky:gnd;
+  col=mix(col,vec3(.05,.05,.07),exp(-abs(y)*18.)*.92);
+  float a=atan(r.x,r.z);
+  col*=1.-.55*smoothstep(.22,0.,abs(a-1.9))*smoothstep(-.1,.5,y);
+  col+=vec3(.9)*smoothstep(.04,0.,abs(y-.32))*smoothstep(.9,.2,abs(a))*.35;
+  col+=vec3(1.)*smoothstep(.07,0.,abs(a-.85))*smoothstep(.05,.45,y)*.9;
+  col+=vec3(1.)*smoothstep(.05,0.,abs(a+.4))*smoothstep(.2,.7,y)*.5;
+  col+=vec3(.49,.36,.88)*smoothstep(.16,0.,abs(a+1.7))*smoothstep(-.3,.35,y)*1.1;
+  col+=vec3(.45,.72,1.)*smoothstep(.12,0.,abs(a-2.5))*.35;
+  return col;
+}
+void main(){
+  vec2 uv=(gl_FragCoord.xy-.5*uRes)/uRes.y;
+  float ry=sin(uTime*.35)*.5+uMouse.x*.45+uSpin, rx=sin(uTime*.27+1.)*.18-uMouse.y*.3;
+  float cy=cos(ry),sy=sin(ry),cx=cos(rx),sx=sin(rx);
+  R=mat3(cy,0.,sy,0.,1.,0.,-sy,0.,cy)*mat3(1.,0.,0.,0.,cx,-sx,0.,sx,cx);
+  vec3 ro=vec3(0.,0.,3.6),rd=normalize(vec3(uv,-1.45));
+  float t=0.,d=1.;
+  for(int i=0;i<120;i++){d=map(ro+rd*t);if(d<.0008||t>8.)break;t+=d;}
+  if(d>.0008){gl_FragColor=vec4(0.);return;}
+  vec3 p=ro+rd*t,n=nrm(p),r=reflect(rd,n);
+  vec3 col=env(r);
+  float fr=pow(1.-max(dot(n,-rd),0.),3.);
+  col=mix(col*.94,vec3(1.),fr*.22);
+  gl_FragColor=vec4(col,1.);
+}`;
+  const VERT = 'attribute vec2 p;void main(){gl_Position=vec4(p,0.,1.);}';
+  function startGL() {
+    const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, antialias: false });
+    if (!gl) return false;
+    const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return gl.getShaderParameter(s, gl.COMPILE_STATUS) ? s : null; };
+    const vs = sh(gl.VERTEX_SHADER, VERT), fs = sh(gl.FRAGMENT_SHADER, FRAG);
+    if (!vs || !fs) return false;
+    const prog = gl.createProgram(); gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return false;
+    gl.useProgram(prog);
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    const loc = gl.getAttribLocation(prog, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    const uRes = gl.getUniformLocation(prog, 'uRes'), uTime = gl.getUniformLocation(prog, 'uTime'), uMouse = gl.getUniformLocation(prog, 'uMouse'), uSpin = gl.getUniformLocation(prog, 'uSpin');
+    const target = { x: 0, y: 0 }, m = { x: 0, y: 0 };
+    let lastMove = -1e9, visible = true, lost = false, t = 6, last = performance.now(), raf = 0, spin = 0;
+    function size() {
+      const dpr = Math.min(devicePixelRatio || 1, 1.25), r = canvas.getBoundingClientRect();
+      canvas.width = Math.max(1, Math.round(r.width * dpr)); canvas.height = Math.max(1, Math.round(r.height * dpr));
+      gl.viewport(0, 0, canvas.width, canvas.height);
+    }
+    function frame(now) {
+      raf = 0;
+      if (lost) return;
+      const dt = Math.min(0.05, (now - last) / 1000); last = now;
+      if (!reduce) t += dt;
+      if (now - lastMove > 2500) { target.x = Math.sin(t * 0.6) * 0.45; target.y = Math.cos(t * 0.45) * 0.35; }
+      m.x += (target.x - m.x) * 0.06; m.y += (target.y - m.y) * 0.06;
+      /* every request that goes in turns the N a little further */
+      spin += (ap * 6.2832 - spin) * 0.12;
+      gl.uniform2f(uRes, canvas.width, canvas.height); gl.uniform1f(uTime, t); gl.uniform2f(uMouse, m.x, m.y); gl.uniform1f(uSpin, spin);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      if (visible && !reduce) raf = requestAnimationFrame(frame);
+    }
+    const kick = () => { if (!raf && !lost) { last = performance.now(); raf = requestAnimationFrame(frame); } };
+    hero.addEventListener('pointermove', (e) => {
+      const r = hero.getBoundingClientRect();
+      target.x = clamp(((e.clientX - r.left) / r.width) * 2 - 1, -1, 1);
+      target.y = clamp(-(((e.clientY - r.top) / r.height) * 2 - 1), -1, 1);
+      lastMove = performance.now();
+      if (reduce) kick();
+    }, { passive: true });
+    /* a lost GPU context hands the stage back to the CSS chrome mark */
+    canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); lost = true; mark.classList.remove('gl-on'); });
+    new IntersectionObserver(([en]) => { visible = en.isIntersecting; if (visible) kick(); }).observe(hero);
+    addEventListener('resize', () => { size(); kick(); });
+    size(); kick();
+    mark.classList.add('gl-on');
+    return true;
+  }
+  try { startGL(); } catch (e) { mark.classList.remove('gl-on'); }
+
+  /* the falling requests: the jobs NyxBot and your agents send through NyxID. They drift down the right side
+     and shy away from the pointer; ap pulls them into the N one by one. */
+  const box = $('[data-rain]'), kinds = $('#kinds');
+  const KINDS = ['call', 'cal', 'letter', 'sticky', 'invoice', 'slip', 'receipt'];
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const N = 12, slips = [];
+  /* slip k starts at ap*1.05 = k and is fully inside 0.3 later; the last one lands at ap = 0.94 */
+  const absorbed = (k) => clamp((ap * 1.05 - k) / 0.3, 0, 1);
+  let W = 0, H = 0, tx = 0, ty = 0, rainOn = false, rLast = 0, mx = -9999, my = -9999, lastY = scrollY;
+  const measure = () => { W = box.clientWidth; H = box.clientHeight; };
+  const aim = () => { const bx = box.getBoundingClientRect(), r = mark.getBoundingClientRect(); tx = r.left - bx.left + r.width / 2; ty = r.top - bx.top + r.height / 2; };
+  const wide = () => innerWidth >= 960;
+  const spawnX = () => (wide() ? rand(0.44, 0.97) : rand(0.02, 0.9)) * W;
+  measure();
+  for (let i = 0; i < N; i++) {
+    const el = document.createElement('div');
+    el.className = 'rain-slip';
+    const z = 0.5 + ((i * 7) % N) / N * 0.5;
+    el.style.fontSize = `${(7 + z * 8).toFixed(1)}px`;
+    el.style.zIndex = Math.round(z * 10);
+    if (z < 0.66) el.style.filter = 'blur(1.2px)';
+    el.appendChild(kinds.content.querySelector(`[data-k="${KINDS[i % KINDS.length]}"]`).cloneNode(true));
+    box.appendChild(el);
+    slips.push({ el, z, op: 0.4 + z * 0.55, k: (i / N) * 0.75, w: el.offsetWidth, h: el.offsetHeight, x: spawnX(), y: rand(-0.1, 1) * H, vy: 14 + z * 30, vx: 0, ph: rand(0, 6.28), sw: rand(0.35, 0.8) });
+  }
+  const place = (s) => {
+    const a = absorbed(s.k), e = a * a * (3 - 2 * a);
+    const x = s.x + (tx - s.w / 2 - s.x) * e, y = s.y + (ty - s.h / 2 - s.y) * e;
+    /* on the way in a slip shrinks, turns and fades, as if the N swallows it */
+    s.el.style.transform = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0) scale(${(1 - 0.9 * e).toFixed(3)}) rotate(${(e * 140 * (s.ph > 3.14 ? 1 : -1)).toFixed(1)}deg)`;
+    s.el.style.opacity = (s.op * (1 - e * e)).toFixed(3);
+  };
+  const placeAll = () => slips.forEach(place);
+  aim();
+  setTimeout(() => { aim(); placeAll(); }, 1400);
+  placeAll();
+  addEventListener('resize', () => { measure(); aim(); placeAll(); });
+  if (!reduce) {
+    const rainFrame = (now) => {
+      if (!rainOn) return;
+      const dt = Math.min(0.05, (now - rLast) / 1000 || 0.016); rLast = now;
+      const boost = 1 + Math.min(4, Math.abs(scrollY - lastY) * 0.12); lastY = scrollY;
+      for (const s of slips) {
+        const cx = s.x + 70 * s.z, cy = s.y + 45 * s.z, dx = cx - mx, dy = cy - my, d = Math.hypot(dx, dy);
+        if (d < 190) { const f = (190 - d) / 190; s.vx += (dx / (d || 1)) * f * 520 * dt; }
+        s.vx *= 0.94;
+        s.y += s.vy * boost * dt;
+        s.x += (Math.sin(now * 0.001 * s.sw + s.ph) * 16 * s.z + s.vx) * dt;
+        if (s.y > H + 40) { s.y = -180; s.x = spawnX(); s.vx = 0; }
+        place(s);
+      }
+      requestAnimationFrame(rainFrame);
+    };
+    hero.addEventListener('pointermove', (e) => { const r = box.getBoundingClientRect(); mx = e.clientX - r.left; my = e.clientY - r.top; });
+    hero.addEventListener('pointerleave', () => { mx = my = -9999; });
+    new IntersectionObserver(([en]) => { const was = rainOn; rainOn = en.isIntersecting; if (rainOn && !was) { rLast = performance.now(); requestAnimationFrame(rainFrame); } }).observe(hero);
+  }
+
+  /* each request that lands makes the N glow once and fills the arc; after the last one NyxBot says "Done!" */
+  let inCount = -1, sayT = 0;
+  const doneChat = $('[data-done-chat]');
+  function applyHero() {
+    nstage.style.setProperty('--p', ap.toFixed(3));
+    nstage.style.setProperty('--fill', (slips.reduce((t, s) => t + absorbed(s.k), 0) / N).toFixed(3));
+    heroCopy.style.transform = `translateY(${(-24 * ap).toFixed(1)}px)`;
+    ticks.style.transform = `rotate(${(ap * 120).toFixed(1)}deg)`;
+    const n = slips.filter((s) => absorbed(s.k) >= 1).length;
+    if (n !== inCount) {
+      if (n > inCount && inCount >= 0) { mark.classList.remove('is-gulp'); void mark.offsetWidth; mark.classList.add('is-gulp'); }
+      inCount = n;
+      setText(countEl, n);
+      const done = n === N;
+      nstage.classList.toggle('is-done', done);
+      hero.classList.toggle('is-done', done);
+      clearTimeout(sayT);
+      if (!done) doneChat.classList.remove('is-said');
+      else if (reduce) doneChat.classList.add('is-said');
+      else sayT = setTimeout(() => doneChat.classList.add('is-said'), 260);
+    }
+    if (!rainOn) placeAll();
+  }
+  applyHero();
+  /* scroll sets apT; ap follows it a little each frame, so the pull eases in and out instead of stepping with every wheel tick */
+  let apT = 0;
+  const follow = () => {
+    const d = apT - ap;
+    if (d === 0) return;
+    ap = Math.abs(d) < 0.0005 ? apT : ap + d * 0.18;
+    applyHero();
+  };
+  if (window.gsap) gsap.ticker.add(follow);
+  else setInterval(() => { ap = apT; applyHero(); }, 100);
+
+
+  /* ---------- 2. one request, start to finish, under the rules you set ----------
+     renderRun(T) draws the run at time T (0 -> RUN_END) from the rules on the switches. Allow runs, Ask first waits
+     for the phone, Block is refused; a step whose input was refused is skipped, and Sarah's reply says what happened. */
+  const rows = $$('[data-row]'), ACTS = rows.map((r) => r.dataset.act);
+  const switches = rows.map((r) => $('.rs', r));
+  const rules = Object.fromEntries(rows.map((r, i) => [ACTS[i], switches[i].dataset.v]));
+  const NEEDS = { book: 'free', note: 'book' };
+  const ASKS = { free: 'see your free times', book: 'create a booking: table for 4, Sun 7:30 PM, Sarah', note: 'add an allergy note to the booking', reply: 'reply to Sarah on Telegram' };
+  const phone = $('[data-phone]'), phoneSay = $('[data-phone-say]'), phoneNote = $('[data-phone-note]');
+  const wireA = $('[data-wire="a"]'), wireB = $('[data-wire="b"]');
+  const eventEl = $('[data-event]'), replyEl = $('[data-reply]'), vault = $('[data-vault]');
+  const runCount = $('[data-run-count]'), runState = $('[data-run-state]'), ruleSum = $('[data-rule-sum]');
+  const chapters = $$('.chapter');
+  const DONE = [4.2, 4.6, 5.0, 5.4];
+  const RUN_END = 6.2;
+  const CH_AT = [0.3, 1.7, 3.1, 5.8];
+  const ASK_FROM = 2.9, ASK_TO = 3.7;
+  let denied = false, lastT = 0;
+
+  /* where each step ends up: done, refused by its rule, refused on the phone, or skipped because its input was refused */
+  function ends() {
+    const end = {};
+    ACTS.forEach((a) => {
+      const need = NEEDS[a];
+      if (need && end[need] !== 'done') end[a] = 'skip';
+      else if (rules[a] === 'block') end[a] = 'no';
+      else if (rules[a] === 'ask' && denied) end[a] = 'denied';
+      else end[a] = 'done';
+    });
+    return end;
+  }
+  const askMsg = $('.stage .msg');
+  function renderRun(T) {
+    lastT = T;
+    askMsg.classList.toggle('is-in', T >= 0.12);
+    const end = ends();
+    const asking = ACTS.filter((a) => rules[a] === 'ask' && end[a] !== 'skip');
+    const waiting = asking.length > 0 && T >= ASK_FROM && T < ASK_TO;
+    rows.forEach((r, i) => {
+      const a = ACTS[i], e = end[a], ran = T >= DONE[i];
+      r.classList.toggle('is-in', T >= 0.95 + i * 0.22);
+      r.classList.toggle('has-rule', T >= 2.1 + i * 0.16);
+      r.classList.toggle('is-wait', waiting && asking.includes(a) && !denied);
+      r.classList.toggle('is-done', ran && e === 'done');
+      r.classList.toggle('is-no', ran && (e === 'no' || e === 'denied'));
+      r.classList.toggle('is-skip', ran && e === 'skip');
+      $('use', r).setAttribute('href', ran && (e === 'no' || e === 'denied') ? '#no' : '#ck');
+      const st = $('[data-st]', r);
+      let label = '', kind = '';
+      if (ran) {
+        if (e === 'no') { label = 'refused'; kind = 'no'; }
+        else if (e === 'denied') { label = 'you said no'; kind = 'no'; }
+        else if (e === 'skip') { label = 'skipped'; kind = 'skip'; }
+      } else if (rules[a] === 'ask' && e !== 'skip' && T >= ASK_FROM) {
+        if (T < ASK_TO && !denied) { label = 'waiting for you'; kind = 'wait'; }
+        else if (denied) { label = 'you said no'; kind = 'no'; }
+        else { label = 'you approved'; kind = 'ok'; }
+      }
+      setText(st, label);
+      st.dataset.s = kind;
+    });
+    phone.classList.toggle('is-in', waiting);
+    if (asking.length) setText(phoneSay, `NyxBot wants to ${asking.map((a) => ASKS[a]).join(' and ')}.`);
+    const doneN = DONE.filter((d, i) => T >= d && end[ACTS[i]] === 'done').length;
+    const anyRun = ACTS.some((a) => end[a] === 'done');
+    wireA.classList.toggle('is-live', T >= 0.7 && T < 2.1);
+    wireB.classList.toggle('is-live', anyRun && T >= 4.05 && T < 5.7);
+    vault.classList.toggle('is-in', anyRun && T >= 4.05);
+    eventEl.classList.toggle('is-in', end.book === 'done' && T >= DONE[1] + 0.12);
+    eventEl.classList.toggle('has-note', end.note === 'done' && T >= DONE[2] + 0.12);
+    /* Sarah's reply follows from the booking */
+    const replyAt = T >= DONE[3] + 0.12;
+    let reply = '';
+    if (end.reply === 'done') {
+      reply = end.book === 'done' ? (end.note === 'done' ? 'Booked. Table for 4, Sun 7:30 PM. I have noted one vegan.' : 'Booked. Table for 4, Sun 7:30 PM.')
+        : 'Sorry, I can\'t book a table right now. The restaurant will reply in the morning.';
+    } else reply = end.reply === 'denied' ? 'Nothing sent. You said no to replying.' : 'Nothing sent. Replying to customers is blocked.';
+    setText(replyEl, reply);
+    replyEl.classList.toggle('is-none', end.reply !== 'done');
+    replyEl.classList.toggle('is-in', replyAt);
+    setText(runCount, doneN);
+    const stopped = ACTS.filter((a) => end[a] !== 'done').length;
+    setText(runState, T < 0.12 ? 'waiting for a request' : T < 0.9 ? 'request received' : T < 2.1 ? 'planning' : T < ASK_FROM ? 'checking your rules'
+      : waiting ? 'waiting for you' : T < 5.6 ? 'working' : stopped ? `finished, ${stopped} stopped by your rules` : 'done in 14 seconds');
+    const c = T < 0.9 ? 0 : T < 2.1 ? 1 : T < 4 ? 2 : 3;
+    chapters.forEach((ch, i) => { ch.classList.toggle('is-on', i === c); ch.classList.toggle('is-past', i < c); });
+  }
+
+  /* the sum under the plan says what the current rules mean */
+  function sumRules() {
+    const v = Object.values(rules);
+    const a = v.filter((x) => x === 'allow').length, k = v.filter((x) => x === 'ask').length, b = v.filter((x) => x === 'block').length;
+    const parts = [a ? `${a} ${a === 1 ? 'step runs on its own' : 'steps run on their own'}.` : 'Nothing runs on its own.'];
+    if (k) parts.push(`${k} <em>${k === 1 ? 'waits' : 'wait'} for your yes.</em>`);
+    if (b) parts.push(`${b} ${b === 1 ? 'is' : 'are'} refused.`);
+    ruleSum.innerHTML = parts.join(' ');
+  }
+  function setRule(sw, v) {
+    sw.dataset.v = v;
+    $$('button', sw).forEach((btn) => {
+      const on = btn.dataset.v === v;
+      btn.setAttribute('aria-checked', String(on));
+      btn.tabIndex = on ? 0 : -1;
+    });
+    rules[sw.closest('[data-row]').dataset.act] = v;
+    denied = false;
+    setText(phoneNote, '');
+    sumRules();
+    renderRun(lastT);
+  }
+  switches.forEach((sw) => {
+    const btns = $$('button', sw);
+    btns.forEach((btn, i) => {
+      btn.tabIndex = btn.getAttribute('aria-checked') === 'true' ? 0 : -1;
+      btn.addEventListener('click', () => setRule(sw, btn.dataset.v));
+      btn.addEventListener('keydown', (e) => {
+        const step = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : e.key === 'ArrowLeft' || e.key === 'ArrowUp' ? -1 : 0;
+        if (!step) return;
+        e.preventDefault();
+        const next = btns[(i + step + btns.length) % btns.length];
+        setRule(sw, next.dataset.v);
+        next.focus();
+      });
+    });
+  });
+  sumRules();
+
+  let runSt = null;
+  const runYFor = (T) => runSt.start + (runSt.end - runSt.start) * (T / RUN_END) + 2;
+  chapters.forEach((ch, i) => ch.addEventListener('click', () => { if (runSt) scrollToY(runYFor(CH_AT[i])); }));
+  $('[data-approve]').addEventListener('click', () => {
+    denied = false;
+    setText(phoneNote, '');
+    if (runSt) scrollToY(runYFor(3.85)); else renderRun(lastT);
+  });
+  $('[data-deny]').addEventListener('click', () => {
+    denied = true;
+    setText(phoneNote, 'Denied. NyxBot stops that step and tells Sarah.');
+    renderRun(lastT);
+  });
+
+  /* pinned on desktop, finished state everywhere else.
+     The hero is pinned for 165% of a screen: the requests go into the N over the first 80%,
+     "Done!" holds for the next 85% so it can be read, then the run scene slides up over it like the other sections. */
+  const HERO_PIN = 1.65, ABSORB_END = 0.8 / HERO_PIN;
+  function staticMode() {
+    renderRun(RUN_END);
+    if (reduce || !hasGsap) { ap = apT = 1; applyHero(); return () => {}; }
+    /* no pin: the requests fall into the N once, on their own, when it comes into view */
+    ap = apT = 0; applyHero();
+    let tw = null;
+    const io = new IntersectionObserver(([en]) => {
+      if (!en.isIntersecting) return;
+      io.disconnect();
+      const o = { p: 0 };
+      tw = gsap.to(o, { p: 1, duration: 3.6, delay: 0.6, ease: 'power1.inOut', onUpdate: () => { apT = o.p; } });
+    }, { threshold: 0.5 });
+    io.observe(nstage);
+    return () => { io.disconnect(); if (tw) tw.kill(); };
+  }
+
+  if (hasGsap) {
+    const mm = gsap.matchMedia();
+    mm.add('(min-width: 960px) and (prefers-reduced-motion: no-preference)', () => {
+      ap = apT = 0; applyHero();
+      ScrollTrigger.create({ trigger: '#top', start: 'top top', end: `+=${HERO_PIN * 100}%`, pin: true, anticipatePin: 1,
+        onUpdate: (st) => { apT = clamp(st.progress / ABSORB_END, 0, 1); }, onRefresh: () => { aim(); placeAll(); } });
+      const rp = { t: 0 };
+      renderRun(0);
+      /* the pin holds the section in place; the run itself starts at "top 70%", while the section is still sliding
+         up over the hero, so the first scroll already shows Sarah's message arriving and the plan filling */
+      const runPin = ScrollTrigger.create({ trigger: '#run', start: 'top top', end: '+=320%', pin: true, anticipatePin: 1 });
+      const tween = gsap.to(rp, { t: RUN_END, ease: 'none', onUpdate: () => renderRun(rp.t),
+        scrollTrigger: { trigger: '#run', start: 'top 70%', end: () => runPin.end, scrub: 0.6, invalidateOnRefresh: true } });
+      runSt = tween.scrollTrigger;
+      return () => { runSt = null; };
+    });
+    /* solutions: pin the section and move the rail sideways by exactly its overflow */
+    mm.add('(min-width: 960px) and (prefers-reduced-motion: no-preference)', () => {
+      const jobs = $('#jobs'), track = $('[data-jobs-track]'), bar = $('[data-jobs-bar]');
+      jobs.classList.add('is-rail');
+      const dist = () => Math.max(0, track.scrollWidth - track.parentElement.clientWidth);
+      /* the cards come in shifted right and are already sliding left while the section scrolls up,
+         so the pin catches the rail mid-motion instead of starting from a hard left edge */
+      const lead = () => Math.min(innerWidth * 0.24, 360);
+      const jobsPin = ScrollTrigger.create({ trigger: jobs, start: 'top top', end: () => `+=${Math.round(dist() * 0.75)}`, pin: true, anticipatePin: 1, invalidateOnRefresh: true });
+      /* two legs in scroll proportion: while the section arrives the cards slide in and settle with the first card under the
+         heading exactly as the pin starts; while pinned they travel until the last card meets the right edge */
+      const approach = innerHeight * 0.85, pinned = Math.max(1, dist() * 0.75);
+      const tw = gsap.timeline({ scrollTrigger: { trigger: jobs, start: 'top 85%', end: () => jobsPin.end, scrub: 0.6, invalidateOnRefresh: true,
+          onUpdate: (st) => { const lead0 = approach / (approach + pinned); bar.style.setProperty('--jp', (0.22 + 0.78 * clamp((st.progress - lead0) / (1 - lead0), 0, 1)).toFixed(3)); } } })
+        .fromTo(track, { x: () => lead() }, { x: 0, ease: 'none', duration: approach })
+        .to(track, { x: () => -dist(), ease: 'none', duration: pinned });
+      return () => { tw.scrollTrigger && tw.scrollTrigger.kill(); tw.kill(); jobsPin.kill(); gsap.set(track, { x: 0 }); jobs.classList.remove('is-rail'); };
+    });
+    mm.add('(max-width: 959px), (prefers-reduced-motion: reduce)', () => staticMode());
+  } else {
+    staticMode();
+  }
+
+  /* day and night: the button flips the mode and remembers it; until then the page follows the system */
+  const root = document.documentElement, themeBtn = $('[data-theme-toggle]'), themeMeta = $('meta[name="theme-color"]');
+  let savedTheme = null;
+  try { savedTheme = localStorage.getItem('nyxid-theme'); } catch (e) { savedTheme = null; }
+  const applyTheme = (t) => {
+    root.dataset.theme = t;
+    themeBtn.setAttribute('aria-label', t === 'dark' ? 'Switch to day mode' : 'Switch to night mode');
+    themeMeta.setAttribute('content', t === 'dark' ? '#0E0E10' : '#F3F3F0');
+  };
+  applyTheme(root.dataset.theme === 'dark' ? 'dark' : 'light');
+  themeBtn.addEventListener('click', () => {
+    const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem('nyxid-theme', next); savedTheme = next; } catch (e) { /* not saved; the switch still applies to this visit */ }
+    if (document.startViewTransition && !reduce) document.startViewTransition(() => applyTheme(next));
+    else applyTheme(next);
+  });
+  /* someone who has not chosen keeps following the system as it changes (for example at sunset) */
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => { if (!savedTheme) applyTheme(e.matches ? 'dark' : 'light'); });
+
+  /* nav: dark glass while it sits over an ink section */
+  const nav = $('[data-nav]');
+  /* ask what is actually painted under the nav: an ink section can sit hidden under the next section's rounded top */
+  const tone = () => { const hit = document.elementsFromPoint(innerWidth / 2, 40).find((n) => !n.closest('.nav')); nav.classList.toggle('is-dark', !!(hit && hit.closest('.on-ink'))); };
+  addEventListener('scroll', tone, { passive: true }); tone();
+
+  /* ---------- 5. apps hub: lines from every chat to NyxID and out to every app ---------- */
+  const hub = $('[data-hub]');
+  function drawHub() {
+    const svg = $('.hub-lines', hub);
+    if (getComputedStyle(svg).display === 'none') return;
+    const r = hub.getBoundingClientRect();
+    const core = $('[data-core]', hub).getBoundingClientRect();
+    const cy = core.top - r.top + core.height / 2;
+    const cL = core.left - r.left, cR = core.right - r.left;
+    svg.setAttribute('viewBox', `0 0 ${r.width} ${r.height}`);
+    let html = '';
+    const add = (d, i, pulse) => {
+      html += `<path data-i="${i}" d="${d}"/>`;
+      if (pulse) html += `<path class="pulse" d="${d}" style="animation-delay:${(-(i * 0.83) % 3.2).toFixed(2)}s"/>`;
+    };
+    const tiles = $$('.tile', hub);
+    const outs = tiles.filter((t) => t.dataset.node === 'out');
+    const minLeft = Math.min(...outs.map((t) => t.getBoundingClientRect().left));
+    tiles.forEach((t, i) => {
+      const b = t.getBoundingClientRect();
+      const y = b.top - r.top + b.height / 2;
+      if (t.dataset.node === 'in') {
+        const x = b.right - r.left, mx = (x + cL) / 2;
+        add(`M${x} ${y} C${mx} ${y} ${mx} ${cy} ${cL} ${cy}`, i, true);
+      } else if (b.left - minLeft < 4) {
+        const x = b.left - r.left, mx = (x + cR) / 2;
+        add(`M${cR} ${cy} C${mx} ${cy} ${mx} ${y} ${x} ${y}`, i, true);
+      } else {
+        const x = b.left - r.left;
+        add(`M${x - 10} ${y} L${x} ${y}`, i, false);
+      }
+    });
+    svg.innerHTML = html;
+    tiles.forEach((t, i) => {
+      const path = $(`path[data-i="${i}"]`, svg);
+      t.onmouseenter = () => path && path.classList.add('is-hot');
+      t.onmouseleave = () => path && path.classList.remove('is-hot');
+    });
+  }
+  drawHub();
+  let hubT;
+  addEventListener('resize', () => { clearTimeout(hubT); hubT = setTimeout(drawHub, 150); });
+
+  /* ---------- 6. setup command ---------- */
+  const TERM = {
+    claude: '<s>$</s> claude mcp add --transport http --scope user <i>nyxid</i> http://localhost:3001/mcp',
+    cursor: '<s>$</s> nyxid mcp config --tool <i>cursor</i>',
+  };
+  const termOut = $('[data-term-out]');
+  $$('[data-term]').forEach((tab) => tab.addEventListener('click', () => {
+    $$('[data-term]').forEach((t) => t.setAttribute('aria-selected', String(t === tab)));
+    termOut.innerHTML = TERM[tab.dataset.term];
+  }));
+  $('[data-copy]').addEventListener('click', (e) => {
+    const text = termOut.textContent.replace(/^\$\s*/, '');
+    const btn = e.currentTarget;
+    const ok = () => { btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = 'Copy'; }, 1600); };
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(ok, ok); else ok();
+  });
+
+  /* ---------- 6. your agent: one request, followed card by card ----------
+     0 the agent sends its own key, 1 it travels, 2 NyxID checks and swaps the key, 3 it travels on, 4 Stripe acts. Then again. */
+  const flow = $('[data-flow]');
+  if (flow) {
+    const cards = $$('[data-flow-at]', flow);
+    const HOLD = [1300, 750, 2300, 750, 3000];
+    let step = 4, flowT = 0;
+    const showStep = (n) => {
+      step = n;
+      flow.dataset.step = n;
+      for (let i = 1; i <= 4; i++) flow.classList.toggle(`s${i}`, n >= i);
+      cards.forEach((c) => c.classList.toggle('is-on', +c.dataset.flowAt === n));
+    };
+    const nextStep = () => { showStep((step + 1) % 5); flowT = setTimeout(nextStep, HOLD[step]); };
+    showStep(4);
+    if (!reduce && 'IntersectionObserver' in window) {
+      new IntersectionObserver(([en]) => {
+        clearTimeout(flowT);
+        if (en.isIntersecting) { showStep(0); flowT = setTimeout(nextStep, HOLD[0]); }
+      }, { threshold: 0.35 }).observe(flow);
+    }
+  }
+
+  /* the jobs bar follows a swipe when the rail scrolls natively */
+  const jobsRail = $('[data-jobs-rail]'), jobsBar = $('[data-jobs-bar]');
+  jobsRail.addEventListener('scroll', () => {
+    const max = jobsRail.scrollWidth - jobsRail.clientWidth;
+    jobsBar.style.setProperty('--jp', (0.34 + 0.66 * (max > 0 ? jobsRail.scrollLeft / max : 1)).toFixed(3));
+  }, { passive: true });
+
+  /* ---------- 8. closing line ---------- */
+  if (hasGsap && !reduce) {
+    const when = { trigger: '[data-close]', start: 'top 62%', once: true };
+    if (Split) {
+      SplitText.create('.big', { type: 'lines', mask: 'lines', linesClass: 'ln', autoSplit: true,
+        onSplit: (self) => gsap.from(self.lines, { yPercent: 108, duration: 1.1, ease: 'power4.out', stagger: 0.12, scrollTrigger: when }) });
+    } else {
+      gsap.from('.big', { y: 30, opacity: 0, duration: 1, ease: 'power4.out', scrollTrigger: when });
+    }
+    gsap.from('.close-cta', { y: 20, opacity: 0, duration: 0.7, ease: 'power3.out', delay: 0.35, scrollTrigger: when });
+  }
+
+  /* ---------- nav: links decode on hover (ScrambleText) ---------- */
+  if (Scramble && !reduce) {
+    $$('.nav-links a').forEach((a) => {
+      const label = a.textContent;
+      a.addEventListener('pointerenter', () => {
+        a.style.width = `${a.offsetWidth}px`;
+        gsap.to(a, { duration: 0.4, overwrite: true, scrambleText: { text: label, chars: 'lowerCase', speed: 0.9 } });
+      });
+    });
+  }
+
+
+  /* ---------- the close: ripples drawn through an ordered dither ----------
+     A low-resolution field (one canvas pixel = 4 screen pixels) of slow ripples: two drifting sources, an occasional
+     new ring, and rings from the pointer. Each pixel is compared with an 8x8 Bayer threshold, so the waves read as a
+     fine violet pixel pattern instead of a gradient. Brighter crests step up to lilac. */
+  function ditherRipple(canvas) {
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const CELL = 4;
+    const BAYER = [0, 32, 8, 40, 2, 34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26, 12, 44, 4, 36, 14, 46, 6, 38, 60, 28, 52, 20, 62, 30, 54, 22,
+      3, 35, 11, 43, 1, 33, 9, 41, 51, 19, 59, 27, 49, 17, 57, 25, 15, 47, 7, 39, 13, 45, 5, 37, 63, 31, 55, 23, 61, 29, 53, 21].map((v) => (v + 0.5) / 64);
+    const rings = [];
+    let w = 0, h = 0, img = null, t = 0, on = false, last = 0, frame = 0, lastRing = 0, nextAuto = 1, cx = 0, cy = 0;
+    const size = () => {
+      w = Math.max(1, Math.ceil(canvas.clientWidth / CELL)); h = Math.max(1, Math.ceil(canvas.clientHeight / CELL));
+      canvas.width = w; canvas.height = h; img = ctx.createImageData(w, h);
+      /* the source sits wherever the N is drawn, so desktop and phone layouts both line up */
+      const mk = canvas.parentElement.querySelector('.close-mark'), cr = canvas.getBoundingClientRect();
+      if (mk) { const m = mk.getBoundingClientRect(); cx = (m.left + m.width / 2 - cr.left) / CELL; cy = (m.top + m.height / 2 - cr.top) / CELL; }
+      else { cx = w * 0.8; cy = h * 0.46; }
+    };
+    const draw = () => {
+      const d = img.data;
+      let i = 0;
+      for (let y = 0; y < h; y++) {
+        const row = (y & 7) * 8;
+        for (let x = 0; x < w; x++, i += 4) {
+          const dx = x - cx, dy = y - cy, d1 = Math.sqrt(dx * dx + dy * dy);
+          /* skip the disc under the N itself so the mark stays clean */
+          let v = d1 < 7 ? -2 : Math.sin(d1 * 0.2 - t * 1.2) * Math.exp(-d1 * 0.013);
+          for (let k = 0; k < rings.length; k++) {
+            const r = rings[k], rr = r.age * 34, ex = x - r.x, ey = y - r.y, gap = Math.sqrt(ex * ex + ey * ey) - rr;
+            v += 1.3 * Math.exp(-(gap * gap) / 14) * (1 - r.age / r.life);
+          }
+          const lum = 0.1 + 0.32 * v, th = BAYER[row + (x & 7)];
+          if (lum > th + 0.34) { d[i] = 201; d[i + 1] = 187; d[i + 2] = 254; d[i + 3] = 135; }
+          else if (lum > th) { d[i] = 151; d[i + 1] = 117; d[i + 2] = 250; d[i + 3] = 72; }
+          else d[i + 3] = 0;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    };
+    const loop = (now) => {
+      if (!on) return;
+      const dt = Math.min(0.05, (now - last) / 1000 || 0.016); last = now;
+      t += dt;
+      for (let k = rings.length - 1; k >= 0; k--) { rings[k].age += dt; if (rings[k].age > rings[k].life) rings.splice(k, 1); }
+      if (t > nextAuto) { rings.push({ x: cx, y: cy, age: 0, life: 4.2 }); nextAuto = t + 3.2; }
+      /* 30 frames a second is plenty for slow waves and halves the work */
+      if ((frame++ & 1) === 0) draw();
+      requestAnimationFrame(loop);
+    };
+    size(); draw();
+    let rt;
+    addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { size(); draw(); }, 120); });
+    if (reduce) return;
+    const host = canvas.closest('footer, section') || canvas;
+    host.addEventListener('pointermove', (e) => {
+      if (performance.now() - lastRing < 180 || rings.length > 5) return;
+      lastRing = performance.now();
+      const r = canvas.getBoundingClientRect();
+      rings.push({ x: (e.clientX - r.left) / CELL, y: (e.clientY - r.top) / CELL, age: 0, life: 2.4 });
+    }, { passive: true });
+    new IntersectionObserver(([en]) => { const was = on; on = en.isIntersecting; if (on && !was) { last = performance.now(); requestAnimationFrame(loop); } }).observe(canvas);
+  }
+  $$('canvas[data-dither]').forEach(ditherRipple);
+
+  /* fonts change every measured height */
+  const settle = () => {
+    drawHub(); aim(); placeAll();
+    if (hasGsap) ScrollTrigger.refresh();
+  };
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(settle);
+  addEventListener('load', settle);
+})();
+</script>
+</body>
+</html>

@@ -15,8 +15,15 @@ describe("window-free public renderer", () => {
           throw new Error("Unexpected documentation access");
         });
         expect(html).toContain("<h1");
-        expect(html).toContain('id="nav"');
-        expect(html).toContain('id="foot"');
+        if (route === "/" && locale === "en") {
+          // The English home page ("light night" design) has its own menu and footer.
+          expect(html).toContain('class="nyx-home"');
+          expect(html).toContain("data-nav");
+          expect(html).toContain('id="end"');
+        } else {
+          expect(html).toContain('id="nav"');
+          expect(html).toContain('id="foot"');
+        }
         expect(html).not.toContain("<!--$!-->");
         expect(meta.locale).toBe(locale);
         expect(meta.description.length).toBeGreaterThan(20);
