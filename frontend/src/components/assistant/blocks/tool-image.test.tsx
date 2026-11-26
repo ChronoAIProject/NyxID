@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ToolImage } from "./tool-image";
 import { assistantHttp } from "@/lib/assistant/assistant-http";
+import { clearGeneratedAttachmentCache } from "@/lib/assistant/generated-attachment-cache";
 vi.mock("@/lib/assistant/assistant-http", () => ({ assistantHttp: vi.fn() }));
 beforeEach(() => {
   vi.clearAllMocks();
@@ -11,7 +12,65 @@ beforeEach(() => {
   });
   vi.mocked(assistantHttp).mockResolvedValue(new Response(new Blob(["bytes"])));
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  clearGeneratedAttachmentCache();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
+
+it.each([
+  ["image/png", "png"], ["image/jpeg", "jpg"],
+  ["image/gif", "gif"], ["image/webp", "webp"],
+])("downloads the original tool %s using the preview URL and a safe filename", async (contentType, extension) => {
+  const { unmount } = render(<ToolImage image={{
+    id: "tool-raster", origin: "tool", endpoint: "/private/tool-raster",
+    contentType, label: "../../untrusted.exe?token=secret",
+  }} />);
+  const preview = await screen.findByRole("img");
+  const download = screen.getByRole("link", { name: `Download tool-image.${extension}` });
+  expect(download).toHaveAttribute("href", preview.getAttribute("src"));
+  expect(download).toHaveAttribute("download", `tool-image.${extension}`);
+  download.addEventListener("click", (event) => event.preventDefault());
+  fireEvent.click(download);
+  expect(assistantHttp).toHaveBeenCalledTimes(1);
+  expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+  unmount();
+  expect(URL.revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:private");
+});
+
+it("refreshes a generated card through its old expiry without exposing the old URL", async () => {
+  vi.useFakeTimers();
+  vi.stubGlobal("IntersectionObserver", undefined);
+  const now = Date.now();
+  vi.mocked(URL.createObjectURL).mockReturnValueOnce("blob:old").mockReturnValueOnce("blob:new");
+  const image = {
+    id: "generated", origin: "generated_artifact", endpoint: "/private/generated",
+    label: "Sandbox", contentType: "image/png", previewKind: "image", size: 32,
+    expiresAt: new Date(now + 100).toISOString(),
+  };
+  const view = render(<ToolImage image={image} />);
+  await act(() => vi.advanceTimersByTimeAsync(0));
+  expect(screen.getByRole("link", { name: /Download/ })).toHaveAttribute("href", "blob:old");
+  let finish!: (response: Response) => void;
+  vi.mocked(assistantHttp).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  view.rerender(<ToolImage image={{ ...image, expiresAt: new Date(now + 1_000).toISOString() }} />);
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: /Download/ })).not.toBeInTheDocument();
+  await act(() => vi.advanceTimersByTimeAsync(100));
+  expect(URL.revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:old");
+  await act(async () => {
+    finish(new Response("refreshed bytes"));
+    await vi.advanceTimersByTimeAsync(0);
+  });
+  expect(assistantHttp).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("link", { name: /Download/ })).toHaveAttribute("href", "blob:new");
+  await act(() => vi.advanceTimersByTimeAsync(899));
+  expect(screen.getByRole("link", { name: /Download/ })).toHaveAttribute("href", "blob:new");
+  await act(() => vi.advanceTimersByTimeAsync(1));
+  expect(screen.getByRole("status")).toHaveTextContent("has expired");
+  expect(URL.revokeObjectURL).toHaveBeenLastCalledWith("blob:new");
+});
+
 it("fetches an owner image and preserves the explicit agent-version fallback", async () => {
   const { unmount } = render(
     <ToolImage
@@ -30,6 +89,7 @@ it("fetches an owner image and preserves the explicit agent-version fallback", a
   );
   expect(screen.getByRole("status")).toHaveTextContent("cannot view");
   expect(assistantHttp).toHaveBeenCalledWith("/private/photo");
+  expect(screen.queryByRole("link", { name: /Download/ })).not.toBeInTheDocument();
   unmount();
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:private");
 });
@@ -87,6 +147,7 @@ it("shows retained guest images with an honest model notice and no tool suggesti
   await screen.findByAltText("Image from guest.png");
   expect(screen.getByRole("status")).toHaveTextContent("unavailable to the model in that turn");
   expect(screen.getByRole("status")).not.toHaveTextContent(/machine|smaller/);
+  expect(screen.queryByRole("link", { name: /Download/ })).not.toBeInTheDocument();
 });
 
 it("shows scanned PDF page coverage without fetching or claiming a complete read", () => {

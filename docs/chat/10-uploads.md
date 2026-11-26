@@ -919,6 +919,14 @@ supported MP4 can render inline; other files download. A conversation key can re
 generated files only in its bound conversation. Existing uploads/tool images keep
 their exact legacy read and response path.
 
+Web previews and downloads share cached authenticated bytes for the same endpoint
+and declared expiry. A changed declared expiry retires the old URL and requires
+a fresh authenticated read. Active leases pin URLs until expiry. The final release
+aborts pending reads or retains completed files for up to two idle minutes,
+bounded by expiry. Timer wakeups recheck the absolute deadline, including beyond
+browser timer limits.
+Expiry and identity changes revoke URLs, cancel timers and discard late results.
+
 An empty-body human-owner POST to
 `/api/v1/assistant/nyxagent/conversations/{id}/messages/{message_id}/artifact-delivery`
 recovers the saved result onto that reply while the conversation is idle.
