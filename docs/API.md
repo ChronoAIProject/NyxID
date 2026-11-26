@@ -1076,12 +1076,8 @@ Initiate an OAuth 2.0 authorization flow with a social provider.
 
 **Response (302):** Redirects to the provider's authorization page. Sets the `nyx_social_state` HttpOnly cookie containing the CSRF state token.
 
-**Mobile Query Parameters:**
-
-| Parameter      | Type   | Description |
-|----------------|--------|-------------|
-| `client`       | string | Set to `"mobile"` for native mobile deep-link mode |
-| `redirect_uri` | string | Required for mobile mode. The released app uses `nyxid://auth/social/callback`. Additional exact destinations require `MOBILE_SOCIAL_REDIRECT_URIS`. Expo destinations require development mode. |
+Mobile apps use the mobile-code endpoint below. A legacy mobile start with an
+allowed callback URI receives an update-required redirect.
 
 **Errors:**
 - `6000 social_auth_failed` -- Provider not configured (missing client ID/secret) or unsupported provider
@@ -1098,9 +1094,9 @@ http://localhost:3001/api/v1/auth/social/google
 
 #### Mobile social code delivery
 
-An app can start a verifier-bound sign-in at `GET /api/v1/auth/social/{provider}/mobile-code`. Generate a random PKCE verifier for this attempt and keep it in the app. Supply the exact `redirect_uri`, the base64url SHA-256 `code_challenge`, and `code_challenge_method=S256`. Deploy support on every API replica before enabling code delivery in the app.
+The app starts a verifier-bound sign-in at `GET /api/v1/auth/social/{provider}/mobile-code`. Generate a random PKCE verifier for this attempt and keep it in the app. Supply the exact `redirect_uri`, the base64url SHA-256 `code_challenge`, and `code_challenge_method=S256`. Deploy support on every API replica before enabling code delivery in the app.
 
-NyxID records the provider, API callback origin, destination, Apple nonce hash when applicable, and optional challenge for ten minutes. A provider callback consumes that attempt once. If a state cookie accompanies the callback, it must match. A sign-in started before upgrade can require a fresh attempt.
+NyxID records the provider, API callback origin, destination, Apple nonce hash when applicable, and required challenge for ten minutes. A provider callback consumes that attempt once. If a state cookie accompanies the callback, it must match. A pending legacy attempt without a challenge receives the update-required redirect.
 
 A successful code-mode callback carries `status=success`, `provider`, and `code`. The app checks its active attempt and posts `{"code":"…","code_verifier":"…"}` to `POST /api/v1/auth/social/mobile-code/redeem` on its original API origin. The code expires after 60 seconds. Redemption creates the session and its refresh record in the same transaction that consumes the code. One matching exchange receives `access_token`, `refresh_token`, and `expires_in` in a non-cacheable JSON response. An invalid, expired, or used code receives HTTP 400. Handle MFA fragments and cancellation through the existing app flow. For a code-mode attempt, require the code on success and discard the verifier on completion or cancellation.
 
@@ -1126,7 +1122,11 @@ OAuth callback handler. Called by the provider after user authorization.
 
 **Response (302 on success, web):** For users without MFA, redirects to the frontend root and sets the `nyx_session` cookie. For users with MFA enabled, no session is created: the callback sets the narrowly scoped, HttpOnly `nyx_mfa_challenge` cookie for five minutes and redirects to `/login?mfa=required` (with a trusted `return_to` value when an OAuth authorization is being resumed).
 
-**Response (302 on success, mobile):** For users without MFA, redirects to the provided deep link with `status=success`, `provider`, `user_id`, `access_token`, `refresh_token`, and `expires_in` query parameters. When `auth:mobile-mfa` is enabled for the signing-in person, MFA users receive no tokens; the deep link fragment contains `status=mfa_required`, `provider`, and the short-lived `mfa_token` challenge. The app posts that token and a TOTP/recovery code to `/auth/mfa/verify`. The flag defaults off: MFA users receive the normal success tokens with a persisted mobile-rollout exemption. Resolution includes live org overrides and occurs only at sign-in; a later flag flip does not revoke existing devices. While off, a social first-factor holder can sign in through mobile without an MFA code.
+**Response (302 on success, mobile):** The native callback carries the one-time
+code described above. When the signing-in person requires mobile MFA, the
+callback carries a short-lived MFA challenge in the fragment. The app submits
+that challenge with an authenticator or recovery code to the MFA verification
+endpoint and receives session credentials in the HTTPS response body.
 
 **Response (302 on error):** Redirects to `{FRONTEND_URL}/login?error={error_key}`.
 
