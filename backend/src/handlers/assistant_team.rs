@@ -481,6 +481,19 @@ pub(crate) async fn after_turn(
     text: &str,
     error: Option<&TurnError>,
 ) {
+    after_turn_inner(state, row, text, error).await;
+    #[cfg(test)]
+    if let Some(turn) = &row.active_turn {
+        settlement_test_observer::completed(&state.db, &turn.turn_id);
+    }
+}
+
+async fn after_turn_inner(
+    state: &AppState,
+    row: &AssistantConversation,
+    text: &str,
+    error: Option<&TurnError>,
+) {
     if row.guest_model_setup {
         return;
     }
@@ -576,8 +589,6 @@ pub(crate) async fn after_turn(
     }
     Box::pin(deliver_settled_channel_result(state, row, turn)).await;
     let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
-    #[cfg(test)]
-    settlement_test_observer::completed(&state.db, &turn.turn_id);
 }
 
 async fn deliver_settled_channel_result(

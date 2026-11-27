@@ -102,6 +102,71 @@ impl Resume {
 pub(crate) struct ResumeOutcome {
     pub(crate) text: String,
     pub(crate) specialist_readback: Option<String>,
+    pub(crate) provider_notice: Option<&'static str>,
+}
+
+const PROVIDER_REJECTION: &str = "The provider rejected this write; this attempt is not confirmed as successful. An independent read reports observed state only, even if it already matches the requested value.";
+
+fn rejected(request: &ApprovalRequest, p: &Proposal) -> bool {
+    p.failure_code.as_deref() == Some("provider_http_rejected")
+        || (p.state == "completed" && request.activity_outcome.as_deref() == Some("failed"))
+}
+
+fn event_source_matches(
+    event: &crate::models::assistant_conversation::AgentEvent,
+    p: &Proposal,
+) -> bool {
+    event.kind == "permission_decided"
+        && event.bound
+        && event.report_to == p.report_to
+        && event.invocation_id == p.invocation_id
+        && event
+            .execution_task
+            .as_ref()
+            .is_some_and(|task| super::super::super::supervisor_write::same_task(task, &p.task))
+        && event.channel_contexts.is_empty()
+}
+
+async fn require_durable_event(
+    db: &Database,
+    row: &AssistantConversation,
+    turn: &crate::models::assistant_conversation::ActiveTurn,
+    event: &crate::models::assistant_conversation::AgentEvent,
+    p: &Proposal,
+) -> AppResult<()> {
+    if turn.origin != crate::models::assistant_conversation::TurnOrigin::Event
+        || !event_source_matches(event, p)
+        || turn.report_to != p.report_to
+        || turn.invocation_id != p.invocation_id
+    {
+        return Err(refused());
+    }
+    let stored = db
+        .collection::<Document>("assistant_conversations")
+        .find_one(doc! {
+            "_id":&row.id,"user_id":&row.user_id,"credential_api_key_id":&p.key_id,
+            "active_turn.turn_id":&turn.turn_id,"active_turn.stop_requested":false,
+            "active_turn.report_to":&p.report_to,"active_turn.invocation_id":&p.invocation_id
+        })
+        .projection(doc! {"active_turn.events":1})
+        .await?
+        .ok_or_else(refused)?;
+    let events: Vec<crate::models::assistant_conversation::AgentEvent> = bson::from_bson(
+        stored
+            .get_document("active_turn")
+            .map_err(encoding)?
+            .get("events")
+            .cloned()
+            .ok_or_else(refused)?,
+    )
+    .map_err(encoding)?;
+    if !events
+        .iter()
+        .any(|stored| stored.id == event.id && event_source_matches(stored, p))
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -124,28 +189,41 @@ pub(crate) async fn resume_turn_with_readback(
         return Ok(Some(ResumeOutcome {
             text: note,
             specialist_readback: None,
+            provider_notice: None,
         }));
     }
     let Some(turn) = row.active_turn.as_ref() else {
         return Ok(None);
     };
-    let ids: Vec<_> = turn
+    let decisions: Vec<_> = turn
         .events
         .iter()
-        .filter_map(|e| e.id.strip_prefix("execution-decision:"))
+        .filter_map(|event| {
+            event
+                .id
+                .strip_prefix("execution-decision:")
+                .map(|id| (event, id))
+        })
         .collect();
-    if ids.is_empty() {
+    if decisions.is_empty() {
         return Ok(None);
+    }
+    if decisions
+        .iter()
+        .any(|(event, _)| event.kind != "permission_decided")
+    {
+        return Err(refused());
     }
     // A readback-only model input cannot replace notices for other coalesced
     // decisions. Multiple approved writes keep explicit per-occurrence status
     // and unverified readback; none silently chooses another write's target.
-    let single_result = ids.len() == 1 && turn.events.len() == 1;
+    let single_result = decisions.len() == 1 && turn.events.len() == 1;
     let mut notes = Vec::new();
     let mut readbacks = Vec::new();
+    let mut provider_notice = None;
     let mut reviews = presentation::ReviewNotes::default();
     let mut seen = std::collections::HashSet::new();
-    for id in ids {
+    for (event, id) in decisions {
         // Replayed wake IDs are the same receipt, never another operation.
         if !seen.insert(id) {
             continue;
@@ -160,7 +238,13 @@ pub(crate) async fn resume_turn_with_readback(
         let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id})).await?.ok_or_else(missing)?;
         let p = proposal(&request)?;
         let version = AssistantVersion::of(&request)?;
+        if version == AssistantVersion::V5 {
+            require_durable_event(&state.db, row, turn, event, p).await?;
+        }
         if turn.execution_task.as_ref().is_none_or(|t| {
+            if version == AssistantVersion::V5 {
+                return !super::super::super::supervisor_write::same_task(t, &p.task);
+            }
             t.task != p.task.task
                 || t.epoch != p.task.epoch
                 || t.actor_user_id != p.task.actor_user_id
@@ -178,6 +262,10 @@ pub(crate) async fn resume_turn_with_readback(
         }
         if p.state == "completed" {
             if version == AssistantVersion::V5 {
+                if rejected(&request, p) {
+                    notes.push(associated(format!("{PROVIDER_REJECTION} No independent readback is verified in this recovery. Do not repeat the write.")));
+                    continue;
+                }
                 notes.push(associated("The retained write has a provider receipt, but no independent readback is verified in this recovery. Do not repeat it; the final row state is unconfirmed.".into()));
                 continue;
             }
@@ -282,6 +370,14 @@ pub(crate) async fn resume_turn_with_readback(
         let readback = if single_result
             && version == AssistantVersion::V5
             && row.is_subagent()
+            && resume.effect.supervisor.as_ref().is_some_and(|origin| {
+                origin.marked.operation_id == p.effect_id
+                    && origin.marked.origin_turn == p.source_turn_id
+                    && super::super::super::supervisor_write::same_task(
+                        &origin.marked.task,
+                        &p.task,
+                    )
+            })
             && p.report_to.as_deref()
                 == resume
                     .effect
@@ -316,6 +412,10 @@ pub(crate) async fn resume_turn_with_readback(
         let (state_name, text, code) = match outcome {
             Ok(response) if sent => {
                 let status = response.status();
+                let provider_rejected = version == AssistantVersion::V5 && !status.is_success();
+                if provider_rejected {
+                    activity_outcome = Some("failed");
+                }
                 match tokio::time::timeout(std::time::Duration::from_secs(120),axum::body::to_bytes(response.into_body(),MAX_PAYLOAD)).await {
                     Ok(Ok(bytes))=>{
                         let text=String::from_utf8_lossy(&bytes);
@@ -325,9 +425,10 @@ pub(crate) async fn resume_turn_with_readback(
                         };
                         let result=format!("Operation finished (HTTP {}).\n{}",status.as_u16(),text.chars().take(16_384).collect::<String>());
                         private_result=Some(result.clone());
-                        activity_outcome = Some(if status.is_success() { "completed" } else { "failed" });
-                        ("completed",if row.group_id.is_some() || row.collaboration.is_some(){format!("Operation finished (HTTP {}). The private result is available on the requester's permission card.",status.as_u16())}else{result},None)
+                        activity_outcome = Some(if status.is_success() {"completed"}else{"failed"});
+                        ("completed",if row.group_id.is_some() || row.collaboration.is_some(){format!("Operation finished (HTTP {}). The private result is available on the requester's permission card.",status.as_u16())}else{result},provider_rejected.then_some("provider_http_rejected"))
                     },
+                    _ if provider_rejected => ("completed", format!("{PROVIDER_REJECTION} HTTP {}. The response body was unavailable.",status.as_u16()), Some("provider_http_rejected")),
                     _=>("unknown","The response was incomplete or unavailable. The operation will not be sent again.".into(),Some("response_unavailable")),
                 }
             }
@@ -431,9 +532,15 @@ pub(crate) async fn resume_turn_with_readback(
             if state_name == "unknown" {
                 readback.push_str(" The write outcome is unknown. Report any current state as an observation only; it does not prove this write attempt caused it.");
             }
+            if activity_outcome == Some("failed") {
+                readback.push_str(&format!(" {PROVIDER_REJECTION} Preserve the rejection in your report to NyxBot; do not infer a successful write from the read."));
+                provider_notice = Some(PROVIDER_REJECTION);
+            }
             readbacks.push(readback);
         }
-        if !single_result && version == AssistantVersion::V5 && sent {
+        if version == AssistantVersion::V5 && sent && activity_outcome == Some("failed") {
+            notes.push(associated(format!("{PROVIDER_REJECTION} The independent readback is unverified in this receipt; do not repeat the write.")));
+        } else if !single_result && version == AssistantVersion::V5 && sent {
             notes.push(format!("Request {id}: the write attempt is {state_name}; independent readback is unverified and the final row state is unconfirmed. Do not repeat the write."));
         } else {
             notes.push(associated(text));
@@ -443,6 +550,7 @@ pub(crate) async fn resume_turn_with_readback(
     Ok(Some(ResumeOutcome {
         text: notes.join("\n\n"),
         specialist_readback: (!readbacks.is_empty()).then(|| readbacks.join("\n\n")),
+        provider_notice,
     }))
 }
 /// Called only after first-party-human ownership checks. Public projections

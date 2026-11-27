@@ -319,12 +319,22 @@ with its own current key, grants and task, then settles its observed result
 through the original assignment to NyxBot. Other retained receipts keep their
 normal result behavior. A failed read reports an unconfirmed final state.
 Only a single execution decision in its own event turn enters this readback
-model path. Coalesced decisions retain their individual request identifiers and
+model path. Its `permission_decided` kind, bound assignment, invocation and task
+must match the durable proposal and current stored turn. Task-root and assigning
+event proofs retain their separate event/turn/deadline identities and live checks;
+display-only audience labels never decide source identity.
+Coalesced decisions retain their individual request identifiers and
 safe status notices, and report attempted writes without verified readback;
 they do not select an arbitrary row for the specialist to read.
 Recovery after a terminal receipt or uncertain dispatch never resends the write:
 when independent readback is not verified, it reports that limitation explicitly.
 An observation after uncertainty does not prove that this write caused the state.
+A provider non-2xx remains a rejected write attempt even when the HTTP exchange
+is complete or an independent read observes the requested value. A bounded
+rejection notice survives the specialist report, coalesced receipts and terminal
+recovery; another occurrence's failed receipt cannot label a later write failed.
+The exact marked wait reads its configured timeout without materializing default
+notification settings after execution authority has been captured.
 
 For the merchant workflow, the supervisor first asks the specialist to read the
 test row using the published `bitable_records_search`, then tells the owner the

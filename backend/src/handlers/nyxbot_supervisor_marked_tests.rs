@@ -60,6 +60,15 @@ async fn marked_owner(j: &Journey, text: &str, id: &str) -> Response {
 
 async fn marked_assign(j: &Journey, text: &str, id: &str) -> tokio::task::JoinHandle<String> {
     let card = owner_text(&body_text(marked_owner(j, text, &format!("{id}-ask")).await).await);
+    if !regex::Regex::new(r"yes ([0-9]{4})")
+        .unwrap()
+        .is_match(&card)
+    {
+        panic!(
+            "a fresh assignment needs its own owner-facing code: {}",
+            review_diagnostics(j).await
+        );
+    }
     let code = delegation_code(&card);
     let response = marked_owner(j, &format!("yes {code}"), &format!("{id}-assign")).await;
     tokio::spawn(body_text(response))
@@ -136,7 +145,7 @@ fn choice(row: &ApprovalRequest, name: &str, key: &str) -> proposals::Decision {
 }
 
 async fn web_allow(j: &Journey, row: &ApprovalRequest, name: &str, key: &str) {
-    crate::handlers::approvals::decide_execution_request(
+    let Json(response) = crate::handlers::approvals::decide_execution_request(
         State(j.state.clone()),
         crate::test_utils::test_auth_user(OWNER),
         Path(row.id.clone()),
@@ -144,6 +153,17 @@ async fn web_allow(j: &Journey, row: &ApprovalRequest, name: &str, key: &str) {
     )
     .await
     .unwrap();
+    assert_eq!(response.id, row.id);
+    assert_eq!(response.status, "approved");
+    assert_eq!(response.decision_channel.as_deref(), Some("web"));
+    assert!(
+        response
+            .execution_proposal
+            .as_ref()
+            .is_some_and(
+                |p| p.version == row.execution_proposal.as_ref().unwrap().version && p.supported
+            )
+    );
 }
 
 async fn reject_ordinary_web(j: &Journey, review: &ApprovalRequest) {
@@ -185,7 +205,7 @@ async fn later_dm_report(
     let binding = review.supervisor_write.as_ref().unwrap();
     let task = &binding.marked.as_ref().unwrap().task;
     assert_eq!(binding.source.channel.channel_id, j.channel.id);
-    tokio::time::timeout(Duration::from_secs(25), async {
+    let result = tokio::time::timeout(Duration::from_secs(25), async {
         loop {
             let owner_turn = j
                 .observed
@@ -234,8 +254,18 @@ async fn later_dm_report(
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .expect("a later send must match the exact specialist settlement, task and owner turn")
+    .await;
+    match result {
+        Ok(report) => report,
+        Err(_) => panic!(
+            "a later send must match specialist turn {}, agent {}, task {} and owner {}: {}",
+            binding.specialist_turn,
+            binding.specialist_agent,
+            task.task.root_id,
+            binding.source.channel.conversation_id,
+            review_diagnostics(j).await
+        ),
+    }
 }
 
 async fn reject_other_routes(j: &Journey, review: &ApprovalRequest, code: &str) {
@@ -352,6 +382,195 @@ fn remove_adapter(j: &Journey) {
         .remove(&j.channel.channel_bot_id);
 }
 
+#[tokio::test]
+async fn supervisor_write_marked_rejection_survives_readback_recovery_and_later_success() {
+    for (proxy, already_matches) in [(false, false), (true, true)] {
+        let j = Box::pin(marked_journey(proxy)).await;
+        let proposal = initial_gap(&j).await;
+        j.script.reject_write.store(true, Ordering::SeqCst);
+        j.script.hold_readback.store(true, Ordering::SeqCst);
+        if already_matches {
+            j.ledger.lock().unwrap().target = "Approved".into();
+        }
+        web_allow(&j, &proposal, "persistent", &Uuid::new_v4().to_string()).await;
+        let (review, code) = wait_review(&j).await;
+        let delivery = cursor(&j).await;
+        let _ = body_text(owner(&j, &format!("yes write-{code}"), "ws7-provider-reject-yes").await)
+            .await;
+        let completed = wait_terminal(&j, &proposal.id).await;
+        assert_eq!(completed.activity_outcome.as_deref(), Some("failed"));
+        let p = proposals::proposal(&completed).unwrap();
+        assert_eq!(p.state, "completed");
+        assert_eq!(p.failure_code.as_deref(), Some("provider_http_rejected"));
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !j
+                .observed
+                .lock()
+                .await
+                .iter()
+                .any(|e| e["stage"] == "readback_started")
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let row = engine::get(&j.state.db, OWNER, &p.conversation_id)
+            .await
+            .unwrap();
+        let egress = crate::handlers::assistant_nyxagent::http_egress(
+            j.state.clone(),
+            crate::test_utils::test_auth_user(OWNER),
+        );
+        for prior_code in [true, false] {
+            if !prior_code {
+                // A previously stored failed receipt may predate the explicit
+                // rejection code; its exact request still records failed activity.
+                j.state
+                    .db
+                    .collection::<Document>("approval_requests")
+                    .update_one(
+                        doc! {"_id":&proposal.id},
+                        doc! {"$set":{"execution_proposal.v4.failure_code":null}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            let recovered = proposals::resume_turn_with_readback(&j.state, egress.as_ref(), &row)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(recovered.text.contains("provider rejected"));
+            assert!(recovered.specialist_readback.is_none());
+            assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
+        }
+        j.script.release.add_permits(1);
+        let final_report = later_dm_report(&j, &delivery, &review, "provider rejected").await;
+        let observed = if already_matches {
+            "Approved"
+        } else {
+            "Pending"
+        };
+        assert_row_report(&final_report, &j, observed, 3);
+        assert!(
+            final_report.contains("not confirmed as successful")
+                && final_report.contains("observed state only")
+        );
+        {
+            let ledger = j.ledger.lock().unwrap();
+            assert_eq!(ledger.rejected, [j.script.selected.clone()]);
+            assert_eq!(ledger.target, observed);
+            assert_eq!(ledger.control, "Untouched");
+            assert_eq!(
+                ledger.writes,
+                [(
+                    j.script.selected.clone(),
+                    json!({"fields":{"Status":"Approved"}})
+                )]
+            );
+        }
+        let binding = review.supervisor_write.as_ref().unwrap();
+        wait_idle(&j, &binding.specialist_conversation).await;
+        wait_idle(&j, &binding.source.channel.conversation_id).await;
+        // A different current occurrence uses the saved permission, a fresh
+        // exact DM decision, and a real successful exchange. The older failed
+        // receipt must not contaminate its readback or owner-facing result.
+        j.script.reject_write.store(false, Ordering::SeqCst);
+        j.script.hold_readback.store(false, Ordering::SeqCst);
+        let result = marked_assign(&j, &j.script.selection(), "ws7-after-rejection").await;
+        let (next, code) = wait_review(&j).await;
+        assert_ne!(next.id, review.id);
+        let _ = body_text(owner(&j, &format!("yes write-{code}"), "ws7-after-rejection-yes").await)
+            .await;
+        let report = owner_text(
+            &tokio::time::timeout(Duration::from_secs(25), result)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert_row_report(&report, &j, "Approved", 5);
+        assert!(
+            !report.contains("provider rejected")
+                && !report.contains("not confirmed as successful")
+        );
+        let ledger = j.ledger.lock().unwrap();
+        assert_eq!(ledger.writes.len(), 2);
+        assert_eq!(ledger.rejected.len(), 1);
+        assert_eq!(ledger.target, "Approved");
+        assert_eq!(ledger.control, "Untouched");
+        drop(ledger);
+        remove_adapter(&j);
+    }
+}
+
+#[tokio::test]
+async fn supervisor_write_marked_wrong_event_kind_or_assignment_cannot_resume_or_read() {
+    for fault in ["kind", "assignment", "invocation"] {
+        let j = Box::pin(marked_journey(false)).await;
+        let proposal = initial_gap(&j).await;
+        let p = proposals::proposal(&proposal).unwrap();
+        proposals::decide(
+            &j.state,
+            OWNER,
+            &proposal.id,
+            &choice(&proposal, "operation", &Uuid::new_v4().to_string()),
+        )
+        .await
+        .unwrap();
+        // The real web decision creates the durable source. Change one
+        // negative fixture property, then consume it via the normal wake path.
+        let field = match fault {
+            "kind" => "pending_events.$[decision].kind",
+            "assignment" => "pending_events.$[decision].report_to",
+            _ => "pending_events.$[decision].invocation_id",
+        };
+        let mut set = doc! {};
+        set.insert(
+            field,
+            if fault == "kind" {
+                "message"
+            } else {
+                "unrelated-source"
+            },
+        );
+        j.state
+            .db
+            .collection::<Document>("assistant_conversations")
+            .update_one(doc! {"_id":&p.conversation_id}, doc! {"$set":set})
+            .array_filters(vec![
+                doc! {"decision.id":format!("execution-decision:{}",proposal.id)},
+            ])
+            .await
+            .unwrap();
+        crate::handlers::assistant_team::wake(&j.state, OWNER, &p.conversation_id).await;
+        wait_idle(&j, &p.conversation_id).await;
+        let stored = load(&j, &proposal.id).await;
+        assert_eq!(
+            proposals::proposal(&stored).unwrap().state,
+            "queued",
+            "{fault}"
+        );
+        assert_no_write(&j);
+        assert_eq!(
+            j.state
+                .db
+                .collection::<Document>("approval_requests")
+                .count_documents(doc! {"supervisor_write":{"$ne":null}})
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            !j.observed
+                .lock()
+                .await
+                .iter()
+                .any(|e| e["stage"] == "retained_readback")
+        );
+        remove_adapter(&j);
+    }
+}
+
 async fn wait_bound(j: &Journey) -> ApprovalRequest {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
@@ -384,6 +603,37 @@ async fn supervisor_write_marked_retained_http_and_mcp_need_web_and_dm_then_spec
         let (review, code) = wait_review(&j).await;
         let binding = review.supervisor_write.as_ref().unwrap();
         assert_eq!(binding.version, 2);
+        let task = &proposals::proposal(&proposal).unwrap().task;
+        assert!(
+            !task
+                .channel_source
+                .as_ref()
+                .unwrap()
+                .audience_label
+                .is_empty()
+        );
+        assert!(binding.source.channel.audience_label.is_empty());
+        let mut display_only = task.clone();
+        display_only
+            .channel_source
+            .as_mut()
+            .unwrap()
+            .audience_label
+            .clear();
+        assert!(crate::services::supervisor_write::same_task(
+            task,
+            &display_only
+        ));
+        display_only
+            .channel_source
+            .as_mut()
+            .unwrap()
+            .event_id
+            .push_str("-different");
+        assert!(!crate::services::supervisor_write::same_task(
+            task,
+            &display_only
+        ));
         assert_eq!(
             binding.marked.as_ref().unwrap().operation_id,
             proposals::proposal(&proposal).unwrap().effect_id
@@ -403,10 +653,21 @@ async fn supervisor_write_marked_retained_http_and_mcp_need_web_and_dm_then_spec
         let dm = body_text(owner(&j, &format!("yes write-{code}"), "ws7-marked-dm").await).await;
         assert!(dm.contains("Write approval saved"));
         assert_eq!(
-            proposals::proposal(&wait_terminal(&j, &proposal.id).await)
-                .unwrap()
-                .state,
-            "completed"
+            j.state
+                .db
+                .collection::<Document>("notification_channels")
+                .count_documents(doc! {"user_id":OWNER})
+                .await
+                .unwrap(),
+            0,
+            "the exact marked review must not materialize default settings after capture"
+        );
+        let terminal = wait_terminal(&j, &proposal.id).await;
+        assert_eq!(
+            proposals::proposal(&terminal).unwrap().state,
+            "completed",
+            "{}",
+            review_diagnostics(&j).await
         );
         let marker = if failed_read {
             NO_CONFIRMATION.to_owned()
@@ -910,9 +1171,11 @@ async fn supervisor_write_marked_terminal_recovery_is_unverifiable_and_never_rep
 #[tokio::test]
 async fn supervisor_write_marked_coalesced_decisions_preserve_notices_and_do_not_choose_a_read_target()
  {
-    let j = Box::pin(marked_journey(false)).await;
-    let approved = initial_gap_stage(&j, 2).await;
-    let denied = j
+    for failed in [false, true] {
+        let j = Box::pin(marked_journey(false)).await;
+        let approved = initial_gap_stage(&j, 2).await;
+        j.script.reject_write.store(failed, Ordering::SeqCst);
+        let denied = j
         .state
         .db
         .collection::<ApprovalRequest>("approval_requests")
@@ -922,52 +1185,57 @@ async fn supervisor_write_marked_coalesced_decisions_preserve_notices_and_do_not
         .await
         .unwrap()
         .unwrap();
-    // Commit both real web decisions before the ordinary wake so the engine
-    // consumes one turn with mixed outcomes, as in the coalescing contract.
-    proposals::decide(
-        &j.state,
-        OWNER,
-        &approved.id,
-        &choice(&approved, "operation", &Uuid::new_v4().to_string()),
-    )
-    .await
-    .unwrap();
-    let mut rejection = choice(&denied, "operation", &Uuid::new_v4().to_string());
-    rejection.approved = false;
-    proposals::decide(&j.state, OWNER, &denied.id, &rejection)
+        // Commit both real web decisions before the ordinary wake so the engine
+        // consumes one turn with mixed outcomes, as in the coalescing contract.
+        proposals::decide(
+            &j.state,
+            OWNER,
+            &approved.id,
+            &choice(&approved, "operation", &Uuid::new_v4().to_string()),
+        )
         .await
         .unwrap();
-    let conversation = proposals::proposal(&approved)
-        .unwrap()
-        .conversation_id
-        .clone();
-    crate::handlers::assistant_team::wake(&j.state, OWNER, &conversation).await;
-    let (review, code) = wait_review(&j).await;
-    assert_no_write(&j);
-    assert!(
-        review
-            .resource
-            .as_ref()
-            .unwrap()
-            .ends_with(&j.script.selected)
-    );
-    let delivery = cursor(&j).await;
-    let _ = body_text(owner(&j, &format!("yes write-{code}"), "ws7-coalesced-dm").await).await;
-    let report = later_dm_report(&j, &delivery, &review, &approved.id).await;
-    assert!(
-        report.contains(&denied.id) && report.contains("denied") && report.contains("unconfirmed")
-    );
-    assert!(
-        !j.observed
-            .lock()
+        let mut rejection = choice(&denied, "operation", &Uuid::new_v4().to_string());
+        rejection.approved = false;
+        proposals::decide(&j.state, OWNER, &denied.id, &rejection)
             .await
-            .iter()
-            .any(|event| event["stage"] == "retained_readback")
-    );
-    let ledger = j.ledger.lock().unwrap();
-    assert_eq!(ledger.writes.len(), 1);
-    assert_eq!(ledger.writes[0].0, j.script.selected);
-    assert_eq!(ledger.control, "Untouched");
-    drop(ledger);
-    remove_adapter(&j);
+            .unwrap();
+        let conversation = proposals::proposal(&approved)
+            .unwrap()
+            .conversation_id
+            .clone();
+        crate::handlers::assistant_team::wake(&j.state, OWNER, &conversation).await;
+        let (review, code) = wait_review(&j).await;
+        assert_no_write(&j);
+        assert!(
+            review
+                .resource
+                .as_ref()
+                .unwrap()
+                .ends_with(&j.script.selected)
+        );
+        let delivery = cursor(&j).await;
+        let _ = body_text(owner(&j, &format!("yes write-{code}"), "ws7-coalesced-dm").await).await;
+        let report = later_dm_report(&j, &delivery, &review, &approved.id).await;
+        assert!(
+            report.contains(&denied.id)
+                && report.contains("denied")
+                && report.contains("unconfirmed")
+        );
+        assert_eq!(report.contains("provider rejected"), failed);
+        assert!(
+            !j.observed
+                .lock()
+                .await
+                .iter()
+                .any(|event| event["stage"] == "retained_readback")
+        );
+        let ledger = j.ledger.lock().unwrap();
+        assert_eq!(ledger.writes.len(), 1);
+        assert_eq!(ledger.writes[0].0, j.script.selected);
+        assert_eq!(ledger.target, if failed { "Pending" } else { "Approved" });
+        assert_eq!(ledger.control, "Untouched");
+        drop(ledger);
+        remove_adapter(&j);
+    }
 }

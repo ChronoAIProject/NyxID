@@ -508,7 +508,37 @@ fn eligible_chat(chat: &ChatAuthority, owner: &str) -> bool {
         && owner == chat.user_id
 }
 
-fn same_task(
+// Compare one proof's substantive identity, never its display label. The task
+// root and assigning event are separate proofs and may have different events,
+// turns and expiry; their own live validators remain independently required.
+fn same_channel_source(
+    a: Option<&crate::models::execution_permission_channel::ChannelSource>,
+    b: Option<&crate::models::execution_permission_channel::ChannelSource>,
+) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.version == b.version
+                && a.event_id == b.event_id
+                && a.actor_user_id == b.actor_user_id
+                && a.agent_id == b.agent_id
+                && a.conversation_id == b.conversation_id
+                && a.key_id == b.key_id
+                && a.original_turn_id == b.original_turn_id
+                && a.channel_id == b.channel_id
+                && a.thread_id == b.thread_id
+                && a.settings_thread_id == b.settings_thread_id
+                && a.channel_revision == b.channel_revision
+                && a.thread_revision == b.thread_revision
+                && a.audience_id == b.audience_id
+                && a.policy_digest == b.policy_digest
+                && a.expires_at == b.expires_at
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn same_task(
     a: &crate::models::execution_permission::TaskAdmission,
     b: &crate::models::execution_permission::TaskAdmission,
 ) -> bool {
@@ -517,7 +547,7 @@ fn same_task(
         && a.epoch == b.epoch
         && a.actor_user_id == b.actor_user_id
         && a.audience == b.audience
-        && a.channel_source == b.channel_source
+        && same_channel_source(a.channel_source.as_deref(), b.channel_source.as_deref())
         && a.hard_deadline == b.hard_deadline
         && !a.cancelled
         && !b.cancelled

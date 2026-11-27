@@ -1737,6 +1737,16 @@ pub(crate) async fn execute_owner_turn(
         .as_ref()
         .and_then(|r| r.specialist_readback.as_deref())
         .unwrap_or(text);
+    let provider_notice = resumed.as_ref().and_then(|r| r.provider_notice);
+    if let Some(notice) = provider_notice {
+        *partial = notice.into();
+    }
+    let preserve_provider_notice = |result: &mut TurnResult, partial: &mut String| {
+        if let Some(notice) = provider_notice {
+            result.text = format!("{notice}\n\n{}", result.text);
+            *partial = result.text.clone();
+        }
+    };
     let attempt = super::assistant_service_execution::begin_model_attempt(&state.db, row)
         .await
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
@@ -1757,7 +1767,16 @@ pub(crate) async fn execute_owner_turn(
         request_key_base,
     ))
     .await;
-    if let Some(fallback) = model_card_fallback(state, &attempt, row, &outcome, partial).await? {
+    if let Some(mut fallback) = model_card_fallback(state, &attempt, row, &outcome, partial)
+        .await
+        .map_err(|error| {
+            if let Some(notice) = provider_notice {
+                *partial = format!("{notice}\n\n{partial}");
+            }
+            error
+        })?
+    {
+        preserve_provider_notice(&mut fallback, partial);
         return Ok(fallback);
     }
     // A current callback refusal can precede any reply. Cancellation in either
@@ -1780,11 +1799,23 @@ pub(crate) async fn execute_owner_turn(
             .map_err(|_| TurnError::internal("assistant_unavailable", "recovery"))?;
         fallback.session_id = None;
         fallback.response_id = None;
+        preserve_provider_notice(&mut fallback, partial);
         *instruction_context = None;
         *partial = fallback.text.clone();
         return Ok(fallback);
     }
-    outcome
+    match outcome {
+        Ok(mut result) => {
+            preserve_provider_notice(&mut result, partial);
+            Ok(result)
+        }
+        Err(error) => {
+            if let Some(notice) = provider_notice {
+                *partial = format!("{notice}\n\n{partial}");
+            }
+            Err(error)
+        }
+    }
 }
 
 fn allows_fallback(error: &TurnError) -> bool {

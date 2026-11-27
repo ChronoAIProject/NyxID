@@ -21,6 +21,7 @@ mod marked_tests;
 #[derive(Default)]
 struct Ledger {
     writes: Vec<(String, Value)>,
+    rejected: Vec<String>,
     target: String,
     control: String,
     reads: Vec<String>,
@@ -164,6 +165,7 @@ struct Script {
     marked: std::sync::atomic::AtomicBool,
     repeat_after_resume: std::sync::atomic::AtomicBool,
     readback_fault: std::sync::atomic::AtomicBool,
+    reject_write: std::sync::atomic::AtomicBool,
     hold_readback: std::sync::atomic::AtomicBool,
     review_fault: std::sync::Mutex<Option<ReviewFault>>,
     stage: Arc<AtomicUsize>,
@@ -502,10 +504,27 @@ async fn model(
         script.selection()
     };
     let mut args = json!({"subagent":"accountant","text":task});
-    if let Some(card)=state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>("assistant_acknowledgements")
-        .find_one(doc! {"conversation_id":&row.id,"status":"allowed","tool_name":"nyxid__message_subagent"})
-        .sort(doc! {"created_at":-1}).await.unwrap() {
-        args["acknowledgement_id"]=json!(card.id);
+    let mut allowed =
+        doc! {"conversation_id":&row.id,"status":"allowed","tool_name":"nyxid__message_subagent"};
+    if let Some(task) = row
+        .active_turn
+        .as_ref()
+        .and_then(|t| t.execution_task.as_ref())
+    {
+        allowed.insert("execution_task.task", bson::to_bson(&task.task).unwrap());
+        allowed.insert("execution_task.epoch", task.epoch);
+    }
+    if let Some(card) = state
+        .db
+        .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+            "assistant_acknowledgements",
+        )
+        .find_one(allowed)
+        .sort(doc! {"created_at":-1})
+        .await
+        .unwrap()
+    {
+        args["acknowledgement_id"] = json!(card.id);
     }
     let result = mcp(state, raw, "nyxid__message_subagent", args).await;
     observed
@@ -578,6 +597,7 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
         marked: std::sync::atomic::AtomicBool::new(false),
         repeat_after_resume: std::sync::atomic::AtomicBool::new(false),
         readback_fault: std::sync::atomic::AtomicBool::new(false),
+        reject_write: std::sync::atomic::AtomicBool::new(false),
         hold_readback: std::sync::atomic::AtomicBool::new(false),
         review_fault: std::sync::Mutex::new(None),
         stage: stage.clone(),
@@ -647,6 +667,11 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             let mut r = written.lock().unwrap();
             r.writes.push((record.clone(), body.clone()));
+            if write_script.reject_write.load(Ordering::SeqCst) {
+                r.rejected.push(record);
+                return ResponseTemplate::new(403)
+                    .set_body_json(json!({"code":403,"msg":"provider rejected update"}));
+            }
             if record == write_script.selected {
                 r.target = body["fields"]["Status"].as_str().unwrap().into();
             } else {
@@ -964,6 +989,21 @@ async fn review_diagnostics(j: &Journey) -> Value {
             "active_turn.supervisor_source.channel.event_id":1,"active_turn.execution_task.version":1,
             "active_turn.execution_task.task.root_id":1})
         .limit(8).await.unwrap().try_collect::<Vec<_>>().await.unwrap();
+    let assignments = j
+        .state
+        .db
+        .collection::<Document>("assistant_acknowledgements")
+        .find(doc! {"user_id":OWNER,"tool_name":"nyxid__message_subagent"})
+        .projection(
+            doc! {"_id":1,"conversation_id":1,"status":1,"requested_turn_id":1,
+            "execution_task.task.root_id":1,"execution_task.epoch":1},
+        )
+        .limit(16)
+        .await
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
     let deliveries = j.state.db.collection::<Document>("audit_log")
         .find(doc! {"user_id":OWNER,"event_type":"nyxbot_channel_supplemental_delivery"})
         .projection(doc! {"_id":1,"event_data.purpose":1,"event_data.egress":1,"event_data.anchor":1,
@@ -1013,7 +1053,7 @@ async fn review_diagnostics(j: &Journey) -> Value {
         "Prepared binding without complete review: inspect supplemental delivery outcome and source anchor."
     };
     json!({"hint":hint,"database":j.state.db.name(),"proxy":j.script.proxy,
-        "stage":j.stage.load(Ordering::SeqCst),"approvals":approvals,"conversations":conversations,
+        "stage":j.stage.load(Ordering::SeqCst),"approvals":approvals,"conversations":conversations,"assignments":assignments,
         "supplemental_deliveries":deliveries,"approval_grants":grants,"tool_flags":tool_flags,
         "channel_requests":sent.len(),"sent_reviews":sent_reviews,"provider_reads":reads,"provider_writes":writes})
 }
@@ -1574,13 +1614,42 @@ async fn supervisor_write_signed_feishu_relay_returns_list_review_and_verified_r
         .unwrap();
     assert_row_report(report, &j, "Pending", 2);
     assert_row_report(report, &j, "Approved", 3);
-    direct_message(
-        &j,
-        &format!("yes write-{write_code}"),
-        "ws7-direct-write-yes",
-    )
-    .await
-    .unwrap();
+    let delivered = direct_texts(&j).await;
+    let events = j.state.db.collection::<Document>("nyxbot_events");
+    let replay_source = doc! {"channel_id":&j.channel.id,"event_id":"ws7-direct-write-yes"};
+    let before = events
+        .find_one(replay_source.clone())
+        .projection(doc! {"_id":1,"status":1,"conversation_id":1,"turn_id":1})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        direct_private(
+            &j.state,
+            &j.channel,
+            "ws7-direct-write-yes",
+            "ou_owner",
+            &format!("yes write-{write_code}")
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    let after = events
+        .find_one(replay_source.clone())
+        .projection(doc! {"_id":1,"status":1,"conversation_id":1,"turn_id":1})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "the duplicate acknowledges the original receipt"
+    );
+    assert_eq!(events.count_documents(replay_source).await.unwrap(), 1);
+    assert_eq!(
+        direct_texts(&j).await,
+        delivered,
+        "a duplicate must not send another message"
+    );
     {
         let ledger = j.ledger.lock().unwrap();
         assert_eq!(ledger.writes.len(), 1);

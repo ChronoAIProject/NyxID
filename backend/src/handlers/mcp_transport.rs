@@ -4628,10 +4628,20 @@ async fn wait_for_mcp_approval(
         .first()
         .cloned()
         .ok_or_else(|| "Approval recipient list unexpectedly empty".to_owned())?;
-    let channel = notification_service::get_or_create_channel(&state.db, &timeout_recipient)
-        .await
-        .map_err(|e| format!("Approval channel lookup failed: {e}"))?;
-    let timeout_secs = channel.approval_timeout_secs;
+    let timeout_secs = if auth
+        .execution_permission
+        .as_ref()
+        .is_some_and(|c| c.supervisor().is_some())
+    {
+        notification_service::approval_timeout_secs(&state.db, &timeout_recipient)
+            .await
+            .map_err(|e| format!("Approval timeout lookup failed: {e}"))?
+    } else {
+        notification_service::get_or_create_channel(&state.db, &timeout_recipient)
+            .await
+            .map_err(|e| format!("Approval channel lookup failed: {e}"))?
+            .approval_timeout_secs
+    };
     let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
         operation,
         pending.resolution.grant_scope.clone(),

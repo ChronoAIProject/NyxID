@@ -897,6 +897,16 @@ For an assigned single-record Bitable update, the operation family selects this
 floor independently of review serialization. An unrenderable effect or ambiguous
 header/provenance binding refuses admission before coverage or proposal creation;
 it does not remove the DM requirement.
+The marked connected wait reads an existing timeout or its implicit default
+without creating notification settings after the permission's authority snapshot.
+Retained readback requires a typed `permission_decided` event with its matching
+durable assignment and task. The exact request's provider rejection remains
+explicit in readback, coalesced and terminal notices; observing a matching row
+does not convert a rejected attempt into a successful write.
+For this bound retained path, `completed` records the finished HTTP exchange;
+a non-2xx records `activity_outcome: failed` and `provider_http_rejected` as its
+failure code. Recovery also preserves a prior exact receipt's failed activity
+when that receipt predates the explicit rejection code.
 
 Retained effects with this independent requirement use envelope version 5 and
 the existing `v4` storage arm, record binding and historical AAD. Their encrypted
