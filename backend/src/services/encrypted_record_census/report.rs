@@ -297,3 +297,6 @@ async fn run_page(census: &Census<'_>, store: &Store<'_>, state: &mut Checkpoint
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;
