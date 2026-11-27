@@ -1,4 +1,5 @@
 //! Real owner handlers, their source commit, and the required-audit relay.
+use crate::handlers::credential_record_fixtures::KeySecret;
 use axum::{
     Json,
     extract::{ConnectInfo, Path, State},
@@ -235,16 +236,23 @@ async fn fixture(case: Case) -> Fixture {
         .await
         .unwrap();
     let credential = uuid::Uuid::new_v4().to_string();
-    let encrypted = state
-        .encryption_keys
-        .encrypt(b"fixture-private-provider-token")
-        .await
-        .unwrap();
-    db.collection::<Document>("user_api_keys").insert_one(doc!{
-        "_id":&credential,"user_id":&owner,"label":"Fixture","credential_type":"oauth2",
-        "access_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
-        "status":"active","credential_epoch":1_i64,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
-    }).await.unwrap();
+    KeySecret::AccessToken
+        .insert(
+            &db,
+            &state.encryption_keys,
+            doc! {
+                "_id": &credential,
+                "user_id": &owner,
+                "label": "Fixture",
+                "credential_type": "oauth2",
+                "status": "active",
+                "credential_epoch": 1_i64,
+                "created_at": bson::DateTime::now(),
+                "updated_at": bson::DateTime::now(),
+            },
+            b"fixture-private-provider-token",
+        )
+        .await;
     let connection = uuid::Uuid::new_v4().to_string();
     let mut service = test_user_service(
         &connection,

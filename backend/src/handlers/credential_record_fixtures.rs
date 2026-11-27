@@ -21,6 +21,11 @@ pub(super) fn unrelated_encryption_keys() -> EncryptionKeys {
     EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x99; 32], None)))
 }
 
+pub(super) fn proxy_node_signing_secret() -> String {
+    "11".repeat(32)
+}
+
+#[derive(Clone, Copy)]
 pub(super) enum KeySecret {
     Credential,
     AccessToken,
@@ -28,28 +33,72 @@ pub(super) enum KeySecret {
 }
 
 impl KeySecret {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Credential => "credential_encrypted",
+            Self::AccessToken => "access_token_encrypted",
+            Self::OAuthClientId => "user_oauth_client_id_encrypted",
+        }
+    }
+
     pub(super) async fn set(self, keys: &EncryptionKeys, row: &mut UserApiKey, plaintext: &[u8]) {
-        let (field, slot) = match self {
-            Self::Credential => ("credential_encrypted", &mut row.credential_encrypted),
-            Self::AccessToken => ("access_token_encrypted", &mut row.access_token_encrypted),
-            Self::OAuthClientId => (
-                "user_oauth_client_id_encrypted",
-                &mut row.user_oauth_client_id_encrypted,
-            ),
+        let field = self.field();
+        let encrypted = credential_record_service::encrypt(
+            keys,
+            COLLECTION_NAME,
+            &row.id,
+            &row.user_id,
+            field,
+            plaintext,
+        )
+        .await
+        .unwrap();
+        let slot = match self {
+            Self::Credential => &mut row.credential_encrypted,
+            Self::AccessToken => &mut row.access_token_encrypted,
+            Self::OAuthClientId => &mut row.user_oauth_client_id_encrypted,
         };
-        *slot = Some(
-            credential_record_service::encrypt(
-                keys,
-                COLLECTION_NAME,
-                &row.id,
-                &row.user_id,
-                field,
-                plaintext,
-            )
-            .await
-            .expect("encrypt fixture key field"),
-        );
+        *slot = Some(encrypted);
         credential_record_service::mark_version(&mut row.secret_context_versions, keys, field);
+    }
+
+    pub(super) async fn insert(
+        self,
+        db: &mongodb::Database,
+        keys: &EncryptionKeys,
+        mut row: bson::Document,
+        plaintext: &[u8],
+    ) {
+        let field = self.field();
+        let bytes = credential_record_service::encrypt(
+            keys,
+            COLLECTION_NAME,
+            row.get_str("_id").unwrap(),
+            row.get_str("user_id").unwrap(),
+            field,
+            plaintext,
+        )
+        .await
+        .unwrap();
+        row.insert(
+            field,
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes,
+            },
+        );
+        let mut versions = Default::default();
+        credential_record_service::mark_version(&mut versions, keys, field);
+        if !versions.is_empty() {
+            row.insert(
+                credential_record_service::VERSIONS,
+                bson::to_bson(&versions).unwrap(),
+            );
+        }
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .insert_one(row)
+            .await
+            .unwrap();
     }
 }
 
