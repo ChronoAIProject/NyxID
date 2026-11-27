@@ -8,6 +8,19 @@ use crate::{
 use bson::{Document, doc};
 use serde_json::{Value, json};
 
+fn catalog_token(slug: &str) -> &'static str {
+    match slug {
+        "api-google-workspace" => "ws6workspace",
+        "api-google-sheets" => "ws6sheets",
+        _ => panic!("unexpected fixture catalog {slug}"),
+    }
+}
+
+fn catalog_label(slug: &str) -> String {
+    let token = catalog_token(slug);
+    format!("{token} {}", "L".repeat(199 - token.len()))
+}
+
 fn tool<'a>(list: &'a Value, name: &str) -> &'a Value {
     list["tools"]
         .as_array()
@@ -18,12 +31,17 @@ fn tool<'a>(list: &'a Value, name: &str) -> &'a Value {
 }
 
 async fn search(router: &axum::Router, key: &str, name: &str, compact: bool) -> Value {
+    // Qualified Google tool names share search terms. Use the connection label
+    // and operation to distinguish both catalogs before bounded search compacts
+    // the best match; partial matches can still appear in the full response.
+    let (slug, operation) = name.split_once("__").unwrap();
+    let query = format!("{} {operation}", catalog_token(slug));
     let result = mcp_request(
         router,
         key,
         "tools/call",
         json!({
-            "name":"nyx__search_tools", "arguments":{"query":name}
+            "name":"nyx__search_tools", "arguments":{"query":&query}
         }),
     )
     .await;
@@ -31,7 +49,10 @@ async fn search(router: &axum::Router, key: &str, name: &str, compact: bool) -> 
     assert!(result.to_string().len() <= 10_000);
     let search: Value =
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(search["matches"][0]["name"], name, "{search}");
+    assert_eq!(
+        search["matches"][0]["name"], name,
+        "query {query}: {search}"
+    );
     assert_eq!(
         search["matches"][0]["input_schema_omitted"] == true,
         compact,
@@ -195,12 +216,13 @@ async fn enrolled_sheets_discovery_guides_both_catalogs_and_preserves_ordinary_t
     let f = Box::pin(direct_fixture("enrolled_sheets_discovery")).await;
     let db = &f.state.db;
     google::seed(db).await;
-    let long_label = "L".repeat(200);
     let mut connections = Vec::new();
     let mut catalog_ids = Vec::new();
     let mut oversized_endpoint_ids = Vec::new();
     let mut rules = Vec::new();
     for slug in ["api-google-workspace", "api-google-sheets"] {
+        let long_label = catalog_label(slug);
+        assert_eq!(long_label.chars().count(), 200);
         let connection = google::connect(db, &f.owner, slug).await;
         let catalog_id = connection.catalog_service_id.as_deref().unwrap();
         let catalog = db
@@ -294,6 +316,7 @@ async fn enrolled_sheets_discovery_guides_both_catalogs_and_preserves_ordinary_t
             .unwrap();
         let list = seeded_tools_list(&router, owner_key.raw_key.as_str()).await;
         for slug in ["api-google-workspace", "api-google-sheets"] {
+            let long_label = catalog_label(slug);
             let name = format!("{slug}__sheets_append_values");
             let append = tool(&list, &name);
             let properties = &append["inputSchema"]["properties"];
@@ -402,6 +425,7 @@ async fn enrolled_sheets_discovery_guides_both_catalogs_and_preserves_ordinary_t
         .unwrap();
         let list = mcp_request(&router, key.raw_key.as_str(), "tools/list", json!({})).await;
         for slug in ["api-google-workspace", "api-google-sheets"] {
+            let long_label = catalog_label(slug);
             let read_name = format!("{slug}__sheets_get_values");
             let read = tool(&list, &read_name);
             assert_read_schema(read);
