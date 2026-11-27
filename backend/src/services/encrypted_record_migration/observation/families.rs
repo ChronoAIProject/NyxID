@@ -1,7 +1,12 @@
 use super::*;
-use crate::models::{default_request_header as headers, platform_credential::PlatformCredential};
+use crate::models::{
+    default_request_header as headers, oauth_state::OAuthState,
+    platform_credential::PlatformCredential,
+};
 use crate::services::{
-    oauth_broker_record_service as broker, oauth_client_webhook_record, platform_credential_service,
+    mfa_service, node_service, oauth_broker_record_service as broker, oauth_client_webhook_record,
+    oauth_state_record_service as oauth, platform_credential_service, saved_login_service,
+    ssh_ca_record_service as ssh,
 };
 use std::collections::HashSet;
 
@@ -236,6 +241,157 @@ impl Source<'_> {
             .await;
             out.check(field, result);
         }
+        Ok(())
+    }
+
+    pub(super) async fn personal(&self, out: &mut Observation) -> AppResult<()> {
+        let owner = text(self.row, "user_id")?;
+        let adapter = self.family.entry.adapter;
+        let version_field = if matches!(adapter, Adapter::Node) {
+            "signing_secret_context_version"
+        } else {
+            "secret_context_version"
+        };
+        let marker = marker(present(self.row, version_field))?;
+        for &field in self.family.entry.fields {
+            let result = async {
+                let Some(raw) = present(self.row, field) else {
+                    let absent = match adapter {
+                        Adapter::Mfa => {
+                            self.row.get_str("factor_type") == Ok("recovery_codes")
+                                && marker == Marker::Unmarked
+                        }
+                        Adapter::Node => marker == Marker::Unmarked,
+                        _ => field != "username_encrypted",
+                    };
+                    if !absent {
+                        return Err(invalid());
+                    }
+                    out.instances.push((field, Storage::Absent));
+                    return Ok(());
+                };
+                let bytes = credentials::stored_bytes(raw)?.ok_or_else(invalid)?;
+                self.record(
+                    out,
+                    field,
+                    owner,
+                    &[field],
+                    marker,
+                    &bytes,
+                    |p| match adapter {
+                        Adapter::Node => node_service::validate_signing_secret_hash(
+                            p,
+                            self.id,
+                            text(self.row, "signing_secret_hash")?,
+                        )
+                        .map(drop),
+                        Adapter::Mfa if self.row.get_str("factor_type") == Ok("totp") => {
+                            mfa_service::validate_factor_seed(p, owner)
+                        }
+                        Adapter::SavedLogin => saved_login_service::validate_plaintext(field, p),
+                        _ => Err(invalid()),
+                    },
+                )
+                .await
+            }
+            .await;
+            out.check(field, result);
+        }
+        Ok(())
+    }
+
+    pub(super) async fn ssh(&self, out: &mut Observation) -> AppResult<()> {
+        let field = self.family.entry.fields[0];
+        let config = present(self.row, "ssh_config")
+            .map(|v| {
+                bson::from_bson::<crate::models::downstream_service::SshServiceConfig>(v.clone())
+                    .map_err(|_| invalid())
+            })
+            .transpose()?;
+        let Some(config) = config else {
+            out.instances.push((field, Storage::Absent));
+            return Ok(());
+        };
+        let Some(bytes) = config.ca_private_key_encrypted else {
+            if config.ca_context_version.is_some()
+                || config.ca_public_key.is_some()
+                || config.certificate_auth_enabled
+            {
+                return Err(invalid());
+            }
+            out.instances.push((field, Storage::Absent));
+            return Ok(());
+        };
+        let public = config.ca_public_key.ok_or_else(invalid)?;
+        let marker = config
+            .ca_context_version
+            .map_or(Marker::Unmarked, |v| Marker::Version(v.into()));
+        self.record(
+            out,
+            field,
+            "platform",
+            &[field, "ca_public_key_sha256", &ssh::public_digest(&public)],
+            marker,
+            &bytes,
+            |p| ssh::validate_key(&public, p),
+        )
+        .await
+    }
+
+    pub(super) async fn oauth(&self, out: &mut Observation) -> AppResult<()> {
+        let state: OAuthState = bson::from_document(self.metadata()).map_err(|_| invalid())?;
+        for &field in self.family.entry.fields {
+            let result = async {
+                let Some(raw) = present(self.row, field) else {
+                    out.instances.push((field, Storage::Absent));
+                    return Ok(());
+                };
+                let encoded = raw.as_str().ok_or_else(invalid)?;
+                let (marker, version, hex) = match encoded.strip_prefix(oauth::PREFIX) {
+                    Some(hex) => (Marker::HexPrefixV3, Some(3), hex),
+                    None => (Marker::Unmarked, None, encoded),
+                };
+                let path = oauth::path(&state, field);
+                let context = oauth::context(&state, &path)?;
+                out.open(
+                    self.keys,
+                    field,
+                    marker,
+                    Binding::Record(version, &context),
+                    &hex::decode(hex).map_err(|_| invalid())?,
+                    oauth::validate,
+                )
+                .await;
+                Ok(())
+            }
+            .await;
+            out.check(field, result);
+        }
+        let pending = async {
+            let Some(raw) = present(self.row, "pending_callback") else {
+                out.instances.push((CALLBACK, Storage::Absent));
+                return Ok(());
+            };
+            let pending: crate::models::oauth_state::PendingOAuthCallback =
+                bson::from_bson(raw.clone()).map_err(|_| invalid())?;
+            let path = ["pending_callback", &state.provider_config_id, &pending.id];
+            let bytes = hex::decode(&pending.encrypted_code).map_err(|_| invalid())?;
+            self.record(
+                out,
+                CALLBACK,
+                &state.user_id,
+                &path,
+                Marker::ImplicitV3,
+                &bytes,
+                |p| {
+                    uuid::Uuid::parse_str(&pending.id).map_err(|_| invalid())?;
+                    bounded_text(p, 8192)
+                },
+            )
+            .await
+        }
+        .await;
+        out.check(CALLBACK, pending);
         Ok(())
     }
 }

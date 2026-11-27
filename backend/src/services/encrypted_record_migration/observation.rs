@@ -20,6 +20,8 @@ pub(crate) struct Family {
     pub(crate) source_companions: &'static [&'static str],
 }
 
+const CALLBACK: &str = "pending_callback.encrypted_code";
+
 pub(crate) fn families() -> impl Iterator<Item = Family> {
     REGISTRY.iter().filter_map(|entry| {
         let companions: &[_] = match entry.adapter {
@@ -48,6 +50,29 @@ pub(crate) fn families() -> impl Iterator<Item = Family> {
                 "secret_context_versions",
                 "channel_signing_preparation",
             ],
+            Adapter::Node => &[
+                "user_id",
+                "signing_secret_context_version",
+                "signing_secret_hash",
+            ],
+            Adapter::Mfa => &["user_id", "secret_context_version", "factor_type"],
+            Adapter::SavedLogin => &["user_id", "secret_context_version"],
+            Adapter::CatalogCa => &[
+                "ssh_config.ca_public_key",
+                "ssh_config.ca_context_version",
+                "ssh_config.certificate_auth_enabled",
+            ],
+            Adapter::OAuthState => &[
+                "user_id",
+                "target_user_id",
+                "credential_user_id",
+                "connection_id",
+                "provider_config_id",
+                "created_at",
+                "expires_at",
+                "pending_callback.id",
+                "pending_callback.expires_at",
+            ],
             Adapter::Broker => &["user_id", "client_id", "secret_context_versions", "revoked"],
             Adapter::OAuthWebhook => &["created_by", "secret_context_versions"],
             _ => return None,
@@ -63,6 +88,8 @@ pub(crate) fn families() -> impl Iterator<Item = Family> {
 pub(crate) enum Marker {
     Unmarked,
     Version(u32),
+    HexPrefixV3,
+    ImplicitV3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,7 +203,11 @@ impl Family {
         self.entry.collection
     }
     pub(crate) fn fields(&self) -> impl Iterator<Item = &'static str> {
-        self.entry.fields.iter().copied()
+        self.entry
+            .fields
+            .iter()
+            .copied()
+            .chain(matches!(self.entry.adapter, Adapter::OAuthState).then_some(CALLBACK))
     }
 
     pub(crate) async fn observe(&self, keys: &EncryptionKeys, row: &Document) -> Observation {
@@ -205,20 +236,28 @@ impl Family {
                 | Adapter::Broker => source.credentials(&mut out).await,
                 Adapter::PlatformCredential => source.platform(&mut out).await,
                 Adapter::Header => source.headers(&mut out).await,
+                Adapter::Node | Adapter::Mfa | Adapter::SavedLogin => {
+                    source.personal(&mut out).await
+                }
+                Adapter::CatalogCa => source.ssh(&mut out).await,
+                Adapter::OAuthState => source.oauth(&mut out).await,
                 _ => Err(invalid()),
             }
         }
         .await;
         out.check(self.entry.fields[0], observed);
-        for (field, storage) in &out.instances {
-            if matches!(
-                storage,
-                Storage::Encrypted {
-                    contract: Contract::Unbound,
-                    ..
+        // Node hashes and SSH public keys independently corroborate old plaintext.
+        if !matches!(self.entry.adapter, Adapter::Node | Adapter::CatalogCa) {
+            for (field, storage) in &out.instances {
+                if matches!(
+                    storage,
+                    Storage::Encrypted {
+                        contract: Contract::Unbound,
+                        ..
+                    }
+                ) {
+                    out.findings.push((*field, Finding::AmbiguousBinding));
                 }
-            ) {
-                out.findings.push((*field, Finding::AmbiguousBinding));
             }
         }
         out
@@ -244,6 +283,7 @@ impl Source<'_> {
         let version = match marker {
             Marker::Unmarked => None,
             Marker::Version(v) => Some(v),
+            Marker::HexPrefixV3 | Marker::ImplicitV3 => Some(3),
         };
         out.open(
             self.keys,

@@ -333,7 +333,7 @@ async fn decrypt_field(
     validate_plaintext(field, &plaintext)?;
     Ok(plaintext)
 }
-fn validate_plaintext(field: &str, value: &[u8]) -> AppResult<()> {
+pub(super) fn validate_plaintext(field: &str, value: &[u8]) -> AppResult<()> {
     let text = std::str::from_utf8(value)
         .map_err(|_| AppError::Internal("Saved login encoding unavailable".into()))?;
     let max = match field {

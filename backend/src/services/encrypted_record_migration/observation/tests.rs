@@ -67,7 +67,9 @@ async fn inspect(f: &Family, k: &EncryptionKeys, row: &Document) -> Observation 
 
 // Construct the documented wire contracts independently of the observation branch.
 async fn fixture(f: &Family, keys: &EncryptionKeys, current: bool) -> Document {
-    use crate::services::oauth_broker_record_service as broker;
+    use crate::services::{
+        oauth_broker_record_service as broker, oauth_state_record_service as oauth,
+    };
     let coll = f.collection();
     let field = f.entry.fields[0];
     let id = hash_token("observation-fixture");
@@ -103,6 +105,49 @@ async fn fixture(f: &Family, keys: &EncryptionKeys, current: bool) -> Document {
                 versions.insert("alpha", 3);
             }
         }
+        Adapter::CatalogCa => {
+            let ca =
+                ssh_key::PrivateKey::random(&mut rand::rngs::OsRng, ssh_key::Algorithm::Ed25519)
+                    .unwrap();
+            let public = ca.public_key().to_openssh().unwrap();
+            let bytes = crate::services::ssh_ca_record_service::encrypt(
+                keys,
+                &id,
+                &public,
+                ca.to_openssh(ssh_key::LineEnding::LF).unwrap().as_bytes(),
+            )
+            .await
+            .unwrap();
+            let mut config = doc! {"host":"host","port":22,"ca_public_key":public,"ca_private_key_encrypted":bin(bytes)};
+            if current {
+                config.insert("ca_context_version", 3);
+            }
+            row.insert("ssh_config", config);
+        }
+        Adapter::OAuthState => {
+            let state = bson::from_document(row.clone()).unwrap();
+            for &name in f.entry.fields {
+                row.insert(
+                    name,
+                    oauth::encrypt(keys, &state, name, b"fixture")
+                        .await
+                        .unwrap(),
+                );
+            }
+            // Expired continuations remain dependencies until MongoDB removes the row.
+            let continuation = uuid::Uuid::new_v4().to_string();
+            let callback_keys = test_encryption_keys();
+            let bytes = seal(
+                &callback_keys,
+                coll,
+                &id,
+                "owner",
+                &["pending_callback", "provider", &continuation],
+                b"code",
+            )
+            .await;
+            row.insert("pending_callback",doc!{"id":continuation,"encrypted_code":hex::encode(bytes),"expires_at":DateTime::from_millis(0)});
+        }
         Adapter::Broker => {
             row.insert(
                 field,
@@ -121,7 +166,21 @@ async fn fixture(f: &Family, keys: &EncryptionKeys, current: bool) -> Document {
                     _ if coll == "provider_configs" => "platform",
                     _ => "owner",
                 };
-                let clear = "value";
+                let clear = match f.entry.adapter {
+                    Adapter::Mfa => {
+                        row.insert("factor_type", "totp");
+                        "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".into()
+                    }
+                    Adapter::Node => {
+                        let s = "2a".repeat(32);
+                        row.insert("signing_secret_hash", hash_token(&s));
+                        s
+                    }
+                    Adapter::SavedLogin if name == "totp_secret_encrypted" => {
+                        "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP".into()
+                    }
+                    _ => "value".to_owned(),
+                };
                 let mut path = vec![name];
                 if matches!(f.entry.adapter, Adapter::Connection) {
                     path.extend(["service_id", "service"]);
@@ -138,7 +197,17 @@ async fn fixture(f: &Family, keys: &EncryptionKeys, current: bool) -> Document {
                     ),
                 );
                 if current {
-                    versions.insert(name, 3);
+                    match f.entry.adapter {
+                        Adapter::Mfa | Adapter::SavedLogin => {
+                            row.insert("secret_context_version", 3);
+                        }
+                        Adapter::Node => {
+                            row.insert("signing_secret_context_version", 3);
+                        }
+                        _ => {
+                            versions.insert(name, 3);
+                        }
+                    }
                 }
             }
         }
@@ -176,9 +245,16 @@ async fn registry_matrix_preserves_bson_and_traffic_on_current_historical_absent
                 f.fields().collect::<BTreeSet<_>>(),
                 observed.instances.iter().map(|p| p.0).collect()
             );
-            for (_, _, ev) in materials(&observed) {
+            for (label, _, ev) in materials(&observed) {
                 assert_eq!(ev.route, Route::Primary(Slot::Current, LogicalKey::Local));
-                assert_eq!(ev.format, if current { Format::V3 } else { Format::V2 });
+                assert_eq!(
+                    ev.format,
+                    if current || label == CALLBACK {
+                        Format::V3
+                    } else {
+                        Format::V2
+                    }
+                );
             }
             if current {
                 assert_eq!(materials(&observed).count(), f.fields().count());
@@ -201,6 +277,15 @@ async fn registry_matrix_preserves_bson_and_traffic_on_current_historical_absent
                             .get_document_mut(field)
                             .unwrap()
                             .insert("alpha", invalid_bytes);
+                    }
+                    Adapter::CatalogCa => {
+                        damaged
+                            .get_document_mut("ssh_config")
+                            .unwrap()
+                            .insert("ca_private_key_encrypted", invalid_bytes);
+                    }
+                    Adapter::OAuthState => {
+                        damaged.insert(field, "v3:00");
                     }
                     _ => {
                         damaged.insert(field, invalid_bytes);
@@ -231,14 +316,17 @@ async fn registry_matrix_preserves_bson_and_traffic_on_current_historical_absent
                 !missing.findings.is_empty(),
                 matches!(
                     f.entry.adapter,
-                    Adapter::CatalogCredential | Adapter::Broker
+                    Adapter::CatalogCredential
+                        | Adapter::Mfa
+                        | Adapter::SavedLogin
+                        | Adapter::Broker
                 ),
                 "{:?}",
                 f.entry.adapter
             );
         }
     }
-    assert_eq!(seen.len(), 11);
+    assert_eq!(seen.len(), 16);
 }
 
 #[tokio::test]
@@ -370,6 +458,29 @@ async fn map_counts_duplicate_material_mixed_routes_and_damaged_siblings_indepen
 #[tokio::test]
 async fn content_checks_and_missing_material_keep_distinct_evidence_after_authentication() {
     let keys = test_encryption_keys();
+    let node = family("nodes", "signing_secret_encrypted");
+    let mut row = fixture(&node, &keys, true).await;
+    row.insert("signing_secret_hash", hash_token("other"));
+    let result = inspect(&node, &keys, &row).await;
+    assert_eq!(
+        result.findings,
+        [("signing_secret_encrypted", Finding::InvalidValue)]
+    );
+    assert_eq!(materials(&result).count(), 1);
+
+    let mfa = family("mfa_factors", "secret_encrypted");
+    let mut row = fixture(&mfa, &keys, true).await;
+    row.insert("factor_type", "recovery_codes");
+    let result = inspect(&mfa, &keys, &row).await;
+    assert_eq!(materials(&result).count(), 1);
+    assert_eq!(
+        result.findings,
+        [("secret_encrypted", Finding::InvalidValue)]
+    );
+    row.remove("secret_encrypted");
+    row.remove("secret_context_version");
+    assert!(inspect(&mfa, &keys, &row).await.findings.is_empty());
+
     let broker = family("oauth_broker_bindings", "refresh_token_encrypted");
     let mut old = test_encryption_keys();
     old.set_contextual_record_writes(false);
