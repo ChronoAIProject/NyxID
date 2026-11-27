@@ -1,5 +1,6 @@
 //! Real turn -> local NyxAgent stand-in -> authenticated proxy -> local model.
 use super::*;
+use crate::handlers::credential_record_fixtures::set_catalog_credential;
 use crate::models::{approval_request::ApprovalRequest, audit_log::AuditLog};
 use crate::services::execution_permission_dispatch::proposals::{self, ModelApprovalHook};
 use axum::{
@@ -216,11 +217,7 @@ async fn model_approval_pipeline_order(
     model.auth_method = "bearer".into();
     model.service_category = "internal".into();
     model.requires_user_credential = false;
-    model.credential_encrypted = state
-        .encryption_keys
-        .encrypt(b"test-only-master")
-        .await
-        .unwrap();
+    set_catalog_credential(&state.encryption_keys, &mut model, b"test-only-master").await;
     model.platform_key =
         Some(serde_json::from_value(json!({"enabled":true,"audience":"public"})).unwrap());
     model.inference = Some(

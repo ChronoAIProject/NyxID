@@ -10,6 +10,7 @@ use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::models::user_api_key::{COLLECTION_NAME as CREDENTIALS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as SERVICES, UserService};
+use crate::services::catalog_credential_record_service as catalog_record;
 use crate::services::key_service::{self, CreatedApiKey};
 use crate::services::user_api_key_service::{self, CreateApiKeyParams};
 use crate::test_utils::{
@@ -237,12 +238,16 @@ impl Fixture {
     async fn platform_catalog(&self) -> DownstreamService {
         let mut catalog = test_auto_connected_catalog_service();
         catalog.auth_method = "bearer".into();
-        catalog.credential_encrypted = self
-            .state
-            .encryption_keys
-            .encrypt(b"inventory-platform-test")
-            .await
-            .unwrap();
+        let keys = &self.state.encryption_keys;
+        catalog.credential_encrypted = catalog_record::encrypt(
+            keys,
+            &catalog.id,
+            catalog_record::owner(&catalog).unwrap(),
+            b"inventory-platform-test",
+        )
+        .await
+        .unwrap();
+        catalog.secret_context_versions = catalog_record::initial_versions(keys, true);
         catalog.platform_key = Some(PlatformKeyConfig {
             purpose: Default::default(),
             enabled: true,

@@ -1,5 +1,6 @@
 //! Admitted model rounds are reads even with Codex telemetry (#2004).
 use super::*;
+use crate::handlers::credential_record_fixtures::set_catalog_credential;
 use crate::models::usage_meter::{CredentialClass, UsageMeterRow, UsageStatus};
 
 #[derive(Clone, Copy)]
@@ -223,12 +224,7 @@ async fn owner_pipeline_mode(route: Route, continue_and_steer: bool, mode: &str)
     if platform {
         catalog.platform_key =
             Some(serde_json::from_value(json!({"enabled":true,"audience":"public"})).unwrap());
-        catalog.credential_encrypted = f
-            .state
-            .encryption_keys
-            .encrypt(b"test-platform")
-            .await
-            .unwrap();
+        set_catalog_credential(&f.state.encryption_keys, &mut catalog, b"test-platform").await;
     }
     f.state
         .db
