@@ -42,9 +42,13 @@ const pin = {
   sha256: research.sha256,
 };
 
+const catalogDenied = { status: 403, json: { error: "forbidden", message: "Skill unavailable through your Ornn access" } };
+const pinMismatch = { status: 400, json: { error: "validation_error", details: { reason: "pinned_version_mismatch" } } };
+
 async function fixture(page: Page, options: {
   unavailable?: boolean;
-  previewError?: number;
+  previewError?: typeof catalogDenied | typeof pinMismatch;
+  attachmentError?: typeof catalogDenied | typeof pinMismatch;
   skillCount?: number;
 } = {}) {
   let revision = 2;
@@ -95,7 +99,7 @@ async function fixture(page: Page, options: {
       const skill = url.searchParams.get("skill");
       const version = url.searchParams.get("version");
       previewRequests.push([skill, version]);
-      if (options.previewError) return route.fulfill({ status: options.previewError, json: {} });
+      if (options.previewError) return route.fulfill(options.previewError);
       const template = [research, claims].find((entry) => entry.skillId === skill && entry.version === version);
       if (!template) return route.fulfill({ status: 404, json: {} });
       const sha256 = template.sha256;
@@ -111,6 +115,7 @@ async function fixture(page: Page, options: {
     if (path === "/assistant/nyxagent/settings") return ok(limits);
     if (path === `/assistant/nyxagent/agents/${agentId}/skills`) {
       if (request.method() === "PUT") {
+        if (options.attachmentError) return route.fulfill(options.attachmentError);
         const selection = request.postDataJSON();
         writes.push(selection);
         expect(selection.expected_revision).toBe(revision);
@@ -203,7 +208,10 @@ test("Learn lets a returning owner browse by keyboard and send an edited starter
 });
 
 for (const scenario of [
-  { name: "catalog denial", options: { previewError: 403 }, message: "Check your Ornn access", action: "Choose another template" },
+  { name: "catalog denial", options: { previewError: catalogDenied }, message: "Check your Ornn access", action: "Choose another template" },
+  { name: "a pinned-version mismatch during preview", options: { previewError: pinMismatch }, message: "could not verify the published package", action: "Choose another template" },
+  { name: "a pinned-version mismatch during attachment", options: { attachmentError: pinMismatch }, message: "could not verify the published package", action: "Choose another template" },
+  { name: "revoked catalog access during attachment", options: { attachmentError: catalogDenied }, message: "Check your Ornn access", action: "Choose another template" },
   { name: "the 16-skill limit", options: { skillCount: 16 }, message: "has 16 skills", action: "Manage NyxBot skills" },
 ]) {
   test(`Learn explains ${scenario.name} and links to recovery without opening a starter`, async ({ page }) => {

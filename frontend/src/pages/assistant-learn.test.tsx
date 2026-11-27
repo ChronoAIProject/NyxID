@@ -1,11 +1,14 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
 import { AssistantLearnPage } from "./assistant-learn";
 
-const { navigate, useFeature } = vi.hoisted(() => ({
+const { navigate, useFeature, readSkillPreview } = vi.hoisted(() => ({
+  readSkillPreview: vi.fn(),
   navigate: vi.fn(),
   useFeature: vi.fn<(flag: string) => boolean>(),
 }));
@@ -15,11 +18,12 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   useNavigate: () => navigate,
   Link: ({ to, search, ...rest }: ComponentProps<"a"> & { to: string; search?: { tour?: boolean } }) => <a href={search?.tour ? to + "?tour=true" : to} {...rest} />,
 }));
-vi.mock("@/hooks/use-agent-skills", () => ({ useAttachTemplateSkill: () => vi.fn(), useSkillPreview: () => ({}) }));
+vi.mock("@/hooks/use-agent-skills", () => ({ useAttachTemplateSkill: () => vi.fn(), readSkillPreview }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature }));
 
 beforeEach(() => {
   navigate.mockClear();
+  useAuthStore.setState({ user: null });
   useFeature.mockImplementation((flag) => flag === FEATURE_FLAG.NYXAGENT_ENGINE);
 });
 
@@ -61,4 +65,25 @@ it("links to the workspace tour and public setup guides", () => {
   const section = within(screen.getByRole("region", { name: "Getting started" }));
   expect(section.getByRole("link", { name: /Usage guides/ })).toHaveAttribute("href", "/docs");
   expect(section.getByRole("link", { name: /Workspace tour/ })).toHaveAttribute("href", "/assistant?tour=true");
+});
+
+it("invalidates a pending catalog read on account switch and closes the previous owner’s dialog", async () => {
+  const user = userEvent.setup();
+  useAuthStore.setState({ user: { id: "owner-one" } as User });
+  let guard: (() => void) | undefined;
+  let rejectRead: ((error: Error) => void) | undefined;
+  readSkillPreview.mockImplementationOnce((_id, _version, authorityGuard) => {
+    guard = authorityGuard;
+    return new Promise((_, reject) => { rejectRead = reject; });
+  });
+  render(<AssistantLearnPage />);
+  const research = within(screen.getByRole("region", { name: "Research" }));
+  await user.click(research.getByRole("button", { name: "Try this · Audit research claims" }));
+  await user.click(screen.getByRole("button", { name: "Open NyxBot" }));
+  expect(guard).toBeTypeOf("function");
+  act(() => useAuthStore.setState({ user: { id: "owner-two" } as User }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(guard).toThrow("Template selection changed");
+  await act(async () => { rejectRead?.(new Error("Stale request")); });
+  expect(navigate).not.toHaveBeenCalled();
 });

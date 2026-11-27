@@ -144,6 +144,13 @@ function skillVersionsQuery(
     retry: false,
   } as const;
 }
+export async function readSkillPreview(id: string, version: string, authorityGuard?: () => void) {
+  return skillPreviewSchema.parse(await assistantJson(
+    `${base}/skills/catalog?skill=${encodeURIComponent(id)}&version=${encodeURIComponent(version)}`,
+    { authorityGuard },
+  ));
+}
+
 function skillPreviewQuery(
   owner: string | undefined,
   id: string | undefined,
@@ -151,12 +158,7 @@ function skillPreviewQuery(
 ) {
   return {
     queryKey: ["ornn-preview", owner, id, version],
-    queryFn: async () =>
-      skillPreviewSchema.parse(
-        await assistantJson(
-          `${base}/skills/catalog?skill=${encodeURIComponent(id!)}&version=${encodeURIComponent(version)}`,
-        ),
-      ),
+    queryFn: () => readSkillPreview(id!, version),
     retry: false,
   } as const;
 }
@@ -167,11 +169,11 @@ export function useSkillVersions(id: string | undefined, page = 1) {
     enabled: Boolean(owner && id),
   });
 }
-export function useSkillPreview(id: string | undefined, version: string, enabled = true) {
+export function useSkillPreview(id: string | undefined, version: string) {
   const owner = useAuthStore((s) => s.user?.id);
   return useQuery({
     ...skillPreviewQuery(owner, id, version),
-    enabled: enabled && Boolean(owner && id && version),
+    enabled: Boolean(owner && id && version),
   });
 }
 

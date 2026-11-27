@@ -13,7 +13,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
-import { useAttachTemplateSkill, useSkillPreview } from "@/hooks/use-agent-skills";
+import { readSkillPreview, useAttachTemplateSkill } from "@/hooks/use-agent-skills";
 import { ApiError } from "@/lib/api-client";
 import { getAssistantIdentityRevision } from "@/lib/assistant/identity";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
@@ -23,23 +23,39 @@ import { useAuthStore } from "@/stores/auth-store";
 
 const focusRing = "focus-visible:ring-2 focus-visible:ring-input-focus focus-visible:ring-offset-2 focus-visible:ring-offset-background";
 
-export function LearnTemplatePreview({ template, featured = false, available }: {
+type ConfirmationStep = "preview" | "agent" | "attach";
+type TemplateFailure = "access" | "mismatch" | "full" | "disabled" | "different" | "conflict" | "agent" | "retry";
+
+function confirmationFailure(error: unknown, step: ConfirmationStep): TemplateFailure {
+  if (!(error instanceof ApiError)) return "retry";
+  const details = error.errorResponse.details;
+  if (details && typeof details === "object" && "reason" in details) {
+    if (details.reason === "pinned_version_mismatch") return "mismatch";
+    if (details.reason === "ornn_principal_denied" || details.reason === "owner_connection_unavailable") return "access";
+  }
+  if (error.status === 409) return "conflict";
+  if (step === "agent") return "agent";
+  // Catalog preview and skill attachment both enforce the owner's Ornn access.
+  if (error.status === 403 || (step === "preview" && [401, 404].includes(error.status))) return "access";
+  return "retry";
+}
+
+export function LearnTemplatePreview({ template, featured = false, available, owner }: {
   readonly template: SkillTemplate;
+  readonly owner: string | undefined;
   readonly featured?: boolean;
   readonly available: boolean;
 }) {
   const { t } = useUiTranslation();
   const navigate = useNavigate();
-  const owner = useAuthStore((state) => state.user?.id);
   const title = template.title();
 
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<"access" | "mismatch" | "full" | "disabled" | "different" | "conflict" | "agent" | "retry">();
+  const [failure, setFailure] = useState<TemplateFailure>();
   const [agentId, setAgentId] = useState<string>();
   const attempt = useRef<symbol | null>(null);
   const attach = useAttachTemplateSkill();
-  const preview = useSkillPreview(template.skillId, template.version, false);
   const starter = t("Use the Ornn skill {{skill}} (version {{version}}) for this task. {{starter}} Ask me for any missing inputs ({{inputs}}).", {
     skill: template.slug,
     version: template.version,
@@ -67,17 +83,16 @@ export function LearnTemplatePreview({ template, featured = false, available }: 
     };
     setBusy(true);
     setFailure(undefined);
-    let checkingCatalog = true;
+    let step: ConfirmationStep = "preview";
     try {
-      const verified = await preview.refetch({ throwOnError: true, cancelRefetch: false });
+      const { reference: pin } = await readSkillPreview(template.skillId, template.version, guard);
       guard();
-      const pin = verified.data?.reference;
-      if (!pin || pin.disabled || pin.skill_id !== template.skillId || pin.version !== template.version ||
+      if (pin.disabled || pin.skill_id !== template.skillId || pin.version !== template.version ||
           pin.sha256 !== template.sha256) {
         setFailure("mismatch");
         return;
       }
-      checkingCatalog = false;
+      step = "agent";
       const { agents } = await nyxBotApi.agents(false, guard);
       guard();
       const personal = agents.find((agent) => agent.kind === "nyxbot" && !agent.share_role &&
@@ -85,6 +100,7 @@ export function LearnTemplatePreview({ template, featured = false, available }: 
         agent.status !== "destroyed" && agent.can_use !== false);
       if (!personal) { setFailure("agent"); return; }
       setAgentId(personal.id);
+      step = "attach";
       const result = await attach(personal.id, pin, guard);
       guard();
       if (result !== "ready") {
@@ -97,9 +113,7 @@ export function LearnTemplatePreview({ template, featured = false, available }: 
     } catch (error) {
       if (attempt.current !== active || owner !== useAuthStore.getState().user?.id ||
           revision !== getAssistantIdentityRevision()) return;
-      const status = error instanceof ApiError ? error.status : undefined;
-      const deniedCatalog = checkingCatalog && (status === 401 || status === 403 || status === 404);
-      setFailure(deniedCatalog ? "access" : status === 409 ? "conflict" : "retry");
+      setFailure(confirmationFailure(error, step));
     } finally {
       if (attempt.current === active) { attempt.current = null; setBusy(false); }
     }

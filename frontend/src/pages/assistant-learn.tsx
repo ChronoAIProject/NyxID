@@ -5,6 +5,7 @@ import { useFeature } from "@/hooks/use-feature-flag";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { findSkillTemplate, SKILL_TEMPLATES, type SkillTemplate } from "@/lib/assistant/skill-templates";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
+import { useAuthStore } from "@/stores/auth-store";
 
 const featured = findSkillTemplate("weekly-budget-variance-digest");
 const categories = ["research", "communications", "operations", "engineering"] as const;
@@ -33,6 +34,7 @@ function TemplateDetails({ template }: { readonly template: SkillTemplate }) {
 
 export function AssistantLearnPage() {
   const { t } = useUiTranslation();
+  const owner = useAuthStore((state) => state.user?.id);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const labels = {
     research: t("Research"),
@@ -42,14 +44,14 @@ export function AssistantLearnPage() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-5xl space-y-8 text-foreground">
+    <div key={owner} className="mx-auto w-full max-w-5xl space-y-8 text-foreground">
       <h1 className="type-compact-page-title sm:type-page-title">{t("Learn")}</h1>
       {featured && (
         <section aria-labelledby="learn-featured" className="grid gap-5 rounded-2xl border border-hairline bg-card p-5 shadow-sm sm:grid-cols-2 sm:items-center sm:gap-8 sm:p-8">
           <div className="space-y-3">
             <h2 id="learn-featured" className="type-group-heading text-text-tertiary">{t("Featured template")}</h2>
             <h3 className="type-section-heading">{featured.title()}</h3>
-            <LearnTemplatePreview available={nyxagentEnabled} template={featured} featured />
+            <LearnTemplatePreview owner={owner} available={nyxagentEnabled} template={featured} featured />
           </div>
           <div className="rounded-xl bg-overlay p-4">
             <TemplateDetails template={featured} />
@@ -102,7 +104,7 @@ export function AssistantLearnPage() {
                 <li key={template.slug} className="flex min-w-0 flex-col items-start gap-4 rounded-xl border border-hairline bg-card p-5">
                   <h4 className="type-card-title">{template.title()}</h4>
                   <TemplateDetails template={template} />
-                  <div className="mt-auto"><LearnTemplatePreview available={nyxagentEnabled} template={template} /></div>
+                  <div className="mt-auto"><LearnTemplatePreview owner={owner} available={nyxagentEnabled} template={template} /></div>
                 </li>
               ))}
             </ul>
