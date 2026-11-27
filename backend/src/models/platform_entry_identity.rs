@@ -83,6 +83,10 @@ pub struct NativeEntryReceipt {
     pub message_id: String,
     pub original_private_human: bool,
     pub content_commitment: String,
+    /// Monotonic parent fence used by bounded cleanup before removing child
+    /// reply handles. Missing on legacy rows, where it deserializes as zero.
+    #[serde(default)]
+    pub cleanup_fence: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub received_at: chrono::DateTime<chrono::Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
