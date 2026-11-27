@@ -29,6 +29,8 @@ for (const anchor of page.querySelectorAll<HTMLAnchorElement>("a[href]")) {
   if (href.startsWith("#")) continue;
   const url = new URL(href, linkOrigin);
   if (url.origin !== linkOrigin) continue;
+  if (["/", "/zh"].includes(url.pathname) && anchor.hasAttribute("lang"))
+    url.hash = location.hash;
   const path = url.pathname + url.search + url.hash;
   const target = /^\/(?:login|register)(?:\?|$)/.test(path)
     ? authHref(path.startsWith("/login") ? "login" : "register")
