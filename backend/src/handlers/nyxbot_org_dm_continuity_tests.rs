@@ -4,11 +4,11 @@
 use super::*;
 use crate::models::{
     assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
-    channel_bot::ChannelBot,
+    channel_bot::COLLECTION_NAME as BOTS,
     channel_conversation::{COLLECTION_NAME as ROUTES, ChannelConversation},
     channel_message::{COLLECTION_NAME as RELAY_MESSAGES, ChannelMessage},
 };
-use crate::services::platform_entry_native::tests::credentials::BotSecret;
+use crate::services::platform_entry_native::tests::credentials::token_update;
 use crate::services::{channel_platform::PlatformAdapter, channel_relay_service as relay};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -95,10 +95,9 @@ async fn engine_answer(
         .expect("live turn at engine boundary");
     // Reset history belongs in session instructions. Inspect it transiently;
     // only this boolean is retained, never the instructions or recap text.
-    let reset_recap_has_first = body["conversation"].is_null()
-        && body["instructions"]
-            .as_str()
-            .is_some_and(|instructions| instructions.contains(FIRST));
+    let reset_recap_has_first = body["instructions"]
+        .as_str()
+        .is_some_and(|instructions| instructions.contains(FIRST));
     // Capture attribution, continuity and the synthetic response identity below.
     // Credentials, headers and stable instructions stay outside diagnostics.
     let observed = json!({"input":body["input"],"conversation":body["conversation"],
@@ -207,18 +206,24 @@ async fn fixture(first_fails: bool) -> Fixture {
     );
     ensure_org_partition(&state, &key).await;
     let platform = MockServer::start().await;
-    let mut bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
-        .await
-        .unwrap();
-    BotSecret::Token
-        .set(&state.encryption_keys, &mut bot, "123:org-dm-2641-test")
-        .await;
-    state
+    let update = token_update(
+        &state.encryption_keys,
+        &row.channel_bot_id,
+        &org_id,
+        "123:org-dm-2641-test",
+        doc! {},
+    )
+    .await;
+    let updated = state
         .db
-        .collection::<ChannelBot>("channel_bots")
-        .replace_one(doc! {"_id":&bot.id}, &bot)
+        .collection::<bson::Document>(BOTS)
+        .update_one(doc! {"_id":&row.channel_bot_id,"user_id":&org_id}, update)
         .await
         .unwrap();
+    assert_eq!(
+        updated.matched_count, 1,
+        "fixture updates its exact org bot"
+    );
     crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
         .lock()
         .unwrap()
