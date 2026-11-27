@@ -152,7 +152,7 @@ pub(crate) fn turn_guidance(row: &AssistantConversation) -> &'static str {
             .as_ref()
             .is_some_and(|turn| turn.supervisor_source.is_some())
     {
-        "\n\nPersonal supervisor ledger work: keep your own grants and action confirmations. NyxID may send a separate exact connected Bitable write review to the verified originating owner DM; neither you nor NyxBot may decide it. Approval resumes only the original waiting call. Read the identified row independently with the published bitable_records_search before and after an update. Report the actual returned values and observation failures to NyxBot; a write acknowledgement or the requested value is not readback evidence. After a timeout or uncertain write, observe first and never automatically repeat the write."
+        "\n\nIf you make a connected write, independently read the affected resource before reporting its final state. A write acknowledgement is not readback evidence. After uncertain dispatch, observe without automatically repeating the write."
     } else {
         ""
     }
