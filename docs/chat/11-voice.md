@@ -1383,6 +1383,16 @@ Retained captions never imply audio activity. End, recovery and inactive calls
 return the halo to rest; Reduce Motion keeps a still glow. This decoration does
 not own or remount media, change next-call preferences, or alter bounded cleanup.
 
+The native panel shows **Hands-free** and **Hold to talk** directly below the
+call status. Selecting a mode changes the current OpenAI call's input gate
+without reconnecting, replacing media, or changing its source or voice. Switching
+out of Hold to talk releases any held input first. Microphone mute and server
+input restrictions remain authoritative. The selector is disabled until the
+call is active and during End, recovery, loss of focus or network connectivity.
+Grok retains Hold to talk only and shows that restriction beside the selector.
+The inline selection affects this call; defaults in Voice preferences and
+account settings continue to apply to the next call.
+
 The full panel has separate **You** and **Assistant** caption regions and a live
 elapsed timer. Speaker mute controls local playback only; microphone mute is a
 separate control and neither ends billing. Minimize keeps the same media session

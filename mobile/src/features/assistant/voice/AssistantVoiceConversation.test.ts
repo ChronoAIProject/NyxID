@@ -862,7 +862,7 @@ test("the aura surrounds the current voice controls without adding a second tran
   assert.match(f.text(), /Listening/);
   assert.doesNotMatch(
     f.text(),
-    /do not duplicate|Hey, what can I do|Hands-free|Settings/,
+    /do not duplicate|Hey, what can I do|Settings/,
   );
   assert.equal(
     f.all().some((row) => row.type === "ScrollView"),
@@ -874,6 +874,8 @@ test("the aura surrounds the current voice controls without adding a second tran
   );
   assert.ok(f.button("Mute microphone"));
   assert.ok(f.button("End voice"));
+  assert.ok(f.button("Use hands-free for this call"));
+  assert.ok(f.button("Use Hold to talk for this call"));
   assert.equal(
     f.find("Voice preferences"),
     undefined,
@@ -1048,7 +1050,141 @@ test("mute is an input action and speaker mute stays inside preferences", async 
   f.harness.unmount();
 });
 
-test("voice and mode changes are saved for next call without changing this call", async () => {
+test("the visible selector changes the current call without saving defaults or replacing media", () => {
+  const f = setup({ active: true });
+  const originalMedia = f.media();
+  const originalSession = f.voice.snapshot?.session.id;
+  assert.equal(
+    f.button("Use hands-free for this call").props.accessibilityState.checked,
+    true,
+  );
+  f.button("Use Hold to talk for this call").props.onPress();
+  f.harness.flush();
+  assert.equal(
+    f.button("Use Hold to talk for this call").props.accessibilityState.checked,
+    true,
+  );
+  assert.ok(f.button("Hold to talk"));
+  assert.equal(f.find("Mute microphone"), undefined);
+  f.openPreferences();
+  assert.equal(
+    f.button("Hands-free mode").props.accessibilityState.checked,
+    true,
+    "next-call defaults remain independent from the live selection",
+  );
+  // Selecting the current choice again does not reapply its input gate.
+  f.button("Use Hold to talk for this call").props.onPress();
+  f.button("Use hands-free for this call").props.onPress();
+  f.harness.flush();
+  assert.ok(f.button("Mute microphone"));
+  assert.equal(f.find("Hold to talk"), undefined);
+  assert.equal(f.media().key, originalMedia.key);
+  assert.equal(f.media().props.media, originalMedia.props.media);
+  assert.equal(f.voice.snapshot?.session.id, originalSession);
+  assert.deepEqual(f.events, [
+    ["mode", "push_to_talk"],
+    ["mode", "automatic"],
+  ]);
+  assert.deepEqual(f.savedPreferences, []);
+  f.harness.unmount();
+});
+
+test("a refused mode switch retains the displayed current mode and controls", () => {
+  const f = setup({ active: true });
+  f.voice.setInputMode = () => false;
+  f.button("Use Hold to talk for this call").props.onPress();
+  f.harness.flush();
+  assert.equal(
+    f.button("Use hands-free for this call").props.accessibilityState.checked,
+    true,
+  );
+  assert.ok(f.button("Mute microphone"));
+  assert.equal(f.find("Hold to talk"), undefined);
+  f.harness.unmount();
+});
+
+test("mode callbacks cannot affect a changed, inactive or unmounted call", () => {
+  for (const change of [
+    "starting",
+    "disconnected",
+    "closing",
+    "conflict",
+    "unknown",
+    "checking",
+    "ending",
+    "offline",
+    "blur",
+    "new-session",
+    "new-media",
+    "unmount",
+  ]) {
+    const f = setup({ active: true });
+    const select = f.button("Use Hold to talk for this call").props.onPress;
+    if (change === "starting") f.voice.starting = true;
+    if (change === "disconnected") f.voice.connected = false;
+    if (change === "closing")
+      f.voice.snapshot = {
+        ...snapshot,
+        session: { ...snapshot.session, state: "closing" },
+      };
+    if (change === "conflict")
+      f.voice.conflict = { ...snapshot.session, id: "other-call" };
+    if (change === "unknown") f.voice.conflictUnknown = true;
+    if (change === "checking") f.voice.checkingConflict = true;
+    if (change === "ending") f.voice.endingConflict = true;
+    if (change === "offline") f.setOnline(false);
+    if (change === "blur") f.setFocused(false);
+    if (change === "new-session")
+      f.voice.snapshot = {
+        ...snapshot,
+        session: { ...snapshot.session, id: "new-call" },
+      };
+    if (change === "new-media") f.voice.mediaAttempt++;
+    f.harness.render();
+    if (!["new-session", "new-media", "unmount"].includes(change))
+      assert.equal(
+        f.button("Use Hold to talk for this call").props.disabled,
+        true,
+        change,
+      );
+    if (change === "unmount") f.harness.unmount();
+    select();
+    assert.equal(f.events.some(([event]) => event === "mode"), false, change);
+    if (change !== "unmount") f.harness.unmount();
+  }
+});
+
+test("Grok visibly retains Hold to talk with unsupported hands-free disabled", () => {
+  const f = setup({
+    active: true,
+    source: { ...source, voice: { ...source.voice, protocol: "xai_realtime" } },
+  });
+  assert.equal(f.button("Use hands-free for this call").props.disabled, true);
+  assert.equal(
+    f.button("Use Hold to talk for this call").props.accessibilityState.checked,
+    true,
+  );
+  f.button("Use hands-free for this call").props.onPress();
+  assert.deepEqual(f.events, []);
+  assert.ok(f.button("Hold to talk"));
+  assert.match(f.text(), /Grok supports Hold to talk/);
+  f.harness.unmount();
+});
+
+test("End blocks a previously captured mode action before the next render", async () => {
+  const pending = deferred<boolean>();
+  const f = setup({ active: true });
+  const select = f.button("Use Hold to talk for this call").props.onPress;
+  f.setEnd(pending.promise);
+  f.button("End voice").props.onPress();
+  select();
+  assert.equal(f.events.some(([event]) => event === "mode"), false);
+  pending.resolve(true);
+  await f.harness.settle();
+  f.harness.unmount();
+});
+
+test("voice and mode preferences are saved for next call without changing this call", async () => {
   const f = setup({ active: true });
   f.openPreferences();
   assert.match(f.text(), /Changes apply to your next call/);
