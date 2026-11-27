@@ -1620,6 +1620,7 @@ pub(crate) mod tests {
             operation_scopes: Default::default(),
             skills: Vec::new(),
             skills_revision: 0,
+            system_skill_overrides: Default::default(),
             skill_metadata: Default::default(),
             operation_scope_revisions: Default::default(),
             machine_node_ids: Vec::new(),

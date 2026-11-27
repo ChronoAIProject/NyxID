@@ -125,6 +125,15 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
     let binding_id = id();
     let event_id = id();
     activate_guests(db, &f.owner).await;
+    crate::services::feature_flag_service::set_platform_override(
+        db,
+        crate::services::feature_flag_service::SYSTEM_SKILLS_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::User(f.owner.clone()),
+        true,
+        &f.owner,
+    )
+    .await
+    .unwrap();
     db.collection::<Document>("channel_bots").insert_one(doc! {
         "_id": &bot_id, "user_id": &f.owner, "platform":"telegram", "label":"Help bot",
         "platform_bot_id":"123", "platform_bot_username":"helper",
@@ -165,6 +174,27 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
         }],
     };
     let agents = db.collection::<Document>("assistant_agents");
+    let mut built_in = root.clone();
+    built_in.skill_id = id();
+    built_in.name = "owner-built-in".into();
+    db.collection::<crate::models::assistant_system_skills::AssistantSystemSkills>(
+        crate::models::assistant_system_skills::COLLECTION_NAME,
+    )
+    .insert_one(
+        crate::models::assistant_system_skills::AssistantSystemSkills {
+            id: crate::models::assistant_system_skills::DOCUMENT_ID.into(),
+            revision: 1,
+            skills: vec![crate::models::assistant_system_skills::SystemSkill {
+                reference: built_in.clone(),
+                description: "Owner-only built-in guidance".into(),
+                size_bytes: 100,
+            }],
+            updated_by: f.owner.clone(),
+            updated_at: chrono::Utc::now(),
+        },
+    )
+    .await
+    .unwrap();
     agents
         .update_one(
             doc! {"_id":agent_id},
@@ -281,6 +311,17 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
         .unwrap()
         .unwrap();
     let agent = team::agent_for_conversation(db, &row).await.unwrap();
+    let owner_system = system::for_person(db, &f.owner, false)
+        .await
+        .unwrap()
+        .expect("owner rollout is enabled");
+    assert_eq!(system::effective(&agent, &owner_system).len(), 1);
+    assert!(
+        system::for_person(db, &f.owner, true)
+            .await
+            .unwrap()
+            .is_none()
+    );
     let credential = crate::services::assistant_agent_credential_service::load_for_conversation(
         db,
         &state.encryption_keys,
@@ -308,6 +349,15 @@ async fn channel_guest_skill_exact_file_preload_and_live_revocation() {
             .iter()
             .any(|tool| tool["name"] == "nyxid__set_agent_skills")
     );
+    let denied = mcp(
+        &router,
+        credential.raw_key.as_str(),
+        "tools/call",
+        json!({"name":GUEST_TOOL_NAME,"arguments":{"skill":built_in.skill_id}}),
+    )
+    .await;
+    assert_eq!(denied["result"]["isError"], true, "{denied}");
+    assert!(upstream.received_requests().await.unwrap().is_empty());
     let package =
         json!({"skill":&root.skill_id,"dependency":dependency_id,"path":"references/help.md"});
     let read = mcp(

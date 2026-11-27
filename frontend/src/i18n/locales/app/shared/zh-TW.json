@@ -337,6 +337,7 @@
   "Broker capability": "憑證代理能力",
   "Browser is required for computer and developer browser access": "要使用電腦和開發者瀏覽器存取，必須先啟用瀏覽器",
   "Browser, desktop and saved-login tools are excluded. Excluding these tools does not protect their underlying files from shell access.": "瀏覽器、桌面和已儲存登入資訊工具不包括在內。排除這些工具並不能防止透過 shell 存取其底層檔案。",
+  "Built-in skills": "內建技能",
   "By User": "依使用者",
   "CPU": "CPU",
   "Cache read": "快取讀取",

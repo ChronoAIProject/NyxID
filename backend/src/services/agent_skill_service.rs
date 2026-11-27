@@ -25,6 +25,79 @@ const MAX_FILES: usize = 256;
 
 #[cfg(test)]
 pub(crate) mod source_fixture;
+/// Server-only binding carried by the existing bound Ornn reader.
+#[derive(Clone)]
+pub(crate) struct OrnnSkillRead {
+    agent_id: String,
+    root: std::sync::Arc<SkillReference>,
+}
+
+impl OrnnSkillRead {
+    pub(crate) fn new(agent_id: &str, root: SkillReference) -> Self {
+        Self {
+            agent_id: agent_id.into(),
+            root: std::sync::Arc::new(root),
+        }
+    }
+
+    pub(crate) fn revalidate<'a>(
+        &'a self,
+        db: &'a Database,
+        person: &'a str,
+        chat: Option<&'a super::assistant_acknowledgement_service::ChatAuthority>,
+        connection: Option<&'a str>,
+        method: &'a str,
+        path: &'a str,
+    ) -> futures::future::BoxFuture<'a, AppResult<()>> {
+        Box::pin(async move {
+            // Keep the live database and authority checks in the caller's
+            // cancellation scope. This is a short, bounded read path; an
+            // independent task would outlive the shutdown inventory unless it
+            // were routed through the server shutdown runtime.
+            self.revalidate_inner(db, person, chat, connection, method, path)
+                .await
+        })
+    }
+
+    async fn revalidate_inner(
+        &self,
+        db: &Database,
+        person: &str,
+        chat: Option<&super::assistant_acknowledgement_service::ChatAuthority>,
+        connection: Option<&str>,
+        method: &str,
+        path: &str,
+    ) -> AppResult<()> {
+        if method != "GET"
+            || chat.is_some_and(|chat| {
+                chat.guest || chat.agent_id != self.agent_id || chat.user_id != person
+            })
+        {
+            return Err(AppError::SkillRead(
+                crate::errors::skill_read::SkillReadReason::SkillNotBound,
+            ));
+        }
+        super::assistant_system_skills_service::validate_download(
+            db,
+            person,
+            chat.is_some_and(|chat| chat.guest),
+            &self.agent_id,
+            &self.root,
+            path,
+        )
+        .await?;
+        if let Some(chat) = chat {
+            crate::services::assistant_service_execution::bound_skill_authority(
+                db,
+                chat,
+                "assistant.skill_read",
+                connection,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrnnCode {
@@ -470,6 +543,11 @@ pub use crate::models::assistant_agent::SkillSelection as Selection;
 
 #[derive(Debug, Serialize)]
 pub struct SkillsResponse {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_skills: Vec<super::assistant_system_skills_service::SystemSkillStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_skills_for_specialists:
+        Option<crate::models::assistant_settings::SystemSkillsForSpecialists>,
     pub agent_id: String,
     pub revision: i64,
     pub skills: Vec<SkillReference>,
@@ -478,6 +556,8 @@ pub struct SkillsResponse {
 impl From<AssistantAgent> for SkillsResponse {
     fn from(agent: AssistantAgent) -> Self {
         Self {
+            system_skills: vec![],
+            system_skills_for_specialists: None,
             agent_id: agent.id,
             revision: agent.skills_revision,
             skills: agent.skills,
@@ -608,7 +688,7 @@ fn literal(id: &str, version: &str) -> AppResult<()> {
     }
     Ok(())
 }
-fn line(s: &str, max: usize) -> String {
+pub(super) fn line(s: &str, max: usize) -> String {
     s.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .take(max)
@@ -656,7 +736,7 @@ pub fn validate(selection: &Selection) -> AppResult<()> {
     Ok(())
 }
 
-async fn data(reader: &impl OrnnReader, path: &str) -> AppResult<Value> {
+pub(super) async fn data(reader: &impl OrnnReader, path: &str) -> AppResult<Value> {
     let bytes = reader.get(path).await?;
     if bytes.len() > MAX_ARCHIVE {
         return Err(invalid("Ornn response is too large"));
@@ -735,6 +815,56 @@ pub async fn preview_checked(
     id: &str,
     version: &str,
 ) -> Result<Preview, PreviewFailure> {
+    preview_matching(reader, id, version, None).await
+}
+
+// Ornn returns current display names even for old versions. Compare package
+// identities, ignoring names and dependency ordering.
+fn same_pinned_content(
+    current: &crate::models::catalog_skill_revision::SkillReference,
+    pinned: &crate::models::catalog_skill_revision::SkillReference,
+) -> bool {
+    fn dependencies(
+        pin: &crate::models::catalog_skill_revision::SkillReference,
+    ) -> Vec<(&str, &str, &str, &str)> {
+        let mut identities: Vec<_> = pin
+            .dependencies
+            .iter()
+            .map(|dep| {
+                (
+                    dep.source.as_str(),
+                    dep.skill_id.as_str(),
+                    dep.version.as_str(),
+                    dep.sha256.as_str(),
+                )
+            })
+            .collect();
+        identities.sort_unstable();
+        identities
+    }
+    current.source == pinned.source
+        && current.skill_id == pinned.skill_id
+        && current.version == pinned.version
+        && current.sha256 == pinned.sha256
+        && dependencies(current) == dependencies(pinned)
+}
+
+/// Attached Test checks the live metadata and closure before any bound download.
+pub(crate) async fn preview_pinned(
+    reader: &impl OrnnReader,
+    pin: &SkillReference,
+) -> AppResult<Preview> {
+    preview_matching(reader, &pin.skill_id, &pin.version, Some(pin))
+        .await
+        .map_err(PreviewFailure::into_error)
+}
+
+async fn preview_matching(
+    reader: &impl OrnnReader,
+    id: &str,
+    version: &str,
+    pinned: Option<&SkillReference>,
+) -> Result<Preview, PreviewFailure> {
     use PreviewFailure::{Mismatch, Read};
     literal(id, version).map_err(Mismatch)?;
     let meta = data(reader, &format!("/api/v1/skills/{id}?version={version}"))
@@ -783,6 +913,11 @@ pub async fn preview_checked(
         skills: vec![reference.clone()],
     })
     .map_err(Mismatch)?;
+    if pinned.is_some_and(|pin| !same_pinned_content(&reference, pin)) {
+        return Err(Mismatch(AppError::SkillRead(
+            crate::errors::skill_read::SkillReadReason::PinnedVersionMismatch,
+        )));
+    }
     let bytes = download_checked(reader, id, version, &reference.sha256).await?;
     let skill_md = package(&bytes)
         .map_err(Mismatch)?
@@ -1370,7 +1505,7 @@ pub async fn set(
         }
     }
     if agent.skills == selection.skills {
-        return Ok(agent.into());
+        return super::assistant_system_skills_service::response(db, owner, agent).await;
     }
     let revision = selection
         .expected_revision
@@ -1408,12 +1543,12 @@ pub async fn set(
             "skills": selection.skills.iter().map(|s| json!({"id": s.skill_id, "name": s.name, "version": s.version, "disabled": s.disabled})).collect::<Vec<_>>(),
         })),
     ).await;
-    Ok(SkillsResponse {
-        agent_id: id.into(),
-        revision,
-        skills: selection.skills.clone(),
-        metadata,
-    })
+    super::assistant_system_skills_service::response(
+        db,
+        owner,
+        super::assistant_team_service::agent(db, owner, id).await?,
+    )
+    .await
 }
 
 /// Persist pins already verified by preview, sharing the B2 revision fence with
@@ -1481,7 +1616,8 @@ pub fn instructions(agent: &AssistantAgent) -> String {
 mod tests;
 
 /// Audit events that make up an agent's skill history.
-pub const HISTORY_EVENTS: [&str; 8] = [
+pub const HISTORY_EVENTS: [&str; 9] = [
+    "assistant_system_skill_toggled",
     "assistant_skill_preload_updated",
     "assistant_skills_updated",
     "assistant_learning_proposal_edited",
@@ -1507,6 +1643,10 @@ pub struct HistoryItem {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub revision: Option<i64>,
     pub proposal_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<Option<bool>>,
     pub skills: Vec<HistoryPin>,
 }
 
@@ -1535,12 +1675,17 @@ pub async fn history(db: &Database, agent: &AssistantAgent) -> AppResult<History
             .into_iter()
             .map(|row| {
                 let data = row.event_data.unwrap_or(Value::Null);
+                let system_toggle = row.event_type == "assistant_system_skill_toggled";
                 HistoryItem {
                     id: row.id,
                     event_type: row.event_type,
                     created_at: row.created_at,
                     revision: data["revision"].as_i64(),
                     proposal_id: data["proposal_id"].as_str().map(str::to_owned),
+                    skill_id: system_toggle
+                        .then(|| data["skill_id"].as_str().map(str::to_owned))
+                        .flatten(),
+                    enabled: system_toggle.then(|| data["enabled"].as_bool()),
                     skills: data["skills"]
                         .as_array()
                         .into_iter()

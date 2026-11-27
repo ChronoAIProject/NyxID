@@ -855,6 +855,7 @@
   "Review capabilities, file roots, service ceilings, expiry and grant revisions in the existing Agent, Key detail, or granted-app controls. Revoking Machine access affects that grant; revoking an OAuth consent or parent Key affects its authority more broadly. Logging out one child credential is limited to that child.": "在現有的代理程式、金鑰詳細資料或已授權應用程式控制項中檢視功能、檔案根目錄、服務上限、到期時間和授權修訂。撤銷機器存取會影響該授權；撤銷 OAuth 同意或父金鑰會更廣泛地影響其權限。登出某個子憑證只影響該子憑證。",
   "Review the existing specialist assignment and its allowed capabilities before use. This Machine has already been created.": "使用前，請檢視現有的專屬代理程式指派及其允許的能力。此機器已經建立。",
   "Review {{value}}'s request: {{summary}}": "審核 {{value}} 的請求：{{summary}}",
+  "Revision": "修訂版本",
   "Revocation pending on machine. Online revocation is immediate. If delivery is interrupted, v2 leased work stops within 45 seconds.": "撤銷正在機器上等待生效。線上撤銷會立即生效。如果傳遞中斷，v2 租約工作將在 45 秒內停止。",
   "Revoke consent for third-party service connections": "撤銷第三方服務連線同意",
   "Revoke credit grant": "撤銷贈送額度",
