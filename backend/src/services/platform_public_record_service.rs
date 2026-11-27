@@ -515,8 +515,28 @@ mod tests {
                 super::super::platform_public_credential_service::tests::fixture();
             let raw = "distinctive-public-agent-key";
             key.key_hash = crate::crypto::token::hash_token(raw);
-            row.credential_ciphertext = keys.encrypt(raw.as_bytes()).await.unwrap();
-            row.upstream_binding_ciphertext = keys.encrypt(binding).await.unwrap();
+            keys.set_contextual_record_writes(false);
+            row.credential_ciphertext = encrypt_session(
+                &keys,
+                &row.id,
+                &row.sponsor_owner_user_id,
+                &row.credential_api_key_id,
+                "credential_ciphertext",
+                raw.as_bytes(),
+            )
+            .await
+            .unwrap();
+            row.upstream_binding_ciphertext = encrypt_session(
+                &keys,
+                &row.id,
+                &row.sponsor_owner_user_id,
+                &row.credential_api_key_id,
+                "upstream_binding_ciphertext",
+                binding,
+            )
+            .await
+            .unwrap();
+            keys.set_contextual_record_writes(true);
             row.upstream_may_exist = true;
             db.collection::<crate::models::api_key::ApiKey>(
                 crate::models::api_key::COLLECTION_NAME,
