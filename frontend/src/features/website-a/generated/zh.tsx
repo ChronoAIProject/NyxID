@@ -1,10 +1,9 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
-// Run: node scripts/website-a/generate.mjs <baseline.html>
 import { lazy, Suspense } from "react";
 import { useWebsite } from "../website-context";
 import WebsiteHeader from "./zh/WebsiteHeader";
 import WebsiteFooter from "./zh/WebsiteFooter";
-const HomePage = lazy(() => import("./zh/HomePage"));
+const HomePage = lazy(() => import("../nyx-home/nyx-home-page"));
 const NyxbotPage = lazy(() => import("./zh/NyxbotPage"));
 const SolutionsPage = lazy(() => import("./zh/SolutionsPage"));
 const HowItWorksPage = lazy(() => import("./zh/HowItWorksPage"));
@@ -124,7 +123,7 @@ export const descriptions: Record<string, string> = {
     "登录没有 API 的供应商和预订后台，补货、下载发票并归档，在你的电脑或托管虚拟机上完成。",
 };
 export const loaders = {
-  "/": () => import("./zh/HomePage"),
+  "/": () => import("../nyx-home/nyx-home-page"),
   "/nyxbot": () => import("./zh/NyxbotPage"),
   "/solutions": () => import("./zh/SolutionsPage"),
   "/how-it-works": () => import("./zh/HowItWorksPage"),

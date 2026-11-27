@@ -7,7 +7,6 @@ import "./nyxbot-app-media.css";
 const mediaRoot = "/landing/nyx/app";
 const mobileQuery = "(max-width: 700px)";
 const captureSize = {
-  workspace: { desktop: [1200, 640], mobile: [440, 680] },
   task: { desktop: [1200, 640], mobile: [440, 680] },
   memory: { desktop: [563, 570], mobile: [440, 570] },
   approval: { desktop: [601, 161], mobile: [378, 184] },

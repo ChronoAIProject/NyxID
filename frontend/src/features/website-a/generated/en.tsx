@@ -1,10 +1,9 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
-// Run: node scripts/website-a/generate.mjs <baseline.html>
 import { lazy, Suspense } from "react";
 import { useWebsite } from "../website-context";
 import WebsiteHeader from "./en/WebsiteHeader";
 import WebsiteFooter from "./en/WebsiteFooter";
-const HomePage = lazy(() => import("./en/HomePage"));
+const HomePage = lazy(() => import("../nyx-home/nyx-home-page"));
 const NyxbotPage = lazy(() => import("./en/NyxbotPage"));
 const SolutionsPage = lazy(() => import("./en/SolutionsPage"));
 const HowItWorksPage = lazy(() => import("./en/HowItWorksPage"));
@@ -126,7 +125,7 @@ export const descriptions: Record<string, string> = {
     "Logs in to supplier and booking portals that have no API, reorders stock, downloads invoices and files them, on your computer or a hosted VM.",
 };
 export const loaders = {
-  "/": () => import("./en/HomePage"),
+  "/": () => import("../nyx-home/nyx-home-page"),
   "/nyxbot": () => import("./en/NyxbotPage"),
   "/solutions": () => import("./en/SolutionsPage"),
   "/how-it-works": () => import("./en/HowItWorksPage"),

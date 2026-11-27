@@ -92,7 +92,6 @@ try {
       if (stillsOnly) continue;
       const suffix = `${theme}${mobile ? "-mobile" : ""}`;
       const { context, page } = await openPage(theme, mobile, true);
-      await still(page, `workspace-${suffix}`);
       const textbox = page.locator("[data-composer-textbox]");
       await textbox.click();
       await textbox.pressSequentially(task, { delay: 44 });

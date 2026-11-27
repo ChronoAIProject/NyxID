@@ -1,5 +1,4 @@
-/* NyxID home page animations, ported from the "light night" design
-   (mockups/landing-combined/nyxid-light-night.html and kit.js).
+/* NyxID home page animations, adapted from Chloe’s light/night design.
 
    The design's code is kept as it was, with these changes for the app:
    - GSAP, its plugins and Lenis are imported instead of read from window.

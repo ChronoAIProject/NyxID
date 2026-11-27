@@ -1,4 +1,4 @@
-// NyxID home page, ported from the "light night" design (mockups/landing-combined/nyxid-light-night.html).
+// NyxID home page, adapted from Chloe’s light/night design.
 // The markup below is the design's markup converted to JSX; nyx-home-motion.js runs its animations.
 import { useLayoutEffect, useRef } from "react";
 import type { CSSProperties } from "react";
