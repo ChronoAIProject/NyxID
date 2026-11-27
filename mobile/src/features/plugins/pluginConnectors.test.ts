@@ -78,7 +78,7 @@ test("production instance suffixes never replace the canonical catalog brand slu
   }
 });
 
-test("disabled stays Added and mixed connections are Enabled only with a healthy route", () => {
+test("disabled stays Added and mixed connections are Connected when a healthy route exists", () => {
   const off = { ...connection, is_active: false };
   const disabled = deriveConnectorItems([off], [catalog]);
   assert.equal(disabled.added[0]?.disabled, true);
@@ -89,7 +89,7 @@ test("disabled stays Added and mixed connections are Enabled only with a healthy
     [catalog],
   );
   assert.equal(mixed.added[0]?.disabled, false);
-  assert.equal(mixed.added[0]?.status, "Enabled");
+  assert.equal(mixed.added[0]?.status, "Connected");
   assert.equal(mixed.added[0]?.statusTone, "success");
   for (const unhealthy of [
     { ...connection, status: "pending_auth" },
@@ -98,7 +98,7 @@ test("disabled stays Added and mixed connections are Enabled only with a healthy
     { ...connection, connection_status: "expired" as const },
   ]) {
     const result = deriveConnectorItems([off, unhealthy], [catalog]);
-    assert.notEqual(result.added[0]?.status, "Enabled");
+    assert.notEqual(result.added[0]?.status, "Connected");
     assert.notEqual(result.added[0]?.statusTone, "success");
   }
 });
@@ -202,6 +202,62 @@ test("missing catalog still preserves Added while catalog-only cards are availab
   assert.equal(result.available[0]?.meta, "oauth");
   assert.equal(result.available[0]?.status, "Connect");
   assert.deepEqual(result.available[0]?.connections, []);
+});
+
+test("model providers remain selectable while managed platform connections stay out of the marketplace", () => {
+  const platform: ServiceConnection = { ...connection, id: "platform", credential_binding: "platform" };
+  const model = { ...catalog, slug: "model", inference: {} };
+  const items = deriveConnectorItems([
+    platform,
+    { ...platform, id: "platform-custom", catalog_service_slug: null },
+    { ...connection, id: "manual", catalog_service_slug: "model" },
+    { ...connection, id: "auto", catalog_service_slug: "chrono-llm", auto_connected: true },
+  ], [
+    catalog, model, { ...catalog, slug: "chrono-llm" },
+    { ...catalog, slug: "managed", platform_key: { available: true } },
+    { ...catalog, slug: "normal", platform_key: { available: false }, inference: null },
+  ]);
+  assert.deepEqual(items.added.flatMap((item) => item.manageKeyIds), ["manual"]);
+  assert.deepEqual(items.models.map((item) => item.connectSlug), ["model", "chrono-llm"]);
+  assert.deepEqual(items.available.map((item) => item.connectSlug), ["normal"]);
+});
+
+test("personal setup is offered only for org-only catalog credentials and SSH uses advanced setup", () => {
+  const org: ServiceConnection = { ...connection, credential_source: {
+    type: "org", org_id: "org", org_name: "Org", role: "member", allowed: true,
+  } };
+  const ownSlug = (keys: ServiceConnection[], entry: CatalogEntry) =>
+    deriveConnectorItems(keys, [entry]).added[0]?.connectOwnSlug;
+  assert.equal(ownSlug([org], catalog), catalog.slug);
+  assert.equal(ownSlug([connection, org], catalog), undefined);
+  assert.equal(ownSlug([org], { ...catalog, requires_credential: false }), undefined);
+  const ssh = { ...catalog, service_type: "ssh" };
+  assert.equal(ownSlug([org], ssh), undefined);
+  const [item] = deriveConnectorItems([], [ssh]).available;
+  assert.equal(item?.connectSlug, undefined);
+  assert.equal(item?.advancedSetupSlug, ssh.slug);
+});
+
+test("grouped cards surface failed and unverified active saved credentials before healthy siblings", () => {
+  const saved = { ...connection, credential_type: "api_key" };
+  const verified = { ...saved, credential_verification: {
+    state: "verified", reason_code: "provider_accepted", can_check: false,
+  } };
+  const failed = { ...saved, status: "failed" };
+  const status = (...rows: ServiceConnection[]) => deriveConnectorItems(rows, []).added[0]?.status;
+  assert.equal(status(verified, saved), "Saved, not verified");
+  assert.equal(status(verified, failed), "Authorization failed");
+  assert.equal(status(verified, { ...failed, is_active: false }), "Verified");
+  assert.equal(status(verified, { ...saved, credential_missing: true }), "Credential missing");
+});
+
+test("blank descriptions fall back to searchable catalog or connection details", () => {
+  const { added } = deriveConnectorItems([{ ...connection, description: "  Work projects  " }],
+    [{ ...catalog, description: " " }]);
+  assert.equal(added[0]?.description, "Work projects");
+  assert.ok(matchesPluginQuery(added[0]!, "Projects"));
+  assert.equal(deriveConnectorItems([], [{ ...catalog, description: "  ", base_url: "https://example.test" }])
+    .available[0]?.description, "Proxy requests to https://example.test.");
 });
 
 test("a single catalog connection prefers its override then server catalog icon then fetched catalog icon", () => {

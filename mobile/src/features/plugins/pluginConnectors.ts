@@ -16,7 +16,10 @@ export interface ConnectorCardItem {
   readonly added: boolean;
   readonly disabled?: boolean;
   readonly manageKeyIds?: readonly string[];
+  readonly connectionCountLabel?: string;
   readonly connectSlug?: string;
+  readonly connectOwnSlug?: string;
+  readonly advancedSetupSlug?: string;
   readonly connections: readonly ServiceConnection[];
   readonly catalogEntry?: CatalogEntry;
   readonly status: string;
@@ -27,6 +30,7 @@ export interface ConnectorCardItem {
 export interface ConnectorItems {
   readonly added: readonly ConnectorCardItem[];
   readonly available: readonly ConnectorCardItem[];
+  readonly models: readonly ConnectorCardItem[];
 }
 
 function catalogMeta(entry: CatalogEntry): string {
@@ -56,15 +60,24 @@ function connectionState(
 ): Pick<ConnectorCardItem, "status" | "statusTone"> {
   if (connections.every((connection) => !connection.is_active))
     return { status: translateApp("Disabled"), statusTone: "neutral" };
-  const saved = connections.filter(connection => healthy(connection) && isSavedCredential(connection));
+  const enabled = connections.filter((connection) => connection.is_active);
+  const saved = enabled
+    .filter((connection) =>
+      isSavedCredential(connection) &&
+      (connection.credential_source?.type !== "org" || connection.credential_source.allowed),
+    )
+    .map(describeConnection);
   if (saved.length) {
-    const health = saved.map(describeConnection);
-    const result = health.find(item => item.tone === "error") ?? health.find(item => item.tone === "warning") ?? health[0]!;
-    return { status: result.label, statusTone: result.tone === "muted" ? "neutral" : result.tone };
+    const result = saved.find((item) => item.tone === "error")
+      ?? saved.find((item) => item.tone !== "success")
+      ?? saved[0]!;
+    return {
+      status: result.label,
+      statusTone: result.tone === "muted" ? "neutral" : result.tone,
+    };
   }
   if (connections.some(healthy))
-    return { status: translateApp("Enabled"), statusTone: "success" };
-  const enabled = connections.filter((connection) => connection.is_active);
+    return { status: translateApp("Connected"), statusTone: "success" };
   if (enabled.some((connection) => connection.credential_missing))
     return { status: translateApp("Missing credential"), statusTone: "warning" };
   if (
@@ -125,7 +138,10 @@ function addedItem(
       connections.map((connection) => authLabel(connection.credential_type)),
     ),
   ].join(" / ");
-  const count = `${connections.length} ${connections.length === 1 ? "connection" : "connections"}`;
+  const count = translateApp(
+    connections.length === 1 ? "{{count}} connection" : "{{count}} connections",
+    { count: connections.length },
+  );
   const endpointDescription = isSavedCredential(first) ? describeConnection(first).description :
     first.endpoint_url
       ? translateApp("Connected through the NyxID proxy ({{endpointUrl}}).", {
@@ -146,7 +162,7 @@ function addedItem(
     category: first.service_type === "ssh" ? translateApp("Connector · SSH")
         : translateApp("Connector"),
     description:
-      catalogEntry?.description ?? first.description ?? endpointDescription,
+      catalogEntry?.description?.trim() || first.description?.trim() || endpointDescription,
     meta:
       connections.length > 1
         ? count
@@ -156,6 +172,12 @@ function addedItem(
     added: true,
     disabled: connections.every((connection) => !connection.is_active),
     manageKeyIds: connections.map((connection) => connection.id),
+    connectionCountLabel: count,
+    connectOwnSlug:
+      catalogEntry?.requires_credential && catalogEntry.service_type !== "ssh" &&
+      connections.every((connection) => connection.credential_source?.type === "org")
+        ? catalogEntry.slug
+        : undefined,
     connections,
     catalogEntry,
     ...connectionState(connections),
@@ -167,7 +189,31 @@ function addedItem(
   };
 }
 
-/** Group manual connections by catalog slug; all connected slugs stay out of Discover. */
+function catalogItem(entry: CatalogEntry): ConnectorCardItem {
+  const ssh = entry.service_type === "ssh";
+  const meta = catalogMeta(entry);
+  return {
+    id: `catalog:${entry.slug}`,
+    name: entry.name,
+    iconSlug: entry.slug,
+    iconUrl: entry.icon_url,
+    category: ssh ? translateApp("Connector · SSH") : translateApp("Connector"),
+    description: entry.description?.trim() || (entry.base_url
+      ? translateApp("Proxy requests to {{baseUrl}}.", { baseUrl: entry.base_url })
+      : translateApp("Connect this service through the NyxID proxy.")),
+    meta,
+    added: false,
+    connectSlug: ssh ? undefined : entry.slug,
+    advancedSetupSlug: ssh ? entry.slug : undefined,
+    connections: [],
+    catalogEntry: entry,
+    status: translateApp("Connect"),
+    statusTone: "neutral",
+    summary: meta,
+  };
+}
+
+/** Group manual user credentials by catalog slug and keep managed bindings out of Browse. */
 export function deriveConnectorItems(
   connections: readonly ServiceConnection[],
   catalog: readonly CatalogEntry[],
@@ -179,13 +225,22 @@ export function deriveConnectorItems(
   const bySlug = new Map<string, ServiceConnection[]>();
   const custom: ServiceConnection[] = [];
   for (const connection of connections) {
-    if (connection.auto_connected) continue;
+    if (connection.auto_connected || connection.credential_binding === "platform") continue;
     const slug = connection.catalog_service_slug;
     if (slug) {
       const group = bySlug.get(slug) ?? [];
       group.push(connection);
       bySlug.set(slug, group);
     } else custom.push(connection);
+  }
+  const available: ConnectorCardItem[] = [];
+  const models: ConnectorCardItem[] = [];
+  for (const entry of catalog) {
+    if (entry.inference || entry.slug === "chrono-llm") {
+      models.push(catalogItem(entry));
+    } else if (!connectedSlugs.has(entry.slug) && !entry.platform_key?.available) {
+      available.push(catalogItem(entry));
+    }
   }
   return {
     added: [
@@ -196,32 +251,8 @@ export function deriveConnectorItems(
         addedItem(`key:${connection.id}`, [connection], undefined, null),
       ),
     ],
-    available: catalog
-      .filter((entry) => !connectedSlugs.has(entry.slug))
-      .map((entry) => ({
-        id: `catalog:${entry.slug}`,
-        name: entry.name,
-        iconSlug: entry.slug,
-        iconUrl: entry.icon_url,
-        category:
-          entry.service_type === "ssh" ? translateApp("Connector · SSH")
-            : translateApp("Connector"),
-        description:
-          entry.description ??
-          (entry.base_url
-            ? translateApp("Proxy requests to {{baseUrl}}.", {
-                baseUrl: entry.base_url,
-              })
-            : translateApp("Connect this service through the NyxID proxy.")),
-        meta: catalogMeta(entry),
-        added: false,
-        connectSlug: entry.slug,
-        connections: [],
-        catalogEntry: entry,
-        status: translateApp("Connect"),
-        statusTone: "neutral" as const,
-        summary: catalogMeta(entry),
-      })),
+    available,
+    models,
   };
 }
 

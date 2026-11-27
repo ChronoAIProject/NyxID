@@ -142,6 +142,7 @@ test("plugin API reads preserve database icon metadata across keys and catalog r
     requires_credential: true,
     requires_gateway_url: false,
     icon_url: "https://assets.example/catalog.svg",
+    inference: { wire_protocol: "openai_responses", model_list: true, binding: "user" },
   };
   const paths: string[] = [];
   const api = loadServicesApi(async (path) => {
@@ -155,5 +156,6 @@ test("plugin API reads preserve database icon metadata across keys and catalog r
   assert.equal(keys[0]?.icon_url, connection.icon_url);
   assert.equal(keys[0]?.catalog_icon_url, connection.catalog_icon_url);
   assert.equal(entries[0]?.icon_url, catalogEntry.icon_url);
+  assert.ok(entries[0]?.inference, "preserve the presence of catalog inference metadata for Models");
   assert.deepEqual(paths, ["/keys", "/catalog"]);
 });

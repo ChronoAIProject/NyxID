@@ -460,6 +460,30 @@ test("connect API uses the existing authenticated contracts, compacts empty fiel
   await assert.rejects(api.status(id), /different connection request/);
 });
 
+test("personal hosted setup pins user credentials while ordinary setup preserves the server's choice", async () => {
+  const bodies: unknown[] = [];
+  const h = hookHarness({
+    "./http": {
+      requestJson: async (path: string, options: { body: unknown }) => {
+        assert.equal(path, "/connect-links");
+        bodies.push(JSON.parse(JSON.stringify(options.body)));
+        return { id, connect_url: "https://nyxid.test/connect/demo", expires_at: "2099-10-28T00:00:00Z" };
+      },
+    },
+  });
+  const { connectLinksApi } = h.load(
+    fileURLToPath(new URL("../../lib/api/connectLinksApi.ts", import.meta.url)),
+  ) as typeof import("../../lib/api/connectLinksApi");
+  await connectLinksApi.create("provider", undefined, ["read"], { personal: true });
+  await connectLinksApi.create("provider", undefined, undefined, { personal: false });
+  await connectLinksApi.create("provider");
+  assert.deepEqual(bodies, [
+    { service_slug: "provider", use_platform_key: false, assistant_personal: true, scopes: ["read"] },
+    { service_slug: "provider" },
+    { service_slug: "provider", requested_by: "NyxBot chat" },
+  ]);
+});
+
 test("device authorization polls only its issued state, preserves code on slow-down, and settles from a server response", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const x = flowHarness();
