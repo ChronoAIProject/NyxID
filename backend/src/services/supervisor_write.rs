@@ -192,63 +192,54 @@ fn safe_text(text: &str, limit: usize) -> bool {
             .any(|word| word.len() > 24)
 }
 
-// Reject duplicate JSON keys, rather than reviewing a parser's last-key view
-// while a provider may choose another interpretation.
-struct Unique(Value);
-impl<'de> serde::Deserialize<'de> for Unique {
+// The supported JSON shape has exactly two map levels. Capture raw scalar
+// tokens only inside `fields`, checking decimal value before building a review.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RowUpdate {
+    fields: ScalarFields,
+}
+
+struct ScalarFields(serde_json::Map<String, Value>);
+impl<'de> serde::Deserialize<'de> for ScalarFields {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
         impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = Unique;
+            type Value = ScalarFields;
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("unique JSON object")
+                f.write_str("a unique map of scalar ledger fields")
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(
                 self,
                 mut map: A,
-            ) -> Result<Unique, A::Error> {
+            ) -> Result<ScalarFields, A::Error> {
                 let mut values = serde_json::Map::new();
                 while let Some(key) = map.next_key::<String>()? {
-                    if values.contains_key(&key) {
-                        return Err(serde::de::Error::custom("duplicate field"));
+                    if values.len() >= 8 || values.contains_key(&key) {
+                        return Err(serde::de::Error::custom("too many or duplicate fields"));
                     }
                     let raw = map.next_value::<Box<serde_json::value::RawValue>>()?;
-                    let parsed = serde_json::from_str::<Unique>(raw.get())
-                        .map_err(serde::de::Error::custom)?
-                        .0;
-                    if let Value::Number(number) = &parsed
-                        && canonical_decimal(raw.get()) != canonical_decimal(&number.to_string())
+                    let token = raw.get().trim();
+                    if matches!(token.as_bytes().first(), Some(b'{' | b'[')) {
+                        return Err(serde::de::Error::custom("ledger fields must be scalar"));
+                    }
+                    // This parser receives a scalar token, so nested maps never
+                    // enter a fresh deserializer or recursively call this visitor.
+                    let value: Value =
+                        serde_json::from_str(token).map_err(serde::de::Error::custom)?;
+                    if let Value::Number(number) = &value
+                        && canonical_decimal(token) != canonical_decimal(&number.to_string())
                     {
                         return Err(serde::de::Error::custom(
                             "number cannot be reviewed exactly",
                         ));
                     }
-                    values.insert(key, parsed);
+                    values.insert(key, value);
                 }
-                Ok(Unique(Value::Object(values)))
-            }
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Unique, E> {
-                Ok(Unique(Value::String(v.into())))
-            }
-            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Unique, E> {
-                Ok(Unique(Value::Bool(v)))
-            }
-            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Unique, E> {
-                Ok(Unique(v.into()))
-            }
-            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Unique, E> {
-                Ok(Unique(v.into()))
-            }
-            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Unique, E> {
-                serde_json::Number::from_f64(v)
-                    .map(|n| Unique(n.into()))
-                    .ok_or_else(|| E::custom("invalid number"))
-            }
-            fn visit_unit<E: serde::de::Error>(self) -> Result<Unique, E> {
-                Ok(Unique(Value::Null))
+                Ok(ScalarFields(values))
             }
         }
-        deserializer.deserialize_any(Visitor)
+        deserializer.deserialize_map(Visitor)
     }
 }
 
@@ -346,10 +337,6 @@ pub(crate) fn effect(
     } else {
         path.as_str()
     };
-    let parts: Vec<_> = canonical.split('/').collect();
-    let ["", "bitable", "v1", "apps", _, "tables", _, "records", _] = parts.as_slice() else {
-        return None;
-    };
     let mut effect = effect_fields(canonical, body)?;
     effect.path = path;
     Some(effect)
@@ -357,10 +344,21 @@ pub(crate) fn effect(
 
 fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
     let parts: Vec<_> = path.split('/').collect();
-    let ["", "bitable", "v1", "apps", _, "tables", _, "records", _] = parts.as_slice() else {
+    let [
+        "",
+        "bitable",
+        "v1",
+        "apps",
+        base,
+        "tables",
+        table,
+        "records",
+        record,
+    ] = parts.as_slice()
+    else {
         return None;
     };
-    let ids = [parts[4], parts[6], parts[8]];
+    let ids = [*base, *table, *record];
     if ids.iter().any(|id| {
         id.len() > 64
             || id.is_empty()
@@ -370,12 +368,8 @@ fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
     }) {
         return None;
     }
-    let Unique(value) = serde_json::from_slice::<Unique>(body).ok()?;
-    let object = value.as_object()?;
-    if object.len() != 1 {
-        return None;
-    }
-    let fields = object.get("fields")?.as_object()?;
+    let update = serde_json::from_slice::<RowUpdate>(body).ok()?;
+    let fields = &update.fields.0;
     if fields.is_empty() || fields.len() > 8 {
         return None;
     }
@@ -1032,6 +1026,9 @@ mod tests {
             r#"{"fields":{"Status":"first"},"fields":{"Status":"second"}}"#,
             r#"{"fields":{"Status":{"text":"Approved"}}}"#,
             r#"{"fields":{"Status":["Approved"]}}"#,
+            r#"{"fields":{"Status":{"nested":{"text":"Approved"}}}}"#,
+            r#"{"fields":null}"#,
+            r#"{"fields":[]}"#,
             r#"{"fields":{"api_key":"short-secret"}}"#,
             r#"{"fields":{"Status":"nyxid_ag_private"}}"#,
             r#"{"fields":{"Status":"AKIA0123456789ABCDEF"}}"#,
@@ -1047,6 +1044,13 @@ mod tests {
         let body = serde_json::json!({"fields":{"Status":"a".repeat(97)}}).to_string();
         assert!(effect("api-feishu", "PUT", path, None, body.as_bytes(), false).is_none());
         let body=serde_json::json!({"fields":(0..9).map(|n|(format!("field{n}"),Value::Bool(true))).collect::<serde_json::Map<_,_>>()}).to_string();
+        assert!(effect("api-feishu", "PUT", path, None, body.as_bytes(), false).is_none());
+        let body = format!(
+            "{{\"fields\":{{\"Status\":{}\"Approved\"{}}}}}",
+            "{\"nested\":".repeat(256),
+            "}".repeat(256)
+        );
+        assert!(body.len() < 4096);
         assert!(effect("api-feishu", "PUT", path, None, body.as_bytes(), false).is_none());
     }
 
