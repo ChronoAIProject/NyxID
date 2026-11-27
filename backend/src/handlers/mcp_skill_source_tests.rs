@@ -8,13 +8,77 @@ use wiremock::{
 };
 
 async fn bounded(response: Response, error: bool) -> Value {
+    let (value, is_error) = bounded_outcome(response).await;
+    assert_eq!(is_error, error, "{value}");
+    value
+}
+
+async fn bounded_outcome(response: Response) -> (Value, bool) {
     let raw = axum::body::to_bytes(response.into_body(), 20_000)
         .await
         .unwrap();
     let rpc: Value = serde_json::from_slice(&raw).unwrap();
-    assert!(rpc["result"].to_string().len() <= 9200, "{}", raw.len());
-    assert_eq!(rpc["result"]["isError"], error, "{rpc}");
-    serde_json::from_str(rpc["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    assert!(rpc.get("error").is_none(), "{rpc}");
+    assert!(
+        rpc["result"].to_string().len() <= crate::services::agent_skill_service::PAGE_BUDGET,
+        "{}",
+        raw.len()
+    );
+    let is_error = rpc["result"]["isError"].as_bool().unwrap();
+    let value =
+        serde_json::from_str(rpc["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    (value, is_error)
+}
+
+/// Retry only a definite pending action, after the fixture's human decision.
+/// Inspect every response: another floor may require another exact card, while
+/// any other error must fail instead of replaying an uncertain/completed write.
+async fn call_with_owner_cards(f: &Fixture, name: &str, mut args: Value) -> Value {
+    let mut approved = Vec::new();
+    for _ in 0..4 {
+        let owner = authenticate_id(f, &f.nyxbot_thread).await;
+        let (value, is_error) = bounded_outcome(call(f, &owner, name, args.clone()).await).await;
+        if !is_error {
+            let history = acks::history(&f.state.db, &f.owner, &f.nyxbot_thread)
+                .await
+                .unwrap();
+            for id in &approved {
+                let card = history
+                    .iter()
+                    .find(|card| &card.id == id)
+                    .expect("approved action card");
+                assert_eq!(card.status, "used", "{name}: {id}");
+            }
+            return value;
+        }
+        assert_eq!(
+            value["error"], "acknowledgement_required",
+            "{name}: {value}"
+        );
+        assert_eq!(value["kind"], "action", "{name}: {value}");
+        assert_eq!(value["decider"], "user", "{name}: {value}");
+        assert_ne!(
+            value["source"], "authored",
+            "authored publication uses its decision handler"
+        );
+        let id = value["acknowledgement_id"].as_str().unwrap().to_owned();
+        assert!(
+            !approved.contains(&id),
+            "repeated confirmation for {name}: {value}"
+        );
+        let card = acks::decide(&f.state.db, &f.owner, &f.nyxbot_thread, &id, true)
+            .await
+            .unwrap();
+        assert_eq!(card.status, "allowed");
+        assert_eq!(card.tool_name.as_deref(), Some(name));
+        if let Some(retry) = value.get("retry_arguments") {
+            assert!(retry.is_object(), "{name}: {value}");
+            args = retry.clone();
+        }
+        args["acknowledgement_id"] = json!(id);
+        approved.push(id);
+    }
+    panic!("confirmation flow did not finish for {name}");
 }
 
 async fn registry(f: &Fixture) -> (MockServer, SkillReference) {
@@ -107,15 +171,10 @@ async fn skill_read_recovery_private_derivative_preserves_created_ids() {
     .await
     .unwrap();
     let owner = authenticate_id(&f, &f.nyxbot_thread).await;
-    let created = result(
-        call(
-            &f,
-            &owner,
-            "nyxid__spawn_subagent",
-            json!({"name":"desk","description":"Personal desk procedure","services":[service]}),
-        )
-        .await,
-        false,
+    let created = call_with_owner_cards(
+        &f,
+        "nyxid__spawn_subagent",
+        json!({"name":"desk","description":"Personal desk procedure","services":[service]}),
     )
     .await;
     let desk_id = created["subagent"]["id"].as_str().unwrap();
@@ -148,11 +207,7 @@ async fn skill_read_recovery_private_derivative_preserves_created_ids() {
         .expect(1)
         .mount(&server)
         .await;
-    let first = bounded(
-        call(&f, &owner, "ornn-api__create_workspace_fixture", json!({})).await,
-        false,
-    )
-    .await;
+    let first = call_with_owner_cards(&f, "ornn-api__create_workspace_fixture", json!({})).await;
     assert_eq!(first["complete"], false);
     let mut recovered = first["content"].as_str().unwrap().to_owned();
     let mut next = first["next_part"].as_u64();
@@ -195,6 +250,9 @@ async fn skill_read_recovery_private_derivative_preserves_created_ids() {
         true,
     )
     .await;
+    assert_eq!(card["error"], "acknowledgement_required");
+    assert_eq!(card["source"], "authored");
+    assert_eq!(card["agent_id"], desk_id);
     let proposal: crate::models::assistant_agent_learning::AssistantAgentLearningProposal = f
         .state
         .db
@@ -206,7 +264,7 @@ async fn skill_read_recovery_private_derivative_preserves_created_ids() {
     let published_id = uuid::Uuid::new_v4().to_string();
     authored::mount_publication(&f, &server, &proposal, &published_id, "POST").await;
     let ack = card["acknowledgement_id"].as_str().unwrap().to_owned();
-    crate::handlers::assistant_nyxagent::decide_acknowledgement(
+    let Json(decided) = crate::handlers::assistant_nyxagent::decide_acknowledgement(
         axum::extract::State(f.state.clone()),
         crate::test_utils::test_auth_user(&f.owner),
         axum::extract::Path((f.nyxbot_thread.clone(), ack.clone())),
@@ -214,14 +272,21 @@ async fn skill_read_recovery_private_derivative_preserves_created_ids() {
     )
     .await
     .unwrap();
+    let decided = serde_json::to_value(decided).unwrap();
+    assert_eq!(decided["id"], ack);
+    assert_eq!(decided["status"], "used");
     // Repeated decision exercises the publication saga's existing once-only path.
-    let _ = crate::handlers::assistant_nyxagent::decide_acknowledgement(
+    let Json(repeated) = crate::handlers::assistant_nyxagent::decide_acknowledgement(
         axum::extract::State(f.state.clone()),
         crate::test_utils::test_auth_user(&f.owner),
-        axum::extract::Path((f.nyxbot_thread.clone(), ack)),
+        axum::extract::Path((f.nyxbot_thread.clone(), ack.clone())),
         Json(serde_json::from_value(json!({"decision":"allow"})).unwrap()),
     )
-    .await;
+    .await
+    .unwrap();
+    let repeated = serde_json::to_value(repeated).unwrap();
+    assert_eq!(repeated["id"], ack);
+    assert_eq!(repeated["status"], "used");
     let saved = bounded(
         call(
             &f,
@@ -240,8 +305,9 @@ async fn skill_read_recovery_private_derivative_preserves_created_ids() {
         saved["pin"]["sha256"],
         proposal.publication.as_ref().unwrap().sha256
     );
-    result(call(&f,&owner,"nyxid__set_agent_operations",
-        json!({"subagent":"desk","service_id":service,"selection":{"expected_revision":0,"read_only":true}})).await,false).await;
+    let saved_scope = call_with_owner_cards(&f, "nyxid__set_agent_operations",
+        json!({"subagent":"desk","service_id":service,"selection":{"expected_revision":0,"read_only":true}})).await;
+    assert_eq!(saved_scope["revision"], 1);
     let scopes = bounded(
         call(
             &f,
@@ -264,6 +330,19 @@ async fn skill_read_recovery_private_derivative_preserves_created_ids() {
     assert_eq!(desk.id, desk_id);
     assert_eq!(desk.skills.len(), 1);
     assert_eq!(desk.skills[0].skill_id, published_id);
+    let cards = acks::history(&f.state.db, &f.owner, &f.nyxbot_thread)
+        .await
+        .unwrap();
+    assert_eq!(
+        cards
+            .iter()
+            .filter(
+                |card| card.tool_name.as_deref() == Some("nyxid__spawn_subagent")
+                    && card.status == "used"
+            )
+            .count(),
+        1
+    );
     let requests = server.received_requests().await.unwrap();
     assert_eq!(
         requests

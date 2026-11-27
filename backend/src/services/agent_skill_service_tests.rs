@@ -783,6 +783,25 @@ async fn agent_skill_source_changes_refuse_after_authority_and_integrity() {
         .await
         .unwrap();
     let fingerprint = manifest["source_fingerprint"].as_str().unwrap();
+    let first_file = read(
+        &registry,
+        &agent,
+        ID,
+        None,
+        "SKILL.md",
+        0,
+        Some(fingerprint),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first_file["complete"], false);
+    assert_eq!(
+        first_file["sha256"],
+        source_fixture::expected()["SKILL.md"]["sha256"]
+    );
+    let next_offset = first_file["next_offset"].as_u64().unwrap() as usize;
+    assert_eq!(next_offset, first_file["content"].as_str().unwrap().len());
+    assert!(next_offset > 0);
     // A later pin edit or preload metadata update cannot invalidate identical source.
     agent.skills_revision += 1;
     let mut unrelated = registry.reference();
@@ -796,13 +815,13 @@ async fn agent_skill_source_changes_refuse_after_authority_and_integrity() {
             ID,
             None,
             "SKILL.md",
-            6000,
+            next_offset,
             Some(fingerprint)
         )
         .await
         .is_ok()
     );
-    let missing = read(&registry, &agent, ID, None, "SKILL.md", 6000, None)
+    let missing = read(&registry, &agent, ID, None, "SKILL.md", next_offset, None)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -824,27 +843,29 @@ async fn agent_skill_source_changes_refuse_after_authority_and_integrity() {
             3 => changed.id = uuid::Uuid::new_v4().to_string(),
             _ => changed.skills[0].name = "new-alias".into(),
         }
-        let error = read(
-            &registry,
-            &changed,
-            &changed.skills[0].name,
-            None,
-            "missing-file.md",
-            0,
-            Some(fingerprint),
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            AppError::SkillRead(SkillReadReason::SourceChanged)
-        ));
-        let details = error.response_body().details.unwrap();
-        assert_eq!(details["complete"], false);
-        assert_eq!(details["next_offset"], 0);
-        assert!(details.get("content").is_none());
-        assert!(details.get("source_fingerprint").is_none());
-        assert!(!details.to_string().contains(ID));
+        for (path, offset) in [("SKILL.md", next_offset), ("missing-file.md", 0)] {
+            let error = read(
+                &registry,
+                &changed,
+                &changed.skills[0].name,
+                None,
+                path,
+                offset,
+                Some(fingerprint),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                error,
+                AppError::SkillRead(SkillReadReason::SourceChanged)
+            ));
+            let details = error.response_body().details.unwrap();
+            assert_eq!(details["complete"], false);
+            assert_eq!(details["next_offset"], 0);
+            assert!(details.get("content").is_none());
+            assert!(details.get("source_fingerprint").is_none());
+            assert!(!details.to_string().contains(ID));
+        }
     }
     // New manifest/archive bytes at the same literal version are a source change.
     let replacement = Registry {

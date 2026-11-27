@@ -531,14 +531,33 @@ async fn skill_read_source_effective_builtins_and_explicit_roots_keep_exact_sour
     .await
     .unwrap();
     let source = first["source_fingerprint"].as_str().unwrap();
+    let mut root_next = None;
     for dependency in [None, Some(DEP)] {
+        let first_file = skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            dependency,
+            "SKILL.md",
+            0,
+            Some(source),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_file["complete"], false);
+        let next = first_file["next_offset"].as_u64().unwrap() as usize;
+        assert_eq!(next, first_file["content"].as_str().unwrap().len());
+        assert!(next > 0);
+        if dependency.is_none() {
+            root_next = Some(next);
+        }
         let page = skills::read(
             &registry,
             &read_view(&agent, Some(&system)),
             ID,
             dependency,
             "SKILL.md",
-            6000,
+            next,
             Some(source),
         )
         .await
@@ -546,6 +565,7 @@ async fn skill_read_source_effective_builtins_and_explicit_roots_keep_exact_sour
         assert_eq!(page["source_fingerprint"], source);
         assert_eq!(page["archive_sha256"], registry.reference().sha256);
     }
+    let root_next = root_next.unwrap();
     // Platform/config revisions and unrelated pin edits retain identical content.
     system.system.revision += 1;
     agent.skills_revision += 1;
@@ -560,7 +580,7 @@ async fn skill_read_source_effective_builtins_and_explicit_roots_keep_exact_sour
             ID,
             None,
             "SKILL.md",
-            6000,
+            root_next,
             Some(source)
         )
         .await
@@ -582,7 +602,7 @@ async fn skill_read_source_effective_builtins_and_explicit_roots_keep_exact_sour
             crate::errors::skill_read::SkillReadReason::SourceChanged
         ))
     ));
-    // Explicit root shadows the built-in. Its exact closure must be read anew.
+    // An explicit root with identical pins shadows the built-in and retains source.
     agent.skills.push(registry.reference());
     assert!(
         skills::read(
@@ -591,7 +611,7 @@ async fn skill_read_source_effective_builtins_and_explicit_roots_keep_exact_sour
             ID,
             None,
             "SKILL.md",
-            6000,
+            root_next,
             Some(source)
         )
         .await
