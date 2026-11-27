@@ -1635,6 +1635,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "durable_operation_grants is compacted by local::retain_settled_evidence after terminal execution; the original row is deleted and only opaque user_id, row identity and settlement reason remain in personal_erasure_local_receipts.",
     },
     Entry {
+        collection: "encrypted_record_census_log",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "encrypted_record_census_log retains protected stream positions and document locators for replay. Its control records expire with the generation.",
+    },
+    Entry {
         collection: "encrypted_record_migration_findings",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
