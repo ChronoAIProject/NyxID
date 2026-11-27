@@ -43,10 +43,10 @@ impl CatalogAuthority {
 }
 
 /// Resolve the caller's catalog write authority, or `None` when they have none.
-pub async fn catalog_authority(
+async fn catalog_authority(
     state: &AppState,
     auth_user: &AuthUser,
-) -> AppResult<Option<CatalogAuthority>> {
+) -> AppResult<Result<Option<CatalogAuthority>, AppError>> {
     let user_id = auth_user.user_id.to_string();
     let user = state
         .db
@@ -55,13 +55,17 @@ pub async fn catalog_authority(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
     let platform_role = role_service::resolve_platform_role(&state.db, &user).await?;
-    if platform_role.is_admin() {
-        return Ok(Some(CatalogAuthority::Admin));
+    let authority = if platform_role.is_admin() {
+        CatalogAuthority::Admin
+    } else if role_service::can_manage_catalog(&state.db, &user, platform_role).await? {
+        CatalogAuthority::CatalogManager
+    } else {
+        return Ok(Ok(None));
+    };
+    match super::admin_helpers::privileged_session_denial(state, auth_user, &user).await {
+        Some(error) => Ok(Err(error)),
+        None => Ok(Ok(Some(authority))),
     }
-    if role_service::can_manage_catalog(&state.db, &user, platform_role).await? {
-        return Ok(Some(CatalogAuthority::CatalogManager));
-    }
-    Ok(None)
 }
 
 pub async fn require_catalog_writer(
@@ -70,7 +74,7 @@ pub async fn require_catalog_writer(
 ) -> AppResult<CatalogAuthority> {
     super::login_client_context::require_first_party_human(auth_user)?;
     catalog_authority(state, auth_user)
-        .await?
+        .await??
         .ok_or_else(|| AppError::Forbidden("Admin or Catalog Manager access required".to_string()))
 }
 
@@ -106,7 +110,16 @@ pub async fn require_catalog_row_writer(
         super::services_helpers::require_admin(state, auth_user).await?;
         return Ok(Some(CatalogAuthority::Admin));
     }
-    let authority = catalog_authority(state, auth_user).await?;
+    let authority = match catalog_authority(state, auth_user).await? {
+        Ok(authority) => authority,
+        Err(_)
+            if service.created_by == auth_user.user_id.to_string()
+                && !(service.catalog_manager_created && service.visibility != "private") =>
+        {
+            None
+        }
+        Err(error) => return Err(error),
+    };
     match authority {
         Some(CatalogAuthority::Admin) => return Ok(authority),
         Some(CatalogAuthority::CatalogManager)
@@ -737,6 +750,7 @@ pub async fn require_tool_writer(
         .ok_or_else(|| AppError::Forbidden("Tool management requires a human account".into()))?;
     let role = role_service::resolve_platform_role(&state.db, &user).await?;
     if role.is_admin() {
+        super::admin_helpers::require_privileged_session(state, auth, &user).await?;
         return Ok(CatalogAuthority::Admin);
     }
     let eligible_owner = if let Some(s) = service {
@@ -755,6 +769,7 @@ pub async fn require_tool_writer(
             "Admin or owning Tools Manager access required".into(),
         ));
     }
+    super::admin_helpers::require_privileged_session(state, auth, &user).await?;
     Ok(CatalogAuthority::ToolsManager)
 }
 

@@ -1,4 +1,5 @@
 //! Storage identity for the input retained by a background response window.
+use crate::crypto::record_field::historical::HistoricalAad;
 use crate::{
     crypto::{aes::EncryptionKeys, record_field::RecordContext},
     errors::{AppError, AppResult},
@@ -49,15 +50,9 @@ impl<'a> Identity<'a> {
         ]
     }
 
-    fn aad(&self) -> AppResult<Vec<u8>> {
-        serde_json::to_vec(&(
-            "nyxid/reattach-window/1",
-            self.owner,
-            self.conversation,
-            self.credential,
-            self.key,
-        ))
-        .map_err(|_| invalid())
+    fn aad(&self) -> AppResult<HistoricalAad<'_>> {
+        HistoricalAad::reattach_window(self.owner, self.conversation, self.credential, self.key)
+            .map_err(|_| invalid())
     }
 
     pub(super) async fn seal(&self, keys: &EncryptionKeys, plain: &[u8]) -> AppResult<SealedInput> {
@@ -66,7 +61,7 @@ impl<'a> Identity<'a> {
             let ctx = RecordContext::new(COLLECTION_NAME, self.conversation, self.owner, &path)?;
             (keys.encrypt_record(plain, &ctx).await?, Some(3))
         } else {
-            (keys.encrypt_with_aad(plain, &self.aad()?).await?, None)
+            (self.aad()?.seal(keys, plain).await?, None)
         };
         Ok(SealedInput {
             ciphertext: Binary {
@@ -90,9 +85,7 @@ impl<'a> Identity<'a> {
                     RecordContext::new(COLLECTION_NAME, self.conversation, self.owner, &path)?;
                 keys.decrypt_record(value, &ctx).await
             }
-            None if keys.allow_legacy_record_reads() => {
-                keys.decrypt_with_aad(value, &self.aad()?).await
-            }
+            None if keys.allow_legacy_record_reads() => self.aad()?.open(keys, value).await,
             _ => Err(invalid()),
         }
     }
@@ -211,7 +204,7 @@ mod tests {
             key: "window\\01",
         };
         assert_eq!(
-            identity.aad().unwrap(),
+            identity.aad().unwrap().as_bytes(),
             r#"["nyxid/reattach-window/1","person:λ","chat/%2F","key\"","window\\01"]"#.as_bytes()
         );
     }

@@ -127,14 +127,24 @@ for refusal codes and the `login --agent-key` unattended path.
 
 ## notification
 
-Control how approval requests reach you.
+Set your global approval preference and the account-wide notification switches.
 
 ```bash
 nyxid notification settings
-nyxid notification update --approval-email true --approval-push false --approval-telegram true
+nyxid notification update --approval-mode writes_only   # or: all, off
+nyxid notification update --approval-push false --approval-telegram true
 nyxid notification telegram-link        # link a Telegram account
 nyxid notification telegram-disconnect
 ```
+
+Each `update` flag writes one account setting:
+
+| Flag | Settings field | Effect |
+|---|---|---|
+| `--approval-mode <mode>` | `global_approval_mode` | Global approval preference: `writes_only` (the default; approval for writes and destructive operations only), `all` or `off`. |
+| `--approval-push <bool>` | `push_enabled` | Account-wide push switch. `false` stops every push to your devices, not only approvals (NyxBot Notifications included). `true` requires a registered device. |
+| `--approval-telegram <bool>` | `telegram_enabled` | Account-wide switch for the NyxID Telegram bot's notices, not only approvals. `true` requires a linked Telegram account. |
+| `--approval-email <bool>` | `approval_required` | Legacy global approval toggle, kept for compatibility: `true` selects **All requests**, `false` selects **Off**. It does not send email; NyxID has no email notification channel. Cannot be combined with `--approval-mode`. |
 
 ## approval
 
@@ -147,13 +157,32 @@ nyxid approval approve <id>
 nyxid approval deny <id> [--reason <text>]
 nyxid approval grants                    # standing time-based grants
 nyxid approval revoke-grant <id> [--yes]
-nyxid approval enable                    # require approval globally
-nyxid approval disable [--yes]
+nyxid approval enable                    # global preference: All requests
+nyxid approval disable [--yes]           # global preference: Off
 nyxid approval service-configs           # per-service policy list
 nyxid approval set-config <id> --require-approval true --approval-mode grant
 ```
 
+`approve` sends `{"approved": true}` and `deny` sends `{"approved": false}` to `POST /api/v1/approvals/requests/{id}/decide`. A successful denial returns `status: "rejected"` and the command exits 0. With `--output json`, stdout contains the decision response. The optional `--reason` adds a `reason` field to the request that the server does not store.
+
+If approving or denying returns HTTP 422 about a missing `approved` field, check `nyxid --version`. Versions 0.71.0 and 0.78.0 send incompatible `decision` strings. Build a checkout containing #2885 with `cargo build --locked -p nyxid-cli` and use its `./target/debug/nyxid`, or install a published release once it includes the repair. While v0.78.0 is the latest release, `nyxid update` does not provide the repair. Changing `--reason` or `--output` does not correct the request body.
+
 `set-config` takes a `UserService` ID (from [`nyxid service list`](/docs/cli/reference/service)) or a catalog ID; `--approval-mode` is `per_request` (every call) or `grant` (approval mints a reusable grant).
+
+### Organization service approvers
+
+Sign in as an Admin entitled to the service. Pass an organization UUID, slug or exact display name and an owned connection or catalog service ID.
+
+```bash
+nyxid approval approvers show --org acme --service "$SERVICE" --output json
+nyxid approval approvers set --org acme --service "$SERVICE" --set "$ALEX,$SAM"
+nyxid approval approvers set --org acme --service "$SERVICE" --remove "$SAM" --add "$RAVI"
+nyxid approval approvers set --org acme --service "$SERVICE" --inherit
+```
+
+`show` lists eligible person UUIDs, their display names and whether editing is available. `--inherit` includes future eligible Admins automatically. `--set` replaces the list. With `--add` or `--remove`, the CLI starts from the saved list, or from the current eligible candidates when inheriting. A change to that inherited set saves a named snapshot. An ineffective edit preserves inheritance. Named lists must contain 1–128 distinct eligible Admins.
+
+Each edit reads the config UUID and revision before submitting. If another Admin edits or replaces the config in between, the command reports 409. Run `show` and review the current policy before submitting a new edit. Both commands accept `--output json`. The JSON field `approver_user_ids` is null for inheritance and an empty array if automatic pruning removed every named approver.
 
 ## endpoint
 

@@ -30,6 +30,7 @@ export const contentNames = [
   "AgentCreate",
   "AgentDetail",
   "AgentProfileEdit",
+  "AgentAvatarEdit",
   "GroupEditor",
   "ServiceSetup",
   "AgentSkills",

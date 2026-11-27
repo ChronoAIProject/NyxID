@@ -176,9 +176,11 @@ it("refreshes the open thread on every change but lists only when a turn or coun
   expect(change("t1", 2)).toEqual({
     now: [["assistant", "nyxagent", "u", "history", "nyxa-1"]],
     lists: threadAndAgents,
+    activity: true,
   });
-  // Tool activity during the turn: only the open thread.
+  // Tool activity during the turn refreshes the transcript and projection.
   expect(change("t1", 2).lists).toEqual([]);
+  expect(change("t1", 2).activity).toBe(true);
   // It settles with a reply: the lists again.
   expect(change(null, 3).lists).toEqual(threadAndAgents);
   // A hidden group member thread refreshes its group, never the thread list.
@@ -190,6 +192,7 @@ it("refreshes the open thread on every change but lists only when a turn or coun
     ),
   ).toEqual({
     now: [["assistant", "nyxagent", "u", "groups", "messages", "nyxg-1"]],
+    activity: true,
     lists: [
       ["assistant", "nyxagent", "u", "groups", "list"],
       ["assistant", "nyxagent", "u", "agents"],
@@ -199,6 +202,7 @@ it("refreshes the open thread on every change but lists only when a turn or coun
   expect(nyxAgentLiveRefresh("u", { type: "resync" }, seen)).toEqual({
     now: [["assistant", "nyxagent", "u"]],
     lists: [],
+    activity: true,
   });
   expect(change("t1", 2).lists).toEqual(threadAndAgents);
 });

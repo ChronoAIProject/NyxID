@@ -1,3 +1,5 @@
+mod approvers;
+
 use std::io::Write;
 
 use anyhow::Result;
@@ -117,6 +119,7 @@ fn parse_approval_rule(spec: &str) -> Result<Value> {
 
 pub async fn run(command: ApprovalCommands) -> Result<()> {
     match command {
+        ApprovalCommands::Approvers { command } => approvers::run(command).await,
         ApprovalCommands::List { org, auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let org = resolve_optional_org(&mut api, org).await?;

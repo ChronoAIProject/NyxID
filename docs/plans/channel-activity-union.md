@@ -1,5 +1,7 @@
 # Typed channel activity implementation record
 
+> **Status:** Historical — implementation record for a shipped feature. Current spec: [Typed channel activity](../CHANNEL_ACTIVITY.md).
+
 The implementation builds on main `4e8de717`, including PR #1640's X mentions and replies. It is implemented and personally reviewed in the existing Heca `gpt-6-astra` / xhigh / full-access session. No subagent was spawned. Runtime documentation and receiver integration instructions are in [Typed channel activity](../CHANNEL_ACTIVITY.md).
 
 ## Delivered behavior

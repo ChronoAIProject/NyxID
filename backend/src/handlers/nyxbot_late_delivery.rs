@@ -163,12 +163,47 @@ impl Drop for StreamGuard {
     }
 }
 
+/// Identifies the turn whose hosted output is being handed to a provider.
+pub(super) struct HostedReply {
+    conversation_id: String,
+    turn_id: Option<String>,
+}
+
+impl HostedReply {
+    pub(super) fn new(conversation_id: &str, turn_id: Option<&str>) -> Option<Self> {
+        crate::services::channel_guest_access::is_hosted_conversation(conversation_id).then(|| {
+            Self {
+                conversation_id: conversation_id.to_owned(),
+                turn_id: turn_id.map(str::to_owned),
+            }
+        })
+    }
+
+    pub(super) fn for_event(event: &NyxbotEvent) -> Option<Self> {
+        Self::new(event.conversation_id.as_deref()?, event.turn_id.as_deref())
+    }
+
+    pub(super) fn is_for_conversation(&self, conversation_id: Option<&str>) -> bool {
+        conversation_id == Some(self.conversation_id.as_str())
+    }
+
+    fn matches(&self, event: &NyxbotEvent) -> bool {
+        self.is_for_conversation(event.conversation_id.as_deref())
+            && self.turn_id.is_some()
+            && event.turn_id == self.turn_id
+            && event
+                .delivery
+                .as_ref()
+                .is_some_and(|delivery| delivery.version == 1 && delivery.guest)
+    }
+}
+
 pub(super) fn provider_stream(
     state: AppState,
     event_key: String,
     response_id: String,
     created: Value,
-    receiver: broadcast::Receiver<Value>,
+    turn: InboundTurn,
     admitted_at: chrono::DateTime<Utc>,
 ) -> Response {
     provider_stream_inner(
@@ -176,7 +211,7 @@ pub(super) fn provider_stream(
         event_key,
         response_id,
         created,
-        receiver,
+        turn,
         admitted_at,
         false,
     )
@@ -191,7 +226,7 @@ pub(super) fn provider_stream_direct(
     event_key: String,
     response_id: String,
     created: Value,
-    receiver: broadcast::Receiver<Value>,
+    turn: InboundTurn,
     admitted_at: chrono::DateTime<Utc>,
 ) -> Response {
     provider_stream_inner(
@@ -199,7 +234,7 @@ pub(super) fn provider_stream_direct(
         event_key,
         response_id,
         created,
-        receiver,
+        turn,
         admitted_at,
         true,
     )
@@ -210,7 +245,7 @@ fn provider_stream_inner(
     event_key: String,
     response_id: String,
     created: Value,
-    receiver: broadcast::Receiver<Value>,
+    turn: InboundTurn,
     admitted_at: chrono::DateTime<Utc>,
     direct_delivery: bool,
 ) -> Response {
@@ -223,6 +258,10 @@ fn provider_stream_inner(
     let deadline = admitted_at + ChronoDuration::seconds(STREAM_SECS);
     let wait = (deadline - Utc::now()).to_std().unwrap_or_default();
     let deadline = tokio::time::Instant::now() + wait;
+    let InboundTurn {
+        receiver,
+        hosted_reply,
+    } = turn;
     sse(async_stream::stream! {
         yield created;
         match tokio::time::timeout_at(deadline, final_reply(receiver)).await {
@@ -233,9 +272,13 @@ fn provider_stream_inner(
                 process(&state, &event_key).await;
             }
             Ok(outcome) => {
-                let (allowed,org_guest,language)=org_stream_authority(&state,&event_key).await.unwrap_or((false,false,None));
+                let (allowed,org_guest,language)=stream_authority(&state, &event_key, hosted_reply.as_ref()).await.unwrap_or((false,false,None));
                 if !allowed {
-                    let _=refuse(&state,&event_key).await;
+                    // The event ID may now identify another turn. Only refuse a
+                    // hosted reply through its own delivery fence.
+                    if hosted_reply.is_none() {
+                        let _ = refuse(&state, &event_key).await;
+                    }
                     guard.disarm();
                     for frame in message_frames(&response_id,None) {yield frame;}
                     return;
@@ -262,40 +305,11 @@ fn provider_stream_inner(
                 {
                     guard.disarm();
                     for frame in message_frames(&response_id, None) { yield frame; }
-                } else if direct_delivery {
-                    // Direct custom destinations remain `pending`, so the
-                    // durable worker owns the chat send. Do not claim the
-                    // normal gateway stream barrier here: claiming it would
-                    // prevent that worker from dispatching the approved relay
-                    // receipt while still leaving the provider without a
-                    // completion frame.
+                } else if direct_delivery || claim_stream(&state, &event_key, status, hosted_reply.as_ref()).await.unwrap_or(false) {
                     guard.disarm();
-                    match outcome {
-                        Ok(text) => {
-                            let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
-                            let wake_state = state.clone();
-                            let wake_event = event_key.clone();
-                            crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
-                            for frame in message_frames(&response_id, Some(&text)) { yield frame; }
-                        },
-                        Err(error) if matches!(error.code, "channel_retry_attachment_unavailable" | "capacity_exceeded" | "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
-                            let wake_state = state.clone();
-                            let wake_event = event_key.clone();
-                            crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
-                            for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
-                        },
-                        Err(error) => {
-                            let wake_state = state.clone();
-                            let wake_event = event_key.clone();
-                            crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
-                            yield json!({"type": "response.failed", "response": {
-                                "id": &response_id, "status": "failed",
-                                "error": {"code": identifier(error.code), "message": "NyxBot could not finish this turn."}}});
-                        }
-                    }
-                } else if delivery::claim_stream(&state.db, &event_key, status).await.unwrap_or(false) {
-                    guard.disarm();
-                    if let Ok(Some(event)) = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {"_id":&event_key}).await {
+                    if !direct_delivery
+                        && let Ok(Some(event)) = state.db.collection::<NyxbotEvent>(EVENTS).find_one(doc! {"_id":&event_key}).await
+                    {
                         if let Some(turn) = &event.turn_id {
                             crate::turn_trace::milestone(turn, crate::turn_trace::Stage::Channel, None, Some(crate::turn_trace::Outcome::Streamed));
                         }
@@ -303,17 +317,41 @@ fn provider_stream_inner(
                             "conversation_id":event.conversation_id,"turn_id":event.turn_id,"transport":"gateway",
                             "outcome":"streamed","reason":"platform_delivery_unconfirmed"})).await;
                     }
-                    match outcome {
+                    let frames = match outcome {
                         Ok(text) => {
-                            let text = stream_images(&state, &event_key, &text, deadline.into_std()).await;
-                            for frame in message_frames(&response_id, Some(&text)) { yield frame; }
+                            let text = if hosted_reply.is_some() {
+                                bounded_reply(&text)
+                            } else {
+                                stream_images(&state, &event_key, &text, deadline.into_std()).await
+                            };
+                            let allowed = hosted_reply.is_some()
+                                || stream_authority(&state, &event_key, None)
+                                    .await
+                                    .is_ok_and(|(allowed, _, _)| allowed);
+                            message_frames(&response_id, allowed.then_some(text.as_str()))
                         },
                         Err(error) if matches!(error.code, "channel_retry_attachment_unavailable" | "capacity_exceeded" | "outcome_unknown" | "guest_model_route_required" | "assistant_start_unavailable" | "org_channel_guest_unavailable" | "model_approval_required" | "model_policy_denied" | "model_org_approval_required") => {
-                            for frame in message_frames(&response_id, Some(&error.message)) { yield frame; }
+                            message_frames(&response_id, Some(&error.message))
                         },
-                        Err(error) => yield json!({"type": "response.failed", "response": {
+                        Err(error) => vec![json!({"type": "response.failed", "response": {
                             "id": &response_id, "status": "failed",
-                            "error": {"code": identifier(error.code), "message": "NyxBot could not finish this turn."}}}),
+                            "error": {"code": identifier(error.code), "message": "NyxBot could not finish this turn."}}})],
+                    };
+                    // The durable worker still owns the direct custom chat send.
+                    if direct_delivery {
+                        let wake_state = state.clone();
+                        let wake_event = event_key.clone();
+                        crate::services::shutdown::process().spawn(async move { process(&wake_state, &wake_event).await; });
+                    }
+                    for frame in frames {
+                        if let Some(hosted) = &hosted_reply
+                            && frame_has_answer(&frame)
+                            && !hosted_stream_allowed(&state, &event_key, hosted).await
+                        {
+                            for frame in message_frames(&response_id, None) { yield frame; }
+                            return;
+                        }
+                        yield frame;
                     }
                 } else {
                     // The deadline/sweeper won: the final answer belongs to the
@@ -698,9 +736,15 @@ pub(super) async fn stream_images(
             return Ok(bounded_reply(text));
         };
         let conversation = engine::get(&state.db, crate::services::org_channel_service::event_actor(&event), conversation_id).await?;
+        let guest = crate::services::channel_guest_access::is_hosted_conversation(conversation_id);
         let Some((channel, thread)) = eligible(state, &event, delivery, &conversation).await? else {
-            return Ok(bounded_reply(text));
+            return Ok(if guest { String::new() } else { bounded_reply(text) });
         };
+        // Add-on delivery currently sends text from the admitted event. It
+        // never materializes legacy guest attachments or image deliveries.
+        if guest {
+            return Ok(bounded_reply(text));
+        }
         let Some(message) = state.db.collection::<AssistantMessage>(MESSAGES).find_one(doc! {
             "user_id": crate::services::org_channel_service::event_actor(&event), "conversation_id": conversation_id, "turn_id": turn_id, "role":"assistant",
         }).await? else { return Ok(bounded_reply(text)); };
@@ -817,6 +861,9 @@ pub(super) async fn eligible_with(
         };
         target
     };
+    if !guest_delivery_current(state, event, &channel, &thread).await? {
+        return Ok(None);
+    }
     if event.expires_at <= Utc::now() || channel.transport != d.transport {
         return Ok(None);
     }
@@ -962,6 +1009,56 @@ pub(super) async fn eligible_with(
     Ok(Some((channel, thread)))
 }
 
+async fn guest_delivery_current(
+    state: &AppState,
+    event: &NyxbotEvent,
+    channel: &NyxbotChannel,
+    thread: &NyxbotThread,
+) -> AppResult<bool> {
+    use crate::services::channel_guest_access as guest;
+    let Some(id) = event
+        .conversation_id
+        .as_deref()
+        .filter(|id| guest::is_hosted_conversation(id))
+    else {
+        return Ok(true);
+    };
+    let platform = canonical_platform(&channel.platform);
+    let Some(turn) = guest::admitted_turn(
+        &state.db,
+        &channel.channel_bot_id,
+        &channel.id,
+        platform,
+        &event.id,
+    )
+    .await?
+    else {
+        return Ok(false);
+    };
+    let destination = guest::transport::destination(
+        thread
+            .platform_chat_id
+            .as_deref()
+            .unwrap_or(&thread.partition),
+        thread.platform_thread_id.as_deref(),
+    );
+    if turn.hosted_conversation_id() != id
+        || turn.source_event_id != event.id
+        || turn.conversation_id != destination
+    {
+        return Ok(false);
+    }
+    if turn.audience == guest::AnswerAudience::Private && thread.kind.as_deref() != Some("private")
+    {
+        return Ok(false);
+    }
+    match guest::policy::load_bound_policy(&state.db, &turn).await {
+        Ok(_) => Ok(true),
+        Err(AppError::Forbidden(_)) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 async fn event_reference(state: &AppState, event: &NyxbotEvent) -> AppResult<Zeroizing<String>> {
     let ciphertext = event
         .event_context_ciphertext
@@ -990,14 +1087,28 @@ async fn mint_target(
 ) -> AppResult<()> {
     fetch_target(state, event, channel, d).await?;
     if let (Some(sealed), Some(expires)) = (&d.target_ciphertext, d.target_expires_at) {
-        state.db.collection::<NyxbotEvent>(EVENTS).update_one(doc! {"_id": &event.id, "delivery.state":{"$in":["pending","preparing_text"]}, "delivery.target_ciphertext": bson::Bson::Null},
+        let update = event_record::set_material(
             doc! {
-                "$set": {
-                    "delivery.target_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: sealed.clone()},
-                    "delivery.target_expires_at": bson::DateTime::from_chrono(expires),
+                "delivery.target_ciphertext": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: sealed.clone() },
+                "delivery.target_expires_at": bson::DateTime::from_chrono(expires),
+            },
+            "delivery.target_context_version",
+            d.target_context_version,
+        );
+        state
+            .db
+            .collection::<NyxbotEvent>(EVENTS)
+            .update_one(
+                doc! {
+                    "_id": &event.id,
+                    "user_id": &event.user_id,
+                    "channel_id": &event.channel_id,
+                    "delivery.state": {"$in":["pending","preparing_text"]},
+                    "delivery.target_ciphertext": bson::Bson::Null,
                 },
-                "$unset": {"delivery.target_context_version": ""},
-            }).await?;
+                update,
+            )
+            .await?;
     }
     let canonical = state
         .db
@@ -1052,9 +1163,16 @@ async fn fetch_target(
     if expires <= Utc::now() || expires > Utc::now() + ChronoDuration::hours(24) {
         return Ok(());
     }
-    let sealed = state.encryption_keys.encrypt(target.as_bytes()).await?;
+    let sealed = event_record::seal(
+        &state.encryption_keys,
+        &event.id,
+        &event.user_id,
+        &[event_record::TARGET, &event.channel_id],
+        target.as_bytes(),
+    )
+    .await?;
     d.target_ciphertext = Some(sealed);
-    d.target_context_version = None;
+    d.target_context_version = event_record::version(&state.encryption_keys);
     d.target_expires_at = Some(expires);
     Ok(())
 }
@@ -1243,9 +1361,63 @@ async fn silent_result(state: &AppState, event_id: &str) -> AppResult<bool> {
 
 // Ordinary channels retain their existing response path. Org channel answers
 // must recheck the original actor and source immediately before streaming.
-async fn org_stream_authority(
+async fn claim_stream(
+    state: &AppState,
+    event_id: &str,
+    status: &str,
+    hosted: Option<&HostedReply>,
+) -> AppResult<bool> {
+    use crate::services::channel_guest_access as guest;
+    let event = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id": event_id})
+        .await?;
+    if hosted.is_some_and(|hosted| event.as_ref().is_none_or(|event| !hosted.matches(event))) {
+        return Ok(false);
+    }
+    if let Some(event) = event.as_ref().filter(|event| {
+        event
+            .conversation_id
+            .as_deref()
+            .is_some_and(guest::is_hosted_conversation)
+    }) {
+        return guest::claim_hosted_delivery(
+            &state.db,
+            event,
+            doc! {"_id": event_id, "conversation_id": &event.conversation_id, "turn_id": &event.turn_id,
+            "delivery.version": 1, "delivery.state": "waiting",
+            "delivery.stream_deadline": {"$gt": bson::DateTime::now()}},
+            doc! {"$set": {"delivery.state": "streamed", "status": status}},
+        )
+        .await;
+    }
+    delivery::claim_stream(&state.db, event_id, status).await
+}
+
+pub(super) fn frame_has_answer(frame: &Value) -> bool {
+    frame["type"]
+        .as_str()
+        .is_some_and(|kind| kind.starts_with("response.output_"))
+        || frame["response"]["output"]
+            .as_array()
+            .is_some_and(|output| !output.is_empty())
+}
+
+pub(super) async fn hosted_stream_allowed(
     state: &AppState,
     id: &str,
+    hosted: &HostedReply,
+) -> bool {
+    stream_authority(state, id, Some(hosted))
+        .await
+        .is_ok_and(|(allowed, _, _)| allowed)
+}
+
+async fn stream_authority(
+    state: &AppState,
+    id: &str,
+    hosted: Option<&HostedReply>,
 ) -> AppResult<(bool, bool, Option<NoticeLanguage>)> {
     let Some(event) = state
         .db
@@ -1253,12 +1425,27 @@ async fn org_stream_authority(
         .find_one(doc! {"_id":id})
         .await?
     else {
-        return Ok((true, false, None));
+        return Ok((hosted.is_none(), false, None));
     };
+    if hosted.is_some_and(|hosted| !hosted.matches(&event)) {
+        return Ok((false, false, None));
+    }
     let Some(d) = &event.delivery else {
-        return Ok((true, false, None));
+        return Ok((
+            !event
+                .conversation_id
+                .as_deref()
+                .is_some_and(crate::services::channel_guest_access::is_hosted_conversation),
+            false,
+            None,
+        ));
     };
-    if d.origin.org_execution.is_none() {
+    if d.origin.org_execution.is_none()
+        && !event
+            .conversation_id
+            .as_deref()
+            .is_some_and(crate::services::channel_guest_access::is_hosted_conversation)
+    {
         return Ok((true, false, d.notice_language));
     }
     let Some(conversation) = event.conversation_id.as_deref() else {
@@ -1272,7 +1459,7 @@ async fn org_stream_authority(
     .await?;
     Ok((
         eligible(state, &event, d, &row).await?.is_some(),
-        d.guest,
+        d.guest && d.origin.org_execution.is_some(),
         d.notice_language,
     ))
 }

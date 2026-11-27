@@ -546,16 +546,40 @@ async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> 
             return Err(crate::errors::AppError::SecurityReadinessUnavailable);
         }
     }
+    // Native status is polled even when intake is already flagged, so a
+    // quiet channel can recover without receiving another message.
+    let native_discord = row.transport == "gateway"
+        && matches!(
+            row.gateway_source,
+            Some(crate::models::nyxbot_channel::GatewaySource::Discord { .. })
+        );
+    let native_status = if native_discord {
+        crate::services::nyxbot_gateway_source::check_status(state, row).await
+    } else {
+        Ok(())
+    };
     if row.platform == "discord" {
         let bot =
             crate::services::channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
         let intake = crate::services::channel_bot_health::discord::load(&state.db, &[bot]).await?;
         if let Some(intake) = intake.get(&row.channel_bot_id) {
             if let Some(code) = intake.code {
+                // Connection outages are stored independently of delivery results.
+                if code == crate::services::channel_bot_health::discord::NATIVE_CONNECTION_DOWN {
+                    return native_status;
+                }
                 let mut filter = doc! {"_id":&row.id,"status":"active","transport":&row.transport,"binding_id":&row.binding_id};
                 if code == crate::services::channel_bot_health::discord::NATIVE_UNCONFIRMED {
                     // An admission after the health read must not be replaced
                     // by this stale no-event observation.
+                    // Keep real delivery failures, even during initial hand-over.
+                    let mut replaceable = vec![bson::Bson::Null];
+                    replaceable.extend(
+                        crate::services::channel_bot_health::discord::INTAKE_CODES
+                            .iter()
+                            .map(|code| bson::Bson::from(*code)),
+                    );
+                    filter.insert("delivery_error", doc! {"$in": replaceable});
                     filter.insert("$or",bson::bson!([
                         {"gateway_intake.binding_id":{"$ne":&row.binding_id}},
                         {"gateway_intake.last_inbound_at":null},
@@ -564,17 +588,20 @@ async fn check_delivery(state: &AppState, row: &NyxbotChannel) -> AppResult<()> 
                 }
                 state.db.collection::<NyxbotChannel>(CHANNELS).update_one(filter,
                     doc! {"$set":{"delivery_status":if intake.receiving_side=="native_gateway" {"unconfirmed"}else{"failing"},"delivery_error":code}}).await?;
-                return Ok(());
+                return native_status;
             }
             if row
                 .delivery_error
                 .as_deref()
                 .is_some_and(crate::services::channel_bot_health::discord::is_intake_code)
             {
-                state.db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"delivery_error":&row.delivery_error},
+                state.db.collection::<NyxbotChannel>(CHANNELS).update_one(doc! {"_id":&row.id,"status":"active","transport":&row.transport,"binding_id":&row.binding_id,"gateway_channel_id":&row.gateway_channel_id,"delivery_error":&row.delivery_error},
                     doc! {"$set":{"delivery_status":"unknown"},"$unset":{"delivery_error":"","delivery_failed_at":""}}).await?;
             }
         }
+    }
+    if native_discord {
+        return native_status;
     }
     if row.transport == "gateway" && row.gateway_source.is_some() {
         return crate::services::nyxbot_gateway_source::check_status(state, row).await;

@@ -1360,6 +1360,7 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         // SSH services are not auto-provisioned today, so there is no
         // auto-connected source to exempt from the global fallback here.
         false,
+        connection.map(|c| c.id.as_str()),
         auth_user.assistant_chat.as_deref(),
     )
     .await?;
@@ -1399,6 +1400,7 @@ pub(crate) async fn authorize_ssh_access_for_connection(
         operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.org_policy = pending.resolution.policy_stamp();
     request_operation.assistant_group = crate::services::org_group_service::approval_binding(
         &state.db,
         auth_user.assistant_group_id.as_deref(),

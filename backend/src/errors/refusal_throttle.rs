@@ -6,6 +6,7 @@ impl AppError {
     pub(crate) fn counts_for_refusal_throttle(&self) -> bool {
         let counted = match self {
             Self::BadRequest(_)
+            | Self::CmaJsonContentTypeRequired
             | Self::CredentialUnavailable(_)
             | Self::RequestBodyTooLarge { .. }
             | Self::Forbidden(_)
@@ -71,6 +72,8 @@ impl AppError {
             | Self::SkillRead(_)
             | Self::AssistantMissingAccess(_)
             | Self::Conflict(_)
+            | Self::CmaSandboxSlotOccupied { .. }
+            | Self::SkillPublication(_)
             | Self::TriggerOverlapSkip { .. }
             | Self::AssistantTurnActive
             | Self::VoiceQueueFull
@@ -85,6 +88,7 @@ impl AppError {
             | Self::BillingRecoveryFailed { .. }
             | Self::VoiceStartFailed(_)
             | Self::AssistantTurnRequired
+            | Self::OrgAgentAccessAuthoringUnavailable
             | Self::AssistantModelAuthorityChanged
             | Self::GrantCascadeConfirmationRequired(_)
             | Self::RateLimited

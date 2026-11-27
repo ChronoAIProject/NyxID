@@ -313,6 +313,7 @@ pub struct AgentRefResponse {
     pub kind: crate::models::assistant_agent::AgentKind,
     pub name: String,
     pub display_name: Option<String>,
+    pub avatar: Option<crate::services::assistant_avatar_service::AvatarView>,
     /// Destroyed agents' threads are read-only.
     pub destroyed: bool,
 }
@@ -349,6 +350,8 @@ pub struct ConversationResponse {
     context_reset_at: Option<DateTime<Utc>>,
     context_reset_reason: Option<String>,
     role: crate::models::assistant_conversation::AgentRole,
+    /// Presentation eligibility only; never an execution or permission grant.
+    handoff_eligible: bool,
     /// The agent this thread belongs to; `None` only when it could not be
     /// resolved (legacy rows resolve to the owner's NyxBot).
     agent: Option<AgentRefResponse>,
@@ -389,6 +392,7 @@ impl ConversationResponse {
                 kind: agent.kind,
                 name: agent.name.clone(),
                 display_name: agent.display_name.clone(),
+                avatar: crate::services::assistant_avatar_service::view(agent.avatar.as_ref()),
                 destroyed: agent.destroyed_at.is_some(),
             })
             .or(self.agent);
@@ -458,6 +462,7 @@ impl From<AssistantConversation> for ConversationResponse {
                 .collect(),
         });
         Self {
+            handoff_eligible: engine::handoff_thread_eligible(&row),
             platform_thread: row
                 .platform_thread
                 .as_ref()
@@ -481,6 +486,7 @@ impl From<AssistantConversation> for ConversationResponse {
                 kind: crate::models::assistant_agent::AgentKind::Specialist,
                 name: "Shared agent".into(),
                 display_name: None,
+                avatar: None,
                 destroyed: false,
             }),
             pending_events: row.pending_events.len(),
@@ -974,7 +980,7 @@ pub struct HistoryQuery {
     limit: Option<i64>,
     before_seq: Option<i64>,
 }
-fn limit(value: Option<i64>) -> AppResult<i64> {
+pub(super) fn limit(value: Option<i64>) -> AppResult<i64> {
     let value = value.unwrap_or(50);
     if !(1..=100).contains(&value) {
         return Err(AppError::BadRequest(
@@ -1506,6 +1512,7 @@ pub async fn attachment(
 ) -> AppResult<Response> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
+    engine::require_public_conversation(&id)?;
     auth.ensure_live_assistant_turn(&state.db, "assistant.attachment")
         .await?;
     if Uuid::parse_str(&attachment_id).is_err() {
@@ -1600,7 +1607,7 @@ pub async fn artifact_delivery(
             "Artifact recovery requires an empty body".into(),
         ));
     }
-    let row = engine::get(&state.db, &user, &id).await?;
+    let row = engine::get_public(&state.db, &user, &id).await?;
     if row.active_turn.is_some() {
         return Err(AppError::AssistantTurnActive);
     }
@@ -1704,6 +1711,7 @@ pub async fn decide_acknowledgement(
     Path((id, ack_id)): Path<(String, String)>,
     Json(body): Json<AcknowledgementDecision>,
 ) -> AppResult<Json<AcknowledgementResponse>> {
+    engine::require_public_conversation(&id)?;
     let user = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user).await?;
     if let Some(card) = state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
@@ -1786,6 +1794,7 @@ pub async fn change_model(
     let artifacts_enabled = features.iter().any(|key| {
         key == crate::services::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY
     });
+    engine::require_public_conversation(&id)?;
     require_available_model(&state, &auth, &body.model).await?;
     let (before, row) = engine::change_model(&state.db, &owner, &id, &body.model).await?;
     engine::audit_model_change(
@@ -1841,7 +1850,7 @@ pub async fn stop(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    let target = engine::get(&state.db, &user_id, &id).await?;
+    let target = engine::get_public(&state.db, &user_id, &id).await?;
     let stopped = engine::request_stop_row_target(&state.db, &target).await?;
     if let Some(row) = stopped.as_ref().filter(|row| {
         row.active_turn
@@ -1895,7 +1904,7 @@ pub async fn delete(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    let target = engine::get(&state.db, &user_id, &id).await?;
+    let target = engine::get_public(&state.db, &user_id, &id).await?;
     // Preserve the existing voice live-slot rule before recording a stop. The
     // delete service repeats this check in its transaction for race safety.
     if state
@@ -2605,7 +2614,9 @@ pub async fn turns(
     }
     // Ownership is checked before provisioning or touching a credential.
     let org_access = if let Some(id) = &input.conversation_id {
-        engine::get_authorized(&state.db, &user_id, id).await?.1
+        engine::get_public_authorized(&state.db, &user_id, id)
+            .await?
+            .1
     } else {
         None
     };
@@ -2617,6 +2628,18 @@ pub async fn turns(
     start.org_access = org_access;
     if super::login_client_context::require_first_party_human(&auth).is_ok() {
         start.owner_instruction_source = Some(engine::OwnerInstructionSource::FirstPartyOwner);
+        if parts
+            .headers
+            .get("x-nyxid-chat-capabilities")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(',')
+                    .any(|part| part.trim() == "nyxbot-handoff-v1")
+            })
+        {
+            start.note = Some(engine::HANDOFF_UI_NOTE.into());
+        }
         start.title_language = parts
             .headers
             .get("accept-language")

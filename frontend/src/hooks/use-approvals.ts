@@ -1,4 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAuthStore } from "@/stores/auth-store";
+import type { ServiceApprovers, ServiceApproversDraft } from "@/schemas/service-approvers";
 import { api } from "@/lib/api-client";
 import type {
   NotificationSettings,
@@ -249,6 +251,35 @@ export function useServiceApprovalConfigs(orgId?: string) {
       return api.get<ServiceApprovalConfigsResponse>(path);
     },
   });
+}
+
+export function useOrgServiceApprovers(orgId: string, serviceId: string) {
+  const client = useQueryClient();
+  const actor = useAuthStore((state) => state.user?.id);
+  const key = ["approvals", "service-configs", orgId, serviceId, "approvers", actor];
+  const authorityGuard = () => {
+    if (!actor || useAuthStore.getState().user?.id !== actor) throw new Error("Account changed");
+  };
+  const path = `/approvals/service-configs/${encodeURIComponent(serviceId)}/approvers?org_id=${encodeURIComponent(orgId)}`;
+  const policy = useQuery({
+    queryKey: key,
+    enabled: Boolean(actor),
+    gcTime: 0,
+    retry: false,
+    queryFn: () => api.get<ServiceApprovers>(path, { authorityGuard }),
+  });
+  const replace = useMutation({
+    mutationFn: (body: ServiceApproversDraft & { config_id: string; expected_revision: number }) =>
+      api.put<ServiceApprovers>(path, body, { authorityGuard }),
+    retry: false,
+    onSuccess: async (saved) => {
+      await client.cancelQueries({ queryKey: key });
+      client.setQueryData(key, saved);
+      void client.invalidateQueries({ queryKey: ["approvals", "requests"] });
+      void client.invalidateQueries({ queryKey: ["approvals", "grants"] });
+    },
+  });
+  return { policy, replace };
 }
 
 export function useSetServiceApprovalConfig() {

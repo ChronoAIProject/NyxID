@@ -1,4 +1,6 @@
 //! Durable provider responses. Reads never recreate or resubmit model/tool work.
+pub(crate) mod storage;
+
 use crate::{
     crypto::{
         aes::EncryptionKeys,
@@ -58,6 +60,11 @@ pub fn metadata(value: &Value) -> AppResult<BTreeMap<String, String>> {
     }
     Ok(map)
 }
+pub(crate) fn conversation_identity(channel: &str, binding: &str, partition: &str) -> String {
+    let hash = crate::crypto::token::hash_token(&format!("{channel}:{binding}:{partition}"));
+    format!("nyxbot_{}", &hash[..32])
+}
+
 impl Payload {
     pub fn new(id: &str, identity: &str, metadata: BTreeMap<String, String>) -> Self {
         let snapshot = json!({"id":id,"object":"response","status":"queued", "output":[],
@@ -110,29 +117,20 @@ impl Payload {
         }
         self.lifecycle(if failed { "failed" } else { "completed" });
     }
-    pub async fn seal(&self, keys: &EncryptionKeys) -> AppResult<Vec<u8>> {
+    pub(crate) fn encoded(&self) -> AppResult<zeroize::Zeroizing<Vec<u8>>> {
         let bytes = zeroize::Zeroizing::new(serde_json::to_vec(self).map_err(|_| unavailable())?);
         if bytes.len() > MAX_PAYLOAD_BYTES {
             return Err(unavailable());
         }
-        keys.encrypt(&bytes).await
+        Ok(bytes)
+    }
+    #[cfg(test)]
+    pub async fn seal_legacy(&self, keys: &EncryptionKeys) -> AppResult<Vec<u8>> {
+        keys.encrypt(&self.encoded()?).await
     }
 }
 pub async fn payload(keys: &EncryptionKeys, row: &GatewayResponse) -> AppResult<Payload> {
-    let field = [
-        "payload_ciphertext",
-        &row.channel_id,
-        &row.binding_id,
-        &row.response_id,
-    ];
-    let context = RecordContext::new(RESPONSES, &row.id, &row.user_id, &field)?;
-    open_payload(
-        keys,
-        &context,
-        row.payload_context_version,
-        &row.payload_ciphertext,
-    )
-    .await
+    decode(&storage::open(keys, row).await?)
 }
 
 pub(crate) async fn event_reply(
@@ -142,7 +140,7 @@ pub(crate) async fn event_reply(
     response_id: &str,
     reply: &ReplyPayload,
 ) -> AppResult<Payload> {
-    let field = ["response_reply.ciphertext", &channel.id, response_id];
+    let field = [super::nyxbot_event_record::REPLY, &channel.id, response_id];
     let context = RecordContext::new(EVENTS, event_id, &channel.user_id, &field)?;
     open_payload(keys, &context, reply.context_version, &reply.ciphertext).await
 }
@@ -154,10 +152,14 @@ async fn open_payload(
     ciphertext: &[u8],
 ) -> AppResult<Payload> {
     let bytes = record_field::decrypt_context(keys, context, version, ciphertext).await?;
+    decode(&bytes)
+}
+
+pub(super) fn decode(bytes: &[u8]) -> AppResult<Payload> {
     if bytes.len() > MAX_PAYLOAD_BYTES {
         return Err(unavailable());
     }
-    serde_json::from_slice(&bytes).map_err(|_| unavailable())
+    serde_json::from_slice(bytes).map_err(|_| unavailable())
 }
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     super::nyxbot_response_read::ensure_indexes(db).await?;
@@ -240,14 +242,6 @@ pub async fn load(
     }
     Ok(response)
 }
-fn replace_payload(fields: Document) -> Document {
-    doc! {
-        "$set": fields,
-        "$unset": {"payload_context_version": ""},
-        "$inc": {"revision": 1_i64},
-    }
-}
-
 pub async fn finish(
     db: &Database,
     keys: &EncryptionKeys,
@@ -296,11 +290,9 @@ pub async fn finish(
     } else {
         body.finish(text.as_deref(), failed);
     }
-    let sealed = body.seal(keys).await?;
     // No upsert: a concurrent purge always wins. All frames and the snapshot
     // become visible atomically, before any network byte is exposed.
-    let mut terminal = doc! {"terminal":true,
-    "payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:sealed}};
+    let mut terminal = doc! {"terminal": true};
     if event.as_ref().is_some_and(|e| e.turn_id.is_some()) && body.has_output() {
         terminal.insert("answer_delivery", "prepared");
     }
@@ -309,7 +301,7 @@ pub async fn finish(
         .update_one(
             doc! {"_id":&row.id,"terminal":false,"revision":row.revision,
             "expires_at":{"$gt":bson::DateTime::now()}},
-            replace_payload(terminal),
+            storage::revision_update(keys, row, &body, terminal).await?,
         )
         .await?;
     if changed.modified_count == 1 {
@@ -462,9 +454,10 @@ where
         } else {
             let mut body=payload(keys,row).await?;
             if body.progress() {
-                let sealed=body.seal(keys).await?;
-                db.collection::<GatewayResponse>(RESPONSES).update_one(doc! {"_id":&row.id,"revision":row.revision,"terminal":false},
-                    replace_payload(doc! {"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:sealed}})).await?;
+                let update = storage::revision_update(keys, row, &body, Document::new()).await?;
+                db.collection::<GatewayResponse>(RESPONSES)
+                    .update_one(doc! {"_id": &row.id, "revision": row.revision, "terminal": false}, update)
+                    .await?;
             }
         }
     } else if event.status != "queued"

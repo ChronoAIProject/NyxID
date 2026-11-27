@@ -20,9 +20,20 @@ export function channelPlatformName(platform: string) {
   );
 }
 
+export function conversationTitle(thread: AssistantConversation) {
+  if (
+    thread.message_count === 0 &&
+    !thread.channel &&
+    thread.title_source === "provisional" &&
+    thread.title === "New conversation"
+  )
+    return translateApp("New conversation");
+  return thread.title;
+}
+
 export function threadTitle(thread: AssistantConversation) {
   return (
-    thread.channel?.chat_title?.trim() || thread.title.trim() ||
+    thread.channel?.chat_title?.trim() || conversationTitle(thread).trim() ||
     translateApp("Untitled chat")
   );
 }

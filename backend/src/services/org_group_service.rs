@@ -431,6 +431,7 @@ pub async fn create(
             last_recipient_ids_by_actor: std::collections::HashMap::new(),
             created_by: created_by.into(),
             message_count: 0,
+            pending_org_use_revisions: Default::default(),
             pending_agent_ids: Vec::new(),
             hops_remaining: 0,
             followers: Vec::new(),
@@ -901,6 +902,14 @@ pub(crate) async fn append_with_hook(
                     hook.after_reads().await;
                 }
                 fence(&db, &access, session).await?;
+                if let Some(agent) = agent.as_ref() {
+                    let current = org::fence_member_use(&db,session,&access.actor,&access.group.user_id,&agent.id,true).await?;
+                    if let Some(id) = request.as_deref() {
+                        let record = db.collection::<crate::models::assistant_group::GroupRequest>(crate::models::assistant_group::REQUESTS_COLLECTION_NAME)
+                            .find_one(doc! {"_id":id,"group_id":&access.group.id,"actor_user_id":&access.actor}).session(&mut *session).await?.ok_or_else(missing)?;
+                        if record.org_use_revisions.get(&agent.id).copied().unwrap_or(0) != current {return Err(missing());}
+                    }
+                }
                 let now = Utc::now();
                 let group = db
                     .collection::<AssistantGroup>(GROUPS)
@@ -961,6 +970,17 @@ pub(crate) async fn append_with_hook(
                     .await?;
                 }
                 if let Some(mut request) = enqueue.clone() {
+                    // Bind all currently usable roster members, including possible later hand-offs.
+                    let mut cursor = db.collection::<AssistantAgent>(AGENTS).find(doc! {"_id":{"$in":&group.member_agent_ids},"user_id":&group.user_id,"kind":"specialist","destroyed_at":null}).session(&mut *session).await?;
+                    let targets: Vec<_> = cursor.stream(&mut *session).try_collect().await?;
+                    let snapshot = access.org.as_ref().ok_or_else(missing)?;
+                    for target in targets {
+                        if snapshot.permits_agent(&access.actor,&target) {
+                            let revision = org::fence_member_use(&db,session,&access.actor,&group.user_id,&target.id,false).await?;
+                            request.org_use_revisions.insert(target.id,revision);
+                        }
+                    }
+                    if request.pending_agent_ids.iter().any(|id|!request.org_use_revisions.contains_key(id)) {return Err(missing());}
                     request.message_seq = message.seq;
                     db.collection::<crate::models::assistant_group::GroupRequest>(
                         crate::models::assistant_group::REQUESTS_COLLECTION_NAME,

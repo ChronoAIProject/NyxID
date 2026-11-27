@@ -1,4 +1,5 @@
 use super::*;
+use crate::models::assistant_agent::COLLECTION_NAME;
 use crate::models::{
     assistant_agent::{AgentKind, AgentSkillMetadata},
     catalog_skill_revision::SkillReference,
@@ -33,6 +34,11 @@ impl Registry {
     fn agent(&self) -> AssistantAgent {
         let now = chrono::Utc::now();
         AssistantAgent {
+            org_maintainer_user_ids: None,
+            org_user_ids: None,
+            org_access_revision: 0,
+            org_use_revision: 0,
+            org_maintain_revision: 0,
             channel_checking_notice: false,
             id: "a".into(),
             user_id: "owner".into(),
@@ -75,6 +81,7 @@ impl Registry {
             home_conversation_id: None,
             memory: vec![],
             display_name: None,
+            avatar: None,
             persona: None,
             voice_instructions: None,
             destroyed_at: None,

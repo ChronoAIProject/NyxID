@@ -164,7 +164,7 @@ pub(crate) async fn confirm(
             super::live_doc(db,tx,"org_memberships",doc!{"org_user_id":&b.org_id,"member_user_id":person,
                 "revoked_at":bson::Bson::Null,"role":{"$in":roles}},true).await?;
         }
-        super::fence_management(db,tx,channel,&channel.user_id).await?;
+        super::fence_binding_authority(db,tx,channel,&channel.user_id,false).await?;
         super::live_doc(db,tx,"nyxbot_channels",doc!{"_id":&channel.id,"status":"active","org_specialist.revision":&b.revision},true).await?;
         let challenge=db.collection::<Document>(CHALLENGES).find_one_and_update(doc!{"_id":id,"user_id":actor,"channel_id":&channel.id,
             "binding_revision":&b.revision,"state":"observed","expires_at":{"$gt":bson::DateTime::now()}},

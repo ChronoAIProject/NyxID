@@ -4,7 +4,6 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
@@ -390,10 +389,15 @@ pub struct ChannelBotHealthResponse {
     pub error: Option<String>,
     pub recommended_action: &'static str,
     pub recommended_action_text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommendation_cause: Option<String>,
     /// Whether the caller may run the recovery action (owner write access).
     pub can_write: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nyxbot_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nyxbot_setup_diagnostic:
+        Option<crate::services::channel_bot_health::nyxbot::SetupDiagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nyxbot_last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -426,7 +430,7 @@ pub async fn admin_list(
     let ids: Vec<String> = bots.iter().map(|bot| bot.id.clone()).collect();
     let gateway = channel_bot_service::gateway_linked_ids(&state.db, &ids).await?;
     let intake = crate::services::channel_bot_health::discord::load(&state.db, &bots).await?;
-    let nyxbot_rows = latest_nyxbot_rows(&state.db, &ids).await?;
+    let nyxbot_rows = latest_nyxbot_rows(&state.db, &bots).await?;
     let billing = org_guest_billing_for_rows(&state.db, &bots, &nyxbot_rows).await?;
     let mut nyxbot_states = std::collections::HashMap::new();
     for row in nyxbot_rows.values() {
@@ -554,7 +558,7 @@ pub(crate) async fn health_loaded(
     let mut intake =
         crate::services::channel_bot_health::discord::load(&state.db, std::slice::from_ref(bot))
             .await?;
-    let nyxbot_rows = latest_nyxbot_rows(&state.db, std::slice::from_ref(&bot.id)).await?;
+    let nyxbot_rows = latest_nyxbot_rows(&state.db, std::slice::from_ref(bot)).await?;
     let billing =
         org_guest_billing_for_rows(&state.db, std::slice::from_ref(bot), &nyxbot_rows).await?;
     let nyxbot_state = if let Some(row) = nyxbot_rows.get(&bot.id) {
@@ -573,104 +577,7 @@ pub(crate) async fn health_loaded(
     ))
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
-struct NyxbotHealthRow {
-    #[serde(default)]
-    answer_events: Vec<crate::services::channel_bot_health::answer::Observation>,
-    #[serde(default)]
-    answer_responses: Vec<crate::services::channel_bot_health::answer::Observation>,
-    #[serde(rename = "_id")]
-    id: String,
-    user_id: String,
-    channel_bot_id: String,
-    #[serde(default)]
-    bot_owner_id: Option<String>,
-    status: String,
-    #[serde(default)]
-    last_error: Option<String>,
-    #[serde(default)]
-    org_specialist: Option<crate::models::org_channel::Binding>,
-    #[serde(default)]
-    agent_id: Option<String>,
-    #[serde(default)]
-    org_restore_last_reason: Option<String>,
-    #[serde(default, with = "crate::models::bson_datetime::optional")]
-    org_restore_next_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
-    org_restore_claim_id: Option<String>,
-    #[serde(default)]
-    org_restore_attempts: i32,
-    #[serde(default)]
-    native_intake_refused: bool,
-    #[serde(default)]
-    gateway_not_received: Option<crate::services::channel_bot_health::MissingGatewayEvent>,
-}
-
-async fn latest_nyxbot_rows(
-    db: &mongodb::Database,
-    bot_ids: &[String],
-) -> AppResult<std::collections::HashMap<String, NyxbotHealthRow>> {
-    if bot_ids.is_empty() {
-        return Ok(Default::default());
-    }
-    // `nyxbot_health_latest` supplies the indexed sort. Project before the
-    // group so encrypted gateway material and sender data never enter the
-    // aggregation; the final limit is bounded by the requested page.
-    let documents: Vec<mongodb::bson::Document> = db
-        .collection::<mongodb::bson::Document>(crate::models::nyxbot_channel::COLLECTION_NAME)
-        .aggregate([
-            doc! {"$match": {"channel_bot_id": {"$in": bot_ids}}},
-            doc! {"$project": {
-                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1, "binding_id": 1,
-                "created_at": 1, "status": 1, "last_error": 1, "org_specialist": 1,
-                "agent_id": 1, "org_restore_last_reason": 1,
-                "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
-                "org_restore_attempts": 1,
-                "gateway_not_received": {"$cond":[{"$and":[
-                    {"$eq":["$status","active"]},{"$eq":["$transport","gateway"]},
-                    {"$eq":["$delivery_status","failing"]},{"$eq":["$delivery_error","not_received"]}]},
-                    {"message_at":"$delivery_failed_at"},null]},
-                "native_intake_refused": {"$and":[{"$eq":["$transport","gateway"]},
-                    {"$eq":["$status","active"]},{"$eq":["$gateway_native_phase","ready"]},
-                    {"$in":["$gateway_source.type",["discord","whatsapp"]]},
-                    {"$eq":[{"$ifNull":["$gateway_setup_release_id",null]},null]},
-                    {"$eq":[{"$ifNull":["$pending_agent_api_key_id",null]},null]},
-                    {"$eq":["$gateway_native_delivery",crate::services::channel_bot_health::codes::GATEWAY_INTAKE_REFUSED]}]},
-            }},
-            doc! {"$sort": {"channel_bot_id": 1, "created_at": -1, "_id": -1}},
-            doc! {"$group": {"_id": "$channel_bot_id", "row": {"$first": "$$ROOT"},
-                "gateway_not_received": {"$max": "$gateway_not_received"}}},
-            doc! {"$replaceWith": {"$mergeObjects": ["$row", {"gateway_not_received": "$gateway_not_received"}]}},
-            doc! {"$project": {
-                "_id": 1, "user_id": 1, "channel_bot_id": 1, "bot_owner_id": 1, "binding_id": 1,
-                "status": 1, "last_error": 1, "org_specialist": 1,
-                "agent_id": 1, "org_restore_last_reason": 1,
-                "org_restore_claim_id": 1, "org_restore_next_attempt_at": 1,
-                "org_restore_attempts": 1, "native_intake_refused": 1, "gateway_not_received": 1,
-            }},
-            doc! {"$limit": bot_ids.len() as i64},
-            crate::services::channel_bot_health::answer::event_lookup(),
-            crate::services::channel_bot_health::answer::response_lookup(),
-        ])
-        .hint(mongodb::options::Hint::Name(
-            "nyxbot_health_latest".to_owned(),
-        ))
-        .await?
-        .try_collect()
-        .await?;
-    let rows: Vec<NyxbotHealthRow> = documents
-        .into_iter()
-        .map(|document| {
-            mongodb::bson::from_document(document)
-                .map_err(|error| AppError::Internal(format!("invalid NyxBot health row: {error}")))
-        })
-        .collect::<AppResult<Vec<_>>>()?;
-    let mut latest = std::collections::HashMap::new();
-    for row in rows {
-        latest.entry(row.channel_bot_id.clone()).or_insert(row);
-    }
-    Ok(latest)
-}
+use crate::services::channel_bot_health::nyxbot::{NyxbotHealthRow, latest_nyxbot_rows};
 
 async fn org_guest_billing_for_rows(
     db: &mongodb::Database,
@@ -722,8 +629,10 @@ fn health_with_intake(
         error: bot.error.clone(),
         recommended_action: recommendation.action,
         recommended_action_text: recommendation.text,
+        recommendation_cause: recommendation.cause,
         can_write,
         nyxbot_status: None,
+        nyxbot_setup_diagnostic: None,
         nyxbot_last_error: None,
         nyxbot_restore_state: None,
     }
@@ -738,6 +647,8 @@ fn health_with_nyxbot(
     nyxbot_state: Option<&str>,
     org_guest_billing: Option<&str>,
 ) -> ChannelBotHealthResponse {
+    let gateway =
+        crate::services::channel_bot_health::nyxbot::current_gateway(bot, nyxbot, gateway);
     let mut facts =
         crate::services::channel_bot_health::HealthFacts::for_bot(bot, chrono::Utc::now(), gateway);
     facts.org_guest_billing = org_guest_billing;
@@ -764,6 +675,11 @@ fn health_with_nyxbot(
             ));
         }
         response.nyxbot_status = Some(row.status.clone());
+        if crate::services::channel_bot_health::nyxbot::gateway_failure(bot, row).is_some() {
+            response.nyxbot_setup_diagnostic = row.setup_diagnostic.as_ref().and_then(
+                crate::services::channel_bot_health::nyxbot::SetupDiagnostic::from_document,
+            );
+        }
         response.nyxbot_last_error = row.last_error.clone();
         response.nyxbot_restore_state = row
             .org_restore_claim_id
@@ -771,9 +687,14 @@ fn health_with_nyxbot(
             .map(|_| "in_flight".to_owned())
             .or_else(|| row.org_restore_last_reason.clone());
     }
-    let recommendation = crate::services::channel_bot_health::recommend(&facts);
+    let recommendation = crate::services::channel_bot_health::recommend_with_gateway_failure(
+        &facts,
+        nyxbot
+            .and_then(|row| crate::services::channel_bot_health::nyxbot::gateway_failure(bot, row)),
+    );
     response.recommended_action = recommendation.action;
     response.recommended_action_text = recommendation.text;
+    response.recommendation_cause = recommendation.cause;
     response
 }
 
@@ -2597,6 +2518,8 @@ mod tests {
             x_events: None,
             last_verification: None,
             ownership_version: 0,
+            guest_access_v1: false,
+            guest_access_v1_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "lark".to_string(),
@@ -2678,6 +2601,8 @@ mod tests {
             x_events: None,
             last_verification: None,
             ownership_version: 0,
+            guest_access_v1: false,
+            guest_access_v1_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),

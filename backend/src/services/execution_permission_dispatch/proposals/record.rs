@@ -1,6 +1,7 @@
 //! Retained approval fields use the selected version arm for their record context.
 //! Historical assistant arms share the v1 AAD. External requests use the v2 AAD.
 use super::{AssistantVersion, ExecutionProposal, REQUESTS, conflict};
+use crate::crypto::record_field::historical::{HistoricalAad, ProposalDomain};
 use crate::{
     crypto::{aes::EncryptionKeys, record_field::RecordContext},
     errors::AppResult,
@@ -29,14 +30,14 @@ impl Slot {
         }
     }
 
-    fn aad(self, id: &str, field: Field) -> String {
-        let version = match self {
-            Self::Assistant(_) => "v1",
-            Self::V2 => "v2",
+    fn aad(self, id: &str, field: Field) -> HistoricalAad<'_> {
+        let domain = match self {
+            Self::Assistant(_) => ProposalDomain::Assistant,
+            Self::V2 => ProposalDomain::External,
         };
         match field {
-            Field::Payload => format!("execution-proposal:{version}:{id}"),
-            Field::Result => format!("execution-proposal:{version}:{id}:result"),
+            Field::Payload => HistoricalAad::proposal_payload(domain, id),
+            Field::Result => HistoricalAad::proposal_result(domain, id),
         }
     }
 
@@ -67,11 +68,7 @@ impl Slot {
             let ctx = RecordContext::new(REQUESTS, id, owner, &path)?;
             Ok((keys.encrypt_record(plain, &ctx).await?, Some(3)))
         } else {
-            Ok((
-                keys.encrypt_with_aad(plain, self.aad(id, field).as_bytes())
-                    .await?,
-                None,
-            ))
+            Ok((self.aad(id, field).seal(keys, plain).await?, None))
         }
     }
     async fn open_value(
@@ -90,8 +87,7 @@ impl Slot {
                 keys.decrypt_record(&value.bytes, &context).await
             }
             None if keys.allow_legacy_record_reads() => {
-                keys.decrypt_with_aad(&value.bytes, self.aad(id, field).as_bytes())
-                    .await
+                self.aad(id, field).open(keys, &value.bytes).await
             }
             _ => Err(conflict()),
         }

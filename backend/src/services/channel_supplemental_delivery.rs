@@ -56,6 +56,7 @@ pub enum Reason {
     InvalidAnchor,
     StaleReferenceAnchor,
     NativeProgressUnsupported,
+    MissingResultIdentity,
     AuthorityRefused,
     SourceUnavailable,
     ReferenceUnavailable,
@@ -137,6 +138,49 @@ pub(crate) struct SavedDestination {
     pub origin: ChannelOrigin,
     pub source: ResultSource,
     pub additional: bool,
+}
+
+impl SavedDestination {
+    pub(crate) fn purpose(&self) -> Purpose {
+        if self.additional {
+            Purpose::TeamAdditionalResult
+        } else {
+            Purpose::TeamResult
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SavedHandoffTargets {
+    handoff_delivery: SavedHandoffRouting,
+}
+
+#[derive(Deserialize)]
+struct SavedHandoffRouting {
+    targets: Vec<SavedDestination>,
+}
+
+/// A pending or leased handoff can still deliver unsent parts. Only a handoff
+/// whose delivery worker cleared both fields has completed its delivery work.
+pub(crate) async fn finished_handoff_targets(
+    db: &Database,
+    owner: &str,
+    conversation: &str,
+    turn: &str,
+    reply_id: &str,
+) -> AppResult<Vec<SavedDestination>> {
+    let mut filter = settled_reply_filter(owner, conversation, turn);
+    filter.extend(doc! {
+        "_id": reply_id, "handoff_delivery.targets": {"$exists": true},
+        "handoff_delivery_due_at": {"$exists": false},
+        "handoff_delivery_lease": {"$exists": false},
+    });
+    Ok(db
+        .collection::<SavedHandoffTargets>(crate::models::assistant_message::COLLECTION_NAME)
+        .find_one(filter)
+        .projection(doc! {"handoff_delivery.targets": 1})
+        .await?
+        .map_or_else(Vec::new, |reply| reply.handoff_delivery.targets))
 }
 
 pub(crate) fn managed_source(
@@ -407,7 +451,22 @@ pub(crate) fn saved_key(turn: &str, origin: &ChannelOrigin) -> String {
     format!("saved-result:{turn}:{}", result_destination(origin))
 }
 
+/// Hash the local dispatch identity and part, keeping gateway headers printable
+/// and independent of the sealed event reference and text.
+pub(crate) fn side_message_key<T: Serialize>(identity: &T, part: usize) -> String {
+    let encoded = serde_json::to_vec(&(identity, part)).expect("dispatch identifiers serialize");
+    let digest = Sha256::digest(encoded);
+    format!("nyxbot-side-v1:{digest:x}")
+}
+
 tokio::task_local! {pub(crate) static SAVED_RELAY_KEY: String;}
+
+pub(crate) fn settled_reply_filter(owner: &str, conversation: &str, turn: &str) -> Document {
+    doc! {
+        "user_id": owner, "conversation_id": conversation, "turn_id": turn, "role": "assistant",
+        "status": {"$in": ["completed", "failed", "cancelled"]},
+    }
+}
 
 /// A possibly committed claim never authorizes dispatch. This marker has no retry path.
 pub async fn claim_result(
@@ -421,8 +480,7 @@ pub async fn claim_result(
         return Ok(Err(Reason::SourceUnavailable));
     };
     let messages = db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME);
-    let identity = doc! {"user_id":owner,"conversation_id":conversation,"turn_id":turn,"role":"assistant",
-    "status":{"$in":["completed","failed","cancelled"]}};
+    let identity = settled_reply_filter(owner, conversation, turn);
     let Some(saved) = messages
         .find_one(identity.clone())
         .projection(doc! {"_id":1})

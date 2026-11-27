@@ -51,6 +51,8 @@ export const FEATURE_FLAG = {
   SHARED_AGENTS: "assistant:shared-agents",
   // Default off: the Notifications bell, feed, sidebar unread markers and push switches.
   ASSISTANT_NOTIFICATIONS: "assistant:notifications",
+  // Default off: personalised blob avatars, moods and the avatar editor.
+  ASSISTANT_AVATARS: "assistant:avatars",
   MACHINE_CAPABILITIES: "assistant:machine-capabilities",
   ORG_INSTRUCTION: "assistant:org-instruction-v1",
   EXECUTION_PERMISSIONS: "permissions:execution-v1",

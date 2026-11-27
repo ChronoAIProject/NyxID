@@ -7,6 +7,8 @@ establish completion, and a scan for `user_id` alone cannot establish ownership.
 The registry and inventory drift tests described below keep the cleanup map
 reviewable as collections change.
 
+Personal erasure prunes the erased person from each organization specialist’s user and maintainer lists. Each affected capability revision advances once. Organization specialists remain with the organization.
+
 ## Owner-index rollout
 
 These startup additions never drop, rename, or rebuild an existing index. They
@@ -14,9 +16,9 @@ reuse any existing index whose first key is the erasure owner predicate and
 add only the audited gaps below. The names are stable, so a rolling deploy
 can run old and new replicas against the same database. These indexes support
 bounded owner scans for account erasure and the pre-job orphan sweep; they do
-not change retention or ownership decisions. The manifest adds 16 indexes:
-15 stream indexes plus the group-message author index used for attribution
-redaction. Other classified gaps add no index.
+not change retention or ownership decisions. The manifest adds 17 indexes, comprising
+14 stream indexes, the group-message author index used for attribution
+redaction, and the two specialist access-list indexes. The reply delivery index on `{user_id:1, inbound_message_id:1}` already covers owner erasure.
 
 Each row below is a real missing prefix on a collection that grows with
 events, messages, requests, or deliveries. Without it, the owner query would
@@ -56,6 +58,8 @@ that collection has no such field. An already deployed extra index is left
 untouched.
 
 ```javascript
+db.assistant_agents.createIndex({"org_maintainer_user_ids": 1}, {name: "personal_erasure_owner_assistant_agents_org_maintainer_user_ids"});
+db.assistant_agents.createIndex({"org_user_ids": 1}, {name: "personal_erasure_owner_assistant_agents_org_user_ids"});
 db.assistant_group_mention_notifications.createIndex({"user_id": 1}, {name: "personal_erasure_owner_assistant_group_mention_notifications_user_id"});
 db.assistant_group_messages.createIndex({"author_user_id": 1}, {name: "personal_erasure_owner_assistant_group_messages_author_user_id"});
 db.assistant_group_messages.createIndex({"user_id": 1}, {name: "personal_erasure_owner_assistant_group_messages_user_id"});
@@ -67,6 +71,7 @@ db.channel_email_receipts.createIndex({"user_id": 1}, {name: "personal_erasure_o
 db.channel_email_sends.createIndex({"user_id": 1}, {name: "personal_erasure_owner_channel_email_sends_user_id"});
 db.nyxbot_events.createIndex({"user_id": 1}, {name: "personal_erasure_owner_nyxbot_events_user_id"});
 db.refresh_tokens.createIndex({"user_id": 1}, {name: "personal_erasure_owner_refresh_tokens_user_id"});
+db.service_approval_configs.createIndex({"approver_user_ids": 1}, {name: "personal_erasure_owner_service_approval_configs_approver_user_ids"});
 db.service_change_events.createIndex({"actor.person_id": 1}, {name: "personal_erasure_owner_service_change_events_actor_person_id"});
 db.service_pool_health_observations.createIndex({"pool_id": 1}, {name: "personal_erasure_owner_service_pool_health_observations_pool_id"});
 db.trigger_deliveries.createIndex({"user_id": 1}, {name: "personal_erasure_owner_trigger_deliveries_user_id"});
@@ -138,7 +143,7 @@ registry):
 | `assistant_agent_learning_members`, `assistant_agent_learning_runs`, `assistant_agent_learning_skill_roots`, `assistant_learning_migrations` | Opt-in membership and explicit learning/publication work (`assistant_agent_learning::set_member_opt_in`, `create_run` and `reserve_run`); bounded feature lifecycle rather than every assistant message. |
 | `assistant_async_quotas` | One quota counter per owner (`async_service_operation::reserve_with_artifacts`); replaced resource state rather than an append-only history. |
 | `assistant_group_agent_access`, `assistant_group_agent_proposals`, `assistant_group_invites`, `assistant_group_read_states` | Group access/invite lifecycle and one read-state per participant (`services/collaboration_group_service/membership.rs`, `collaboration_group_service::notifications::ensure_state`); invites/proposals also expire (`collaboration_group_service::ensure_indexes`). |
-| `assistant_skill_draft_attempts`, `assistant_voice_windows`, `assistant_voice_announcements` | Explicit draft attempts expire after a day (`db::ensure_indexes`, `assistant_skill_draft_attempts` expiry index); voice windows are bounded by a voice session (`voice::runtime::checkpoint_windows` and `voice::runtime::settle_windows`), and announcements are expiring coordination (`assistant_voice_announcement::Announcement::expires_at`). |
+| `assistant_skill_draft_attempts`, `assistant_voice_windows` | Explicit draft attempts expire after a day (`db::ensure_indexes`, `assistant_skill_draft_attempts` expiry index). Voice windows are bounded by a voice session (`voice::runtime::checkpoint_windows` and `voice::runtime::settle_windows`). |
 | `channel_adapter_accounts`, `channel_adapter_allocations`, `channel_email_subscriptions`, `openclaw_channel_mappings` | Adapter account/resource setup and one subscription per bot (`channel_email::EmailSubscription`, `services/call_channels/binding.rs`, `services/channel_adapters/openclaw.rs`); no event-per-message history. |
 | `channel_meta_provider_targets` | Independent retry/proof children of a signed request, keyed only by request/bot/grant UUIDs and optional scope UUID. Pending children have no TTL. After completion, indexed pages apply the parent's 90-day proof deadline before parent TTL is enabled. Excluded from export; no subject, owner list or copied source/content. |
 | `channel_meta_grant_scopes` | One bot/grant UUID pair with keyed subject/binding fingerprints, platform/App ID, generation range, timestamps and independent cleanup proof. Retained erasure bookkeeping, excluded from export; no raw subject, owner list, credentials, participant IDs or copied content. Exact completion releases the app-drain obligation and removes identity, App ID, generation and attribution fields; opaque exact replay proof has no terminal TTL. Subjectless manual retirement removes its unused scope. |
@@ -448,7 +453,7 @@ backend/src/models/approval_grant.rs: COLLECTION_NAME=approval_grants | user_id
 backend/src/models/approval_request.rs: COLLECTION_NAME=approval_requests | actor_user_id, user_id
 backend/src/models/assistant_acknowledgement.rs: COLLECTION_NAME=assistant_acknowledgements | user_id
 backend/src/models/assistant_action_receipt.rs: COLLECTION_NAME=assistant_action_receipts | user_id
-backend/src/models/assistant_agent.rs: COLLECTION_NAME=assistant_agents | created_by, user_id
+backend/src/models/assistant_agent.rs: COLLECTION_NAME=assistant_agents | created_by, org_maintainer_user_ids, org_user_ids, user_id
 backend/src/models/assistant_agent_credential.rs: COLLECTION_NAME=assistant_agent_credentials | user_id
 backend/src/models/assistant_agent_learning.rs: CONFIG_COLLECTION_NAME=assistant_agent_learning, MEMBERS_COLLECTION_NAME=assistant_agent_learning_members, RUNS_COLLECTION_NAME=assistant_agent_learning_runs, PROPOSALS_COLLECTION_NAME=assistant_agent_learning_proposals, REJECTIONS_COLLECTION_NAME=assistant_agent_learning_rejections, ROOTS_COLLECTION_NAME=assistant_agent_learning_skill_roots, PUBLICATION_TARGETS_COLLECTION_NAME=assistant_learning_publication_targets, MIGRATIONS_COLLECTION_NAME=assistant_learning_migrations, AUTHORED_CLAIMS_COLLECTION_NAME=assistant_authored_draft_claims | actor_id, member_user_id, owner_id
 backend/src/models/assistant_attachment.rs: COLLECTION_NAME=assistant_attachments | user_id
@@ -552,7 +557,7 @@ backend/src/models/remote_machine_outbox.rs: COLLECTION_NAME=machine_effect_outb
 backend/src/models/saved_login.rs: COLLECTION_NAME=saved_logins | user_id
 backend/src/models/service_account.rs: COLLECTION_NAME=service_accounts | created_by, owner_user_id
 backend/src/models/service_account_key_read_grant.rs: COLLECTION_NAME=service_account_key_read_grants | owner_id
-backend/src/models/service_approval_config.rs: COLLECTION_NAME=service_approval_configs | user_id
+backend/src/models/service_approval_config.rs: COLLECTION_NAME=service_approval_configs | approver_user_ids, user_id
 backend/src/models/service_change_event.rs: COLLECTION_NAME=service_change_events, HEADS_COLLECTION_NAME=service_history_heads | owner_id
 backend/src/models/service_pool.rs: COLLECTION_NAME=service_pools | user_id
 backend/src/models/service_pool_member_health.rs: COLLECTION_NAME=service_pool_member_health, OBSERVATION_COLLECTION_NAME=service_pool_health_observations | owner_id
@@ -742,7 +747,7 @@ startup awaits a large-collection build and may be delayed. Pre-build with:
 db.assistant_messages.createIndex({user_id:1, created_at:-1, _id:-1}, {name:"assistant_messages_account_export"});
 ```
 
-The message index joins the 16 erasure indexes above. Upgrade tests allow
+The message index joins the 17 erasure indexes above. Upgrade tests allow
 precisely the declared additions and preserve the previous
 index set, including on an older-replica startup.
 
@@ -766,12 +771,11 @@ db.platform_delivery_tests.createIndex({installation_id:1}, {name:"account_expor
 db.platform_setup_steps.createIndex({setup_id:1}, {name:"account_export_platform_setup_steps_setup_id"});
 ```
 
-The complete additive rollout set is 23 indexes: 16 erasure indexes and seven
-export indexes. Existing definitions remain untouched; the upgrade tests compare
+The additive rollout comprises 17 erasure indexes and six export indexes. Existing definitions remain untouched; the upgrade tests compare
 all definitions before/after and replay the old startup fixture afterward.
 
 
-Four growing history collections also need export selector indexes. Actor selection is
+Three growing history collections also need export selector indexes. Actor selection is
 independent of resource ownership: an organization or group can retain many events
 authored by other people. Attachment selection must cover every origin, including
 tool images without a channel source. The non-partial owner-prefix compound
@@ -789,8 +793,9 @@ existing index sets.
 This follows the existing awaited large-collection additions in
 `assistant_nyxagent::ensure_indexes` and the message-history export index above.
 Each owning initializer reuses any non-partial index with the required first key,
-regardless of its name. No existing index is dropped, renamed or rebuilt. The
-fresh, upgrade and mixed-fleet tests include these additions and preserve the
+regardless of its name. The Meta erasure indexes on `assistant_attachments` and
+`assistant_voice_announcements` start with `user_id` and cover their owner reads.
+The fresh, upgrade and mixed-fleet tests include these additions and preserve the
 original definitions. Prebuild on a large deployment before restarting replicas:
 
 ```javascript

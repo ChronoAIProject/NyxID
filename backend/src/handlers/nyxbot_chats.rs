@@ -1350,24 +1350,23 @@ pub(crate) async fn list_chats(
     {
         return Err(AppError::NotFound(format!("Channel {id} not found")));
     }
-    let mut managed = Vec::new();
-    for row in channels {
-        if let Some(binding) = &row.org_specialist {
-            match crate::services::org_channel_service::require_admin(
-                &state.db,
-                owner,
-                &binding.org_id,
-            )
-            .await
-            {
-                Ok(()) => {}
-                Err(AppError::Forbidden(_)) if channel_id.is_none() => continue,
-                Err(e) => return Err(e),
-            }
-        }
-        managed.push(row);
+    let manageable = crate::services::org_channel_service::management::manageable_agents(
+        &state.db, owner, &channels,
+    )
+    .await?;
+    let channels: Vec<_> = channels
+        .into_iter()
+        .filter(|row| {
+            row.org_specialist.is_none()
+                || row
+                    .agent_id
+                    .as_ref()
+                    .is_some_and(|id| manageable.contains(id))
+        })
+        .collect();
+    if channel_id.is_some() && channels.is_empty() {
+        return Err(crate::services::org_channel_service::denied());
     }
-    let channels = managed;
     let ids: Vec<&str> = channels.iter().map(|row| row.id.as_str()).collect();
     let chats: Vec<NyxbotThread> = state
         .db
@@ -2334,6 +2333,12 @@ async fn send_post_planned_impl(
                 }
                 journal::PartClaim::Send(attempt) => attempt,
             };
+        let slack_blocks = target.bot.platform == "slack"
+            && delivery.renderer_version == Some(plan::SLACK_RENDERER_VERSION)
+            && part
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.get("blocks").is_some());
         match crate::services::channel_text_preparation::with_part(
             &state.db,
             &delivery,
@@ -2343,7 +2348,10 @@ async fn send_post_planned_impl(
                 &state.db,
                 journal::formatting_receipt(&delivery, index, &attempt),
                 Some(&target.bot.id),
-                send_post_one(state, target, part, fence),
+                crate::services::channel_adapters::slack::with_planned_text_part(
+                    slack_blocks,
+                    send_post_one(state, target, part, fence),
+                ),
             ),
         )
         .await
@@ -3092,16 +3100,66 @@ pub async fn list_channel_chats(
     if let Some(binding) = &row.org_specialist {
         let access =
             crate::services::org_agent_service::access(&state.db, &owner, &binding.org_id).await?;
+        let admin = matches!(
+            access,
+            crate::services::org_service::OwnerAccess::AsOrgAdmin { .. }
+        );
         if !crate::services::org_agent_service::can_use(&access) && row.user_id != owner {
             return Err(crate::services::org_channel_service::denied());
         }
-        if matches!(access, crate::services::org_service::OwnerAccess::AsOrgMember { role, .. } if role.can_proxy())
+        let manageable = crate::services::org_channel_service::management::manageable_agents(
+            &state.db,
+            &owner,
+            std::slice::from_ref(&row),
+        )
+        .await?;
+        if !row
+            .agent_id
+            .as_ref()
+            .is_some_and(|id| manageable.contains(id))
         {
-            return Ok(Json(member_chat_settings(&state, &row).await?));
+            let mut view = member_chat_settings(&state, &row).await?;
+            if admin {
+                add_guest_history_links(&state, &owner, &binding.org_id, &id, &mut view).await;
+            }
+            return Ok(Json(view));
         }
+        let chats = list_chats(&state, &owner, Some(&id)).await?;
+        let mut view = json!({"chats": chats, "can_manage":true});
+        if admin {
+            add_guest_history_links(&state, &owner, &binding.org_id, &id, &mut view).await;
+        }
+        return Ok(Json(view));
     }
     let chats = list_chats(&state, &owner, Some(&id)).await?;
     Ok(Json(json!({"chats": chats, "can_manage":true})))
+}
+
+async fn add_guest_history_links(
+    state: &AppState,
+    actor: &str,
+    org: &str,
+    channel: &str,
+    view: &mut Value,
+) {
+    let chats = view["chats"].as_array_mut().expect("serialized chat list");
+    let ids: Vec<_> = chats
+        .iter()
+        .filter_map(|chat| chat["id"].as_str())
+        .collect();
+    let links = crate::services::org_channel_service::guest_history::latest_by_chat(
+        &state.db, actor, org, channel, &ids,
+    )
+    .await;
+    let Ok(links) = links else {
+        tracing::debug!(channel_id = channel, "Guest history links unavailable");
+        return;
+    };
+    for chat in chats {
+        if let Some(id) = chat["id"].as_str().and_then(|id| links.get(id)) {
+            chat["guest_conversation_id"] = json!(id);
+        }
+    }
 }
 
 // Filter before sorting/limiting. The bounded list has no total, cursor or

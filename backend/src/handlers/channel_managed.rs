@@ -244,11 +244,14 @@ pub async fn start(
             serde_json::json!({ "platform": platform, "owner_user_id": owner, "connection_id": started.connection_id }),
         ),
     );
+    let headers = super::user_tokens::connector_launch_headers(
+        &state,
+        &auth,
+        &started.state_id,
+        &started.launch_proof,
+    )?;
     Ok((
-        HeaderMap::from_iter([(
-            header::CACHE_CONTROL,
-            "no-store".parse().expect("static header"),
-        )]),
+        headers,
         Json(StartResponse {
             connection_id: started.connection_id,
             authorization_url: started.authorization_url,

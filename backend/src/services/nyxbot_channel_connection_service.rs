@@ -16,7 +16,7 @@ use crate::{
             accessible_bot, audit, link, load_channel, org_access_with, release_org_channel,
         },
         nyxbot_gateway_release_service as releases,
-        nyxbot_gateway_service::gateway_base,
+        nyxbot_gateway_service::{GatewayResponse, gateway_base},
         org_channel_service::OrgAccess,
     },
 };
@@ -259,6 +259,34 @@ pub(crate) async fn create_gateway_agent_key(
     .await
 }
 
+pub(crate) async fn record_setup_diagnostic(
+    state: &AppState,
+    row: &NyxbotChannel,
+    release: Option<&str>,
+    operation: &str,
+    response: Option<&GatewayResponse>,
+) -> AppResult<()> {
+    let Some(diagnostic) =
+        crate::services::channel_bot_health::nyxbot::SetupDiagnostic::new(operation, response)
+    else {
+        return Ok(());
+    };
+    let result = state.db.collection::<bson::Document>(CHANNELS).update_one(
+        doc! {"_id":&row.id,"user_id":&row.user_id,"status":"pending","route_api_key_id":&row.route_api_key_id,"gateway_setup_release_id":release},
+        doc! {"$set":{"setup_diagnostic":bson::to_bson(&diagnostic).map_err(|_|AppError::Internal("Channel diagnostic encoding failed".into()))?}},
+    ).await?;
+    if result.matched_count == 1 {
+        audit(
+            state,
+            &row.user_id,
+            "nyxbot_gateway_setup_observed",
+            json!({"channel_agent_id":row.id,"diagnostic":diagnostic}),
+        )
+        .await;
+    }
+    Ok(())
+}
+
 pub(crate) fn gateway_diagnostic_audit(mut details: Value, row: &NyxbotChannel) -> Value {
     details["transport"] = json!(row.transport);
     if let Some(code) = &row.gateway_native_activation {
@@ -469,44 +497,57 @@ pub(crate) async fn connect(
     let label = excerpt(&bot.label, 60);
     let direct_callback =
         super::nyxbot_channel_query_service::direct_callback(&state.config.base_url, &id);
+    let mut preflight_error = None;
     let gateway_url = if wants_gateway {
         match gateway_base(state).await {
             Ok(url) => Some(url),
             Err(_) if may_fall_back => None,
-            Err(error) => return Err(error),
+            Err(error) => {
+                preflight_error = Some(super::nyxbot_gateway_service::availability_code(&error));
+                None
+            }
         }
     } else {
         None
     };
-    let gateway = gateway_url.is_some();
+    if platform == "telegram" && preflight_error.is_none() {
+        releases::telegram_setup_preflight(state, &bot, owner).await?;
+    }
+    let gateway = gateway_url.is_some() || preflight_error.is_some();
     let callback = match gateway_url.as_deref() {
         Some(url) => format!("{url}/callbacks/pending"),
         None => direct_callback.clone(),
     };
-    let route_key = key_service::create_api_key(
-        &state.db,
-        &bot_owner_id,
-        &format!("NyxBot channel route {}", identifier(&label)),
-        "read proxy",
-        crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
-            crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
-        ),
-        Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
-        Some(&[]),
-        Some(&[]),
-        Some(false),
-        Some(false),
-        Some(false),
-        None,
-        None,
-        Some("generic"),
-        Some(&callback),
-    )
-    .await?;
+    let route_key = if preflight_error.is_none() {
+        Some(
+            key_service::create_api_key(
+                &state.db,
+                &bot_owner_id,
+                &format!("NyxBot channel route {}", identifier(&label)),
+                "read proxy",
+                crate::services::api_key_validation::NewKeyExpiry::NeverExpires(
+                    crate::services::api_key_validation::NonExpiringReason::ManagedNyxbot,
+                ),
+                Some("NyxBot channel route key. Managed by NyxBot; disconnect NyxBot to remove."),
+                Some(&[]),
+                Some(&[]),
+                Some(false),
+                Some(false),
+                Some(false),
+                None,
+                None,
+                Some("generic"),
+                Some(&callback),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let mut agent_key_raw: Option<Zeroizing<String>> = None;
     let mut agent_key_id = None;
     let mut agent_key_ciphertext = None;
-    if gateway {
+    if gateway && preflight_error.is_none() {
         let agent = create_gateway_agent_key(state, owner, &label).await?;
         agent_key_ciphertext = Some(
             channel_key::seal(
@@ -532,6 +573,7 @@ pub(crate) async fn connect(
         gateway_native_activation_operation: None,
         gateway_native_delivery: None,
         gateway_intake: None,
+        gateway_discord_connection: None,
         gateway_bot_mentions: Default::default(),
         gateway_threads: Default::default(),
         follow_capacity_revision: 0,
@@ -546,10 +588,15 @@ pub(crate) async fn connect(
         transport: if gateway { "gateway" } else { "direct" }.into(),
         status: "pending".into(),
         last_error: None,
-        route_api_key_id: route_key.id.clone(),
+        route_api_key_id: route_key
+            .as_ref()
+            .map(|key| key.id.clone())
+            .unwrap_or_default(),
         route_id: None,
         agent_api_key_id: agent_key_id.clone(),
-        secret_context_versions: if gateway && state.encryption_keys.contextual_record_writes() {
+        secret_context_versions: if agent_key_ciphertext.is_some()
+            && state.encryption_keys.contextual_record_writes()
+        {
             [(channel_key::FIELD.to_owned(), 3)].into()
         } else {
             Default::default()
@@ -641,8 +688,19 @@ pub(crate) async fn connect(
                         "This bot already has a selected agent".into(),
                     ));
                 }
-                db.collection::<NyxbotChannel>(CHANNELS)
-                    .insert_one(&inserted)
+                let mut document = bson::to_document(&inserted)
+                    .map_err(|_| AppError::Internal("Channel encoding failed".into()))?;
+                // Read the generation under the bot write fence in this same
+                // transaction; preflight can predate an ownership round trip.
+                let live = db
+                    .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+                    .find_one(doc! {"_id":&inserted.channel_bot_id,"user_id":bot_owner(&inserted)})
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::Forbidden("Bot authority changed".into()))?;
+                document.insert("bot_ownership_version", live.ownership_version);
+                db.collection::<bson::Document>(CHANNELS)
+                    .insert_one(document)
                     .session(&mut *session)
                     .await?;
                 if inserted.org_specialist.is_some() {
@@ -666,7 +724,9 @@ pub(crate) async fn connect(
         .await
         .map_err(crate::services::api_key_mutation_service::map_transaction_error);
     if let Err(error) = saved {
-        let _ = key_service::delete_api_key(&state.db, &bot_owner_id, &route_key.id).await;
+        if let Some(key) = &route_key {
+            let _ = key_service::delete_api_key(&state.db, &bot_owner_id, &key.id).await;
+        }
         if let Some(key) = &agent_key_id {
             let _ = key_service::delete_api_key(&state.db, owner, key).await;
         }
@@ -689,7 +749,15 @@ pub(crate) async fn connect(
         row
     };
     let mut meta_route_error = None;
-    let mut outcome = if gateway {
+    let mut outcome = if let Some(code) = preflight_error {
+        let operation = if code == "gateway_configuration_required" {
+            "configuration"
+        } else {
+            "catalog_read"
+        };
+        record_setup_diagnostic(state, &row, None, operation, None).await?;
+        Err(code)
+    } else if gateway {
         effects
             .connect_gateway(
                 state,
@@ -699,7 +767,10 @@ pub(crate) async fn connect(
                     .as_deref()
                     .map(String::as_str)
                     .unwrap_or_default(),
-                &route_key.full_key,
+                &route_key
+                    .as_ref()
+                    .ok_or_else(|| AppError::Internal("Route key missing".into()))?
+                    .full_key,
             )
             .await
     } else if guarded_default {
@@ -939,14 +1010,11 @@ pub(crate) async fn connect(
             }
             cleanup?;
             Err(AppError::ValidationError(match code {
-                "gateway_provider_not_registered" => {
-                    "The Agent Event Gateway has not registered NyxBot as a provider yet \
-                    (operator step). Telegram bots cannot use NyxBot until it is."
-                        .into()
-                }
                 // Keep bounded codes through tool/watch callers. Their presentation
                 // layer supplies guidance without parsing an error's prose.
-                "gateway_not_authenticated"
+                "gateway_provider_not_registered"
+                | "gateway_rejected_request"
+                | "gateway_not_authenticated"
                 | "gateway_permission_required"
                 | "gateway_configuration_required"
                 | "gateway_unavailable" => code.into(),

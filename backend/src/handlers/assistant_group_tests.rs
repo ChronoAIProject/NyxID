@@ -2939,3 +2939,64 @@ async fn durable_wake_review_destroyed_during_admission_retires_member_request()
     server.abort();
     state.db.drop().await.unwrap();
 }
+
+/// Group members and the speaking agent of each message carry the stored
+/// avatar (or null, so clients derive the default).
+#[tokio::test]
+async fn group_members_and_messages_project_avatars() {
+    let (state, _, server) = setup("group_avatars").await;
+    let nyxbot = team::ensure_nyxbot(&state.db, OWNER).await.unwrap();
+    let researcher = researcher(&state).await;
+    state
+        .db
+        .collection::<mongodb::bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &researcher.id},
+            doc! {"$set": {"avatar": {"template":"face-v1","choices":{"head":"block","eyes":"happy","palette":"core-ocean"}}}},
+        )
+        .await
+        .unwrap();
+    let (_, Json(group)) = create_group(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Json(CreateGroupRequest {
+            collaboration: false,
+            org: None,
+            participant_user_ids: Vec::new(),
+            name: "avatars".into(),
+            member_agent_ids: vec![nyxbot.id.clone(), researcher.id.clone()],
+        }),
+    )
+    .await
+    .unwrap();
+    let Json(listed) = list_groups(State(state.clone()), test_auth_user(OWNER))
+        .await
+        .unwrap();
+    let members = listed["groups"][0]["members"].as_array().unwrap().clone();
+    let member = |id: &str| members.iter().find(|m| m["id"] == id).unwrap().clone();
+    assert_eq!(member(&researcher.id)["avatar"]["choices"]["head"], "block");
+    assert!(member(&nyxbot.id)["avatar"].is_null());
+    post(&state, OWNER, &group.id, "@researcher hi", None)
+        .await
+        .unwrap();
+    // The creation notice, the owner's message and the researcher's reply.
+    settled(&state, &group.id, 3).await;
+    let Json(page) = list_messages(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        Path(group.id.clone()),
+        Query(MessagesQuery::default()),
+    )
+    .await
+    .unwrap();
+    let reply = page["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["agent"]["id"] == researcher.id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(reply["agent"]["avatar"]["choices"]["eyes"], "happy");
+    server.abort();
+    state.db.drop().await.unwrap();
+}

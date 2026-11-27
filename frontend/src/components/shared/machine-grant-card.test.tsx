@@ -556,12 +556,106 @@ describe("Machine grant owner management", () => {
       source_and_grant_valid: false,
     };
     render(<MachineGrantCard source={{ kind: "oauth", id: "client" }} />);
-    expect(
-      screen.getByRole("button", { name: "Approve Machine permissions" }),
-    ).toBeDisabled();
-    expect(
-      screen.getByText(/Reconnect from this application/),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve Machine permissions" })).toBeNull();
+    expect(screen.getByRole("status")).toHaveTextContent("No Machine grant");
+    expect(screen.getByText(/Reconnect from the app, choose the Machines/)).toBeInTheDocument();
+    expect(screen.queryByText("Source + grant:")).toBeNull();
+  });
+  it("explains the effective OAuth blocker and keeps the old API reason generic", () => {
+    const legacy = {
+      grant: null,
+      source_valid: false,
+      source_validity_reason: "ineligible",
+      grant_valid: false,
+      grant_validity_reason: "missing",
+      source_and_grant_valid: false,
+    };
+    mocks.data = legacy;
+    const source = { kind: "oauth", id: "client" } as const;
+    const view = render(<MachineGrantCard source={source} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Machine access could not be confirmed");
+    mocks.data = { ...legacy, oauth_machine_status: "client_proxy_scope_missing" };
+    view.rerender(<MachineGrantCard source={source} />);
+    expect(screen.getByRole("status")).toHaveTextContent("App lacks proxy capability");
+    expect(screen.getByText(/Ask the app provider to enable proxy access/)).toBeInTheDocument();
+    mocks.data = { ...legacy, oauth_machine_status: "consent_machine_scope_missing" };
+    view.rerender(<MachineGrantCard source={source} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Machine access omitted from consent");
+    expect(screen.queryByText("No Machine grant")).toBeNull();
+  });
+  it("shows current assignment names and safe placeholders on all-services OAuth grants", () => {
+    const serviceIds = ["active-id", "deleted-id", "unavailable-id", "disabled-id", "disabled-without-name"];
+    const read = {
+      grant: { ...grant(), assignments: { machine: {
+        capabilities: { shell: true, files: false },
+        mode: "shared_legacy",
+        revision: 1,
+        file_roots: ["/workspace"],
+        service_ids: serviceIds,
+      } } },
+      oauth_machine_status: "valid",
+      source_and_grant_valid: true,
+    };
+    mocks.data = {
+      ...read,
+      oauth_machine_services: {
+        "active-id": { label: "Current endpoint name", deleted: false },
+        "deleted-id": { label: null, deleted: true },
+        "unavailable-id": { label: null, deleted: false },
+        "disabled-id": { label: "Paused endpoint", deleted: false, disabled: true },
+        "disabled-without-name": { label: null, deleted: false, disabled: true },
+      },
+    };
+    const source = { kind: "oauth", id: "client" } as const;
+    const view = render(<MachineGrantCard source={source} consentServices={[]} />);
+    const ceiling = screen.getByText(/Gateway service ceiling/);
+    expect(ceiling).toHaveTextContent("Current endpoint name, Deleted service, Service details unavailable, Paused endpoint (disabled), Service disabled");
+    expect(screen.getByRole("button", { name: "Edit Machine permissions" })).toBeEnabled();
+    serviceIds.forEach((id) => expect(ceiling).not.toHaveTextContent(id));
+
+    mocks.data = { ...read, oauth_machine_status: undefined };
+    view.rerender(<MachineGrantCard source={source} consentServices={[
+      { id: "active-id", label: "Saved endpoint name", catalog_service_name: "Catalog fallback", slug: "service", deleted: false },
+      { id: "deleted-id", label: "deleted-id", catalog_service_name: null, slug: null, deleted: true },
+      { id: "unavailable-id", label: "—", catalog_service_name: null, slug: null, deleted: false },
+    ]} />);
+    expect(ceiling).toHaveTextContent("Saved endpoint name, Deleted service, Service details unavailable");
+    expect(ceiling).not.toHaveTextContent("Catalog fallback");
+    expect(ceiling).not.toHaveTextContent("—");
+    serviceIds.forEach((id) => expect(ceiling).not.toHaveTextContent(id));
+  });
+  it("uses current OAuth service visibility over saved consent labels", () => {
+    const read = {
+      grant: { ...grant(), assignments: { machine: {
+        capabilities: { shell: true },
+        mode: "shared_legacy",
+        revision: 1,
+        file_roots: ["/workspace"],
+        service_ids: ["org-service", "private-service"],
+      } } },
+      source_and_grant_valid: true,
+      oauth_machine_status: "valid",
+    };
+    const source = { kind: "oauth", id: "client" } as const;
+    const consentServices = [
+      { id: "org-service", label: "#1", catalog_service_name: null, slug: null, deleted: true },
+      { id: "private-service", label: "Prior label", catalog_service_name: null, slug: "private", deleted: false },
+    ];
+    mocks.data = { ...read, oauth_machine_services: {
+      "org-service": { label: "Shared team service", deleted: false },
+      "private-service": { label: null, deleted: true },
+    } };
+    const view = render(<MachineGrantCard source={source} consentServices={consentServices} />);
+    const ceiling = screen.getByText(/Gateway service ceiling/);
+    expect(ceiling).toHaveTextContent("Shared team service, Deleted service");
+    expect(ceiling).not.toHaveTextContent(/Prior label|org-service|private-service/);
+    mocks.data = {
+      ...read, oauth_machine_status: "client_disabled",
+      source_and_grant_valid: false, oauth_machine_services: {},
+    };
+    view.rerender(<MachineGrantCard source={source} consentServices={consentServices} />);
+    expect(ceiling).toHaveTextContent("Service details unavailable, Service details unavailable");
+    expect(ceiling).not.toHaveTextContent(/Prior label|org-service|private-service/);
   });
   it("does not offer editing without current parent Key CAS", () => {
     mocks.data = {

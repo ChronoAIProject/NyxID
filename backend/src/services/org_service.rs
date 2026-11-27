@@ -103,6 +103,7 @@ async fn prepare_org_user(
         avatar_url: avatar_url.map(|s| s.to_string()),
         email_verified: false,
         email_verification_token: None,
+        email_verification_expires_at: None,
         password_reset_token: None,
         password_reset_expires_at: None,
         is_active: true,
@@ -664,9 +665,18 @@ pub async fn delete_org_user(
     db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
         .delete_many(doc! { "user_id": org_user_id })
         .await?;
-    db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .delete_many(doc! { "user_id": org_user_id })
+    let bots = db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+    let mut bot_ids = bots
+        .find(doc! { "user_id": org_user_id, "channel_guest_data_present": true })
+        .projection(doc! { "_id": 1 })
         .await?;
+    while let Some(row) = bot_ids.try_next().await? {
+        let id = row
+            .get_str("_id")
+            .map_err(|_| AppError::Internal("Malformed channel bot ID".into()))?;
+        super::channel_bot_service::purge_guest_data(db, id).await?;
+    }
+    bots.delete_many(doc! { "user_id": org_user_id }).await?;
     // OpenClaw channel mappings. Hard-deleted, no blocker, no platform-
     // side cleanup: NyxID never registers anything with OpenClaw -- the
     // user manually pastes the per-mapping webhook secret into their
@@ -1227,21 +1237,27 @@ pub async fn resolve_owner_access(
     };
     let effective_scope =
         crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
-    let membership_id = m.id.clone();
+    Ok(access_for_membership(m, effective_scope))
+}
 
-    Ok(match m.role {
+pub(crate) fn access_for_membership(
+    m: OrgMembership,
+    effective_scope: Option<Vec<String>>,
+) -> OwnerAccess {
+    let membership_id = m.id;
+    match m.role {
         OrgRole::Admin => OwnerAccess::AsOrgAdmin {
-            org_user_id: owner.id,
+            org_user_id: m.org_user_id,
             membership_id,
             allowed_service_ids: effective_scope,
         },
         OrgRole::Member | OrgRole::Viewer => OwnerAccess::AsOrgMember {
-            org_user_id: owner.id,
+            org_user_id: m.org_user_id,
             membership_id,
             role: m.role,
             allowed_service_ids: effective_scope,
         },
-    })
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1517,6 +1533,7 @@ mod tests {
             avatar_url: None,
             email_verified: false,
             email_verification_token: None,
+            email_verification_expires_at: None,
             password_reset_token: None,
             password_reset_expires_at: None,
             is_active: true,

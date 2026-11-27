@@ -36,6 +36,10 @@ pub struct OAuthSession {
     pub connect_link_id: Option<String>,
     #[serde(default)]
     pub grant_subject_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assets_context_version: Option<u8>,
     pub selected_asset_id: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub assets_encrypted: Option<Vec<u8>>,

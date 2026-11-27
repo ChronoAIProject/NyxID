@@ -550,6 +550,7 @@ pub(crate) fn recommendation(code: &str) -> Option<super::channel_bot_health::Re
     Some(super::channel_bot_health::Recommendation {
         action,
         text: text.into(),
+        cause: None,
     })
 }
 

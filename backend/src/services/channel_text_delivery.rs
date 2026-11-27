@@ -485,8 +485,13 @@ mod tests {
         version: Option<u32>,
         platform: &str,
     ) -> AppResult<(Vec<super::super::channel_platform::OutboundReply>, String)> {
+        let text = if platform == "slack" {
+            format!(r"\*literal\* {}", "Slack text. ".repeat(7_100))
+        } else {
+            "A literal (value). https://example.test/a-b?x=1&y=2\n\n".repeat(250)
+        };
         let parts = super::super::channel_reply_plan::recorded_assistant_parts(
-            &"A literal (value). https://example.test/a-b?x=1&y=2\n\n".repeat(250),
+            &text,
             platform,
             "https://nyxid.test/thread",
             version,
@@ -575,17 +580,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renderer_versions_resume_only_the_pending_suffix_and_old_workers_refuse_v2() {
+    async fn renderer_versions_resume_only_the_pending_suffix_and_old_workers_refuse_new_plans() {
         let db = crate::test_utils::connect_transaction_test_database("text_renderer_resume").await;
         ensure_indexes(&db).await.unwrap();
-        for platform in ["discord", "whatsapp"] {
-            for version in [None, Some(2)] {
+        for (platform, current) in [("discord", 2), ("whatsapp", 2), ("slack", 3)] {
+            for version in [None, Some(1), Some(current)] {
                 let key = format!("{platform}-{version:?}");
                 let (parts, fingerprint) = rendered(version, platform).unwrap();
                 let row = if version.is_none() {
                     begin(&db, &key, "owner", "source", &fingerprint, parts.len())
                         .await
                         .unwrap()
+                } else if version == Some(1) {
+                    begin_versioned(
+                        &db,
+                        &key,
+                        "owner",
+                        "source",
+                        &fingerprint,
+                        parts.len(),
+                        None,
+                        version,
+                        None,
+                    )
+                    .await
+                    .unwrap()
                 } else {
                     assistant_plan(&db, &key, "owner", "source", platform, None, |v, _| {
                         rendered(v, platform)
@@ -595,6 +614,16 @@ mod tests {
                     .0
                 };
                 assert_eq!(row.renderer_version, version);
+                if platform == "slack" {
+                    assert!(parts[0].text.as_deref().unwrap().starts_with("*literal*"));
+                    assert_eq!(
+                        parts[0]
+                            .metadata
+                            .as_ref()
+                            .is_some_and(|meta| meta["blocks"].is_array()),
+                        version == Some(current)
+                    );
+                }
                 let PartClaim::Send(attempt) = claim(&db, &row, 0).await.unwrap() else {
                     panic!("pending");
                 };
@@ -621,10 +650,14 @@ mod tests {
                     super::super::channel_reply_plan::fingerprint(&resumed_parts),
                     fingerprint
                 );
+                if platform == "slack" {
+                    assert_eq!(resumed_parts[0].text, parts[0].text);
+                    assert_eq!(resumed_parts[0].metadata, parts[0].metadata);
+                }
                 assert!(
                     matches!(claim(&db, &resumed, 0).await.unwrap(), PartClaim::Sent(part) if part.platform_message_id.as_deref() == Some("accepted-prefix"))
                 );
-                if version.is_some() {
+                if version == Some(current) {
                     let (old_parts, old_fingerprint) = rendered(None, platform).unwrap();
                     assert!(matches!(
                         begin(
@@ -679,6 +712,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                assert!(
+                    matches!(claim(&db, &resumed, 1).await.unwrap(), PartClaim::Sent(part) if part.platform_message_id.as_deref() == Some("accepted-suffix"))
+                );
                 let raw = db
                     .collection::<bson::Document>(COLLECTION_NAME)
                     .find_one(doc! {"_id":&row.id})
@@ -686,9 +722,110 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(raw.contains_key("renderer_version"), version.is_some());
-                assert!(!raw.contains_key("text") && !raw.contains_key("body"));
+                assert!(
+                    !raw.contains_key("text")
+                        && !raw.contains_key("body")
+                        && !raw.contains_key("blocks")
+                );
+                if platform == "slack" {
+                    assert!(!raw.to_string().contains("literal"));
+                }
             }
         }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn renderer_slack_fallback_records_only_its_reason_under_the_part_claim() {
+        use crate::services::channel_adapters::slack::{SlackAdapter, with_planned_text_part};
+        use crate::services::channel_platform::PlatformAdapter;
+        use serde_json::json;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, path},
+        };
+
+        let db = crate::test_utils::connect_transaction_test_database("text_renderer_slack").await;
+        ensure_indexes(&db).await.unwrap();
+        let (row, parts) = assistant_plan(
+            &db,
+            "slack-fallback",
+            "owner",
+            "source",
+            "slack",
+            None,
+            |version, _| {
+                let parts = super::super::channel_reply_plan::recorded_assistant_parts(
+                    r"**\*\***",
+                    "slack",
+                    "",
+                    version,
+                )?;
+                let hash = super::super::channel_reply_plan::fingerprint(&parts);
+                Ok((parts, hash))
+            },
+        )
+        .await
+        .unwrap();
+        let PartClaim::Send(attempt) = claim(&db, &row, 0).await.unwrap() else {
+            panic!("expected a pending part");
+        };
+        let server = MockServer::start().await;
+        let adapter = SlackAdapter::media_test_adapter(&server.uri());
+        let mut rich = json!({"channel":"C123","text":"**","mrkdwn":false});
+        rich["blocks"] = parts[0].metadata.as_ref().unwrap()["blocks"].clone();
+        for (body, response) in [
+            (rich, json!({"ok":false,"error":"invalid_blocks"})),
+            (
+                json!({"channel":"C123","text":"**","mrkdwn":false}),
+                json!({"ok":true,"ts":"123.456"}),
+            ),
+        ] {
+            Mock::given(path("/chat.postMessage"))
+                .and(body_json(body))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let receipt = formatting_receipt(&row, 0, &attempt);
+        let http = reqwest::Client::new();
+        let credentials = "fixture".into();
+        let id = super::super::telegram_formatting::scope(
+            &db,
+            receipt,
+            None,
+            with_planned_text_part(
+                true,
+                adapter.send_reply(&http, &credentials, "C123", &parts[0]),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let stored = load(&db, &row.logical_key).await.unwrap().unwrap();
+        assert_eq!(stored.parts[0].state, TextPartState::Sending);
+        assert_eq!(
+            stored.parts[0].formatting_fallback.as_deref(),
+            Some("slack_formatting_fallback")
+        );
+        assert!(claim(&db, &stored, 0).await.is_err());
+        finish(&db, &row, 0, &attempt, TextPartState::Sent, Some(&id), None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            claim(&db, &stored, 0).await.unwrap(),
+            PartClaim::Sent(_)
+        ));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        server.verify().await;
+        let raw = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!raw.to_string().contains("rich_text") && !raw.to_string().contains("**"));
         db.drop().await.unwrap();
     }
 
@@ -748,7 +885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renderer_new_plans_converge_without_changing_slack_or_telegram() {
+    async fn renderer_new_plans_converge_and_keep_the_telegram_fingerprint() {
         let db = crate::test_utils::connect_transaction_test_database("text_renderer_new").await;
         ensure_indexes(&db).await.unwrap();
         for platform in ["discord", "whatsapp", "slack", "telegram"] {
@@ -781,7 +918,7 @@ mod tests {
                 .await
                 .is_err()
             );
-            if matches!(platform, "slack" | "telegram") {
+            if platform == "telegram" {
                 assert_eq!(a.fingerprint, rendered(None, platform).unwrap().1);
             }
         }
@@ -929,7 +1066,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!raw.contains_key("text") && !raw.contains_key("body"));
+        assert!(
+            !raw.contains_key("text") && !raw.contains_key("body") && !raw.contains_key("blocks")
+        );
         db.drop().await.unwrap();
     }
 }

@@ -2,20 +2,13 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::consent::Consent;
-use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
-};
-use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
-use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
-use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, consent_service};
 
@@ -42,6 +35,8 @@ pub struct ConsentAllowedServiceItem {
     pub label: String,
     pub catalog_service_name: Option<String>,
     pub deleted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,22 +83,20 @@ pub async fn list_my_consents(
     auth_user: AuthUser,
 ) -> AppResult<Json<ConsentListResponse>> {
     let user_id = auth_user.user_id.to_string();
-    let consents = consent_service::list_user_consents(&state.db, &user_id).await?;
+    let allow_org_access = crate::mw::auth::require_first_party_human(&auth_user).is_ok();
+    let display =
+        consent_service::list_user_consent_displays(&state.db, &user_id, allow_org_access).await?;
 
-    let mut items = Vec::with_capacity(consents.len());
-    for c in consents {
-        // Look up client name
-        let client_name = state
-            .db
-            .collection::<OauthClient>(OAUTH_CLIENTS)
-            .find_one(doc! { "_id": &c.client_id })
-            .await?
-            .map(|cl| cl.client_name)
+    let mut items = Vec::with_capacity(display.consents.len());
+    for c in display.consents {
+        let client_name = display
+            .client_names
+            .get(&c.client_id)
+            .cloned()
             .unwrap_or_else(|| c.client_id.clone());
         let legacy_unrestricted = is_legacy_unrestricted(&c);
         let allowed_service_ids = response_allowed_service_ids(&c);
-        let allowed_services =
-            resolve_allowed_services(&state.db, &user_id, &allowed_service_ids).await?;
+        let allowed_services = render_allowed_services(&allowed_service_ids, &display.services);
 
         items.push(ConsentItem {
             id: c.id,
@@ -168,100 +161,51 @@ fn response_allowed_service_ids(consent: &Consent) -> Vec<String> {
     consent.allowed_service_ids.clone().unwrap_or_default()
 }
 
-async fn resolve_allowed_services(
-    db: &mongodb::Database,
-    user_id: &str,
+fn render_allowed_services(
     allowed_service_ids: &[String],
-) -> AppResult<Vec<ConsentAllowedServiceItem>> {
-    if allowed_service_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let services: Vec<UserService> =
-        crate::services::service_history::collection::<UserService>(db, USER_SERVICES)
-            .find(doc! { "_id": { "$in": allowed_service_ids }, "user_id": user_id })
-            .await?
-            .try_collect()
-            .await?;
-    let endpoint_ids: Vec<String> = services
-        .iter()
-        .map(|service| service.endpoint_id.clone())
-        .collect();
-    let catalog_service_ids: Vec<String> = services
-        .iter()
-        .filter_map(|service| service.catalog_service_id.clone())
-        .collect();
-
-    let endpoints: Vec<UserEndpoint> = if endpoint_ids.is_empty() {
-        Vec::new()
-    } else {
-        crate::services::service_history::collection::<UserEndpoint>(db, USER_ENDPOINTS)
-            .find(doc! { "_id": { "$in": endpoint_ids } })
-            .await?
-            .try_collect()
-            .await?
-    };
-    let catalog_services: Vec<DownstreamService> = if catalog_service_ids.is_empty() {
-        Vec::new()
-    } else {
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .find(doc! { "_id": { "$in": catalog_service_ids } })
-            .await?
-            .try_collect()
-            .await?
-    };
-
-    let services_by_id: HashMap<String, UserService> = services
-        .into_iter()
-        .map(|service| (service.id.clone(), service))
-        .collect();
-    let endpoints_by_id: HashMap<String, UserEndpoint> = endpoints
-        .into_iter()
-        .map(|endpoint| (endpoint.id.clone(), endpoint))
-        .collect();
-    let catalog_names_by_id: HashMap<String, String> = catalog_services
-        .into_iter()
-        .map(|service| (service.id.clone(), service.name))
-        .collect();
-
+    services_by_id: &BTreeMap<String, consent_service::ConsentServiceDisplay>,
+) -> Vec<ConsentAllowedServiceItem> {
     let mut resolved = Vec::with_capacity(allowed_service_ids.len());
+    let mut missing_count = 0;
     for service_id in allowed_service_ids {
         let Some(service) = services_by_id.get(service_id) else {
+            missing_count += 1;
             resolved.push(ConsentAllowedServiceItem {
                 id: service_id.clone(),
                 slug: None,
-                label: service_id.clone(),
+                label: format!("#{missing_count}"),
                 catalog_service_name: None,
                 deleted: true,
+                disabled: None,
             });
             continue;
         };
 
-        let label = endpoints_by_id
-            .get(&service.endpoint_id)
-            .map(|endpoint| endpoint.label.clone())
-            .unwrap_or_else(|| service.slug.clone());
-        let catalog_service_name = service
-            .catalog_service_id
-            .as_ref()
-            .and_then(|id| catalog_names_by_id.get(id).cloned());
-
         resolved.push(ConsentAllowedServiceItem {
-            id: service.id.clone(),
-            slug: Some(service.slug.clone()),
-            label,
-            catalog_service_name,
+            id: service_id.clone(),
+            slug: service.slug.clone(),
+            label: service.label.clone(),
+            catalog_service_name: service.catalog_service_name.clone(),
             deleted: false,
+            disabled: service.disabled.then_some(true),
         });
     }
-
-    Ok(resolved)
+    resolved
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{connect_test_database, test_user_endpoint, test_user_service};
+    use crate::{
+        models::{
+            user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint},
+            user_service::{COLLECTION_NAME as USER_SERVICES, UserService},
+        },
+        test_utils::{
+            connect_transaction_test_database, test_app_state, test_auth_user, test_user_endpoint,
+            test_user_service,
+        },
+    };
     use chrono::Utc;
 
     // ---- ConsentItem serialization ----
@@ -281,6 +225,7 @@ mod tests {
                 label: "OpenAI key".to_string(),
                 catalog_service_name: Some("OpenAI".to_string()),
                 deleted: false,
+                disabled: None,
             }],
             legacy_unrestricted: false,
             granted_at: "2026-01-01T00:00:00+00:00".to_string(),
@@ -371,15 +316,14 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_allowed_services_returns_names_and_deleted_placeholders() {
-        let Some(db) = connect_test_database("consent_allowed_services").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("consent_allowed_services").await;
+        let state = test_app_state(db.clone());
         let user_id = uuid::Uuid::new_v4().to_string();
         let other_user_id = uuid::Uuid::new_v4().to_string();
         let endpoint_id = uuid::Uuid::new_v4().to_string();
-        let service_id = uuid::Uuid::new_v4().to_string();
-        let foreign_service_id = uuid::Uuid::new_v4().to_string();
-        let missing_service_id = uuid::Uuid::new_v4().to_string();
+        let service_id = "00000000-0000-4000-8000-000000000001".to_owned();
+        let missing_service_id = "00000000-0000-4000-8000-000000000002".to_owned();
+        let foreign_service_id = "00000000-0000-4000-8000-000000000003".to_owned();
 
         db.collection::<UserEndpoint>(USER_ENDPOINTS)
             .insert_one(test_user_endpoint(
@@ -407,18 +351,24 @@ mod tests {
             .await
             .unwrap();
 
-        let items = resolve_allowed_services(
+        let ids = vec![
+            service_id.clone(),
+            missing_service_id.clone(),
+            foreign_service_id.clone(),
+        ];
+        consent_service::grant_consent_with_services(
             &db,
             &user_id,
-            &[
-                service_id.clone(),
-                missing_service_id.clone(),
-                foreign_service_id.clone(),
-            ],
+            "fixture",
+            "openid proxy",
+            Some(ids),
         )
         .await
         .unwrap();
-
+        let response = list_my_consents(State(state.clone()), test_auth_user(&user_id))
+            .await
+            .unwrap();
+        let items = &response.0.consents[0].allowed_services;
         assert_eq!(items.len(), 3);
         assert_eq!(items[0].id, service_id);
         assert_eq!(items[0].slug.as_deref(), Some("openai"));
@@ -427,9 +377,29 @@ mod tests {
         assert_eq!(items[1].id, missing_service_id);
         assert!(items[1].slug.is_none());
         assert!(items[1].deleted);
+        assert_eq!(items[1].label, "#1");
         assert_eq!(items[2].id, foreign_service_id);
+        assert_eq!(items[2].label, "#2");
         assert!(items[2].slug.is_none());
         assert!(items[2].deleted);
+        let ids = vec![foreign_service_id.clone(), missing_service_id.clone()];
+        let displays = consent_service::list_user_consent_displays(&db, &user_id, true)
+            .await
+            .unwrap();
+        let reversed = render_allowed_services(&ids, &displays.services);
+        for (index, id) in [&foreign_service_id, &missing_service_id]
+            .into_iter()
+            .enumerate()
+        {
+            let json = serde_json::to_value(&reversed[index]).unwrap();
+            assert_eq!(
+                json,
+                serde_json::json!({
+                    "id": id, "slug": null, "label": format!("#{}", index + 1),
+                    "catalog_service_name": null, "deleted": true
+                })
+            );
+        }
     }
 
     // ---- ConsentRevokeResponse serialization ----

@@ -2443,6 +2443,11 @@ async fn handle_tools_list(
     session_id: Option<&str>,
     request: &JsonRpcRequest,
 ) -> Response {
+    use crate::services::channel_guest_access::guest_tools;
+    let add_on = auth
+        .chat
+        .as_ref()
+        .and_then(|chat| chat.channel_guest.as_ref());
     // Thread API-key node scope into the discovery chain so scoped
     // keys don't see tools whose only dispatchable routes are all out of
     // scope (seventeenth-round Codex review P2).
@@ -2488,7 +2493,11 @@ async fn handle_tools_list(
         &auth.assistant_operation_scopes,
         &mut services,
     );
-    if let Some(chat) = auth.chat.as_ref() {
+    if let Some(turn) = add_on {
+        if let Err(error) = guest_tools::filter_catalog(&state.db, turn, &mut services).await {
+            return app_error_to_rpc(request.id.clone(), &error);
+        }
+    } else if let Some(chat) = auth.chat.as_ref() {
         services.push(
             crate::services::assistant_account_tools::virtual_service_for(&state.db, chat).await,
         );
@@ -2535,6 +2544,39 @@ async fn handle_tools_list(
         tool_defs.push(crate::services::assistant_resource_service::definition());
         if retained_results::chat(auth).is_some() {
             tool_defs.push(crate::services::assistant_tool_result_service::definition());
+        }
+    }
+
+    if let Some(chat) = auth
+        .chat
+        .as_ref()
+        .filter(|chat| chat.channel_guest.is_some())
+    {
+        tool_defs.retain(|definition| {
+            definition.name == super::agent_skills::GUEST_TOOL_NAME
+                || matches!(
+                    definition.name.as_str(),
+                    "nyx__search_tools" | "nyx__call_tool"
+                )
+                || mcp_service::resolve_tool_call(&definition.name, &services).is_some()
+        });
+        match Box::pin(guest_tools::definitions(
+            &state.db,
+            chat,
+            &auth.effective_approval_owner_user_id(),
+        ))
+        .await
+        {
+            Ok(definitions) => tool_defs.extend(definitions),
+            Err(error) => return app_error_to_rpc(request.id.clone(), &error),
+        }
+        if !tool_defs
+            .iter()
+            .any(|tool| tool.name == super::agent_skills::GUEST_TOOL_NAME)
+            && let Some(skill) =
+                Box::pin(super::agent_skills::guest_tool_definition(state, chat)).await
+        {
+            tool_defs.push(skill);
         }
     }
 
@@ -3235,7 +3277,22 @@ async fn dispatch_tools_call(
         .await;
     }
 
-    if let Some(refused) = guest_tool_refusal(auth, tool_name, request.id.clone()) {
+    let add_on = auth
+        .chat
+        .as_ref()
+        .filter(|chat| chat.channel_guest.is_some());
+    if let Some(chat) = add_on {
+        if let Some(response) =
+            guest_native_tool(state, auth, chat, tool_name, &arguments, request.id.clone()).await
+        {
+            return response;
+        }
+        if !matches!(tool_name, "nyx__search_tools" | "nyx__call_tool")
+            && !guest_sheets_tool_name(tool_name)
+        {
+            return guest_refused(request.id.clone());
+        }
+    } else if let Some(refused) = guest_tool_refusal(auth, tool_name, request.id.clone()) {
         return refused;
     }
 
@@ -3432,6 +3489,49 @@ async fn dispatch_tools_call(
         None,
     ))
     .await
+}
+
+fn guest_sheets_tool_name(name: &str) -> bool {
+    name.split_once("__").is_some_and(|(service, operation)| {
+        !service.is_empty() && matches!(operation, "sheets_get_values" | "sheets_append_values")
+    })
+}
+
+fn guest_native_tool<'a>(
+    state: &'a AppState,
+    auth: &'a McpAuthContext,
+    chat: &'a crate::services::assistant_acknowledgement_service::ChatAuthority,
+    tool_name: &'a str,
+    arguments: &'a serde_json::Value,
+    id: Option<serde_json::Value>,
+) -> futures::future::BoxFuture<'a, Option<Response>> {
+    use crate::services::channel_guest_access::{guest_tools, personal_records};
+    Box::pin(async move {
+        if tool_name == super::agent_skills::GUEST_TOOL_NAME {
+            return Some(handle_guest_skill(state, chat, arguments, id).await);
+        }
+        if !personal_records::is_tool(tool_name) {
+            return None;
+        }
+        let owner = auth.effective_approval_owner_user_id();
+        Some(
+            match Box::pin(guest_tools::execute(
+                &state.db, chat, &owner, tool_name, arguments,
+            ))
+            .await
+            {
+                Ok(value) => tool_result(id, &value.to_string(), false),
+                Err(error) => tool_result(
+                    id,
+                    &serde_json::json!({
+                        "error": error.error_key(), "error_code": error.error_code()
+                    })
+                    .to_string(),
+                    true,
+                ),
+            },
+        )
+    })
 }
 
 // Select before polling: constructing every meta-tool in one async match makes
@@ -3938,7 +4038,12 @@ fn dispatch_service_tool<'a>(
         {
             return refused;
         }
-        if auth.execution_permission.is_some() {
+        if auth.execution_permission.is_some()
+            && auth
+                .chat
+                .as_ref()
+                .is_none_or(|chat| chat.channel_guest.is_none())
+        {
             let result = async {
                 let user = permission_dispatch_auth(auth)?;
                 prepared
@@ -4413,6 +4518,7 @@ async fn authorize_mcp_operation(
             &approval_owner_user_id,
             &target.service_owner_user_id,
             &target.service_id,
+            target.connection_id.as_deref(),
             operation,
             auth.approval_requester_type(),
             &approval_requester_id,
@@ -4446,7 +4552,25 @@ async fn authorize_mcp_operation(
                 guest_refused(request_id),
             ));
         }
-        approval_service::ApprovalOutcome::Allowed { .. } => return Ok(automatic),
+        approval_service::ApprovalOutcome::Allowed { .. } => {
+            if auth
+                .chat
+                .as_ref()
+                .is_some_and(|chat| chat.channel_guest.is_some())
+                && let Some(prepared) = prepared
+            {
+                prepared.channel_guest_approval = Some(Box::new(
+                    crate::services::channel_guest_access::guest_tools::SheetsApproval {
+                        actor: approval_owner_user_id,
+                        owner: target.service_owner_user_id,
+                        catalog: target.service_id,
+                        descriptor: operation.clone(),
+                        auto_connected: target.is_auto_connected,
+                    },
+                ));
+            }
+            return Ok(automatic);
+        }
         approval_service::ApprovalOutcome::Denied => {
             return Err(guest_service_failure(
                 auth,
@@ -4509,6 +4633,7 @@ async fn wait_for_mcp_approval(
         operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.org_policy = pending.resolution.policy_stamp();
     request_operation.assistant_group = crate::services::org_group_service::approval_binding(
         &state.db,
         auth.assistant_group_id.as_deref(),
@@ -4745,6 +4870,22 @@ async fn guest_service_refusal(
     request_id: Option<serde_json::Value>,
 ) -> Option<Response> {
     use crate::models::assistant_agent::GuestAccess;
+    if let Some(turn) = auth
+        .chat
+        .as_ref()
+        .and_then(|chat| chat.channel_guest.as_ref())
+        && let Err(error) =
+            Box::pin(prepared.authorize_guest_data(&state.db, turn, service, endpoint)).await
+    {
+        return Some(tool_result(
+            request_id,
+            &serde_json::json!({
+                "error": error.error_key(), "error_code": error.error_code()
+            })
+            .to_string(),
+            true,
+        ));
+    }
     if let Some(shared) = auth
         .chat
         .as_ref()
@@ -5123,7 +5264,28 @@ fn native_team_tool_result(
                 "isError": is_error,
             })));
     }
-    // Only a trusted native remember diagnostic may enrich persisted activity.
+    if name == "nyxid__draft_agent_skill" && is_error && value["error"] == "conflict" {
+        use crate::services::assistant_agent_learning_review::PublicationFailureCode;
+        let details = &value["details"];
+        let code = match details["reason"].as_str() {
+            Some("publication_ambiguous") => Some(PublicationFailureCode::PublishUncertain),
+            Some(reason) => PublicationFailureCode::parse(reason),
+            None => None,
+        };
+        let status = details["upstream_status"]
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok());
+        let failure = code.and_then(|code| code.save_failure(status)).or_else(|| {
+            crate::errors::skill_publication::SkillPublicationFailure::registry_unavailable(
+                details["reason"].as_str()?,
+                status,
+            )
+        });
+        if let Some(failure) = failure {
+            response.extensions_mut().insert(failure.activity());
+        }
+    }
+    // Only a trusted native remember diagnostic may enrich persisted memory activity.
     // Never interpret arbitrary downstream result text as safe UI metadata.
     if name == "nyxid__remember"
         && is_error
@@ -5142,6 +5304,28 @@ fn native_team_tool_result(
             });
     }
     response
+}
+
+fn handle_guest_skill<'a>(
+    state: &'a AppState,
+    chat: &'a crate::services::assistant_acknowledgement_service::ChatAuthority,
+    args: &'a serde_json::Value,
+    id: Option<serde_json::Value>,
+) -> futures::future::BoxFuture<'a, Response> {
+    use super::agent_skills::{GUEST_TOOL_NAME, guest_tool};
+    Box::pin(async move {
+        match guest_tool(state, chat, args).await {
+            Ok(value) => native_team_tool_result(id, GUEST_TOOL_NAME, &value, false),
+            Err(error) => {
+                let result = crate::services::assistant_account_tools::error_result_for(
+                    error,
+                    Some(chat),
+                    &state.config.frontend_url,
+                );
+                native_team_tool_result(id, GUEST_TOOL_NAME, &result.value, true)
+            }
+        }
+    })
 }
 
 async fn handle_account_tool(
@@ -5600,6 +5784,28 @@ async fn handle_meta_call_tool(
             serde_json::Value::Object(flat)
         };
 
+    if let Some(chat) = auth
+        .chat
+        .as_ref()
+        .filter(|chat| chat.channel_guest.is_some())
+    {
+        if let Some(response) = guest_native_tool(
+            state,
+            auth,
+            chat,
+            tool_name,
+            &inner_args,
+            request_id.clone(),
+        )
+        .await
+        {
+            return response;
+        }
+        if !guest_sheets_tool_name(tool_name) || result_query.is_some() {
+            return guest_refused(request_id);
+        }
+    }
+
     if native_activity_names().contains(tool_name) && tool_name != "nyx__call_tool" {
         update_activity_label(state, auth, tool_name).await;
     }
@@ -5821,7 +6027,12 @@ async fn handle_meta_call_tool(
     {
         return refused;
     }
-    if auth.execution_permission.is_some() {
+    if auth.execution_permission.is_some()
+        && auth
+            .chat
+            .as_ref()
+            .is_none_or(|chat| chat.channel_guest.is_none())
+    {
         let result = async {
             let user = permission_dispatch_auth(auth)?;
             prepared
@@ -6207,7 +6418,28 @@ async fn handle_meta_search(
 
     let mut candidates = search_result.matches;
     if !exact_service_id_query {
-        if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
+        if let Some(chat) = auth
+            .chat
+            .as_ref()
+            .filter(|chat| chat.channel_guest.is_some())
+        {
+            use crate::services::channel_guest_access::guest_tools;
+            match Box::pin(guest_tools::definitions(
+                &state.db,
+                chat,
+                &auth.effective_approval_owner_user_id(),
+            ))
+            .await
+            {
+                Ok(definitions) => candidates.extend(definitions),
+                Err(error) => return app_error_to_rpc(request_id, &error),
+            }
+            if let Some(skill) =
+                Box::pin(super::agent_skills::guest_tool_definition(state, chat)).await
+            {
+                candidates.push(skill);
+            }
+        } else if let Some(chat) = auth.chat.as_ref().filter(|chat| !chat.guest) {
             candidates.extend(Box::pin(chat_native_definitions(state, chat)).await);
         } else if auth.chat.is_none()
             && let Some(source) = auth.machine_source.as_ref()
@@ -6414,6 +6646,15 @@ async fn load_all_services_for_meta_tools(
         }
         // Reserve the native namespace against a connected service shadowing it.
         services.retain(|service| service.service_slug != "nyxid");
+        if let Some(turn) = &chat.channel_guest {
+            crate::services::channel_guest_access::guest_tools::filter_catalog(
+                &state.db,
+                turn,
+                &mut services,
+            )
+            .await?;
+            return Ok(services);
+        }
         services.push(
             crate::services::assistant_account_tools::virtual_service_for(&state.db, chat).await,
         );
@@ -7199,19 +7440,6 @@ async fn handle_mcp_ssh_exec(
         Ok(service) => service,
         Err(e) => return tool_result(request_id, &format!("SSH service error: {e}"), true),
     };
-    let approval_owner_user_id = auth.effective_approval_owner_user_id();
-    let service_owner_user_id = match proxy_service::find_effective_service_owner(
-        &state.db,
-        &approval_owner_user_id,
-        None,
-        Some(&service_id),
-    )
-    .await
-    {
-        Ok(Some(owner)) => owner,
-        Ok(None) => approval_owner_user_id.clone(),
-        Err(e) => return tool_result(request_id, &format!("SSH service error: {e}"), true),
-    };
     let operation = operation_descriptor::build_ssh_descriptor(
         operation_descriptor::SshOperationKind::Exec,
         Some(command),
@@ -7220,10 +7448,11 @@ async fn handle_mcp_ssh_exec(
         state,
         auth,
         crate::services::mcp_approval::McpApprovalTarget {
+            connection_id: Some(connection.id.clone()),
             service_id: service_id.clone(),
             service_name: service.name.clone(),
             service_slug: service.slug.clone(),
-            service_owner_user_id,
+            service_owner_user_id: connection.user_id.clone(),
             // SSH services are not auto-provisioned.
             is_auto_connected: false,
         },
@@ -8899,6 +9128,7 @@ mod tests {
         .await
         .unwrap();
         let target = crate::services::mcp_approval::McpApprovalTarget {
+            connection_id: None,
             service_id: uuid::Uuid::new_v4().to_string(),
             service_owner_user_id: f.owner.clone(),
             service_name: "Drive".into(),
@@ -9095,6 +9325,7 @@ mod tests {
 
         let now = chrono::Utc::now();
         let config = ServiceApprovalConfig {
+            approvers: Default::default(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: org_id.clone(),
             service_id: catalog_service_id.clone(),
@@ -9129,6 +9360,7 @@ mod tests {
 
         db.collection::<ApprovalGrant>(APPROVAL_GRANTS)
             .insert_one(ApprovalGrant {
+                org_policy: None,
                 execution_review: None,
                 execution_last_used_at: None,
                 execution_use: None,
@@ -9317,6 +9549,7 @@ mod tests {
             .expect("insert allowlisted cancellation endpoint");
         db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: actor_id.clone(),
                 service_id: service.id.clone(),
@@ -12162,6 +12395,7 @@ mod skill_authoring_discovery_tests {
         auth.chat = Some(ChatAuthority {
             key_version: 0,
             voice_parent_conversation_id: None,
+            channel_guest: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,

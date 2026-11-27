@@ -30,6 +30,7 @@ export function GroupedDetail({
   onReveal,
   backLabel,
   onBack,
+  onActiveChange,
   children,
   level: requestedLevel,
 }: {
@@ -40,6 +41,8 @@ export function GroupedDetail({
   readonly onReveal?: () => void;
   readonly backLabel: string;
   readonly onBack: () => void;
+  /** Whether this page currently covers its parent, including tab/search visibility. */
+  readonly onActiveChange?: (active: boolean) => void;
   readonly children: ReactNode;
   readonly level?: number;
 }) {
@@ -68,6 +71,10 @@ export function GroupedDetail({
     onBack(); return true;
   } } : null);
   const active = open && context.visible && !searching;
+  useEffect(() => {
+    onActiveChange?.(active);
+    return () => onActiveChange?.(false);
+  }, [active, onActiveChange]);
   useEffect(() => {
     if (!active || !page.current) return;
     const previous =

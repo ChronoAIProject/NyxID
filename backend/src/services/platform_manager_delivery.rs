@@ -1913,14 +1913,28 @@ async fn send_claimed(
         } else if let CapturedMaterial::Native(authority) = &material {
             use super::platform_native_reply_service::NativeSendOutcome;
             let guard=telegram_effect_guard(state,row,claim_id,&body,&identity,public.as_ref());
-            match super::channel_platform::with_post_effect_guard(guard,super::platform_native_reply_service::send_part(
+            let slack_blocks = chat.platform() == "slack"
+                && plan.renderer_version == Some(super::channel_reply_plan::SLACK_RENDERER_VERSION)
+                && part.metadata.as_ref().is_some_and(|metadata| metadata.get("blocks").is_some());
+            let send = super::platform_native_reply_service::send_part(
                 state,
                 authority,
                 Zeroizing::new(part.text.clone().unwrap_or_default()),
                 native.ok_or_else(refused)?.adapter.as_ref(),
                 part.metadata.as_ref(),
-            ))
-            .await?
+            );
+            let send = super::channel_platform::with_post_effect_guard(guard, send);
+            let outcome = if slack_blocks {
+                super::telegram_formatting::scope(
+                    &state.db,
+                    journal::formatting_receipt(&plan, index, &attempt),
+                    plan.channel_bot_id.as_deref(),
+                    super::channel_adapters::slack::with_planned_text_part(true, send),
+                ).await
+            } else {
+                send.await
+            };
+            match outcome?
             {
                 NativeSendOutcome::Sent {
                     platform_message_id,

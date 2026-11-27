@@ -689,7 +689,7 @@ async fn org_notice_2625_bot_or_route_closed_reads_complete_empty_and_record_hea
                 .collection::<bson::Document>(EVENTS)
                 .update_one(
                     doc! {"channel_id":&f.row.id,"event_id":&c.source},
-                    doc! {"$set":{"response_reply.context_version":3}},
+                    doc! {"$set":{"response_reply.context_version":99}},
                 )
                 .await
                 .unwrap();

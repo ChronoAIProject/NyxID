@@ -1,9 +1,12 @@
 import { useDiagnosticsNotice } from "../lib/crashReporting/useDiagnosticsNotice";
+import { useLaunchLifecycle, useLaunchShell, launchSplashHidden } from "../lib/performance/launchPerformance";
+import { usePerformanceLifecycle } from "../lib/performance/useNativePerformance";
 import { newAssistantChatParams } from "./assistantChatParams";
 import { workspaceCornerSensor } from "../components/workspace/workspaceLayout";
 import { useAppLanguage } from "../i18n/LanguageProvider";
 import { translateApp } from "../i18n/appTranslation";
 import { LanguageProvider } from "../i18n/LanguageProvider";
+import { AgentAvatarsProvider } from "../lib/avatars/AgentAvatarsProvider";
 import "react-native-gesture-handler";
 import { useForegroundNotificationToast } from "./useForegroundNotificationToast";
 import { useNotificationNavigation } from "./useNotificationNavigation";
@@ -195,6 +198,8 @@ export default function App() {
 
 function AppContent() {
   useAppLanguage();
+  usePerformanceLifecycle();
+  useLaunchLifecycle();
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
   const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(
     undefined,
@@ -281,7 +286,7 @@ function AppContent() {
   const ready = fontsLoaded || fontLoadTimeout;
   useEffect(() => {
     if (ready) {
-      SplashScreen.hideAsync().catch(() => {
+      SplashScreen.hideAsync().then(launchSplashHidden).catch(() => {
         /* already hidden — fine */
       });
     }
@@ -437,6 +442,7 @@ function AppContent() {
               <ChatLayoutProvider>
                 <MobileConsentProvider>
                   <AuthSessionProvider>
+                    <AgentAvatarsProvider>
                     <ThemedAppShell
                       navigationRef={navigationRef}
                       currentRouteName={currentRouteName}
@@ -450,6 +456,7 @@ function AppContent() {
                       pushToast={pushToast}
                       pushToastKey={pushToastKey}
                     />
+                    </AgentAvatarsProvider>
                   </AuthSessionProvider>
                 </MobileConsentProvider>
               </ChatLayoutProvider>
@@ -568,6 +575,7 @@ function ThemedAppShell({
     sheetOpen: false,
   });
   const sidebarOpen = !persistentSidebar && drawerPresented;
+  useLaunchShell(currentRouteName && navigationRef.getCurrentRoute()?.key, !!currentRouteName && !sidebarOpen && !accessibility.sheetOpen && !navigationBlocked);
   const workspaceAccessibility = useMemo(
     () => ({ ...accessibility, sidebarOpen }),
     [accessibility, sidebarOpen],
@@ -740,6 +748,7 @@ function ThemedAppShell({
       route,
       undefined,
       navigationRef.getRootState(),
+      Platform.OS,
     );
     // The root native modal sits above the whole push shell. Neither its
     // presentation nor its guarded dismissal changes the underlying offset.
@@ -893,7 +902,7 @@ function ThemedAppShell({
         !navigationBlocked &&
         !accessibility.sheetOpen &&
         (Boolean(edgeBackRevision && edgeBacks.current.size) ||
-          isWorkspaceSidebarRoot(currentRouteName))
+          isWorkspaceSidebarRoot(currentRouteName, Platform.OS))
       }
       onEdgeBack={
         edgeBacks.current.size

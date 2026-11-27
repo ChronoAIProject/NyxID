@@ -224,6 +224,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_indexes(crate::services::assistant_cma_slot_audit::indexes())
         .await?;
     crate::services::crash_report_service::ensure_indexes(db).await?;
+    crate::services::channel_guest_access::ensure_indexes(db).await?;
     db.collection::<bson::Document>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
         .create_indexes(crate::services::assistant_cma_sandbox_service::indexes())
         .await?;
@@ -1797,6 +1798,18 @@ async fn ensure_core_indexes(db: &Database) -> Result<(), mongodb::error::Error>
     sac.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
+    sac.create_index(
+        IndexModel::builder()
+            .keys(doc! {"approver_grants_pending": 1})
+            .options(
+                IndexOptions::builder()
+                    .partial_filter_expression(doc! {"approver_grants_pending": true})
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
+
     // ── user_provider_credentials ──
     let user_creds = db.collection::<mongodb::bson::Document>("user_provider_credentials");
     user_creds
@@ -2993,8 +3006,49 @@ async fn ensure_service_indexes(db: &Database) -> Result<(), mongodb::error::Err
         .await?;
 
     // ── channel_bots ──
+    db.collection::<mongodb::bson::Document>(crate::models::channel_guest_policy::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"bot_id": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    db.collection::<mongodb::bson::Document>(
+        crate::models::channel_guest_setup::GuestSetup::COLLECTION_NAME,
+    )
+    .create_index(IndexModel::builder().keys(doc! {"owner_id": 1}).build())
+    .await?;
     crate::services::telegram_new_service::ensure_indexes(db).await?;
     let channel_bots = db.collection::<mongodb::bson::Document>("channel_bots");
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"channel_guest_purge_before_ownership":1,"_id":1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(
+                            doc! {"channel_guest_purge_before_ownership":{"$gt":0_i64}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"is_active":1,"channel_guest_data_present":1})
+                .options(
+                    IndexOptions::builder()
+                        .partial_filter_expression(
+                            doc! {"is_active":false,"channel_guest_data_present":true},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     crate::services::channel_adapters::aurinko::ensure_indexes(db).await?;
 
     channel_bots

@@ -236,6 +236,8 @@ pub async fn refresh_delegation_token(
 
 #[cfg(test)]
 mod tests {
+    use crate::handlers::credential_record_fixtures::KeySecret;
+    use crate::services::credential_record_service;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -433,6 +435,7 @@ mod tests {
             crate::models::service_approval_config::COLLECTION_NAME,
         )
         .insert_one(ServiceApprovalConfig {
+            approvers: Default::default(),
             id: Uuid::new_v4().to_string(),
             user_id: TEST_USER_ID.to_string(),
             service_id: "00000000-0000-4000-8000-000000000301".to_string(),
@@ -1815,6 +1818,7 @@ mod tests {
         )
         .insert_many([
             ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 service_id: "00000000-0000-4000-8000-000000000301".to_string(),
@@ -1827,6 +1831,7 @@ mod tests {
                 updated_at: Utc::now(),
             },
             ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: TEST_USER_ID.to_string(),
                 service_id: TEST_GENERIC_SERVICE.to_string(),
@@ -3043,46 +3048,14 @@ mod tests {
             .expect("restore selected endpoint");
 
         let credential_id = "00000000-0000-4000-8000-000000000701";
-        fixture
-            .db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(UserApiKey {
-                secret_context_versions: Default::default(),
-                oauth_app_observation: None,
-                id: credential_id.to_string(),
-                user_id: TEST_USER_ID.to_string(),
-                label: "full-router credential".to_string(),
-                credential_type: "bearer".to_string(),
-                credential_encrypted: Some(
-                    fixture
-                        .state
-                        .encryption_keys
-                        .encrypt(b"full-router-secret")
-                        .await
-                        .expect("encrypt full-router credential"),
-                ),
-                access_token_encrypted: None,
-                refresh_token_encrypted: None,
-                token_scopes: None,
-                expires_at: None,
-                provider_config_id: None,
-                connection_id: None,
-                oauth_attempt_nonce: None,
-                user_oauth_client_id_encrypted: None,
-                user_oauth_client_secret_encrypted: None,
-                credential_source: None,
-                status: "active".to_string(),
-                last_used_at: None,
-                last_authorized_at: None,
-                error_message: None,
-                source: Some("user_created".to_string()),
-                source_id: None,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                credential_epoch: 1,
-            })
-            .await
-            .expect("insert active credential");
+        insert_bearer_credential(
+            &fixture,
+            credential_id,
+            "full-router credential",
+            b"full-router-secret",
+            1,
+        )
+        .await;
         user_services
             .update_one(
                 mongodb::bson::doc! { "_id": TEST_SERVICE_A },
@@ -3515,49 +3488,84 @@ mod tests {
         .await;
     }
 
-    async fn insert_bearer_credential(
-        fixture: &FullRouterFixture,
-        credential_id: &str,
-        secret: &[u8],
-        epoch: i64,
-    ) {
-        let encrypted = fixture
-            .state
-            .encryption_keys
-            .encrypt(secret)
-            .await
-            .expect("encrypt test credential");
+    async fn rotate_router_credential(fixture: &FullRouterFixture, id: &str, secret: &[u8]) {
+        let keys = &fixture.state.encryption_keys;
+        let field = "credential_encrypted";
+        let encrypted = credential_record_service::encrypt(
+            keys,
+            USER_API_KEYS,
+            id,
+            TEST_USER_ID,
+            field,
+            secret,
+        )
+        .await
+        .unwrap();
+        let mut set = mongodb::bson::doc! {
+            field: mongodb::bson::Binary {
+                subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                bytes: encrypted,
+            },
+        };
+        let mut unset = mongodb::bson::Document::new();
+        credential_record_service::mark_classic_update(&mut set, &mut unset, keys, field);
         fixture
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(UserApiKey {
-                secret_context_versions: Default::default(),
-                oauth_app_observation: None,
-                id: credential_id.to_string(),
-                user_id: TEST_USER_ID.to_string(),
-                label: "ac5 credential".to_string(),
-                credential_type: "bearer".to_string(),
-                credential_encrypted: Some(encrypted),
-                access_token_encrypted: None,
-                refresh_token_encrypted: None,
-                token_scopes: None,
-                expires_at: None,
-                provider_config_id: None,
-                connection_id: None,
-                oauth_attempt_nonce: None,
-                user_oauth_client_id_encrypted: None,
-                user_oauth_client_secret_encrypted: None,
-                credential_source: None,
-                status: "active".to_string(),
-                last_used_at: None,
-                last_authorized_at: None,
-                error_message: None,
-                source: Some("user_created".to_string()),
-                source_id: None,
-                credential_epoch: epoch,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .update_one(
+                mongodb::bson::doc! { "_id": id },
+                mongodb::bson::doc! {
+                    "$set": set,
+                    "$unset": unset,
+                    "$inc": { "credential_epoch": 1 },
+                },
+            )
+            .await
+            .expect("rotate credential in place");
+    }
+
+    async fn insert_bearer_credential(
+        fixture: &FullRouterFixture,
+        credential_id: &str,
+        label: &str,
+        secret: &[u8],
+        epoch: i64,
+    ) {
+        let mut row = UserApiKey {
+            secret_context_versions: Default::default(),
+            oauth_app_observation: None,
+            id: credential_id.to_string(),
+            user_id: TEST_USER_ID.to_string(),
+            label: label.to_string(),
+            credential_type: "bearer".to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_attempt_nonce: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            credential_source: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            last_authorized_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            credential_epoch: epoch,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        KeySecret::Credential
+            .set(&fixture.state.encryption_keys, &mut row, secret)
+            .await;
+        fixture
+            .db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(row)
             .await
             .expect("insert test credential");
     }
@@ -3584,6 +3592,7 @@ mod tests {
         insert_bearer_credential(
             &fixture,
             "00000000-0000-4000-8000-000000000711",
+            "ac5 credential",
             b"secret-a",
             1,
         )
@@ -3591,6 +3600,7 @@ mod tests {
         insert_bearer_credential(
             &fixture,
             "00000000-0000-4000-8000-000000000712",
+            "ac5 credential",
             b"secret-b",
             1,
         )
@@ -3622,53 +3632,24 @@ mod tests {
         .await;
 
         bind_service_credential(&fixture, "00000000-0000-4000-8000-000000000711").await;
-        let rotated = fixture
-            .state
-            .encryption_keys
-            .encrypt(b"secret-a-rotated")
-            .await
-            .expect("encrypt rotated credential");
-        fixture
-            .db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .update_one(
-                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000711" },
-                mongodb::bson::doc! {
-                    "$set": { "credential_encrypted": mongodb::bson::Binary {
-                        subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                        bytes: rotated,
-                    } },
-                    "$inc": { "credential_epoch": 1 }
-                },
-            )
-            .await
-            .expect("rotate credential in place");
+        rotate_router_credential(
+            &fixture,
+            "00000000-0000-4000-8000-000000000711",
+            b"secret-a-rotated",
+        )
+        .await;
         let created = create_full_router_request(&fixture, "ac5-cred-rotate").await;
         let request_id = created["request_id"]
             .as_str()
             .expect("create response request_id")
             .to_string();
         approve_full_router_request(&fixture, &request_id).await;
-        fixture
-            .db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .update_one(
-                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000711" },
-                mongodb::bson::doc! {
-                    "$set": { "credential_encrypted": mongodb::bson::Binary {
-                        subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                        bytes: fixture
-                            .state
-                            .encryption_keys
-                            .encrypt(b"secret-a-rotated-again")
-                            .await
-                            .expect("encrypt second rotation"),
-                    } },
-                    "$inc": { "credential_epoch": 1 }
-                },
-            )
-            .await
-            .expect("second in-place rotation");
+        rotate_router_credential(
+            &fixture,
+            "00000000-0000-4000-8000-000000000711",
+            b"secret-a-rotated-again",
+        )
+        .await;
         let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
         refresh_full_router_delegation(&mut fixture).await;
         let (status, body) = redeem_full_router_request(&fixture, &created).await;
@@ -3688,43 +3669,41 @@ mod tests {
     #[tokio::test]
     async fn full_router_background_token_refresh_does_not_drift() {
         let mut fixture = setup_full_router_fixture("exact_router_ac5_refresh").await;
-        let access = fixture
-            .state
-            .encryption_keys
-            .encrypt(b"oauth-access")
-            .await
-            .expect("encrypt access token");
+        let mut key = UserApiKey {
+            secret_context_versions: Default::default(),
+            oauth_app_observation: None,
+            id: "00000000-0000-4000-8000-000000000713".to_string(),
+            user_id: TEST_USER_ID.to_string(),
+            label: "oauth refresh canary".to_string(),
+            credential_type: "oauth2".to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: Some("openid".to_string()),
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_attempt_nonce: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            credential_source: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            last_authorized_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            credential_epoch: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        KeySecret::AccessToken
+            .set(&fixture.state.encryption_keys, &mut key, b"oauth-access")
+            .await;
         fixture
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(UserApiKey {
-                secret_context_versions: Default::default(),
-                oauth_app_observation: None,
-                id: "00000000-0000-4000-8000-000000000713".to_string(),
-                user_id: TEST_USER_ID.to_string(),
-                label: "oauth refresh canary".to_string(),
-                credential_type: "oauth2".to_string(),
-                credential_encrypted: None,
-                access_token_encrypted: Some(access),
-                refresh_token_encrypted: None,
-                token_scopes: Some("openid".to_string()),
-                expires_at: None,
-                provider_config_id: None,
-                connection_id: None,
-                oauth_attempt_nonce: None,
-                user_oauth_client_id_encrypted: None,
-                user_oauth_client_secret_encrypted: None,
-                credential_source: None,
-                status: "active".to_string(),
-                last_used_at: None,
-                last_authorized_at: None,
-                error_message: None,
-                source: Some("user_created".to_string()),
-                source_id: None,
-                credential_epoch: 1,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .insert_one(&key)
             .await
             .expect("insert oauth key");
         bind_service_credential(&fixture, "00000000-0000-4000-8000-000000000713").await;
@@ -3737,24 +3716,34 @@ mod tests {
             .to_string();
         approve_full_router_request(&fixture, &request_id).await;
 
-        let refreshed = fixture
-            .state
-            .encryption_keys
-            .encrypt(b"oauth-access-refreshed")
-            .await
-            .expect("encrypt refreshed access token");
+        KeySecret::AccessToken
+            .set(
+                &fixture.state.encryption_keys,
+                &mut key,
+                b"oauth-access-refreshed",
+            )
+            .await;
+        let field = "access_token_encrypted";
+        let mut set = mongodb::bson::doc! {
+            field: mongodb::bson::Binary {
+                subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                bytes: key.access_token_encrypted.unwrap(),
+            },
+            "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+        };
+        let mut unset = mongodb::bson::Document::new();
+        credential_record_service::mark_classic_update(
+            &mut set,
+            &mut unset,
+            &fixture.state.encryption_keys,
+            field,
+        );
         fixture
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
             .update_one(
-                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000713" },
-                mongodb::bson::doc! { "$set": {
-                    "access_token_encrypted": mongodb::bson::Binary {
-                        subtype: mongodb::bson::spec::BinarySubtype::Generic,
-                        bytes: refreshed,
-                    },
-                    "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
-                } },
+                mongodb::bson::doc! { "_id": &key.id },
+                mongodb::bson::doc! { "$set": set, "$unset": unset },
             )
             .await
             .expect("simulate background token refresh");
@@ -3789,6 +3778,7 @@ mod tests {
         insert_bearer_credential(
             &fixture,
             "00000000-0000-4000-8000-000000000714",
+            "ac5 credential",
             b"injection-matrix-secret",
             1,
         )
@@ -4116,7 +4106,14 @@ mod tests {
     async fn full_router_observe_reports_execution_authority_drift_before_redeem() {
         let mut fixture = setup_full_router_fixture("exact_router_ac5_observe").await;
         let credential_id = "00000000-0000-4000-8000-000000000719";
-        insert_bearer_credential(&fixture, credential_id, b"observe-secret", 1).await;
+        insert_bearer_credential(
+            &fixture,
+            credential_id,
+            "ac5 credential",
+            b"observe-secret",
+            1,
+        )
+        .await;
         bind_service_credential(&fixture, credential_id).await;
         refresh_full_router_delegation(&mut fixture).await;
         let created = create_full_router_request(&fixture, "ac5-observe").await;

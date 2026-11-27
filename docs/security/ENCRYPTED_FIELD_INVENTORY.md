@@ -5,10 +5,6 @@ This inventory mirrors the collection, field and adapter entries in the
 **Implemented** means the registry dispatches to a service-owned verifier and
 migration adapter. It describes the source implementation; it does not establish
 that a deployment has completed migration or is ready to retire a key.
-**Pending** means the family lacks a complete registry verifier and migration
-adapter. Some Pending families already have contextual writers and readers.
-Pending adapters block complete migration readiness, including when their
-collections are empty.
 
 A canonical context binds the collection, record ID, canonical owner and exact
 field identity without ambiguous concatenation.
@@ -20,8 +16,8 @@ must retain their established dimensions during rewrap.
 
 ## Registered fields
 
-The registry has 50 entries for 48 collections, with 42 implemented adapters
-and 8 Pending entries. Each row lists the exact BSON paths for one adapter.
+The registry has 51 entries for 49 collections, with 51 implemented adapters
+and 0 Pending entries. Each row lists the exact BSON paths for one adapter.
 A collection may use separate adapters for different fields.
 
 | Collection | Exact encrypted field paths | Service-owned adapter | Status |
@@ -46,23 +42,23 @@ A collection may use separate adapters for different fields.
 | `agent_key_login_requests` | `delivery_credential_encrypted` | [agent_login_record_service.rs](../../backend/src/services/agent_login_record_service.rs) | Implemented |
 | `assistant_agent_learning_proposals` | `scope_encrypted`, `body_encrypted`, `publication.interface_encrypted` | [assistant_learning_record_storage.rs](../../backend/src/services/assistant_learning_record_storage.rs) | Implemented |
 | `assistant_async_operations` | `result_encrypted` | [async_service_operation.rs](../../backend/src/services/async_service_operation.rs) | Implemented |
-| `auth_device_codes` | `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
-| `auth_device_codes_v2` | `agent_key_grant.delivery_credential_encrypted`, `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
-| `device_codes` | `delivery_api_key_encrypted`, `delivery_refresh_token_encrypted` | — | Pending |
+| `auth_device_codes` | `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | [Device delivery](../../backend/src/services/auth_device_service/record.rs) | Implemented |
+| `auth_device_codes_v2` | `agent_key_grant.delivery_credential_encrypted`, `delivery_access_token_encrypted`, `delivery_refresh_token_encrypted` | [Device delivery](../../backend/src/services/auth_device_service/record.rs) | Implemented |
+| `device_codes` | `delivery_api_key_encrypted`, `delivery_refresh_token_encrypted` | [Node device delivery](../../backend/src/services/device_code_service/record.rs) | Implemented |
 | `channel_bots` | `registration_pin_encrypted`, `webhook_secret_encrypted`, `bot_token_encrypted`, `app_secret_encrypted`, `lark_verification_token_encrypted`, `lark_encrypt_key_encrypted` | [channel_bot_record.rs](../../backend/src/services/channel_bot_record.rs) | Implemented |
 | `channel_connect_links` | `receiver.secret_encrypted` | [channel_connect_link_service.rs](../../backend/src/services/channel_connect_link_service.rs) | Implemented |
 | `downstream_services` | `credential_encrypted` | [catalog_credential_record_service.rs](../../backend/src/services/catalog_credential_record_service.rs) | Implemented |
 | `downstream_services` | `ssh_config.ca_private_key_encrypted` | [ssh_ca_record_service.rs](../../backend/src/services/ssh_ca_record_service.rs) | Implemented |
 | `nyxbot_channels` | `agent_key_ciphertext` | [nyxbot_channel_key.rs](../../backend/src/services/nyxbot_channel_key.rs) | Implemented |
 | `nyxbot_threads` | `event_ref_ciphertext` | [Thread reference storage](../../backend/src/services/nyxbot_thread_reference.rs) | Implemented |
-| `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload`, `response_reply.ciphertext` | — | Pending |
-| `mobile_social_deliveries` | `ciphertext` | — | Pending |
+| `nyxbot_events` | `delivery.target_ciphertext`, `event_context_ciphertext`, `guest_setup_payload`, `response_reply.ciphertext`, `channel_guest_setup_payload` | [Event storage](../../backend/src/services/nyxbot_event_record.rs) | Implemented |
+| `mobile_social_deliveries` | `ciphertext` | [Mobile sign-in delivery](../../backend/src/services/mobile_social_service/record.rs) | Implemented |
 | `oauth_broker_bindings` | `refresh_token_encrypted` | [oauth_broker_record_service.rs](../../backend/src/services/oauth_broker_record_service.rs) | Implemented |
 | `oauth_clients` | `revocation_webhook_secret_encrypted`, `connection_webhook_secret_encrypted` | [OAuth client webhooks](../../backend/src/services/oauth_client_webhook_record.rs) | Implemented |
 | `oracle_login_profiles` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
 | `oracle_login_snapshots` | `encrypted_envelope` | [oracle_login_record_service.rs](../../backend/src/services/oracle_login_record_service.rs) | Implemented |
 | `platform_entry_gateway_transports` | `request_ciphertext` | [platform_entry_gateway_service.rs](../../backend/src/services/platform_entry_gateway_service.rs) | Implemented |
-| `platform_native_reply_handles` | `ciphertext` | — | Pending |
+| `platform_native_reply_handles` | `ciphertext` | [Native reply handle](../../backend/src/services/platform_native_reply_record.rs) | Implemented |
 | `platform_setups` | `facts_ciphertext` | [platform_setup_record_service.rs](../../backend/src/services/platform_setup_record_service.rs) | Implemented |
 | `triggers` | `verification_secret_encrypted`, `delivery_secret_encrypted` | [trigger_record_service.rs](../../backend/src/services/trigger_record_service.rs) | Implemented |
 | `trigger_deliveries` | `envelope_encrypted` | [trigger_record_service.rs](../../backend/src/services/trigger_record_service.rs) | Implemented |
@@ -71,11 +67,16 @@ A collection may use separate adapters for different fields.
 | `assistant_cma_sandboxes` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
 | `assistant_cma_creations` | `request_ciphertext` | [assistant_cma_request_record.rs](../../backend/src/services/assistant_cma_request_record.rs) | Implemented |
 | `nyxbot_event_bindings` | `provider_key_ciphertext`, `producer_secret_ciphertext` | [storage.rs](../../backend/src/services/nyxbot_event_binding_service/storage.rs) | Implemented |
-| `nyxbot_gateway_responses` | `payload_ciphertext` | — | Pending |
+| `nyxbot_gateway_responses` | `payload_ciphertext` | [Gateway replay storage](../../backend/src/services/nyxbot_response_recovery/storage.rs) | Implemented |
 | `channel_whatsapp_native` | `native_verify_token_encrypted` | [token_record.rs](../../backend/src/services/whatsapp_native/token_record.rs) | Implemented |
 | `assistant_conversations` | `active_turn.restart_admission.window.input` | [Reattach window storage](../../backend/src/services/assistant_reattach_window_record.rs) | Implemented |
 | `approval_requests` | `execution_proposal.v1.payload`, `execution_proposal.v1.result`, `execution_proposal.v2.payload`, `execution_proposal.v2.result`, `execution_proposal.v3.payload`, `execution_proposal.v3.result`, `execution_proposal.v4.payload`, `execution_proposal.v4.result` | [Approval proposal storage](../../backend/src/services/execution_permission_dispatch/proposals/record.rs) | Implemented |
-| `channel_meta_oauth_sessions` | `assets_encrypted` | — | Pending |
+| `channel_meta_oauth_sessions` | `assets_encrypted` | [Meta OAuth consent assets](../../backend/src/services/channel_meta_service/asset_record.rs) | Implemented |
+| `channel_messages` | `thread_id` | [Discord guest reply handle](../../backend/src/services/channel_guest_access/relay.rs) | Implemented |
+
+For `channel_messages.thread_id`, the walk selects sealed Discord guest reply
+handles with the `guest-interaction.v3:` prefix. The relay adapter authenticates
+the record binding and rewraps eligible handles under the current key.
 
 OAuth client webhook signing keys use the registration ID, the persisted creator
 and a separate field path for each webhook. System, dynamic and ownerless
@@ -129,18 +130,32 @@ the reference deadline and relay message. A matching relay binding is recomputed
 with the new ciphertext in the same exact-source update.
 [Thread reference storage](../../backend/src/services/nyxbot_thread_reference.rs)
 
-### Production storage for Pending fields
+NyxBot event writers bind the event ID, owner, channel and field purpose. The
+stored no-turn reply also binds its response ID. The adapter compares the exact
+event before updating ciphertext and version pairs. Delivery claims, guest
+leases, media retention and replay mappings keep their original values.
+[Event storage](../../backend/src/services/nyxbot_event_record.rs)
 
-- Mobile social sign-in stores and redeems its encrypted PKCE-bound response.
-  [Mobile delivery](../../backend/src/services/mobile_social_service.rs)
-- V2 device approval stores the credential inside the Agent Key grant. A session
-  grant writes the access and refresh token fields at the top level.
-  [Agent Key grants](../../backend/src/services/auth_device_service/grants.rs) · [Device sessions](../../backend/src/services/auth_device_service.rs)
-- The NyxBot event holds its context, the late-delivery target, the queued guest setup payload and the stored no-turn reply.
-  Gateway response rows store a separate replay payload. Event replies bind the event,
-  owner, channel and response ID. Gateway payloads bind the response row, owner,
-  channel, binding and response ID. Both writers use the historical encoding.
-  [Event context](../../backend/src/handlers/nyxbot_native_responses.rs) · [Late delivery](../../backend/src/handlers/nyxbot_late_delivery.rs) · [Guest queue](../../backend/src/handlers/nyxbot_guest_setup_queue.rs) · [No-turn reply](../../backend/src/handlers/nyxbot_response_read.rs) · [Replay](../../backend/src/services/nyxbot_response_recovery.rs)
+Gateway response payloads bind the response row, owner, channel, binding and response ID.
+Migration checks the stored snapshot and frame order, fences the complete source, and
+rewraps the original bytes while preserving replay revision and expiry.
+[Gateway replay storage](../../backend/src/services/nyxbot_response_recovery/storage.rs)
+
+Device-code delivery binds the request in its actual collection to the approving person
+and session. The v2 Agent Key grant binds its parent and issued child. Migration matches
+the complete stored request before replacing the pair or the nested credential.
+[Device storage](../../backend/src/services/auth_device_service/record.rs)
+
+Node device-code approval binds each delivery field to the request, signer, approving
+person, personal or organization owner, issued key and node. A signed poll clears the
+pair and its marker in one claim. Retained expired pairs use the same migration.
+[Node device delivery](../../backend/src/services/device_code_service/record.rs)
+
+Mobile social sign-in binds its encrypted BSON response and prepared session rows to the
+delivery ID, user, code hash, PKCE challenge and field. Rewrap matches the exact
+stored row, including expiry. Redemption checks the database clock and installs the
+session in the transaction that consumes the code.
+[Mobile delivery](../../backend/src/services/mobile_social_service.rs)
 
 NyxBot custom-event bindings retain a provider API key and a producer HMAC
 secret. Each field binds to the binding ID, linking person, target agent and
@@ -163,6 +178,13 @@ ownership generation. Callback transitions preserve it. Relay-phase settings
 replacement clears it. Enrollment requires a matching live bot. Migration can
 authenticate retained settings under the original owner after a transfer.
 [WhatsApp enrollment and storage](../../backend/src/services/whatsapp_native/token_record.rs)
+
+Meta consent assets bind the session, owner, actor, platform, app, grant subject
+and attempt to the encrypted field. The adapter checks the selected Page or inbox
+against the retained list, preserves its exact JSON and compares the full source
+row before rewrap. Legacy validation checks the common subject and eligible
+asset shape. Their envelope cannot distinguish two otherwise identical grants
+from the same subject. A conflicting list produces a metadata-only finding.
 
 ## Source and storage boundaries
 
@@ -209,10 +231,15 @@ version-map validation and exact-source migration stay in services.
 - Platform gateway setup binds the serialized request to the transport ID,
   credential owner and field. Replay and migration check the exact bytes
   against the retained SHA-256, including for historical unbound envelopes.
-  Retirement retains the request and its hash. Native
-  replies authenticate the binding digest bytes as AES AAD.
-  [Gateway transport](../../backend/src/services/platform_entry_gateway_service.rs) · [Native reply reader](../../backend/src/services/platform_native_reply_service.rs)
-- Mobile sign-in delivery authenticates the code hash, PKCE challenge and user.
+  Retirement retains the request and its hash.
+  [Gateway transport](../../backend/src/services/platform_entry_gateway_service.rs)
+- Discord native reply handles use the recomputed receipt binding digest as historical
+  AAD. Contextual storage also binds the handle ID, platform scope, field, profile,
+  receipt ID and the handle's own creation and expiry times. Storage checks require
+  the companion receipt even after expiry. Missing parents leave a blocked finding
+  while the handle survives.
+  [Native reply reader](../../backend/src/services/platform_native_reply_service.rs)
+- Historical mobile sign-in delivery AAD authenticates the code hash, PKCE challenge and user.
   Execution proposals v1, v3 and v4 use `execution-proposal:v1:{id}`. V2 uses
   `execution-proposal:v2:{id}`. Each result appends `:result`.
   The assistant reattach window authenticates the serialized tuple of domain,
@@ -280,8 +307,7 @@ The current status response exposes phase, current collection, scanned rows,
 `rewrite_operations_observed`, unresolved findings, per-field outcomes and
 blockers. Rewrite observations are not an exact total: a crash between a
 successful source update and its progress record can omit that rewrite on replay.
-`implementation_registry_incomplete` remains a blocker while any Pending
-adapter exists. Backup/rollback-reader evidence, enabled legacy readers,
+Backup/rollback-reader evidence, enabled legacy readers,
 provider/registry changes, unfinished walks and unresolved findings also block
 readiness. Completing a walk does not authorize key retirement. The complete
 per-family format/key inventory and retirement report remain follow-up work.
@@ -292,8 +318,7 @@ rollback binary. Short-lived families may use drain reporting only after all
 writers/readers are converted, every writer's maximum lifetime is proved, and
 contextual writes have been enabled for at least that lifetime. Drain checks
 must include expired rows and rows awaiting purge; an expiry timestamp does not
-remove a retained old-key dependency. The pending families do not currently
-provide that completed drain-reporting contract.
+remove a retained old-key dependency.
 
 AWS and GCP KMS may decrypt several internal key versions behind one configured
 logical key ID. Successful authentication with the current logical ID does not
@@ -336,11 +361,7 @@ migration or retirement has completed.
 ## Remaining work
 
 [Encryption migration and retirement work (#1934)](https://github.com/ChronoAIProject/NyxID/issues/1934)
-includes completing the Pending families in the registry table above. Each needs
-complete writer/reader coverage, context and lifecycle validation, owner rebind
-where applicable, exact-source
-migration or a proved drain contract, and swap/concurrency/round-trip regression
-evidence. The same follow-up must deliver per-family readiness and
+covers per-family readiness and
 key-retirement reporting, including drain status and retained old-key, legacy
 reader, rollback and backup dependencies.
 
@@ -356,12 +377,21 @@ this API or prove every encrypted field is context-bound.
 
 ### Generated Sandbox files (#2037)
 
-`async_service_operation_artifacts.data_encrypted` uses contextual v3 envelope AAD:
+Write mode and stored format are separate. New writes of both generated-file
+fields below use legacy envelope encryption without a version marker unless
+`CONTEXTUAL_RECORD_WRITES=true` (enabling it requires
+`CONTEXTUAL_RECORD_WRITERS_DRAINED=true`); contextual writes store the formats
+below and set `secret_context_versions.data_encrypted` to `3`. Reads follow each
+row's version marker. See
+[Generated Sandbox files](../chat/10-uploads.md#generated-sandbox-files).
+
+In contextual format, `async_service_operation_artifacts.data_encrypted` uses
+contextual v3 envelope AAD:
 collection, pending record ID and owner, then `data_encrypted`, conversation,
 originating turn, watch, operation and source-result identity. Only pending rows
 retain ciphertext; materialized/expired/discarded/missing rows clear it and their
-context-version map. `assistant_attachments.data_encrypted` with generated origin
-uses the existing attachment/owner/conversation/completion-turn AAD plus originating
+context-version map. In contextual format, `assistant_attachments.data_encrypted`
+with generated origin uses the existing attachment/owner/conversation/completion-turn AAD plus originating
 turn, watch, operation and source-result identity. Legacy attachment AAD is unchanged.
 The selected metadata summary reuses `assistant_async_operations.result_encrypted`
 and its existing adapter. Delivery/content-series metadata contains no ciphertext;

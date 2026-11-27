@@ -608,7 +608,10 @@ async fn nyxbot_gateway_stream_keeps_alive_while_images_precede_committed_text()
         f.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        receiver,
+        InboundTurn {
+            receiver,
+            hosted_reply: None,
+        },
         Utc::now(),
     );
     let text = body_text(response).await;
@@ -1244,9 +1247,19 @@ async fn nyxbot_home_event_also_delivers_images_to_each_chat_and_errors_only_apo
             .await
             .unwrap();
         f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&f.event.conversation_id},doc! {"$set":{
-            "channel":bson::Bson::Null,"reply_channel":bson::to_bson(&primary).unwrap(),"deliver_also":[bson::to_bson(&extra).unwrap()],
+            "channel":bson::Bson::Null,"reply_channel":bson::to_bson(&primary).unwrap(),
             "active_turn":{"turn_id":&f.event.turn_id,"origin":"event","started_at":bson::DateTime::now(),"stop_requested":false},
         }}).await.unwrap();
+        f.state.db.collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .update_one(
+                doc! {"conversation_id":&f.event.conversation_id,"turn_id":&f.event.turn_id,"role":"assistant"},
+                doc! {"$set":{
+                    "post_turn_deliver_also":[bson::to_bson(&extra).unwrap()],
+                    "status":if failed {"failed"} else {"completed"},
+                }},
+            )
+            .await
+            .unwrap();
         let row = engine::get(
             &f.state.db,
             OWNER,
@@ -1254,12 +1267,11 @@ async fn nyxbot_home_event_also_delivers_images_to_each_chat_and_errors_only_apo
         )
         .await
         .unwrap();
-        let error = engine::TurnError::internal("upstream_failed", "upstream");
         crate::handlers::assistant_team::after_turn_boxed(
             f.state.clone(),
             row.clone(),
-            "Useful answer".into(),
-            failed.then_some(error),
+            "Uncommitted answer".into(),
+            None,
         )
         .await;
         let requests = server.received_requests().await.unwrap();
@@ -1277,6 +1289,13 @@ async fn nyxbot_home_event_also_delivers_images_to_each_chat_and_errors_only_apo
                     "/bottoken/sendMessage"
                 ]
             );
+            for request in requests
+                .iter()
+                .filter(|r| r.url.path().ends_with("sendMessage"))
+            {
+                let body: Value = request.body_json().unwrap();
+                assert_eq!(body["text"], "Useful answer");
+            }
             let count = f
                 .state
                 .db
@@ -1288,12 +1307,6 @@ async fn nyxbot_home_event_also_delivers_images_to_each_chat_and_errors_only_apo
                 .unwrap();
             assert_eq!(count, 2);
         }
-        assert!(
-            engine::take_deliveries(&f.state.db, OWNER, &row.id)
-                .await
-                .unwrap()
-                .is_empty()
-        );
         f.state.db.drop().await.unwrap();
     }
 }
@@ -3912,7 +3925,7 @@ async fn relay_recovery_keeps_images_and_replays_without_resending_them() {
         answer_delivery: None,
         revision: 0,
         payload_context_version: None,
-        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };

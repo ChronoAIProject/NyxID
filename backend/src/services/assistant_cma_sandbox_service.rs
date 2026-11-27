@@ -50,8 +50,40 @@ fn invalid_request() -> AppError {
 fn stale() -> AppError {
     AppError::Conflict("cma_sandbox_generation_changed".into())
 }
-fn occupied() -> AppError {
-    AppError::Conflict("cma_sandbox_account_slot_occupied".into())
+const OCCUPIED: &str = "cma_sandbox_account_slot_occupied";
+
+pub(super) async fn occupied(
+    db: &Database,
+    row: &AssistantCmaSandbox,
+    message: &'static str,
+) -> AppError {
+    let _ = audit_occupied_slot(db, row).await;
+    let holding = occupied_holding(row);
+    let release_condition = match holding {
+        "live_sandbox" => {
+            "Use the existing sandbox's workspace, or retire it and wait for CMA to confirm retirement."
+        }
+        "retiring" => "Wait for CMA to confirm retirement of this sandbox.",
+        _ => {
+            "The slot releases when CMA confirms the original request created nothing, or when its sandbox is confirmed retired."
+        }
+    };
+    AppError::CmaSandboxSlotOccupied {
+        message,
+        details: Box::new(serde_json::json!({
+            "reservation_id": row.id, "holding": holding,
+            "created_at": row.created_at, "release_condition": release_condition,
+        })),
+    }
+}
+
+async fn occupied_after_race(db: &Database, owner: &str) -> AppResult<AssistantCmaSandbox> {
+    let winner = db
+        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
+        .find_one(doc! {"user_id":owner, "occupies_account_slot":true})
+        .await?
+        .ok_or_else(stale)?;
+    Err(occupied(db, &winner, OCCUPIED).await)
 }
 
 pub(super) fn created_filter(owner_id: &str) -> Document {
@@ -61,6 +93,7 @@ pub(super) fn created_filter(owner_id: &str) -> Document {
 pub(super) async fn audit_occupied_slot(db: &Database, row: &AssistantCmaSandbox) -> AppResult<()> {
     super::assistant_cma_slot_audit::record(db, row).await
 }
+
 pub(super) fn occupied_holding(row: &AssistantCmaSandbox) -> &'static str {
     if row.retire_requested_at.is_some() || row.admission_state == SandboxAdmissionState::Retiring {
         "retiring"
@@ -315,8 +348,7 @@ pub async fn begin_creation(
         if row.idempotency_key.as_deref() == Some(idempotency_key) {
             return same_creation(row, &service_id, &normalized.hash);
         }
-        let _ = audit_occupied_slot(&db, &row).await;
-        return Err(occupied());
+        return Err(occupied(&db, &row, OCCUPIED).await);
     }
     let previous = db
         .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
@@ -409,8 +441,7 @@ pub async fn begin_creation(
                 );
             }
             Err(error) if duplicate_app_key(&error) => {
-                let _ = super::assistant_cma_slot_audit::record_race(&db, owner_id).await;
-                return Err(occupied());
+                return occupied_after_race(&db, owner_id).await;
             }
             Err(error) => return Err(error),
         }
@@ -421,8 +452,7 @@ pub async fn begin_creation(
             if let Some(row) = creation_by_key(&db, owner_id, idempotency_key).await? {
                 same_creation(row, &service_id, &normalized.hash)
             } else {
-                let _ = super::assistant_cma_slot_audit::record_race(&db, owner_id).await;
-                Err(occupied())
+                occupied_after_race(&db, owner_id).await
             }
         }
         Err(error) => Err(error),

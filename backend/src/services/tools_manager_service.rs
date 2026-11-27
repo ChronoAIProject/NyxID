@@ -142,6 +142,7 @@ pub async fn commit_manager_update(
         &super::catalog_mutation_service::Authority {
             actor: audit_actor.clone(),
             first_party_human: true,
+            privileged_mfa_denied: false,
             admin_required: false,
             catalog_base_aliases: Vec::new(),
             catalog_base_url: "http://localhost:3001".into(),

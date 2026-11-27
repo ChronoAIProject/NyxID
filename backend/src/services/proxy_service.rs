@@ -5381,7 +5381,20 @@ async fn forward_request_with_egress_guard_inner(
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
-    let response = if let Some(guard) = dispatch_guard {
+    let response = if let Some(guard) = egress_guard.filter(|guard| guard.has_guest_data()) {
+        if dispatch_guard.is_some() || resource_proof.is_some()
+            || target.execution_permission.is_some() || target.execution_request.is_some()
+        {
+            return Err(ForwardRequestError::PreDispatchRejected(
+                super::channel_guest_access::policy::denied(),
+            ));
+        }
+        let request = request.build()?;
+        guard.authorize_guest_request(&request)
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+        client.execute(request).await?
+    } else if let Some(guard) = dispatch_guard {
         let mut request = request.build()?;
         if let Some(proof) = resource_proof {
             proof

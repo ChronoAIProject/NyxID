@@ -215,6 +215,20 @@ function renderSheet(props: Partial<ComponentProps<typeof AgentDetailsSheet>> = 
   return { onDeleted, user: userEvent.setup({ delay: null, pointerEventsCheck: 0 }) };
 }
 
+it("shows the activity badge in the details header for a newer live snapshot", async () => {
+  const previous = globalThis.__nyxidAssistantHttpMock!;
+  const owner = useAuthStore.getState().user!;
+  useAuthStore.getState().setUser({
+    ...owner, capabilities: { billing_available: false, enabled_features: ["assistant:avatars"] },
+  });
+  agent = { ...agent, status: "idle", activity: [] };
+  globalThis.__nyxidAssistantHttpMock = (request) => request.endpoint === "/assistant/nyxagent/agents/activity"
+    ? new Response(JSON.stringify({ agents: [{ agent_id: agent.id, threads: [{ conversation_id: "a", state: "waiting" }] }] }))
+    : previous(request);
+  renderSheet();
+  await waitFor(() => expect(document.querySelector('[data-agent-header] [data-avatar-activity="waiting"]')).toBeInTheDocument());
+});
+
 // Set up draft values in one render; keyboard/focus behavior uses user-event below.
 function appendText(field: HTMLElement, text: string) {
   fireEvent.change(field, { target: { value: (field as HTMLInputElement).value + text } });
@@ -1555,4 +1569,157 @@ it("allows 128 selected people and disables a 129th until someone is removed", a
   expect(screen.getByRole("checkbox", { name: /Blair/ })).toBeEnabled();
   await user.click(screen.getByRole("checkbox", { name: /Blair/ }));
   expect(screen.getByRole("checkbox", { name: /^Person 0 / })).toBeDisabled();
+});
+function enableAvatars() {
+  const user = useAuthStore.getState().user!;
+  useAuthStore.getState().setUser({
+    ...user,
+    capabilities: { ...user.capabilities, enabled_features: [...(user.capabilities?.enabled_features ?? []), "assistant:avatars"] },
+  } as never);
+}
+
+it("hides the avatar editor while assistant:avatars is off", async () => {
+  renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  await within(sheet).findByLabelText("Profile", { selector: "form" });
+  expect(within(sheet).queryByLabelText("Avatar", { selector: "form" })).not.toBeInTheDocument();
+});
+
+it("edits the avatar with keyboard pickers and saves it through the reviewed bar", async () => {
+  enableAvatars();
+  const { user } = renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  await user.click(await within(sheet).findByRole("button", { name: "Edit avatar" }));
+  const editor = await within(sheet).findByLabelText("Avatar", { selector: "form" });
+  // A live preview and the default look for this agent.
+  expect(within(sheet).getByRole("img", { name: "Avatar preview" })).toBeInTheDocument();
+  const bodies = within(editor).getByRole("radiogroup", { name: "Head" });
+  const checked = within(bodies).getByRole("radio", { checked: true });
+  checked.focus();
+  await user.keyboard("{Home}");
+  expect(within(bodies).getByRole("radio", { name: "Block" })).toHaveAttribute("aria-checked", "true");
+  await user.keyboard("{ArrowRight}");
+  expect(within(bodies).getByRole("radio", { name: "Tall" })).toHaveAttribute("aria-checked", "true");
+  expect(within(bodies).getByRole("radio", { name: "Tall" })).toHaveFocus();
+  await user.click(within(editor).getByRole("button", {name: "Next: Style"}));
+  const colours = within(editor).getByRole("radiogroup", { name: "Colour" });
+  await user.click(within(colours).getByRole("radio", { name: "Mint" }));
+  // Preview expressions are never saved.
+  await user.click(within(editor).getByRole("button", { name: "Next: Motion" }));
+  await user.selectOptions(within(editor).getByRole("combobox", { name: "Preview expression" }), "success");
+  await user.click(within(editor).getByRole("button", { name: "Save avatar" }));
+  const review = await screen.findByRole("dialog", { name: "Review changes" });
+  expect(within(review).getByText(/Head/)).toBeInTheDocument();
+  await confirmChanges();
+  await waitFor(() => {
+    const patch = writes.find((write) => write.method === "PATCH" && write.endpoint === "/assistant/nyxagent/agents/agent-researcher");
+    expect(patch?.body).toMatchObject({ avatar: { template: "face-v1", choices: { head: "tall", palette: "core-mint" } } });
+    expect(Object.keys(patch!.body as object)).toEqual(["avatar"]);
+  });
+});
+
+it("resets a stored avatar to the default by clearing it", async () => {
+  enableAvatars();
+  agent = agentRow({
+    avatar: { template: "face-v1", choices: { head: "wide", eyes: "visor", palette: "core-ocean" } },
+  });
+  const { user } = renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  await user.click(await within(sheet).findByRole("button", { name: "Edit avatar" }));
+  const editor = await within(sheet).findByLabelText("Avatar", { selector: "form" });
+  expect(within(editor).getByRole("radio", { name: "Wide" })).toHaveAttribute("aria-checked", "true");
+  await user.click(within(editor).getByRole("button", { name: "Reset to default" }));
+  expect(within(editor).getByRole("button", { name: "Reset to default" })).toBeDisabled();
+  await user.click(within(editor).getByRole("button", { name: "Save avatar" }));
+  await confirmChanges();
+  await waitFor(() =>
+    expect(writes).toContainEqual({
+      method: "PATCH",
+      endpoint: "/assistant/nyxagent/agents/agent-researcher",
+      body: { avatar: null },
+    }),
+  );
+});
+
+it("keeps the avatar read-only for people who cannot maintain the agent", async () => {
+  enableAvatars();
+  agent = agentRow({ owner_kind: "org", org_role: "viewer", can_maintain: false });
+  renderSheet();
+  const sheet = await screen.findByRole("dialog", { name: "Agent details" });
+  await within(sheet).findByText("Ownership");
+  expect(within(sheet).queryByLabelText("Avatar", { selector: "form" })).not.toBeInTheDocument();
+});
+
+
+it("the explicit avatar save reviews only appearance and retains an unrelated profile draft", async () => {
+  enableAvatars();
+  const {user}=renderSheet();
+  const sheet=await screen.findByRole("dialog", {name:"Agent details"});
+  const profile=await within(sheet).findByRole("form", {name:"Profile"});
+  await user.type(within(profile).getByRole("textbox", {name:"Display name"}),"Research friend");
+  await user.click(within(sheet).getByRole("button", {name:"Edit avatar"}));
+  const editor=await within(sheet).findByRole("form", {name:"Avatar"});
+  await user.click(within(editor).getByRole("radio", {name:"Wink"}));
+  expect(within(sheet).getAllByRole("button", {name:"Save avatar"})).toHaveLength(1);
+  expect(within(sheet).getAllByRole("button", {name:"Discard avatar"})).toHaveLength(1);
+  expect(within(sheet).queryByRole("region", {name:"Unsaved changes"})).not.toBeInTheDocument();
+  expect(within(sheet).queryByRole("button", {name:"Save changes"})).not.toBeInTheDocument();
+  await user.click(within(editor).getByRole("button", {name:"Save avatar"}));
+  const review=await screen.findByRole("dialog", {name:"Review changes"});
+  expect(within(review).getByRole("heading", {name:"Avatar"})).toBeInTheDocument();
+  expect(within(review).queryByRole("heading", {name:"Profile"})).not.toBeInTheDocument();
+  await confirmChanges();
+  await waitFor(()=>expect(within(editor).getByRole("status")).toHaveTextContent("Avatar saved."));
+  expect(writes).toContainEqual({method:"PATCH",endpoint:"/assistant/nyxagent/agents/agent-researcher",body:expect.objectContaining({avatar:expect.any(Object)})});
+  expect(writes.some(write=>write.method==="PATCH" && write.body && "display_name" in (write.body as object))).toBe(false);
+  await user.click(within(sheet).getByRole("button", {name:"Back to Overview"}));
+  expect(within(profile).getByRole("textbox", {name:"Display name"})).toHaveValue("Research friend");
+  expect(screen.getByRole("region", {name:"Unsaved changes"})).toHaveTextContent(/profile/i);
+});
+
+it("discards only the avatar draft and reviews a native form submit before writing", async () => {
+  enableAvatars();
+  const {user}=renderSheet();
+  const sheet=await screen.findByRole("dialog", {name:"Agent details"});
+  const profile=await within(sheet).findByRole("form", {name:"Profile"});
+  await user.type(within(profile).getByRole("textbox", {name:"Display name"}),"Keep profile");
+  await user.click(within(sheet).getByRole("button", {name:"Edit avatar"}));
+  const editor=within(sheet).getByRole("form", {name:"Avatar"});
+  await user.click(within(editor).getByRole("radio", {name:"Wink"}));
+  await user.click(within(editor).getByRole("button", {name:"Discard avatar"}));
+  expect(within(editor).getByRole("button", {name:"Save avatar"})).toBeDisabled();
+  expect(within(editor).queryByRole("button", {name:"Discard avatar"})).not.toBeInTheDocument();
+  await user.click(within(editor).getByRole("radio", {name:"Wink"}));
+  fireEvent.submit(editor);
+  const review=await screen.findByRole("dialog", {name:"Review changes"});
+  expect(within(review).getByRole("heading", {name:"Avatar"})).toBeInTheDocument();
+  expect(writes).toEqual([]);
+  await user.click(within(review).getByRole("button", {name:"Keep editing"}));
+  await user.click(within(editor).getByRole("button", {name:"Discard avatar"}));
+  await user.click(within(sheet).getByRole("button", {name:"Back to Overview"}));
+  expect(within(profile).getByRole("textbox", {name:"Display name"})).toHaveValue("Keep profile");
+  expect(screen.getByRole("region", {name:"Unsaved changes"})).toHaveTextContent(/profile/i);
+});
+
+it("guards unsaved avatar changes when returning to Overview and leaves profile drafts intact", async () => {
+  enableAvatars();
+  const {user}=renderSheet();
+  const sheet=await screen.findByRole("dialog", {name:"Agent details"});
+  const profile=await within(sheet).findByRole("form", {name:"Profile"});
+  await user.type(within(profile).getByRole("textbox", {name:"Display name"}),"Keep profile");
+  await user.click(within(sheet).getByRole("button", {name:"Edit avatar"}));
+  const editor=within(sheet).getByRole("form", {name:"Avatar"});
+  await user.click(within(editor).getByRole("radio", {name:"Wink"}));
+  await user.click(within(sheet).getByRole("button", {name:"Back to Overview"}));
+  const warning=await screen.findByRole("dialog", {name:"Discard unsaved changes?"});
+  await user.click(within(warning).getByRole("button", {name:"Keep editing"}));
+  expect(within(editor).getByRole("radio", {name:"Wink"})).toHaveAttribute("aria-checked","true");
+  await user.click(within(sheet).getByRole("button", {name:"Back to Overview"}));
+  await user.click(within(await screen.findByRole("dialog", {name:"Discard unsaved changes?"})).getByRole("button", {name:"Discard"}));
+  await waitFor(()=>expect(within(sheet).queryByRole("form", {name:"Avatar"})).not.toBeInTheDocument());
+  expect(within(profile).getByRole("textbox", {name:"Display name"})).toHaveValue("Keep profile");
+  await waitFor(()=>expect(within(sheet).getByRole("button", {name:"Edit avatar"})).toHaveFocus());
+  await user.click(within(sheet).getByRole("button", {name:"Edit avatar"}));
+  expect(within(within(sheet).getByRole("form", {name:"Avatar"})).getByRole("button", {name:"Save avatar"})).toBeDisabled();
+  expect(writes).toEqual([]);
 });

@@ -84,6 +84,7 @@ pub enum Erasure {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExclusionReason {
+    GuestPrivacy,
     SecretMaterial,
     TransientCoordination,
     ErasureBookkeeping,
@@ -460,11 +461,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "assistant_agents",
-        owner: OwnerSelector::Fields(&["user_id"]),
+        owner: OwnerSelector::Fields(&["user_id", "org_user_ids", "org_maintainer_user_ids"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("assistant"),
         export_selector: ExportSelector::Person("user_id"),
-        why: "assistant_agents stores the person-owned assistant agents record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "Local cleanup deletes assistant_agents owned by the person and prunes the person's access-list entries from surviving specialists. Only the owner can export the agent.",
     },
     Entry {
         collection: "assistant_analytics_settings",
@@ -1302,6 +1303,62 @@ pub static ENTRIES: &[Entry] = &[
         export: Export::Excluded(ExclusionReason::TransientCoordination),
         export_selector: ExportSelector::None,
         why: "channel_event_logs is lifecycle data owned through channel_conversations; cleanup removes the child only after that parent is removed.",
+    },
+    Entry {
+        collection: "channel_guest_activation",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("platform rollout configuration"),
+        export: Export::Excluded(ExclusionReason::NotPersonal),
+        export_selector: ExportSelector::None,
+        why: "channel_guest_activation stores the platform-wide enable generation, fleet switch and administrator-selected bot IDs in one row. The pilot applies across accounts.",
+    },
+    Entry {
+        collection: "channel_guest_activation_fences",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::NotPersonal("platform rollout write fences"),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "channel_guest_activation_fences stores sixteen numeric stripes with the global activation epoch, enabled bit and a write-conflict nonce. Each stripe serves multiple installations.",
+    },
+    Entry {
+        collection: "channel_guest_personal_records",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Domain(ErasureDomain::ChannelBots),
+        export: Export::Excluded(ExclusionReason::GuestPrivacy),
+        export_selector: ExportSelector::None,
+        why: "channel_guest_personal_records stores private titles and bodies for a verified channel guest. Its owner_id is the bot-scoped guest digest. Bot retirement and ownership transfer purge the dataset by bot and generation, with exact-grant cleanup for Meta. A bot owner’s account export has no authority over guest content.",
+    },
+    Entry {
+        collection: "channel_guest_policies",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Domain(ErasureDomain::ChannelBots),
+        export: Export::Excluded(ExclusionReason::GuestPrivacy),
+        export_selector: ExportSelector::None,
+        why: "channel_guest_policies stores applied access rules by bot_id, including guest, room and record selectors. Retirement removes the policy and transfer clears the rules. The owner export reports the applied revision through channel_guest_setup.",
+    },
+    Entry {
+        collection: "channel_guest_setup",
+        owner: OwnerSelector::Fields(&["owner_id"]),
+        erasure: Erasure::LocalInventory,
+        export: Export::Section("channels"),
+        export_selector: ExportSelector::Person("owner_id"),
+        why: "channel_guest_setup belongs to the bot owner. Its draft, prepared and applied settings can name other guests and maintainers. Local inventory removes owner rows. Account export includes only setup status, revisions and update time.",
+    },
+    Entry {
+        collection: "channel_guest_verified_observations",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Domain(ErasureDomain::ChannelBots),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "channel_guest_verified_observations records verified guest and room digests for one bot and ownership generation. Observations expire after 30 days and are purged on bot retirement, transfer or exact Meta grant erasure.",
+    },
+    Entry {
+        collection: "channel_guest_work_v1",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Domain(ErasureDomain::ChannelBots),
+        export: Export::Excluded(ExclusionReason::TransientCoordination),
+        export_selector: ExportSelector::None,
+        why: "channel_guest_work_v1 binds an admitted guest turn to its bot, source event, guest identity and authorization revisions for retry and delivery. Work expires after 30 days and is purged by turn.bot_id or the exact Meta grant.",
     },
     Entry {
         collection: "channel_meta_controls",
@@ -2971,11 +3028,11 @@ pub static ENTRIES: &[Entry] = &[
     },
     Entry {
         collection: "service_approval_configs",
-        owner: OwnerSelector::Fields(&["user_id"]),
+        owner: OwnerSelector::Fields(&["user_id", "approver_user_ids"]),
         erasure: Erasure::LocalInventory,
         export: Export::Section("services"),
         export_selector: ExportSelector::Person("user_id"),
-        why: "service_approval_configs stores the person-owned service approval configs record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "Erasure deletes service_approval_configs by personal owner and prunes named approver IDs from organization policies, advancing the policy revision and grant cutoff.",
     },
     Entry {
         collection: "service_change_events",
@@ -3345,6 +3402,9 @@ pub(crate) const EXPORT_SELECTOR_INDEX_GAPS: &[(&str, &str)] = &[
 /// blanket "one index per field" loop: existing indexes are reused whenever
 /// their first key covers the predicate.
 pub(crate) const OWNER_INDEX_GAPS: &[(&str, &str)] = &[
+    ("assistant_agents", "org_maintainer_user_ids"),
+    ("service_approval_configs", "approver_user_ids"),
+    ("assistant_agents", "org_user_ids"),
     ("assistant_group_mention_notifications", "user_id"),
     ("assistant_group_messages", "author_user_id"),
     ("assistant_group_messages", "user_id"),

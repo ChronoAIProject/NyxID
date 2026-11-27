@@ -379,6 +379,7 @@ pub(crate) async fn forward_native(
         )
         .into(),
         reply_token: Some(reply_token),
+        guest_access_token: None,
         agent: CallbackAgent {
             api_key_id: key.id.clone(),
             name: "NyxID shared chat entry".into(),

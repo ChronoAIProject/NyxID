@@ -172,6 +172,7 @@ pub fn record<'a>(
             || watch.execution_binding.is_none()
             || watch.delivery.group_id.is_some()
             || watch.delivery.invocation_id.is_some()
+            || super::channel_guest_access::is_hosted_conversation_namespace(&watch.conversation_id)
             || !valid_agent(remote)
         {
             return Ok(());
@@ -416,7 +417,13 @@ pub async fn connections_page(
         });
     }
     if let Some(conversation) = conversation {
-        let allowed = match Box::pin(super::assistant_nyxagent::get(db, user, conversation)).await {
+        let allowed = match Box::pin(super::assistant_nyxagent::get_public(
+            db,
+            user,
+            conversation,
+        ))
+        .await
+        {
             Ok(chat) => {
                 chat.group_id.is_none() && !chat.shared_agent_thread && chat.collaboration.is_none()
             }
@@ -511,6 +518,10 @@ async fn page_filtered(
         });
     }
     filter.insert("user_id", user);
+    filter.insert(
+        "conversation_id",
+        super::channel_guest_access::exclude_hosted_conversations(),
+    );
     if let Some(after) = after {
         uuid::Uuid::parse_str(after)
             .map_err(|_| AppError::BadRequest("Invalid CMA origin cursor".into()))?;

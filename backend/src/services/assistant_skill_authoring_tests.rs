@@ -82,7 +82,7 @@ pub(crate) async fn contextualize(
 #[path = "assistant_skill_authoring_meta_lifecycle_tests.rs"]
 mod meta_lifecycle;
 
-fn input(agent: &str) -> Value {
+pub(crate) fn input(agent: &str) -> Value {
     json!({"scope":{"status":"complete","omissions":[]},"agent":agent,"name":"weekly-review","description":"Prepare a weekly review", "skill_md":"# Weekly review\n1. Check outstanding work.\n2. Write a concise report.","files":[{"path":"references/checklist.md","content":"Verify dates before publishing."}]})
 }
 
@@ -135,7 +135,7 @@ async fn pending_skill_event_count(
         .count()
 }
 
-async fn fixture(name: &str) -> Fixture {
+pub(crate) async fn fixture(name: &str) -> Fixture {
     let f = orchestrator_fixture(name).await;
     review::migrate_publication_targets(&f.state, false)
         .await
@@ -308,6 +308,7 @@ async fn pending_source_read_keeps_one_retryable_proposal_without_a_card() {
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.id.clone(),
@@ -1390,7 +1391,7 @@ async fn mount_version(
         .mount(server)
         .await;
 }
-async fn setup_ornn(f: &Fixture) -> MockServer {
+pub(crate) async fn setup_ornn(f: &Fixture) -> MockServer {
     let server = MockServer::start().await;
     let mut service = crate::test_utils::test_auto_connected_catalog_service();
     service.slug = "ornn-api".into();
@@ -1991,7 +1992,12 @@ async fn validator_read_status_replaces_previous_attempt_status() {
         .expect(0)
         .mount(&server)
         .await;
-    assert!(finish(&f, card.clone(), true).await.is_err());
+    let error = finish(&f, card.clone(), true).await.unwrap_err();
+    assert!(matches!(&error, AppError::Conflict(message) if message == "ornn_unavailable"));
+    assert_eq!(error.status_code(), http::StatusCode::CONFLICT);
+    let response = error.response_body();
+    assert_eq!(response.error_code, 1004);
+    assert!(response.details.is_none());
     let failed = f
         .state
         .db
@@ -2392,7 +2398,7 @@ async fn new_skill_check_finds_the_exact_version_after_a_lost_create_response() 
         .mount(&server)
         .await;
     assert!(
-        matches!(finish(&f, card.clone(), true).await, Err(AppError::Conflict(code)) if code.contains("publication_ambiguous"))
+        matches!(finish(&f, card.clone(), true).await, Err(AppError::SkillPublication(failure)) if failure.reason == "publication_ambiguous")
     );
     let used = allowed_card(&f, &card).await;
     Mock::given(method("GET"))
@@ -2403,7 +2409,7 @@ async fn new_skill_check_finds_the_exact_version_after_a_lost_create_response() 
         .mount(&server)
         .await;
     assert!(
-        matches!(finish(&f, used.clone(), true).await, Err(AppError::Conflict(code)) if code.contains("publication_ambiguous"))
+        matches!(finish(&f, used.clone(), true).await, Err(AppError::SkillPublication(failure)) if failure.reason == "publication_ambiguous")
     );
     assert_eq!(
         card_preview(&f, &row, &used).await["actions"],
@@ -2549,6 +2555,7 @@ async fn authored_approval_uses_signed_person_and_pins_exact_post_then_put_versi
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.id.clone(),
@@ -2948,7 +2955,18 @@ async fn released_target_is_claimed_by_second_draft_and_old_retry_reports_target
         .expect(1)
         .mount(&server)
         .await;
-    assert!(finish(&f, first_card.clone(), true).await.is_err());
+    let refusal = finish(&f, first_card.clone(), true)
+        .await
+        .err()
+        .unwrap()
+        .response_body();
+    assert_eq!(refusal.error, "conflict");
+    assert_eq!(
+        refusal.details.unwrap(),
+        json!({
+            "reason": "ornn_write_forbidden", "upstream_status": 403, "recovery": "check_access"
+        })
+    );
     let failed = f
         .state
         .db
@@ -4625,17 +4643,15 @@ async fn authored_review_links_self_id_listing_and_cross_turn_reuse() {
     .unwrap();
     assert!(hidden.is_empty());
     // A later turn is the same draft, never another proposal or approval card.
-    let turn = Uuid::new_v4().to_string();
-    f.state
-        .db
-        .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&f.row.id},
-            doc! {"$set":{"active_turn.turn_id":&turn}},
+    f.finish_turn(&f.row).await;
+    f.row = f
+        .begin_turn(
+            crate::models::assistant_conversation::TurnOrigin::User,
+            "Review the requested skill",
         )
-        .await
-        .unwrap();
-    f.chat.turn_id = Some(turn);
+        .await;
+    f.chat =
+        super::super::assistant_authority_tests::chat_for_row(&f.state, &f.owner, &f.row).await;
     let activity = super::super::assistant_nyxagent::activity_started_for_turn(
         &f.state.db,
         &f.owner,
@@ -5877,6 +5893,7 @@ async fn pending_source_read_timeout_keeps_retryable_reservation_without_a_card(
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.id.clone(),

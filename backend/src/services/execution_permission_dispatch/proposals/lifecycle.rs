@@ -174,7 +174,9 @@ async fn maintain(state: &crate::AppState, row: &ApprovalRequest) -> AppResult<(
                 next_state="expired";
             }
             if source.collaboration.is_some(){super::super::super::collaboration_group_service::runtime::queue_decision(db,&source,session).await?;}
-            let entry=bson::to_bson(&event(&row,p)).map_err(encoding)?;
+            let mut wake = event(&row, p);
+            wake.org_use_revision = source.org_use_revision;
+            let entry=bson::to_bson(&wake).map_err(encoding)?;
             if chats.update_one(doc!{"_id":&source.id,"active_turn":null,"pending_events.63":{"$exists":false},"pending_events.id":{"$ne":&event_id}},doc!{"$push":{"pending_events":entry},"$inc":{"execution_dispatch_fence":1_i64}}).session(&mut *session).await?.matched_count!=1{return Err(conflict());}
             if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":&row.id,"execution_proposal.v1.state":next_state}),version.update(doc!{"$set":{"execution_proposal.v1.wake_at":bson::DateTime::now()}})).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
             Ok(())

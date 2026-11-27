@@ -154,7 +154,9 @@ pub const CAPABILITIES: &[&str] = &[
     super::billing::model_tariffs::READINESS,
     "assistant:generated-artifacts",
     "assistant:org-agents",
+    super::feature_flag_service::ORG_AGENT_ACCESS_FLAG_KEY,
     super::org_channel_service::FLAG,
+    super::channel_guest_access::FLAG,
     super::org_channel_service::GUEST_GRANTS_READINESS,
     "assistant:shared-agents",
     super::collaboration_group_service::READINESS,
@@ -176,6 +178,7 @@ pub const CAPABILITIES: &[&str] = &[
     super::execution_permission_channel::READINESS,
     super::feature_flag_service::HOSTED_CONNECT_INTENT_FLAG_KEY,
     "approval:required-web-v1",
+    super::org_service_approvers::FLAG,
     // Older transport writers do not wait for relay sockets before remote setup.
     "channel:discord-gateway",
     super::nyxbot_gateway_source::READINESS,

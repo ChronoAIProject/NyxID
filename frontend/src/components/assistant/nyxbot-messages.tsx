@@ -14,7 +14,7 @@ import {
   ShieldQuestionMark,
   ShieldX,
 } from "lucide-react";
-import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import { AgentAvatar, type AvatarAgent } from "@/components/assistant/nyxbot-agent-avatar";
 import { MessageTime } from "@/components/assistant/message-time";
 import { ToolImage } from "./blocks/tool-image";
 import type { ChatMessage } from "@/lib/assistant/chat-types";
@@ -166,12 +166,19 @@ export function NyxBotEventNotice({ message }: { readonly message: ChatMessage }
 const NYXBOT_MARK = { id: "nyxbot", name: "NyxBot", kind: "nyxbot" } as const;
 
 /** An instruction NyxBot sent to this specialist: shaped like a user turn, labelled as NyxBot's. */
-export function NyxBotOrchestratorMessage({ message }: { readonly message: ChatMessage }) {
+export function NyxBotOrchestratorMessage({
+  message,
+  nyxbot,
+}: {
+  readonly message: ChatMessage;
+  /** The owner's NyxBot, so the mark shows its chosen avatar. */
+  readonly nyxbot?: AvatarAgent;
+}) {
   const { t: translateUi } = useCardTranslation();
   return (
     <article aria-label={translateUi("Message from NyxBot")} className="group/message flex flex-col items-end gap-1">
       <div className="flex items-center gap-1.5 text-12 text-text-tertiary">
-        <AgentAvatar agent={NYXBOT_MARK} size="xs" />{translateUi("From NyxBot")}</div>
+        <AgentAvatar agent={nyxbot ?? NYXBOT_MARK} size="xs" />{translateUi("From NyxBot")}</div>
       <div className="ml-auto max-w-[90%] whitespace-pre-wrap rounded-lg border border-hairline bg-overlay px-3 py-2 text-16 text-foreground [overflow-wrap:anywhere] sm:max-w-[78%]">
         {message.content}
       </div>

@@ -498,6 +498,13 @@ a formatter with their source phrase and captured values (`useLocalizedState`);
 queued toasts retain their own formatter, and app-owned Errors expose their
 message through `localizedError`. Rendering subscribes to `useAppLanguage`, so
 changing language updates an existing notice without repeating its action.
+Automation result rows show the localized completion action and omit an empty
+summary or the exact stored marker `无（建设中，未发送）`. The English preview
+“Completed.” stays visible and searchable because it can be the actual reply.
+The mobile interface localizes the exact default “New conversation” title for
+provisional drafts with zero messages. It preserves titles from sent messages,
+users, providers and legacy or generated rows. Agent
+profile status, approval policy and credit units use the selected app language.
 Unknown server diagnostics retain the server text. Messages, names, provider voice labels, URLs,
 credentials and protocol values are preserved. Legal content stays in its
 authored language. App language does not change dictation recognition or the

@@ -15,6 +15,7 @@ export function TelegramNewConnect({
   fullPage = false,
   stayInPlace = false,
   returnTo,
+  initialRequestId,
   onConnected,
   renderFields,
 }: ChannelBotConnectProps) {
@@ -25,7 +26,9 @@ export function TelegramNewConnect({
   const actor = useAuthStore((state) => state.user?.id);
   const [localRequest, setLocalRequest] = useState<{ actor: string | undefined; id: string | undefined }>();
   const localRequestId = localRequest && localRequest.actor === actor ? localRequest.id : undefined;
-  const requestId = localRequestId ?? (stayInPlace ? undefined : link ? link.telegramRequestId : search.request_id);
+  const requestId = localRequest && localRequest.actor === actor
+    ? localRequest.id
+    : initialRequestId ?? (link ? link.telegramRequestId : stayInPlace ? undefined : search.request_id);
   const configuration = useTelegramNewConfiguration(requestId, false);
   const pending = useIsMutating({ mutationKey: ["telegram-new", actor] }) > 0;
   const saved = configuration.data?.request;

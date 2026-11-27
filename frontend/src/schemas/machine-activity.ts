@@ -1,5 +1,6 @@
 import { historyEnum } from "./assistant-history-compat";
 import { z } from "zod";
+import { agentAvatarFieldSchema } from "./agent-avatar";
 
 export const machineReceiptSchema = z.object({
   operation_id: z.string(),
@@ -34,6 +35,7 @@ export const machineActivityPageSchema = z.object({
         id: z.string(),
         name: z.string(),
         display_name: z.string().nullable(),
+        avatar: agentAvatarFieldSchema,
         kind: z.enum(["nyxbot", "specialist"]),
       }),
     )

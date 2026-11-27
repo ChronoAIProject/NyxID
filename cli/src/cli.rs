@@ -2287,8 +2287,8 @@ pub enum BillingCommands {
     },
     /// Create a hosted wallet top-up checkout
     Topup {
-        /// Credits to add
-        #[arg(long)]
+        /// Whole credits to add (USD 1 each; 10–10,000,000 for new purchases)
+        #[arg(long, allow_negative_numbers = true)]
         amount_credits: i64,
         /// Retry-safe idempotency key
         #[arg(long)]
@@ -2304,8 +2304,8 @@ pub enum BillingCommands {
     },
     /// Verify the deployed Lago + Stripe wallet top-up flow
     VerifyTopupFlow {
-        /// Credits to add in the verification top-up
-        #[arg(long, default_value_t = 1)]
+        /// Whole credits to add in the verification top-up (USD 1 each)
+        #[arg(long, default_value_t = 20, allow_negative_numbers = true)]
         amount_credits: i64,
         /// Fresh retry-safe idempotency key; omit to generate one
         #[arg(long)]
@@ -3373,6 +3373,65 @@ pub enum NodeDaemonCommands {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn billing_topup_parses_signed_boundaries_and_verifier_defaults_to_twenty() {
+        for amount in [
+            "-1",
+            "0",
+            "9",
+            "10",
+            "11",
+            "20",
+            "50",
+            "100",
+            "500",
+            "10000000",
+            "10000001",
+            "9223372036854775807",
+        ] {
+            let cli =
+                Cli::try_parse_from(["nyxid", "billing", "topup", "--amount-credits", amount])
+                    .unwrap();
+            let Commands::Billing {
+                command: BillingCommands::Topup { amount_credits, .. },
+            } = cli.command
+            else {
+                panic!("topup command");
+            };
+            assert_eq!(amount_credits, amount.parse::<i64>().unwrap());
+        }
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "billing",
+                "topup",
+                "--amount-credits",
+                "9223372036854775808"
+            ])
+            .is_err()
+        );
+        for args in [
+            vec!["nyxid", "billing", "verify-topup-flow"],
+            vec![
+                "nyxid",
+                "billing",
+                "verify-topup-flow",
+                "--amount-credits",
+                "-1",
+            ],
+        ] {
+            let expected = if args.len() == 3 { 20 } else { -1 };
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Commands::Billing {
+                command: BillingCommands::VerifyTopupFlow { amount_credits, .. },
+            } = cli.command
+            else {
+                panic!("verifier command");
+            };
+            assert_eq!(amount_credits, expected);
+        }
+    }
 
     #[test]
     fn docker_machine_start_and_restart_parse_explicit_separation_only_for_machine() {
@@ -5257,8 +5316,55 @@ pub enum NotificationCommands {
 
 // ---- Approval (I15-I20) ----
 
+#[derive(clap::Args)]
+pub struct ApproverTarget {
+    /// Organization UUID, slug or exact display name
+    #[arg(long)]
+    pub org: String,
+    /// Owned connection ID or catalog service ID
+    #[arg(long)]
+    pub service: String,
+    #[command(flatten)]
+    pub auth: AuthArgs,
+}
+
+#[derive(clap::Args)]
+#[group(required = true, multiple = true)]
+pub struct ApproverEdit {
+    /// Restore automatic selection of all eligible Admins
+    #[arg(long, conflicts_with_all = ["set", "add", "remove"])]
+    pub inherit: bool,
+    /// Replace the entire list with these person UUIDs
+    #[arg(long, value_delimiter = ',', conflicts_with_all = ["add", "remove"])]
+    pub set: Vec<uuid::Uuid>,
+    /// Include these person UUIDs
+    #[arg(long, value_delimiter = ',')]
+    pub add: Vec<uuid::Uuid>,
+    /// Exclude these person UUIDs
+    #[arg(long, value_delimiter = ',')]
+    pub remove: Vec<uuid::Uuid>,
+}
+
+#[derive(Subcommand)]
+pub enum ApproverCommands {
+    /// Show saved policy and eligible Admins
+    Show(ApproverTarget),
+    /// Update the saved policy
+    Set {
+        #[command(flatten)]
+        target: ApproverTarget,
+        #[command(flatten)]
+        edit: ApproverEdit,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum ApprovalCommands {
+    /// Manage approvers for an organization service
+    Approvers {
+        #[command(subcommand)]
+        command: ApproverCommands,
+    },
     /// List approval requests
     List {
         /// List approval history scoped to the given org instead of your
@@ -5297,7 +5403,7 @@ pub enum ApprovalCommands {
     Deny {
         /// Request ID
         id: String,
-        /// Reason for denial
+        /// Optional denial text (not stored by the server)
         #[arg(long)]
         reason: Option<String>,
         #[command(flatten)]
@@ -5399,7 +5505,7 @@ pub enum ApprovalCommands {
         /// scope. You must be an admin of that org. The org's policy is
         /// authoritative for org-shared services -- it overrides any
         /// personal policy each member may have set, and notifications
-        /// fan out to every active org admin.
+        /// reach the eligible approvers for that service.
         #[arg(
             long,
             value_name = "ID|SLUG|NAME",

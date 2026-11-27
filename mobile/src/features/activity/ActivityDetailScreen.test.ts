@@ -1,3 +1,4 @@
+import { setAppTranslationLanguage } from "../../i18n/appTranslation";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath, URL } from "node:url";
@@ -13,7 +14,7 @@ const nodes = (e: Element): Element[] => [
     .flat(Infinity)
     .flatMap((c) => (c?.props ? nodes(c) : [])),
 ];
-function setup(execution_proposal?: ChallengeDetail["execution_proposal"]) {
+function setup(execution_proposal?: ChallengeDetail["execution_proposal"], approvalMode = "grant") {
   const calls: unknown[][] = [];
   const openedUrls: string[] = [];
   let frontendUrl = "https://app.example.test";
@@ -27,7 +28,7 @@ function setup(execution_proposal?: ChallengeDetail["execution_proposal"]) {
     action: "Write",
     resource: "repo",
     summary: "Review write",
-    approval_mode: "grant",
+    approval_mode: approvalMode,
     risk_level: "low",
     status: "PENDING",
     created_at: "2026-10-28T00:00:00Z",
@@ -198,4 +199,13 @@ test("execution proposal detail retains the redesigned groups and has only a web
   ]);
   assert.deepEqual(e.calls, []);
   e.h.unmount();
+});
+
+test("per-request approval uses the selected language and keeps request evidence verbatim", (t) => {
+  t.after(() => setAppTranslationLanguage("en"));
+  setAppTranslationLanguage("zh-CN");
+  const e = setup(undefined, "per_request");
+  t.after(e.h.unmount);
+  assert.equal(e.row("批准").props.value, "每次请求");
+  assert.equal(e.row("资源").props.value, "repo");
 });

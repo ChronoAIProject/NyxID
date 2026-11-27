@@ -15,6 +15,9 @@ const ROOT: &str = "/assistant/nyxagent";
 const MAX_INPUT_BYTES: usize = 131_072;
 const MAX_INPUT_CHARS: usize = 32_768;
 
+#[path = "nyxbot_discovery.rs"]
+mod conversation_discovery;
+
 #[derive(Subcommand)]
 pub enum NyxbotCommands {
     /// Submit owner work; waits unless --no-wait is selected
@@ -27,7 +30,12 @@ pub enum NyxbotCommands {
     Cancel(InvocationArgs),
     /// Discover owned agents and specialist IDs
     Agents(AuthArgs),
-    /// List conversations, optionally filtered by agent
+    /// Show or replace an organization specialist's member access policy
+    Access {
+        #[command(subcommand)]
+        command: AccessCommand,
+    },
+    /// List conversations, including readable guest history when filtered by an organization specialist
     Conversations {
         #[arg(long)]
         agent: Option<String>,
@@ -38,7 +46,7 @@ pub enum NyxbotCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Read a conversation's durable messages and owner action cards
+    /// Read a conversation's durable messages, including read-only guest history
     History {
         conversation: String,
         #[arg(long)]
@@ -51,6 +59,103 @@ pub enum NyxbotCommands {
     /// Discover available model IDs
     Models(AuthArgs),
 }
+#[derive(Subcommand)]
+pub enum AccessCommand {
+    /// Show the current access policy and edit revision
+    Show {
+        agent_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Replace both lists using the expected revision in a JSON file
+    Set {
+        agent_id: String,
+        #[arg(long)]
+        file: PathBuf,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+struct OrgAccess {
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    maintainers: Option<Vec<String>>,
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    users: Option<Vec<String>>,
+    revision: i64,
+    authoring_available: bool,
+}
+
+impl OrgAccess {
+    fn render(&self, output: OutputFormat) -> Result<String> {
+        if matches!(output, OutputFormat::Json) {
+            return Ok(terminal_json(&serde_json::to_string_pretty(self)?));
+        }
+        let display = |list: &Option<Vec<String>>| match list.as_deref() {
+            None => "Inherit (eligible organization members)".into(),
+            Some([]) => "Nobody".into(),
+            Some(ids) => ids.join(", "),
+        };
+        Ok(terminal_text(&format!(
+            "Maintainers: {}\nUsers: {}\nRevision: {}\nAuthoring available: {}",
+            display(&self.maintainers),
+            display(&self.users),
+            self.revision,
+            self.authoring_available
+        )))
+    }
+}
+
+async fn access(command: AccessCommand) -> Result<()> {
+    let (agent, auth, file) = match command {
+        AccessCommand::Show { agent_id, auth } => (agent_id, auth, None),
+        AccessCommand::Set {
+            agent_id,
+            auth,
+            file,
+        } => (agent_id, auth, Some(file)),
+    };
+    let mut api = ApiClient::from_auth(&auth)?;
+    let path = format!("{ROOT}/agents/{}/org-access", urlencoding::encode(&agent));
+    let result: Result<OrgAccess> = if let Some(file) = file {
+        let reader = std::io::BufReader::new(
+            std::fs::File::open(file).context("Cannot read specialist policy file")?,
+        );
+        let policy: ReplacementFile =
+            serde_json::from_reader(reader).context("Invalid specialist policy file")?;
+        api.put(&path, &policy).await
+    } else {
+        api.get(&path).await
+    };
+    match result {
+        Ok(policy) => {
+            println!("{}", policy.render(auth.output)?);
+            Ok(())
+        }
+        Err(error) => {
+            let mut failure = classify_failure(&error);
+            if failure.http_status == Some(409) {
+                failure.guidance = Some(
+                    "The policy revision is stale. Run nyxid nyxbot access show, review the changes and update your file before submitting again.",
+                );
+            }
+            println!("{}", render_discovery_failure(&failure, auth.output)?);
+            Err(OutcomeExit(failure.exit_code).into())
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ReplacementFile {
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    maintainers: Option<Vec<String>>,
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    users: Option<Vec<String>>,
+    expected_revision: u64,
+}
+
 #[derive(Args)]
 #[command(group(clap::ArgGroup::new("input").required(true).args(["text","file"])))]
 pub struct RunArgs {
@@ -235,6 +340,8 @@ struct CommandFailure {
     error_code: Option<i64>,
     reason: Option<String>,
     guidance: Option<&'static str>,
+    #[serde(skip)]
+    discovery_refusal: Option<conversation_discovery::Refusal>,
 }
 
 fn classify_failure(error: &anyhow::Error) -> CommandFailure {
@@ -246,6 +353,7 @@ fn classify_failure(error: &anyhow::Error) -> CommandFailure {
         error_code: None,
         reason: None,
         guidance: None,
+        discovery_refusal: None,
     };
     if let Some(auth) = error.downcast_ref::<crate::auth::ReauthRequired>() {
         result.cli_status = "login_required";
@@ -308,6 +416,7 @@ fn classify_failure(error: &anyhow::Error) -> CommandFailure {
         error_code: api.and_then(|e| e.response()).map(|e| e.error_code),
         reason,
         guidance,
+        discovery_refusal: api.and_then(conversation_discovery::refusal),
     }
 }
 fn failure(key: &str, error: &anyhow::Error, last: Option<Receipt>) -> Report {
@@ -561,19 +670,27 @@ async fn read_discovery(
             error_code: None,
             reason: None,
             guidance: Some("Retry discovery later; this command does not submit work."),
+            discovery_refusal: None,
         }),
     }
 }
 
 async fn discovery(auth: AuthArgs, path: String) -> Result<()> {
     let mut api = ApiClient::from_auth(&auth)?;
-    match read_discovery(&mut api, &path).await {
+    emit_discovery(read_discovery(&mut api, &path).await, auth.output)
+}
+
+fn emit_discovery(
+    result: std::result::Result<Value, CommandFailure>,
+    output: OutputFormat,
+) -> Result<()> {
+    match result {
         Ok(value) => {
-            println!("{}", render_discovery(&value, auth.output)?);
+            println!("{}", render_discovery(&value, output)?);
             Ok(())
         }
         Err(failure) => {
-            println!("{}", render_discovery_failure(&failure, auth.output)?);
+            println!("{}", render_discovery_failure(&failure, output)?);
             Err(OutcomeExit(failure.exit_code).into())
         }
     }
@@ -624,6 +741,7 @@ pub async fn run(command: NyxbotCommands) -> Result<()> {
         }
         NyxbotCommands::Show(args) => inspect(args, false).await,
         NyxbotCommands::Cancel(args) => inspect(args, true).await,
+        NyxbotCommands::Access { command } => access(command).await,
         NyxbotCommands::Agents(auth) => discovery(auth, format!("{ROOT}/agents")).await,
         NyxbotCommands::Models(auth) => discovery(auth, format!("{ROOT}/models")).await,
         NyxbotCommands::Conversations {
@@ -631,26 +749,14 @@ pub async fn run(command: NyxbotCommands) -> Result<()> {
             agent,
             cursor,
             limit,
-        } => {
-            let mut path = format!("{ROOT}/conversations?limit={limit}");
-            if let Some(agent) = agent {
-                path.push_str(&format!("&agent_id={}", urlencoding::encode(&agent)));
-            }
-            if let Some(cursor) = cursor {
-                path.push_str(&format!("&cursor={}", urlencoding::encode(&cursor)));
-            }
-            discovery(auth, path).await
-        }
+        } => conversation_discovery::list(auth, agent, cursor, limit).await,
         NyxbotCommands::History {
             auth,
             conversation,
             before_seq,
             limit,
         } => {
-            let mut path = format!(
-                "{ROOT}/conversations/{}?limit={limit}",
-                urlencoding::encode(&conversation)
-            );
+            let mut path = conversation_discovery::history_path(&conversation, limit);
             if let Some(seq) = before_seq {
                 path.push_str(&format!("&before_seq={seq}"));
             }

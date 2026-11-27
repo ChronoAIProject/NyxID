@@ -208,6 +208,9 @@ pub(crate) async fn update_in_session(
             ]},
         );
     }
+    if row.org_specialist.is_none() {
+        channel_filter.insert("org_specialist", bson::Bson::Null);
+    }
     // Preserve the ability to narrow private access on a failed link.
     if settings.private_chats.as_deref() == Some("everyone")
         || settings.private_chat_posts == Some(true)

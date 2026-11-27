@@ -223,7 +223,10 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
     if run.outcome != RunOutcome::Pending && !continuation {
         return schedules::reschedule(&state.db, job, None).await;
     }
-    if matches!(run.reason.as_deref(), Some("overlap_skip" | "queue_full")) {
+    if matches!(
+        run.reason.as_deref(),
+        Some("overlap_skip" | "queue_full" | "target_unavailable")
+    ) {
         return schedules::finish_claimed(
             &state.db,
             job,
@@ -394,7 +397,36 @@ async fn run_job_once(state: &AppState, job: &Document) -> AppResult<()> {
         return deliver_existing(state, job, &run, &trigger).await;
     };
     let agent = match team::agent(&state.db, &run.user_id, agent_id).await {
-        Ok(agent) if agent.destroyed_at.is_none() => agent,
+        Ok(agent) if agent.org_use_revision != run.org_use_revision => {
+            return schedules::finish_claimed(
+                &state.db,
+                job,
+                id,
+                RunOutcome::Skipped,
+                Some("target_unavailable"),
+                &state.config.frontend_url,
+            )
+            .await;
+        }
+        Ok(agent) if agent.destroyed_at.is_none() => {
+            match crate::services::org_agent_service::require_use(&state.db, &run.user_id, &agent)
+                .await
+            {
+                Ok(()) => agent,
+                Err(e) if e.is_forbidden() || matches!(e, AppError::NotFound(_)) => {
+                    return schedules::finish_claimed(
+                        &state.db,
+                        job,
+                        id,
+                        RunOutcome::Skipped,
+                        Some("target_unavailable"),
+                        &state.config.frontend_url,
+                    )
+                    .await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
         Ok(_) | Err(AppError::NotFound(_)) => {
             schedules::pause_target(&state.db, &trigger, "target_unavailable").await?;
             return schedules::finish_claimed(
@@ -766,6 +798,7 @@ async fn deliver_existing(
                     &claim,
                     "",
                     &admission_run.id,
+                    0,
                     session,
                 )
                 .await,
@@ -861,6 +894,43 @@ pub(super) async fn settle_result(
     error: Option<&str>,
 ) -> AppResult<()> {
     use futures::TryStreamExt;
+    if let Some(org) = row.agent_owner_id.as_deref().filter(|o| *o != row.user_id)
+        && !row.shared_agent_thread
+        && row.collaboration.is_none()
+    {
+        let allowed = match team::agent(
+            &state.db,
+            &row.user_id,
+            row.agent_id
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?,
+        )
+        .await
+        {
+            Ok(agent) => {
+                agent.user_id == org
+                    && agent.org_use_revision == run.org_use_revision
+                    && crate::services::org_agent_service::specialist_rights(
+                        &row.user_id,
+                        &agent,
+                        &crate::services::org_agent_service::access(&state.db, &row.user_id, org)
+                            .await?,
+                    )
+                    .can_use
+            }
+            Err(AppError::NotFound(_)) => false,
+            Err(error) => return Err(error),
+        };
+        if !allowed {
+            return schedules::finish_thread_result(
+                &state.db,
+                run,
+                Some("target_unavailable"),
+                &state.config.frontend_url,
+            )
+            .await;
+        }
+    }
     if error.is_none() {
         let cards: Vec<crate::models::assistant_acknowledgement::AssistantAcknowledgement> = state
             .db

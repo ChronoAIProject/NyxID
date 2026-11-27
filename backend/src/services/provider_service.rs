@@ -6634,10 +6634,13 @@ pub async fn seed_default_services(
         #[cfg(test)]
         super::startup_seed_tests::missing(db, "service", seed.service_slug).await;
 
-        // Create an empty encrypted credential (field is required)
-        let empty_credential = encryption_keys.encrypt(b"").await?;
-
         let service_id = Uuid::new_v4().to_string();
+        let empty_credential = super::catalog_credential_record_service::empty_credential(
+            encryption_keys,
+            &service_id,
+            "system",
+        )
+        .await?;
         let is_llm_service = seed.service_slug.starts_with("llm-");
         let description = seed.description.map(String::from).unwrap_or_else(|| {
             if is_llm_service {

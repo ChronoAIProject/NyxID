@@ -255,6 +255,7 @@ pub async fn create_request(
         &caller.requester_id,
         false,
         approval_target.is_auto_connected,
+        Some(&input.user_service_id),
         chat.as_ref(),
     )
     .await?;
@@ -338,6 +339,7 @@ pub async fn create_request(
         pending.resolution.grant_scope.clone(),
     )
     .with_exact_service(binding);
+    operation.org_policy = pending.resolution.policy_stamp();
     operation.assistant_group = super::org_group_service::approval_binding(
         &state.db,
         caller.assistant_group_id.as_deref(),
@@ -366,7 +368,8 @@ pub async fn create_request(
     )
     .await?;
 
-    result_for(&request, ExactServiceApprovalState::Pending)
+    let observed = current_state(state, caller, &request).await?;
+    result_for(&request, observed.state)
 }
 
 pub async fn observe_request(
@@ -740,32 +743,47 @@ async fn claim_redemption(
         .exact_service
         .as_ref()
         .ok_or_else(|| AppError::BadRequest("not_an_exact_service_request".to_string()))?;
-    Ok(db
-        .collection::<ApprovalRequest>(REQUESTS)
-        .find_one_and_update(
-            doc! {
-                "_id": &request.id,
-                "status": "approved",
-                "expires_at": { "$gt": bson::DateTime::from_chrono(admitted_at) },
-                "exact_service.request_key": &binding.request_key,
-                "exact_service.redemption": { "$exists": false },
-            },
-            doc! { "$set": {
-                "exact_service.redemption": bson::to_bson(&ExactServiceApprovalRedemption {
-                    status: ExactServiceRedemptionStatus::Executing,
-                    admitted_at,
-                    completed_at: None,
-                    receipt: None,
-                    failure_code: None,
-                }).map_err(|error| AppError::Internal(error.to_string()))?,
-            }},
-        )
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?)
+    let filter = doc! {
+        "_id": &request.id,
+        "status": "approved",
+        "expires_at": { "$gt": bson::DateTime::from_chrono(admitted_at) },
+        "exact_service.request_key": &binding.request_key,
+        "exact_service.redemption": { "$exists": false },
+    };
+    let update = doc! { "$set": {
+        "exact_service.redemption": bson::to_bson(&ExactServiceApprovalRedemption {
+            status: ExactServiceRedemptionStatus::Executing,
+            admitted_at,
+            completed_at: None,
+            receipt: None,
+            failure_code: None,
+        }).map_err(|error| AppError::Internal(error.to_string()))?,
+    }};
+    let rows = db.collection::<ApprovalRequest>(REQUESTS);
+    if !request.from_org_policy {
+        return Ok(rows
+            .find_one_and_update(filter, update)
+            .return_document(ReturnDocument::After)
+            .await?);
+    }
+    super::transaction_service::run_db_only(
+        db,
+        &(db, request, filter, update),
+        |tx, (db, request, filter, update)| {
+            Box::pin(async move {
+                if !super::org_service_approvers::live_in_session(db, request, true, tx).await? {
+                    return Ok(None);
+                }
+                Ok(db
+                    .collection::<ApprovalRequest>(REQUESTS)
+                    .find_one_and_update(filter.clone(), update.clone())
+                    .return_document(ReturnDocument::After)
+                    .session(tx)
+                    .await?)
+            })
+        },
+    )
+    .await
 }
 
 async fn reload_after_lost_redemption_claim(
@@ -776,7 +794,7 @@ async fn reload_after_lost_redemption_claim(
     let request = load_bound_request(state, caller, request_id).await?;
     let request = expire_if_needed(state, request).await?;
     let request = recover_stale_execution(&state.db, request, Utc::now()).await?;
-    let observed = persisted_state(&request)?;
+    let observed = current_state(state, caller, &request).await?;
     let mut result = result_for(&request, observed.state)?;
     if result.failure_code.is_none() {
         result.failure_code = observed.failure_code;
@@ -1574,6 +1592,17 @@ async fn current_state(
     request: &ApprovalRequest,
 ) -> AppResult<ObservedApprovalState> {
     let persisted = persisted_state(request)?;
+    if matches!(
+        persisted.state,
+        ExactServiceApprovalState::Pending | ExactServiceApprovalState::Approved
+    ) && request.from_org_policy
+        && !super::org_service_approvers::request_live(&state.db, request).await?
+    {
+        return Ok(observed(
+            ExactServiceApprovalState::Revoked,
+            Some("selector_revoked"),
+        ));
+    }
     if persisted.state != ExactServiceApprovalState::Approved {
         return Ok(persisted);
     }
@@ -1645,7 +1674,7 @@ async fn evaluate_live_authority(
             "catalog_drift",
         ));
     }
-    match approval_policy_is_live(state, caller, &resolution, &binding.arguments).await {
+    match approval_policy_is_live(state, caller, &resolution, request, &binding.arguments).await {
         Ok(true) => {}
         Ok(false) => {
             return LiveAuthorityEvaluation::Terminal(authority_terminal(
@@ -1682,8 +1711,14 @@ async fn approval_policy_is_live(
     state: &AppState,
     caller: &ExactServiceApprovalCaller,
     resolution: &ExactCatalogResolution<'_>,
+    request: &ApprovalRequest,
     arguments: &serde_json::Value,
 ) -> AppResult<bool> {
+    if request.from_org_policy
+        && !super::org_service_approvers::request_live(&state.db, request).await?
+    {
+        return Ok(false);
+    }
     let descriptor = mcp_service::build_mcp_operation_descriptor(
         resolution.service(),
         resolution.endpoint(),
@@ -1691,7 +1726,7 @@ async fn approval_policy_is_live(
     )?;
     let target = approval_target(state, caller, resolution.service()).await?;
     Ok(matches!(
-        approval_service::evaluate_and_check(
+        approval_service::evaluate_service(
             &state.db,
             &caller.approval_owner_user_id,
             &target.service_owner_user_id,
@@ -1701,6 +1736,9 @@ async fn approval_policy_is_live(
             &caller.requester_id,
             false,
             target.is_auto_connected,
+            Default::default(),
+            Some(&resolution.service().service_id),
+            request.assistant_group.as_ref().map(|g|g.actor_user_id.as_str()),
         )
         .await?,
         approval_service::ApprovalOutcome::NeedsApproval(pending)
@@ -2263,6 +2301,7 @@ mod tests {
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: actor_id.clone(),
                 service_id: catalog_service_id.clone(),
@@ -2314,6 +2353,7 @@ mod tests {
             .map(|value| value.request_key.clone())
             .unwrap_or_else(|| format!("generic-{id}"));
         ApprovalRequest {
+            org_policy: None,
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
@@ -2372,6 +2412,7 @@ mod tests {
             "client-alpha",
             None,
             approval_service::ApprovalRequestOperation {
+                org_policy: None,
                 connected_request_id: None,
                 connected_deadline: None,
                 approval: Default::default(),
@@ -3276,6 +3317,50 @@ mod tests {
             .expect("replay terminal receipt");
         assert_eq!(replay.state, ExactServiceApprovalState::Redeemed);
         assert_eq!(replay.receipt, Some(receipt));
+    }
+
+    #[tokio::test]
+    async fn org_exact_claim_is_ordered_with_narrowing_and_never_reopens_a_claimed_effect() {
+        use crate::models::service_approval_config::{COLLECTION_NAME as CONFIGS, OrgPolicyStamp};
+        let db =
+            crate::test_utils::connect_transaction_test_database("org_exact_claim_cutoff").await;
+        let admitted = Utc::now();
+        let mut row = approval_request(
+            "exact",
+            "approved",
+            admitted + Duration::minutes(5),
+            Some(binding()),
+        );
+        row.from_org_policy = true;
+        row.org_policy = Some(OrgPolicyStamp {
+            config_id: "policy".into(),
+            revision: 0,
+            connection_id: None,
+        });
+        let rows = db.collection::<ApprovalRequest>(REQUESTS);
+        rows.insert_one(&row).await.unwrap();
+        let cfgs = db.collection::<bson::Document>(CONFIGS);
+        cfgs.insert_one(doc! {"_id":"policy","user_id":&row.user_id,"service_id":&row.service_id,"service_name":"Service",
+            "approval_required":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
+        let narrow = cfgs.update_one(doc! {"_id":"policy"},doc! {"$set":{"approver_revision":1_i64,"min_grant_revision":1_i64,"approver_user_ids":[]}});
+        let (claim, change) = tokio::join!(claim_redemption(&db, &row, admitted), async {
+            narrow.await
+        });
+        change.unwrap();
+        let winner = claim.unwrap().is_some();
+        assert_eq!(
+            rows.count_documents(doc! {"exact_service.redemption.status":"executing"})
+                .await
+                .unwrap(),
+            u64::from(winner)
+        );
+        assert!(
+            claim_redemption(&db, &row, admitted)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(rows.count_documents(doc! {}).await.unwrap(), 1);
     }
 
     #[tokio::test]

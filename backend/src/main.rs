@@ -1807,6 +1807,23 @@ async fn server_run(cli: Cli) {
         });
     }
 
+    {
+        let db = state.db.clone();
+        services::shutdown::process().spawn_worker(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(30));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            while let Some(_work) = services::shutdown::process().tick(&mut ticks).await {
+                if let Err(error) = services::channel_bot_service::sweep_guest_retirement(&db).await
+                {
+                    tracing::warn!(
+                        error_code = error.error_code(),
+                        "Channel guest retirement reconciliation deferred"
+                    );
+                }
+            }
+        });
+    }
+
     let discord_shutdown = tokio_util::sync::CancellationToken::new();
     let discord_worker = services::shutdown::process().spawn_worker(
         services::discord_gateway::run(state.clone(), discord_shutdown.clone()),
@@ -2552,6 +2569,7 @@ fn private_cors(allowed_origins: std::collections::HashSet<axum::http::HeaderVal
             "X-API-Key".parse().unwrap(),
             "X-NyxID-Client".parse().unwrap(),
             "X-NyxID-Client-Version".parse().unwrap(),
+            "X-NyxID-Chat-Capabilities".parse().unwrap(),
             "X-NyxID-Analytics".parse().unwrap(),
             "X-NyxID-Analytics-Account".parse().unwrap(),
             "DNT".parse().unwrap(),
@@ -3319,7 +3337,7 @@ mod tests {
                         .header("Access-Control-Request-Method", "PUT")
                         .header(
                             "Access-Control-Request-Headers",
-                            "content-type,x-nyxid-analytics,x-nyxid-analytics-account,dnt",
+                            "content-type,x-nyxid-analytics,x-nyxid-analytics-account,dnt,x-nyxid-chat-capabilities",
                         )
                         .body(axum::body::Body::empty())
                         .unwrap(),
@@ -3343,6 +3361,7 @@ mod tests {
                 assert!(allowed.contains("x-nyxid-analytics"));
                 assert!(allowed.contains("x-nyxid-analytics-account"));
                 assert!(allowed.contains("dnt"));
+                assert!(allowed.contains("x-nyxid-chat-capabilities"));
             } else {
                 assert!(
                     !response

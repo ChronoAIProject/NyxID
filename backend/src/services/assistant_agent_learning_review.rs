@@ -572,7 +572,8 @@ pub async fn status(db: &Database, actor: &str, agent_id: &str) -> AppResult<Lea
     };
     Ok(LearningStatus {
         available,
-        can_maintain: agent.destroyed_at.is_none() && org_agent_service::can_maintain(&access),
+        can_maintain: agent.destroyed_at.is_none()
+            && org_agent_service::specialist_rights(actor, &agent, &access).can_maintain,
         org_owned: actor != agent.user_id,
         enabled: config.as_ref().is_some_and(|c| c.enabled),
         threshold: config.as_ref().map_or(DEFAULT_THRESHOLD, |c| c.threshold),
@@ -708,7 +709,7 @@ async fn current(
     let Some(mut run) = run else {
         return Ok(false);
     };
-    if row.evidence.is_empty() {
+    if run.org_maintain_revision != agent.org_maintain_revision || row.evidence.is_empty() {
         return Ok(false);
     }
     run.evidence = row.evidence.clone();
@@ -1457,7 +1458,15 @@ async fn defer_publication_error<T>(
     .await?;
     match code {
         Code::VersionConflict => Err(AppError::Conflict("version_conflict".into())),
-        Code::PublishUncertain => Err(publication::ambiguous()),
+        Code::PublishUncertain => Err(publication::ambiguous(error.status().or(fallback_status))),
+        Code::VerifyFailed | Code::OrnnUnavailable if row.source == ProposalSource::Authored => {
+            let diagnostic =
+                crate::errors::skill_publication::SkillPublicationFailure::registry_unavailable(
+                    code.as_str(),
+                    error.status(),
+                );
+            Err(diagnostic.map_or_else(|| error.into_app_error(), AppError::from))
+        }
         _ => Err(error.into_app_error()),
     }
 }
@@ -1568,9 +1577,11 @@ pub async fn edit(
     let owner_id = row.owner_id.clone();
     let proposal_agent = row.agent_id.clone();
     let body_len = encoded.len() as i64;
+    let acting_user = actor.to_owned();
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<()> = async {
+            Box::pin(org_agent_service::fence_maintenance(&db,session,&acting_user,&agent)).await?;
             let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
                 .find_one(doc! {"_id":&proposal_id,"owner_id":&owner_id,"agent_id":&proposal_agent,"revision":revision_filter(expected_revision),"status":{"$in":["pending","publication_failed"]}})
                 .session(&mut *session).await?.ok_or_else(conflict)?;
@@ -1642,11 +1653,13 @@ pub async fn reject(
     let agent_id = agent_id.to_owned();
     let fingerprint = row.fingerprint.clone();
     let reason = reason.to_owned();
+    let acting_user = actor.to_owned();
     let mut session = db.client().start_session().await?;
     session
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<()> = async {
+            Box::pin(org_agent_service::fence_maintenance(&db,session,&acting_user,&agent)).await?;
                 // Includes pre-#1828 pre-dispatch failures (see UNDISPATCHED_STATUSES).
                 let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
                     .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(revision),"status":{"$in":UNDISPATCHED_STATUSES.to_vec()}})
@@ -1753,6 +1766,7 @@ async fn discard_automatic(
     session.start_transaction().and_run2(async move |session| {
         let row = &row_for_discard;
         let result: AppResult<()> = async {
+            org_agent_service::fence_maintenance(&db,session,&actor_owned,&agent).await?;
             let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
                 doc! {"_id":&row.id,"owner_id":&actor_owned,"revision":revision_filter(revision),"source":"authored","status":"pinned","publication.acknowledgement_id":bson::Bson::Null,"publication.approved_by":&actor_owned},
                 doc! {
@@ -1798,6 +1812,7 @@ impl OrnnReader for UnavailableReader {
 pub(crate) struct BindingFailure {
     pub(crate) code: Option<publication::FailureCode>,
     pub(crate) rules: Vec<String>,
+    pub(crate) upstream_status: Option<u16>,
     pub(crate) error: AppError,
 }
 
@@ -1806,6 +1821,7 @@ impl From<AppError> for BindingFailure {
         Self {
             code: None,
             rules: Vec::new(),
+            upstream_status: None,
             error,
         }
     }
@@ -1823,6 +1839,7 @@ impl BindingFailure {
         Self {
             code: Some(error.failure_code(PublicationStage::BaseVerify)),
             rules: error.rules(),
+            upstream_status: error.status(),
             error: error.into_app_error(),
         }
     }
@@ -1888,6 +1905,7 @@ pub(crate) async fn approval_binding_typed<R: OrnnReader>(
         return Err(BindingFailure {
             code: Some(publication::FailureCode::BaseChanged),
             rules: Vec::new(),
+            upstream_status: None,
             error: AppError::Conflict("base_skill_changed".into()),
         });
     }
@@ -2259,6 +2277,7 @@ pub async fn accept_scope(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let result: AppResult<()> = async {
+            org_agent_service::fence_maintenance(&db,session,&operator.user_id,&agent).await?;
             let changed = db.collection::<bson::Document>(PROPOSALS_COLLECTION_NAME).update_one(
                 doc! {"_id":&row.id,"owner_id":&row.owner_id,"revision":row.revision,"publication.operation_id":&p.operation_id,"publication.reduced_scope_acceptance":bson::to_bson(&p.reduced_scope_acceptance).map_err(|_| conflict())?},
                 doc! {"$set":{"publication.reduced_scope_acceptance":bson::to_bson(&consent).map_err(|_| conflict())?}}).session(&mut *session).await?;
@@ -2283,7 +2302,9 @@ pub async fn approve(
     binding: &Value,
     reader: &impl OrnnReader,
 ) -> AppResult<Value> {
-    approve_core(state, chat, agent_id, id, Some(card), binding, reader).await
+    approve_core(state, chat, agent_id, id, Some(card), binding, reader)
+        .await
+        .map_err(AppError::with_legacy_skill_registry_error)
 }
 
 /// Server-initiated publication uses the chat owner's identity and the same
@@ -2358,12 +2379,16 @@ async fn approve_core(
         .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let result: AppResult<LearningPublication> = async {
+                super::org_agent_service::fence_maintenance(&db,session,&actor_for_claim,&agent_for_claim).await?;
                 super::erasure_admission::fence_in_session(&db, &agent_for_claim.user_id, session).await?;
                 let fresh = db.collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
                     .find_one(doc! {"_id":&proposal_id,"revision":revision_filter(proposal_revision),"publication.operation_id":&operation_id})
                     .session(&mut *session).await?.ok_or_else(conflict)?;
                 let mut next = fresh.publication.clone().ok_or_else(conflict)?;
                 super::assistant_skill_authoring::fence_proposal_in_session(&db,session,&fresh).await?;
+                if next.approved_by.is_some() && next.org_maintain_revision != agent_for_claim.org_maintain_revision {
+                    return Err(conflict());
+                }
                 if fresh.scope_digest.is_some() && next.reduced_scope_acceptance.as_ref().is_some_and(|consent| consent.revision != fresh.revision || consent.approval_digest != digest) { return Err(conflict()); }
 
                 if publication::binding(&fresh, &next, agent_for_claim.skills_revision) != binding { return Err(conflict()); }
@@ -2413,6 +2438,7 @@ async fn approve_core(
                 next.approved_by = Some(actor_for_claim.clone());
                 next.acknowledgement_id = card.clone();
                 next.approval_digest = Some(digest.clone());
+                next.org_maintain_revision = agent_for_claim.org_maintain_revision;
                 next.skills_revision = agent_for_claim.skills_revision;
                 next.lease_id = Some(lease.clone());
                 next.lease_expires_at = Some(Utc::now() + Duration::seconds(LEASE_SECONDS));
@@ -2423,7 +2449,7 @@ async fn approve_core(
                     .collection::<bson::Document>(PROPOSALS_COLLECTION_NAME)
                     .update_one(
                         doc! {"_id":&proposal_id,"revision":revision_filter(proposal_revision),"publication.operation_id":&operation_id,"status":{"$in":["pending","publishing","publication_failed","published_unpinned"]},"$or":[{"publication.lease_expires_at":bson::Bson::Null},{"publication.lease_expires_at":{"$lte":bson::DateTime::now()}}]},
-                        doc! {"$set":{"status":"publishing","publication.invocation_id":&next.invocation_id,"publication.approved_by":&next.approved_by,"publication.acknowledgement_id":&next.acknowledgement_id,"publication.approval_digest":&next.approval_digest,"publication.skills_revision":next.skills_revision,"publication.lease_id":&next.lease_id,"publication.lease_expires_at":next.lease_expires_at.map(bson::DateTime::from_chrono),"publication.attempt":next.attempt,"publication.last_stage":"claimed","publication.last_registry_status":bson::Bson::Null,"failure_rules":[],"failure_code":bson::Bson::Null,"updated_at":bson::DateTime::now()}},
+                        doc! {"$set":{"status":"publishing","publication.invocation_id":&next.invocation_id,"publication.approved_by":&next.approved_by,"publication.acknowledgement_id":&next.acknowledgement_id,"publication.approval_digest":&next.approval_digest,"publication.skills_revision":next.skills_revision,"publication.org_maintain_revision":next.org_maintain_revision,"publication.lease_id":&next.lease_id,"publication.lease_expires_at":next.lease_expires_at.map(bson::DateTime::from_chrono),"publication.attempt":next.attempt,"publication.last_stage":"claimed","publication.last_registry_status":bson::Bson::Null,"failure_rules":[],"failure_code":bson::Bson::Null,"updated_at":bson::DateTime::now()}},
                     )
                     .session(&mut *session)
                     .await?;
@@ -2643,6 +2669,19 @@ async fn mark_started(
     }).await.map_err(transactions::map_transaction_error)?;
     Ok(())
 }
+async fn fence_pin_authority(
+    db: &Database,
+    session: &mut mongodb::ClientSession,
+    target: &AssistantAgent,
+    publication: &LearningPublication,
+) -> AppResult<()> {
+    let approver = publication.approved_by.as_deref().ok_or_else(conflict)?;
+    if publication.org_maintain_revision != target.org_maintain_revision {
+        return Err(conflict());
+    }
+    org_agent_service::fence_maintenance(db, session, approver, target).await
+}
+
 /// Re-validates the claimed operation against live state. Returns the agent
 /// and, when the result must not be attached, why: withdrawn learned evidence
 /// or a changed source skill on an operation that may already have
@@ -2660,6 +2699,7 @@ async fn recheck(
     if latest.revision != row.revision
         || latest.fingerprint != row.fingerprint
         || agent.skills_revision != p.skills_revision
+        || agent.org_maintain_revision != p.org_maintain_revision
         || latest.publication.as_ref().is_none_or(|v| {
             v.lease_id != p.lease_id || v.lease_expires_at.is_none_or(|t| t <= Utc::now())
         })
@@ -2793,7 +2833,10 @@ async fn execute(
                     },
                 )
                 .await?;
-                return Err(AppError::Conflict(code.as_str().into()));
+                return Err(match code.save_failure(status) {
+                    Some(failure) => failure.into(),
+                    None => AppError::Conflict(code.as_str().into()),
+                });
             }
             publication::PublishOutcome::VersionConflict { status } => {
                 match publication::reconcile(reader, actor, p, body.base_skill.as_ref()).await {
@@ -2827,7 +2870,7 @@ async fn execute(
                     },
                 )
                 .await?;
-                return Err(publication::ambiguous());
+                return Err(publication::ambiguous(status));
             }
         }
     };
@@ -2933,6 +2976,7 @@ async fn execute(
         .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let result: AppResult<i64> = async {
+                Box::pin(fence_pin_authority(&db, session, &agent_for_pin, &publication_for_pin)).await?;
                 super::erasure_admission::fence_in_session(&db, &row_for_pin.owner_id, session).await?;
                 Box::pin(fence_invocation_publication(&db, session, &row_for_pin, &publication_for_pin)).await?;
                 let marked = db
@@ -3356,7 +3400,8 @@ async fn actions_for_card(
     if !effective && (card.status != "pending" || !card_live) {
         actions.push(AuthoredAction::Discard);
     }
-    if renewal_eligible(row, card, agent.skills_revision, now)
+    if !undispatched_legacy
+        && renewal_eligible(row, card, agent.skills_revision, now)
         && !actions.iter().any(|action| {
             matches!(
                 action,

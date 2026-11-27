@@ -157,7 +157,7 @@ pub async fn list(
     super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     if let Some(id) = &query.conversation_id {
-        engine::get(&state.db, &owner, id).await?;
+        engine::get_public(&state.db, &owner, id).await?;
     }
     let mut rows = desktop::list(&state.db, &owner, query.conversation_id.as_deref()).await?;
     if let Some(context_id) = &query.context_id {
@@ -329,7 +329,7 @@ pub async fn upgrade(
         ));
     }
     if let Some(id) = &query.conversation_id {
-        engine::get(&state.db, &owner, id).await?;
+        engine::get_public(&state.db, &owner, id).await?;
     }
     let row = desktop::open_display_for_context(
         &state.db,
@@ -980,12 +980,12 @@ pub async fn request_control(
         node.name
     );
     let conversation = engine::get(&state.db, &chat.user_id, &chat.conversation_id).await?;
-    super::nyxbot::deliver_update_for(
+    super::nyxbot::deliver_machine_control_notice(
         state,
         &conversation,
         &message,
-        None,
-        super::nyxbot::supplemental::Purpose::MachineDesktopNotice,
+        &row.session_id,
+        row.revision,
     )
     .await;
     let _ = crate::services::notification_service::machine_control_requested(

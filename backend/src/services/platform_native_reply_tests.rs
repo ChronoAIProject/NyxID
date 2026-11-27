@@ -1,6 +1,6 @@
 use super::*;
 use crate::models::{
-    platform_entry_identity::NativeEntryConfiguration,
+    platform_entry_identity::{NativeControlSurface, NativeEntryConfiguration},
     platform_manager_delivery::{DeliveryReference, DeliveryState},
     platform_manager_ingress::{IngressAudience, IngressPhase, PlatformManagerIngress},
 };
@@ -170,8 +170,16 @@ async fn claim(
 }
 
 pub(crate) async fn discord_fixture(base: &str) -> (AppState, ChannelBot, NativeEntryReceipt) {
+    discord_fixture_with_keys(base, crate::test_utils::test_encryption_keys()).await
+}
+
+async fn discord_fixture_with_keys(
+    base: &str,
+    keys: crate::crypto::aes::EncryptionKeys,
+) -> (AppState, ChannelBot, NativeEntryReceipt) {
     let db = crate::test_utils::connect_transaction_test_database("native_discord_reply").await;
-    let state = crate::test_utils::test_app_state(db.clone());
+    let mut state = crate::test_utils::test_app_state(db.clone());
+    state.encryption_keys = std::sync::Arc::new(keys);
     crate::services::platform_entry_migration::ensure(&db)
         .await
         .unwrap();
@@ -1441,3 +1449,6 @@ fn retained_signed_native_receipt_produces_real_login_status_and_manager_admissi
         },
     );
 }
+
+#[path = "platform_native_reply_mixed.rs"]
+mod mixed;

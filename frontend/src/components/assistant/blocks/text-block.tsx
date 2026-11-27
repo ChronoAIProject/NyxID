@@ -11,7 +11,7 @@ import {
 import type { Root } from "mdast";
 import { mentionTokens } from "@/lib/assistant/nyxbot-mentions";
 import type { InlineMention } from "@/lib/assistant/group-mentions";
-import ReactMarkdown, { type Components } from "react-markdown";
+import ReactMarkdown, { type Components, type ExtraProps } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import { remarkAutolinkPunctuation } from "@/lib/assistant/autolink-punctuation";
 import remarkGfm from "remark-gfm";
@@ -20,6 +20,22 @@ import { AssistantLink } from "@/components/assistant/blocks/assistant-link";
 import { assistantModalLinkTarget } from "@/lib/assistant/assistant-link-target";
 import { useSmoothReveal } from "@/hooks/use-smooth-reveal";
 import { splitStableMarkdown } from "@/lib/assistant/markdown-stream";
+import { parseNyxBotHandoff } from "@/schemas/nyxbot-handoff";
+import { NyxBotHandoffCard } from "./nyxbot-handoff-card";
+
+const HandoffRenderingContext = createContext<{ enabled: boolean; messageId?: string }>({ enabled: false });
+
+function MarkdownPre({ node, children }: ComponentProps<"pre"> & ExtraProps) {
+  const handoffRendering = useContext(HandoffRenderingContext);
+  const code = node?.children[0];
+  if (handoffRendering.enabled && node?.children.length === 1 && code?.type === "element" && code.tagName === "code" &&
+      Array.isArray(code.properties.className) && code.properties.className.includes("language-nyxbot-handoff") && code.properties.dataHandoffFirst === true) {
+    const text = code.children.map((child) => child.type === "text" ? child.value : "").join("");
+    const handoff = parseNyxBotHandoff(text);
+    if (handoff) return <NyxBotHandoffCard handoff={handoff} messageId={handoffRendering.messageId} />;
+  }
+  return <pre data-scroll-fade="" className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline bg-overlay px-3 py-2 font-mono type-code text-foreground [&>code]:bg-transparent [&>code]:p-0 [&>code]:text-inherit`}>{children}</pre>;
+}
 
 // Everything the assistant may stream should actually render (issue: results
 // were flattened). rehype-sanitize still scrubs attributes/urls; these are the
@@ -77,6 +93,7 @@ const SANITIZE_SCHEMA = {
     ...defaultSchema.attributes,
     input: [...(defaultSchema.attributes?.input ?? []), "checked"],
     span: [...(defaultSchema.attributes?.span ?? []), "dataGroupMention", "title"],
+    code: [...(defaultSchema.attributes?.code ?? []), "dataHandoffFirst"],
     th: [...(defaultSchema.attributes?.th ?? []), "align"],
     td: [...(defaultSchema.attributes?.td ?? []), "align"],
   },
@@ -116,6 +133,12 @@ function isHttpsHref(href: string): boolean {
 /** Literalize raw HTML and flatten images nested inside Markdown links. */
 function remarkSafeModelContent() {
   return (tree: Root) => {
+    // Only one top-level artifact may propose owner work. Quotes, lists and
+    // additional fences remain ordinary transcript content.
+    const first = tree.children.find((node) => node.type === "code" && node.lang === "nyxbot-handoff");
+    if (first?.type === "code") {
+      first.data = { ...first.data, hProperties: { dataHandoffFirst: true } };
+    }
     function visit(node: unknown, insideLink = false): void {
       if (!node || typeof node !== "object") return;
       const candidate = node as {
@@ -279,14 +302,7 @@ const COMPONENTS: Components = {
     </blockquote>
   ),
   hr: () => <hr className={`${BLOCK} border-hairline`} />,
-  pre: ({ children }) => (
-    <pre
-      data-scroll-fade=""
-      className={`${BLOCK} overflow-x-auto rounded-lg border border-hairline bg-overlay px-3 py-2 font-mono type-code text-foreground [&>code]:bg-transparent [&>code]:p-0 [&>code]:text-inherit`}
-    >
-      {children}
-    </pre>
-  ),
+  pre: MarkdownPre,
   code: ({ className, children }) => {
     // Fenced blocks carry `language-*`; the surrounding <pre> owns the styling.
     if (typeof className === "string" && className.startsWith("language-")) {
@@ -437,6 +453,8 @@ export const TextBlock = memo(function TextBlock({
   text,
   streaming = false,
   mentions,
+  allowHandoff = false,
+  handoffMessageId,
 }: {
   readonly text: string;
   /**
@@ -446,17 +464,20 @@ export const TextBlock = memo(function TextBlock({
    */
   readonly streaming?: boolean;
   readonly mentions?: readonly InlineMention[];
+  readonly allowHandoff?: boolean;
+  readonly handoffMessageId?: string;
 }) {
   const revealed = useSmoothReveal(text, streaming);
   // Everything above the last settled block is frozen and memoized; only the
   // live tail is re-parsed per frame. Splitting is refused wherever it could
   // change meaning, in which case this is a whole-text parse as before.
   const { prefix, tail } = useMemo(
-    () => splitStableMarkdown(revealed),
-    [revealed],
+    () => allowHandoff ? { prefix: "", tail: revealed } : splitStableMarkdown(revealed),
+    [revealed, allowHandoff],
   );
 
   return (
+    <HandoffRenderingContext value={{ enabled: allowHandoff && !streaming, messageId: handoffMessageId }}>
     <div
       className={`min-w-0 break-words type-chat-message [overflow-wrap:anywhere] ${streaming ? "[&>p:has(+_[data-streaming-caret])]:inline" : ""}`}
     >
@@ -479,5 +500,6 @@ export const TextBlock = memo(function TextBlock({
         />
       ) : null}
     </div>
+    </HandoffRenderingContext>
   );
 });

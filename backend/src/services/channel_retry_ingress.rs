@@ -2,12 +2,13 @@
 //! Claims and message records contain routing metadata only (ADR-013).
 
 use super::{
+    channel_guest_access::{self as guest, GuestMode, relay as guest_relay},
     channel_platform::InboundMessage,
     channel_relay_service, channel_routing_service,
     coordination_service::{EventDedupClaimResult, EventDedupStore},
 };
 use crate::models::{
-    api_key::{ApiKey, COLLECTION_NAME as API_KEYS},
+    api_key::COLLECTION_NAME as API_KEYS,
     channel_bot::ChannelBot,
     channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage},
 };
@@ -89,6 +90,18 @@ pub async fn deliver(
     {
         return Err(retry_later());
     }
+    let messages = db.collection::<ChannelMessage>(MESSAGES);
+    let previous = messages
+        .find_one(doc! {
+            "channel_bot_id": &bot.id, "platform": &bot.platform,
+            "direction": "inbound", "platform_message_id": &inbound.platform_message_id,
+        })
+        .await?;
+    if let Some(message) = &previous
+        && settle_obsolete_guest_retry(db, bot, inbound, message).await?
+    {
+        return Ok(());
+    }
     let route = channel_routing_service::resolve_agent(
         db,
         &bot.id,
@@ -101,15 +114,17 @@ pub async fn deliver(
     if route.conversation.user_id != bot.user_id || route.conversation.platform != bot.platform {
         return Err(retry_later());
     }
-    let api_key = db
-        .collection::<ApiKey>(API_KEYS)
+    let retained_key = db
+        .collection::<guest_relay::RetainedRelayKey>(API_KEYS)
         .find_one(doc! { "_id": &route.api_key_id, "user_id": &bot.user_id, "is_active": true })
         .await?
         .filter(|key| {
-            key.expires_at
+            key.key
+                .expires_at
                 .is_none_or(|expiry| expiry > chrono::Utc::now())
         })
         .ok_or_else(retry_later)?;
+    let api_key = &retained_key.key;
     let callback_url = api_key
         .callback_url
         .as_deref()
@@ -122,18 +137,10 @@ pub async fn deliver(
     {
         return Err(AppError::RateLimited);
     }
-    let mut stored = match db
-        .collection::<ChannelMessage>(MESSAGES)
-        .find_one(doc! {
-            "channel_bot_id": &bot.id, "platform": &bot.platform,
-            "direction": "inbound", "platform_message_id": &inbound.platform_message_id,
-        })
-        .await?
-    {
+    let mut stored = match previous {
         Some(message) => message,
         None => {
-            channel_relay_service::store_inbound_message_with_id(
-                db,
+            let mut message = channel_relay_service::inbound_metadata(
                 &bot.id,
                 &route.conversation.id,
                 &bot.user_id,
@@ -141,8 +148,29 @@ pub async fn deliver(
                 inbound,
                 &api_key.id,
                 message_id,
+            );
+            if !guest_relay::prepare(
+                db,
+                context.encryption_keys,
+                bot,
+                &route.conversation,
+                inbound,
+                &mut message,
             )
             .await?
+            {
+                return Err(retry_later());
+            }
+            if message.guest_relay.is_some() || message.hosted_guest_selector_unavailable {
+                super::channel_admission_service::store_current_owner(db, message.clone())
+                    .await?
+                    .ok_or_else(retry_later)?;
+            } else {
+                db.collection::<ChannelMessage>(MESSAGES)
+                    .insert_one(&message)
+                    .await?;
+            }
+            message
         }
     };
     if stored.thread_context.is_none()
@@ -170,6 +198,39 @@ pub async fn deliver(
     {
         return Ok(());
     }
+    guest_relay::revalidate_retry(db, bot, &route.conversation, &api_key.id, inbound, &stored)
+        .await?;
+    if stored.guest_relay.is_none() {
+        if !stored.hosted_guest_selector_unavailable
+            && let Err(error) = guest::select_mode_for_bot(db, bot).await
+        {
+            if !guest_relay::is_hosted_route(db, &bot.id, &route.conversation.id, &api_key.id)
+                .await?
+                || stored.conversation_id != route.conversation.id
+                || stored.agent_api_key_id.as_deref() != Some(&api_key.id)
+            {
+                return Err(error);
+            }
+            let updated = messages
+                .update_one(
+                    doc! {"_id":&stored.id,"channel_bot_id":&bot.id,"user_id":&bot.user_id,
+                    "conversation_id":&route.conversation.id,"agent_api_key_id":&api_key.id,
+                    "guest_relay":null,"callback_status":{"$ne":"delivered"}},
+                    doc! {"$set":{"hosted_guest_selector_unavailable":true}},
+                )
+                .await?;
+            if updated.matched_count != 1 {
+                return Err(retry_later());
+            }
+            stored.hosted_guest_selector_unavailable = true;
+        }
+        if stored.hosted_guest_selector_unavailable
+            && (stored.conversation_id != route.conversation.id
+                || stored.agent_api_key_id.as_deref() != Some(&api_key.id))
+        {
+            return Err(retry_later());
+        }
+    }
     // Pending retries follow the current owner-approved route while keeping the
     // UUID stable. Old route-bound reply JWTs cease to match this message.
     if stored.conversation_id != route.conversation.id
@@ -186,15 +247,13 @@ pub async fn deliver(
         stored.conversation_id = route.conversation.id.clone();
         stored.agent_api_key_id = Some(api_key.id.clone());
     }
-    let reply_token = crate::crypto::jwt::generate_relay_reply_token(
+    let reply_token = guest_relay::reply_token(
         context.jwt_keys,
         context.config,
-        &api_key.id,
-        &route.conversation.id,
-        &stored.id,
-        &bot.platform,
+        &stored,
+        &route.conversation,
     )?;
-    let payload = channel_relay_service::build_callback_payload(
+    let mut payload = channel_relay_service::build_callback_payload(
         &stored,
         &route.conversation,
         &api_key.id,
@@ -203,42 +262,63 @@ pub async fn deliver(
         Some(reply_token),
         &context.config.base_url,
     );
+    payload.guest_access_token = guest_relay::guest_data_token(
+        context.jwt_keys,
+        context.config,
+        &stored,
+        &route.conversation,
+    )?;
     // The sender is untrusted mail input. The runtime receives only the normal
     // agent-scoped delegation, never the mailbox credential.
     let owner = bot.user_id.parse().map_err(|_| retry_later())?;
-    let access =
-        if channel_relay_service::is_linked_org_nyxbot_route(db, &bot.id, &api_key.id).await? {
-            None
-        } else {
-            let scope = super::token_service::FIRST_PARTY_ACCESS_SCOPES;
-            let rbac = super::rbac_helpers::build_rbac_claim_data(db, &bot.user_id, scope)
-                .await
-                .ok();
-            Some(crate::crypto::jwt::generate_relay_access_token(
-                context.jwt_keys,
-                context.config,
-                &owner,
-                scope,
-                rbac.as_ref(),
-                &crate::crypto::jwt::RelayAgentScope {
-                    api_key_id: api_key.id.clone(),
-                    api_key_name: api_key.name.clone(),
-                    allowed_service_ids: api_key.allowed_service_ids.clone(),
-                    allowed_node_ids: api_key.allowed_node_ids.clone(),
-                    allow_all_services: api_key.allow_all_services,
-                    allow_all_nodes: api_key.allow_all_nodes,
-                },
-            )?)
-        };
+    let access = if stored.guest_relay.is_some()
+        || stored.hosted_guest_selector_unavailable
+        || channel_relay_service::is_linked_org_nyxbot_route(db, &bot.id, &api_key.id).await?
+    {
+        None
+    } else {
+        let scope = super::token_service::FIRST_PARTY_ACCESS_SCOPES;
+        let rbac = super::rbac_helpers::build_rbac_claim_data(db, &bot.user_id, scope)
+            .await
+            .ok();
+        Some(
+            retained_key
+                .mint_ordinary_bearer(
+                    db,
+                    context.jwt_keys,
+                    context.config,
+                    &owner,
+                    &route.conversation,
+                    scope,
+                    rbac.as_ref(),
+                    &crate::crypto::jwt::RelayAgentScope {
+                        api_key_id: api_key.id.clone(),
+                        api_key_name: api_key.name.clone(),
+                        allowed_service_ids: api_key.allowed_service_ids.clone(),
+                        allowed_node_ids: api_key.allowed_node_ids.clone(),
+                        allow_all_services: api_key.allow_all_services,
+                        allow_all_nodes: api_key.allow_all_nodes,
+                    },
+                )
+                .await?,
+        )
+    };
     let mut config = context.config.clone();
     config.channel_relay_callback_timeout_secs = config.channel_relay_callback_timeout_secs.min(10);
+    if stored.guest_relay.is_some() {
+        guest_relay::revalidate_delivery(db, &stored, &route.conversation, bot, &api_key.id, None)
+            .await?;
+    }
     let delivery = channel_relay_service::forward_to_agent(
-        channel_relay_service::callback_request(
+        channel_relay_service::callback_request_for_source(
             db,
             &config,
             Some(&bot.id),
             &api_key.id,
             callback_url,
+            stored
+                .hosted_guest_selector_unavailable
+                .then_some(route.conversation.id.as_str()),
         )
         .await,
         &config,
@@ -271,11 +351,70 @@ pub async fn deliver(
         ),
         None,
         None,
-        Some(api_key.id),
-        Some(api_key.name),
+        Some(api_key.id.clone()),
+        Some(api_key.name.clone()),
     );
     match delivery.result {
         Err(error) if channel_relay_service::destination_refused(&error) => Ok(()),
         result => result,
     }
+}
+
+/// A successfully read generation or policy change makes the original
+/// admission terminal. A failed authority read leaves the receipt retryable.
+async fn settle_obsolete_guest_retry(
+    db: &mongodb::Database,
+    bot: &ChannelBot,
+    inbound: &InboundMessage,
+    message: &ChannelMessage,
+) -> AppResult<bool> {
+    let Some(turn) = message.guest_relay.as_ref() else {
+        return Ok(false);
+    };
+    if message.user_id != bot.user_id
+        || turn.bot_id != bot.id
+        || message.platform_conversation_id.as_deref() != Some(&inbound.conversation_id)
+        || message.sender_platform_id.as_deref() != Some(&inbound.sender_platform_id)
+        || message.thread_id != inbound.thread_id
+    {
+        return Err(retry_later());
+    }
+    let rows = db.collection::<bson::Document>(MESSAGES);
+    let source = doc! {
+        "_id": &message.id, "channel_bot_id": &bot.id, "user_id": &bot.user_id,
+        "guest_relay.activation_epoch": turn.activation_epoch,
+        "guest_relay.bot_revision": turn.bot_revision,
+        "guest_relay.policy_revision": turn.policy_revision,
+    };
+    let mut terminal = source.clone();
+    terminal.insert("guest_relay_obsolete_at", doc! {"$type":"date"});
+    if rows
+        .find_one(terminal)
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    let mode = guest::select_mode(db, &bot.id).await?;
+    if mode
+        == (GuestMode::AddOn {
+            activation_epoch: turn.activation_epoch,
+            bot_revision: turn.bot_revision,
+        })
+        && guest::policy::load_policy(db, &bot.id)
+            .await?
+            .map_or(0, |policy| policy.revision)
+            == turn.policy_revision
+    {
+        return Ok(false);
+    }
+    let mut pending = source;
+    pending.insert("callback_status", doc! {"$ne":"delivered"});
+    pending.insert("guest_relay_obsolete_at", bson::Bson::Null);
+    rows.update_one(
+        pending,
+        doc! {"$set": {"guest_relay_obsolete_at": bson::DateTime::now(), "callback_status": "failed"}},
+    ).await?;
+    Ok(true)
 }

@@ -138,6 +138,7 @@
         crate::handlers::user_tokens::disconnect_provider,
         // User Services
         crate::handlers::user_services_handler::list_user_services,
+        crate::handlers::oauth_consent_disclosure::read,
         crate::handlers::user_services_handler::update_user_service,
         crate::handlers::user_services_handler::delete_user_service,
         // NyxID API Keys

@@ -1470,9 +1470,7 @@ pub async fn set(
     } else {
         vec![doc! {"skills_revision": selection.expected_revision}]
     };
-    let result = db
-        .collection::<AssistantAgent>(COLLECTION_NAME)
-        .update_one(
+    let result = super::org_agent_service::update_maintained(db,owner,&agent,
             doc! {"_id": id, "user_id": &agent.user_id, "destroyed_at": bson::Bson::Null, "$or": revisions},
             doc! {"$set": {
                 "skills": bson::to_bson(&selection.skills).map_err(|_| invalid("Invalid skills"))?,
@@ -1482,7 +1480,7 @@ pub async fn set(
             }},
         )
         .await?;
-    if result.matched_count != 1 {
+    if result.is_none() {
         return Err(AppError::Conflict(
             "Skills changed; reload the current revision".into(),
         ));

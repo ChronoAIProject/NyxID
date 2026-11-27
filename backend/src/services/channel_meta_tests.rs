@@ -742,6 +742,9 @@ async fn instagram(server: &MockServer) {
         .expect(1)
         .mount(server)
         .await;
+    instagram_selection(server).await;
+}
+async fn instagram_selection(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path("/v25.0/me"))
         .and(header("authorization", "Bearer long-token"))
@@ -887,7 +890,8 @@ async fn prepared_instagram_installation(reconnect: bool) {
     if reconnect {
         bots.update_one(
             doc! {"_id": &bot.id},
-            doc! {"$set": {"platform_bot_id":"777", "meta_binding.grant_subject_id":""}},
+            doc! {"$set": {"platform_bot_id":"777", "meta_binding.grant_subject_id":"",
+            "guest_access_v1":false,"guest_access_v1_revision":2_i64}},
         )
         .await
         .unwrap();
@@ -939,6 +943,11 @@ async fn prepared_instagram_installation(reconnect: bool) {
         .unwrap();
     assert_eq!(managed.id == bot.id, reconnect);
     assert_eq!(managed.credential_source, "platform");
+    assert_eq!(managed.guest_access_v1, !reconnect);
+    assert_eq!(
+        managed.guest_access_v1_revision,
+        if reconnect { 2 } else { 1 }
+    );
     assert_eq!(
         settings
             .find_one(id)
@@ -1275,23 +1284,20 @@ async fn due_work_claim_is_atomic_and_does_not_starve_after_a_hundred_not_due_ro
     assert!(claim_due(&state.db).await.unwrap().is_none());
 }
 
-#[tokio::test]
-async fn facebook_page_picker_keeps_siblings_independent_and_records_login_provenance() {
-    let (state, _, server, bot) = fixture("messenger").await;
-    configure(&state, &bot).await;
+async fn messenger_graph(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/v25.0/oauth/access_token"))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(json!({"access_token":"login-token","expires_in":5184000})),
         )
-        .mount(&server)
+        .mount(server)
         .await;
     Mock::given(method("GET"))
         .and(path("/v25.0/me"))
         .and(header("authorization", "Bearer login-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"900"})))
-        .mount(&server)
+        .mount(server)
         .await;
     Mock::given(method("GET"))
         .and(path("/v25.0/me/permissions"))
@@ -1303,7 +1309,7 @@ async fn facebook_page_picker_keeps_siblings_independent_and_records_login_prove
         {"permission":"pages_messaging",
             "status":"granted"}]}),
         ))
-        .mount(&server)
+        .mount(server)
         .await;
 
     Mock::given(method("GET"))
@@ -1322,7 +1328,7 @@ async fn facebook_page_picker_keeps_siblings_independent_and_records_login_prove
             "tasks":["ADVERTISE"],
             "access_token":"wrong-task-token"}]})),
         )
-        .mount(&server)
+        .mount(server)
         .await;
 
     for (asset, token) in [("777", "first-page-token"), ("888", "second-page-token")] {
@@ -1333,7 +1339,7 @@ async fn facebook_page_picker_keeps_siblings_independent_and_records_login_prove
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{
                 "app_id":"111","is_valid":true,"type":"PAGE","profile_id":asset,
                 "scopes":["pages_messaging","pages_manage_metadata"]}})))
-            .mount(&server)
+            .mount(server)
             .await;
         Mock::given(method("GET"))
             .and(path("/v25.0/me"))
@@ -1342,10 +1348,17 @@ async fn facebook_page_picker_keeps_siblings_independent_and_records_login_prove
                 ResponseTemplate::new(200)
                     .set_body_json(json!({"id":asset,"name":"Page","category":"Business"})),
             )
-            .mount(&server)
+            .mount(server)
             .await;
-        subscriptions(&server, asset).await;
+        subscriptions(server, asset).await;
     }
+}
+
+#[tokio::test]
+async fn facebook_page_picker_keeps_siblings_independent_and_records_login_provenance() {
+    let (state, _, server, bot) = fixture("messenger").await;
+    configure(&state, &bot).await;
+    messenger_graph(&server).await;
     Mock::given(method("DELETE"))
         .and(path("/v25.0/777/subscribed_apps"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success":true})))
@@ -8647,3 +8660,6 @@ async fn meta_owner_turns_keep_neutral_titles_and_reclaimed_replies_retain_their
     );
     state.db.drop().await.unwrap();
 }
+
+#[path = "channel_meta_service/mixed_assets.rs"]
+mod mixed_assets;

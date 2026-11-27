@@ -349,7 +349,7 @@ async fn inspect_x_credential(
     ))
 }
 
-pub async fn require_platform_admin(db: &Database, actor: &str) -> AppResult<()> {
+pub async fn require_platform_admin(db: &Database, actor: &str) -> AppResult<User> {
     let user = db
         .collection::<User>(USERS)
         .find_one(doc! { "_id": actor, "is_active": true })
@@ -362,7 +362,7 @@ pub async fn require_platform_admin(db: &Database, actor: &str) -> AppResult<()>
     {
         return Err(AppError::Forbidden("NyxID admin access required".into()));
     }
-    Ok(())
+    Ok(user)
 }
 
 fn valid_id(value: &str) -> AppResult<()> {
@@ -567,6 +567,7 @@ pub async fn preview(
     .await
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub async fn preview_with_agent(
     db: &Database,
@@ -577,6 +578,32 @@ pub async fn preview_with_agent(
     resource_id: &str,
     destination: &str,
     capacity: u32,
+) -> AppResult<TransferPreview> {
+    preview_with_platform(
+        db,
+        actor,
+        api_key_id,
+        first_party_human,
+        kind,
+        resource_id,
+        destination,
+        capacity,
+        access::OwnershipPlatformAccess::Granted,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn preview_with_platform(
+    db: &Database,
+    actor: &str,
+    api_key_id: Option<&str>,
+    first_party_human: bool,
+    kind: ResourceKind,
+    resource_id: &str,
+    destination: &str,
+    capacity: u32,
+    platform_access: access::OwnershipPlatformAccess,
 ) -> AppResult<TransferPreview> {
     if kind == ResourceKind::ChannelBot {
         super::platform_bot_authority::refuse_platform_bot(db, resource_id).await?;
@@ -594,6 +621,7 @@ pub async fn preview_with_agent(
         resource_id,
         &owner,
         false,
+        platform_access,
     )
     .await?;
     let result = inspect(
@@ -622,10 +650,20 @@ pub struct TransferCommand<'a> {
     pub capacity: u32,
 }
 
+#[cfg(test)]
 pub async fn transfer_with_keys(
     db: &Database,
     keys: Option<&crate::crypto::aes::EncryptionKeys>,
     command: TransferCommand<'_>,
+) -> AppResult<OwnershipTransfer> {
+    transfer_with_platform(db, keys, command, access::OwnershipPlatformAccess::Granted).await
+}
+
+pub(crate) async fn transfer_with_platform(
+    db: &Database,
+    keys: Option<&crate::crypto::aes::EncryptionKeys>,
+    command: TransferCommand<'_>,
+    platform_access: access::OwnershipPlatformAccess,
 ) -> AppResult<OwnershipTransfer> {
     let TransferCommand {
         actor,
@@ -684,7 +722,14 @@ pub async fn transfer_with_keys(
         return if receipt_matches(&receipt) {
             let mut session = db.client().start_session().await?;
             session.start_transaction().await?;
-            access::authorize_replay(&db, &mut session, &receipt, first_party_human).await?;
+            access::authorize_replay(
+                &db,
+                &mut session,
+                &receipt,
+                first_party_human,
+                platform_access,
+            )
+            .await?;
             session.commit_transaction().await?;
             Ok(receipt)
         } else {
@@ -694,13 +739,14 @@ pub async fn transfer_with_keys(
         };
     }
 
-    access::require_resource_access(
+    access::require_resource_access_with_platform(
         &db,
         &actor,
         api_key_id.as_deref(),
         first_party_human,
         kind,
         &resource_id,
+        platform_access,
     )
     .await?;
     // Authenticate captured material after ACL admission and before the retrying
@@ -834,11 +880,11 @@ pub async fn transfer_with_keys(
                         "Transfer request ID was already used for another operation".into(),
                     ));
                 }
-                access::authorize_replay(&db, transaction, &receipt, first_party_human).await?;
+                access::authorize_replay(&db, transaction, &receipt, first_party_human, platform_access).await?;
                 return Ok(receipt);
             }
             let owner = access::resource_owner(&db, transaction, kind, &resource_id).await?;
-            access::authorize_resource(&db, transaction, &actor, api_key_id.as_deref(), first_party_human, kind, &resource_id, &owner, true).await?;
+            access::authorize_resource(&db, transaction, &actor, api_key_id.as_deref(), first_party_human, kind, &resource_id, &owner, true, platform_access).await?;
             let reviewed = inspect(
                 &db,
                 transaction,
@@ -979,10 +1025,26 @@ pub async fn transfer_with_keys(
                 set.extend(rebound.clone());
             }
             let mut update = doc! { "$set": set };
+            let mut retire_guest_data = false;
             if kind == ResourceKind::ChannelBot {
                 let mut increments=doc! {"ownership_version":1_i64};
-                let moving_bot=db.collection::<Document>(BOTS).find_one(doc! {"_id":&resource_id}).session(&mut **transaction).await?;
-                if moving_bot.as_ref().and_then(|row|row.get_str("platform").ok()).is_some_and(super::channel_adapters::meta::is_meta) {
+                let moving_bot = credential_rebind.as_ref().map(|(row, _)| row)
+                    .ok_or_else(|| AppError::Conflict("Transfer source changed".into()))?;
+                let current = super::channel_bot_record::decode(moving_bot)?;
+                retire_guest_data = moving_bot.get_bool("channel_guest_data_present") == Ok(true);
+                if current.guest_access_v1_revision > 0 || retire_guest_data {
+                    current.guest_access_v1_revision.checked_add(1)
+                        .ok_or_else(|| AppError::Conflict("Bot guest access revision exhausted".into()))?;
+                    increments.insert("guest_access_v1_revision", 1_i64);
+                }
+                if retire_guest_data {
+                    let cutoff = current.ownership_version.checked_add(1)
+                        .ok_or_else(|| AppError::Conflict("Bot ownership revision exhausted".into()))?;
+                    update.get_document_mut("$set").map_err(|_| AppError::Internal("Invalid channel transfer".into()))?
+                        .insert("channel_guest_purge_before_ownership", cutoff);
+                    update.insert("$unset", doc! { "guest_skill_selection": "" });
+                }
+                if super::channel_adapters::meta::is_meta(&current.platform) {
                     increments.insert("meta_binding.generation",1_i64);
                     update.get_document_mut("$set").map_err(|_|AppError::Internal("Invalid channel transfer".into()))?.extend(doc! {
                         "meta_binding.subscription":"reconnect_required","meta_binding.grant_reconnect_required":true,
@@ -1018,6 +1080,11 @@ pub async fn transfer_with_keys(
                 return Err(AppError::Conflict(
                     "The resource owner changed. Review a fresh transfer preview".into(),
                 ));
+            }
+            if retire_guest_data {
+                super::channel_guest_access::setup::retire_for_transfer_in_session(
+                    &db, transaction, &resource_id,
+                ).await?;
             }
             let receipt = OwnershipTransfer {
                 tool_transfer: reviewed.tool_transfer,
@@ -1068,8 +1135,14 @@ pub async fn transfer_with_keys(
                 Some(receipt) if receipt_matches(&receipt) => {
                     let mut session = db.client().start_session().await?;
                     session.start_transaction().await?;
-                    access::authorize_replay(&db, &mut session, &receipt, first_party_human)
-                        .await?;
+                    access::authorize_replay(
+                        &db,
+                        &mut session,
+                        &receipt,
+                        first_party_human,
+                        platform_access,
+                    )
+                    .await?;
                     session.commit_transaction().await?;
                     Ok(receipt)
                 }

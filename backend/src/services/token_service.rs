@@ -376,6 +376,12 @@ pub async fn insert_prepared_session(
 }
 
 impl PreparedSessionRows {
+    pub(super) fn matches_delivery_user(&self, user_id: &str) -> bool {
+        self.session.user_id == user_id
+            && self.refresh.user_id == user_id
+            && self.refresh.session_id.as_deref() == Some(self.session.id.as_str())
+    }
+
     pub(super) async fn insert(
         &self,
         db: &mongodb::Database,

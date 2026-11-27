@@ -327,8 +327,9 @@ per-message entities, so emphasis, links and code do not depend on parsing an
 unfinished Markdown fragment. Native manager and proactive posts use the same
 platform-specific limits (including Slack scalar and Lark JSON-byte accounting).
 
-Authored post requests retain their 4,000-character input limit; Unicode can
-still require multiple provider messages. Saved manager replies and automation
+Authored post requests accept at most 32,768 characters of input. This input
+limit is separate from the platform's single-message limit, so a post can still
+require multiple provider messages. Saved manager replies and automation
 results use the larger delivery bound below, with their saved thread as the
 source for any overflow link.
 
@@ -339,18 +340,44 @@ label-plus-URL text. WhatsApp uses its native style markers and `label (URL)`;
 unsafe literal markers use the smallest code span. Colliding backticks that its
 documented code syntax cannot represent pass through unchanged. Formatting never
 adds a refusal; URLs exceeding one message retain the existing split behavior.
-Slack and Telegram output remain unchanged.
+New Slack assistant text plans use renderer v3. A plan uses rich text when
+CommonMark-escaped `*`, `_` or `~` survives as display text outside code and
+link labels. In such a plan, each part containing an escaped delimiter or
+a literal backtick sends one `rich_text` block within the ordinary
+40,000-scalar fallback text budget. Other parts use ordinary Slack text
+formatting. The block retains authored styles, preformatted code and
+supported HTTP, HTTPS and mailto links. Link labels retain their text and
+style. Inline code inside a label is a text run and surrounding label
+runs link to the authored destination. A wholly code label displays only its
+code. Other unsupported destinations appear as visible text. Escaped
+delimiters in bare URLs also trigger rich text. Bare URLs preserve CommonMark
+character-reference decoding, and decoded whitespace ends the link.
+Authored angle autolinks preserve their original bytes. Mention-like text
+remains literal.
+
+The block part also carries entity-escaped plain display text and
+`mrkdwn: false`. Masked destinations appear once in that fallback text
+and the fallback fits the ordinary 40,000-scalar budget. Under the same
+delivery claim, an HTTP 200 Slack response with `ok: false` and
+`invalid_blocks`, `invalid_blocks_format` or `msg_blocks_too_long` records
+`slack_formatting_fallback` and sends the same text once without the block.
+An uncertain response keeps the existing delivery fence. The fallback
+applies to journaled assistant text. Raw sends, edits and upload captions
+use their adapter contracts. For a plan without a surviving escape, literal
+backticks still select whole-reply plain-text mode.
 
 The journal pins the renderer version with its fingerprint and notice inputs.
 An absent version means v1, retained only to finish recorded plans. New workers
 resume each version's pending suffix without replaying accepted parts. An old
-worker encountering v2 refuses its different fingerprint before claiming a part;
+worker without the pinned renderer refuses its different fingerprint before claiming a part;
 the recipient keeps the accepted prefix. Normal source-specific failure/recovery
 reporting still applies. Never reset a journal to change its renderer.
 
 Each text delivery is bounded to 64 messages, matching ordinary channel relay's
 amplification bound. An oversized result sends 63 content messages and a final
-plain notice linking the exact saved thread for the remainder. Ordinary replies
+plain notice linking the exact saved thread for the remainder. (Agent replies
+through `/channel-relay/reply` follow a different rule: more than 64 parts fails
+before sending; see [Complete IM replies](CHANNEL_COMPLETE_REPLIES.md#bounds-and-splitting).) Ordinary replies
 contain their content without an automatic NyxID link. Chat-decidable action
 requests retain their chat instructions; a pending action requiring web review
 adds a link. Native attachment failures also explain where to find the item.

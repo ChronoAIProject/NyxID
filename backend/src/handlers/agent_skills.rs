@@ -25,6 +25,212 @@ use serde_json::{Value, json};
 
 pub(crate) use crate::services::agent_skill_service::OrnnSkillRead;
 
+use crate::services::channel_guest_access::skills as guest_skills;
+
+pub(crate) const GUEST_TOOL_NAME: &str = "nyxid__skill_read";
+
+pub(crate) async fn guest_tool_definition(
+    state: &AppState,
+    chat: &ChatAuthority,
+) -> Option<crate::services::mcp_service::McpToolDefinition> {
+    let agent = guest_skills::visible_agent(&state.db, chat).await.ok()?;
+    if agent.skills.is_empty() {
+        return None;
+    }
+    Some(crate::services::mcp_service::McpToolDefinition {
+        name: GUEST_TOOL_NAME.into(),
+        description: crate::services::assistant_team_tools::description("skill_read").into(),
+        input_schema: crate::services::assistant_team_tools::schema("skill_read"),
+    })
+}
+
+pub(crate) async fn get_guest_skills(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(bot): Path<String>,
+) -> AppResult<Json<guest_skills::Inventory>> {
+    require_skill_maintainer_session(&auth)?;
+    Ok(Json(
+        guest_skills::get(&state.db, &auth.user_id.to_string(), &bot).await?,
+    ))
+}
+
+pub(crate) async fn set_guest_skills(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(bot): Path<String>,
+    Json(input): Json<guest_skills::Update>,
+) -> AppResult<Json<guest_skills::Inventory>> {
+    require_skill_maintainer_session(&auth)?;
+    let actor = crate::services::audit_service::AuditActor::from_auth_user(&auth);
+    Ok(Json(guest_skills::set(&state, &actor, &bot, input).await?))
+}
+
+fn require_skill_maintainer_session(auth: &AuthUser) -> AppResult<()> {
+    super::login_client_context::require_first_party_human(auth)
+}
+
+pub(crate) async fn read_guest_declaration(
+    state: &AppState,
+    actor: &str,
+    bot_id: &str,
+    skills_revision: i64,
+    skill_id: &str,
+) -> AppResult<Value> {
+    let (binding, agent) = guest_skills::maintainer_binding(&state.db, actor, bot_id).await?;
+    let pin = guest_skills::exact_pin(&agent, skills_revision, skill_id)
+        .ok_or(AppError::SkillRead(SkillReadReason::SkillNotBound))?;
+    let service = state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! {"slug":"ornn-api","is_active":true})
+        .await?
+        .ok_or(AppError::SkillRead(
+            SkillReadReason::OwnerConnectionUnavailable,
+        ))?;
+    let path = format!(
+        "/api/v1/skills/{}/versions/{}/download",
+        pin.skill_id, pin.version
+    );
+    let standing =
+        guest_skills::standing_approved(&state.db, actor, bot_id, &agent, skill_id).await?;
+    let descriptor =
+        crate::services::operation_descriptor::build_http_descriptor("GET", &path, None);
+    if !matches!(
+        crate::services::approval_service::evaluate_channel_skill_read(
+            &state.db,
+            actor,
+            &agent.user_id,
+            &service.id,
+            &descriptor,
+            bot_id,
+            standing,
+        )
+        .await?,
+        crate::services::approval_service::ApprovalOutcome::Allowed { .. },
+    ) {
+        return Err(AppError::Forbidden(
+            "The attached skill read requires approval".into(),
+        ));
+    }
+    let reader = Reader {
+        state,
+        person: actor,
+        thread_key: None,
+        scopes: Some(&agent.operation_scopes),
+        chat: None,
+    };
+    let files = skills::pinned_files(&reader.bound_skill(&agent), pin).await?;
+    let (live_binding, live) = guest_skills::maintainer_binding(&state.db, actor, bot_id).await?;
+    if live_binding.id != binding.id
+        || live.id != agent.id
+        || guest_skills::exact_pin(&live, skills_revision, skill_id) != Some(pin)
+    {
+        return Err(AppError::SkillRead(SkillReadReason::SkillNotBound));
+    }
+    let bytes = files
+        .get("nyxid-guest-access.json")
+        .filter(|file| file.len() <= 16 * 1024)
+        .ok_or_else(|| {
+            AppError::ValidationError("Missing or oversized nyxid-guest-access.json".into())
+        })?;
+    serde_json::from_slice(bytes)
+        .map_err(|_| AppError::ValidationError("Invalid nyxid-guest-access.json".into()))
+}
+
+pub(crate) async fn guest_skill_lookup(
+    State(state): State<AppState>,
+    request: Request<Body>,
+) -> AppResult<Json<guest_skills::BotAuthorization>> {
+    let token = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|_| request.method() == http::Method::GET)
+        .ok_or_else(|| AppError::Unauthorized("The Ornn bot capability is required".into()))?;
+    Ok(Json(guest_skills::lookup(&state, token).await?))
+}
+
+struct GuestSkillReader<'a> {
+    state: &'a AppState,
+    chat: &'a ChatAuthority,
+    root_id: &'a str,
+}
+
+#[async_trait::async_trait]
+impl OrnnReader for GuestSkillReader<'_> {
+    async fn get(&self, path: &str) -> AppResult<Vec<u8>> {
+        let permit = guest_skills::authorize(&self.state.db, self.chat, self.root_id, path).await?;
+        let service = self
+            .state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! {"slug":"ornn-api","is_active":true})
+            .await?
+            .ok_or(AppError::SkillRead(
+                SkillReadReason::OwnerConnectionUnavailable,
+            ))?;
+        let response = INTERNAL_CALLER
+            .scope(
+                "ornn-channel-skill",
+                Box::pin(super::proxy::channel_guest_skill_download(
+                    self.state,
+                    service.clone(),
+                    permit.clone(),
+                )),
+            )
+            .await?;
+        let status = response.status().as_u16();
+        if matches!(status, 401 | 403 | 404) {
+            return Err(AppError::SkillRead(SkillReadReason::OrnnPrincipalDenied));
+        }
+        if !response.status().is_success() {
+            return Err(AppError::OAuthAuthorityUnavailable);
+        }
+        let bytes = to_bytes(response.into_body(), skills::MAX_ARCHIVE)
+            .await
+            .map_err(|_| AppError::OAuthAuthorityUnavailable)?;
+        permit.revalidate(&self.state.db).await?;
+        guest_skills::revalidate_catalog(&self.state.db, &service).await?;
+        permit.require_approved(&self.state.db, &service.id).await?;
+        Ok(bytes.to_vec())
+    }
+}
+
+pub(crate) async fn guest_tool(
+    state: &AppState,
+    chat: &ChatAuthority,
+    args: &Value,
+) -> AppResult<Value> {
+    crate::services::assistant_team_tools::validate("skill_read", args)?;
+    let agent = guest_skills::visible_agent(&state.db, chat).await?;
+    let root = arg(args, "skill");
+    if !agent.skills.iter().any(|pin| pin.skill_id == root) {
+        audit_skill_read_refusal(state, &chat.user_id, "skill_not_bound");
+        return Err(AppError::SkillRead(SkillReadReason::SkillNotBound));
+    }
+    let outline = args["section"].as_str() == Some("outline");
+    if outline && !crate::services::skill_outline::enabled(&state.db, &chat.user_id).await? {
+        return Err(AppError::Forbidden("Skill outlines are not enabled".into()));
+    }
+    let reader = GuestSkillReader {
+        state,
+        chat,
+        root_id: root,
+    };
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        Box::pin(read_attached(&reader, &agent, args, outline)),
+    )
+    .await
+    .map_err(|_| AppError::OAuthAuthorityUnavailable)?
+}
+
 /// Identity assertion for catalog/search/authoring reads. It retains the
 /// historical signed-person requirement without granting the bound-pin
 /// connection exception carried by `OrnnSkillRead`.
@@ -870,7 +1076,12 @@ pub(crate) async fn preload_for_turn(
     row: &crate::models::assistant_conversation::AssistantConversation,
     agent: &crate::models::assistant_agent::AssistantAgent,
 ) -> AppResult<String> {
-    if !crate::services::agent_skill_preload::enabled(agent, row.guest_turn) {
+    let guest_add_on = row.guest_turn
+        && row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.channel_guest.is_some());
+    if !crate::services::agent_skill_preload::enabled(agent, row.guest_turn && !guest_add_on) {
         return Ok(String::new());
     }
     let chat = acks::chat_for_conversation(&state.db, row)
@@ -878,7 +1089,7 @@ pub(crate) async fn preload_for_turn(
         .filter(|chat| {
             chat.turn_live
                 && !chat.turn_stopped
-                && !chat.guest
+                && chat.guest == row.guest_turn
                 && chat.agent_id == agent.id
                 && chat.conversation_id == row.id
                 && chat.turn_id.as_deref()
@@ -887,6 +1098,27 @@ pub(crate) async fn preload_for_turn(
         .ok_or_else(|| {
             AppError::Forbidden("Live owner turn required for skill preloading".into())
         })?;
+    if guest_add_on {
+        let mut agent = guest_skills::visible_agent(&state.db, &chat).await?;
+        for pin in &mut agent.skills {
+            // Failure entries may identify the pin without disclosing package metadata.
+            pin.name.clone_from(&pin.skill_id);
+        }
+        let chat = &chat;
+        return Ok(
+            crate::services::agent_skill_preload::instructions_by_pin(&agent, |pin| {
+                Box::pin(async move {
+                    let reader = GuestSkillReader {
+                        state,
+                        chat,
+                        root_id: &pin.skill_id,
+                    };
+                    skills::pinned_files(&reader, pin).await
+                })
+            })
+            .await,
+        );
+    }
     let reader = Reader {
         state,
         person: &row.user_id,
@@ -1565,6 +1797,7 @@ mod tests {
         ChatAuthority {
             key_version: 0,
             voice_parent_conversation_id: None,
+            channel_guest: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
@@ -1852,6 +2085,7 @@ mod tests {
             )
             .insert_one(
                 crate::models::service_approval_config::ServiceApprovalConfig {
+                    approvers: Default::default(),
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),
                     service_id: service.id.clone(),
@@ -1987,3 +2221,7 @@ mod tests {
 #[cfg(test)]
 #[path = "agent_skills/org_owner_tests.rs"]
 mod org_owner_tests;
+
+#[cfg(test)]
+#[path = "agent_skills/channel_guest_tests.rs"]
+mod channel_guest_tests;

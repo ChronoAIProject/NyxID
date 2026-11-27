@@ -92,6 +92,7 @@ COPY backend/prompts backend/prompts
 COPY backend/content backend/content
 COPY backend/specs backend/specs
 COPY backend/assets backend/assets
+COPY shared/agent-avatars/catalog.json shared/agent-avatars/catalog.json
 COPY cloud-auth/src cloud-auth/src
 COPY service-adapters/src service-adapters/src
 COPY machine/src machine/src

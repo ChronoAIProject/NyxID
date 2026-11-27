@@ -1664,6 +1664,20 @@
       }
     }
   ],
+  "channel_guest_setup": [
+    {
+      "_id": "fixture-value",
+      "owner_id": "fixture-owner",
+      "revision": 2,
+      "pending_activation": true,
+      "policy_revision": 1,
+      "updated_at": {
+        "$date": {
+          "$numberLong": "1700000000000"
+        }
+      }
+    }
+  ],
   "channel_messages": [
     {
       "_id": "fixture-value",

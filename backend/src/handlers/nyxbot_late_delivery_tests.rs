@@ -203,7 +203,10 @@ async fn long_turn_deadline_is_quiet_then_durable_late_answer_once() {
         f.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        receiver,
+        InboundTurn {
+            receiver,
+            hosted_reply: None,
+        },
         Utc::now() - ChronoDuration::seconds(late_delivery::STREAM_SECS + 1),
     );
     let text = body_text(response).await;
@@ -241,7 +244,10 @@ async fn committed_stream_is_never_late_sent_even_after_deadline() {
         f.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        receiver,
+        InboundTurn {
+            receiver,
+            hosted_reply: None,
+        },
         Utc::now(),
     );
     assert!(body_text(response).await.contains("Useful answer"));
@@ -250,6 +256,108 @@ async fn committed_stream_is_never_late_sent_even_after_deadline() {
     delivery::detach(&f.state.db, &f.event.id).await.unwrap();
     late_delivery::sweep(&f.state).await.unwrap();
     assert!(sends(&f).await.is_empty());
+}
+
+#[tokio::test]
+async fn hosted_reply_delivery_custom_replay_rechecks_the_original_event() {
+    use futures::StreamExt;
+
+    let mut f = fixture("hosted_reply_custom_replay").await;
+    let ordinary = f.event.conversation_id.clone();
+    let hosted = || Some(format!("nyxag-{}", Uuid::new_v4().simple()));
+    let events = f.state.db.collection::<NyxbotEvent>(EVENTS);
+    for (conversation, replacement, expect_answer) in [
+        (hosted(), None, false),
+        (hosted(), ordinary.clone(), false),
+        (ordinary.clone(), None, true),
+    ] {
+        f.event.conversation_id = conversation;
+        f.event.turn_id = Some(Uuid::new_v4().to_string());
+        f.event.custom_binding_id = Some("custom-test".into());
+        f.event.status = "completed".into();
+        f.event.delivery.as_mut().unwrap().guest = true;
+        events
+            .replace_one(doc! {"_id": &f.event.id}, &f.event)
+            .upsert(true)
+            .await
+            .unwrap();
+        settled(&f, false).await;
+
+        let response = custom_replay(&f.state, &f.event.id, "response").await;
+        let mut chunks = response.into_body().into_data_stream();
+        let created = chunks.next().await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&created).contains("response.created"));
+        events.delete_one(doc! {"_id": &f.event.id}).await.unwrap();
+        if let Some(replacement) = replacement {
+            let mut event = f.event.clone();
+            event.conversation_id = Some(replacement);
+            events.insert_one(event).await.unwrap();
+        }
+        let mut body = String::new();
+        while let Some(chunk) = chunks.next().await {
+            body.push_str(&String::from_utf8_lossy(&chunk.unwrap()));
+        }
+
+        assert!(body.contains("response.completed"), "{body}");
+        assert_eq!(body.contains("Useful answer"), expect_answer, "{body}");
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn hosted_reply_delivery_active_direct_stream_requires_its_original_turn() {
+    let f = fixture("hosted_reply_direct_stream").await;
+    let events = f.state.db.collection::<NyxbotEvent>(EVENTS);
+    let conversation = "nyxag-1234567890abcdef1234567890abcdef";
+    let original_turn = Uuid::new_v4().to_string();
+    let response = |hosted_reply| {
+        let (sender, receiver) = broadcast::channel(8);
+        sender
+            .send(json!({"event":"block.completed","block":{"text":"Useful answer"}}))
+            .unwrap();
+        sender
+            .send(json!({"event":"turn.completed","status":"completed"}))
+            .unwrap();
+        late_delivery::provider_stream_direct(
+            f.state.clone(),
+            f.event.id.clone(),
+            "response".into(),
+            json!({"type":"response.created"}),
+            InboundTurn {
+                receiver,
+                hosted_reply,
+            },
+            Utc::now(),
+        )
+    };
+
+    let missing = response(late_delivery::HostedReply::new(
+        conversation,
+        Some(&original_turn),
+    ));
+    events.delete_one(doc! {"_id": &f.event.id}).await.unwrap();
+    let missing = body_text(missing).await;
+    assert!(missing.contains("response.completed"), "{missing}");
+    assert!(!missing.contains("Useful answer"), "{missing}");
+
+    let mut replaced = f.event.clone();
+    replaced.conversation_id = Some(conversation.into());
+    replaced.delivery.as_mut().unwrap().guest = true;
+    events.insert_one(replaced).await.unwrap();
+    let stale = body_text(response(late_delivery::HostedReply::new(
+        conversation,
+        Some(&original_turn),
+    )))
+    .await;
+    assert!(stale.contains("response.completed"), "{stale}");
+    assert!(!stale.contains("Useful answer"), "{stale}");
+    assert_eq!(status(&f).await, "waiting");
+
+    // Old provider streams can finish a direct result after the event is gone.
+    let ordinary = response(None);
+    events.delete_one(doc! {"_id": &f.event.id}).await.unwrap();
+    assert!(body_text(ordinary).await.contains("Useful answer"));
+    f.state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -414,19 +522,7 @@ async fn original_reply_target_survives_event_expiry_and_newer_chat_activity() {
         .unwrap()
         .unwrap();
     let delivery = event.delivery.as_ref().unwrap();
-    assert!(delivery.target_context_version.is_none());
-    let target = contextual_event_field(
-        &f.state.encryption_keys,
-        &event,
-        "delivery.target_ciphertext",
-        delivery.target_ciphertext.as_deref().unwrap(),
-    )
-    .await;
-    patch(
-        &f,
-        doc! {"delivery.target_ciphertext":target,"delivery.target_context_version":3},
-    )
-    .await;
+    assert_eq!(delivery.target_context_version, Some(3));
     patch(
         &f,
         doc! {"created_at": bson::DateTime::from_chrono(Utc::now() - ChronoDuration::hours(1))},
@@ -594,7 +690,10 @@ async fn partial_failure_is_a_committed_provider_message_not_generic_failure() {
         f.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        receiver,
+        InboundTurn {
+            receiver,
+            hosted_reply: None,
+        },
         Utc::now(),
     );
     let text = body_text(response).await;
@@ -992,7 +1091,10 @@ async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery
                     f.event.id.clone(),
                     "response".into(),
                     json!({"type":"response.created"}),
-                    receiver,
+                    InboundTurn {
+                        receiver,
+                        hosted_reply: None,
+                    },
                     Utc::now(),
                 );
                 let text = body_text(response).await;
@@ -1134,7 +1236,7 @@ async fn pending_recovery(
         answer_delivery: None,
         revision: 0,
         payload_context_version: None,
-        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
@@ -1409,7 +1511,10 @@ async fn model_approval_channel_stream_delivers_actionable_settings_url() {
         f.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        receiver,
+        InboundTurn {
+            receiver,
+            hosted_reply: None,
+        },
         Utc::now(),
     );
     let body = body_text(response).await;

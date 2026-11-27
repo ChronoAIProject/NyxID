@@ -8,6 +8,11 @@ pub struct AssistantAcknowledgement {
     /// Original admitted Meta sources for data-bearing decision continuations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub meta_contexts: Vec<super::assistant_conversation::ChannelTurnContext>,
+    #[serde(default)]
+    pub org_maintain_revision: i64,
+    /// A relink can require maintenance on the current and the requested specialist.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub org_maintenance_targets: std::collections::BTreeMap<String, i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_execution: Option<super::assistant_conversation::ActivityExecution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

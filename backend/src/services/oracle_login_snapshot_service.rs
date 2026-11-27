@@ -1,3 +1,4 @@
+use crate::crypto::record_field::oracle::OracleOuter;
 use std::fmt;
 
 use chrono::{Duration, Utc};
@@ -63,10 +64,6 @@ impl fmt::Debug for LoginSnapshotPayload {
             )
             .finish()
     }
-}
-
-pub(crate) fn snapshot_aad(pool_id: &str, snapshot_id: &str, format_version: u32) -> String {
-    format!("oracle-login-snapshot:{pool_id}:{snapshot_id}:v{format_version}")
 }
 
 pub(super) fn verify_worker_token_hash(pool: &OraclePool, verifier: &str) -> AppResult<()> {
@@ -211,9 +208,8 @@ pub(crate) async fn create_snapshot_in_session(
     verify_worker_token_hash(pool, input.worker_token_sha256.as_str())?;
 
     let id = uuid::Uuid::new_v4().to_string();
-    let aad = snapshot_aad(&pool.id, &id, input.format_version);
-    let encrypted_envelope = encryption_keys
-        .encrypt_with_aad(input.sealed_envelope.as_slice(), aad.as_bytes())
+    let encrypted_envelope = OracleOuter::snapshot(&pool.id, &id, input.format_version)
+        .seal(encryption_keys, &input.sealed_envelope)
         .await?;
     let now = Utc::now();
     let expires_at = now + Duration::seconds(LOGIN_SNAPSHOT_TTL_SECS);

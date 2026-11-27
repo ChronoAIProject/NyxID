@@ -962,6 +962,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .post(handlers::user_tokens::generic_oauth_callback_post),
         )
         .route(
+            "/callback/continuation/{id}",
+            post(handlers::user_tokens::preview_connector_continuation),
+        )
+        .route(
+            "/callback/continuation/{id}/confirm",
+            post(handlers::user_tokens::confirm_connector_continuation),
+        )
+        .route(
             "/{provider_id}/services",
             get(handlers::providers::list_linked_services),
         )
@@ -1246,6 +1254,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             "/feature-flags/{flag_key}/metadata",
             put(handlers::admin_feature_flags::update_feature_flag_metadata)
                 .patch(handlers::admin_feature_flags::patch_feature_flag_metadata),
+        )
+        .route(
+            "/feature-flags/nyxbot-guest-audience/pilot",
+            get(handlers::admin_feature_flags::get_channel_guest_pilot)
+                .put(handlers::admin_feature_flags::set_channel_guest_pilot),
         )
         .route(
             "/feature-flags/{flag_key}/history",
@@ -1844,6 +1857,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
                 .delete(handlers::approvals::delete_service_config),
         )
         .route(
+            "/service-configs/{service_id}/approvers",
+            get(handlers::approvals::get_org_approvers).put(handlers::approvals::put_org_approvers),
+        )
+        .route(
             "/service-configs/{service_id}/authorization",
             get(handlers::approvals::get_service_config_authorization),
         );
@@ -1962,6 +1979,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         .route(
             "/user-services",
             get(handlers::user_services_handler::list_user_services),
+        )
+        .route(
+            "/user-services/consent-disclosure",
+            post(handlers::oauth_consent_disclosure::read),
         )
         .route("/endpoints", get(handlers::user_endpoints::list_endpoints))
         .route(
@@ -2194,6 +2215,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
     // Direct-owner read access; service accounts remain rejected as before.
     let org_read_routes = Router::new()
         .route("/", get(handlers::agent_skills::org_membership_lookup))
+        .route(
+            "/ornn-channel-skill",
+            get(handlers::agent_skills::guest_skill_lookup),
+        )
         .route("/{org_id}", get(handlers::orgs::get_org))
         .route(
             "/{org_id}/authorization",
@@ -2271,6 +2296,11 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
 
     let channel_bot_routes = Router::new()
         .route(
+            "/{id}/guest-skills",
+            get(handlers::agent_skills::get_guest_skills)
+                .put(handlers::agent_skills::set_guest_skills),
+        )
+        .route(
             "/{id}/native-whatsapp/relay-verify-token",
             post(handlers::channel_whatsapp_native::rollback::replace),
         )
@@ -2294,6 +2324,30 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         )
         .route("/{id}/verify", post(handlers::channel_bots::verify_bot))
         .route("/{id}/health", get(handlers::channel_bots::health))
+        .route(
+            "/{id}/guest-setup",
+            get(handlers::channel_guest_setup::get).put(handlers::channel_guest_setup::preference),
+        )
+        .route(
+            "/{id}/guest-setup/staging",
+            get(handlers::channel_guest_setup::staging),
+        )
+        .route(
+            "/{id}/guest-setup/prepare",
+            post(handlers::channel_guest_setup::prepare),
+        )
+        .route(
+            "/{id}/guest-setup/draft",
+            put(handlers::channel_guest_setup::save_draft),
+        )
+        .route(
+            "/{id}/guest-setup/preview",
+            post(handlers::channel_guest_setup::preview),
+        )
+        .route(
+            "/{id}/guest-setup/apply",
+            post(handlers::channel_guest_setup::apply),
+        )
         .route(
             "/{id}/resubscribe",
             post(handlers::channel_bots::resubscribe),
@@ -2326,6 +2380,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
         );
 
     let channel_relay_routes = Router::new()
+        .route(
+            "/guest-tools",
+            post(handlers::channel_relay::guest_tools).layer(DefaultBodyLimit::max(32 * 1024)),
+        )
         .route(
             "/conversations/{id}/activity-capability",
             put(handlers::channel_activities::declare_callback),
@@ -2877,6 +2935,14 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_nyxagent::list),
         )
         .route(
+            "/nyxagent/agents/{id}/guest-conversations",
+            get(handlers::org_specialist_channels::guest_conversations),
+        )
+        .route(
+            "/nyxagent/guest-conversations/{id}",
+            get(handlers::org_specialist_channels::guest_history),
+        )
+        .route(
             "/nyxagent/conversations/{id}",
             get(handlers::assistant_nyxagent::history).patch(handlers::assistant_nyxagent::rename),
         )
@@ -2928,10 +2994,19 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_team::list_agents).post(handlers::assistant_team::create_agent),
         )
         .route(
+            "/nyxagent/agents/activity",
+            get(handlers::assistant_team::list_agent_activity),
+        )
+        .route(
             "/nyxagent/agents/{id}",
             get(handlers::assistant_team::get_agent)
                 .patch(handlers::assistant_team::update_agent)
                 .delete(handlers::assistant_team::delete_agent),
+        )
+        .route(
+            "/nyxagent/agents/{id}/org-access",
+            get(handlers::assistant_team::get_org_access)
+                .put(handlers::assistant_team::put_org_access),
         )
         .route(
             "/nyxagent/skills/catalog",

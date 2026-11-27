@@ -425,23 +425,55 @@ async fn enabled_org_meta_combined_patch_keeps_the_old_policy_and_assignment_on_
     assert_eq!(result["guest_enabled"], true);
     let before = load_channel(&state, OWNER, &row.id).await.unwrap();
     assert!(before.org_specialist.as_ref().unwrap().guests.enabled);
+    let relink_error = || async {
+        link_channel(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(OWNER),
+            Path(row.id.clone()),
+            Json(LinkRequest {
+                agent_id: Some(second.id.clone()),
+                private_chats: Some("owner".into()),
+                private_chat_posts: Some(false),
+                apply_to_existing: false,
+            }),
+        )
+        .await
+        .unwrap_err()
+    };
+    let agents = state
+        .db
+        .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME);
     crate::services::durable_wake_tests::resume_after(
         "meta_relink_before_commit",
         async {
-            let error = link_channel(
-                State(state.clone()),
-                crate::test_utils::test_auth_user(OWNER),
-                Path(row.id.clone()),
-                Json(LinkRequest {
-                    agent_id: Some(second.id.clone()),
-                    private_chats: Some("owner".into()),
-                    private_chat_posts: Some(false),
-                    apply_to_existing: false,
-                }),
-            )
-            .await
-            .unwrap_err();
-            assert!(matches!(error, AppError::Conflict(_)));
+            assert!(matches!(relink_error().await, AppError::Forbidden(_)));
+        },
+        async {
+            agents
+                .update_one(
+                    doc! {"_id":&second.id},
+                    doc! {"$set":{"org_maintainer_user_ids":[]},
+                    "$inc":{"org_maintain_revision":1_i64}},
+                )
+                .await
+                .unwrap();
+        },
+    )
+    .await;
+    let refused = load_channel(&state, OWNER, &row.id).await.unwrap();
+    assert_eq!(refused.agent_id, before.agent_id);
+    assert_eq!(refused.private_chats, before.private_chats);
+    agents
+        .update_one(
+            doc! {"_id":&second.id},
+            doc! {"$unset":{"org_maintainer_user_ids":""}},
+        )
+        .await
+        .unwrap();
+    crate::services::durable_wake_tests::resume_after(
+        "meta_relink_before_commit",
+        async {
+            assert!(matches!(relink_error().await, AppError::Conflict(_)));
         },
         async {
             callback_for(
@@ -1163,75 +1195,80 @@ async fn first_and_repaired_meta_connect_return_their_committed_owner_code() {
     }
 }
 
-#[tokio::test]
-async fn meta_connect_with_lost_activation_ack_rejects_a_superseding_patch() {
-    use crate::services::nyxbot_channel_connection_service::{
-        META_ACTIVATION_ACK_LOST, RESTORE_CONNECT_FAIL_STAGE,
-    };
-    for relink in [false, true] {
-        let (state, _calls, _server) = setup("meta_connect_uncertain_activation").await;
-        let _ = app(&state).await;
-        let first = specialist_named(&state, "first-assignment").await;
-        let second = specialist_named(&state, "second-assignment").await;
-        let bot = bot_doc("messenger", "Support");
-        let bot_id = bot.get_str("_id").unwrap().to_string();
-        state
-            .db
-            .collection::<bson::Document>("channel_bots")
-            .insert_one(bot)
-            .await
-            .unwrap();
-        let connect = connect_channel(
-            State(state.clone()),
-            crate::test_utils::test_auth_user(OWNER),
-            Json(ConnectRequest {
-                bot_id: bot_id.clone(),
-                agent_id: Some(first.id.clone()),
-            }),
-        );
-        crate::services::durable_wake_tests::resume_after(
-            "meta_activation_ack_lost",
-            async {
-                let result = RESTORE_CONNECT_FAIL_STAGE
-                    .scope(META_ACTIVATION_ACK_LOST, connect)
-                    .await;
-                if relink {
-                    assert!(matches!(result, Err(AppError::Conflict(_))));
-                } else {
-                    assert_eq!(result.unwrap().0["channel_agent"]["agent_id"], first.id);
-                }
-            },
-            async {
-                if relink {
-                    let current = state
-                        .db
-                        .collection::<NyxbotChannel>(CHANNELS)
-                        .find_one(doc! {"channel_bot_id":&bot_id,"status":"active"})
-                        .await
-                        .unwrap()
-                        .unwrap();
-                    let Json(updated) = link_channel(
-                        State(state.clone()),
-                        crate::test_utils::test_auth_user(OWNER),
-                        Path(current.id.clone()),
-                        Json(LinkRequest {
-                            agent_id: Some(second.id.clone()),
-                            private_chats: None,
-                            private_chat_posts: None,
-                            apply_to_existing: false,
-                        }),
-                    )
+#[test]
+fn meta_connect_with_lost_activation_ack_rejects_a_superseding_patch() {
+    crate::test_utils::run_native_journey_test(
+        "meta_connect_with_lost_activation_ack_rejects_a_superseding_patch",
+        || async {
+            use crate::services::nyxbot_channel_connection_service::{
+                META_ACTIVATION_ACK_LOST, RESTORE_CONNECT_FAIL_STAGE,
+            };
+            for relink in [false, true] {
+                let (state, _calls, _server) = setup("meta_connect_uncertain_activation").await;
+                let _ = app(&state).await;
+                let first = specialist_named(&state, "first-assignment").await;
+                let second = specialist_named(&state, "second-assignment").await;
+                let bot = bot_doc("messenger", "Support");
+                let bot_id = bot.get_str("_id").unwrap().to_string();
+                state
+                    .db
+                    .collection::<bson::Document>("channel_bots")
+                    .insert_one(bot)
                     .await
                     .unwrap();
-                    assert_eq!(updated["changed"], true);
-                    let saved = load_channel(&state, OWNER, &current.id).await.unwrap();
-                    assert_eq!(saved.link_code_hash, current.link_code_hash);
-                    assert_eq!(saved.agent_id.as_deref(), Some(second.id.as_str()));
-                }
-            },
-        )
-        .await;
-    }
+                let connect = connect_channel(
+                    State(state.clone()),
+                    crate::test_utils::test_auth_user(OWNER),
+                    Json(ConnectRequest {
+                        bot_id: bot_id.clone(),
+                        agent_id: Some(first.id.clone()),
+                    }),
+                );
+                crate::services::durable_wake_tests::resume_after(
+                    "meta_activation_ack_lost",
+                    async {
+                        let result = RESTORE_CONNECT_FAIL_STAGE
+                            .scope(META_ACTIVATION_ACK_LOST, connect)
+                            .await;
+                        if relink {
+                            assert!(matches!(result, Err(AppError::Conflict(_))));
+                        } else {
+                            assert_eq!(result.unwrap().0["channel_agent"]["agent_id"], first.id);
+                        }
+                    },
+                    async {
+                        if relink {
+                            let current = state
+                                .db
+                                .collection::<NyxbotChannel>(CHANNELS)
+                                .find_one(doc! {"channel_bot_id":&bot_id,"status":"active"})
+                                .await
+                                .unwrap()
+                                .unwrap();
+                            let Json(updated) = link_channel(
+                                State(state.clone()),
+                                crate::test_utils::test_auth_user(OWNER),
+                                Path(current.id.clone()),
+                                Json(LinkRequest {
+                                    agent_id: Some(second.id.clone()),
+                                    private_chats: None,
+                                    private_chat_posts: None,
+                                    apply_to_existing: false,
+                                }),
+                            )
+                            .await
+                            .unwrap();
+                            assert_eq!(updated["changed"], true);
+                            let saved = load_channel(&state, OWNER, &current.id).await.unwrap();
+                            assert_eq!(saved.link_code_hash, current.link_code_hash);
+                            assert_eq!(saved.agent_id.as_deref(), Some(second.id.as_str()));
+                        }
+                    },
+                )
+                .await;
+            }
+        },
+    );
 }
 
 #[tokio::test]

@@ -129,11 +129,14 @@ const OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE: &str =
     "This provider is not configured for OAuth yet. Please contact your admin.";
 pub const CHAT_CONNECT_STATE_PREFIX: &str = "1cc_";
 
-#[derive(Debug)]
 pub struct OAuthInitiateResult {
     pub authorization_url: String,
     pub attempt_nonce: Option<String>,
+    pub state_id: String,
+    pub launch_proof: Zeroizing<String>,
 }
+
+crate::errors::redacted_debug!(OAuthInitiateResult);
 
 /// Return the canonical UUID-v4 nonce embedded in a chat-connect state id.
 /// Other state formats, including every legacy bare UUID, return `None`.
@@ -1080,7 +1083,10 @@ pub(crate) async fn initiate_oauth_connect_with_audit(
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
     });
 
+    let launch_proof = Zeroizing::new(crate::crypto::token::generate_random_token());
     let mut oauth_state = OAuthState {
+        launch_proof_hash: Some(crate::crypto::token::hash_token(&launch_proof)),
+        pending_callback: None,
         history_context: crate::services::service_history::context::current(),
         id: state_id.clone(),
         user_id: user_id.to_string(),
@@ -1232,6 +1238,8 @@ pub(crate) async fn initiate_oauth_connect_with_audit(
     Ok(OAuthInitiateResult {
         authorization_url: auth_url,
         attempt_nonce,
+        state_id,
+        launch_proof,
     })
 }
 
@@ -1460,6 +1468,8 @@ pub(crate) async fn request_device_code_with_audit(
     let expires_at = now + Duration::seconds(expires_in);
 
     let mut oauth_state = OAuthState {
+        launch_proof_hash: None,
+        pending_callback: None,
         history_context: crate::services::service_history::context::current(),
         id: state_id.clone(),
         user_id: user_id.to_string(),
@@ -2283,6 +2293,7 @@ pub async fn peek_oauth_state(db: &mongodb::Database, state_id: &str) -> AppResu
 ///   on `user_provider_tokens`. The outcome carries
 ///   `connection_id: None` and the caller typically follows with
 ///   `sync_provider_token_to_api_keys` to fan tokens out to legacy keys.
+#[cfg(test)]
 pub async fn handle_oauth_callback(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -2329,6 +2340,22 @@ pub async fn handle_oauth_callback(
             "OAuth state provider mismatch".to_string(),
         ));
     }
+
+    complete_claimed_oauth_callback(db, encryption_keys, base_url, code, &oauth_state).await
+}
+
+/// Exchange a provider code after atomically claiming its state. Keep the
+/// state row until completion so credential reconciliation sees live work.
+pub(crate) async fn complete_claimed_oauth_callback(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    base_url: &str,
+    code: &str,
+    oauth_state: &OAuthState,
+) -> AppResult<OAuthCallbackOutcome> {
+    let now = Utc::now();
+    let state = oauth_state.id.as_str();
+    let provider_id = oauth_state.provider_config_id.as_str();
 
     // When admin-on-behalf flow, store tokens under the target SA's ID
     if let Some(context) = oauth_state.history_context.clone() {
@@ -2413,7 +2440,7 @@ pub async fn handle_oauth_callback(
     if let Some(encrypted_verifier) = oauth_state.code_verifier.as_deref() {
         let verifier = super::oauth_state_record_service::decrypt(
             encryption_keys,
-            &oauth_state,
+            oauth_state,
             "code_verifier",
             encrypted_verifier,
         )
@@ -3888,6 +3915,8 @@ mod tests {
         let provider_id = uuid::Uuid::new_v4().to_string();
         db.collection::<OAuthState>(OAUTH_STATES)
             .insert_one(OAuthState {
+                launch_proof_hash: None,
+                pending_callback: None,
                 id: state_id.clone(),
                 user_id: user_id.clone(),
                 history_context: None,

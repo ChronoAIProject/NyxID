@@ -22,6 +22,7 @@ const state = vi.hoisted(() => ({
   streaming: false,
   interruption: undefined as string | undefined,
   destroyed: false,
+  orgViewer: false,
   historyError: undefined as string | undefined,
   refreshHistory: vi.fn(async () => undefined),
   mode: "nyxmode" as NyxAgentAccessMode,
@@ -30,6 +31,9 @@ const state = vi.hoisted(() => ({
   approvalDeadline: "2099-01-01T00:00:00Z",
   approvalStatus: undefined as "pending" | "approved" | undefined,
   expiredCard: false,
+  liveCards: [] as NyxAgentAcknowledgement[],
+  shared: false,
+  consentPending: false,
   send: vi.fn(async () => undefined),
   agentLoaded: true,
   desktop: true,
@@ -50,6 +54,11 @@ const conversation = {
   agent,
   active_turn: null,
 };
+function currentConversation() {
+  return state.shared
+    ? { ...conversation, agent: { ...agent, kind: "specialist", name: "researcher" } }
+    : conversation;
+}
 const staleCard: NyxAgentAcknowledgement = {
   id: "old-card", kind: "action", status: "pending", summary: "Publish legacy draft", decider: "user", decided_by: null,
   reason: null, service_slug: null, service_name: null, tool_name: "nyxid__draft_agent_skill",
@@ -68,8 +77,9 @@ vi.mock("@/hooks/use-feature-flag", () => ({
   useFeature: (name: string) => name === "assistant:voice" && state.voice,
 }));
 vi.mock("@/hooks/use-media-query", () => ({ useMediaQuery: () => state.desktop }));
-vi.mock("@/hooks/use-nyxbot-agents", () => ({
-  useNyxBotAgents: () => ({ data: state.agentLoaded ? { agents: [{ ...agent, status: state.destroyed ? "destroyed" : "idle", can_use: !state.destroyed, access_mode_override: state.override }] } : undefined }),
+vi.mock("@/hooks/use-nyxbot-agents", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/hooks/use-nyxbot-agents")>(),
+  useNyxBotAgents: () => ({ data: state.agentLoaded ? { agents: [{ ...agent, status: state.destroyed ? "destroyed" : "idle", can_use: !state.destroyed, access_mode_override: state.override, ...(state.orgViewer ? { owner_kind: "org", can_maintain: false } : {}), ...(state.shared ? { kind: "specialist", name: "researcher", share_role: "user" } : {}) }] } : undefined }),
   selectedAgentOf: (rows?: unknown[]) => rows?.[0],
   nyxBotOf: (rows?: unknown[]) => rows?.[0],
   useNyxBotSettings: () => ({ data: { access_mode: state.mode, voice: state.savedVoice ? voicePreferences : null } }),
@@ -78,27 +88,38 @@ vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useChangeNyxAgentModel: () => ({ isPending: false, mutateAsync: vi.fn() }),
 }));
 vi.mock("@/hooks/use-nyxbot-groups", () => ({ useNyxBotGroups: () => ({ data: [] }) }));
+vi.mock("@/hooks/use-shared-agents", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/hooks/use-shared-agents")>(),
+  useSharedConsents: () => ({
+    error: null,
+    data: { consents: state.consentPending ? [{
+      id: "connection-consent", connection_id: "own-connection", catalog_service_id: "report-service",
+      connection_name: "Reports", operation: "Read report", conversation_id: conversation.id,
+      decision: "pending", expires_at: null, scope: "request",
+    }] : [] },
+  }),
+}));
 vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () => ({
-  conversation: state.search.c ? conversation : undefined,
-  session: { title: "Thread", messages: state.approvalStatus ? [approvalMessage] : state.staleCard ? [{ id: `nyxagent-acknowledgement:${staleCard.id}`, role: "system", content: staleCard.summary }]
+  conversation: state.search.c ? currentConversation() : undefined,
+  session: { title: "Thread", messages: state.approvalStatus ? [approvalMessage] : state.liveCards.length ? state.liveCards.map((card) => ({ id: `nyxagent-acknowledgement:${card.id}`, role: "system", content: card.summary })) : state.staleCard ? [{ id: `nyxagent-acknowledgement:${staleCard.id}`, role: "system", content: staleCard.summary }]
     : state.search.c ? [{ id: "one", role: "assistant", content: "Hello" }] : [] },
   interruption: state.interruption,
   error: state.historyError,
-  isStreaming: state.streaming, waiting: [], acknowledgements: state.staleCard ? [{ ...staleCard, status: state.expiredCard ? "expired" : staleCard.status }] : [], approvals: state.approvalStatus ? [{
+  isStreaming: state.streaming, waiting: [], acknowledgements: state.liveCards.length ? state.liveCards : state.staleCard ? [{ ...staleCard, status: state.expiredCard ? "expired" : staleCard.status }] : [], approvals: state.approvalStatus ? [{
     id: "append", status: state.approvalStatus, summary: approvalMessage.content, service_name: "Sheets",
     approval_mode: "per_request", expires_at: state.approvalDeadline,
   }] : [], conversations: [], threadsLoaded: false,
   send: state.send, stop: vi.fn(), refreshHistory: state.refreshHistory, deleteConversation: vi.fn(),
 }) }));
 vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
-  getConversation: (id?: string) => id && state.agentLoaded ? conversation : undefined,
+  getConversation: (id?: string) => id && state.agentLoaded ? currentConversation() : undefined,
   capabilities: () => Promise.resolve({ steer: null }),
 } }));
 vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children, contentTitle }: { children: ReactNode; contentTitle?: boolean }) => <main data-content-title={Boolean(contentTitle)}>{children}</main> }));
 vi.mock("./assistant-engine-sidebar", () => ({ AssistantEngineSidebar: () => null }));
 vi.mock("./nyxbot-agent-panels", () => ({
   ThreadPanels: ({ children }: { children: ReactNode }) => <>{children}</>,
-  ThreadHeader: ({ controls, title, loading }: { controls?: ReactNode; title?: string; loading?: boolean }) => <header data-testid="thread-header" data-title={title} data-loading={loading}>{controls}</header>,
+  ThreadHeader: ({ controls, title, loading, mood }: { controls?: ReactNode; title?: string; loading?: boolean; mood?: string }) => <header data-testid="thread-header" data-title={title} data-loading={loading} data-avatar-mood={mood}>{controls}</header>,
   PendingEventsNote: () => null, WaitingNote: () => null, ChannelBadge: () => null,
 }));
 vi.mock("./nyxbot-agent-details", () => ({ AgentDetailsSheet: () => null }));
@@ -132,6 +153,7 @@ beforeEach(() => {
   state.search = {};
   state.streaming = false;
   state.destroyed = false;
+  state.orgViewer = false;
   state.historyError = undefined;
   state.refreshHistory.mockClear();
   state.mode = "nyxmode";
@@ -140,6 +162,9 @@ beforeEach(() => {
   state.approvalStatus = undefined;
   state.approvalDeadline = "2099-01-01T00:00:00Z";
   state.expiredCard = false;
+  state.liveCards = [];
+  state.shared = false;
+  state.consentPending = false;
   state.send.mockReset();
   state.interruption = undefined;
   state.agentLoaded = true;
@@ -149,6 +174,20 @@ beforeEach(() => {
 function mount() {
   return render(<QueryClientProvider client={new QueryClient()}><NyxAgentAssistantChatPage /></QueryClientProvider>);
 }
+
+it("reflects a connection-consent decision in the avatar without an acknowledgement or proxy approval", () => {
+  state.search = { c: conversation.id };
+  state.shared = true;
+  state.consentPending = true;
+  const client = new QueryClient();
+  const view = render(<QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.getByRole("region", { name: "Needs your decision" })).toBeVisible();
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-avatar-mood", "approval");
+  state.consentPending = false;
+  view.rerender(<QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>);
+  expect(screen.queryByRole("region", { name: "Needs your decision" })).not.toBeInTheDocument();
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-avatar-mood", "idle");
+});
 it("updates the same approval row when history reports a decision mid-turn", () => {
   state.search = { c: conversation.id };
   state.streaming = true;
@@ -167,6 +206,54 @@ it("updates the same approval row when history reports a decision mid-turn", () 
   expect(screen.queryByRole("button", { name: "Approve and send" })).toBeNull();
 });
 
+
+it("pins only live human requests once and leaves expiry and orchestrator decisions in history", () => {
+  state.search = { c: conversation.id };
+  state.mode = "ask_every_time";
+  state.liveCards = [
+    { ...staleCard, id: "live", summary: "Create a document" },
+    { ...staleCard, id: "expired", summary: "Earlier request", expires_at: "2020-01-01T00:00:00Z" },
+    { ...staleCard, id: "routed", summary: "NyxBot's decision", decider: "orchestrator" },
+  ];
+  mount();
+  const stack = screen.getByRole("region", { name: "Needs your decision" });
+  expect(within(stack).getByRole("button", { name: "Allow" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Review decision: Create a document" })).toBeVisible();
+  expect(screen.getByText("Earlier request", { exact: false })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Ask for a new confirmation" })).toBeVisible();
+  // The other Allow is the user's existing optional override of NyxBot.
+  expect(screen.getAllByRole("button", { name: "Allow" })).toHaveLength(2);
+});
+
+it("keeps organization confirmation in the stack when Full access retires ordinary requests", () => {
+  state.search = { c: conversation.id };
+  state.mode = "autopilot";
+  state.liveCards = [
+    { ...staleCard, id: "ordinary", summary: "Ordinary write" },
+    { ...staleCard, id: "organization", summary: "Use the organization connection", confirmation: { risk: "change", reason: "org_connection" } },
+  ];
+  mount();
+  const stack = screen.getByRole("region", { name: "Needs your decision" });
+  expect(within(stack).getByText("Confirm: Use the organization connection")).toBeVisible();
+  expect(screen.getAllByRole("button", { name: "Allow" })).toHaveLength(1);
+});
+
+it("keeps organization maintenance requests hidden from members who cannot maintain the agent", () => {
+  state.search = { c: conversation.id };
+  state.mode = "ask_every_time";
+  state.orgViewer = true;
+  state.liveCards = [
+    { ...staleCard, id: "action", summary: "Create a document" },
+    { ...staleCard, id: "account", kind: "account", summary: "Change account access" },
+    { ...staleCard, id: "service", kind: "service", summary: "Change service access" },
+  ];
+  mount();
+  expect(screen.getByRole("region", { name: "Needs your decision" })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Review decision: Create a document" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: /Review decision: Change/ })).not.toBeInTheDocument();
+  expect(screen.getAllByRole("button", { name: "Allow" })).toHaveLength(1);
+  expect(screen.queryByRole("button", { name: "Review full request" })).not.toBeInTheDocument();
+});
 it.each([
   { search: { draft: true }, desktop: true },
   { search: { c: conversation.id }, desktop: true },

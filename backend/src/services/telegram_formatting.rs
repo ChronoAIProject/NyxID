@@ -54,11 +54,20 @@ pub fn parse_refusal(status: reqwest::StatusCode, value: &serde_json::Value) -> 
 /// Persist before retrying; a failed write leaves the original sending fence.
 /// No provider description, message text, token or URL crosses this boundary.
 pub async fn record_fallback() -> AppResult<()> {
+    record_fallback_notice(FALLBACK).await?;
+    tracing::warn!(
+        code = FALLBACK,
+        "Telegram formatting rejected; sending the same display text without entities"
+    );
+    Ok(())
+}
+
+pub(crate) async fn record_fallback_notice(reason: &'static str) -> AppResult<()> {
     if let Ok((db, receipts, bot)) = RECEIPTS.try_with(Clone::clone) {
         for receipt in receipts {
             let changed = db
                 .collection::<bson::Document>(receipt.collection)
-                .update_one(receipt.filter, doc! {"$set": {receipt.field: FALLBACK}})
+                .update_one(receipt.filter, doc! {"$set": {receipt.field: reason}})
                 .await?;
             if changed.matched_count != 1 {
                 return Err(super::channel_reply_delivery::unconfirmed());
@@ -69,14 +78,10 @@ pub async fn record_fallback() -> AppResult<()> {
             // clears the error but must not erase evidence of degraded formatting.
             db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
                 doc! {"_id": bot},
-                doc! {"$set": {"diagnostics.last_outbound_notice": {"code":"10005", "reason":FALLBACK, "at":bson::DateTime::now()}}},
+                doc! {"$set": {"diagnostics.last_outbound_notice": {"code":"10005", "reason":reason, "at":bson::DateTime::now()}}},
             ).await?;
         }
     }
-    tracing::warn!(
-        code = FALLBACK,
-        "Telegram formatting rejected; sending the same display text without entities"
-    );
     Ok(())
 }
 

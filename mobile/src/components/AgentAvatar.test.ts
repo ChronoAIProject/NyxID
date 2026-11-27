@@ -32,12 +32,24 @@ function setup() {
     "../theme/designTokens": { fonts: { bodySemi: "semibold" } },
     "./agentAvatarModel": model,
     "./brand/brandVectors": { nyxidIconXml },
+    // Flag off: today's avatar (the blob renderers are covered by Jest).
+    "../lib/avatars/agentAvatarsFlag": { useAgentAvatarsEnabled: () => false },
+    "./avatar/AvatarArt": { AvatarAnimated: "AvatarAnimated", AvatarStill: "AvatarStill" },
   });
-  return harness.load(
+  const loaded = harness.load(
     fileURLToPath(new URL("./AgentAvatar.tsx", import.meta.url)),
   ) as {
     AgentAvatar: (props: any) => Element;
     AgentAvatarStack: (props: any) => Element;
+  };
+  // AgentAvatar picks a renderer component; expand it to the drawn element.
+  const expand = (element: Element): Element =>
+    typeof element.type === "function"
+      ? expand((element.type as (props: any) => Element)(element.props))
+      : element;
+  return {
+    AgentAvatar: (props: any) => expand(loaded.AgentAvatar(props)),
+    AgentAvatarStack: loaded.AgentAvatarStack,
   };
 }
 test("agent identity uses display initials, exact mark, sizes and decorative semantics", () => {

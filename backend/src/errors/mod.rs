@@ -3,6 +3,7 @@ pub mod memory_write;
 pub mod refresh;
 mod refusal_throttle;
 pub mod skill_draft;
+pub mod skill_publication;
 pub mod skill_read;
 pub mod voice_start;
 use axum::http::StatusCode;
@@ -155,6 +156,18 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Conflict: {message}")]
+    CmaSandboxSlotOccupied {
+        message: &'static str,
+        details: Box<serde_json::Value>,
+    },
+
+    #[error("CMA creation requires a JSON Content-Type (application/json or application/*+json)")]
+    CmaJsonContentTypeRequired,
+
+    #[error(transparent)]
+    SkillPublication(#[from] skill_publication::SkillPublicationFailure),
+
     #[error("Conflict: trigger_overlap_skip")]
     TriggerOverlapSkip { blocking_run_id: String },
 
@@ -217,6 +230,9 @@ pub enum AppError {
         "Your access settings or model connection changed during this task; review the completed actions and try again"
     )]
     AssistantModelAuthorityChanged,
+
+    #[error("Organization specialist access authoring is unavailable")]
+    OrgAgentAccessAuthoringUnavailable,
 
     #[error("Attachment expired per retention policy. Upload it again to continue.")]
     AssistantAttachmentExpired,
@@ -939,6 +955,8 @@ impl AppError {
             Self::CrashReportConsentRequired => StatusCode::FORBIDDEN,
             Self::NotFound(_) | Self::MonitoringNotConfigured => StatusCode::NOT_FOUND,
             Self::Conflict(_)
+            | Self::CmaSandboxSlotOccupied { .. }
+            | Self::SkillPublication(_)
             | Self::TriggerOverlapSkip { .. }
             | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::AssistantTurnActive | Self::ErasurePreparing | Self::DiagnosticNotReady => {
@@ -954,6 +972,7 @@ impl AppError {
             Self::AssistantTurnRequired => StatusCode::CONFLICT,
             Self::AssistantModelUnavailable => StatusCode::BAD_REQUEST,
             Self::AssistantModelAuthorityChanged => StatusCode::FORBIDDEN,
+            Self::OrgAgentAccessAuthoringUnavailable => StatusCode::FORBIDDEN,
             Self::AssistantAttachmentExpired => StatusCode::GONE,
             Self::ServiceConcurrencyLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => StatusCode::TOO_MANY_REQUESTS,
@@ -1100,7 +1119,9 @@ impl AppError {
             Self::ChannelPlatformEditUnsupported => StatusCode::NOT_IMPLEMENTED,
             Self::DeviceChannelReplyNotAllowed => StatusCode::BAD_REQUEST,
             Self::ChannelConversationNotReachable(_) => StatusCode::BAD_REQUEST,
-            Self::ChannelMediaUnsupported => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::ChannelMediaUnsupported | Self::CmaJsonContentTypeRequired => {
+                StatusCode::UNSUPPORTED_MEDIA_TYPE
+            }
             Self::ChannelMediaTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::ChannelMediaFetchFailed(_) => StatusCode::BAD_GATEWAY,
             Self::ChannelAttachmentNotFound => StatusCode::NOT_FOUND,
@@ -1176,7 +1197,9 @@ impl AppError {
             Self::RefreshRefused { source, .. } => source.error_code(),
             Self::VoiceStartFailed(failure) => failure.source.error_code(),
             Self::InvocationDiagnostic { source, .. } => source.error_code(),
-            Self::BadRequest(_) | Self::CredentialUnavailable(_) => 1000,
+            Self::BadRequest(_)
+            | Self::CredentialUnavailable(_)
+            | Self::CmaJsonContentTypeRequired => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
             Self::OAuthAuthorityUnavailable => 12900,
@@ -1184,7 +1207,10 @@ impl AppError {
             | Self::ForbiddenWithGuidance { .. }
             | Self::AssistantMissingAccess(_) => 1002,
             Self::NotFound(_) => 1003,
-            Self::Conflict(_) | Self::TriggerOverlapSkip { .. } => 1004,
+            Self::Conflict(_)
+            | Self::CmaSandboxSlotOccupied { .. }
+            | Self::SkillPublication(_)
+            | Self::TriggerOverlapSkip { .. } => 1004,
             Self::AssistantTurnActive => 12100,
             Self::VoiceQueueFull => 12500,
             Self::ApprovalUnsupported => 12502,
@@ -1202,6 +1228,7 @@ impl AppError {
             Self::AssistantTurnRequired => 12102,
             Self::AssistantModelUnavailable => 12103,
             Self::AssistantModelAuthorityChanged => 12104,
+            Self::OrgAgentAccessAuthoringUnavailable => 12105,
             Self::AssistantAttachmentExpired => 12101,
             Self::ServiceConcurrencyLimited => 12600,
             Self::RateLimited | Self::RateLimitedWithRetry { .. } => 1005,
@@ -1472,14 +1499,19 @@ impl AppError {
             Self::RefreshRefused { source, .. } => source.error_key(),
             Self::VoiceStartFailed(failure) => failure.source.error_key(),
             Self::InvocationDiagnostic { source, .. } => source.error_key(),
-            Self::BadRequest(_) | Self::CredentialUnavailable(_) => "bad_request",
+            Self::BadRequest(_)
+            | Self::CredentialUnavailable(_)
+            | Self::CmaJsonContentTypeRequired => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
             Self::OAuthAuthorityUnavailable => "oauth_authority_unavailable",
             Self::Forbidden(_) | Self::ForbiddenWithGuidance { .. } => "forbidden",
             Self::AssistantMissingAccess(_) => "missing_access",
             Self::NotFound(_) => "not_found",
-            Self::Conflict(_) | Self::TriggerOverlapSkip { .. } => "conflict",
+            Self::Conflict(_)
+            | Self::CmaSandboxSlotOccupied { .. }
+            | Self::SkillPublication(_)
+            | Self::TriggerOverlapSkip { .. } => "conflict",
             Self::AssistantTurnActive => "turn_active",
             Self::ErasurePreparing => "erasure_preparing",
             Self::VoiceQueueFull => "voice_queue_full",
@@ -1495,6 +1527,7 @@ impl AppError {
             Self::AssistantTurnRequired => "assistant_turn_required",
             Self::AssistantModelUnavailable => "model_unavailable",
             Self::AssistantModelAuthorityChanged => "model_authority_changed",
+            Self::OrgAgentAccessAuthoringUnavailable => "org_agent_access_authoring_unavailable",
             Self::AssistantAttachmentExpired => "attachment_expired",
             Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::ServiceConcurrencyLimited => "service_concurrency_limited",
@@ -1800,6 +1833,8 @@ impl AppError {
                 request_id,
                 approve_url,
             )),
+            AppError::CmaSandboxSlotOccupied { details, .. } => Some(details.as_ref().clone()),
+            AppError::SkillPublication(failure) => Some(serde_json::json!(failure)),
             AppError::MemoryWrite(reason) => {
                 Some(serde_json::json!({"reason": reason, "category": reason.category()}))
             }

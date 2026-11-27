@@ -227,6 +227,7 @@ async fn persist_rules(
     let authority = crate::services::catalog_mutation_service::Authority {
         actor: audit_service::AuditActor::from_auth_user(auth),
         first_party_human: super::login_client_context::require_first_party_human(auth).is_ok(),
+        privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(state, auth),
         admin_required: service.offering_kind
             == crate::models::downstream_service::OfferingKind::Tool
             || service.owner_user_id.is_some()

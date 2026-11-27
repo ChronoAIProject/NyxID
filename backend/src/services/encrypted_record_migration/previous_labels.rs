@@ -270,3 +270,29 @@ pub(super) fn event_reply_draft() -> impl Iterator<Item = super::FieldLabels> {
         }
     })
 }
+
+pub(super) const EVENT_REPLY_DIGEST: &str =
+    "e14a5e14ec97244a2d0df86ec47fd2023ead5f11257b2887521c04095138e75c";
+pub(super) const META_ASSETS: super::FieldLabels =
+    ("channel_meta_oauth_sessions", &["assets_encrypted"]);
+
+pub(super) const EVENT_WRITERS_DIGEST: &str =
+    "b1632ff0b29289fc5b9e88653fbce4769d3f778fbcfa4ed8494960ccf38d3ada";
+
+pub(super) const DEVICE_BASE_DIGEST: &str =
+    "3dccc8a1829fcd079496272ca807f3549396e93e611bb013f0a2ba9d1efa8513";
+
+pub(super) const NODE_DEVICE_BASE_DIGEST: &str =
+    "90d8a86835621035aac28bbb0e064ef45c90b76e3572949f4c41917c5ed9323a";
+
+pub(super) const NATIVE_REPLY_BASE_DIGEST: &str =
+    "c9160176c797bce8a685fbe1525b33093a611b56b2d9f0568523c478b3f57e50";
+
+pub(super) const MOBILE_SOCIAL_BASE_DIGEST: &str =
+    "72058b48a651932bcd6db8e41c61501152380812f83bdcbdd31d1273a982126b";
+
+pub(super) const META_CONSENT_BASE_DIGEST: &str =
+    "72d9fc2dca536136c4a9a4ae34ee542299ec7c517cae2fa5f039912f2a95169d";
+
+pub(super) const BEFORE_CHANNEL_GUEST_DIGEST: &str =
+    "c526844b3d17aa7a1211f84b3e167ffa92c1e7fae23853506517fc966a0a8dae";

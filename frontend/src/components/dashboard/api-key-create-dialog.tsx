@@ -2,7 +2,8 @@ import { getFormattingLocale } from "@/lib/formatting-locale";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { getAssistantIdentityRevision, subscribeAssistantIdentity } from "@/lib/assistant/identity";
 import { Link } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -82,18 +83,20 @@ function nodeCanBeScopedToKey(
   return node.owner.kind === "user" || node.owner.kind === "org";
 }
 
-export function ApiKeyCreateDialog({
+function ActorBoundApiKeyCreateDialog({
   externalOpen,
   onExternalOpenChange,
   hideTrigger,
   setupMode = false,
   initialServiceId,
+  onComplete,
 }: {
   readonly externalOpen?: boolean;
   readonly onExternalOpenChange?: (open: boolean) => void;
   readonly hideTrigger?: boolean;
   readonly setupMode?: boolean;
   readonly initialServiceId?: string | null;
+  readonly onComplete?: (keyId: string) => Promise<void>;
 } = {}) {
   useUiTranslation();
   const [internalOpen, setInternalOpen] = useState(false);
@@ -103,7 +106,13 @@ export function ApiKeyCreateDialog({
   const [createdKeyId, setCreatedKeyId] = useState<string | null>(null);
   const [createdExpiry, setCreatedExpiry] = useState<string | null | undefined>();
   const [copied, setCopied] = useState(false);
-  const createMutation = useCreateApiKey();
+  const [finishing, setFinishing] = useState(false);
+  const finishingRef = useRef(false);
+  const [completionError, setCompletionError] = useState<string>();
+  const actorRevision = useRef(getAssistantIdentityRevision()).current;
+  const createMutation = useCreateApiKey(() => {
+    if (actorRevision !== getAssistantIdentityRevision()) throw new Error("Your account changed. Reopen setup before continuing.");
+  });
 
   const { data: services } = useKeys({ includeTools: true });
   const { data: nodes } = useNodes();
@@ -202,6 +211,22 @@ export function ApiKeyCreateDialog({
     form.reset(newApiKeyDefaults());
   }
 
+  async function finish() {
+    if (finishingRef.current) return;
+    finishingRef.current = true;
+    setFinishing(true);
+    setCompletionError(undefined);
+    try {
+      if (onComplete && createdKeyId) await onComplete(createdKeyId);
+      handleClose();
+    } catch (error) {
+      setCompletionError(translateErrorMessage(error instanceof Error ? error.message : "Could not continue the chat. Try again."));
+    } finally {
+      finishingRef.current = false;
+      setFinishing(false);
+    }
+  }
+
   return (
     <Dialog
       open={open}
@@ -212,7 +237,10 @@ export function ApiKeyCreateDialog({
           <AddCtaButton label={translateUi("Create API Key")} onClick={() => {}} />
         </DialogTrigger>
       )}
-      <DialogContent>
+      <DialogContent
+        onEscapeKeyDown={(event) => { if (onComplete && createdKey) event.preventDefault(); }}
+        onInteractOutside={(event) => { if (onComplete && createdKey) event.preventDefault(); }}
+      >
         {createdKey ? (
           <>
             <DialogHeader>
@@ -244,6 +272,7 @@ export function ApiKeyCreateDialog({
                 )}
               </Button>
             </div>
+            {completionError && <p role="alert" className="text-13 text-destructive">{completionError}</p>}
             <DialogFooter>
               {setupMode && createdKeyId && (
                 <Button variant="outline" asChild>
@@ -254,7 +283,7 @@ export function ApiKeyCreateDialog({
                   >{translateUi("Review Scope & Bindings")}</Link>
                 </Button>
               )}
-              <Button variant="primary" onClick={handleClose}>{translateUi("Done")}</Button>
+              <Button variant="primary" disabled={finishing} isLoading={finishing} onClick={() => void finish()}>{onComplete ? translateUi("Back to chat") : translateUi("Done")}</Button>
             </DialogFooter>
           </>
         ) : (
@@ -421,4 +450,9 @@ export function ApiKeyCreateDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+export function ApiKeyCreateDialog(props: Parameters<typeof ActorBoundApiKeyCreateDialog>[0] = {}) {
+  const identity = useSyncExternalStore(subscribeAssistantIdentity, getAssistantIdentityRevision, getAssistantIdentityRevision);
+  return <ActorBoundApiKeyCreateDialog key={identity} {...props} />;
 }

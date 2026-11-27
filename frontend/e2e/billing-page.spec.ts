@@ -676,7 +676,7 @@ for (const width of [1440, 768, 390, 320]) {
   });
 }
 
-test("top-up and receipt buttons use the real API actions", async ({
+test("top-up and receipt buttons use the billing API", async ({
   page,
   context,
 }) => {
@@ -687,13 +687,14 @@ test("top-up and receipt buttons use the real API actions", async ({
   const checkouts: Record<string, unknown>[] = [];
   await page.route("**/api/v1/billing/topup", async (route) => {
     expect(route.request().method()).toBe("POST");
-    checkouts.push(route.request().postDataJSON());
+    const request = route.request().postDataJSON();
+    checkouts.push(request);
     await route.fulfill({
       json: {
         owner_id: "test-user",
         checkout_url: "https://billing.example.test/checkout",
-        amount_credits: 100,
-        idempotency_key: checkouts[0]!.idempotency_key,
+        amount_credits: request.amount_credits,
+        idempotency_key: request.idempotency_key,
         reused: false,
         status: "checkout_created",
       },
@@ -711,10 +712,43 @@ test("top-up and receipt buttons use the real API actions", async ({
   await expect(receipt).toHaveURL("https://billing.example.test/receipt");
   await receipt.close();
   await page.getByRole("button", { name: "Add credits" }).click();
-  await page.getByRole("button", { name: "Continue to payment" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add credits" });
+  const input = dialog.getByRole("spinbutton");
+  const continueButton = dialog.getByRole("button", { name: "Continue to payment" });
+  await expect(input).toHaveValue("20");
+  await expect(dialog.getByRole("button", { name: "US$20", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.locator("#topup-total")).toHaveText("20 credits · Subtotal: USD 20.00");
+  await input.fill("19");
+  await expect(dialog.locator("#topup-total")).toHaveText("19 credits · Subtotal: USD 19.00");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Add credits" }).click();
+  await expect(input).toHaveValue("20");
+  await expect(dialog.getByRole("button", { name: "US$20", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.locator("#topup-total")).toHaveText("20 credits · Subtotal: USD 20.00");
+  const presets = dialog.getByRole("button", { name: /^US\$(20|50|100|500)$/ });
+  await expect(presets).toHaveText(["US$20", "US$50", "US$100", "US$500"]);
+  for (const amount of ["20", "50", "100", "500"]) {
+    await presets.filter({ hasText: new RegExp(`^US\\$${amount}$`) }).click();
+    await expect(input).toHaveValue(amount);
+  }
+  await input.fill("9");
+  await expect(continueButton).toBeDisabled();
+  await input.fill("10");
+  await expect(continueButton).toBeEnabled();
+  await input.fill("37");
+  await expect(continueButton).toBeEnabled();
+  await expect(dialog.locator("#topup-total")).toHaveText("37 credits · Subtotal: USD 37.00");
+  await input.fill("10000000");
+  await expect(continueButton).toBeEnabled();
+  await input.fill("10000001");
+  await expect(continueButton).toBeDisabled();
+  await input.fill("9223372036854775808");
+  await expect(continueButton).toBeDisabled();
+  await input.fill("20");
+  await continueButton.click();
   await expect(page).toHaveURL("https://billing.example.test/checkout");
   expect(checkouts).toHaveLength(1);
-  expect(checkouts[0]).toMatchObject({ amount_credits: 100 });
+  expect(checkouts[0]).toMatchObject({ amount_credits: 20 });
   expect(checkouts[0]!.idempotency_key).toMatch(/^[\da-f-]{36}$/);
 });
 

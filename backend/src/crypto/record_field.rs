@@ -1,7 +1,9 @@
-//! Server-encrypted binary fields whose historical format used unbound encryption.
-//! Services supply trusted identities and interpret the stored field version.
-//! Fields with historical AAD use their owning adapter. Recipient-sealed
-//! deliveries use the recipient protocol and key.
+//! Server-encrypted record fields. Services validate the row identity and select
+//! the stored format. Historical bindings and the Oracle worker envelope have
+//! purpose-specific operations. Recipient-sealed deliveries use their own protocol.
+pub(crate) mod historical;
+pub(crate) mod oracle;
+
 use super::aes::EncryptionKeys;
 pub(crate) use super::aes::RecordContext;
 use crate::errors::{AppError, AppResult};
@@ -28,8 +30,17 @@ pub(crate) async fn encrypt_context(
     context: &RecordContext<'_>,
     bytes: &[u8],
 ) -> AppResult<Vec<u8>> {
+    encrypt_with_context(keys, bytes, || Ok(*context)).await
+}
+
+/// Some compatible writers predate validation of the contextual identity.
+pub(crate) async fn encrypt_with_context<'a>(
+    keys: &EncryptionKeys,
+    bytes: &[u8],
+    context: impl FnOnce() -> AppResult<RecordContext<'a>>,
+) -> AppResult<Vec<u8>> {
     if keys.contextual_record_writes() {
-        keys.encrypt_record(bytes, context).await
+        keys.encrypt_record(bytes, &context()?).await
     } else {
         keys.encrypt(bytes).await
     }
@@ -59,14 +70,28 @@ pub(crate) async fn decrypt_context(
     version: Option<u8>,
     ciphertext: &[u8],
 ) -> AppResult<Zeroizing<Vec<u8>>> {
-    if version == Some(3) {
-        keys.decrypt_record(ciphertext, context).await
-    } else if version.is_none() && keys.allow_legacy_record_reads() {
-        keys.decrypt(ciphertext).await
-    } else {
-        Err(AppError::Internal(
-            "Record field requires contextual migration".into(),
-        ))
+    decrypt_with_context(
+        keys,
+        ciphertext,
+        version.map(u32::from),
+        || Ok(*context),
+        || AppError::Internal("Record field requires contextual migration".into()),
+    )
+    .await
+}
+
+/// The owner interprets its storage marker and supplies its existing policy error.
+pub(crate) async fn decrypt_with_context<'a>(
+    keys: &EncryptionKeys,
+    ciphertext: &[u8],
+    version: Option<u32>,
+    context: impl FnOnce() -> AppResult<RecordContext<'a>>,
+    unavailable: impl FnOnce() -> AppError,
+) -> AppResult<Zeroizing<Vec<u8>>> {
+    match version {
+        Some(3) => keys.decrypt_record(ciphertext, &context()?).await,
+        None if keys.allow_legacy_record_reads() => keys.decrypt(ciphertext).await,
+        _ => Err(unavailable()),
     }
 }
 

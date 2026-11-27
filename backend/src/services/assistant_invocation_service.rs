@@ -487,6 +487,7 @@ pub async fn cancel_deleted_conversation(
 pub async fn decision_in_session(
     db: &Database,
     session: &mut ClientSession,
+    org_use_revision: i64,
     card: &crate::models::assistant_acknowledgement::AssistantAcknowledgement,
 ) -> AppResult<Option<String>> {
     let Some(id) = card.invocation_id.as_deref() else {
@@ -509,6 +510,7 @@ pub async fn decision_in_session(
                 .and_then(|routing| routing.report_to()),
         )
         .for_invocation(Some(id));
+    event.org_use_revision = org_use_revision;
     event.execution_task = card.execution_task.clone();
     event.id = Uuid::new_v5(
         &Uuid::NAMESPACE_OID,

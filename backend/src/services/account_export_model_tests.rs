@@ -363,6 +363,7 @@ fn stored_fixture(collection: &str, row: &Document) -> Result<Document, String> 
         "channel_email_subscriptions" => {
             roundtrip::<crate::models::channel_email::EmailSubscription>(row)
         }
+        "channel_guest_setup" => roundtrip::<crate::models::channel_guest_setup::GuestSetup>(row),
         "channel_messages" => roundtrip::<crate::models::channel_message::ChannelMessage>(row),
         "channel_reply_deliveries" => {
             roundtrip::<crate::models::channel_reply_delivery::ChannelReplyDelivery>(row)

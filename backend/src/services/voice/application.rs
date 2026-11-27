@@ -536,7 +536,9 @@ pub async fn agents(
         }
         let thread = Box::pin(team::home_thread(&state.db, &state.encryption_keys, &agent)).await?;
         rows.push(json!({"agent_id":agent.id,"name":agent.name,
-            "display_name":agent.display_name,"description":agent.description,
+            "display_name":agent.display_name,"kind":agent.kind,
+            "avatar":crate::services::assistant_avatar_service::view(agent.avatar.as_ref()),
+            "description":agent.description,
             "service_id":service_id,"conversation_id":thread.id}));
     }
     let settings = crate::services::assistant_settings_service::get(&state.db, &user).await?;

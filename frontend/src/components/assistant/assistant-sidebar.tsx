@@ -25,6 +25,12 @@ import { isNyxAgentConversationId } from "@/lib/assistant/conversation-ids";
 import { AgentStatusDot } from "@/components/assistant/nyxbot-agent-panels";
 import { AgentAvatar, AgentAvatarStack } from "@/components/assistant/nyxbot-agent-avatar";
 import {
+  ROSTER_ACTIVITY_LABELS,
+  type AgentRosterMood,
+} from "../../../../shared/agent-avatars/activity";
+import { useAgentAvatarsEnabled } from "@/hooks/use-agent-avatars";
+import { rosterMoodFor, type AgentActivityMood } from "@/hooks/use-agent-activity";
+import {
   AGENT_STATUS_LABEL,
   agentHandle,
   agentTitle,
@@ -290,7 +296,7 @@ function ConversationRow({
           </span>
         ) : showDraft ? <span className="mt-0.5 block">{draftLine}</span> : null}
       </button>
-      <DropdownMenu open={menuOpen} onOpenChange={(open) => {
+      {!conversation.read_only ? <DropdownMenu open={menuOpen} onOpenChange={(open) => {
         if (open) {
           rowList.current = optionsTrigger.current?.closest("nav") ?? null;
           pinAction.current = false;
@@ -367,7 +373,7 @@ function ConversationRow({
           >
             <Trash2 aria-hidden="true" />{translateUi("Delete")}</DropdownMenuItem>
         </DropdownMenuContent>
-      </DropdownMenu>
+      </DropdownMenu> : null}
     </div>
   );
 }
@@ -379,6 +385,7 @@ function ConversationRow({
  */
 export interface SidebarAgents {
   readonly agents: readonly AssistantAgent[];
+  readonly activityMood?: AgentActivityMood;
   readonly destroyedTruncated?: boolean;
   readonly loading?: boolean;
   readonly loadError?: string;
@@ -388,6 +395,9 @@ export interface SidebarAgents {
   /** The selected agent's threads, newest first. */
   readonly threads: readonly Conversation[];
   readonly threadsLoading?: boolean;
+  readonly onMoreGuestThreads?: () => void;
+  readonly loadingGuestThreads?: boolean;
+  readonly guestThreadsError?: boolean;
   readonly onSelectAgent: (agentId: string) => void;
   readonly onNewThread: (agentId: string) => void;
   /** Open an agent's details sheet; the row's hover menu offers it. */
@@ -416,15 +426,33 @@ export interface SidebarGroups {
   readonly unreadGroupIds?: ReadonlySet<string>;
 }
 
-function agentAccessibleName(agent: AssistantAgent): string {
+function agentAccessibleName(agent: AssistantAgent, activity?: AgentRosterMood): string {
   const title = agentTitle(agent);
   const handle = agentHandle(agent);
   const named = handle ? `${title} (${handle})` : title;
-  if (agent.kind === "nyxbot") return translateUi("{{name}} — your personal agent", { name: named });
+  const activeLabel = activity && activity !== "idle"
+    ? translateUi(ROSTER_ACTIVITY_LABELS[activity])
+    : undefined;
+  if (agent.kind === "nyxbot") {
+    const label = translateUi("{{name}} — your personal agent", { name: named });
+    return activeLabel ? `${label}, ${activeLabel}` : label;
+  }
   const pending = agent.pending_acknowledgements;
-  return `${named}, specialist, ${AGENT_STATUS_LABEL[agent.status]}${
-    pending ? `, ${String(pending)} pending ${pending === 1 ? "request" : "requests"}` : ""
-  }`;
+  const status = activeLabel ?? (activity === "idle" && agent.status !== "destroyed"
+    ? AGENT_STATUS_LABEL.idle
+    : AGENT_STATUS_LABEL[agent.status]);
+  return translateUi("{{name}}, {{kind}}, {{status}}{{pending}}", {
+    name: named,
+    kind: translateUi("specialist"),
+    status,
+    pending: pending
+      ? translateUi(", {{requests}}", {
+          requests: translateUi("{{count}} pending requests", {
+            count: pending,
+          }),
+        })
+      : "",
+  });
 }
 
 /**
@@ -563,6 +591,9 @@ function AgentRow({
   readonly threadColumnEnabled?: boolean;
 }) {
   useUiTranslation();
+  const activity = useAgentAvatarsEnabled()
+    ? (model.activityMood ?? rosterMoodFor)(agent)
+    : undefined;
   const nyxbot = agent.kind === "nyxbot";
   const threadsColumn = useContext(AssistantThreadsContext);
   // Clicking the selected agent folds its threads away for the thread open at
@@ -573,8 +604,9 @@ function AgentRow({
   const highlighted = selected && (!threadsColumn || separateThreads);
   const platforms = [...new Set(agent.channels.map((channel) => channel.platform))];
   const pinnedIds = usePinnedConversationIds();
+  const canReadGuestHistory = agent.owner_kind === "org" && agent.can_govern === true;
   const threads = expanded
-    ? splitChannelThreads(model.threads)
+    ? splitChannelThreads(agent.can_use === false ? model.threads.filter((thread) => thread.read_only) : model.threads)
     : { own: [], bots: [] };
   const ordered = pinnedConversationsFirst(threads.own, pinnedIds);
   const [showAllThreads, setShowAllThreads] = useState(false);
@@ -651,7 +683,7 @@ function AgentRow({
           <button
             type="button"
             onClick={() => {
-              if (agent.can_use === false) {
+              if (agent.can_use === false && !canReadGuestHistory) {
                 model.onAgentDetails?.(agent.id);
               } else if (model.onBackToWorkspace) {
                 model.onSelectAgent(agent.id);
@@ -665,7 +697,7 @@ function AgentRow({
                 model.onSelectAgent(agent.id);
               }
             }}
-            aria-label={agentAccessibleName(agent)}
+            aria-label={agentAccessibleName(agent, activity)}
             data-agent-id={agent.id}
             aria-expanded={threadsColumn || model.onBackToWorkspace ? undefined : expanded}
             aria-controls={separateThreads ? threadsColumn?.id : undefined}
@@ -692,10 +724,14 @@ function AgentRow({
               )}
             >
               <span className="relative flex shrink-0">
-                <AgentAvatar agent={agent} size="sm" />
-                {nyxbot ? null : (
+                <AgentAvatar agent={agent} size="sm" mood={activity} />
+                {nyxbot || (activity && activity !== "idle") ? null : (
                   <AgentStatusDot
-                    status={agent.status}
+                    status={
+                      activity === "idle" && agent.status !== "destroyed"
+                        ? "idle"
+                        : agent.status
+                    }
                     className="absolute -bottom-0.5 -right-0.5 ring-2 ring-sidebar transition-colors group-hover:ring-sidebar-hover"
                   />
                 )}
@@ -767,7 +803,7 @@ function AgentRow({
           </DropdownMenu>
         ) : null}
       </div>
-      {expanded && agent.can_use !== false ? (
+      {expanded && (agent.can_use !== false || canReadGuestHistory) ? (
         // The guide line runs down from the avatar's centre.
         <div
           role="group"
@@ -801,6 +837,12 @@ function AgentRow({
               unreadThreadIds={model.unreadThreadIds}
             />
           ))}
+          {model.onMoreGuestThreads ? (
+            <button type="button" disabled={model.loadingGuestThreads} onClick={model.onMoreGuestThreads}
+              className="w-full rounded-lg px-3 py-2 text-left type-secondary text-text-tertiary hover:bg-overlay">
+              {translateUi("Load more guest conversations")}
+            </button>
+          ) : null}
           {canChat ? (
             <button
               type="button"
@@ -1656,11 +1698,17 @@ function RailAgent({
   readonly onSelect: (conversationId: string) => void;
 }) {
   useUiTranslation();
+  const activity = useAgentAvatarsEnabled()
+    ? (model.activityMood ?? rosterMoodFor)(agent)
+    : undefined;
   const [open, setOpen] = useState(false);
   const selected = agent.id === model.selectedAgentId;
   if (agent.can_use === false) return (
     <button type="button" className={RAIL_BUTTON} aria-label={agentAccessibleName(agent)}
-      onClick={() => model.onAgentDetails?.(agent.id)}><AgentAvatar agent={agent} /></button>
+      onClick={() => {
+        if (agent.owner_kind === "org" && agent.can_govern) model.onSelectAgent(agent.id);
+        else model.onAgentDetails?.(agent.id);
+      }}><AgentAvatar agent={agent} /></button>
   );
   return (
     // Its chats open on click, never on a passing pointer; "All chats"
@@ -1669,12 +1717,12 @@ function RailAgent({
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label={agentAccessibleName(agent)}
+          aria-label={agentAccessibleName(agent, activity)}
           aria-current={selected ? "true" : undefined}
           className={cn(RAIL_BUTTON, selected && "bg-overlay-strong")}
         >
-          <AgentAvatar agent={agent} size="md" />
-          {agent.status === "running" ? (
+          <AgentAvatar agent={agent} size="md" mood={activity} />
+          {agent.status === "running" && activity === undefined ? (
             <span aria-hidden="true" className="absolute right-1 bottom-1 h-1.5 w-1.5 rounded-full bg-success motion-safe:animate-pulse" />
           ) : null}
         </button>
@@ -1690,6 +1738,7 @@ function RailAgent({
         {open ? (
           <RailAgentChats
             agent={agent}
+            activity={activity}
             model={model}
             activeConversationId={activeConversationId}
             onPick={(conversationId) => {
@@ -1713,6 +1762,7 @@ function RailAgent({
 
 function RailAgentChats({
   agent,
+  activity,
   model,
   activeConversationId,
   onPick,
@@ -1720,6 +1770,7 @@ function RailAgentChats({
   onAll,
 }: {
   readonly agent: AssistantAgent;
+  readonly activity?: AgentRosterMood;
   readonly model: SidebarAgents;
   readonly activeConversationId: string | undefined;
   readonly onPick: (conversationId: string) => void;
@@ -1761,7 +1812,7 @@ function RailAgentChats({
   return (
     <div className="space-y-1 text-14">
       <div className="flex items-center gap-2 px-1 pb-1">
-        <AgentAvatar agent={agent} size="sm" />
+        <AgentAvatar agent={agent} size="sm" mood={activity} />
         <span className="min-w-0 flex-1 truncate font-medium text-foreground">{agentTitle(agent)}</span>
         <button
           type="button"

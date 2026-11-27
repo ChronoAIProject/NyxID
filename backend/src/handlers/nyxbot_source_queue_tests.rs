@@ -97,14 +97,16 @@ async fn accepted_queued_sources_mint_original_targets_without_a_turn_or_budget(
         let saved = record(&f, &event.id).await;
         assert_eq!(saved.status, "queued");
         assert!(saved.turn_id.is_none());
-        let d = saved.delivery.unwrap();
+        let d = saved.delivery.as_ref().unwrap();
         assert!(d.checked_at > event.created_at);
-        let plain = f
-            .state
-            .encryption_keys
-            .decrypt(d.target_ciphertext.as_ref().unwrap())
-            .await
-            .unwrap();
+        let plain = event_record::delivery_target(
+            &f.state.encryption_keys,
+            &saved,
+            d,
+            d.target_ciphertext.as_ref().unwrap(),
+        )
+        .await
+        .unwrap();
         assert!(std::str::from_utf8(&plain).unwrap().contains(target));
     }
     assert!(sends(&f).await.is_empty());
@@ -351,7 +353,10 @@ async fn successful_blank_stream_and_detached_duplicate_destinations_are_termina
         f.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        rx,
+        InboundTurn {
+            receiver: rx,
+            hosted_reply: None,
+        },
         Utc::now(),
     );
     let body = body_text(response).await;
@@ -1397,6 +1402,7 @@ fn verified_context(
     crate::models::assistant_conversation::ChannelTurnContext {
         meta_grant: None,
         text_completeness: None,
+        channel_guest: None,
         org_origin: None,
         source_event_id: event.id.clone(),
         channel_id: channel.id.clone(),

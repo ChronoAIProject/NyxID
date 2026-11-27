@@ -32,6 +32,7 @@ export type SegmentControlProps = {
   /** External spacing only; grouped-choice visuals belong to this component. */
   style?: StyleProp<ViewStyle>;
   stacked?: boolean;
+  compact?: boolean;
   onPress: (index: number) => void;
 };
 
@@ -65,6 +66,7 @@ export function SegmentControl({
   accessibilityLabel,
   style,
   stacked = false,
+  compact = false,
   onPress,
 }: SegmentControlProps) {
   const { colors } = useTheme();
@@ -148,6 +150,7 @@ export function SegmentControl({
         disabled={disabled}
         style={({ pressed }) => [
           styles.item,
+          compact && styles.itemCompact,
           stacked && styles.itemStacked,
           adaptive && widths.length > 0 && { flex: 0, width: widths[i] },
           stacked && isActive && styles.selected,
@@ -155,7 +158,7 @@ export function SegmentControl({
         ]}
         onPress={() => onPress(i)}
       >
-        {segmentContent(seg, isActive, styles, adaptive)}
+        {segmentContent(seg, isActive, styles, compact, adaptive)}
       </Pressable>
     );
   });
@@ -226,9 +229,9 @@ export function SegmentControl({
                   key={seg.id ?? seg.label}
                   testID={`segment-measure-${i}`}
                   onLayout={(e) => measure(i, e.nativeEvent.layout.width)}
-                  style={[styles.item, styles.itemNatural]}
+                  style={[styles.item, compact && styles.itemCompact, styles.itemNatural]}
                 >
-                  {segmentContent(seg, i === activeIndex, styles, false, true)}
+                  {segmentContent(seg, i === activeIndex, styles, compact, false, true)}
                 </View>
               ))}
             </View>
@@ -245,6 +248,7 @@ function segmentContent(
   seg: Segment,
   active: boolean,
   styles: ReturnType<typeof createStyles>,
+  compact: boolean,
   adaptive: boolean,
   measuring = false,
 ) {
@@ -261,7 +265,7 @@ function segmentContent(
         <View
           style={[
             styles.countBadge,
-            adaptive && { height: undefined, minHeight: 18 },
+            (compact || adaptive) && styles.countBadgeGrowing,
             active && styles.countBadgeActive,
           ]}
         >
@@ -319,6 +323,7 @@ const createStyles = (c: ThemeColors) => {
       gap: spacing.xs,
       zIndex: 1,
     },
+    itemCompact: { paddingHorizontal: spacing.xs },
     itemStacked: {
       flex: undefined,
     },
@@ -355,6 +360,7 @@ const createStyles = (c: ThemeColors) => {
       backgroundColor: c.primaryTone.bg,
       borderColor: c.primaryTone.border,
     },
+    countBadgeGrowing: { height: undefined, minHeight: 18 },
     countText: {
       ...typeScale.badge,
       color: c.primaryOnTint,

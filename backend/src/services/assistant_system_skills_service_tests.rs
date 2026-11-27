@@ -1459,6 +1459,7 @@ async fn nyxbot_and_specialist_read_same_proxy_key_without_ornn_grant_and_previe
             )
             .insert_one(
                 crate::models::service_approval_config::ServiceApprovalConfig {
+                    approvers: Default::default(),
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),
                     service_id: service.id.clone(),
@@ -2439,6 +2440,7 @@ async fn catalog_pin_dispatch_check(via_node: bool) {
         .unwrap();
         db.collection(crate::models::service_approval_config::COLLECTION_NAME)
             .insert_one(ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: catalog.id.clone(),

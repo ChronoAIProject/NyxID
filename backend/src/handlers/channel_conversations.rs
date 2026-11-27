@@ -34,6 +34,8 @@ pub struct CreateConversationRequest {
     pub platform: Option<String>,
     pub agent_api_key_id: String,
     #[serde(default)]
+    pub dedicate_agent_key_for_guest_access: bool,
+    #[serde(default)]
     pub platform_conversation_id: Option<String>,
     #[serde(default)]
     pub platform_conversation_type: Option<String>,
@@ -54,6 +56,8 @@ pub struct CreateConversationRequest {
 pub struct UpdateConversationRequest {
     #[serde(default)]
     pub agent_api_key_id: Option<String>,
+    #[serde(default)]
+    pub dedicate_agent_key_for_guest_access: Option<bool>,
     #[serde(default)]
     pub default_agent: Option<bool>,
     #[serde(default)]
@@ -89,6 +93,8 @@ pub struct ConversationItem {
     pub agent_api_key_id: String,
     pub default_agent: bool,
     pub allow_agent_initiated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest_access_state: Option<&'static str>,
     pub capabilities: crate::services::channel_platform::ChannelCapabilities,
     pub is_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -220,6 +226,7 @@ fn conversation_to_item(
         agent_api_key_id: conv.agent_api_key_id.clone(),
         default_agent: conv.default_agent,
         allow_agent_initiated: conv.allow_agent_initiated,
+        guest_access_state: None,
         capabilities: crate::services::channel_adapters::conversation_capabilities(
             &conv.platform,
             &conv.platform_conversation_id,
@@ -230,6 +237,22 @@ fn conversation_to_item(
         created_at: conv.created_at.to_rfc3339(),
         updated_at: conv.updated_at.to_rfc3339(),
     }
+}
+
+async fn guest_route_item(
+    state: &AppState,
+    conversation: &crate::models::channel_conversation::ChannelConversation,
+) -> ConversationItem {
+    let mut item = conversation_to_item(state, conversation);
+    if conversation.channel_bot_id.is_some() {
+        item.guest_access_state = Some(
+            match channel_routing_service::guest_access_state(&state.db, conversation).await {
+                Ok(status) => status,
+                Err(_) => "authority_unavailable",
+            },
+        );
+    }
+    item
 }
 
 // ---------------------------------------------------------------------------
@@ -253,7 +276,7 @@ pub async fn create_conversation(
     tele: TelemetryContext,
     Json(body): Json<CreateConversationRequest>,
 ) -> AppResult<(StatusCode, Json<ConversationItem>)> {
-    if body.allow_agent_initiated.is_some() {
+    if body.allow_agent_initiated.is_some() || body.dedicate_agent_key_for_guest_access {
         super::login_client_context::require_first_party_human(&auth_user)?;
     }
     let actor = auth_user.user_id.to_string();
@@ -279,6 +302,11 @@ pub async fn create_conversation(
     let is_device = matches!(body.platform.as_deref(), Some("device"));
 
     let conversation = if is_device {
+        if body.dedicate_agent_key_for_guest_access {
+            return Err(AppError::ValidationError(
+                "Device routes do not use guest access keys".into(),
+            ));
+        }
         create_device_conversation(&state, &owner_id, &body).await?
     } else {
         create_bot_conversation(&state, &owner_id, &body).await?
@@ -305,6 +333,7 @@ pub async fn create_conversation(
             "channel_bot_id": &body.channel_bot_id,
             "platform": &conversation.platform,
             "agent_api_key_id": &body.agent_api_key_id,
+            "dedicate_agent_key_for_guest_access": body.dedicate_agent_key_for_guest_access,
             "owner_user_id": &owner_id,
             "target_org_id": body.target_org_id,
         })),
@@ -312,7 +341,7 @@ pub async fn create_conversation(
 
     Ok((
         StatusCode::CREATED,
-        Json(conversation_to_item(&state, &conversation)),
+        Json(guest_route_item(&state, &conversation).await),
     ))
 }
 
@@ -380,7 +409,7 @@ async fn create_bot_conversation(
         ));
     }
 
-    channel_routing_service::create_conversation(
+    channel_routing_service::create_conversation_with_guest_key(
         &state.db,
         owner_id,
         Some(channel_bot_id),
@@ -391,6 +420,7 @@ async fn create_bot_conversation(
         &body.agent_api_key_id,
         default_agent,
         body.allow_agent_initiated.unwrap_or(false),
+        body.dedicate_agent_key_for_guest_access,
     )
     .await
 }
@@ -467,10 +497,10 @@ pub async fn list_conversations(
         channel_routing_service::list_conversations(&state.db, &owner_id, params.bot_id.as_deref())
             .await?;
     let total = conversations.len() as u64;
-    let items = conversations
-        .iter()
-        .map(|conv| conversation_to_item(&state, conv))
-        .collect();
+    let mut items = Vec::with_capacity(conversations.len());
+    for conversation in &conversations {
+        items.push(guest_route_item(&state, conversation).await);
+    }
     Ok(Json(ConversationListResponse {
         conversations: items,
         total,
@@ -486,7 +516,7 @@ pub async fn get_conversation(
     let actor = auth_user.user_id.to_string();
     let (_owner_id, conversation) =
         resolve_conversation_owner(&state, &actor, &conversation_id, false).await?;
-    Ok(Json(conversation_to_item(&state, &conversation)))
+    Ok(Json(guest_route_item(&state, &conversation).await))
 }
 
 /// PUT /api/v1/channel-conversations/{id}
@@ -496,7 +526,7 @@ pub async fn update_conversation(
     Path(conversation_id): Path<String>,
     Json(body): Json<UpdateConversationRequest>,
 ) -> AppResult<Json<ConversationItem>> {
-    if body.allow_agent_initiated.is_some() {
+    if body.allow_agent_initiated.is_some() || body.dedicate_agent_key_for_guest_access.is_some() {
         super::login_client_context::require_first_party_human(&auth_user)?;
     }
     let actor = auth_user.user_id.to_string();
@@ -515,7 +545,7 @@ pub async fn update_conversation(
         }
     }
 
-    let updated = channel_routing_service::update_conversation(
+    let updated = channel_routing_service::update_conversation_with_guest_key(
         &state.db,
         &conversation_id,
         &owner_id,
@@ -523,6 +553,7 @@ pub async fn update_conversation(
         body.default_agent,
         body.is_active,
         body.allow_agent_initiated,
+        body.dedicate_agent_key_for_guest_access,
     )
     .await?;
 
@@ -533,10 +564,11 @@ pub async fn update_conversation(
         Some(serde_json::json!({
             "conversation_id": &conversation_id,
             "owner_user_id": &owner_id,
+            "dedicate_agent_key_for_guest_access": body.dedicate_agent_key_for_guest_access,
         })),
     );
 
-    Ok(Json(conversation_to_item(&state, &updated)))
+    Ok(Json(guest_route_item(&state, &updated).await))
 }
 
 /// DELETE /api/v1/channel-conversations/{id}

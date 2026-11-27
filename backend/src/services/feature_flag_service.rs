@@ -222,6 +222,13 @@ const SKILL_RUNS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_AVATARS_FLAG_KEY: &str = "assistant:avatars";
+const ASSISTANT_AVATARS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_AVATARS_FLAG_KEY,
+    description: "Personalised agent avatars and the avatar editor. Stored configurations are retained while disabled.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_MODEL_CONTROLS_FLAG_KEY: &str = "assistant:model-controls";
 const ASSISTANT_MODEL_CONTROLS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_MODEL_CONTROLS_FLAG_KEY,
@@ -264,12 +271,24 @@ const ORG_SPECIALIST_CHANNELS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ORG_AGENT_ACCESS_FLAG_KEY: &str = "assistant:org-agent-access-lists-v1";
+const ORG_AGENT_ACCESS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ORG_AGENT_ACCESS_FLAG_KEY,
+    description: "Allow organization Admins to edit specialist access lists after fleet readiness.",
+    default_enabled: false,
+};
+
 const ORG_AGENTS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: "assistant:org-agents",
     description: "Allows organization specialist creation after all replicas enforce live member authority.",
     default_enabled: false,
 };
 
+const NAMED_APPROVERS: FeatureFlagDef = FeatureFlagDef {
+    key: super::org_service_approvers::FLAG,
+    description: "Allow named approver configuration on organization services after fleet activation.",
+    default_enabled: false,
+};
 pub const GUEST_OPERATION_SCOPES_FLAG_KEY: &str = "assistant:guest-operation-scopes";
 const GUEST_OPERATION_SCOPES_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: GUEST_OPERATION_SCOPES_FLAG_KEY,
@@ -441,12 +460,19 @@ const MOBILE_NEW_DOMAINS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+const CHANNEL_GUEST_ACCESS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: super::channel_guest_access::FLAG,
+    description: "Enable the channel guest audience add-on for selected bots. Global only and requires serving-fleet readiness.",
+    default_enabled: false,
+};
+
 /// Flags resolved without a user or organization; only a global override applies.
 const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[
     OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
     INVITATION_CODE_FLAG_KEY,
     OAUTH_EXACT_REDIRECTS_FLAG_KEY,
     APP_TOKEN_MANAGEMENT_FLAG_KEY,
+    super::channel_guest_access::FLAG,
     MOBILE_NEW_DOMAINS_FLAG_KEY,
     CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
 ];
@@ -549,9 +575,11 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     OAUTH_EXACT_REDIRECTS_FLAG,
     APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
+    CHANNEL_GUEST_ACCESS_FLAG,
     MOBILE_MFA_FLAG,
     STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
+    ASSISTANT_AVATARS_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     ASSISTANT_CMA_SANDBOXES_FLAG,
@@ -566,6 +594,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     TURN_HANDOFF_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
+    NAMED_APPROVERS,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_PDF_VISION_FLAG,
     ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG,
@@ -580,6 +609,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AGENT_LEARNING_FLAG,
     ASSISTANT_NOTIFICATIONS_FLAG,
     ORG_AGENTS_FLAG,
+    ORG_AGENT_ACCESS_FLAG,
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
@@ -630,9 +660,11 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     OAUTH_EXACT_REDIRECTS_FLAG,
     APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
+    CHANNEL_GUEST_ACCESS_FLAG,
     MOBILE_MFA_FLAG,
     STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
+    ASSISTANT_AVATARS_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     ASSISTANT_CMA_SANDBOXES_FLAG,
@@ -647,6 +679,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     TURN_HANDOFF_FLAG,
     ASSISTANT_GENERATED_ARTIFACTS_FLAG,
     GUEST_OPERATION_SCOPES_FLAG,
+    NAMED_APPROVERS,
     ASSISTANT_CHANNEL_MEDIA_FLAG,
     ASSISTANT_PDF_VISION_FLAG,
     ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG,
@@ -661,6 +694,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AGENT_LEARNING_FLAG,
     ASSISTANT_NOTIFICATIONS_FLAG,
     ORG_AGENTS_FLAG,
+    ORG_AGENT_ACCESS_FLAG,
     ORG_SPECIALIST_CHANNELS_FLAG,
     SHARED_AGENTS_FLAG,
     ASSISTANT_VOICE_FLAG,
@@ -1142,6 +1176,33 @@ pub(crate) fn resolve_personal_definitions<'a>(
     enabled_keys
 }
 
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AuthoringUnavailableReason {
+    FlagOff,
+    ReadinessMissing,
+}
+
+/// The caller has already established the org Admin's management permission.
+pub(crate) async fn org_admin_authoring_unavailable_reason(
+    db: &mongodb::Database,
+    actor: &str,
+    org: &str,
+    key: &str,
+) -> AppResult<Option<AuthoringUnavailableReason>> {
+    let enabled = resolve_enabled_features(db, org, actor, OrgRole::Admin).await?;
+    if !enabled.iter().any(|candidate| candidate == key) {
+        return Ok(Some(AuthoringUnavailableReason::FlagOff));
+    }
+    match super::security_readiness_service::require_serving(db, key).await {
+        Ok(()) => Ok(None),
+        Err(AppError::SecurityReadinessUnavailable) => {
+            Ok(Some(AuthoringUnavailableReason::ReadinessMissing))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Resolve enabled-flag keys for a member of an org (org context). Applies the
 /// platform-global baseline, the org's own overrides, and platform user overrides.
 pub async fn resolve_enabled_features(
@@ -1162,6 +1223,55 @@ pub async fn resolve_enabled_features(
         member_user_id,
         role,
     ))
+}
+
+/// A cleared deny must pass readiness if it restores an enabled parent.
+pub(super) async fn clear_enables_inherited_override(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    key: &str,
+    kind: FlagTargetKind,
+    target: Option<&str>,
+) -> AppResult<bool> {
+    use crate::models::org_membership::{COLLECTION_NAME as MEMBERS, OrgMembership};
+    let rows = db.collection::<FeatureFlagOverride>(COLLECTION_NAME);
+    let global = rows
+        .find_one(
+            doc! {"flag_key":key,"definition_id":null,"org_user_id":null,
+            "target_kind":"global","enabled":true},
+        )
+        .session(&mut *session)
+        .await?
+        .is_some();
+    if kind != FlagTargetKind::User {
+        return Ok(kind == FlagTargetKind::Org && global);
+    }
+    let actor = target.ok_or_else(|| AppError::BadRequest("Missing user target".into()))?;
+    let mut cursor = db
+        .collection::<OrgMembership>(MEMBERS)
+        .find(doc! {"member_user_id":actor,"revoked_at":null})
+        .session(&mut *session)
+        .await?;
+    let memberships: Vec<OrgMembership> = cursor.stream(&mut *session).try_collect().await?;
+    if memberships.is_empty() {
+        return Ok(global);
+    }
+    let orgs: Vec<_> = memberships.iter().map(|m| &m.org_user_id).collect();
+    let mut cursor = rows
+        .find(doc! {"flag_key":key,"definition_id":null,"org_user_id":{"$in":orgs}})
+        .session(&mut *session)
+        .await?;
+    let mut by_org: HashMap<String, Vec<FeatureFlagOverride>> = HashMap::new();
+    while let Some(row) = cursor.next(&mut *session).await.transpose()? {
+        if let Some(org) = &row.org_user_id {
+            by_org.entry(org.clone()).or_default().push(row);
+        }
+    }
+    Ok(memberships.iter().any(|m| {
+        let overrides = by_org.get(&m.org_user_id).map_or(&[][..], Vec::as_slice);
+        !resolve_definitions_from_overrides([(key, global, None)], &[], overrides, actor, m.role)
+            .is_empty()
+    }))
 }
 
 /// Resolve enabled-flag keys for a user in the personal (non-org) context.
@@ -1277,6 +1387,10 @@ pub async fn app_token_management_enforced(db: &mongodb::Database) -> AppResult<
 
 pub async fn oauth_exact_redirects_enforced(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &OAUTH_EXACT_REDIRECTS_FLAG).await
+}
+
+pub(crate) async fn channel_guest_access_enabled(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &CHANNEL_GUEST_ACCESS_FLAG).await
 }
 
 async fn global_flag_enabled(db: &mongodb::Database, flag: &FeatureFlagDef) -> AppResult<bool> {
@@ -2252,32 +2366,6 @@ mod tests {
                 .await
                 .unwrap();
         }
-        for flag in FEATURE_FLAGS.iter().filter(|flag| {
-            super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
-        }) {
-            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
-                assert!(matches!(
-                    set_platform_override(&db, flag.key, &target, true, &user).await,
-                    Err(AppError::SecurityReadinessUnavailable)
-                ));
-                assert!(
-                    !set_platform_override(&db, flag.key, &target, false, &user)
-                        .await
-                        .unwrap()
-                        .enabled
-                );
-            }
-            assert!(matches!(
-                set_platform_org_override(&db, &org, flag.key, true, &user).await,
-                Err(AppError::SecurityReadinessUnavailable)
-            ));
-            assert!(
-                !set_platform_org_override(&db, &org, flag.key, false, &user)
-                    .await
-                    .unwrap()
-                    .enabled
-            );
-        }
         // Ordinary flags retain enable/disable behavior without readiness.
         for enabled in [true, false] {
             for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
@@ -2297,24 +2385,44 @@ mod tests {
                 enabled
             );
         }
-        super::super::security_readiness_service::ready_test_replica(&db).await;
-        for flag in FEATURE_FLAGS.iter().filter(|flag| {
-            super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
-        }) {
-            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
-                assert!(
-                    set_platform_override(&db, flag.key, &target, true, &user)
-                        .await
-                        .unwrap()
-                        .enabled
-                );
+        for ready in [false, true] {
+            if ready {
+                super::super::security_readiness_service::ready_test_replica(&db).await;
             }
-            assert!(
-                set_platform_org_override(&db, &org, flag.key, true, &user)
-                    .await
-                    .unwrap()
-                    .enabled
-            );
+            for flag in FEATURE_FLAGS.iter().filter(|flag| {
+                super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
+            }) {
+                for enabled in [true, false] {
+                    let global =
+                        set_platform_override(&db, flag.key, &FlagTarget::Global, enabled, &user)
+                            .await;
+                    let personal = set_platform_override(
+                        &db,
+                        flag.key,
+                        &FlagTarget::User(user.clone()),
+                        enabled,
+                        &user,
+                    )
+                    .await;
+                    let organization =
+                        set_platform_org_override(&db, &org, flag.key, enabled, &user).await;
+                    for (scoped, result) in
+                        [(false, global), (true, personal), (true, organization)]
+                    {
+                        if scoped && is_global_only(flag.key) {
+                            assert!(matches!(result, Err(AppError::BadRequest(message))
+                                if message == format!("{} supports only a global override", flag.key)));
+                        } else if enabled && !ready {
+                            assert!(matches!(
+                                result,
+                                Err(AppError::SecurityReadinessUnavailable)
+                            ));
+                        } else {
+                            assert_eq!(result.unwrap().enabled, enabled);
+                        }
+                    }
+                }
+            }
         }
         db.drop().await.unwrap();
     }
@@ -3596,13 +3704,17 @@ mod tests {
             shipped,
             vec![
                 "auth:oauth-refresh-client-auth-v1",
+                "channels:messenger",
+                "channels:instagram",
                 "auth:invitation-code",
                 "auth:oauth-exact-redirects-v1",
                 "auth:app-token-management-v1",
                 "mobile:new-domains",
+                "nyxbot:guest-audience-v1",
                 "auth:mobile-mfa",
                 "auth:staging-qr-login",
                 "assistant:nyxagent-engine",
+                "assistant:avatars",
                 "assistant:model-controls",
                 "assistant:workspace-preview",
                 "assistant:cma-sandboxes",
@@ -3617,6 +3729,7 @@ mod tests {
                 "assistant:turn-handoff",
                 "assistant:generated-artifacts",
                 "assistant:guest-operation-scopes",
+                "approval:org-service-named-approvers-v1",
                 "assistant:channel-media",
                 "assistant:pdf-vision",
                 "assistant:channel-guest-media",
@@ -3631,6 +3744,7 @@ mod tests {
                 "assistant:agent-learning",
                 "assistant:notifications",
                 "assistant:org-agents",
+                "assistant:org-agent-access-lists-v1",
                 "nyxbot:org-specialist-channels",
                 "assistant:shared-agents",
                 "assistant:voice",

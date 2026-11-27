@@ -14,6 +14,7 @@ async fn custom_binding(
         .db
         .collection::<NyxbotEventBinding>(EVENT_BINDINGS)
         .insert_one(NyxbotEventBinding {
+            org_use_revision: 0,
             id: id.into(),
             user_id: OWNER.into(),
             agent_id: row.agent_id.clone().unwrap(),
@@ -433,6 +434,23 @@ async fn org_event_binding_setup_and_retirement_preserve_the_key_rewrap_winner()
             let debug = format!("{row:?}");
             assert!(!debug.contains("ciphertext") && !debug.contains(&row.producer_key_id));
             if outcome == "ready" {
+                let agents = state.db.collection::<bson::Document>(AGENTS);
+                agents
+                    .update_one(
+                        doc! {"_id": &agent.id},
+                        doc! {"$set": {"org_user_ids": [], "org_use_revision": 1_i64}},
+                    )
+                    .await
+                    .unwrap();
+                assert!(bindings::authorize_provider(&state, &row).await.is_err());
+                agents
+                    .update_one(
+                        doc! {"_id": &agent.id},
+                        doc! {"$set": {"org_user_ids": [OWNER]}},
+                    )
+                    .await
+                    .unwrap();
+                assert!(bindings::authorize_provider(&state, &row).await.is_err());
                 continue;
             }
             Box::pin(bindings::revoke(&state, OWNER, id)).await.unwrap();

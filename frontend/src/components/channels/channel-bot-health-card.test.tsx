@@ -409,3 +409,44 @@ it.each([
   expect(screen.getByText(explanation)).toBeVisible();
   expect(screen.queryByText("需要注意")).not.toBeInTheDocument();
 });
+
+it.each(["telegram", "telegram-new"])("shows the last gateway refusal without changing verification truth for %s", async (platform) => {
+  mockGet.mockResolvedValue(health({ platform, can_write: false, status: "active", webhook_registered: true,
+    nyxbot_status: "failed", nyxbot_last_error: "gateway_rejected_request", recommendation_cause: "gateway_rejected_request",
+    nyxbot_setup_diagnostic: {operation:"create",outcome:"rejected",http_status:400,field:"/name",problem_code:"invalid_request"},
+    recommended_action:"contact_admin",recommended_action_text:"gateway_rejected_request: Last connection attempt: rejected." }));
+  renderCard();
+  expect(await screen.findByText(/Last connection attempt: The gateway rejected the connection request/)).toBeVisible();
+  expect(screen.getByText("Needs attention")).toBeVisible();
+  expect(screen.queryByRole("button",{name:"Verify"})).not.toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+it.each([
+  ["en", "Last connection attempt: The gateway has not registered"],
+  ["zh-CN", "上次连接尝试：网关尚未将"],
+  ["zh-TW", "上次連線嘗試：閘道尚未將"],
+])("localizes missing-provider recovery in %s", async (language, text) => {
+  mockGet.mockResolvedValue(health({platform:"telegram",nyxbot_status:"failed",nyxbot_last_error:"gateway_provider_not_registered",recommendation_cause:"gateway_provider_not_registered",
+    recommended_action:"contact_admin",recommended_action_text:"gateway_provider_not_registered: Last connection attempt: missing."}));
+  renderCard();
+  await screen.findByText(/Last connection attempt/);
+  await act(async () => {await appI18n.changeLanguage(language);});
+  expect(screen.getByText((value)=>value.startsWith(text))).toBeVisible();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+it("retains a bot fault recommendation despite failed gateway history", async () => {
+  mockGet.mockResolvedValue(health({platform:"telegram",nyxbot_status:"failed",nyxbot_last_error:"gateway_rejected_request",
+    recommended_action:"reconnect",recommended_action_text:"Reconnect the Telegram account, then select Verify."}));
+  renderCard();
+  expect(await screen.findByText("Reconnect the Telegram account, then select Verify.")).toBeVisible();
+  expect(screen.queryByText(/Last connection attempt/)).not.toBeInTheDocument();
+});
+
+it("renders an older response without guessing a setup cause from prose", async () => {
+  mockGet.mockResolvedValue(health({platform:"telegram",nyxbot_status:"failed",nyxbot_last_error:"gateway_rejected_request",
+    recommended_action:"contact_admin",recommended_action_text:"gateway_rejected_request: older server guidance"}));
+  renderCard();
+  expect(await screen.findByText("gateway_rejected_request: older server guidance")).toBeVisible();
+});

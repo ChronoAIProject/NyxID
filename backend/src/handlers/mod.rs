@@ -53,6 +53,7 @@ pub mod channel_bots;
 pub mod channel_connect_links;
 pub mod channel_conversations;
 pub mod channel_events;
+pub(crate) mod channel_guest_setup;
 pub mod channel_managed;
 #[cfg(test)]
 pub(crate) mod channel_managed_tests;
@@ -66,6 +67,8 @@ pub mod connect_links;
 pub mod connections;
 pub mod consent;
 pub mod credential_accept;
+#[cfg(test)]
+mod credential_record_fixtures;
 pub mod credential_verification;
 pub mod delegation;
 pub mod demo;
@@ -97,6 +100,7 @@ pub mod node_agent;
 pub mod node_ws;
 pub mod notifications;
 pub mod oauth;
+pub mod oauth_consent_disclosure;
 pub(crate) mod oauth_consent_response;
 pub mod oidc_discovery;
 pub mod openclaw_channel;

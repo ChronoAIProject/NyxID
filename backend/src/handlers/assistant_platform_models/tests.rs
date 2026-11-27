@@ -1048,7 +1048,7 @@ async fn discovery_selection_and_model_grants_share_live_public_entitlements() {
         ""
     );
     specialist.model = plan.model.public_id.clone();
-    let summary = team::summaries_for_agents(&state.db, PERSON, vec![specialist.clone()], 0)
+    let summary = team::summaries_for_agents(&state.db, PERSON, vec![specialist.clone()], 0, None)
         .await
         .unwrap();
     assert!(summary[0].model_unavailable);
@@ -1060,7 +1060,7 @@ async fn discovery_selection_and_model_grants_share_live_public_entitlements() {
         .delete_one(doc! {"_id":&plan.model.id})
         .await
         .unwrap();
-    let summary = team::summaries_for_agents(&state.db, PERSON, vec![specialist], 0)
+    let summary = team::summaries_for_agents(&state.db, PERSON, vec![specialist], 0, None)
         .await
         .unwrap();
     assert!(

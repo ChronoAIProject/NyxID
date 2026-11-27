@@ -259,6 +259,7 @@ pub async fn configure(
             let result: AppResult<_> = async {
                 let actor = actor.as_str();
                 let agent_id = agent_id.as_str();
+                super::org_agent_service::fence_maintenance(&db, session, actor, &agent).await?;
                 fence_live_agent(&db, agent_id, &agent.user_id, session).await?;
                 let collection = db.collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME);
                 let now = Utc::now();
@@ -422,10 +423,15 @@ pub async fn enrollment_epoch(
         return Ok((config.learning_epoch > 0).then_some(config.learning_epoch));
     }
     let can_use = match snapshot {
-        Some(access) => access.matches(actor, &agent.user_id),
-        None => super::org_agent_service::can_use(
-            &super::org_agent_service::access(db, actor, &agent.user_id).await?,
-        ),
+        Some(access) => access.permits_agent(actor, agent),
+        None => {
+            super::org_agent_service::specialist_rights(
+                actor,
+                agent,
+                &super::org_agent_service::access(db, actor, &agent.user_id).await?,
+            )
+            .can_use
+        }
     };
     if !can_use {
         return Ok(None);
@@ -472,24 +478,23 @@ async fn owner_is_org(db: &Database, owner: &str) -> AppResult<bool> {
     Ok(user.user_type.is_org())
 }
 
-async fn member_ids(
-    db: &Database,
-    agent_id: &str,
-    owner_id: &str,
-    epoch: i64,
-) -> AppResult<Vec<String>> {
+async fn member_ids(db: &Database, agent: &AssistantAgent, epoch: i64) -> AppResult<Vec<String>> {
     let members: Vec<AssistantAgentLearningMember> = db
         .collection::<AssistantAgentLearningMember>(MEMBERS_COLLECTION_NAME)
-        .find(doc! {"agent_id": agent_id, "opted_in": true, "learning_epoch": epoch})
+        .find(doc! {"agent_id": &agent.id, "opted_in": true, "learning_epoch": epoch})
         .limit(1000)
         .await?
         .try_collect::<Vec<_>>()
         .await?;
     let mut ids = Vec::with_capacity(members.len());
     for member in members {
-        if super::org_agent_service::can_use(
-            &super::org_agent_service::access(db, &member.member_user_id, owner_id).await?,
-        ) {
+        if super::org_agent_service::specialist_rights(
+            &member.member_user_id,
+            agent,
+            &super::org_agent_service::access(db, &member.member_user_id, &agent.user_id).await?,
+        )
+        .can_use
+        {
             ids.push(member.member_user_id);
         }
     }
@@ -516,7 +521,7 @@ async fn candidate_threads(
         filter.insert("agent_owner_id", bson::Bson::Null);
     } else {
         filter.insert("agent_owner_id", &config.owner_id);
-        let ids = member_ids(db, &agent.id, &config.owner_id, config.learning_epoch).await?;
+        let ids = member_ids(db, agent, config.learning_epoch).await?;
         if ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -836,6 +841,7 @@ async fn create_run(
         turn_id: row.turn_id.clone(),
     });
     let run = AssistantAgentLearningRun {
+        org_maintain_revision: agent.org_maintain_revision,
         id: Uuid::new_v4().to_string(),
         agent_id: agent.id.clone(),
         owner_id: agent.user_id.clone(),
@@ -877,6 +883,7 @@ async fn reserve_run(
         .start_transaction()
         .and_run2(async move |session| {
             let result: AppResult<_> = async {
+                super::org_agent_service::fence_maintenance(&db,session,&run.actor_id,&agent).await?;
                 fence_live_agent(&db, &agent.id, &agent.user_id, session).await?;
                 if db.collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
                     .count_documents(doc! {"agent_id": &agent.id, "status": {"$in": ["queued", "analyzing"]}})
@@ -1100,9 +1107,13 @@ async fn evidence_is_current(
             return Ok(None);
         }
     } else if agent.user_id == run.owner_id {
-        if !super::org_agent_service::can_use(
+        if !super::org_agent_service::specialist_rights(
+            &conversation.user_id,
+            agent,
             &super::org_agent_service::access(db, &conversation.user_id, &agent.user_id).await?,
-        ) {
+        )
+        .can_use
+        {
             return Ok(None);
         }
         if db
@@ -1233,6 +1244,9 @@ async fn run_authority_error(
         .await?;
     if config.is_none() {
         return Ok(Some("configuration_changed"));
+    }
+    if run.org_maintain_revision != agent.org_maintain_revision {
+        return Ok(Some("owner_access_lost"));
     }
     if agent.user_id == run.actor_id {
         return Ok(None);
@@ -1587,6 +1601,11 @@ pub(crate) mod tests {
         commands.lock().unwrap().clear();
         let now = Utc::now();
         let agent = AssistantAgent {
+            org_maintainer_user_ids: None,
+            org_user_ids: None,
+            org_access_revision: 0,
+            org_use_revision: 0,
+            org_maintain_revision: 0,
             channel_checking_notice: false,
             id: Uuid::new_v4().to_string(),
             user_id: "learning-test-owner".into(),
@@ -1615,6 +1634,7 @@ pub(crate) mod tests {
             home_conversation_id: None,
             memory: Vec::new(),
             display_name: None,
+            avatar: None,
             persona: None,
             voice_instructions: None,
             destroyed_at: None,
