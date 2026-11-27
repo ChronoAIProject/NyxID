@@ -78,7 +78,7 @@ static RELAY_COMPLETIONS: std::sync::LazyLock<
     >,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-struct RelayCompletionGuard(RelayCompletionKey);
+pub(super) struct RelayCompletionGuard(RelayCompletionKey);
 
 impl Drop for RelayCompletionGuard {
     fn drop(&mut self) {
@@ -86,7 +86,7 @@ impl Drop for RelayCompletionGuard {
     }
 }
 
-fn watch_relay_callback(
+pub(super) fn watch_relay_callback(
     channel_id: &str,
     message_id: &str,
 ) -> (RelayCompletionGuard, tokio::sync::oneshot::Receiver<()>) {

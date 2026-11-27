@@ -446,10 +446,15 @@ runner loads the original human request from that exact live root and supplies
 bounded, redacted operation receipts as quoted, untrusted tool data. It preserves
 the conversation key, selected model, billing lane, task/source audience and
 ordinary model and tool egress checks. The model continues the remaining task;
-the retained effect keeps its original operation identity and cannot be sent
-again from any automatic continuation of that task, including a later readback
-review. A separately gated readback may require its own review before continuing.
-A new human request has its own root and may execute the same reviewed effect.
+the retained effect keeps its original operation identity. A server-owned retained
+owner turn joins earlier marked successes in that task, including during a later
+independent readback review. The current turn's durable continuation release
+establishes this context; a client-supplied receipt or an ordinary follow-up event
+does not. Ordinary distinct admitted follow-ups may use reusable authority for a
+new occurrence after receipt delivery. Original/resume turn retries, pending and
+uncertain outcomes retain their existing deduplication. A separately gated readback
+may require its own review before continuing. A new human request has its own root
+and may execute the same reviewed effect.
 Redaction uses the runner's existing verified conversation credential; retained
 resume does not decrypt another copy of it. Normal egress still requires the
 live conversation-key relationship; reusing the verified bytes does not bypass

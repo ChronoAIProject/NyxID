@@ -50,6 +50,11 @@ async fn channel_turn_transport(
     let route = Uuid::new_v4().to_string();
     let thread = Uuid::new_v4().to_string();
     let event = Uuid::new_v4().to_string();
+    let partition = if transport == "direct" {
+        crate::handlers::nyxbot::chats::direct_partition("200", "7", Some("77"))
+    } else {
+        "original-chat".into()
+    };
     let now = bson::DateTime::now();
     let db = &f.state.db;
     db.collection::<Document>("channel_bots").insert_one(doc!{"_id":&bot,"user_id":&f.owner,"platform":platform,"platform_bot_id":if whatsapp {"333"} else {"100"},"label":"Owner bot","platform_bot_username":"owner_bot","webhook_registered":true,"webhook_secret_hash":"hash","bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1]},"is_active":true,"status":"active","created_at":now,"updated_at":now}).await.unwrap();
@@ -98,13 +103,13 @@ async fn channel_turn_transport(
         .insert_one(c)
         .await
         .unwrap();
-    db.collection::<Document>("nyxbot_threads").insert_one(doc!{"_id":&thread,"user_id":&f.owner,"channel_id":&id,"partition":"original-chat","conversation_id":&previous.id,"kind":"private","owner_chat":true,"created_at":now,"updated_at":now}).await.unwrap();
+    db.collection::<Document>("nyxbot_threads").insert_one(doc!{"_id":&thread,"user_id":&f.owner,"channel_id":&id,"partition":&partition,"conversation_id":&previous.id,"kind":"private","owner_chat":true,"created_at":now,"updated_at":now}).await.unwrap();
     let origin = ChannelOrigin {
         org_execution: None,
         native_event_id: native.then(|| event.clone()),
         thread: None,
         nyxbot_channel_id: id.clone(),
-        partition: "original-chat".into(),
+        partition: partition.clone(),
         platform: platform.into(),
     };
     let delivery = ChannelTurnDelivery {
@@ -129,7 +134,7 @@ async fn channel_turn_transport(
         target_ciphertext: None,
         target_expires_at: None,
     };
-    db.collection::<Document>("nyxbot_events").insert_one(doc!{"_id":&event,"channel_id":&id,"user_id":&f.owner,"partition":"original-chat","event_id":"original-provider-event","delivery":bson::to_bson(&delivery).unwrap(),"status":"running","created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(24))}).await.unwrap();
+    db.collection::<Document>("nyxbot_events").insert_one(doc!{"_id":&event,"channel_id":&id,"user_id":&f.owner,"partition":&partition,"event_id":"original-provider-event","delivery":bson::to_bson(&delivery).unwrap(),"status":"running","created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(24))}).await.unwrap();
     if sealed {
         let target = event_record::seal(
             &f.state.encryption_keys,
@@ -570,6 +575,29 @@ async fn another_channel_turn(
         .await
         .unwrap()
         .unwrap();
+    // Contextual records must be opened under their old identity before a new
+    // synthetic event is created; ciphertext never moves between event IDs.
+    let context = match event.event_context_ciphertext.as_deref() {
+        Some(bytes) => Some(
+            event_record::event_context(&f.state.encryption_keys, &event, bytes)
+                .await
+                .unwrap(),
+        ),
+        None => None,
+    };
+    let target = match event.delivery.as_ref().and_then(|delivery| {
+        delivery
+            .target_ciphertext
+            .as_deref()
+            .map(|bytes| (delivery, bytes))
+    }) {
+        Some((delivery, bytes)) => Some(
+            event_record::delivery_target(&f.state.encryption_keys, &event, delivery, bytes)
+                .await
+                .unwrap(),
+        ),
+        None => None,
+    };
     event.id = Uuid::new_v4().to_string();
     event.event_id = Uuid::new_v4().to_string();
     event.turn_id = None;
@@ -577,7 +605,35 @@ async fn another_channel_turn(
     event.status = "running".into();
     event.created_at = Utc::now();
     let id = event.id.clone();
+    if let Some(context) = context {
+        event.event_context_ciphertext = Some(
+            event_record::seal(
+                &f.state.encryption_keys,
+                &id,
+                &event.user_id,
+                &[event_record::CONTEXT, &event.channel_id],
+                &context,
+            )
+            .await
+            .unwrap(),
+        );
+        event.event_context_version = event_record::version(&f.state.encryption_keys);
+    }
     let delivery = event.delivery.as_mut().unwrap();
+    if let Some(target) = target {
+        delivery.target_ciphertext = Some(
+            event_record::seal(
+                &f.state.encryption_keys,
+                &id,
+                &event.user_id,
+                &[event_record::TARGET, &event.channel_id],
+                &target,
+            )
+            .await
+            .unwrap(),
+        );
+        delivery.target_context_version = event_record::version(&f.state.encryption_keys);
+    }
     delivery.execution_source_bound = false;
     if delivery.origin.native_event_id.is_some() {
         delivery.origin.native_event_id = Some(id.clone());

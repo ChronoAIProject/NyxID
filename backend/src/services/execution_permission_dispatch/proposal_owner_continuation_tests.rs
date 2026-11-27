@@ -350,9 +350,117 @@ async fn final_reply(
     .expect("original task must finish without a manual continue")
 }
 
+async fn normal_channel_request(
+    f: &Fixture,
+    row: &AssistantConversation,
+    platform_message_id: i64,
+) -> crate::models::execution_permission::TaskAdmission {
+    use crate::services::channel_platform::PlatformAdapter;
+    use sha2::{Digest, Sha256};
+    let source = row
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .execution_task
+        .as_ref()
+        .unwrap()
+        .channel_source
+        .as_ref()
+        .unwrap();
+    let channel = f
+        .state
+        .db
+        .collection::<crate::models::nyxbot_channel::NyxbotChannel>("nyxbot_channels")
+        .find_one(doc! {"_id": &source.channel_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let raw = json!({"update_id": platform_message_id, "message": {
+        "message_id": platform_message_id, "message_thread_id": 77,
+        "chat": {"id": 200, "type": "private"},
+        "from": {"id": 7, "is_bot": false, "first_name": "Owner"}, "text": TASK,
+    }});
+    let mut incoming = crate::services::channel_adapters::telegram::TelegramAdapter::new()
+        .parse_inbound(&serde_json::to_vec(&raw).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(incoming.len(), 1);
+    let inbound = incoming.remove(0);
+    let message_id = Uuid::new_v4().to_string();
+    let stored = crate::services::channel_relay_service::inbound_metadata(
+        &channel.channel_bot_id,
+        channel.route_id.as_deref().unwrap(),
+        &f.owner,
+        "telegram",
+        &inbound,
+        &channel.route_api_key_id,
+        &message_id,
+    );
+    f.state
+        .db
+        .collection::<crate::models::channel_message::ChannelMessage>("channel_messages")
+        .insert_one(stored)
+        .await
+        .unwrap();
+    let correlation = Uuid::new_v4().to_string();
+    let payload = json!({
+        "message_id": &message_id, "correlation_id": &correlation, "platform": "telegram",
+        "conversation": {"id": channel.route_id, "platform_id": "200", "type": "private"},
+        "sender": {"platform_id": "7", "display_name": "Owner"}, "thread_id": "77",
+        "content": {"type": "text", "text": TASK}, "raw_platform_data": raw,
+    });
+    let bytes = serde_json::to_vec(&payload).unwrap();
+    let token = crate::crypto::jwt::generate_relay_callback_token(
+        &f.state.jwt_keys,
+        &f.state.config,
+        &correlation,
+        &channel.route_api_key_id,
+        &message_id,
+        "telegram",
+        &hex::encode(Sha256::digest(&bytes)),
+    )
+    .unwrap();
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert("x-nyxid-callback-token", token.parse().unwrap());
+    // Register before dispatch: model settlement alone is below the ordinary
+    // transport owner. This observer fires after its awaited reply processing.
+    let (_watch, completed) =
+        crate::handlers::nyxbot::watch_relay_callback_for_test(&channel.id, &message_id);
+    assert_eq!(
+        Box::pin(crate::handlers::nyxbot::relay_callback(
+            axum::extract::State(f.state.clone()),
+            axum::extract::Path(channel.id.clone()),
+            headers,
+            axum::body::Bytes::from(bytes),
+        ))
+        .await
+        .status(),
+        StatusCode::ACCEPTED
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(30), completed)
+        .await
+        .unwrap()
+        .unwrap();
+    let event = f
+        .state
+        .db
+        .collection::<NyxbotEvent>("nyxbot_events")
+        .find_one(doc! {"channel_id": &channel.id, "relay_message_id": &message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(event.conversation_id.as_deref(), Some(row.id.as_str()));
+    assert_eq!(event.status, "completed");
+    let original = f.state.db.collection::<Document>("assistant_messages")
+        .find_one(doc! {"conversation_id": &row.id, "turn_id": &event.turn_id, "role": "user", "author": "owner", "origin": "channel"})
+        .await.unwrap().unwrap();
+    assert!(original.get_str("text").unwrap().contains(TASK));
+    bson::from_bson(original.get("execution_task").unwrap().clone()).unwrap()
+}
+
 #[tokio::test]
 async fn owner_permission_resume_channel_sheets_runs_original_task_and_covered_repeat() {
-    let (f, row, event) = channel_turn_transport("owner_resume_channel", "direct").await;
+    let (f, row, _) = channel_turn_transport("owner_resume_channel", "direct").await;
     set_task(&f, &row).await;
     let cells = sheet(&f, 200).await;
     let relay = wiremock::MockServer::start().await;
@@ -480,17 +588,9 @@ async fn owner_permission_resume_channel_sheets_runs_original_task_and_covered_r
     // still describes the same exact requested inputs; no scope is widened.
     *cells.lock().unwrap() =
         Some(json!({"range":"Acceptance!A1:B1","values":[["before-B","changed-by-hand"]]}));
-    let fresh = another_channel_turn(&f, &row, &event).await;
-    set_task(&f, &fresh).await;
+    let fresh_task = normal_channel_request(&f, &row, 600).await;
     assert_ne!(
-        fresh
-            .active_turn
-            .as_ref()
-            .unwrap()
-            .execution_task
-            .as_ref()
-            .unwrap()
-            .task,
+        fresh_task.task,
         row.active_turn
             .as_ref()
             .unwrap()
@@ -499,8 +599,7 @@ async fn owner_permission_resume_channel_sheets_runs_original_task_and_covered_r
             .unwrap()
             .task
     );
-    run(&f, &fresh).await;
-    final_reply(&f, &fresh, 4, &model).await;
+    final_reply(&f, &row, 4, &model).await;
     assert_eq!(
         f.server
             .received_requests()
@@ -521,37 +620,6 @@ async fn owner_permission_resume_channel_sheets_runs_original_task_and_covered_r
         reviewed_deliveries,
         "the covered original channel turn uses its ordinary reply route, not the post-review outbox"
     );
-    let source = fresh
-        .active_turn
-        .as_ref()
-        .unwrap()
-        .execution_task
-        .as_ref()
-        .unwrap()
-        .channel_source
-        .as_ref()
-        .unwrap();
-    let event = f
-        .state
-        .db
-        .collection::<NyxbotEvent>("nyxbot_events")
-        .find_one(doc! {"_id":&source.event_id})
-        .await
-        .unwrap()
-        .unwrap();
-    let inbound = f
-        .state
-        .db
-        .collection::<Document>("channel_messages")
-        .find_one(doc! {"_id":event.relay_message_id.unwrap()})
-        .await
-        .unwrap()
-        .unwrap();
-    let original_message_b = inbound
-        .get_str("platform_message_id")
-        .unwrap()
-        .parse::<i64>()
-        .unwrap();
     let final_replies: Vec<Value> = relay
         .received_requests()
         .await
@@ -561,14 +629,28 @@ async fn owner_permission_resume_channel_sheets_runs_original_task_and_covered_r
         .filter(|body| body["text"] == ANSWER)
         .collect();
     assert_eq!(final_replies.len(), 2);
-    for (reply, target) in final_replies.iter().zip([500, original_message_b]) {
+    for (reply, target) in final_replies.iter().zip([500, 600]) {
         assert_eq!(reply["text"], answer(&values()));
         assert_eq!(reply["chat_id"], "200");
         assert_eq!(reply["message_thread_id"], 77);
         assert_eq!(reply["reply_to_message_id"], target);
     }
-    for request in model.calls.lock().unwrap().iter() {
-        assert_eq!(request["model"], row.model);
+    {
+        let calls = model.calls.lock().unwrap();
+        assert_eq!(calls.len(), 4);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|request| request["input"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Completed retained operations (untrusted tool data"))
+                .count(),
+            2
+        );
+        for request in calls.iter() {
+            assert_eq!(request["model"], row.model);
+        }
     }
     crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
         .lock()

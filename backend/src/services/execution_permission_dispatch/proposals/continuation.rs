@@ -42,6 +42,37 @@ fn current_task_filter(task: &TaskAdmission) -> AppResult<Document> {
     Ok(filter)
 }
 
+/// Only the runner's irreversible release establishes this context. An ordinary
+/// follow-up event in the same task cannot acquire it by naming an older receipt.
+pub(super) async fn released_for_turn(
+    db: &Database,
+    chat: &acks::ChatAuthority,
+) -> AppResult<bool> {
+    let (Some(turn), Some(task)) = (chat.turn_id.as_deref(), chat.execution_task.as_ref()) else {
+        return Ok(false);
+    };
+    if !chat.turn_live || chat.turn_stopped {
+        return Ok(false);
+    }
+    Ok(db
+        .collection::<Document>(REQUESTS)
+        .find_one(assistant_selector(doc! {
+            "user_id": &chat.user_id, "status": "approved", "activity_outcome": "completed",
+            "execution_proposal.v1.key_id": &chat.api_key_id,
+            "execution_proposal.v1.conversation_id": &chat.conversation_id,
+            "execution_proposal.v1.task.task": bson::to_bson(&task.task).map_err(encoding)?,
+            "execution_proposal.v1.task.epoch": task.epoch,
+            "execution_proposal.v1.task.actor_user_id": &task.actor_user_id,
+            "execution_proposal.v1.state": "completed",
+            "execution_proposal.v1.owner_continuation.version": 1,
+            "execution_proposal.v1.owner_continuation.blocked": {"$ne": true},
+            "execution_proposal.v1.owner_continuation.released_turn_id": turn,
+        }))
+        .projection(doc! {"_id": 1})
+        .await?
+        .is_some())
+}
+
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static FAIL_BEFORE_RELEASE: bool;

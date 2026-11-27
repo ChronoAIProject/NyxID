@@ -973,8 +973,8 @@ pub(super) fn approve_url(frontend_url: &str) -> String {
 /// Pending/denied/uncertain effects remain task-bound. A completed receipt can
 /// authorize a new occurrence only in a different server-admitted turn after
 /// settlement delivered that receipt; retries of either original/resume turn join it.
-/// Marked owner continuations join it throughout the original task, including
-/// later independently reviewed readbacks. A new human root remains independent.
+/// A released retained-owner turn also joins prior marked successes in the task,
+/// including later reviewed readbacks. Ordinary admitted follow-ups stay independent.
 pub(super) async fn existing_effect(
     db: &Database,
     context: &RequestContext,
@@ -984,7 +984,10 @@ pub(super) async fn existing_effect(
     frontend_url: &str,
 ) -> AppResult<()> {
     let task = chat.execution_task.as_ref().ok_or_else(refused)?;
-    if let Some(row)=db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{
+    // A task has at most 32 assistant proposals. One bounded query preserves
+    // the ordinary no-match cost and lets outstanding retries take precedence
+    // over an older delivered success with the same prepared digest.
+    let rows: Vec<ApprovalRequest> = db.collection::<ApprovalRequest>(REQUESTS).find(assistant_selector(doc! {
         "user_id":&chat.user_id,"execution_proposal.v1.key_id":&chat.api_key_id,
         "execution_proposal.v1.conversation_id":&chat.conversation_id,"execution_proposal.v1.task.task":bson::to_bson(&task.task).map_err(encoding)?,
         "execution_proposal.v1.task.epoch":task.epoch,"execution_proposal.v1.contract.binding.connection_id":connection,
@@ -994,11 +997,31 @@ pub(super) async fn existing_effect(
             {"execution_proposal.v1.delivered_turn_id":null},
             {"execution_proposal.v1.source_turn_id":&chat.turn_id},
             {"execution_proposal.v1.resume_turn_id":&chat.turn_id}]
-    })).await? {
+    })).limit(32).await?.try_collect().await?;
+    let mut existing = None;
+    let mut marked = None;
+    for row in rows {
+        let p = proposal(&row)?;
+        if p.state != "completed"
+            || p.delivered_turn_id.is_none()
+            || Some(p.source_turn_id.as_str()) == chat.turn_id.as_deref()
+            || p.resume_turn_id == chat.turn_id
+        {
+            existing = Some(row);
+            break;
+        }
+        marked = Some(row);
+    }
+    if existing.is_none() && marked.is_some() && continuation::released_for_turn(db, chat).await? {
+        existing = marked;
+    }
+    if let Some(row) = existing {
         if let Ok(p) = proposal(&row) {
             context.observation.replay(&row.status, &p.state);
         }
-        return Err(if row.status=="pending"&&row.expires_at>Utc::now(){AppError::ApprovalRequired{request_id:row.id}}else{
+        return Err(if row.status == "pending" && row.expires_at > Utc::now() {
+            AppError::ApprovalRequired { request_id: row.id }
+        } else {
             AppError::ApprovalFailed{request_id:row.id,reason:"This task already has a decision for this operation. Its retained effect will not be repeated; review its status.".into(),approve_url:approve_url(frontend_url)}
         });
     }

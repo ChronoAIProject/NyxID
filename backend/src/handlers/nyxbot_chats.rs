@@ -30,7 +30,7 @@ pub(super) fn chat_kind(kind: &str) -> &'static str {
 }
 
 /// A private chat's thread on NyxID's relay: one per chat and sender.
-pub(super) fn direct_partition(chat_id: &str, sender_id: &str, thread_id: Option<&str>) -> String {
+pub(crate) fn direct_partition(chat_id: &str, sender_id: &str, thread_id: Option<&str>) -> String {
     format!(
         "direct_{}",
         &sha256_hex(format!(
