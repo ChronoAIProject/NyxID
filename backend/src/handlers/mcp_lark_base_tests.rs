@@ -1,5 +1,6 @@
 //! Real chat dispatch tests for the stored-catalog attachment capability.
 use super::*;
+use crate::handlers::credential_record_fixtures::KeySecret;
 use crate::models::{
     downstream_service::{self, DownstreamService},
     service_endpoint::{self, PublicationState, ServiceEndpoint},
@@ -253,17 +254,23 @@ fn setup_catalog(
             .await
             .unwrap();
         let credential = Uuid::new_v4().to_string();
-        let encrypted = f
-            .state
-            .encryption_keys
-            .encrypt(b"owner-oauth-test-token")
-            .await
-            .unwrap();
-        f.state.db.collection::<bson::Document>("user_api_keys").insert_one(doc! {
-            "_id":&credential,"user_id":&f.owner,"label":"Receipt account","credential_type":"oauth2","status":"active",
-            "access_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
-            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
-        }).await.unwrap();
+        KeySecret::AccessToken
+            .insert(
+                &f.state.db,
+                &f.state.encryption_keys,
+                doc! {
+                    "_id": &credential,
+                    "user_id": &f.owner,
+                    "label": "Receipt account",
+                    "credential_type": "oauth2",
+                    "status": "active",
+
+                    "created_at": bson::DateTime::now(),
+                    "updated_at": bson::DateTime::now(),
+                },
+                b"owner-oauth-test-token",
+            )
+            .await;
         f.state
             .db
             .collection::<bson::Document>("user_services")
@@ -336,13 +343,14 @@ fn setup_catalog(
                 .await
                 .unwrap()
                 .unwrap();
-            let encrypted = f
-                .state
-                .encryption_keys
-                .encrypt(br#"{"app_id":"test-app","app_secret":"secret-do-not-audit"}"#)
-                .await
-                .unwrap();
-            f.state.db.collection::<bson::Document>("user_api_keys").update_one(doc! {"_id":connection.get_str("api_key_id").unwrap()},doc! {"$set":{"credential_type":"api_key","credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}},"$unset":{"access_token_encrypted":""}}).await.unwrap();
+            let key_id = connection.get_str("api_key_id").unwrap();
+            set_exchange_credential(
+                &f,
+                key_id,
+                br#"{"app_id":"test-app","app_secret":"secret-do-not-audit"}"#,
+                true,
+            )
+            .await;
             f.state
                 .db
                 .collection::<bson::Document>("user_services")
@@ -365,6 +373,40 @@ fn setup_catalog(
         }
     })
 }
+async fn set_exchange_credential(
+    f: &Fixture,
+    key_id: &str,
+    secret: &[u8],
+    clear_access_token: bool,
+) {
+    use crate::models::user_api_key::COLLECTION_NAME;
+    use crate::services::credential_record_service as records;
+    let field = "credential_encrypted";
+    let keys = &f.state.encryption_keys;
+    let bytes = records::encrypt(keys, COLLECTION_NAME, key_id, &f.owner, field, secret)
+        .await
+        .unwrap();
+    let mut set = doc! {
+        "credential_type": "api_key",
+        field: bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes },
+    };
+    let mut unset = bson::Document::new();
+    records::mark_classic_update(&mut set, &mut unset, keys, field);
+    if clear_access_token {
+        unset.insert("access_token_encrypted", "");
+        unset.insert("secret_context_versions.access_token_encrypted", "");
+    }
+    f.state
+        .db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": key_id, "user_id": &f.owner},
+            doc! {"$set": set, "$unset": unset},
+        )
+        .await
+        .unwrap();
+}
+
 async fn use_paused_tenant_exchange(u: &BaseFixture, exchange: &PausedTokenExchange) -> String {
     let instance =
         u.f.state
@@ -375,9 +417,7 @@ async fn use_paused_tenant_exchange(u: &BaseFixture, exchange: &PausedTokenExcha
             .unwrap()
             .unwrap();
     let credential = instance.get_str("api_key_id").unwrap().to_owned();
-    let encrypted = u.f.state.encryption_keys.encrypt(b"{}").await.unwrap();
-    u.f.state.db.collection::<bson::Document>("user_api_keys").update_one(doc! {"_id":&credential},doc! {"$set":{
-        "credential_type":"api_key","credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+    set_exchange_credential(&u.f, &credential, b"{}", false).await;
     u.f.state
         .db
         .collection::<bson::Document>("user_services")
@@ -1284,9 +1324,8 @@ async fn lark_base_write_tenant_token_exchange_and_oauth_user_principals_use_exi
                     .await
                     .unwrap()
                     .unwrap();
-            let encrypted = u.f.state.encryption_keys.encrypt(b"{}").await.unwrap();
-            u.f.state.db.collection::<bson::Document>("user_api_keys").update_one(doc! {"_id":instance.get_str("api_key_id").unwrap()},doc! {"$set":{
-                "credential_type":"api_key","credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+            set_exchange_credential(&u.f, instance.get_str("api_key_id").unwrap(), b"{}", false)
+                .await;
             u.f.state
                 .db
                 .collection::<bson::Document>("user_services")

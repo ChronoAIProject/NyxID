@@ -87,7 +87,7 @@ async fn source(
     row
 }
 async fn attach(f: &Fixture, source: &AssistantConversation, machine: bool) -> TurnAttachment {
-    let attachment = AssistantAttachment {
+    let mut attachment = AssistantAttachment {
         chunks: 0,
         artifact: Default::default(),
         secret_context_versions: Default::default(),
@@ -98,9 +98,10 @@ async fn attach(f: &Fixture, source: &AssistantConversation, machine: bool) -> T
         turn_id: source.active_turn.as_ref().unwrap().turn_id.clone(),
         content_type: "image/png".into(),
         size: 8,
-        data_encrypted: f.state.encryption_keys.encrypt(b"pixels-0").await.unwrap(),
+        data_encrypted: Vec::new(),
         created_at: Utc::now(),
     };
+    set_image_data(&f.state.encryption_keys, &mut attachment, b"pixels-0").await;
     f.state
         .db
         .collection::<AssistantAttachment>(crate::models::assistant_attachment::COLLECTION_NAME)

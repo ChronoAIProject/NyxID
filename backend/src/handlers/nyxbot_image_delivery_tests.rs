@@ -75,15 +75,13 @@ pub(super) async fn image_fixture(platform: &str, transport: &str) -> (Fixture, 
     } else {
         "token"
     };
-    let encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(token.as_bytes())
-        .await
-        .unwrap();
-    f.state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&f.channel.channel_bot_id},doc! {"$set":{
-        "platform":platform,"bot_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
-    }}).await.unwrap();
+    set_bot_secrets(
+        &f.state,
+        &f.channel,
+        doc! {"platform":platform},
+        &[(BotSecret::Token, token.as_bytes())],
+    )
+    .await;
     let adapter: std::sync::Arc<dyn PlatformAdapter> = if platform == "lark" {
         Mock::given(path("/open-apis/auth/v3/tenant_access_token/internal"))
             .respond_with(
@@ -129,7 +127,7 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
     let mut attachments = Vec::new();
     for index in 0..2 {
         let bytes = format!("pixels-{index}");
-        let row = AssistantAttachment {
+        let mut row = AssistantAttachment {
             artifact: Default::default(),
             secret_context_versions: Default::default(),
             id: Uuid::new_v4().to_string(),
@@ -140,14 +138,10 @@ async fn add_images(f: &Fixture) -> Vec<TurnAttachment> {
             content_type: "image/png".into(),
             size: bytes.len() as i64,
             chunks: 0,
-            data_encrypted: f
-                .state
-                .encryption_keys
-                .encrypt(bytes.as_bytes())
-                .await
-                .unwrap(),
+            data_encrypted: Vec::new(),
             created_at: Utc::now(),
         };
+        set_image_data(&f.state.encryption_keys, &mut row, bytes.as_bytes()).await;
         f.state
             .db
             .collection::<AssistantAttachment>(crate::models::assistant_attachment::COLLECTION_NAME)
@@ -753,16 +747,14 @@ async fn nyxbot_gateway_expired_event_reference_keeps_images_before_local_result
     let attachments = add_images(&f).await;
     mock_sends(&server, "telegram", false, std::time::Duration::ZERO).await;
     let ciphertext = f
-        .state
-        .encryption_keys
-        .encrypt(b"expired-reference")
-        .await
-        .unwrap();
+        .seal_reference(&f.state.encryption_keys, b"expired-reference")
+        .await;
     f.state.db.collection::<bson::Document>(THREADS).update_one(
-        doc! {"channel_id":&f.channel.id},
+        doc! {"_id":&f.thread_id},
         doc! {"$set":{
             "last_message_id":bson::Bson::Null,
             "event_ref_ciphertext":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext},
+            "event_ref_context_version": event_record::version(&f.state.encryption_keys).map(i32::from),
             "event_ref_expires_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(1)),
         }},
     ).await.unwrap();
@@ -863,19 +855,12 @@ async fn nyxbot_x_image_billing_refusal_suspends_bot_and_skips_remaining_images(
         "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
     }).await.unwrap();
     let connection_id = Uuid::new_v4().to_string();
-    let access_token = f
-        .state
-        .encryption_keys
-        .encrypt(b"test-access-token")
-        .await
-        .unwrap();
-    f.state.db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME).insert_one(doc! {
-        "_id": &connection_id, "user_id": OWNER, "label": "X account", "credential_type": "oauth2", "credential_source": "platform",
-        "provider_config_id": &provider_id, "status": "active",
-        "token_scopes": crate::services::channel_adapters::x::REQUIRED_SCOPES.join(" "),
-        "access_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: access_token },
-        "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
-    }).await.unwrap();
+    KeySecret::AccessToken.insert(&f.state.db, &f.state.encryption_keys, doc! {
+    "_id": &connection_id, "user_id": OWNER, "label": "X account", "credential_type": "oauth2", "credential_source": "platform",
+    "provider_config_id": &provider_id, "status": "active",
+    "token_scopes": crate::services::channel_adapters::x::REQUIRED_SCOPES.join(" "),
+    "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+    },b"test-access-token").await;
     f.state
         .db
         .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
@@ -3790,15 +3775,13 @@ async fn shared_transports_security_posts_reject_org_bots_even_for_live_admin() 
         ))
         .await
         .unwrap();
-    f.state
-        .db
-        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&f.channel.channel_bot_id},
-            doc! {"$set":{"user_id":&org}},
-        )
-        .await
-        .unwrap();
+    set_bot_secrets(
+        &f.state,
+        &f.channel,
+        doc! {"user_id":&org},
+        &[(BotSecret::Token, b"token")],
+    )
+    .await;
     assert!(
         chats::post_current_turn(
             &f.state,

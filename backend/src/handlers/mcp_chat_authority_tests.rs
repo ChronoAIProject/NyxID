@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::credential_record_fixtures::set_catalog_credential;
 use crate::models::assistant_agent::GuestAccess;
 use crate::services::{
     assistant_acknowledgement_service as acks, assistant_agent_credential_service as credentials,
@@ -730,12 +731,12 @@ async fn subagents_request_platform_services_and_execute_after_allow() {
     service.base_url = address;
     service.service_category = "internal".into();
     service.auth_method = "bearer".into();
-    service.credential_encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(uuid::Uuid::new_v4().to_string().as_bytes())
-        .await
-        .unwrap();
+    set_catalog_credential(
+        &f.state.encryption_keys,
+        &mut service,
+        uuid::Uuid::new_v4().to_string().as_bytes(),
+    )
+    .await;
     f.state
         .db
         .collection::<crate::models::downstream_service::DownstreamService>(
@@ -7625,12 +7626,7 @@ async fn chat_master_and_platform_catalogs_without_platform_selection_keep_legac
             enabled: platform_enabled,
             ..Default::default()
         });
-        catalog.credential_encrypted = f
-            .state
-            .encryption_keys
-            .encrypt(b"internal-master")
-            .await
-            .unwrap();
+        set_catalog_credential(&f.state.encryption_keys, &mut catalog, b"internal-master").await;
         f.state
             .db
             .collection::<crate::models::downstream_service::DownstreamService>(
@@ -8105,19 +8101,30 @@ async fn assistant_connect_reports_unavailable_providers_and_accepts_configured_
         0
     );
     // Public device-code clients need an ID, but no client secret.
-    let client_id = f
-        .state
-        .encryption_keys
-        .encrypt(b"public-device-client")
-        .await
-        .unwrap();
+    use crate::services::credential_record_service as records;
+    let provider_id = catalog.provider_config_id.as_deref().unwrap();
+    let keys = &f.state.encryption_keys;
+    let field = "client_id_encrypted";
+    let bytes = records::encrypt(
+        keys,
+        crate::models::provider_config::COLLECTION_NAME,
+        provider_id,
+        records::PLATFORM_OWNER,
+        field,
+        b"public-device-client",
+    )
+    .await
+    .unwrap();
+    let mut set =
+        doc! { field: bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes } };
+    let mut unset = bson::Document::new();
+    records::mark_classic_update(&mut set, &mut unset, keys, field);
     f.state
         .db
-        .collection::<bson::Document>("provider_configs")
+        .collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
         .update_one(
-            doc! {"_id":catalog.provider_config_id.as_deref().unwrap()},
-            doc! {"$set":{"client_id_encrypted":bson::Binary {
-            subtype:bson::spec::BinarySubtype::Generic, bytes:client_id}}},
+            doc! {"_id": provider_id},
+            doc! {"$set": set, "$unset": unset},
         )
         .await
         .unwrap();
@@ -8165,12 +8172,12 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_
         audience: crate::models::downstream_service::PlatformKeyAudience::Public,
         ..Default::default()
     });
-    catalog.credential_encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"fixture-platform-key")
-        .await
-        .unwrap();
+    set_catalog_credential(
+        &f.state.encryption_keys,
+        &mut catalog,
+        b"fixture-platform-key",
+    )
+    .await;
     f.state
         .db
         .collection::<crate::models::downstream_service::DownstreamService>("downstream_services")

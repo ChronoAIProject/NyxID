@@ -4,7 +4,12 @@ use crate::models::assistant_conversation::{AgentEvent, TurnOrigin};
 use crate::services::{assistant_team_service as team, channel_thread_follow_service as follow};
 
 pub(super) async fn source(f: &Fixture, name: &str) -> NyxbotEvent {
+    source_for_channel(f, name, &f.channel.id).await
+}
+
+async fn source_for_channel(f: &Fixture, name: &str, channel: &str) -> NyxbotEvent {
     let mut event = f.event.clone();
+    event.channel_id = channel.to_owned();
     event.id = Uuid::new_v4().to_string();
     event.event_id = name.into();
     event.status = "running".into();
@@ -12,18 +17,14 @@ pub(super) async fn source(f: &Fixture, name: &str) -> NyxbotEvent {
     let d = event.delivery.as_mut().unwrap();
     d.state = "pending".into();
     d.target_ciphertext = None;
+    d.target_context_version = None;
     d.target_expires_at = None;
-    event.event_context_ciphertext = Some(
-        f.state
-            .encryption_keys
-            .encrypt(
-                serde_json::to_vec(&json!({"event_ref": format!("cmaeg1.ev.{name}")}))
-                    .unwrap()
-                    .as_slice(),
-            )
-            .await
-            .unwrap(),
-    );
+    set_event_context(
+        &f.state.encryption_keys,
+        &mut event,
+        &serde_json::to_vec(&json!({"event_ref": format!("cmaeg1.ev.{name}")})).unwrap(),
+    )
+    .await;
     Mock::given(method("POST"))
         .and(path(format!("/events/cmaeg1.ev.{name}/reply-target")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -1433,8 +1434,7 @@ async fn identity_2187_coalesced_bot_sources_are_scoped_and_pruned_before_runtim
         "conversation_id":&f.event.conversation_id,"kind":"private","owner_chat":true,"platform_chat_id":"second-chat",
         "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).await.unwrap();
     let a = source(&f, "context-a").await;
-    let mut b = source(&f, "context-b").await;
-    b.channel_id = second.id.clone();
+    let mut b = source_for_channel(&f, "context-b", &second.id).await;
     b.delivery.as_mut().unwrap().origin.nyxbot_channel_id = second.id.clone();
     b.delivery.as_mut().unwrap().sender_id = "8".into();
     b.delivery.as_mut().unwrap().source_route_id = second.route_id.clone();
