@@ -1714,19 +1714,29 @@ pub(crate) async fn execute_owner_turn(
         .await
         .map_err(|_| TurnError::internal("cancelled", "prepare"))?;
     }
-    if let Some(text) =
-        super::execution_permission_dispatch::proposals::resume_turn(state, egress, row)
-            .await
-            .map_err(|_| TurnError::internal("assistant_unavailable", "permission_resume"))?
+    let resumed = super::execution_permission_dispatch::proposals::resume_turn_with_readback(
+        state, egress, row,
+    )
+    .await
+    .map_err(|_| TurnError::internal("assistant_unavailable", "permission_resume"))?;
+    if let Some(receipt) = &resumed
+        && receipt.specialist_readback.is_none()
     {
-        *partial = text.clone();
+        *partial = receipt.text.clone();
         return Ok(TurnResult {
-            text,
+            text: receipt.text.clone(),
             session_id: row.nyxagent_session_id.clone(),
             response_id: None,
             error: None,
         });
     }
+    // Only the exact assigned-supervisor ledger continuation reaches this
+    // branch. The specialist reads under its own normal authority, and its
+    // observed result settles through the original report_to assignment.
+    let text = resumed
+        .as_ref()
+        .and_then(|r| r.specialist_readback.as_deref())
+        .unwrap_or(text);
     let attempt = super::assistant_service_execution::begin_model_attempt(&state.db, row)
         .await
         .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;

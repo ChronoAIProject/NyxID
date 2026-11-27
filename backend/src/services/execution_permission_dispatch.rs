@@ -50,6 +50,7 @@ pub(crate) struct RequestContext {
     descendant: Option<Arc<descendants::Descendant>>,
     authoring: std::sync::atomic::AtomicBool,
     generated_correlation: OnceLock<String>,
+    supervisor: OnceLock<Box<crate::models::approval_request::SupervisorOrigin>>,
     resume: Option<Arc<proposals::Resume>>,
     drain: OnceLock<Drain>,
     authenticated_key: OnceLock<String>,
@@ -85,6 +86,19 @@ struct Drain {
 }
 
 impl RequestContext {
+    fn legacy_without_supervisor(&self) -> AppResult<()> {
+        if self.supervisor().is_some() {
+            Err(refused())
+        } else {
+            Ok(())
+        }
+    }
+    pub(crate) fn supervisor(&self) -> Option<&crate::models::approval_request::SupervisorOrigin> {
+        self.supervisor.get().map(Box::as_ref)
+    }
+    pub(crate) fn generated_request_id(&self) -> Option<&str> {
+        self.generated_correlation.get().map(String::as_str)
+    }
     /// Set only when the proxy itself generated the header; caller-supplied
     /// correlation IDs remain exact inputs and cannot use this exemption.
     pub(crate) fn bind_generated_correlation(&self, value: &str) {
@@ -115,7 +129,7 @@ impl RequestContext {
         if resume.version == 2 {
             return proposals::v2::attach_resume(auth, resume);
         }
-        if !matches!(resume.version, 1 | 3 | 4) {
+        if !matches!(resume.version, 1 | 3 | 4 | 5) {
             return Err(refused());
         }
         let chat = auth
@@ -136,6 +150,14 @@ impl RequestContext {
         context.operation_id = resume.effect_id.clone();
         if let Some(value) = resume.effect.generated_correlation.as_deref() {
             context.bind_generated_correlation(value);
+        }
+        if let Some(origin) = &resume.effect.supervisor {
+            if resume.version != 5 {
+                return Err(refused());
+            }
+            let _ = context.supervisor.set(origin.clone());
+        } else if resume.version == 5 {
+            return Err(refused());
         }
         context.resume = Some(Arc::new(resume));
         context.enable_authoring();
@@ -324,6 +346,7 @@ impl RequestContext {
             descendant: None,
             authoring: std::sync::atomic::AtomicBool::new(false),
             generated_correlation: OnceLock::new(),
+            supervisor: OnceLock::new(),
             resume: None,
             drain: OnceLock::new(),
             authenticated_key: OnceLock::new(),
@@ -1183,6 +1206,7 @@ impl Permit {
                 descendant: None,
                 authoring: std::sync::atomic::AtomicBool::new(false),
                 generated_correlation: OnceLock::new(),
+                supervisor: OnceLock::new(),
                 resume: None,
                 drain: OnceLock::new(),
                 authenticated_key: OnceLock::new(),
@@ -1728,7 +1752,7 @@ pub(crate) fn admit_http<'a>(
                 "legacy",
                 "legacy_unsupported_source",
             ));
-            return Ok(());
+            return context.legacy_without_supervisor();
         };
         if method == "CONNECT"
             || headers.contains_key(axum::http::header::UPGRADE)
@@ -1747,7 +1771,7 @@ pub(crate) fn admit_http<'a>(
                 "legacy",
                 "legacy_unsupported_transport",
             ));
-            return Ok(());
+            return context.legacy_without_supervisor();
         }
         if matches!(
             target.auth_method.as_str(),
@@ -1759,13 +1783,13 @@ pub(crate) fn admit_http<'a>(
                 "legacy",
                 "legacy_unsupported_transport",
             ));
-            return Ok(());
+            return context.legacy_without_supervisor();
         }
         if !context
             .admit_candidate(&state.db, auth.assistant_chat.as_deref())
             .await?
         {
-            return Ok(());
+            return context.legacy_without_supervisor();
         }
         context.observation.stage(diagnostics::Stage::Authority);
         // Preserve the proxy ingress's legacy-card retry decision. This only
@@ -1833,6 +1857,48 @@ pub(crate) fn admit_http<'a>(
                 .observation
                 .decide(diagnostics::Decision::new("hard_denial", "policy_denied"));
             return Err(refused());
+        }
+        if matches!(&outcome, super::approval_service::ApprovalOutcome::NeedsApproval(p)
+            if !p.resolution.from_org_policy && p.resolution.mode == crate::models::service_approval_config::ApprovalMode::PerRequest && owner == actor)
+            && super::supervisor_write::operation_family(
+                target.catalog_slug.as_deref().unwrap_or_default(),
+                method,
+                path,
+            )
+        {
+            let effect = super::supervisor_write::effect(
+                target.catalog_slug.as_deref().unwrap_or_default(),
+                method,
+                path,
+                query,
+                body,
+                !super::supervisor_write::http_headers_allow_review(
+                    headers,
+                    &[
+                        target.catalog_headers(),
+                        target.user_service_default_headers.as_slice(),
+                    ],
+                    context.generated_request_id(),
+                ),
+            );
+            let captured = super::supervisor_write::capture_marked(
+                &state.db,
+                auth.assistant_chat.as_deref(),
+                connection,
+                owner,
+                &target.service.id,
+                &target.base_url,
+                effect,
+                &context.operation_id,
+                context.supervisor(),
+                context.resume().is_some_and(|r| r.supervisor_assignment),
+            )
+            .await?;
+            if let Some(origin) = captured {
+                let _ = context.supervisor.set(origin);
+            } else if context.supervisor().is_some() {
+                return Err(refused());
+            }
         }
         let mut floors = Vec::new();
         if matches!(outcome, super::approval_service::ApprovalOutcome::NeedsApproval(ref p) if !p.resolution.from_org_policy && owner == actor)
@@ -1946,7 +2012,7 @@ pub(crate) fn admit_http<'a>(
         if floors.is_empty()
             && super::assistant_model_observer::stateless_for(&actor, &target.service.id)
         {
-            return Ok(());
+            return context.legacy_without_supervisor();
         }
         if floors.is_empty()
             && !(context.authoring_allowed()
@@ -1956,7 +2022,7 @@ pub(crate) fn admit_http<'a>(
                     .is_some_and(proposals::supported_chat)
                 || proposals::v2::eligible(context, auth.assistant_chat.as_deref()))
         {
-            return Ok(());
+            return context.legacy_without_supervisor();
         }
         let endpoint = context
             .resume()
@@ -1995,6 +2061,9 @@ pub(crate) fn admit_http<'a>(
             },
         )
         .await?;
+        if context.supervisor().is_some() && permit.is_none() {
+            return Err(refused());
+        }
         target.execution_permission = permit;
         Ok(())
     }))
@@ -2006,6 +2075,11 @@ pub(crate) fn approval_outcome(
     connection: Option<&str>,
     outcome: super::approval_service::ApprovalOutcome,
 ) -> super::approval_service::ApprovalOutcome {
+    // Coverage satisfies its declared personal-service floor, never the
+    // independently bound originating-owner DM decision for this exact call.
+    if context.is_some_and(|c| c.supervisor().is_some()) {
+        return outcome;
+    }
     if let Some(permit) = context.and_then(|c| c.permit())
         && owner == permit.subject.actor_user_id
         && connection

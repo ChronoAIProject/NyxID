@@ -6878,6 +6878,16 @@ async fn execute_tool_resolved_inner(
         } else {
             None
         };
+        if target
+            .execution_request
+            .as_ref()
+            .is_some_and(|c| c.supervisor().is_some())
+            && supervisor_permit.is_none()
+        {
+            return Err(AppError::Forbidden(
+                "The independent original-chat write decision is required".into(),
+            ));
+        }
         if supervisor_permit.is_some() && decision.admission.is_none() {
             return Err(AppError::Forbidden(
                 "Exact write admission is unavailable".into(),

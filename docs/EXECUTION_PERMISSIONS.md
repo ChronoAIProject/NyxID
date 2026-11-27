@@ -50,6 +50,7 @@ control. Nothing in this release changes those gates.
 | --- | --- |
 | Access-mode risk prompts (Auto/Ask) | Yes, within the permission's complete scope. |
 | Personal service approval layer (Grant/PerRequest) | Yes, only for the acting person's own connection. |
+| Originating-owner DM decision for an eligible delegated personal Bitable write | **No.** This independent exact decision remains required when the underlying personal PerRequest policy requires review, including implicit Writes only. |
 | Shared-agent connection consent | Yes, only that exact actor in the shared lane, their connection and bound agent behavior. |
 | Webhook/automation confirmation (untrusted input) | **No.** |
 | `machine_confirm` | **No.** |
@@ -882,10 +883,43 @@ across-private-conversations choice is offered. Review lasts at most ten minutes
 and is capped by the original task and reply-source deadline.
 
 The separate [personal supervisor ledger-write review](chat/09-nyxbot-orchestrator.md#personal-supervisor-ledger-write-review-2605)
-uses `yes write-<code>` only for a legacy connected PerRequest Bitable write.
-It never creates or decides an execution proposal, grants reusable execution
-permission, or depends on execution-permission enrollment/readiness. Existing
-proposal sources, human web decisions and source/result fences remain in force.
+uses `yes write-<code>` for one eligible delegated personal Bitable write under
+the underlying PerRequest policy, including implicit Writes only. It applies to
+unmarked work and to enrolled work with exact execution coverage. Coverage can
+satisfy its declared personal-service layer; it never supplies this independent
+DM decision. A gap retains its required web decision and all other floors. Its
+typed retained resume must obtain a fresh exact decision in the original DM
+before sending. A DM decision never decides a proposal or creates reusable
+execution permission. Marked work retains enrollment/readiness, task, claim,
+expiry and final authority checks throughout; no failed delivery downgrades it
+to an ordinary approval or unmarked execution.
+For an assigned single-record Bitable update, the operation family selects this
+floor independently of review serialization. An unrenderable effect or ambiguous
+header/provenance binding refuses admission before coverage or proposal creation;
+it does not remove the DM requirement.
+
+Retained effects with this independent requirement use envelope version 5 and
+the existing `v4` storage arm, record binding and historical AAD. Their encrypted
+payload also retains the admitted original assignment, specialist/key/task and
+effect occurrence; no code, raw review or second copy of row values is stored.
+Selection, deduplication, decision, resume, cancellation, purge and uncertainty
+use the same occurrence/state machine as v4. Readers that do not understand
+version 5 refuse it. A current reader refuses an older retained delegated write
+when the required original assignment proof is absent; missing metadata never
+implies consent. The original task/source deadlines cap the DM review. A
+positively unsent or uncertain marked review keeps its bound requirement visible
+and cannot be approved through the ordinary web fallback.
+
+Deployment requires every API dispatcher and resume worker serving this path
+to run the independent-floor implementation before it is used in an enrolled
+cohort. The existing `permissions:execution-dispatch-v1`,
+`permissions:execution-authoring-v1`, `permissions:execution-authoring-channel-v1`
+and execution-enrollment readiness checks remain required; those older
+capabilities alone do not attest this additional behavior on an older replica.
+A versioned retained row protects its own resume, not a direct covered call
+handled by an older API replica. Drain eligible calls and retained work, and
+cancel or finish their original task roots, before rollback to such a replica;
+enrollment is never disabled to bypass this floor.
 
 Post-review results have a separate `execution_permission_deliveries` occurrence,
 committed with the ordinary stored assistant message. The outbox retains only

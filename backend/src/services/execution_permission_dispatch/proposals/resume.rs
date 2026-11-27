@@ -4,6 +4,7 @@ use super::*;
 /// No public request deserializes this object.
 #[derive(Clone)]
 pub struct Resume {
+    pub(crate) supervisor_assignment: bool,
     pub(crate) connected_wait: Option<Arc<super::v2::blocking::WaitGuard>>,
     pub version: u32,
     pub request_id: String,
@@ -98,13 +99,32 @@ impl Resume {
 
 /// Runs only typed, server-authored decision events, never ordinary turns. The
 /// normal turn lease and admission remain responsible for requester isolation.
+pub(crate) struct ResumeOutcome {
+    pub(crate) text: String,
+    pub(crate) specialist_readback: Option<String>,
+}
+
+#[cfg(test)]
 pub(crate) async fn resume_turn(
     state: &crate::AppState,
     egress: &dyn super::super::super::platform_manager_contract::NyxAgentEgress,
     row: &AssistantConversation,
 ) -> AppResult<Option<String>> {
+    Ok(resume_turn_with_readback(state, egress, row)
+        .await?
+        .map(|r| r.text))
+}
+
+pub(crate) async fn resume_turn_with_readback(
+    state: &crate::AppState,
+    egress: &dyn super::super::super::platform_manager_contract::NyxAgentEgress,
+    row: &AssistantConversation,
+) -> AppResult<Option<ResumeOutcome>> {
     if let Some(note) = Box::pin(super::v2::resume_voice(state, row)).await? {
-        return Ok(Some(note));
+        return Ok(Some(ResumeOutcome {
+            text: note,
+            specialist_readback: None,
+        }));
     }
     let Some(turn) = row.active_turn.as_ref() else {
         return Ok(None);
@@ -117,7 +137,12 @@ pub(crate) async fn resume_turn(
     if ids.is_empty() {
         return Ok(None);
     }
+    // A readback-only model input cannot replace notices for other coalesced
+    // decisions. Multiple approved writes keep explicit per-occurrence status
+    // and unverified readback; none silently chooses another write's target.
+    let single_result = ids.len() == 1 && turn.events.len() == 1;
     let mut notes = Vec::new();
+    let mut readbacks = Vec::new();
     let mut reviews = presentation::ReviewNotes::default();
     let mut seen = std::collections::HashSet::new();
     for id in ids {
@@ -125,6 +150,13 @@ pub(crate) async fn resume_turn(
         if !seen.insert(id) {
             continue;
         }
+        let associated = |text: String| {
+            if single_result {
+                text
+            } else {
+                format!("Request {id}: {text}")
+            }
+        };
         let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id})).await?.ok_or_else(missing)?;
         let p = proposal(&request)?;
         let version = AssistantVersion::of(&request)?;
@@ -145,7 +177,11 @@ pub(crate) async fn resume_turn(
             continue;
         }
         if p.state == "completed" {
-            notes.push(if matches!(p.contract.context.audience,Audience::Group{..}) {"The operation completed. Its private result is available on your permission card.".into()}else{result_for_human(state,&request).await?.unwrap_or_else(||"The operation completed; its retained result is no longer available.".into())});
+            if version == AssistantVersion::V5 {
+                notes.push(associated("The retained write has a provider receipt, but no independent readback is verified in this recovery. Do not repeat it; the final row state is unconfirmed.".into()));
+                continue;
+            }
+            notes.push(associated(if matches!(p.contract.context.audience,Audience::Group{..}) {"The operation completed. Its private result is available on your permission card.".into()}else{result_for_human(state,&request).await?.unwrap_or_else(||"The operation completed; its retained result is no longer available.".into())}));
             continue;
         }
         if p.state == "dispatched"
@@ -153,7 +189,9 @@ pub(crate) async fn resume_turn(
             && p.claimed_at
                 .is_some_and(|at| at > Utc::now() - Duration::minutes(2))
         {
-            notes.push("The approved operation is already being processed.".into());
+            notes.push(associated(
+                "The approved operation is already being processed.".into(),
+            ));
             continue;
         }
         if matches!(p.state.as_str(), "dispatched" | "unknown") {
@@ -167,14 +205,16 @@ pub(crate) async fn resume_turn(
                 }.await;
                 super::super::super::api_key_mutation_service::transaction_result(result)
             })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
-            notes.push("The operation's outcome is unknown. It will not be sent again.".into());
+            notes.push(associated(if version == AssistantVersion::V5 {
+                "The write outcome is unknown and its final row state is unconfirmed. A later observation cannot prove this attempt caused it. It will not be sent again.".into()
+            } else { "The operation's outcome is unknown. It will not be sent again.".into() }));
             continue;
         }
         if !matches!(p.state.as_str(), "queued" | "preparing") {
-            notes.push(format!(
+            notes.push(associated(format!(
                 "The operation was not sent ({}).",
                 p.failure_code.as_deref().unwrap_or("unavailable")
-            ));
+            )));
             continue;
         }
         super::super::super::security_readiness_service::require_serving(&state.db, READINESS)
@@ -204,10 +244,10 @@ pub(crate) async fn resume_turn(
             )
             .await?;
             session.commit_transaction().await?;
-            notes.push(
+            notes.push(associated(
                 "The operation was not sent because its authority or task is no longer available."
                     .into(),
-            );
+            ));
             continue;
         }
         let raw = Field::Payload
@@ -220,10 +260,13 @@ pub(crate) async fn resume_turn(
         let effect: PreparedEffect = serde_json::from_slice(&raw).map_err(encoding)?;
         let claim_id = Uuid::new_v4().to_string();
         if !claim_preparation(&state.db, id, &claim_id, &turn.turn_id).await? {
-            notes.push("The approved operation is already being processed.".into());
+            notes.push(associated(
+                "The approved operation is already being processed.".into(),
+            ));
             continue;
         }
         let resume = Resume {
+            supervisor_assignment: p.report_to.is_some(),
             connected_wait: None,
             version: version.number(),
             source_credential_id: p.source_credential_id.clone(),
@@ -236,6 +279,20 @@ pub(crate) async fn resume_turn(
             effect,
             independent_card_id: p.independent_card_id.clone(),
         };
+        let readback = if single_result
+            && version == AssistantVersion::V5
+            && row.is_subagent()
+            && p.report_to.as_deref()
+                == resume
+                    .effect
+                    .supervisor
+                    .as_ref()
+                    .map(|o| o.source.channel.conversation_id.as_str())
+        {
+            super::super::super::supervisor_write::readback_instruction(&resume.effect)
+        } else {
+            None
+        };
         let outcome = egress.resume_execution(row, resume).await;
         let current = state
             .db
@@ -246,7 +303,9 @@ pub(crate) async fn resume_turn(
         if proposal(&current)?.state == "not_sent"
             && proposal(&current)?.failure_code.as_deref() == Some("operation_not_sent")
         {
-            notes.push("The node was unavailable. Nothing was sent.".into());
+            notes.push(associated(
+                "The node was unavailable. Nothing was sent.".into(),
+            ));
             continue;
         }
         let sent = proposal(&current)?.state == "dispatched";
@@ -365,10 +424,26 @@ pub(crate) async fn resume_turn(
             }.await;
             super::super::super::api_key_mutation_service::transaction_result(result)
         })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
-        notes.push(text);
+        if matches!(state_name, "completed" | "unknown")
+            && sent
+            && let Some(mut readback) = readback
+        {
+            if state_name == "unknown" {
+                readback.push_str(" The write outcome is unknown. Report any current state as an observation only; it does not prove this write attempt caused it.");
+            }
+            readbacks.push(readback);
+        }
+        if !single_result && version == AssistantVersion::V5 && sent {
+            notes.push(format!("Request {id}: the write attempt is {state_name}; independent readback is unverified and the final row state is unconfirmed. Do not repeat the write."));
+        } else {
+            notes.push(associated(text));
+        }
     }
     notes.extend(reviews.render());
-    Ok(Some(notes.join("\n\n")))
+    Ok(Some(ResumeOutcome {
+        text: notes.join("\n\n"),
+        specialist_readback: (!readbacks.is_empty()).then(|| readbacks.join("\n\n")),
+    }))
 }
 /// Called only after first-party-human ownership checks. Public projections
 /// never decrypt the provider receipt.

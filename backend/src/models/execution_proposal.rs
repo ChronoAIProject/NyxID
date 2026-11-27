@@ -107,6 +107,10 @@ pub struct Review {
 /// Encrypted retention payload, not a public request type.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PreparedEffect {
+    /// Independent original-owner DM floor. Present only in a v5 envelope;
+    /// encrypted with the retained effect and never exposed in review DTOs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<Box<super::approval_request::SupervisorOrigin>>,
     #[serde(default)]
     pub generated_correlation: Option<String>,
     pub connection: String,

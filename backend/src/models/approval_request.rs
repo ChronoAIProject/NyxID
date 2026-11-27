@@ -560,6 +560,9 @@ mod tests {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SupervisorWrite {
     pub version: u32,
+    /// Version 2 keeps this independent of execution-permission coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marked: Option<Box<SupervisorTask>>,
     pub source: SupervisorSource,
     pub catalog_service: String,
     pub specialist_agent: String,
@@ -590,4 +593,32 @@ pub struct SupervisorSource {
     pub assigning_turn: String,
     #[serde(default, with = "super::bson_datetime::optional")]
     pub reset_at: Option<DateTime<Utc>>,
+}
+
+/// Server-authored lineage retained inside the encrypted prepared effect.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SupervisorOrigin {
+    pub source: SupervisorSource,
+    pub agent: String,
+    pub conversation: String,
+    pub key: String,
+    pub connection: String,
+    pub catalog: String,
+    pub url_digest: String,
+    pub body_digest: String,
+    pub effect_digest: String,
+    pub marked: SupervisorTask,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SupervisorTask {
+    pub operation_id: String,
+    pub origin_turn: String,
+    pub task: super::execution_permission::TaskAdmission,
+}
+
+impl std::fmt::Debug for SupervisorOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SupervisorOrigin { [REDACTED] }")
+    }
 }

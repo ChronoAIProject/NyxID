@@ -889,9 +889,12 @@ impl ApprovalRequestOperation {
         let received = CALLBACK_INGRESS
             .try_with(|at| *at)
             .unwrap_or_else(|_| approval_now());
-        let deadline = (received
+        let mut deadline = (received
             + Duration::seconds(i64::from(timeout_secs.min(NYXBOT_CONNECTED_WRITE_SECS))))
         .min(binding.source.channel.expires_at);
+        if let Some(marked) = &binding.marked {
+            deadline = deadline.min(marked.task.hard_deadline);
+        }
         self.connected_deadline = Some(
             self.connected_deadline
                 .map_or(deadline, |current| current.min(deadline)),
@@ -1150,10 +1153,20 @@ pub(crate) async fn fallback_supervisor_review(
     state: &crate::AppState,
     request: &ApprovalRequest,
 ) -> AppResult<ApprovalRequest> {
+    if request
+        .supervisor_write
+        .as_ref()
+        .is_some_and(|b| b.version != 1 || b.marked.is_some())
+    {
+        return Err(AppError::Forbidden(
+            "The required original-chat review was not delivered; no write is authorized".into(),
+        ));
+    }
     let updated=state.db.collection::<ApprovalRequest>(REQUESTS).find_one_and_update(doc! {
         "_id":&request.id,"user_id":&request.user_id,"status":"pending",
         "expires_at":{"$gt":bson::DateTime::now()},"supervisor_write.review_confirmed":false,
-        "supervisor_write.dm_decision_receipt":null,"supervisor_write.dispatching":false
+        "supervisor_write.dm_decision_receipt":null,"supervisor_write.dispatching":false,
+        "supervisor_write.version":1,"supervisor_write.marked":null
     },doc! {"$unset":{"supervisor_write":""}})
         .return_document(ReturnDocument::After).await?
         .ok_or_else(|| AppError::Conflict("Review source changed".into()))?;
@@ -1714,7 +1727,7 @@ pub(crate) async fn decide_supervisor_in_session(
         intent: source.intent(&request.id, &request.service_id, &request.user_id, approved)?,
         filter: doc! {"_id":&request.id,"user_id":&request.user_id,"status":"pending",
         "approval_mode":"per_request","execution_proposal":null,"exact_service":null,
-        "assistant_group":null,"from_org_policy":false,"supervisor_write.version":1,
+        "assistant_group":null,"from_org_policy":false,"supervisor_write.version":b.version as i32,
         "supervisor_write.code_digest":&b.code_digest,"supervisor_write.review_confirmed":true,
         "supervisor_write.dispatching":false,"supervisor_write.dm_decision_receipt":null},
         update: doc! {"status":if approved {"approved"} else {"rejected"},

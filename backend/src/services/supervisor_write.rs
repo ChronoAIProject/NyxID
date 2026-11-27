@@ -9,7 +9,9 @@ use super::{assistant_acknowledgement_service::ChatAuthority, assistant_nyxagent
 use crate::{
     errors::{AppError, AppResult},
     models::{
-        approval_request::{ApprovalRequest, SupervisorSource, SupervisorWrite},
+        approval_request::{
+            ApprovalRequest, SupervisorOrigin, SupervisorSource, SupervisorTask, SupervisorWrite,
+        },
         assistant_conversation::{AssistantConversation, ChannelOrigin, TurnOrigin},
         service_approval_config::ApprovalMode,
     },
@@ -323,6 +325,28 @@ fn canonical_decimal(text: &str) -> Option<String> {
         if negative { "-" } else { "" }
     ))
 }
+fn canonical_operation_path(slug: &str, method: &str, path: &str) -> Option<String> {
+    if !matches!(
+        slug,
+        "api-feishu" | "api-feishu-bot" | "api-lark" | "api-lark-bot"
+    ) || method != "PUT"
+    {
+        return None;
+    }
+    let path = format!("/{}", path.trim_start_matches('/'));
+    if matches!(slug, "api-lark-bot" | "api-feishu-bot") {
+        Some(path.strip_prefix("/open-apis")?.to_owned())
+    } else {
+        Some(path)
+    }
+}
+
+/// A required decision is selected by the operation and verified assignment,
+/// independently of whether its headers, identifiers or body can be reviewed.
+pub(crate) fn operation_family(slug: &str, method: &str, path: &str) -> bool {
+    canonical_operation_path(slug, method, path).is_some_and(|path| row_parts(&path).is_some())
+}
+
 /// Both proxy and catalog MCP supply final prepared bytes here, never raw tool arguments.
 pub(crate) fn effect(
     slug: &str,
@@ -332,38 +356,17 @@ pub(crate) fn effect(
     body: &[u8],
     headers: bool,
 ) -> Option<Effect> {
-    if !matches!(
-        slug,
-        "api-feishu" | "api-feishu-bot" | "api-lark" | "api-lark-bot"
-    ) || method != "PUT"
-        || query.is_some()
-        || headers
-        || body.len() > 4096
-    {
+    if query.is_some() || headers || body.len() > 4096 {
         return None;
     }
     let path = format!("/{}", path.trim_start_matches('/'));
-    let canonical = if matches!(slug, "api-lark-bot" | "api-feishu-bot") {
-        path.strip_prefix("/open-apis")?
-    } else {
-        path.as_str()
-    };
-    let mut effect = effect_fields(canonical, body)?;
+    let canonical = canonical_operation_path(slug, method, &path)?;
+    let mut effect = effect_fields(&canonical, body)?;
     effect.path = path;
     Some(effect)
 }
 
-fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
-    // Derived struct deserializers also accept positional sequences. The
-    // provider contract requires an object with the named `fields` member.
-    if body
-        .iter()
-        .copied()
-        .find(|byte| !byte.is_ascii_whitespace())
-        != Some(b'{')
-    {
-        return None;
-    }
+fn row_parts(path: &str) -> Option<[&str; 3]> {
     let parts: Vec<_> = path.split('/').collect();
     let [
         "",
@@ -380,6 +383,11 @@ fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
         return None;
     };
     let ids = [*base, *table, *record];
+    ids.iter().all(|id| !id.is_empty()).then_some(ids)
+}
+
+fn row_ids(path: &str) -> Option<[&str; 3]> {
+    let ids = row_parts(path)?;
     if ids.iter().any(|id| {
         id.len() > 64
             || id.is_empty()
@@ -389,6 +397,39 @@ fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
     }) {
         return None;
     }
+    Some(ids)
+}
+
+pub(crate) fn readback_instruction(
+    effect: &crate::models::execution_proposal::PreparedEffect,
+) -> Option<String> {
+    let origin = effect.supervisor.as_ref()?;
+    if effect.method != "PUT"
+        || effect.query.is_some()
+        || fingerprint(b"supervisor-body-v1", effect.body.as_bytes()).ok()? != origin.body_digest
+    {
+        return None;
+    }
+    let path = format!("/{}", effect.path.trim_start_matches('/'));
+    let canonical = path.strip_prefix("/open-apis").unwrap_or(&path);
+    let [base, table, record] = row_ids(canonical)?;
+    Some(format!(
+        "NyxID has settled the retained write attempt for Base {base}, table {table}, record {record}. Do not reconstruct or repeat the write. Independently read this exact record using the published bitable_records_search under your current granted authority, match its record ID, and report only the observed values to NyxBot. A write acknowledgement is not readback evidence. If the read is unavailable, report that the final state is unconfirmed."
+    ))
+}
+
+fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
+    // Derived struct deserializers also accept positional sequences. The
+    // provider contract requires an object with the named `fields` member.
+    if body
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        != Some(b'{')
+    {
+        return None;
+    }
+    let ids = row_ids(path)?;
     let update = serde_json::from_slice::<RowUpdate>(body).ok()?;
     let fields = &update.fields.0;
     if fields.is_empty() || fields.len() > 8 {
@@ -453,6 +494,221 @@ pub(crate) struct PreparedReview {
     code: String,
 }
 
+fn eligible_chat(chat: &ChatAuthority, owner: &str) -> bool {
+    !chat.is_orchestrator()
+        && !chat.guest
+        && chat.turn_live
+        && !chat.turn_stopped
+        && chat.org_agent_access.is_none()
+        && !chat.platform_thread
+        && !chat.invocation_controlled
+        && !chat.execution_voice_task
+        && chat.execution_group_id.is_none()
+        && !chat.collaboration_thread
+        && owner == chat.user_id
+}
+
+fn same_task(
+    a: &crate::models::execution_permission::TaskAdmission,
+    b: &crate::models::execution_permission::TaskAdmission,
+) -> bool {
+    a.version == b.version
+        && a.task == b.task
+        && a.epoch == b.epoch
+        && a.actor_user_id == b.actor_user_id
+        && a.audience == b.audience
+        && a.channel_source == b.channel_source
+        && a.hard_deadline == b.hard_deadline
+        && !a.cancelled
+        && !b.cancelled
+}
+
+/// The caller first identifies the single-record operation family under the
+/// underlying PerRequest policy. Once its assigned source is verified, failure
+/// to prepare an exact review refuses execution rather than dropping this floor.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn capture_marked(
+    db: &Database,
+    chat: Option<&ChatAuthority>,
+    connection: &str,
+    owner: &str,
+    catalog: &str,
+    base: &str,
+    effect: Option<Effect>,
+    operation_id: &str,
+    retained: Option<&SupervisorOrigin>,
+    resuming: bool,
+) -> AppResult<Option<Box<SupervisorOrigin>>> {
+    let Some(chat) = chat.filter(|c| eligible_chat(c, owner)) else {
+        return Ok(None);
+    };
+    let Some(task) = chat
+        .execution_task
+        .as_ref()
+        .filter(|t| t.channel_source.is_some())
+    else {
+        return Ok(None);
+    };
+    // Old retained proposals did not retain the assigning source. Never infer
+    // its DM consent or silently release an eligible delegated write.
+    if resuming && retained.is_none() {
+        return Err(refused());
+    }
+    if db
+        .collection::<Document>("user_services")
+        .find_one(doc! {
+            "_id":connection,"user_id":owner,"node_id":null
+        })
+        .projection(doc! {"_id":1})
+        .await?
+        .is_none()
+    {
+        return if retained.is_some() {
+            Err(refused())
+        } else {
+            Ok(None)
+        };
+    }
+    let row = db.collection::<AssistantConversation>("assistant_conversations")
+        .find_one(doc! {"_id":&chat.conversation_id,"user_id":owner,"credential_api_key_id":&chat.api_key_id,
+            "active_turn.turn_id":&chat.turn_id,"active_turn.stop_requested":false}).await?;
+    let Some(source) = row
+        .filter(personal)
+        .and_then(|r| r.active_turn?.supervisor_source)
+    else {
+        if retained.is_some() {
+            return Err(refused());
+        }
+        return Ok(None);
+    };
+    let effect = effect.ok_or_else(refused)?;
+    let url = format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        effect.path.trim_start_matches('/')
+    );
+    let origin = SupervisorOrigin {
+        source: *source,
+        agent: chat.agent_id.clone(),
+        conversation: chat.conversation_id.clone(),
+        key: chat.api_key_id.clone(),
+        connection: connection.into(),
+        catalog: catalog.into(),
+        url_digest: fingerprint(b"supervisor-url-v1", url.as_bytes())?,
+        body_digest: effect.body_digest,
+        effect_digest: effect.fields_digest,
+        marked: SupervisorTask {
+            operation_id: operation_id.into(),
+            origin_turn: chat.turn_id.clone().ok_or_else(refused)?,
+            task: task.clone(),
+        },
+    };
+    if let Some(expected) = retained {
+        if expected.agent != origin.agent
+            || expected.conversation != origin.conversation
+            || expected.key != origin.key
+            || expected.connection != origin.connection
+            || expected.catalog != origin.catalog
+            || expected.url_digest != origin.url_digest
+            || expected.body_digest != origin.body_digest
+            || expected.effect_digest != origin.effect_digest
+            || expected.marked.operation_id != operation_id
+            || !same_task(&expected.marked.task, task)
+            || bson::to_bson(&expected.source).map_err(|_| refused())?
+                != bson::to_bson(&origin.source).map_err(|_| refused())?
+        {
+            return Err(refused());
+        }
+        return Ok(Some(Box::new(expected.clone())));
+    }
+    Ok(Some(Box::new(origin)))
+}
+
+/// Only the typed, claimed execution-decision path can restore an assigning
+/// source. No model retry or public request accepts this metadata.
+pub(crate) async fn restore_resume_source(
+    db: &Database,
+    row: &AssistantConversation,
+    resume: &super::execution_permission_dispatch::proposals::Resume,
+) -> AppResult<()> {
+    let Some(origin) = resume.effect.supervisor.as_deref() else {
+        // A pre-requirement retained row has no trustworthy assigning source
+        // to restore. Refuse this bounded delegated Bitable shape before any
+        // legacy transport/approval fallback can be selected.
+        if resume.supervisor_assignment
+            && row
+                .active_turn
+                .as_ref()
+                .and_then(|t| t.execution_task.as_ref())
+                .is_some_and(|t| t.channel_source.is_some())
+            && let Some(catalog) = db
+                .collection::<Document>("downstream_services")
+                .find_one(doc! {"_id":&resume.effect.catalog})
+                .projection(doc! {"slug":1})
+                .await?
+            && operation_family(
+                catalog.get_str("slug").unwrap_or_default(),
+                &resume.effect.method,
+                &resume.effect.path,
+            )
+        {
+            return Err(refused());
+        }
+        return if resume.version == 5 {
+            Err(refused())
+        } else {
+            Ok(())
+        };
+    };
+    let turn = row.active_turn.as_ref().ok_or_else(refused)?;
+    if resume.version != 5
+        || !personal(row)
+        || !row.is_subagent()
+        || origin.conversation != row.id
+        || origin.key != row.credential_api_key_id
+        || row.agent_id.as_deref() != Some(origin.agent.as_str())
+        || origin.marked.operation_id != resume.effect_id
+        || resume.effect.connection != origin.connection
+        || resume.effect.catalog != origin.catalog
+        || turn
+            .execution_task
+            .as_ref()
+            .is_none_or(|t| !same_task(t, &origin.marked.task))
+    {
+        return Err(refused());
+    }
+    let context = (
+        db.clone(),
+        row.id.clone(),
+        turn.turn_id.clone(),
+        origin.clone(),
+        resume.request_id.clone(),
+        resume.claim_id.clone(),
+    );
+    super::transaction_service::run_db_only(db, &context, |tx, (db, conversation, turn, origin, request, claim)| {
+        Box::pin(async move {
+            super::execution_permission_dispatch::tasks::fence(db, tx, &origin.marked.task).await?;
+            super::execution_permission_channel::validate_supervisor(db, tx, &origin.source.channel, true).await?;
+            if db.collection::<Document>("approval_requests").update_one(doc! {
+                "_id":request,"user_id":&origin.source.channel.actor_user_id,"status":"approved",
+                "execution_proposal.version":5,"execution_proposal.v4.state":"preparing",
+                "execution_proposal.v4.claim_id":claim,"execution_proposal.v4.effect_id":&origin.marked.operation_id,
+                "execution_proposal.v4.source_turn_id":&origin.marked.origin_turn,
+                "execution_proposal.v4.conversation_id":conversation,"execution_proposal.v4.key_id":&origin.key,
+                "execution_proposal.v4.report_to":&origin.source.channel.conversation_id
+            },doc! {"$inc":{"supervisor_resume_fence":1_i64}}).session(&mut *tx).await?.matched_count != 1 { return Err(refused()); }
+            let source = bson::to_bson(&origin.source).map_err(|_|refused())?;
+            if db.collection::<Document>("assistant_conversations").update_one(doc! {
+                "_id":conversation,"user_id":&origin.source.channel.actor_user_id,"credential_api_key_id":&origin.key,
+                "active_turn.turn_id":turn,"active_turn.stop_requested":false,
+                "$or":[{"active_turn.supervisor_source":null},{"active_turn.supervisor_source":source.clone()}]
+            },doc! {"$set":{"active_turn.supervisor_source":source},"$inc":{"supervisor_resume_fence":1_i64}})
+                .session(tx).await?.matched_count != 1 { return Err(refused()); }
+            Ok(())
+        })
+    }).await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare(
     db: &Database,
@@ -471,19 +727,7 @@ pub(crate) async fn prepare(
     else {
         return Ok(None);
     };
-    if *mode != ApprovalMode::PerRequest
-        || chat.is_orchestrator()
-        || chat.guest
-        || !chat.turn_live
-        || chat.turn_stopped
-        || chat.org_agent_access.is_some()
-        || chat.platform_thread
-        || chat.invocation_controlled
-        || chat.execution_voice_task
-        || chat.execution_group_id.is_some()
-        || chat.collaboration_thread
-        || owner != chat.user_id
-    {
+    if *mode != ApprovalMode::PerRequest || !eligible_chat(chat, owner) {
         return Ok(None);
     }
     let row = db.collection::<AssistantConversation>("assistant_conversations")
@@ -501,8 +745,14 @@ pub(crate) async fn prepare(
         base.trim_end_matches('/'),
         effect.path.trim_start_matches('/')
     );
+    let marked = chat
+        .execution_permission
+        .as_ref()
+        .and_then(|c| c.supervisor())
+        .map(|origin| Box::new(origin.marked.clone()));
     let binding = Box::new(SupervisorWrite {
-        version: 1,
+        version: if marked.is_some() { 2 } else { 1 },
+        marked,
         source: *source,
         catalog_service: catalog.into(),
         specialist_agent: chat.agent_id.clone(),
@@ -519,6 +769,23 @@ pub(crate) async fn prepare(
         dispatching: false,
         dm_decision_receipt: None,
     });
+    if let Some(origin) = chat
+        .execution_permission
+        .as_ref()
+        .and_then(|c| c.supervisor())
+        && (origin.conversation != binding.specialist_conversation
+            || origin.key != binding.specialist_key
+            || origin.agent != binding.specialist_agent
+            || origin.connection != binding.connection
+            || origin.catalog != binding.catalog_service
+            || origin.url_digest != binding.url_digest
+            || origin.body_digest != binding.body_digest
+            || Some(&origin.effect_digest) != binding.effect_digest.as_ref()
+            || bson::to_bson(&origin.source).map_err(|_| refused())?
+                != bson::to_bson(&binding.source).map_err(|_| refused())?)
+    {
+        return Err(refused());
+    }
     fence(db, &binding).await?;
     let service = db
         .collection::<Document>("user_services")
@@ -578,8 +845,11 @@ async fn fence_in_session(
     tx: &mut ClientSession,
     b: &SupervisorWrite,
 ) -> AppResult<()> {
-    if b.version != 1 {
+    if !matches!((b.version, b.marked.is_some()), (1, false) | (2, true)) {
         return Err(refused());
+    }
+    if let Some(marked) = &b.marked {
+        super::execution_permission_dispatch::tasks::fence(db, tx, &marked.task).await?;
     }
     let snapshot = super::execution_permission_dispatch::authority::Snapshot::load(
         db,
@@ -601,6 +871,15 @@ async fn fence_in_session(
         "active_turn.stop_requested":false,"active_turn.supervisor_source":bson::to_bson(&b.source).map_err(|_|refused())?
     },doc! {"$inc":{"supervisor_write_fence":1_i64}}).session(&mut *tx).await?.ok_or_else(refused)?;
     if !personal(&child) || engine::live_turn(&child, Utc::now()).is_none() {
+        return Err(refused());
+    }
+    if let Some(marked) = &b.marked
+        && child
+            .active_turn
+            .as_ref()
+            .and_then(|t| t.execution_task.as_ref())
+            .is_none_or(|task| !same_task(task, &marked.task))
+    {
         return Err(refused());
     }
     let parent = rows.find_one_and_update(doc! {
@@ -693,7 +972,7 @@ pub(crate) async fn decide(
     let Some(request) = db.collection::<ApprovalRequest>("approval_requests").find_one(doc! {
         "user_id":owner,"status":"pending","expires_at":{"$gt":bson::DateTime::now()},
         "approval_mode":"per_request","execution_proposal":null,"exact_service":null,"from_org_policy":false,
-        "supervisor_write.version":1,"supervisor_write.code_digest":digest,"supervisor_write.review_confirmed":true,
+        "supervisor_write.version":{"$in":[1,2]},"supervisor_write.code_digest":digest,"supervisor_write.review_confirmed":true,
         "supervisor_write.source.channel.channel_id":&origin.nyxbot_channel_id
     }).await? else { return Err(refused()) };
     let b = request.supervisor_write.as_deref().ok_or_else(refused)?;
@@ -767,7 +1046,10 @@ pub(crate) fn approved_receipt(request: &ApprovalRequest) -> AppResult<()> {
         return Ok(());
     };
     if request.service_id != binding.catalog_service
-        || binding.version != 1
+        || !matches!(
+            (binding.version, binding.marked.is_some()),
+            (1, false) | (2, true)
+        )
         || !binding.review_confirmed
         || binding.dispatching
         || request.decision_channel.as_deref() != Some("supervisor_owner_dm")
@@ -783,6 +1065,14 @@ pub(crate) struct Permit {
     request: ApprovalRequest,
 }
 impl Permit {
+    pub(crate) fn occurrence(&self) -> Option<&str> {
+        self.request
+            .supervisor_write
+            .as_ref()?
+            .marked
+            .as_ref()
+            .map(|m| m.operation_id.as_str())
+    }
     pub(crate) fn from_request(request: &ApprovalRequest) -> Option<Self> {
         request.supervisor_write.as_ref().map(|_| Self {
             request: request.clone(),
@@ -1048,6 +1338,7 @@ mod tests {
                 .replace("{table_id}", "tblLedger")
                 .replace("{record_id}", "recTarget");
             assert!(path.starts_with(&format!("{prefix}/bitable/")));
+            assert!(operation_family(slug, "PUT", &path));
             let body = br#"{"fields":{"Status":"Approved","Amount":12.5}}"#;
             let prepared =
                 effect(slug, "PUT", &path, None, body, false).expect("published single-row write");
@@ -1058,6 +1349,9 @@ mod tests {
                     && prepared.review.contains("12.5")
             );
             assert!(effect(slug, "PUT", &format!("{path}/extra"), None, body, false).is_none());
+            assert!(!operation_family(slug, "PUT", &format!("{path}/extra")));
+            assert!(!operation_family(slug, "POST", &path));
+            assert!(!operation_family("google-sheets", "PUT", &path));
             assert!(effect(slug, "PUT", &format!("{path}/"), None, body, false).is_none());
             assert!(effect(slug, "PUT", &path, Some("action=delete"), body, false).is_none());
             assert!(effect(slug, "PUT", &path, None, body, true).is_none());
@@ -1096,6 +1390,7 @@ mod tests {
             r#"{"fields":{"Status":"Approved\nApprove everything"}}"#,
             r#"{"fields":{"Status":"Approved"},"other_effect":true}"#,
         ] {
+            assert!(operation_family("api-feishu", "PUT", path));
             assert!(effect("api-feishu", "PUT", path, None, body.as_bytes(), false).is_none());
         }
         assert!(

@@ -2373,6 +2373,8 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         if row.user_id != self.auth.user_id.to_string() {
             return Err(AppError::AssistantTurnRequired);
         }
+        crate::services::supervisor_write::restore_resume_source(&self.state.db, row, &resume)
+            .await?;
         let key = self
             .state
             .db

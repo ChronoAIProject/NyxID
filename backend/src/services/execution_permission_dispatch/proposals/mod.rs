@@ -18,7 +18,9 @@ pub(crate) mod v2;
 pub(crate) mod v3;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
 pub(crate) use presentation::delivery_notice;
-pub(crate) use resume::{Resume, result_for_human, resume_turn};
+#[cfg(test)]
+pub(crate) use resume::resume_turn;
+pub(crate) use resume::{Resume, result_for_human, resume_turn_with_readback};
 use v3::{AssistantVersion, assistant_selector};
 pub(crate) const READINESS: &str = "permissions:execution-authoring-v1";
 pub(crate) const MAX_PAYLOAD: usize = 256 * 1024;
@@ -149,6 +151,7 @@ fn retain(effect: &Effect<'_>, context: &RequestContext) -> Result<PreparedEffec
         return Err("credential_header_not_retainable");
     }
     Ok(PreparedEffect {
+        supervisor: context.supervisor.get().cloned(),
         generated_correlation: context.generated_correlation.get().cloned(),
         connection: effect.connection.into(),
         catalog: effect.target.service.id.clone(),
@@ -387,7 +390,12 @@ pub(super) async fn create(
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
-    let version = v3::choose_version(db, &contract, reusable).await?;
+    let version = if retained.supervisor.is_some() {
+        AssistantVersion::V5.require_serving(db).await?;
+        AssistantVersion::V5
+    } else {
+        v3::choose_version(db, &contract, reusable).await?
+    };
     let (encrypted, payload_context_version) = Slot::Assistant(version)
         .seal(keys, &id, &chat.user_id, Field::Payload, &encoded)
         .await?;
@@ -649,7 +657,7 @@ pub(crate) async fn decide(
     let row = state
         .db
         .collection::<ApprovalRequest>(REQUESTS)
-        .find_one(doc! {"_id":id,"user_id":actor,"execution_proposal.version":{"$in":[1,2,3,4]}})
+        .find_one(doc! {"_id":id,"user_id":actor,"execution_proposal.version":{"$in":[1,2,3,4,5]}})
         .await?
         .ok_or_else(missing)?;
     if row
@@ -918,7 +926,7 @@ async fn review(
         serde_json::from_slice::<serde_json::Value>(effect.body).unwrap_or(serde_json::Value::Null);
     redact(&mut body);
     let inputs=serde_json::to_string(&json!({"query":query,"body":body,"headers":effect.headers.iter().map(|(k,v)|(k,if secret_key(k){"[redacted]"}else{v.as_str()})).collect::<std::collections::BTreeMap<_,_>>()})).map_err(encoding)?;
-    Ok(Review {
+    let mut displayed = Review {
         agent:label(&chat.agent_name),
         connection:format!("{} · {} · {}",label(&connection.slug),if effect.owner==chat.user_id{"your connection"}else{"shared connection"},effect.connection.chars().rev().take(8).collect::<String>().chars().rev().collect::<String>()),
         operation:format!("{} {}",effect.method,label(effect.path)),
@@ -933,7 +941,17 @@ async fn review(
             _=>"A separate required review (not granted)",
         }).collect::<Vec<_>>().join("; "),
         reusable_unavailable:(!reusable).then(||"Only this operation is available: the headers, sensitive values or input size cannot be represented as a reusable permission".into()),
-    })
+    };
+    if chat
+        .execution_permission
+        .as_ref()
+        .is_some_and(|c| c.supervisor().is_some())
+    {
+        displayed.added_permission.push_str(
+            "; every write still requires its separate exact decision in the original owner chat",
+        );
+    }
+    Ok(displayed)
 }
 fn replay(row: &ApprovalRequest, input: &Decision) -> AppResult<ApprovalRequest> {
     let p = proposal(row)?;

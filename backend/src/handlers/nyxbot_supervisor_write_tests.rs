@@ -15,6 +15,9 @@ use wiremock::{
     matchers::{method, path_regex},
 };
 
+#[path = "nyxbot_supervisor_marked_tests.rs"]
+mod marked_tests;
+
 #[derive(Default)]
 struct Ledger {
     writes: Vec<(String, Value)>,
@@ -42,17 +45,29 @@ async fn mcp(state: &AppState, raw: &str, name: &str, args: Value) -> Value {
 }
 
 async fn raw_update(state: &AppState, raw: &str, selected: &str, body: &str) -> Value {
+    raw_update_with_headers(state, raw, selected, body, &[]).await
+}
+
+async fn raw_update_with_headers(
+    state: &AppState,
+    raw: &str,
+    selected: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> Value {
     use tower::ServiceExt;
     let (_, private) = crate::routes::build_router_with_state(state.clone());
-    let request = axum::http::Request::builder()
+    let mut request = axum::http::Request::builder()
         .method("PUT")
         .uri(format!(
             "/api/v1/proxy/s/ledger/bitable/v1/apps/bascnLedger/tables/tblLedger/records/{selected}"
         ))
         .header("x-api-key", raw)
-        .header("content-type", "application/json")
-        .body(Body::from(body.to_owned()))
-        .unwrap();
+        .header("content-type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let request = request.body(Body::from(body.to_owned())).unwrap();
     let response = private
         .with_state(state.clone())
         .oneshot(request)
@@ -81,6 +96,10 @@ fn tool_value(result: &Value) -> Option<Value> {
 }
 
 fn row_observation(result: &Value, selected: &str) -> Option<String> {
+    row_observation_at(result, "bascnLedger", "tblLedger", selected)
+}
+
+fn row_observation_at(result: &Value, base: &str, table: &str, selected: &str) -> Option<String> {
     let response = tool_value(result)?;
     if response["code"] != 0 {
         return None;
@@ -93,12 +112,25 @@ fn row_observation(result: &Value, selected: &str) -> Option<String> {
     let status = record["fields"]["Status"].as_str()?;
     let marker = record["fields"]["Observation"].as_str()?;
     Some(format!(
-        "Base bascnLedger, table tblLedger, record {id}: Status = {status}; independent observation {marker}."
+        "Base {base}, table {table}, record {id}: Status = {status}; independent observation {marker}."
     ))
 }
 
 const NO_CONFIRMATION: &str =
     "The selected row has no matching specialist observation; no final value is confirmed.";
+
+fn retained_readback_target(input: &str) -> Option<(String, String, String)> {
+    let target = regex::Regex::new(r"NyxID has settled the retained write attempt for Base ([A-Za-z0-9]{1,64}), table ([A-Za-z0-9]{1,64}), record ([A-Za-z0-9]{1,64})\.").unwrap();
+    let captures = target
+        .captures_iter(input)
+        .last()
+        .filter(|_| input.contains("Independently read this exact record"))?;
+    Some((
+        captures[1].to_owned(),
+        captures[2].to_owned(),
+        captures[3].to_owned(),
+    ))
+}
 fn checked_report(report: Option<&str>, selected: &str) -> String {
     report
         .filter(|report| {
@@ -114,8 +146,26 @@ fn checked_report(report: Option<&str>, selected: &str) -> String {
         )
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ReviewFault {
+    CallerCondition,
+    DuplicateMedia,
+    DefaultMedia,
+    GeneratedCorrelationOverride,
+    CallerCorrelation,
+    CustomCallerOverride,
+    UnsafeValue,
+    WrappedBody,
+    DuplicateField,
+}
+
 struct Script {
     proxy: bool,
+    marked: std::sync::atomic::AtomicBool,
+    repeat_after_resume: std::sync::atomic::AtomicBool,
+    readback_fault: std::sync::atomic::AtomicBool,
+    hold_readback: std::sync::atomic::AtomicBool,
+    review_fault: std::sync::Mutex<Option<ReviewFault>>,
     stage: Arc<AtomicUsize>,
     selected: String,
     control: String,
@@ -180,12 +230,104 @@ async fn model(
                 .is_some(),
             "delegation must carry original source"
         );
-        assert!(
-            row.active_turn.as_ref().unwrap().execution_task.is_none(),
-            "this journey exercises the legacy connected-approval lane"
-        );
-        let args = json!({"app_token":"bascnLedger","table_id":"tblLedger","body":{}});
+        if script.marked.load(Ordering::SeqCst) {
+            assert!(
+                row.active_turn
+                    .as_ref()
+                    .unwrap()
+                    .execution_task
+                    .as_ref()
+                    .is_some_and(|t| t.channel_source.is_some()),
+                "marked delegation must retain its admitted channel task"
+            );
+        } else {
+            assert!(
+                row.active_turn.as_ref().unwrap().execution_task.is_none(),
+                "this journey exercises the legacy connected-approval lane"
+            );
+        }
+        let retained_readback = script.marked.load(Ordering::SeqCst)
+            && row
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| event.id.starts_with("execution-decision:"));
+        let retained_target = if retained_readback {
+            let input = request["input"].as_str().unwrap();
+            let Some(target) = retained_readback_target(input) else {
+                return NO_CONFIRMATION.into();
+            };
+            Some(target)
+        } else {
+            None
+        };
+        if retained_readback && script.hold_readback.load(Ordering::SeqCst) {
+            observed
+                .lock()
+                .await
+                .push(json!({"stage":"readback_started","conversation_id":row.id,
+                "turn_id":row.active_turn.as_ref().unwrap().turn_id}));
+            script.release.acquire().await.unwrap().forget();
+        }
+        if retained_readback && script.repeat_after_resume.load(Ordering::SeqCst) {
+            let repeat = if script.proxy {
+                raw_update(
+                    state,
+                    raw,
+                    &script.selected,
+                    r#"{"fields":{"Status":"Approved"}}"#,
+                )
+                .await
+            } else {
+                mcp(
+                    state,
+                    raw,
+                    "ledger__bitable_record_update",
+                    update_arguments(&script.selected, json!({"Status":"Approved"})),
+                )
+                .await
+            };
+            assert!(
+                if script.proxy {
+                    repeat["status"] != 200
+                } else {
+                    tool_value(&repeat).is_none()
+                },
+                "the original/resume occurrence must not authorize a repeated write"
+            );
+            observed
+                .lock()
+                .await
+                .push(json!({"stage":"repeat_after_resume","result":repeat}));
+        }
+        let args = if let Some((base, table, _)) = &retained_target {
+            json!({"app_token":base,"table_id":table,"body":{}})
+        } else {
+            json!({"app_token":"bascnLedger","table_id":"tblLedger","body":{}})
+        };
         let before = mcp(state, raw, "ledger__bitable_records_search", args.clone()).await;
+        if let Some((base, table, record)) = retained_target {
+            observed
+                .lock()
+                .await
+                .push(json!({"stage":"retained_readback","result":before.clone(),"requested":{"base":base,"table":table,"record":record},
+                "conversation_id":row.id,"turn_id":row.active_turn.as_ref().unwrap().turn_id}));
+            let report = row_observation_at(&before, &base, &table, &record)
+                .unwrap_or_else(|| NO_CONFIRMATION.into());
+            return if request["input"]
+                .as_str()
+                .unwrap()
+                .contains("The write outcome is unknown")
+            {
+                format!(
+                    "The write outcome is unknown; this observation does not establish cause. {report}"
+                )
+            } else {
+                report
+            };
+        }
         observed
             .lock()
             .await
@@ -197,7 +339,42 @@ async fn model(
             let control = row_observation(&before, &script.control).expect("control provider row");
             return format!("Pending ledger entries. {selected} Control entry. {control}");
         }
-        let written = if stage == 3 {
+        let fault = *script.review_fault.lock().unwrap();
+        let written = if let Some(fault) = fault {
+            let body = match fault {
+                ReviewFault::UnsafeValue => {
+                    r#"{"fields":{"Status":"https://example.com/private"}}"#
+                }
+                ReviewFault::WrappedBody => r#"{"body":{"fields":{"Status":"Approved"}}}"#,
+                ReviewFault::DuplicateField => {
+                    r#"{"fields":{"Status":"Pending","Status":"Approved"}}"#
+                }
+                _ => r#"{"fields":{"Status":"Approved"}}"#,
+            };
+            let headers = match fault {
+                ReviewFault::CallerCondition => vec![("if-match", "ledger-v1")],
+                ReviewFault::DuplicateMedia => vec![("content-type", "application/json")],
+                ReviewFault::CallerCorrelation => vec![("x-request-id", "caller-selected")],
+                ReviewFault::CustomCallerOverride => vec![("x-ledger-mode", "caller-selected")],
+                _ => Vec::new(),
+            };
+            if script.proxy {
+                raw_update_with_headers(state, raw, &script.selected, body, &headers).await
+            } else {
+                assert!(matches!(
+                    fault,
+                    ReviewFault::DefaultMedia | ReviewFault::UnsafeValue
+                ));
+                let fields = serde_json::from_str::<Value>(body).unwrap()["fields"].clone();
+                mcp(
+                    state,
+                    raw,
+                    "ledger__bitable_record_update",
+                    update_arguments(&script.selected, fields),
+                )
+                .await
+            }
+        } else if stage == 3 {
             let first = br#"{"fields":{"Amount":12,"Status":"Approved"}}"#;
             let second = br#"{ "fields": { "Status": "Approved", "Amount": 12.0 } }"#;
             let mut replies = Vec::new();
@@ -256,10 +433,18 @@ async fn model(
             )
             .await
         };
+        let submitted = if script.proxy {
+            written["status"] == 200
+        } else {
+            tool_value(&written).is_some_and(|value| value["code"] == 0)
+        };
         observed
             .lock()
             .await
             .push(json!({"stage":"write","result":written}));
+        if script.marked.load(Ordering::SeqCst) && !submitted {
+            return NO_CONFIRMATION.into();
+        }
         script.delay_settlement().await;
         let after = mcp(state, raw, "ledger__bitable_records_search", args).await;
         observed
@@ -289,13 +474,21 @@ async fn model(
     {
         observed.lock().await.push(json!({"stage":"supervisor_event","conversation_id":row.id,
             "turn_id":row.active_turn.as_ref().unwrap().turn_id,"input":request["input"],
-            "sources":row.active_turn.as_ref().unwrap().events.iter().map(|event|json!({"id":event.id,"kind":event.kind,"agent_id":event.agent_id})).collect::<Vec<_>>()}));
+            "sources":row.active_turn.as_ref().unwrap().events.iter().map(|event|json!({"id":event.id,"kind":event.kind,"agent_id":event.agent_id,
+                "task_root":event.execution_task.as_ref().map(|t|t.task.root_id.as_str()),
+                "task_epoch":event.execution_task.as_ref().map(|t|t.epoch)})).collect::<Vec<_>>()}));
         let input = request["input"].as_str().expect("rendered model input");
         let pattern = regex::Regex::new(
             r#"Specialist accountant replied\. Reply excerpt: "([^"]*)" Read more"#,
         )
         .unwrap();
         let report = pattern.captures_iter(input).last();
+        if script.marked.load(Ordering::SeqCst)
+            && let Some(report) = &report
+            && report[1].contains("independent readback is unverified")
+        {
+            return format!("Accountant status. {}", &report[1]);
+        }
         return checked_report(report.as_ref().map(|capture| &capture[1]), &script.selected);
     }
     if row.active_turn.as_ref().unwrap().origin
@@ -355,6 +548,7 @@ async fn model(
 }
 
 struct Journey {
+    _readiness_heartbeat: Option<tokio_util::task::AbortOnDropHandle<()>>,
     state: AppState,
     channel: NyxbotChannel,
     key: String,
@@ -381,6 +575,11 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
     let evidence = observed.clone();
     let script = Arc::new(Script {
         proxy,
+        marked: std::sync::atomic::AtomicBool::new(false),
+        repeat_after_resume: std::sync::atomic::AtomicBool::new(false),
+        readback_fault: std::sync::atomic::AtomicBool::new(false),
+        hold_readback: std::sync::atomic::AtomicBool::new(false),
+        review_fault: std::sync::Mutex::new(None),
         stage: stage.clone(),
         selected: format!("recA{}", &Uuid::new_v4().simple().to_string()[..8]),
         control: format!("recZ{}", &Uuid::new_v4().simple().to_string()[..8]),
@@ -429,6 +628,9 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
     Mock::given(method("POST")).and(path_regex(".*/bitable/v1/apps/bascnLedger/tables/tblLedger/records/search$"))
         .respond_with(move |_:&wiremock::Request| {
             let mut r=read.lock().unwrap(); let value=r.target.clone();r.reads.push(value);
+            if read_script.readback_fault.load(Ordering::SeqCst) && !r.writes.is_empty() {
+                return ResponseTemplate::new(403).set_body_json(json!({"code":403,"msg":"read unavailable"}));
+            }
             ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"items":[
                 {"record_id":read_script.control,"fields":{"Status":r.control,"Observation":format!("provider-search-{}:{}",r.reads.len(),read_script.control)}},
                 {"record_id":read_script.selected,"fields":{"Status":r.target,"Observation":format!("provider-search-{}:{}",r.reads.len(),read_script.selected)}}
@@ -694,6 +896,7 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
             .await;
     }
     Journey {
+        _readiness_heartbeat: None,
         state,
         channel,
         key,
@@ -750,7 +953,10 @@ async fn review_diagnostics(j: &Journey) -> Value {
         .projection(doc! {"_id":1,"status":1,"approval_mode":1,"created_at":1,"expires_at":1,
             "supervisor_write.version":1,"supervisor_write.review_confirmed":1,"supervisor_write.dispatching":1,
             "supervisor_write.specialist_conversation":1,"supervisor_write.specialist_turn":1,
-            "supervisor_write.source.channel.event_id":1,"execution_proposal.version":1})
+            "supervisor_write.source.channel.event_id":1,"supervisor_write.marked.operation_id":1,
+            "supervisor_write.marked.origin_turn":1,"execution_proposal.version":1,
+            "execution_proposal.v4.state":1,"execution_proposal.v4.failure_code":1,
+            "execution_proposal.v4.source_turn_id":1,"execution_proposal.v4.resume_turn_id":1})
         .limit(8).await.unwrap().try_collect::<Vec<_>>().await.unwrap();
     let conversations = j.state.db.collection::<Document>(CONVERSATIONS)
         .find(doc! {"user_id":OWNER})

@@ -5589,7 +5589,15 @@ async fn execute_resolved_proxy_inner<'a>(
                             target.catalog_headers(),
                             target.user_service_default_headers.as_slice(),
                         ],
-                        generated_request_id.as_ref().map(|id| id.0.as_str()),
+                        generated_request_id
+                            .as_ref()
+                            .map(|id| id.0.as_str())
+                            .or_else(|| {
+                                auth_user
+                                    .execution_permission
+                                    .as_ref()
+                                    .and_then(|c| c.generated_request_id())
+                            }),
                     ),
                 )
             } else {
@@ -5606,6 +5614,16 @@ async fn execute_resolved_proxy_inner<'a>(
                 service_id,
             )
             .await?;
+            if auth_user
+                .execution_permission
+                .as_ref()
+                .is_some_and(|c| c.supervisor().is_some())
+                && supervisor.is_none()
+            {
+                return Err(AppError::Forbidden(
+                    "The required original-chat write review is unavailable".into(),
+                ));
+            }
             if let Some(review) = &supervisor {
                 request_operation.bind_supervisor_review(review.binding.clone(), timeout_secs);
             }

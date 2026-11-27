@@ -5398,6 +5398,13 @@ async fn forward_request_with_egress_guard_inner(
     } else if let Some(proof) = resource_proof {
         proof.attach(&mut request).await.map_err(ForwardRequestError::PreDispatchRejected)?;
     }
+    if let Some(origin) = target.execution_request.as_ref().and_then(|c| c.supervisor())
+        && egress_guard.and_then(|g|g.supervisor_occurrence()) != Some(origin.marked.operation_id.as_str())
+    {
+        return Err(ForwardRequestError::PreDispatchRejected(AppError::Forbidden(
+            "The independent original-chat write decision is required".into()
+        )));
+    }
     if let Some(guard) = egress_guard {
         guard.claim_supervisor(&request).await.map_err(ForwardRequestError::PreDispatchRejected)?;
     }

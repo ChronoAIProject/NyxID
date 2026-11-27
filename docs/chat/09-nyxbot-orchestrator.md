@@ -257,8 +257,13 @@ Admission captures the exact authenticated source event, owner, NyxBot thread,
 key and assigning turn. The connected write binds its specialist agent, key,
 turn, request occurrence, exact connection and authority, method, destination
 and prepared body. Only PerRequest approval participates, including the implicit
-default used with Writes only. Grant-mode policies and execution proposals keep
-their existing review route.
+default used with Writes only. The independent DM decision remains required on
+enrolled delegated work even when execution permission covers the underlying
+personal-service layer. A permission gap retains its web-only proposal; after
+that web decision, the exact retained operation requires its own original-DM
+decision before dispatch. Grant-mode policies keep their existing review route.
+The [execution-permission contract](../EXECUTION_PERMISSIONS.md#verified-owner-channel-proposals-v4)
+specifies retained-source compatibility and dispatcher deployment requirements.
 
 The closed adapter accepts the published Feishu/Lark Bitable single-record PUT
 with no query or caller-selected headers and a complete, bounded `fields` map of
@@ -277,6 +282,12 @@ internal provenance and the single effective egress value match exactly;
 caller-supplied correlation IDs keep the ordinary route. Numeric tokens whose
 decimal value would change during parsing also keep the ordinary route, so the
 review never displays a rounded ledger amount.
+
+For marked assigned writes, the operation family and verified assignment select
+the independent DM requirement before safe review preparation or execution
+coverage. Unsafe bodies, headers, identifiers or correlation provenance refuse
+that operation; they cannot drop the requirement or select a web fallback.
+The ordinary fallback described above applies only outside this marked bound.
 
 The bot connectors' published paths include `/open-apis`; OAuth connectors'
 paths start at `/bitable`. The adapter preserves the exact prepared destination.
@@ -299,6 +310,21 @@ The specialist receives the real response on its original call, reads the record
 independently, and reports through the existing assignment result path. A write
 receipt alone is not readback evidence. Ordinary notification Telegram settings
 never select this review's destination.
+
+An eligible marked retained resume carries its original assignment through the
+typed web-decision event and still requires the exact DM receipt. A newly settled
+attempt gives only that assigned specialist a bounded readback instruction with
+the validated Base/table/record identifiers. The specialist's normal model reads
+with its own current key, grants and task, then settles its observed result
+through the original assignment to NyxBot. Other retained receipts keep their
+normal result behavior. A failed read reports an unconfirmed final state.
+Only a single execution decision in its own event turn enters this readback
+model path. Coalesced decisions retain their individual request identifiers and
+safe status notices, and report attempted writes without verified readback;
+they do not select an arbitrary row for the specialist to read.
+Recovery after a terminal receipt or uncertain dispatch never resends the write:
+when independent readback is not verified, it reports that limitation explicitly.
+An observation after uncertainty does not prove that this write caused the state.
 
 For the merchant workflow, the supervisor first asks the specialist to read the
 test row using the published `bitable_records_search`, then tells the owner the

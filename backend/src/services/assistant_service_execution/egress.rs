@@ -328,6 +328,12 @@ impl<'a> HttpEgressGuard<'a> {
     pub(crate) fn has_supervisor(&self) -> bool {
         matches!(&self.authority, EgressAuthority::Assistant(g) if g.admission.supervisor_write.is_some())
     }
+    pub(crate) fn supervisor_occurrence(&self) -> Option<&str> {
+        match &self.authority {
+            EgressAuthority::Assistant(g) => g.admission.supervisor_write.as_ref()?.occurrence(),
+            _ => None,
+        }
+    }
     pub(crate) async fn claim_supervisor(&self, request: &reqwest::Request) -> AppResult<()> {
         if let EgressAuthority::Assistant(g) = &self.authority
             && let Some(permit) = &g.admission.supervisor_write

@@ -4671,6 +4671,14 @@ async fn wait_for_mcp_approval(
         .await
         .map_err(|_| "The exact owner-chat write review is unavailable".to_owned())?
     };
+    if auth
+        .execution_permission
+        .as_ref()
+        .is_some_and(|c| c.supervisor().is_some())
+        && supervisor.is_none()
+    {
+        return Err("The required original-chat write review is unavailable".into());
+    }
     if let Some(review) = &supervisor {
         request_operation.bind_supervisor_review(review.binding.clone(), timeout_secs);
     }
