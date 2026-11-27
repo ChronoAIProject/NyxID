@@ -347,6 +347,7 @@ async fn oracle_enrollment_repeated_rejoins_advance_bson_epoch_when_clock_has_no
         .await
         .unwrap();
         assert_eq!(membership.id, membership_id);
+        assert_eq!(membership.eligibility_revision, step);
         assert_eq!(
             membership.created_at.timestamp_millis(),
             epoch.timestamp_millis() + step
@@ -445,4 +446,38 @@ async fn oracle_enrollment_isolated_from_saved_login_material_and_legacy_fanout(
     assert_eq!(fanout.skipped_workers, vec!["mine"]);
     assert_eq!(fanout.queued_workers.len(), 1);
     assert_eq!(fanout.queued_workers[0].0, "legacy");
+}
+
+#[tokio::test]
+async fn eligibility_revision_requires_fresh_installation_enrollment() {
+    let (db, pool, actor, membership, _) = fixture().await;
+    let instance = uuid::Uuid::new_v4().to_string();
+    let original = credential();
+    let worker = enroll(&db, &actor, &pool, &instance, None, &original)
+        .await
+        .unwrap();
+    db.collection::<Document>(WORKERS)
+        .update_one(
+            doc! {"_id":worker.id},
+            doc! {"$unset":{"enrollment.eligibility_revision":""}},
+        )
+        .await
+        .unwrap();
+    assert!(authenticate(&db, &original).await.is_ok());
+    for role in [OrgRole::Viewer, OrgRole::Member] {
+        crate::services::org_service::update_membership(&db, &membership, Some(role), None, None)
+            .await
+            .unwrap();
+    }
+    assert!(authenticate(&db, &original).await.is_err());
+    assert!(matches!(
+        enroll(&db, &actor, &pool, &instance, None, &original).await,
+        Err(AppError::OracleWorkerCredentialRenewalRequired)
+    ));
+    let renewed = credential();
+    enroll(&db, &actor, &pool, &instance, None, &renewed)
+        .await
+        .unwrap();
+    authenticate(&db, &renewed).await.unwrap();
+    db.drop().await.unwrap();
 }

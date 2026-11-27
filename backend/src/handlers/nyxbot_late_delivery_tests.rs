@@ -1063,6 +1063,7 @@ async fn guest_1995_route_refusal_is_safe_chat_text_for_stream_and_late_delivery
             let f = fixture("guest_1995_channel_refusal").await;
             settled(&f, false).await;
             let metadata = crate::models::assistant_message::TurnMetadata {
+                eligibility_revision: 0,
                 continued_after_restart: false,
                 voice_link_publication: None,
                 links_in_chat: None,

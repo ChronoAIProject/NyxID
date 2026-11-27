@@ -133,6 +133,7 @@ pub(crate) async fn create_in_session(
         )
         .await?;
         return Ok(OrgMembership {
+            eligibility_revision: row.eligibility_revision,
             id: row.id,
             org_user_id: org_user_id.to_string(),
             member_user_id: member_user_id.to_string(),
@@ -146,6 +147,7 @@ pub(crate) async fn create_in_session(
 
     let now = Utc::now();
     let membership = OrgMembership {
+        eligibility_revision: 0,
         id: Uuid::new_v4().to_string(),
         org_user_id: org_user_id.to_string(),
         member_user_id: member_user_id.to_string(),
@@ -349,12 +351,13 @@ async fn update_membership_in_session(
         org_membership_authority::fence_live_member(db, &current.member_user_id, &mut *transaction)
             .await?;
     }
+    let mut mutation = doc! {"$set": update};
+    if current.role.can_proxy() && role.is_some_and(|next| !next.can_proxy()) {
+        mutation.insert("$inc", doc! {"eligibility_revision": 1_i64});
+    }
     let updated = db
         .collection::<OrgMembership>(ORG_MEMBERSHIPS)
-        .find_one_and_update(
-            doc! {"_id": membership_id,"revoked_at":null},
-            doc! {"$set":update},
-        )
+        .find_one_and_update(doc! {"_id": membership_id,"revoked_at":null}, mutation)
         .return_document(mongodb::options::ReturnDocument::After)
         .session(&mut *transaction)
         .await?
@@ -439,7 +442,7 @@ async fn revoke_membership_in_session(
         .collection::<OrgMembership>(ORG_MEMBERSHIPS)
         .update_one(
             doc! {"_id":&current.id,"revoked_at":null},
-            doc! {"$set":{"revoked_at":bson::DateTime::now()}},
+            doc! {"$set":{"revoked_at":bson::DateTime::now()}, "$inc":{"eligibility_revision":1_i64}},
         )
         .session(&mut *transaction)
         .await?;

@@ -1698,6 +1698,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
             .unwrap();
     }
     let evidence = LearningEvidence {
+        eligibility_revision: 0,
         label: "teaching task".into(),
         conversation_id: fixture.row.id.clone(),
         turn_id: turn_id.clone(),
@@ -1710,6 +1711,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
         .db
         .collection::<AssistantAgentLearning>(CONFIG_COLLECTION_NAME)
         .insert_one(AssistantAgentLearning {
+            eligibility_revision: 0,
             agent_id: agent.id.clone(),
             owner_id: fixture.owner.clone(),
             enabled: true,
@@ -1736,6 +1738,7 @@ async fn seed_learned_proposal(name: &str) -> SeededLearned {
         .db
         .collection::<AssistantAgentLearningRun>(RUNS_COLLECTION_NAME)
         .insert_one(AssistantAgentLearningRun {
+            eligibility_revision: 0,
             org_maintain_revision: 0,
             id: "run".into(),
             agent_id: agent.id.clone(),
@@ -1917,6 +1920,8 @@ async fn started_learned_publication(name: &str) -> StartedLearned {
         )
         .insert_one(AssistantAcknowledgement {
             meta_contexts: Vec::new(),
+            eligibility_revision: 0,
+            target_eligibility_revisions: Default::default(),
             org_maintenance_targets: Default::default(),
             org_maintain_revision: 0,
             activity_execution: None,
@@ -2306,6 +2311,8 @@ async fn approval_card_is_consumed_once_and_replay_cannot_consume_again() {
         )
         .insert_one(AssistantAcknowledgement {
             meta_contexts: Vec::new(),
+            eligibility_revision: 0,
+            target_eligibility_revisions: Default::default(),
             org_maintenance_targets: Default::default(),
             org_maintain_revision: 0,
             activity_execution: None,

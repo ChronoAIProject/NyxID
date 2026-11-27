@@ -553,6 +553,7 @@ mod tests {
         let member = |role, ids| OwnerAccess::AsOrgMember {
             org_user_id: "org".into(),
             membership_id: "membership".into(),
+            eligibility_revision: 0,
             role,
             allowed_service_ids: ids,
         };

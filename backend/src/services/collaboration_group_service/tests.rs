@@ -4464,3 +4464,42 @@ async fn durable_wake_review_changed_slot_keeps_reply_without_handoff() {
 async fn durable_wake_review_changed_request_authority_keeps_reply_without_handoff() {
     refused_settlement_handoff("wake_changed_request").await;
 }
+
+#[tokio::test]
+async fn eligibility_revision_fences_collaboration_queue_and_execution_slot() {
+    let (f, _, group) = setup("eligibility_collab_queue").await;
+    let (agent, _) = f.create().await;
+    let group = change(
+        &f,
+        &f.admin,
+        &group,
+        Change::AddAgent {
+            agent_id: agent.id.clone(),
+            proposed_by: f.admin.clone(),
+        },
+    )
+    .await
+    .group
+    .unwrap();
+    let group = join(&f, &group, &f.member).await;
+    let db = &f.state.db;
+    let targets = [agent.id.clone()];
+    let enqueue = || requests::enqueue_ready(db, &f.member, &group.id, "Request", Some(&targets));
+    let first = enqueue().await.unwrap();
+    let admitted = admit_test(&f, &f.member, &group.id, &first.id, &agent.id)
+        .await
+        .unwrap();
+    let waiting = enqueue().await.unwrap();
+    f.repromote_member().await;
+    assert!(
+        admit_test(&f, &f.member, &group.id, &waiting.id, &agent.id)
+            .await
+            .is_err()
+    );
+    let fresh = enqueue().await.unwrap();
+    let next = admit_test(&f, &f.member, &group.id, &fresh.id, &agent.id)
+        .await
+        .unwrap();
+    assert_ne!(admitted.slot().authority, next.slot().authority);
+    db.drop().await.unwrap();
+}

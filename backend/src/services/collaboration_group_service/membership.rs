@@ -103,6 +103,7 @@ pub(super) async fn create_ready(
 ) -> AppResult<AssistantGroup> {
     let now = Utc::now();
     let group = AssistantGroup {
+        pending_eligibility_revisions: Default::default(),
         pending_org_use_revisions: Default::default(),
         id: format!("nyxg-{}", Uuid::new_v4().simple()),
         user_id: actor.into(),
@@ -373,9 +374,9 @@ pub(super) async fn apply_ready(
                     proposed.member_agent_ids=vec![agent_id.clone()];proposed.lead_agent_id=agent_id.clone();
                     let access=identity::for_group(db,actor,proposed,session).await?;
                     let authority=access.agent(agent_id).and_then(AgentIdentity::authority).filter(|a|a.lane!=model::Lane::Guest).ok_or_else(missing)?;
-                    let _ = authority;
+
                     identity::fence(db,&access,agent_id,session).await?;
-                    let proposal=model::AgentProposal {id:format!("{id}:{actor}:{agent_id}"),group_id:id.into(),agent_id:agent_id.clone(),proposed_by:actor.into(),membership_revision:expected_revision,expires_at:Utc::now()+Duration::days(7)};
+                    let proposal=model::AgentProposal {eligibility_revision:authority.eligibility_revision,id:format!("{id}:{actor}:{agent_id}"),group_id:id.into(),agent_id:agent_id.clone(),proposed_by:actor.into(),membership_revision:expected_revision,expires_at:Utc::now()+Duration::days(7)};
                     db.collection::<model::AgentProposal>(model::PROPOSALS).replace_one(doc! {"_id":&proposal.id},&proposal).upsert(true).session(&mut *session).await?;
                 }
                 Change::AcceptAgent {proposal_id} => {
@@ -385,6 +386,7 @@ pub(super) async fn apply_ready(
                     group.member_agent_ids.push(proposal.agent_id.clone());
                     let access=identity::for_group(db,&proposal.proposed_by,group.clone(),session).await?;
                     let authority=access.agent(&proposal.agent_id).and_then(AgentIdentity::authority).filter(|a|a.lane!=model::Lane::Guest).ok_or_else(missing)?;
+                    if proposal.eligibility_revision != authority.eligibility_revision { return Err(stale()); }
                     identity::fence(db,&access,&proposal.agent_id,session).await?;
                     insert_agent(db,&group,&proposal.agent_id,&authority.owner_id,&proposal.proposed_by,session).await?;
                     if db.collection::<model::AgentProposal>(model::PROPOSALS).delete_one(doc! {"_id":proposal_id,"membership_revision":expected_revision}).session(&mut *session).await?.deleted_count!=1 {return Err(stale());}

@@ -181,12 +181,14 @@ async fn membership_can_grant_user_service(
         crate::models::org_membership::OrgRole::Admin => org_service::OwnerAccess::AsOrgAdmin {
             org_user_id: membership.org_user_id.clone(),
             membership_id: membership.id.clone(),
+            eligibility_revision: membership.eligibility_revision,
             allowed_service_ids: effective_scope,
         },
         crate::models::org_membership::OrgRole::Member
         | crate::models::org_membership::OrgRole::Viewer => org_service::OwnerAccess::AsOrgMember {
             org_user_id: membership.org_user_id.clone(),
             membership_id: membership.id.clone(),
+            eligibility_revision: membership.eligibility_revision,
             role: membership.role,
             allowed_service_ids: effective_scope,
         },

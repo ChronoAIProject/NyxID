@@ -1488,6 +1488,7 @@ pub(crate) async fn validate_associations(
         }
         super::assistant_nyxagent::require_enabled(db, user_id).await?;
         return Ok(Some(crate::models::trigger::AssistantTargetOwner {
+            eligibility_revision: access.as_ref().map_or(0, |a| a.eligibility_revision()),
             agent_id: agent.id,
             owner_id: if access.is_some_and(|a| a.shared().is_none()) {
                 agent.user_id

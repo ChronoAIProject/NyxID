@@ -722,7 +722,7 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             if let Some(work) = w.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &w.user_id, &w.conversation_id, work, session).await?;}
             if let Some(org) = super::org_agent_service::ordinary_member_org(&row)
                 && (row.credential_api_key_id != w.api_key_id ||
-                    !super::org_agent_service::use_revision_is_live(&db, session, &w.user_id, org, &w.agent_id, row.org_use_revision).await?)
+                    !super::org_agent_service::use_revision_is_live(&db, session, &w.user_id, org, &w.agent_id, row.member_use).await?)
             {
                 db.collection::<bson::Document>(WATCHES).delete_one(lease_filter(&w)).session(&mut *session).await?;
                 return Ok(false);
@@ -740,7 +740,8 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
             let event = AgentEvent {
                 source_owner_id: None,
                 source_org_use_revision: 0,
-                org_use_revision: row.org_use_revision,
+                source_eligibility_revision: 0,
+                member_use: row.member_use,
                 channel_message: None,
                 wake: None,
                 automation_work: w.delivery.automation_work.clone(),

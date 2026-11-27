@@ -2752,6 +2752,7 @@ pub(crate) fn test_membership(
     allowed_service_ids: Option<Vec<String>>,
 ) -> OrgMembership {
     OrgMembership {
+        eligibility_revision: 0,
         id: Uuid::new_v4().to_string(),
         org_user_id: org_user_id.to_string(),
         member_user_id: member_user_id.to_string(),
