@@ -315,7 +315,6 @@ test("shows larger avatars and live textured motion on the actual home and chat 
   await assertMotion(hero);
   await expect(card).toHaveAttribute("data-face-surface", "dither-ordered");
   await expect(card.locator("xpath=..").locator("[data-avatar-renderer]")).toHaveCount(0);
-  await page.screenshot({ path: "../.context/avatar-spacing-home.png" });
   await page.goto(`/assistant?mock=1&nyxbot=1&avatars=1&c=${thread}`);
   const header = page.locator(
     '[data-chat-header-controls][data-compact="false"] [data-avatar-renderer]',
@@ -334,7 +333,6 @@ test("shows larger avatars and live textured motion on the actual home and chat 
     timeout: 10_000,
   });
   await assertMotion(header);
-  await page.screenshot({ path: "../.context/avatar-spacing-chat.png" });
   await page.emulateMedia({ reducedMotion: "reduce" });
   await expect(header.locator("svg g g").first()).toHaveAttribute(
     "transform",

@@ -1,45 +1,13 @@
-/* eslint react-refresh/only-export-components: off -- Browser verification fixture exports measurement helpers. */
-import { useState } from "react";
-import { createRoot } from "react-dom/client";
-import { VoiceRippleBanner } from "../../src/components/assistant/avatar/voice-ripple-banner";
-import { AvatarSvg } from "../../src/components/assistant/avatar/avatar-svg";
-import { paintAvatar } from "../../src/components/assistant/avatar/canvas";
+import { paintAvatar } from "../src/components/assistant/avatar/canvas";
 import {
   defaultAvatar,
   AVATAR_CATALOGUE,
-} from "../../../shared/agent-avatars/model";
-import { drawAvatar } from "../../../shared/agent-avatars/draw";
-import { rasterAvatar, pngAvatar } from "../../../shared/agent-avatars/export";
-import { pngDataUri } from "../../../shared/agent-avatars/png";
-import "../../src/app.css";
+} from "../../shared/agent-avatars/model";
+import { drawAvatar } from "../../shared/agent-avatars/draw";
+import { rasterAvatar, pngAvatar } from "../../shared/agent-avatars/export";
+import { pngDataUri } from "../../shared/agent-avatars/png";
+
 const base = defaultAvatar("nyx", "nyxbot");
-function Fixture() {
-  const [palette, setPalette] = useState("nyx"),
-    [moving, setMoving] = useState(true);
-  return (
-    <main style={{ width: 600, padding: 24 }}>
-      <VoiceRippleBanner
-        config={{
-          ...base,
-          choices: { ...base.choices, ripple_palette: palette },
-        }}
-        name="Support"
-        status={moving ? "Listening" : "Ready"}
-        inputAccepting={moving}
-        outputPlaying={false}
-      />
-      <button onClick={() => setMoving(!moving)}>Toggle input</button>
-      {Object.keys(AVATAR_CATALOGUE.fields.ripple_palette).map((id) => (
-        <button key={id} onClick={() => setPalette(id)}>
-          {id}
-        </button>
-      ))}
-      <div style={{ width: 160, height: 160 }}>
-        <AvatarSvg scene={drawAvatar(base, { resting: true })} />
-      </div>
-    </main>
-  );
-}
 export async function comparePixels() {
   const results = [];
   for (const surface of Object.keys(AVATAR_CATALOGUE.fields.surface)) {
@@ -90,4 +58,3 @@ export async function comparePixels() {
   }
   return results;
 }
-createRoot(document.getElementById("face-kit")!).render(<Fixture />);

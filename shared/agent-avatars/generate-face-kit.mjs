@@ -1,31 +1,35 @@
-/** Extract only the reference's genuine source declarations. Never execute its DOM wrapper. */
+/** Generate the kit from pinned pure design declarations without a gallery. */
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import vm from "node:vm";
 import { contours } from "./svg-path.js";
-const root = new URL("../../", import.meta.url);
+// Pure source declarations retained from Chloe's design; no gallery or DOM code.
 const source = readFileSync(
-  new URL("mockups/nyxid-bot-faces-reference.html", root),
+  new URL("reference-source.json", import.meta.url),
   "utf8",
 );
-const sha = createHash("sha256").update(source).digest("hex");
-if (sha !== "9d91953d4e8a97a190ae75ce32f3b9acec1cb94e4024914b8d618a95ef30ea2e")
+const sourceHash = createHash("sha256").update(source).digest("hex");
+if (
+  sourceHash !==
+  "08d7d2ec374a7a7527b3924c24d52a8059aa04e71cf96e3de8dd7059d29f63a8"
+)
   throw Error("Reference changed; review source before regenerating");
-const slice = (a, b) =>
-  source.slice(source.indexOf(a), source.indexOf(b, source.indexOf(a)));
+const reference = JSON.parse(source);
+// Generated provenance identifies the original design, whose declarations are preserved.
+const sha = reference.original_reference_sha256;
 const kit = vm.runInNewContext(
-  slice("const TINTS =", "/* ---------------- rendering helpers") +
+  reference.face_kit +
     ";({TINTS,HEADS,EYES,LOGO,NYXBOT_EYES,head,compose,circle,rrect})",
   {},
   { timeout: 1000 },
 );
 const sets = vm.runInNewContext(
-  slice("const SETS =", "const PAIRS =") + ";SETS",
+  reference.colour_sets + ";SETS",
   {},
   { timeout: 1000 },
 );
 const ripples = vm.runInNewContext(
-  slice("const RIPPLE_PALS =", "let bannerPal") + ";RIPPLE_PALS",
+  reference.ripple_palettes + ";RIPPLE_PALS",
   {},
   { timeout: 1000 },
 );
@@ -313,7 +317,7 @@ const geometry = {
   tints: kit.TINTS,
   palettes,
   ripples: Object.fromEntries(ripples.map((p) => [p.name.toLowerCase(), p])),
-  bayer: vm.runInNewContext(slice("const B8 =", "const bay =") + ";B8"),
+  bayer: vm.runInNewContext(reference.bayer + ";B8", {}, { timeout: 1000 }),
   effects: {
     dither_grids: [48, 32, 64, 72, 26, 48, 40, 96, 56],
     ascii_columns: [34, 26, 36, 30, 30, 30, 32, 30, 30],

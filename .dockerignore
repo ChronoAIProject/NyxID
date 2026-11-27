@@ -30,5 +30,5 @@ SERVICES_OVERHAUL_PLAN.md
 CODE_REVIEW_FINDINGS.md
 SECURITY_REVIEW_FINDINGS.md
 
-# Local Rive preview output; the authored sources and rig remain build inputs.
+# Local Rive authoring output; the sources and rig remain build inputs.
 shared/agent-avatars/rive/build/

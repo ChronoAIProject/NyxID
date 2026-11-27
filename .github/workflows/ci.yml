@@ -250,14 +250,12 @@ jobs:
               - '.cargo/**'
               - '.config/nextest.toml'
             frontend:
-              - 'mockups/nyxid-bot-faces-reference.html'
               - 'frontend/**'
               # Frontend cross-app tests load real mobile screens and controls.
               - 'mobile/src/**'
               - 'shared/**'
               - '.node-version'
             mobile:
-              - 'mockups/nyxid-bot-faces-reference.html'
               - 'mobile/**'
               - 'shared/**'
               - '.node-version'
