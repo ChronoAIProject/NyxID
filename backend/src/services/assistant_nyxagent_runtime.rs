@@ -1714,7 +1714,7 @@ pub(crate) async fn execute_owner_turn(
         .map_err(|_| TurnError::internal("cancelled", "prepare"))?;
     }
     use super::execution_permission_dispatch::proposals::{self, ResumeOutcome};
-    let continuation = match proposals::resume_turn(state, egress, row)
+    let continuation = match proposals::resume_turn(state, egress, row, credential)
         .await
         .map_err(|_| TurnError::internal("assistant_unavailable", "permission_resume"))?
     {
@@ -2120,9 +2120,9 @@ async fn execute_turn_inner(
     };
     if let Some(retained) = retained {
         decisions.push_str("\n\n");
-        decisions.push_str(&credentials::redact_known_secrets(
+        decisions.push_str(&credentials::redact_key(
             &retained.tool_results,
-            &[credential.raw_key.as_str()],
+            credential.raw_key.as_str(),
         ));
     }
     // Optional turn hints: team state, direct chats and drained events.

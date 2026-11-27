@@ -601,8 +601,9 @@ async fn owner_permission_resume_private_success_recovers_before_release_and_nev
         test_utils::test_auth_user(&f.owner),
     );
     // Crash after the durable HTTP success and before a model release.
+    let credential = load_credential(&f, &resumed).await;
     assert!(matches!(
-        proposals::resume_turn(&f.state, egress.as_ref(), &resumed)
+        proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential)
             .await
             .unwrap(),
         Some(proposals::ResumeOutcome::Continue(_))
@@ -707,7 +708,8 @@ async fn owner_permission_resume_failed_http_and_historical_receipts_never_launc
             f.state.clone(),
             test_utils::test_auth_user(&f.owner),
         );
-        let _ = proposals::resume_turn(&f.state, egress.as_ref(), &resumed)
+        let credential = load_credential(&f, &resumed).await;
+        let _ = proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential)
             .await
             .unwrap();
         if missing == "historical" {
@@ -1017,13 +1019,14 @@ async fn owner_permission_resume_non_success_decisions_and_revocation_never_laun
 }
 
 #[test]
-fn owner_permission_resume_redacts_empty_and_overlapping_credential_aliases() {
+fn owner_permission_resume_redacts_the_verified_key_and_ignores_an_empty_key() {
     assert_eq!(
-        credentials::redact_known_secrets(
-            "prefix-long prefix body",
-            &["", "prefix", "prefix-long", "prefix"]
-        ),
-        "[redacted] [redacted] body"
+        credentials::redact_key("key body key", "key"),
+        "[redacted] body [redacted]"
+    );
+    assert_eq!(
+        credentials::redact_key("ordinary body", ""),
+        "ordinary body"
     );
 }
 
@@ -1094,8 +1097,9 @@ async fn owner_permission_resume_readiness_failure_preserves_known_success_and_a
                     test_utils::test_auth_user(&f.owner),
                 ),
             };
+            let credential = load_credential(&f, &resumed).await;
             assert!(matches!(
-                proposals::resume_turn(&f.state, &egress, &resumed)
+                proposals::resume_turn(&f.state, &egress, &resumed, &credential)
                     .await
                     .unwrap(),
                 Some(proposals::ResumeOutcome::Continue(_))
@@ -1138,4 +1142,156 @@ async fn owner_permission_resume_readiness_failure_preserves_known_success_and_a
         drop(model);
         f.cleanup().await;
     }
+}
+
+#[tokio::test]
+async fn owner_permission_resume_private_terminal_receipts_survive_the_task_deadline() {
+    for outcome in ["denied", "expired", "historical", "released"] {
+        let (f, row) = assistant("owner_resume_terminal_deadline").await;
+        set_task(&f, &row).await;
+        let _ = sheet(&f, 200).await;
+        let model = model(&f, false).await;
+        run(&f, &row).await;
+        let request = pending(&f, None).await;
+        let mut input = decision(&request, "persistent");
+        if outcome == "denied" {
+            input.approved = false;
+            input.choice_id = None;
+            input.choice_digest = None;
+        }
+        proposals::decide(&f.state, &f.owner, &request.id, &input)
+            .await
+            .unwrap();
+        // Admit while the task is live; only this callback's receipt arrives
+        // after its deadline. No expired task is admitted or relaunched.
+        let mut resumed = event_turn(&f, &row).await;
+        let credential = load_credential(&f, &resumed).await;
+        let version = proposals::v3::AssistantVersion::of(&request).unwrap();
+        if matches!(outcome, "historical" | "released") {
+            let egress = crate::handlers::assistant_nyxagent::http_egress(
+                f.state.clone(),
+                test_utils::test_auth_user(&f.owner),
+            );
+            let completion =
+                proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let proposals::ResumeOutcome::Continue(continuation) = completion else {
+                panic!("known HTTP success");
+            };
+            if outcome == "released" {
+                assert!(
+                    continuation
+                        .release(&f.state, &resumed, &credential)
+                        .await
+                        .unwrap()
+                );
+            } else {
+                f.state
+                    .db
+                    .collection::<Document>("approval_requests")
+                    .update_one(
+                        doc! {"_id":&request.id},
+                        version.update(
+                            doc! {"$unset":{"execution_proposal.v1.owner_continuation":""}},
+                        ),
+                    )
+                    .await
+                    .unwrap();
+            }
+        } else if outcome == "expired" {
+            f.state
+                .db
+                .collection::<Document>("approval_requests")
+                .update_one(
+                    doc! {"_id":&request.id},
+                    version.update(
+                        doc! {"$set":{"status":"expired","execution_proposal.v1.state":"expired"}},
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let deadline = Utc::now() - chrono::Duration::seconds(1);
+        let task = resumed
+            .active_turn
+            .as_mut()
+            .unwrap()
+            .execution_task
+            .as_mut()
+            .unwrap();
+        task.hard_deadline = deadline;
+        f.state
+            .db
+            .collection::<Document>("assistant_messages")
+            .delete_one(doc! {"_id":&task.task.root_id})
+            .await
+            .unwrap();
+        f.state.db.collection::<Document>("approval_requests").update_one(doc! {"_id":&request.id},
+            version.update(doc! {"$set":{"execution_proposal.v1.task.hard_deadline":bson::DateTime::from_chrono(deadline)}})).await.unwrap();
+        f.state
+            .db
+            .collection::<Document>("assistant_agent_credentials")
+            .delete_many(doc! {"conversation_id":&row.id})
+            .await
+            .unwrap();
+        let result = execute_with_credential(&f, &resumed, credential)
+            .await
+            .unwrap();
+        assert!(result.error.is_none());
+        assert!(result.text.contains(match outcome {
+            "denied" => "denied",
+            "expired" => "expired",
+            _ => "HTTP 200",
+        }));
+        assert_eq!(model.calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            f.server.received_requests().await.unwrap().len(),
+            usize::from(matches!(outcome, "historical" | "released"))
+        );
+        drop(model);
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn owner_permission_resume_reuses_the_runners_verified_credential() {
+    let (f, row) = assistant("owner_resume_existing_credential").await;
+    set_task(&f, &row).await;
+    let _ = sheet(&f, 200).await;
+    let model = model(&f, false).await;
+    run(&f, &row).await;
+    let request = pending(&f, None).await;
+    proposals::decide(
+        &f.state,
+        &f.owner,
+        &request.id,
+        &decision(&request, "persistent"),
+    )
+    .await
+    .unwrap();
+    let resumed = event_turn(&f, &row).await;
+    let credential = load_credential(&f, &resumed).await;
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("assistant_agent_credentials")
+            .delete_many(doc! {"conversation_id":&row.id},)
+            .await
+            .unwrap()
+            .deleted_count,
+        1
+    );
+    assert_eq!(
+        execute_with_credential(&f, &resumed, credential)
+            .await
+            .unwrap()
+            .text,
+        "Remaining task continued."
+    );
+    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(model.calls.lock().unwrap().len(), 2);
+    drop(model);
+    f.cleanup().await;
 }

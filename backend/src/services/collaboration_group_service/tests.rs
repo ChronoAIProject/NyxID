@@ -4104,7 +4104,17 @@ async fn execution_proposal_shared_private_and_group_resume_keep_requester_and_p
             f.state.clone(),
             crate::test_utils::test_auth_user(&f.member),
         );
-        let text = proposals::resume_turn(&f.state, egress.as_ref(), &resumed)
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &f.state.db,
+                &f.state.encryption_keys,
+                &resumed.user_id,
+                &resumed.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let text = proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential)
             .await
             .unwrap()
             .expect("resume receipt")

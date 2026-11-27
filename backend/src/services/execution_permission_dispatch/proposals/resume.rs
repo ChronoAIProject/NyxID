@@ -102,6 +102,7 @@ pub(crate) async fn resume_turn(
     state: &crate::AppState,
     egress: &dyn super::super::super::platform_manager_contract::NyxAgentEgress,
     row: &AssistantConversation,
+    credential: &crate::services::assistant_agent_credential_service::AssistantCredential,
 ) -> AppResult<Option<ResumeOutcome>> {
     if let Some(note) = Box::pin(super::v2::resume_voice(state, row)).await? {
         return Ok(Some(ResumeOutcome::Receipt(note)));
@@ -124,7 +125,6 @@ pub(crate) async fn resume_turn(
         event.kind == "permission_decided" && event.id.starts_with("execution-decision:")
     });
     let mut continuation_ready = None;
-    let mut continuation_credential = None;
     let mut owner_source = None;
     let mut reviews = presentation::ReviewNotes::default();
     let mut seen = std::collections::HashSet::new();
@@ -149,17 +149,6 @@ pub(crate) async fn resume_turn(
         if p.task.channel_source.is_some() {
             super::super::super::execution_permission_channel::check(&state.db, &p.task).await?;
         }
-        if eligible {
-            let source = match owner_source {
-                Some(source) => source,
-                None => {
-                    let source = continuation::original_owner_source(&state.db, row).await?;
-                    owner_source = Some(source);
-                    source
-                }
-            };
-            eligible = source;
-        }
         if request.status != "approved" {
             reviews.push(&request, p);
             continue;
@@ -179,7 +168,20 @@ pub(crate) async fn resume_turn(
                     && p.delivered_turn_id.is_none()
                     && p.result.is_some()
                 {
-                    receipts.push(receipt);
+                    let source = match owner_source {
+                        Some(source) => source,
+                        None => {
+                            let source =
+                                continuation::original_owner_source(&state.db, row).await?;
+                            owner_source = Some(source);
+                            source
+                        }
+                    };
+                    if source {
+                        receipts.push(receipt);
+                    } else {
+                        withheld.push(receipt);
+                    }
                 } else {
                     withheld.push(receipt);
                 }
@@ -260,18 +262,19 @@ pub(crate) async fn resume_turn(
                 .serving_ready,
             );
         }
-        if eligible && continuation_ready == Some(true) && continuation_credential.is_none() {
-            continuation_credential = Some(
-                crate::services::assistant_agent_credential_service::load_for_conversation(
-                    &state.db,
-                    &state.encryption_keys,
-                    &row.user_id,
-                    &row.id,
-                )
-                .await?
-                .filter(|credential| credential.api_key_id == row.credential_api_key_id)
-                .ok_or_else(refused)?,
-            );
+        if eligible && continuation_ready == Some(true) {
+            let source = match owner_source {
+                Some(source) => source,
+                None => {
+                    let source = continuation::original_owner_source(&state.db, row).await?;
+                    owner_source = Some(source);
+                    source
+                }
+            };
+            eligible = source;
+        }
+        if credential.api_key_id != row.credential_api_key_id || credential.raw_key.is_empty() {
+            return Err(refused());
         }
         let raw = Field::Payload
             .open(&state.encryption_keys, &request)
@@ -327,8 +330,8 @@ pub(crate) async fn resume_turn(
                             Ok(mut value)=>{redact(&mut value);value.to_string()},
                             Err(_)=>text.into_owned(),
                         };
-                        let text = crate::services::assistant_agent_credential_service::redact_known_secrets(
-                            &text, &[continuation_credential.as_ref().map_or("", |credential| credential.raw_key.as_str())],
+                        let text = crate::services::assistant_agent_credential_service::redact_key(
+                            &text, credential.raw_key.as_str(),
                         );
                         let result=format!("Operation finished (HTTP {}).\n{}",status.as_u16(),text.chars().take(16_384).collect::<String>());
                         private_result=Some(result.clone());

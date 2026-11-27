@@ -21,18 +21,13 @@ use crate::{
     services::{api_key_mutation_service as mutations, key_service},
 };
 
-/// Redact known credential aliases without treating an empty alias as a match.
-pub(crate) fn redact_known_secrets(text: &str, secrets: &[&str]) -> String {
-    let mut secrets: Vec<_> = secrets
-        .iter()
-        .copied()
-        .filter(|secret| !secret.is_empty())
-        .collect();
-    secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
-    secrets.dedup();
-    secrets.into_iter().fold(text.to_owned(), |text, secret| {
-        text.replace(secret, "[redacted]")
-    })
+/// An empty key never matches or changes ordinary text.
+pub(crate) fn redact_key(text: &str, key: &str) -> String {
+    if key.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(key, "[redacted]")
+    }
 }
 
 /// The authority a thread key carries. NyxBot threads always run with Full

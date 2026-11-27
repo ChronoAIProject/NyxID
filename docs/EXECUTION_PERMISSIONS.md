@@ -446,6 +446,8 @@ the retained effect keeps its original operation identity and cannot be sent
 again from any automatic continuation of that task, including a later readback
 review. A separately gated readback may require its own review before continuing.
 A new human request has its own root and may execute the same reviewed effect.
+Redaction uses the runner's existing verified conversation credential; retained
+resume does not decrypt another copy of it.
 
 Every distinct request in a batched wake must have a successful, available receipt
 and a version-1 pending `owner_continuation` marker. The marker commits with the
@@ -467,6 +469,10 @@ receipts without the marker, unavailable results and released receipts remain
 receipt-only. Shared/group/org/platform/delegated/voice/external sources retain
 their existing receipt behavior. Metadata contains only version, blocked state
 and the releasing turn ID; the encrypted receipt remains the single result copy.
+Private denied, expired, historical and released receipts remain readable after
+their task deadline. Owner-message source lookup applies only to a possible new
+dispatch or an undelivered eligible continuation marker, never to those terminal
+status paths. An expired task cannot dispatch or release a continuation.
 
 Marker authoring and release require the optional fleet capability
 `permissions:execution-owner-continuation-v1`. Fresh effects retain receipt-only
