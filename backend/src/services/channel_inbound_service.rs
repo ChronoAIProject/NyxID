@@ -1,5 +1,6 @@
 //! Shared post-parse channel routing and callback dispatch.
 
+use super::channel_guest_access::relay as guest_relay;
 use super::channel_inbound_diagnostics::{self as diagnostics, Outcome};
 use crate::AppState;
 use crate::errors::AppError;
@@ -131,6 +132,7 @@ async fn process_messages(
     .await?;
 
     let mut complete = true;
+    let mut selector_failed = false;
     let mut stamped = false;
     for inbound in messages {
         let authorization = adapter
@@ -339,6 +341,29 @@ async fn process_messages(
             telegram,
             route_id: &route.conversation.id,
         };
+        match guest_relay::prepare(
+            state.db,
+            state.encryption_keys,
+            bot,
+            &route.conversation,
+            inbound,
+            &mut metadata,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                matched.record(Outcome::Duplicate).await;
+                continue;
+            }
+            Err(error) => {
+                matched.record(Outcome::StorageUnavailable).await;
+                tracing::warn!(bot_id = %bot.id, error_code = error.error_code(), "channel ingress authority unavailable");
+                selector_failed |= matches!(error, AppError::SecurityReadinessUnavailable);
+                complete = false;
+                continue;
+            }
+        }
         let stored = if let Some((fence, _)) = gateway {
             super::channel_admission_service::store_discord(state.db, metadata, fence).await
         } else if adapter.atomic_inbound_admission() {
@@ -426,7 +451,7 @@ async fn process_messages(
         }
 
         // Look up the API key for signing and name attribution
-        let api_key = match channel_routing_service::load_callback_key(
+        let retained_key = match channel_routing_service::load_retained_callback_key(
             state.db,
             &route,
             &bot.user_id,
@@ -449,11 +474,12 @@ async fn process_messages(
                 continue;
             }
         };
+        let api_key = &retained_key.key;
 
         let extended = activity.as_ref().is_some_and(|value| {
             super::channel_activity_callback_service::supports(
                 &route.conversation,
-                &api_key,
+                api_key,
                 &value.kind,
             )
         });
@@ -476,6 +502,8 @@ async fn process_messages(
         // NyxID identity. Their agents receive reply authority only.
         let user_access_token = if notification
             || super::channel_adapters::meta::is_meta(&bot.platform)
+            || stored_message.guest_relay.is_some()
+            || stored_message.hosted_guest_selector_unavailable
             || bot.credential_source == "telegram_manager"
             || (bot.platform == "x"
                 && super::channel_adapters::x::is_public_conversation(&inbound.conversation_id))
@@ -505,7 +533,7 @@ async fn process_messages(
                     .checked(
                         Outcome::StorageUnavailable,
                         crate::services::key_service::effective_allowed_service_ids(
-                            state.db, &api_key,
+                            state.db, api_key,
                         )
                         .await,
                     )
@@ -514,27 +542,29 @@ async fn process_messages(
                 allow_all_services: api_key.allow_all_services,
                 allow_all_nodes: api_key.allow_all_nodes,
             };
-            crate::crypto::jwt::generate_relay_access_token(
-                state.jwt_keys,
-                state.config,
-                &bot_owner_uuid,
-                scope,
-                rbac_data.as_ref(),
-                &agent_scope,
-            )
-            .ok()
+            retained_key
+                .mint_ordinary_bearer(
+                    state.db,
+                    state.jwt_keys,
+                    state.config,
+                    &bot_owner_uuid,
+                    &route.conversation,
+                    scope,
+                    rbac_data.as_ref(),
+                    &agent_scope,
+                )
+                .await
+                .ok()
         };
 
         let reply_token = if notification {
             None
         } else {
-            match crate::crypto::jwt::generate_relay_reply_token(
+            match guest_relay::reply_token(
                 state.jwt_keys,
                 state.config,
-                &api_key.id,
-                &route.conversation.id,
-                &stored_message.id,
-                &route.conversation.platform,
+                &stored_message,
+                &route.conversation,
             ) {
                 Ok(token) => Some(token),
                 Err(e) => {
@@ -565,6 +595,12 @@ async fn process_messages(
             reply_token,
             &state.config.base_url,
         );
+        payload.guest_access_token = guest_relay::guest_data_token(
+            state.jwt_keys,
+            state.config,
+            &stored_message,
+            &route.conversation,
+        )?;
 
         if extended {
             payload.activity = activity.as_ref().map(|value| {
@@ -573,7 +609,9 @@ async fn process_messages(
                     &inbound.platform_message_id,
                 )
             });
-            payload.conversation.conversation_type = inbound.conversation_type.clone();
+            if stored_message.guest_relay.is_none() {
+                payload.conversation.conversation_type = inbound.conversation_type.clone();
+            }
             if notification {
                 payload.raw_platform_data = None;
                 payload.content.text = None;
@@ -613,7 +651,7 @@ async fn process_messages(
                 || activity.as_ref().is_some_and(|value| {
                     super::channel_activity_callback_service::supports(
                         current,
-                        &api_key,
+                        api_key,
                         &value.kind,
                     )
                 })
@@ -639,6 +677,22 @@ async fn process_messages(
         {
             return Ok(false);
         }
+        if stored_message.guest_relay.is_some()
+            && let Err(error) = guest_relay::revalidate_delivery(
+                state.db,
+                &stored_message,
+                &route.conversation,
+                bot,
+                &api_key.id,
+                None,
+            )
+            .await
+        {
+            matched.record(Outcome::AuthorityChanged).await;
+            tracing::warn!(bot_id = %bot.id, error_code = error.error_code(), "guest callback authority unavailable");
+            complete = false;
+            continue;
+        }
         if !notification
             && (inbound
                 .text
@@ -649,12 +703,15 @@ async fn process_messages(
             matched.record(Outcome::CallbackPending).await;
         }
         let delivery = channel_relay_service::forward_to_agent(
-            channel_relay_service::callback_request(
+            channel_relay_service::callback_request_for_source(
                 state.db,
                 state.config,
                 Some(&bot.id),
                 &api_key.id,
                 &route.callback_url,
+                stored_message
+                    .hosted_guest_selector_unavailable
+                    .then_some(route.conversation.id.as_str()),
             )
             .await,
             state.config,
@@ -728,5 +785,8 @@ async fn process_messages(
         }
     }
 
+    if selector_failed {
+        return Err(Box::new(AppError::SecurityReadinessUnavailable));
+    }
     Ok(complete)
 }

@@ -26,6 +26,9 @@ module.exports = {
     "<rootDir>/src/**/*.jest.test.tsx",
   ],
   setupFilesAfterEnv: ["<rootDir>/jest.setup.ts"],
+  // `../shared` (agent avatars) has no node_modules of its own; its imports
+  // and Babel helpers resolve from the app's, as Metro does.
+  modulePaths: ["<rootDir>/node_modules"],
   // pnpm nests packages under node_modules/.pnpm/<pkg>/node_modules/<pkg>;
   // keep transforming the same packages the jest-expo preset transforms.
   transformIgnorePatterns: [

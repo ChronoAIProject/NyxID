@@ -40,7 +40,7 @@ export function notificationMatchesSearch(item: AssistantNotification, query: st
   const text = normalize([
     notificationTitle(item),
     notificationSentence(item).text,
-    item.preview,
+    notificationPreview(item),
     item.source.label,
     item.actor?.name,
     item.actor?.display_name,
@@ -101,6 +101,15 @@ export function notificationTitle(
   return label || NOTIFICATION_KIND_LABEL[item.kind];
 }
 
+/** Completed runs can carry an empty-result marker in their stored reply. */
+export function notificationPreview(item: AssistantNotification): string {
+  if (item.kind === "automation_result") {
+    const preview = item.preview.trim();
+    if (!preview || preview === "无（建设中，未发送）") return "";
+  }
+  return item.preview;
+}
+
 export function notificationTime(iso: string, now = Date.now()): string {
   const at = Date.parse(iso);
   return Number.isFinite(at) ? formatRelativeTimeFromMs(at, now, "") : "";
@@ -120,7 +129,8 @@ export function notificationAccessibilityLabel(
   const parts = [
     item.actor ? notificationSentence(item).text : notificationTitle(item),
   ];
-  if (item.preview) parts.push(item.preview);
+  const preview = notificationPreview(item);
+  if (preview) parts.push(preview);
   const time = notificationTime(item.updated_at, now);
   if (time) parts.push(time);
   const count = notificationCountLabel(item.count);
@@ -379,7 +389,7 @@ export function notificationSentence(item: AssistantNotification) {
   let showTarget = true;
   switch (item.kind) {
     case "automation_result":
-      action = "finished";
+      action = translateApp("finished");
       showTarget = false;
       break;
     case "automation_problem":

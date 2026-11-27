@@ -842,6 +842,7 @@ mod tests {
             avatar_url: None,
             email_verified: true,
             email_verification_token: None,
+            email_verification_expires_at: None,
             password_reset_token: None,
             password_reset_expires_at: None,
             is_active: active,

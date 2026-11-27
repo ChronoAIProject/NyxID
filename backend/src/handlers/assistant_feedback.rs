@@ -136,7 +136,7 @@ async fn upsert(
     engine::require_enabled(&state.db, &user_id).await?;
     let (turn_id, eligible, context, check_source_grant) =
         if let Some(cid) = conversation_id.as_deref() {
-            let (conversation, _) = engine::get_authorized(&state.db, &user_id, cid).await?;
+            let (conversation, _) = engine::get_public_authorized(&state.db, &user_id, cid).await?;
             engine::authorize_thread_read(&state.db, &conversation).await?;
             let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id)
                 .await?
@@ -233,7 +233,7 @@ async fn withdraw(
                 return Err(AppError::NotFound("message not found".into()));
             }
         } else {
-            let (conversation, _) = engine::get_authorized(&state.db, &user_id, cid).await?;
+            let (conversation, _) = engine::get_public_authorized(&state.db, &user_id, cid).await?;
             engine::authorize_thread_read(&state.db, &conversation).await?;
             let row = feedback_service::conversation_message(&state.db, &user_id, cid, &message_id)
                 .await?

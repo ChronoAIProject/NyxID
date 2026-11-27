@@ -66,6 +66,7 @@ export function AssistantMentionInput({
   onChangeText,
   mentions = [],
   editable,
+  onInputLayout,
   placeholder,
   accessibilityLabel,
   generation = 0,
@@ -78,6 +79,7 @@ export function AssistantMentionInput({
   onChangeText: (value: string) => void;
   mentions?: readonly AssistantMentionOption[];
   editable: boolean;
+  onInputLayout?: (event: import("react-native").LayoutChangeEvent, currentInput: () => TextInput | null) => void;
   placeholder: string;
   accessibilityLabel: string;
   generation?: number | string;
@@ -390,7 +392,10 @@ export function AssistantMentionInput({
             )
               setForcedCursor(null);
           }}
-          onLayout={(event) => overflow.layout(event.nativeEvent.layout.height)}
+          onLayout={(event) => {
+            overflow.layout(event.nativeEvent.layout.height);
+            onInputLayout?.(event, () => input.current);
+          }}
           onContentSizeChange={(event) => {
             if (!mounted.current || scope.current.revision !== revision) return;
             const height = Math.ceil(event.nativeEvent.contentSize.height);

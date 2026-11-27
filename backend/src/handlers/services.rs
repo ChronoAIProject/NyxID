@@ -1104,7 +1104,9 @@ pub async fn list_services(
             .ok_or_else(|| AppError::Forbidden("Account required".into()))?;
         let role = crate::services::role_service::resolve_platform_role(&state.db, &user).await?;
         filter.remove("is_active");
-        if !role.is_admin() {
+        if role.is_admin() {
+            super::admin_helpers::require_privileged_session(&state, &auth_user, &user).await?;
+        } else {
             let tools =
                 crate::services::role_service::can_manage_tools(&state.db, &user, role).await?;
             let catalog =
@@ -1114,6 +1116,7 @@ pub async fn list_services(
                     "Catalog or Tools Manager authority required".into(),
                 ));
             }
+            super::admin_helpers::require_privileged_session(&state, &auth_user, &user).await?;
             let mut visible = vec![doc! {"is_active": true}];
             if tools {
                 visible.push(doc! {"offering_kind": "tool"});
@@ -2172,6 +2175,7 @@ pub async fn delete_service(
         actor: audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
             .is_ok(),
+        privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
         admin_required: service.offering_kind
             == crate::models::downstream_service::OfferingKind::Tool
             || super::services_helpers::is_admin(&state, &auth_user).await?,
@@ -3554,6 +3558,7 @@ pub(crate) async fn update_service_at_revision(
         actor: audit_service::AuditActor::from_auth_user(&auth_user),
         first_party_human: super::login_client_context::require_first_party_human(&auth_user)
             .is_ok(),
+        privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
         admin_required: ingress_admin
             || body.approve_caller_token_destination.is_some()
             || (!tools_manager
@@ -3909,6 +3914,7 @@ pub async fn resync_service_identity(
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user)
                 .is_ok(),
+            privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
             admin_required: admin,
         },
         &service,
@@ -4142,6 +4148,7 @@ pub async fn update_redirect_uris(
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user)
                 .is_ok(),
+            privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
             admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
         },
         &doc! {"redirect_uris": &body.redirect_uris, "updated_at":now},
@@ -4214,6 +4221,7 @@ pub async fn regenerate_oidc_secret(
             catalog_base_url: state.config.base_url.clone(),
             actor: audit_service::AuditActor::from_auth_user(&auth_user),
             first_party_human: super::login_client_context::require_first_party_human(&auth_user).is_ok(),
+            privileged_mfa_denied: super::admin_helpers::privileged_mfa_denied(&state, &auth_user),
             admin_required: super::services_helpers::is_admin(&state, &auth_user).await?,
         },
         &doc! {"client_secret_hash":&new_hash,"updated_at":now},

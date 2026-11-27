@@ -15,6 +15,8 @@ import {
   type AccessibilityRole,
   type AccessibilityState,
   type LayoutChangeEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
 } from "react-native";
 import {
   Check,
@@ -42,22 +44,32 @@ export function useSettingsStacked(availableWidth?: number) {
 /** Scrollable page frame shared by Settings and its sub-pages. */
 export function SettingsPage({
   children,
+  testID,
   scrollRef,
   refreshing,
   onRefresh,
+  onScroll,
+  onLayout,
 }: {
   children: ReactNode;
+  testID?: string;
   scrollRef?: Ref<ScrollView>;
   /** Pull to refresh, for pages that show server data. */
   refreshing?: boolean;
   onRefresh?: () => void;
+  onScroll?: (event: NativeSyntheticEvent<NativeScrollEvent>) => void;
+  onLayout?: (event: LayoutChangeEvent) => void;
 }) {
   useAppLanguage();
   const { colors } = useTheme();
   return (
     <ScreenContainer>
       <PageScrollView
+        testID={testID}
         keyboardAware
+        onScroll={onScroll}
+        onLayout={onLayout}
+        scrollEventThrottle={16}
         scrollRef={scrollRef}
         fadeColor={colors.bg}
         refreshControl={

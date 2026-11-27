@@ -1633,6 +1633,7 @@ pub(crate) mod tests {
             home_conversation_id: None,
             memory: Vec::new(),
             display_name: None,
+            avatar: None,
             persona: None,
             voice_instructions: None,
             destroyed_at: None,

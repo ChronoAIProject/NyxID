@@ -131,6 +131,7 @@ import {
   useVisibleThreadRead,
 } from "../notifications/useNotifications";
 import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
+import { groupMemberMood } from "../assistant/agentMood";
 
 export type GroupConversationTarget = {
   conversationId: string;
@@ -910,7 +911,15 @@ function GroupChat({
                   )}
                   accessibilityLiveRegion="polite"
                 >
-                  <AgentAvatar agent={working[0]!} size="md" />
+                  <AgentAvatar
+                    agent={working[0]!}
+                    size="md"
+                    mood={groupMemberMood(
+                      working[0]!.id,
+                      chat.data?.pending_actions ?? [],
+                    )}
+                    animated
+                  />
                   <ActivityIndicator size="small" color={colors.primary} />
                   <Label muted>
                     {groupWorkingLabel(

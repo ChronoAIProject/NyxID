@@ -1280,6 +1280,8 @@ pub(crate) fn bot() -> ChannelBot {
         x_events: None,
         last_verification: None,
         ownership_version: 0,
+        guest_access_v1: false,
+        guest_access_v1_revision: 0,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: uuid::Uuid::new_v4().to_string(),
         platform: "slack".to_string(),

@@ -26,6 +26,8 @@ import {
 } from "./assistantEventNotices";
 import type { AssistantMessage } from "./assistantTypes";
 import { AssistantAttachmentView } from "./AssistantAttachmentView";
+import type { AgentIdentity } from "../../components/agentAvatarModel";
+import { NYXBOT_PLACEHOLDER } from "../../lib/avatars/ownNyxBot";
 
 function EventRow({
   notice,
@@ -148,10 +150,13 @@ export function AssistantSystemMessage({
   message,
   conversationId,
   onOpenAutomations,
+  nyxbot = NYXBOT_PLACEHOLDER,
 }: {
   message: AssistantMessage;
   conversationId?: string;
   onOpenAutomations: () => void;
+  /** The person's own NyxBot, so its messages carry its chosen avatar. */
+  nyxbot?: AgentIdentity;
 }) {
   useAppLanguage();
   const { colors } = useTheme();
@@ -163,7 +168,7 @@ export function AssistantSystemMessage({
       >
         <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
           <AgentAvatar
-            agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }}
+            agent={nyxbot}
             size="xs"
           />
           <Label muted style={{ fontSize: 10 }}>

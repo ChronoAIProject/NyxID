@@ -1,10 +1,15 @@
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
+import type { AvatarConfig } from "@/lib/assistant/agent-avatar-model";
+import { avatarPatch } from "@/schemas/agent-avatar";
 import type {
   AssistantAgent,
   AssistantAgentCreate,
   AssistantAgentGrantsRequest,
   AssistantAgentList,
+  AssistantAgentDetail,
+  AssistantGroup,
+  AssistantGroupMessages,
   AssistantAgentUpdate,
   NyxAgentChannelChatSettings,
   NyxAgentSettingsUpdate,
@@ -19,6 +24,8 @@ import { useAgentOwnerMutation } from "./use-agent-owner-mutation";
 
 export const nyxBotQueryKeys = {
   root: (userId: string | undefined) => ["assistant", "nyxagent", userId] as const,
+  activity: (userId: string | undefined) =>
+    ["assistant", "nyxagent", userId, "agent-activity"] as const,
   /** Prefix of the agent list and every agent detail. */
   agents: (userId: string | undefined) => ["assistant", "nyxagent", userId, "agents"] as const,
   agent: (userId: string | undefined, agentId: string | undefined) =>
@@ -122,6 +129,48 @@ export function useUpdateNyxBotAgent() {
   return useAgentsMutation(({ id, ...body }: AssistantAgentUpdate & { id: string }) =>
     nyxBotApi.updateAgent(id, body),
   );
+}
+
+/** Save (object) or clear (null) an agent's avatar; human-only PATCH. */
+export function useUpdateAgentAvatar() {
+  const client = useQueryClient();
+  return useAgentOwnerMutation({
+    mutationFn: async ({ id, avatar }: { id: string; avatar: AvatarConfig | null }, guard) => {
+      const owner = useAuthStore.getState().user!.id;
+      const body = avatarPatch(avatar);
+      await nyxBotApi.updateAgent(id, body, guard);
+      guard();
+      const agentsKey = nyxBotQueryKeys.agents(owner);
+      const groupsKey = [...nyxBotQueryKeys.root(owner), "groups"];
+      // Discard reads admitted before the write so they cannot restore the old appearance.
+      await Promise.all([
+        client.cancelQueries({ queryKey: agentsKey }),
+        client.cancelQueries({ queryKey: groupsKey }),
+      ]);
+      guard();
+      const appearance = <T extends { id: string; avatar?: AvatarConfig | null }>(agent: T): T =>
+        agent.id === id ? { ...agent, avatar: body.avatar } : agent;
+      client.setQueriesData<AssistantAgentList | AssistantAgentDetail>({ queryKey: agentsKey }, (data) => {
+        if (!data) return data;
+        return "agents" in data
+          ? { ...data, agents: data.agents.map(appearance) }
+          : { ...data, agent: appearance(data.agent) };
+      });
+      const groupAppearance = (group: AssistantGroup): AssistantGroup => ({ ...group, members: group.members.map(appearance) });
+      client.setQueriesData<AssistantGroup[] | AssistantGroupMessages>({ queryKey: groupsKey }, (data) => {
+        if (!data) return data;
+        return Array.isArray(data) ? data.map(groupAppearance) : {
+          ...data,
+          group: groupAppearance(data.group),
+          messages: data.messages.map((message) => ({ ...message, agent: message.agent ? appearance(message.agent) : message.agent })),
+        };
+      });
+    },
+    onSettled: (owner) => Promise.all([
+      client.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(owner) }),
+      client.invalidateQueries({ queryKey: [...nyxBotQueryKeys.root(owner), "groups"] }),
+    ]),
+  });
 }
 
 export function useSetNyxBotAgentGrants() {

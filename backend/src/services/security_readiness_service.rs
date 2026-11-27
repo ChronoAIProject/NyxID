@@ -156,6 +156,7 @@ pub const CAPABILITIES: &[&str] = &[
     "assistant:org-agents",
     super::feature_flag_service::ORG_AGENT_ACCESS_FLAG_KEY,
     super::org_channel_service::FLAG,
+    super::channel_guest_access::FLAG,
     super::org_channel_service::GUEST_GRANTS_READINESS,
     "assistant:shared-agents",
     super::collaboration_group_service::READINESS,

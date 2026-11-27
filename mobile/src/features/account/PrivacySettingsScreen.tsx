@@ -25,6 +25,7 @@ import { requestJson, requestBoundAuthenticatedResponse } from "../../lib/api/ht
 import { ApiError } from "../../lib/api/ApiError";
 import { getAuthAccountId } from "../../lib/auth/authAccount";
 import { cleanStaleAccountExports, shareAccountExport } from "./accountExport";
+import { PerformanceConsentSettings } from "./PerformanceConsentSettings";
 
 /** Settings › Privacy: optional usage analytics for the account and this device. */
 export function PrivacySettingsScreen(
@@ -266,6 +267,7 @@ export function PrivacySettingsScreen(
             }
           />
         </SettingsGroup>
+        <PerformanceConsentSettings />
         {analyticsPermission.data?.diagnostics_offered === true && (
           <SettingsGroup
             title={t("Crash diagnostics")}

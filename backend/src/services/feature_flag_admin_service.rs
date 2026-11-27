@@ -442,6 +442,16 @@ async fn mutate_in_session(
             {
                 security_readiness_service::require_flag_enable(db, key).await?;
             }
+            if key == super::channel_guest_access::FLAG
+                && before.as_ref().is_some_and(|row| row.enabled) != enabled.unwrap_or(false)
+            {
+                super::channel_guest_access::update_activation_in_session(
+                    db,
+                    session,
+                    enabled.unwrap_or(false),
+                )
+                .await?;
+            }
             if key == enrollment::FLAG {
                 // A clear restores inheritance. Gate potential widening, while a
                 // disable stays available even if readiness or scope reads fail.
@@ -930,40 +940,48 @@ mod tests {
             .insert_one(test_user(&org, UserType::Org))
             .await
             .unwrap();
-        let flag = flags::FEATURE_FLAGS
-            .iter()
-            .find(|flag| security_readiness_service::CAPABILITIES.contains(&flag.key))
-            .expect("a security-gated capability flag");
         let targets = [
             (FlagTargetKind::Global, None),
             (FlagTargetKind::User, Some(actor.user_id.clone())),
-            (FlagTargetKind::Org, Some(org.clone())),
+            (FlagTargetKind::Org, Some(org)),
         ];
-        let set = |kind: FlagTargetKind, target_id: Option<String>, enabled: bool| {
-            mutate(
-                &db,
-                flag.key,
-                Mutation::Override {
-                    kind,
-                    target_id,
-                    enabled: Some(enabled),
-                },
-                &actor,
-            )
-        };
-        for (kind, target_id) in targets.clone() {
-            assert!(matches!(
-                set(kind, target_id.clone(), true).await,
-                Err(AppError::SecurityReadinessUnavailable)
-            ));
-            // Disabling is always allowed.
-            let row = set(kind, target_id, false).await.unwrap().override_row;
-            assert!(!row.expect("disabled override").enabled);
-        }
-        security_readiness_service::ready_test_replica(&db).await;
-        for (kind, target_id) in targets {
-            let row = set(kind, target_id, true).await.unwrap().override_row;
-            assert!(row.expect("enabled override").enabled);
+        for ready in [false, true] {
+            if ready {
+                security_readiness_service::ready_test_replica(&db).await;
+            }
+            for key in [
+                flags::ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,
+                super::super::channel_guest_access::FLAG,
+            ] {
+                for (kind, target_id) in &targets {
+                    for enabled in [true, false] {
+                        let result = mutate(
+                            &db,
+                            key,
+                            Mutation::Override {
+                                kind: *kind,
+                                target_id: target_id.clone(),
+                                enabled: Some(enabled),
+                            },
+                            &actor,
+                        )
+                        .await;
+                        if key == super::super::channel_guest_access::FLAG
+                            && *kind != FlagTargetKind::Global
+                        {
+                            assert!(matches!(result, Err(AppError::BadRequest(message))
+                                if message == format!("{key} supports only a global override")));
+                        } else if enabled && !ready {
+                            assert!(matches!(
+                                result,
+                                Err(AppError::SecurityReadinessUnavailable)
+                            ));
+                        } else {
+                            assert_eq!(result.unwrap().override_row.unwrap().enabled, enabled);
+                        }
+                    }
+                }
+            }
         }
     }
     #[tokio::test]

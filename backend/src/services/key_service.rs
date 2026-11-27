@@ -1816,7 +1816,16 @@ pub async fn validate_api_key(
     db: &mongodb::Database,
     raw_key: &str,
 ) -> AppResult<(String, ApiKey, Option<String>)> {
-    let (user_id, key, credential_id) = observe_api_key(db, raw_key).await?;
+    validate_api_key_for_channel(db, raw_key, false).await
+}
+
+pub(crate) async fn validate_api_key_for_channel(
+    db: &mongodb::Database,
+    raw_key: &str,
+    exact_channel_reply: bool,
+) -> AppResult<(String, ApiKey, Option<String>)> {
+    let (user_id, key, credential_id) =
+        observe_api_key_for_channel(db, raw_key, exact_channel_reply).await?;
     // Update last_used_at
     let now = Utc::now();
     key_mutations::update_one(
@@ -1843,13 +1852,22 @@ pub(crate) async fn observe_api_key(
     db: &mongodb::Database,
     raw_key: &str,
 ) -> AppResult<(String, ApiKey, Option<String>)> {
+    observe_api_key_for_channel(db, raw_key, false).await
+}
+
+async fn observe_api_key_for_channel(
+    db: &mongodb::Database,
+    raw_key: &str,
+    exact_channel_reply: bool,
+) -> AppResult<(String, ApiKey, Option<String>)> {
+    use super::channel_guest_access::relay::RetainedRelayKey;
     let key_hash = hash_token(raw_key);
 
     let primary = db
-        .collection::<ApiKey>(API_KEYS)
+        .collection::<RetainedRelayKey>(API_KEYS)
         .find_one(doc! { "key_hash": &key_hash, "is_active": true })
         .await?;
-    let (key, credential_id) = if let Some(key) = primary {
+    let (retained, credential_id) = if let Some(key) = primary {
         (key, None)
     } else {
         let child = db
@@ -1863,12 +1881,14 @@ pub(crate) async fn observe_api_key(
             ));
         }
         let parent = db
-            .collection::<ApiKey>(API_KEYS)
+            .collection::<RetainedRelayKey>(API_KEYS)
             .find_one(doc! {"_id": &child.api_key_id, "user_id": &child.user_id, "is_active": true})
             .await?
             .ok_or_else(|| AppError::Unauthorized("Invalid API key".into()))?;
         (parent, Some(child.id))
     };
+
+    let key = &retained.key;
 
     if matches!(
         key.purpose,
@@ -1885,8 +1905,11 @@ pub(crate) async fn observe_api_key(
     {
         return Err(AppError::Unauthorized("API key has expired".to_string()));
     }
+    if !exact_channel_reply {
+        retained.require_broad_access(db).await?;
+    }
 
-    Ok((key.user_id.clone(), key, credential_id))
+    Ok((key.user_id.clone(), retained.key, credential_id))
 }
 
 #[cfg(test)]

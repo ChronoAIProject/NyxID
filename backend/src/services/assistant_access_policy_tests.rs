@@ -97,6 +97,7 @@ fn chat(role: AgentRole, guest: bool, report_to: Option<&str>, with_nyxbot: bool
     ChatAuthority {
         key_version: 0,
         voice_parent_conversation_id: None,
+        channel_guest: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: None,

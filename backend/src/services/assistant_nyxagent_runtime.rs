@@ -784,6 +784,18 @@ async fn request(
     let method = method
         .parse()
         .map_err(|_| AppError::Internal("Invalid assistant method".into()))?;
+    if let contract::NyxAgentExecutionContext::Owner { user_id, turn, .. } = authority
+        && super::channel_guest_access::is_hosted_conversation(&turn.conversation_id)
+    {
+        super::channel_guest_access::require_live_request(
+            &_state.db,
+            user_id,
+            &turn.conversation_id,
+            &turn.turn_id,
+            &credential.api_key_id,
+        )
+        .await?;
+    }
     egress
         .request(
             authority,
@@ -1340,6 +1352,8 @@ async fn drive_owner_turn(
             &super::voice::links::frontend_origins(&state.config),
         );
     }
+    #[cfg(test)]
+    super::channel_guest_access::test_hooks::wait_before_settlement(&state.db, &row.id).await;
     let settled = complete_turn(
         &state.db,
         &row,
@@ -1520,6 +1534,21 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
     // do that every 5 s (20 polls) and only the stored stop flag in between.
     let mut polls: u32 = 0;
     loop {
+        if super::channel_guest_access::is_hosted_conversation(&row.id) {
+            let full = polls.is_multiple_of(4);
+            polls = polls.wrapping_add(1);
+            if full
+                && super::channel_guest_access::live_turn(
+                    &state.db,
+                    row,
+                    engine::live_turn(row, Utc::now()),
+                )
+                .await
+                .is_err()
+            {
+                return TurnError::internal("cancelled", "stop");
+            }
+        }
         let stopped = if row.collaboration.is_some() {
             let full = polls.is_multiple_of(20);
             polls = polls.wrapping_add(1);
@@ -2042,9 +2071,10 @@ async fn execute_turn_inner(
         // Only the chat's own messages and the replies to them; never NyxID's
         // notices, event-turn replies (not always delivered) or anything
         // said in the app.
+        let audience_scope = super::channel_guest_access::is_hosted_conversation(&row.id);
         history.retain(|message| {
             message.origin == Some(TurnOrigin::Channel)
-                && matches!(message.role.as_str(), "user" | "assistant")
+                && (message.role == "user" || (!audience_scope && message.role == "assistant"))
         });
     }
     // Cards decided while an earlier turn was still running never reached the
@@ -2116,6 +2146,11 @@ async fn execute_turn_inner(
         crate::services::assistant_skill_authoring::GUIDANCE
     };
     let mut guidance = guidance.to_owned();
+    if let Some(guest) = turn.channel_guest.as_ref() {
+        guidance.push_str(super::channel_guest_access::audience_guidance(
+            guest.audience,
+        ));
+    }
     // NYX template outlines (`assistant:skill-runs`, default off): owner turns only.
     let outlines = !row.guest_model_setup
         && !row.guest_turn
@@ -2176,9 +2211,25 @@ async fn execute_turn_inner(
         guidance
             .push_str(crate::services::assistant_service_execution::instruction::PROMPT_GUIDANCE);
     }
+    let guest_skill_turn = row.guest_turn
+        && row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.channel_guest.is_some());
+    if guest_skill_turn
+        && !row.guest_model_setup
+        && let Ok(Some(chat)) = acknowledgements::chat_for_conversation(&state.db, row).await
+        && chat.api_key_id == credential.api_key_id
+        && chat.turn_id.as_deref() == Some(turn.turn_id.as_str())
+        && chat.channel_guest.as_ref() == turn.channel_guest.as_ref()
+        && let Ok(agent) =
+            super::channel_guest_access::skills::visible_agent(&state.db, &chat).await
+    {
+        guidance.push_str(&super::channel_guest_access::skills::instructions(&agent));
+    }
     if !row.guest_model_setup
         && let Some(agent) = agent.as_ref()
-        && crate::services::agent_skill_preload::enabled(agent, row.guest_turn)
+        && crate::services::agent_skill_preload::enabled(agent, row.guest_turn && !guest_skill_turn)
     {
         let preloaded =
             tokio::time::timeout(Duration::from_secs(30), egress.preload_skills(row, agent)).await;
@@ -2218,7 +2269,7 @@ async fn execute_turn_inner(
                 .context_reset_reason
                 .as_deref()
                 .is_some_and(|reason| reason != "user_reset"));
-    if recap {
+    if recap && row.context_reset_reason.as_deref() != Some("work_boundary") {
         events.notice();
     }
     let saved_recap = tokio::sync::OnceCell::new();
@@ -2618,6 +2669,17 @@ async fn execute_turn_inner(
             && let Some(error) = capacity_error.take()
         {
             return Err(error);
+        }
+        if super::channel_guest_access::is_hosted_conversation(&row.id) {
+            super::channel_guest_access::require_live_request(
+                &state.db,
+                &row.user_id,
+                &row.id,
+                turn_id,
+                &credential.api_key_id,
+            )
+            .await
+            .map_err(|_| TurnError::internal("cancelled", "stop"))?;
         }
         if channel_retry_body.is_some() && !guest_input_ids.is_empty() {
             super::assistant_channel_media::guest::recheck_retry_inputs(

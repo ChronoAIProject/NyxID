@@ -420,7 +420,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
           />
           <SettingsRow
             label={translateApp("Approval")}
-            value={isGrantMode ? translateApp("Grant mode") : "Per-request"}
+            value={translateApp(isGrantMode ? "Grant mode" : "Per-request")}
           />
           {isGrantMode && (
             <SettingsRow label={translateApp("Grant duration")}

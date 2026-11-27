@@ -31,6 +31,24 @@ pub(crate) struct PersonalRouteCheck {
     allowed: bool,
 }
 
+impl PersonalRouteCheck {
+    pub(crate) fn allows(&self, bot_id: &str) -> bool {
+        self.bot_id == bot_id && self.allowed
+    }
+
+    pub(crate) async fn guest_mode(
+        &self,
+        db: &mongodb::Database,
+    ) -> AppResult<super::channel_guest_access::GuestMode> {
+        super::channel_guest_access::select_mode_for_snapshot(
+            db,
+            &self.bot_id,
+            self.bot.as_ref().filter(|_| self.allowed),
+        )
+        .await
+    }
+}
+
 pub(crate) async fn read_personal_routes(
     db: &mongodb::Database,
     bot_id: &str,
@@ -96,7 +114,7 @@ pub(crate) async fn permits_with(
     checked: Option<&PersonalRouteCheck>,
 ) -> AppResult<bool> {
     match checked {
-        Some(checked) => Ok(checked.bot_id == bot_id && checked.allowed),
+        Some(checked) => Ok(checked.allows(bot_id)),
         None => Ok(read_personal_routes(db, bot_id).await?.allowed),
     }
 }

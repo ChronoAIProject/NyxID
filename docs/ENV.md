@@ -372,10 +372,10 @@ Configure Lago to send webhooks to `<BASE_URL>/api/v1/webhooks/lago` with the sa
 Before enabling paid top-ups for users, run a deployed sandbox verification:
 
 ```bash
-nyxid billing verify-topup-flow --amount-credits 1 --open
+nyxid billing verify-topup-flow --amount-credits 20 --open
 ```
 
-Complete the Stripe sandbox checkout opened by the command. The verifier passes only when the reconciled wallet balance increases by exactly the paid amount and the checkout response is Stripe-backed.
+The verifier defaults to 20 whole credits. See the [Add credits contract](BILLING_UI_GLOSSARY.md#4-add-credits-dialog) for purchase limits and replay behavior. Complete the Stripe sandbox checkout opened by the command. The verifier passes only when the reconciled wallet balance increases by exactly the paid amount and the checkout response is Stripe-backed.
 
 Human operators can inspect defaults with `nyxid admin billing config show`,
 prices with `nyxid admin billing service show <slug>` and
@@ -981,6 +981,30 @@ Use the Play App Signing certificate for store-installed apps; include the uploa
 `MOBILE_APP_RETURN_SCHEMES` is an optional comma-separated allowlist of custom RFC 3986 URL schemes used by NyxID mobile builds for service OAuth returns. `nyxid` is always accepted implicitly. Empty segments are ignored; values are trimmed, normalized to lowercase and deduplicated, and must be non-web mobile schemes; reserved web, file, script, browser, and device schemes (including `exp` and uppercase inputs such as `HTTPS`) are rejected after normalization. A malformed nonempty value fails backend startup. Set the same value on every replica when a build uses a custom `APP_SCHEME`; otherwise leave it empty and the app uses `nyxid://services/oauth-return`. Service OAuth accepts only the exact lowercase `<scheme>://services/oauth-return` destination; sent or stored uppercase URIs are rejected.
 
 `MOBILE_SOCIAL_REDIRECT_URIS` lists additional exact mobile account sign-in destinations, separated by commas. The released app's `nyxid://auth/social/callback` works by default. Configure a custom app's complete `<scheme>://auth/social/callback` URI on every replica before distribution. In development an explicitly listed Expo URI may use `exp://<host>:<port>/--/auth/social/callback`. Production refuses Expo returns. Malformed configuration fails at startup.
+
+### Platform admin MFA rollout
+
+Set `ADMIN_MFA_ENFORCEMENT` to `off`, `audit`, or `enforce` on every API
+replica. `off` is the default. In `audit`, the administration guards admit
+existing authorized requests and record unverified privileged access.
+In `enforce`, guarded platform actions require MFA enrollment and a verified
+first-party session. Read and write paths that also admit ordinary owner
+authority may continue using that authority.
+
+Deploy the enrollment banner, verify enrollment and account recovery for
+each active privileged user, and exercise the assessed administration paths
+before setting `enforce`. Check audit events across the fleet before cutover.
+
+
+### Legacy email verification cutoff
+
+New email verification tokens expire after 24 hours. An optional RFC 3339
+`AUTH_VERIFICATION_LEGACY_CUTOFF_AT` timestamp sets the end of redemption
+for legacy verification tokens without an expiration. An empty value keeps
+those tokens redeemable. Confirm that affected users have a verification or
+operator-assisted recovery path before setting the cutoff. Password reset and
+email verification use separate five-per-minute source IP limits with the
+existing `TRUSTED_PROXY_IPS` configuration.
 
 ## Crash diagnostics
 

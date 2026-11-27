@@ -74,6 +74,21 @@ pub async fn enforce_turn_gate(
     user_agent: Option<&str>,
     route: &str,
 ) -> AppResult<()> {
+    if super::channel_guest_access::is_hosted_conversation(&fence.conversation_id) {
+        fence.require_live()?;
+        super::channel_guest_access::require_live_request(
+            db,
+            user_id,
+            &fence.conversation_id,
+            fence
+                .turn_id
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?,
+            api_key_id.ok_or(AppError::AssistantTurnRequired)?,
+        )
+        .await?;
+        return Ok(());
+    }
     if let Some(origin) = &fence.channel_adapter_origin {
         fence.require_live()?;
         super::call_channels::session::fence_tool(
@@ -1119,6 +1134,7 @@ mod access_mode_tests {
         let mut chat = ChatAuthority {
             key_version: 0,
             voice_parent_conversation_id: None,
+            channel_guest: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,
@@ -1162,6 +1178,7 @@ mod access_mode_tests {
 pub struct ChatAuthority {
     pub(crate) key_version: i64,
     pub(crate) voice_parent_conversation_id: Option<String>,
+    pub channel_guest: Option<crate::models::channel_guest_access::GuestTurn>,
     pub(crate) platform_model_context: Option<String>,
     pub(crate) automation_work: Option<crate::models::trigger_run::AutomationWork>,
     pub(crate) execution_group_id: Option<String>,
@@ -1837,7 +1854,8 @@ pub(crate) async fn chat_for_key_version(
     };
     if conversation.credential_api_key_id != key
         && (super::org_agent_service::ordinary_member_org(&conversation).is_some()
-            || super::org_channel_service::origin(&conversation).is_some())
+            || super::org_channel_service::origin(&conversation).is_some()
+            || super::channel_guest_access::is_hosted_conversation(&conversation.id))
     {
         return Err(not_found());
     }
@@ -1873,6 +1891,7 @@ pub(crate) async fn chat_for_key_version(
     if live.is_some_and(|turn| super::assistant_model_observer::approval_error(turn).is_some()) {
         return Err(AppError::ApprovalUnsupported);
     }
+    let channel_guest = super::channel_guest_access::live_turn(db, &conversation, live).await?;
     let turn_live = live.is_some();
     let shared = access.is_some_and(|a| a.shared().is_some());
     let org_guest = access
@@ -1884,6 +1903,7 @@ pub(crate) async fn chat_for_key_version(
     Ok(Some(ChatAuthority {
         key_version: version,
         voice_parent_conversation_id: conversation.voice_parent_conversation_id.clone(),
+        channel_guest,
         platform_model_context: live.and_then(|t| t.platform_model_context.clone()),
         automation_work: live.and_then(|t| t.automation_work.clone()),
         execution_group_id: conversation
@@ -2044,6 +2064,22 @@ pub(crate) async fn fence(
         window.credential_id == chat.api_key_id && Some(&window.turn_id) == chat.turn_id.as_ref()
     }) {
         return Err(AppError::AssistantTurnRequired);
+    }
+    if super::channel_guest_access::is_hosted_conversation(&row.id) {
+        let guest = chat
+            .channel_guest
+            .as_ref()
+            .ok_or(AppError::AssistantTurnRequired)?;
+        if row.credential_api_key_id != chat.api_key_id
+            || super::assistant_nyxagent::live_turn(&row, Utc::now()).is_none_or(|turn| {
+                turn.stop_requested
+                    || Some(&turn.turn_id) != chat.turn_id.as_ref()
+                    || turn.channel_guest.as_ref() != Some(guest)
+            })
+        {
+            return Err(AppError::AssistantTurnRequired);
+        }
+        super::channel_guest_access::fence_in_session(db, session, guest).await?;
     }
     if let Some(work) = chat.automation_work.as_ref() {
         if row.active_turn.as_ref().is_none_or(|t| {
@@ -2361,13 +2397,45 @@ pub async fn pending_counts(
     user: &str,
     ids: &[String],
 ) -> AppResult<std::collections::HashMap<String, u32>> {
+    pending_counts_matching(db, user, doc! {"conversation_id": {"$in": ids}}, None).await
+}
+
+/// One bounded group read for the roster activity projection.
+pub(crate) async fn pending_activity_conversations(
+    db: &Database,
+    user: &str,
+    limit: i64,
+) -> AppResult<std::collections::HashSet<String>> {
+    Ok(pending_counts_matching(
+        db,
+        user,
+        doc! {"conversation_id": {"$type": "string"}},
+        Some(limit),
+    )
+    .await?
+    .into_keys()
+    .collect())
+}
+
+async fn pending_counts_matching(
+    db: &Database,
+    user: &str,
+    mut filter: bson::Document,
+    limit: Option<i64>,
+) -> AppResult<std::collections::HashMap<String, u32>> {
+    filter.extend(
+        doc! {"user_id": user, "status": "pending", "expires_at": {"$gt": bson::DateTime::now()}},
+    );
+    let mut pipeline = vec![
+        doc! {"$match": filter},
+        doc! {"$group": {"_id": "$conversation_id", "count": {"$sum": 1}}},
+    ];
+    if let Some(limit) = limit {
+        pipeline.extend([doc! {"$sort": {"_id": 1}}, doc! {"$limit": limit}]);
+    }
     let mut cursor = db
         .collection::<bson::Document>(ACKS)
-        .aggregate([
-            doc! {"$match": {"user_id": user, "conversation_id": {"$in": ids},
-            "status": "pending", "expires_at": {"$gt": bson::DateTime::now()}}},
-            doc! {"$group": {"_id": "$conversation_id", "count": {"$sum": 1}}},
-        ])
+        .aggregate(pipeline)
         .await?;
     let mut counts = std::collections::HashMap::new();
     while let Some(row) = cursor.try_next().await? {
@@ -3726,6 +3794,7 @@ pub(crate) async fn decide_in_session(
     let chat = ChatAuthority {
         key_version: target.credential_version_floor(),
         voice_parent_conversation_id: target.voice_parent_conversation_id.clone(),
+        channel_guest: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: target

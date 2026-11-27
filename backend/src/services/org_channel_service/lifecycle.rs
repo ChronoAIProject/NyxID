@@ -116,6 +116,8 @@ pub(crate) async fn delete_conversation(
             doc! {"$set":{"status":"refused","delivery.state":"refused"},"$unset": {
                 "guest_setup_payload": "",
                 "guest_setup_context_version": "",
+                "channel_guest_setup_payload": "",
+                "channel_guest_setup_context_version": "",
             }},
         )
         .session(tx)

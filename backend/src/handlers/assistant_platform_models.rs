@@ -319,7 +319,7 @@ pub async fn list(
         ));
     }
     let agent = if let Some(id) = &query.conversation_id {
-        let row = crate::services::assistant_nyxagent::get(&state.db, &person, id).await?;
+        let row = crate::services::assistant_nyxagent::get_public(&state.db, &person, id).await?;
         if row.guest_turn {
             return Ok(empty());
         }

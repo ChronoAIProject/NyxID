@@ -2867,6 +2867,7 @@ mod tests {
             avatar_url: Some("https://example.com/avatar.png".to_string()),
             email_verified: true,
             email_verification_token: None,
+            email_verification_expires_at: None,
             password_reset_token: None,
             password_reset_expires_at: None,
             is_active: true,

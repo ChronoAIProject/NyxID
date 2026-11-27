@@ -8,7 +8,9 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/sync-i18n.mjs --overrides-only && tsc -b && vite build && node scripts/prerender-legal.mjs && vite build --config vite.public-render.config.ts && node scripts/prerender-public.mjs && vite build --config vite.credential-accept.config.ts && node scripts/assert-mock-footprint.mjs && node scripts/verify-public-build.mjs && node scripts/collect-crash-artifacts.mjs",
+    "build": "node scripts/check-avatar-emotes.mjs && node scripts/sync-i18n.mjs --overrides-only && tsc -b && vite build && node scripts/prerender-legal.mjs && vite build --config vite.public-render.config.ts && node scripts/prerender-public.mjs && vite build --config vite.credential-accept.config.ts && node scripts/assert-mock-footprint.mjs && node scripts/verify-public-build.mjs && node scripts/collect-crash-artifacts.mjs",
+    "build:avatar-emotes": "node scripts/build-avatar-emotes.mjs",
+    "check:avatar-emotes": "node scripts/check-avatar-emotes.mjs",
     "build:credential-accept": "vite build --config vite.credential-accept.config.ts",
     "build:wizard": "tsc -b && vite build --config vite.wizard.config.ts && node scripts/install-wizard-bundle.mjs",
     "lint": "eslint . && node scripts/check-typography.mjs && node scripts/check-i18n.mjs",
@@ -45,6 +47,7 @@
     "@radix-ui/react-switch": "^1.2.6",
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-tooltip": "^1.2.8",
+    "@rive-app/canvas-advanced": "2.55.1",
     "@tanstack/react-query": "^5.90.20",
     "@tanstack/react-router": "^1.159.5",
     "@tanstack/react-virtual": "^3.14.19",

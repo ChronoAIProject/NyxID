@@ -18,6 +18,7 @@ const post = vi.fn();
 let group: AssistantGroup;
 let groupLoaded = true;
 let groupError: Error | null = null;
+let avatarActivityEnabled = false;
 let shownMentions: readonly { id: string; name: string; shared?: boolean }[] = [];
 vi.mock("./shared-agent-controls", () => ({
   SharedConsentCards: ({ agentId, conversationId }: { agentId: string; conversationId: string }) => <div data-testid="shared-consents">{agentId}:{conversationId}</div>,
@@ -31,8 +32,8 @@ vi.mock("@/components/assistant/blocks/tool-image", () => ({
 
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
 vi.mock("@/stores/auth-store", () => ({
-  useAuthStore: (select: (state: { user: { id: string } }) => unknown) =>
-    select({ user: { id: "owner" } }),
+  useAuthStore: (select: (state: { user: { id: string; capabilities: { enabled_features: string[] } } }) => unknown) =>
+    select({ user: { id: "owner", capabilities: { enabled_features: avatarActivityEnabled ? ["assistant:avatars"] : [] } } }),
 }));
 vi.mock("@/hooks/use-nyxbot-agents", () => ({
   useNyxBotAgents: () => ({ data: { agents: [] } }),
@@ -160,11 +161,23 @@ async function send() {
 
 describe("group recipient pills", () => {
   beforeEach(() => {
+    avatarActivityEnabled = false;
     groupLoaded = true;
     groupError = null;
     post.mockReset();
     post.mockResolvedValue({});
     group = makeGroup([NYXBOT]);
+  });
+
+  it("shows activity only for the crew member identified as working", () => {
+    avatarActivityEnabled = true;
+    group = { ...group, working_agent_ids: [RESEARCHER] };
+    const { container } = render(<NyxAgentGroupPage groupId={group.id} mock={false} />);
+    const status = screen.getByRole("status", { name: "Agents working" });
+    expect(status.querySelector('[data-avatar-activity="thinking"]')).toBeInTheDocument();
+    expect(status).toHaveTextContent("researcher");
+    expect(container.querySelectorAll("[data-avatar-activity]")).toHaveLength(1);
+    avatarActivityEnabled = false;
   });
 
   it("replaces the loading group header with recovery when loading fails", () => {

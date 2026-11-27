@@ -10,6 +10,7 @@ import { channelSourceTitle } from "@/lib/assistant/channel-thread-presentation"
 import type { Conversation } from "@/types/assistant";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import type { AvatarConfig, AvatarMood } from "@/lib/assistant/agent-avatar-model";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
 import {
   AGENT_KIND_LABEL,
@@ -105,7 +106,7 @@ export function HeaderBar({ children }: { readonly children: ReactNode }) {
             // 12px from the top and from the column's edge: level with the
             // machine card's top and mirroring its inset across the divider.
             ? "absolute top-3 right-3 z-35 max-w-[calc(100%-1.5rem)] items-center gap-x-2 gap-y-1 border border-hairline bg-background/95 px-2 py-1 shadow-sm backdrop-blur-sm"
-            : "items-start gap-3",
+            : "items-start gap-x-4 gap-y-3 py-2",
         )}
       >
         {children}
@@ -130,6 +131,8 @@ export function ThreadHeader({
   kind,
   loading = false,
   agentId,
+  avatar,
+  mood,
   destroyed,
   channelPlatform,
   sourceChannel,
@@ -153,8 +156,12 @@ export function ThreadHeader({
   readonly handle?: string;
   readonly kind: AssistantAgentKind | "unknown";
   readonly loading?: boolean;
-  /** Picks the specialist's avatar tint. */
+  /** Picks the specialist's avatar tint (or derived avatar). */
   readonly agentId?: string;
+  /** The agent's chosen avatar, when it has one. */
+  readonly avatar?: AvatarConfig | null;
+  /** The live mood; decorative, the status notes keep carrying the state. */
+  readonly mood?: AvatarMood;
   readonly destroyed: boolean;
   /** Set when the thread answers one of the user's channel bots. */
   readonly channelPlatform?: string | null;
@@ -189,12 +196,17 @@ export function ThreadHeader({
       <HeaderBar>
         <HeaderItem className="shrink-0">
           {loading ? (
-            <span aria-hidden="true" className={cn("block rounded-full bg-overlay", compact ? "h-5 w-5" : "h-6 w-6")} />
+            <span aria-hidden="true" className={cn("block rounded-full bg-overlay", compact ? "h-5 w-5" : "h-14 w-14")} />
           ) : (
-            <AgentAvatar agent={{ id: agentId ?? name, name, kind }} size={compact ? "sm" : handle ? "xl" : "md"} />
+            <AgentAvatar
+              agent={{ id: agentId ?? name, name, kind, avatar }}
+              size={compact ? "sm" : "2xl"}
+              mood={mood}
+              animated
+            />
           )}
         </HeaderItem>
-        <HeaderItem className={cn("min-w-0", !compact && "self-start")}>
+        <HeaderItem className="min-w-0">
           {compact ? (
             <div className="flex min-w-0 items-center gap-2">
               <h2 className="truncate type-secondary-strong text-foreground">{name}</h2>

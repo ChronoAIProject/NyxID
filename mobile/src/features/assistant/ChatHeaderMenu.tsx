@@ -380,6 +380,7 @@ export function ChatHeaderMenu({
                         </Text>
                         {option.badge ? (
                           <Text
+                            numberOfLines={1}
                             style={[styles.badge, { color: option.badgeColor }]}
                           >
                             {option.badge}

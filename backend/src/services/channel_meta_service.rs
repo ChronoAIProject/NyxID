@@ -1015,6 +1015,7 @@ impl MetaService<'_> {
             let bot_id = s.bot_id.as_deref().ok_or_else(conflict)?;
             let document = doc! {
                 "_id":bot_id,"user_id":&s.owner_id,"ownership_version":0_i64,"platform":&s.platform,"label":&s.label,
+                "guest_access_v1":true,"guest_access_v1_revision":1_i64,
                 "credential_source":"platform","bot_token_encrypted":binary(super::channel_bot_record::encrypt(self.keys,bot_id,&s.owner_id,"bot_token_encrypted",&asset.token).await?),
                 "platform_bot_id":&asset.id,"platform_bot_username":&identity.platform_bot_username,"webhook_registered":false,
                 "webhook_secret_hash":"","app_id":&s.app_id,"meta_binding":bson::to_bson(&binding).map_err(|_|conflict())?,

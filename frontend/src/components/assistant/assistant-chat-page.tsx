@@ -1,5 +1,7 @@
 import { TextBlock } from "./blocks/text-block";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
+import { moodInputFor, settledReplyOf, useAgentMood } from "@/lib/assistant/use-agent-mood";
+import { usePublishAgentActivity, useRosterActivity } from "@/hooks/use-agent-activity";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
 import { translateUi } from "@/i18n/use-ui-translation";
@@ -792,6 +794,7 @@ function NyxAgentThreadPage() {
     });
   }, [navigate, search.mock, selectedId, user?.id]);
   const agents = useNyxBotAgents();
+  const rosterActivityMood = useRosterActivity(agents.dataUpdatedAt);
   const groups = useNyxBotGroups();
   // The agent whose details sheet is open (the thread's agent, or NyxBot from home).
   const [detailsAgentId, setDetailsAgentId] = useState<string>();
@@ -811,10 +814,16 @@ function NyxAgentThreadPage() {
         id: selectedAgent.id,
         kind: selectedAgent.kind,
         name: selectedAgent.name,
+        avatar: selectedAgent.avatar,
         destroyed: selectedAgent.status === "destroyed",
       }
     : undefined;
-  const headerAgent = selectedId ? threadAgent : draftAgent;
+  const headerSnapshot = selectedId ? threadAgent : draftAgent;
+  const currentHeaderAgent = agents.data?.agents.find((agent) => agent.id === headerSnapshot?.id);
+  // The roster includes acknowledged appearance edits. A null avatar is an explicit reset.
+  const headerAgent = headerSnapshot && currentHeaderAgent
+    ? { ...headerSnapshot, avatar: currentHeaderAgent.avatar }
+    : headerSnapshot;
   const destroyed = Boolean(headerAgent?.destroyed || selectedAgent?.status === "destroyed");
   const deniedUse = selectedAgent?.can_use === false && !destroyed;
   const chat = useNyxAgentAssistantChat({
@@ -1089,6 +1098,30 @@ function NyxAgentThreadPage() {
     if (wasDown.current && !connectionDown && selectedId) void chat.refreshHistory();
     wasDown.current = connectionDown;
   }, [connectionDown, selectedId, chat]);
+  // Decorative avatar mood from state this page already holds.
+  const streamedText = chat.isStreaming
+    ? [...chat.session.messages].reverse().find((message) => message.role === "assistant" && message.status === "streaming")?.content
+    : undefined;
+  const avatarMood = useAgentMood(
+    selectedId,
+    moodInputFor({
+      activeTurn: conversation?.active_turn,
+      streaming: chat.isStreaming,
+      streamedText,
+      pendingOwnerAction:
+        decisions.length > 0 ||
+        (conversation?.pending_acknowledgements ?? 0) > 0 ||
+        chat.acknowledgements.some((row) => row.status === "pending") ||
+        chat.approvals.some((row) => !row.status || row.status === "pending"),
+    }),
+    settledReplyOf(chat.session.messages),
+  );
+  usePublishAgentActivity(
+    user?.id,
+    onChatRoute && !destroyed && conversation?.id === selectedId ? selectedId : undefined,
+    conversation?.agent?.id,
+    avatarMood,
+  );
   const turnError =
     lastReply?.status === "error"
       ? withAssistantTrace(
@@ -1157,6 +1190,8 @@ function NyxAgentThreadPage() {
         kind={headerAgent?.kind ?? "nyxbot"}
         loading={!headerAgent}
         agentId={headerAgent?.id}
+        avatar={headerAgent?.avatar}
+        mood={avatarMood}
         destroyed={destroyed}
         channelPlatform={conversation?.platform_thread?.platform ?? channelPlatform}
         sourceChannel={conversation?.channel}
@@ -1332,6 +1367,7 @@ function NyxAgentThreadPage() {
           <NyxBotHome
             userName={user?.display_name ?? undefined}
             agents={agents.data?.agents ?? []}
+            activityMood={rosterActivityMood}
             agentsLoading={agents.isPending}
             groups={(groups.data ?? []).map((group) =>
               groupWithDisplayNames(group, agents.data?.agents),
@@ -1411,7 +1447,7 @@ function NyxAgentThreadPage() {
                 if (message.role === "event")
                   return <NyxBotEventNotice message={message} />;
                 if (message.role === "orchestrator") {
-                  return <NyxBotOrchestratorMessage message={message} />;
+                  return <NyxBotOrchestratorMessage message={message} nyxbot={nyxBotOf(agents.data?.agents)} />;
                 }
                 const via =
                   message.role === "user"
@@ -1536,6 +1572,7 @@ function NyxAgentThreadPage() {
                 <div ref={voicePanelRef} className="pb-2">
                   <VoicePanel
                     key={voiceBinding!.token}
+                    agent={headerAgent}
                     panelId={voiceBinding!.token}
                     preparation={voiceBinding!.preparation}
                     settingsRequest={voiceBinding!.settingsRequest}

@@ -115,6 +115,7 @@ export const createChannelConversationSchema = z.object({
   platform_sender_id: z.string().max(256).optional(),
   default_agent: z.boolean().optional(),
   allow_agent_initiated: z.boolean().optional(),
+  dedicate_agent_key_for_guest_access: z.boolean().optional(),
   /** When set, create this conversation under the given org (caller must be admin). */
   target_org_id: z.string().optional(),
 });

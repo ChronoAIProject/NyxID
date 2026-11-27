@@ -281,6 +281,13 @@ pub(crate) async fn channel_webhook_with_producers(
             {
                 Ok(response) => webhook_response(response, empty_ack_is_text),
                 Err(e) => {
+                    if matches!(
+                        e.downcast_ref::<crate::errors::AppError>(),
+                        Some(crate::errors::AppError::SecurityReadinessUnavailable)
+                    ) {
+                        return (StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")])
+                            .into_response();
+                    }
                     tracing::warn!(bot_id = %bot_id, platform = %platform, error_code = ?e.downcast_ref::<crate::errors::AppError>().map(|error| error.error_code()), "channel webhook processing failed (suppressed)");
                     webhook_response(None, empty_ack_is_text)
                 }
@@ -1903,6 +1910,8 @@ mod tests {
             instance_name: "test-backend".to_string(),
             automation_continuation_v2_enabled: false,
             security_rollout: Default::default(),
+            admin_mfa_enforcement: Default::default(),
+            auth_verification_legacy_cutoff_at: None,
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,
@@ -2176,6 +2185,8 @@ mod tests {
             x_events: None,
             last_verification: None,
             ownership_version: 0,
+            guest_access_v1: false,
+            guest_access_v1_revision: 0,
             id: bot_id.clone(),
             user_id: user_id.clone(),
             platform: platform.to_string(),

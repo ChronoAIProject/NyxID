@@ -1828,6 +1828,19 @@ async fn connect_tool_inner(
             "The user's linked account already reaches the bot; the link adds another."
         },
     });
+    if matches!(
+        crate::services::channel_guest_access::select_mode(&state.db, &row.channel_bot_id).await,
+        Ok(crate::services::channel_guest_access::GuestMode::AddOn { .. })
+    ) {
+        value["guest_experience"] = json!({
+            "url": format!(
+                "{}/channel-bots/{}#guest-experience",
+                state.config.frontend_url.trim_end_matches('/'),
+                row.channel_bot_id,
+            ),
+            "note": "Ask the owner to review Guest experience. Connecting the bot does not apply a guest-data policy."
+        });
+    }
     // The same app registered as two NyxID bots: its events reach only one.
     if let Some(twin) = status::twin_bot(state, &row).await? {
         value["duplicate_bot"] = json!({"id": twin.id, "label": excerpt(twin.label.trim(), 60)});
@@ -2452,7 +2465,7 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
     } else {
         String::new()
     };
-    let text = match &outcome {
+    let mut text = match &outcome {
         // Created in Telegram through NyxID: the account that created it is
         // already the owner's, so nothing is left to verify.
         Ok((agent, value)) if value["channel_agent"]["owner_linked"] == true => format!(
@@ -2483,6 +2496,13 @@ async fn channel_bot_watch(state: &AppState, watch: &NyxbotWatch) -> AppResult<(
             bot.id
         ),
     };
+    if let Ok((_, value)) = &outcome
+        && let Some(url) = value["guest_experience"]["url"].as_str()
+    {
+        text.push_str(&format!(
+            " Share this Guest experience setting with the owner to finish or resume their access choices: {url}"
+        ));
+    }
     settle_and_wake(
         state,
         &watch,
@@ -2998,7 +3018,7 @@ pub async fn disconnect_channel(
 /// What an inbound channel message resolved to.
 enum Inbound {
     /// The owner: a turn with the linked agent is running.
-    Turn(broadcast::Receiver<Value>),
+    Turn(InboundTurn),
     /// A reply without a turn (link confirmation, refusal, busy notice).
     Reply(InboundReply),
     /// Accepted work; its acknowledgement must not clear the original target.
@@ -3007,6 +3027,29 @@ enum Inbound {
     Silent(&'static str),
     /// Retry later: this chat's turn is still running or the pool is full.
     Busy,
+}
+
+struct InboundTurn {
+    receiver: broadcast::Receiver<Value>,
+    hosted_reply: Option<late_delivery::HostedReply>,
+}
+
+impl InboundTurn {
+    fn new(
+        conversation: &crate::models::assistant_conversation::AssistantConversation,
+        receiver: broadcast::Receiver<Value>,
+    ) -> Self {
+        Self {
+            receiver,
+            hosted_reply: late_delivery::HostedReply::new(
+                &conversation.id,
+                conversation
+                    .active_turn
+                    .as_ref()
+                    .map(|turn| turn.turn_id.as_str()),
+            ),
+        }
+    }
 }
 
 struct InboundReply {
@@ -3050,8 +3093,12 @@ impl std::fmt::Display for InboundReply {
     }
 }
 
+#[derive(Clone)]
 struct Sender<'a> {
     truncated_original_bytes: Option<usize>,
+    guest_facts: crate::services::channel_guest_access::transport::TransportFacts<'a>,
+    guest_mode: Option<crate::services::channel_guest_access::HostedAdmission>,
+    native_discord_activity: Option<&'a Value>,
     /// Provider classification before any normalization used by legacy chat.
     /// Only the new execution-source proof uses this distinction.
     original_kind: Option<crate::models::channel_thread::ThreadSenderKind>,
@@ -3183,7 +3230,17 @@ async fn inbound_message(
     // Channel admission nests several large futures before claiming the turn.
     // Keep them off the polling stack for both gateway and direct-relay calls.
     let result = Box::pin(start_chat_turn(
-        state, row, chat, sender, text, guest, addressed, None, event_key,
+        state,
+        row,
+        chat,
+        sender,
+        ChatTurnInput {
+            text,
+            guest,
+            addressed,
+            binding: None,
+            event_key,
+        },
     ))
     .await?;
     Ok(if is_bot && matches!(result, Inbound::Busy) {
@@ -3458,21 +3515,137 @@ async fn owner_thread(
     Ok((format!("nyxa-{}", Uuid::new_v4().simple()), false))
 }
 
+async fn capture_hosted_guest_admission(
+    state: &AppState,
+    row: &NyxbotChannel,
+    event_id: &str,
+    checked: Option<&crate::services::platform_bot_authority::PersonalRouteCheck>,
+    source_unavailable: bool,
+) -> AppResult<()> {
+    use crate::services::channel_guest_access::{self as guest, HostedAdmission};
+    let admission = if source_unavailable {
+        HostedAdmission::Unavailable
+    } else {
+        HostedAdmission::from_selection(match checked {
+            Some(checked) => checked.guest_mode(&state.db).await,
+            None => guest::select_mode(&state.db, &row.channel_bot_id).await,
+        })
+    };
+    guest::stamp_hosted_admission(&state.db, event_id, &row.id, admission).await
+}
+
+async fn gateway_relay_guest_selector_unavailable(
+    db: &mongodb::Database,
+    row: &NyxbotChannel,
+    activity: &Value,
+) -> AppResult<bool> {
+    let (Some(route), Some(message)) = (row.route_id.as_deref(), activity["event_id"].as_str())
+    else {
+        return Ok(false);
+    };
+    let matched = db
+        .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+        .find_one(doc! {
+            "_id": message, "direction": "inbound", "channel_bot_id": &row.channel_bot_id,
+            "user_id": bot_owner(row), "conversation_id": route,
+            "agent_api_key_id": &row.route_api_key_id, "platform": &row.platform,
+            "hosted_guest_selector_unavailable": true,
+        })
+        .projection(doc! {"platform_conversation_id": 1, "sender_platform_id": 1, "thread_id": 1})
+        .await?;
+    let Some(matched) = matched else {
+        return Ok(false);
+    };
+    let source = &activity["source"];
+    if source["type"] != "nyxid_relay"
+        || source["route_id"] != route
+        || source["platform"].as_str().is_none_or(|platform| {
+            canonical_platform(platform) != canonical_platform(&row.platform)
+        })
+        || matched.get_str("platform_conversation_id").ok()
+            != activity["conversation"]["id"].as_str()
+        || matched.get_str("sender_platform_id").ok() != activity["actor"]["id"].as_str()
+        || matched.get_str("thread_id").ok() != activity["conversation"]["thread_id"].as_str()
+    {
+        return Err(AppError::Forbidden(
+            "Channel source authority changed".into(),
+        ));
+    }
+    Ok(true)
+}
+
+async fn hosted_guest_facts<'a>(
+    state: &AppState,
+    row: &NyxbotChannel,
+    chat: &NyxbotThread,
+    sender: &Sender<'a>,
+    event_key: &str,
+) -> AppResult<crate::services::channel_guest_access::transport::TransportFacts<'a>> {
+    use crate::models::channel_message::{COLLECTION_NAME as MESSAGES, ChannelMessage};
+    use crate::services::channel_guest_access::transport;
+    if sender.guest_facts.sender_id.is_some() {
+        return Ok(sender.guest_facts);
+    }
+    if sender.execution_kind() != crate::models::channel_thread::ThreadSenderKind::Human {
+        return Ok(transport::TransportFacts::default());
+    }
+    if let Some(activity) = sender.native_discord_activity {
+        return native_discord::private_guest_facts(state, row, activity).await;
+    }
+    let event = state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id": event_key, "channel_id": &row.id})
+        .await?;
+    let Some(source_id) = event.and_then(|event| event.relay_message_id) else {
+        return Ok(transport::TransportFacts::default());
+    };
+    let source = state
+        .db
+        .collection::<ChannelMessage>(MESSAGES)
+        .find_one(
+            doc! {"_id": source_id, "channel_bot_id": &row.channel_bot_id, "direction": "inbound",
+            "guest_transport_audience": {"$in": ["private", "shared"]}},
+        )
+        .await?;
+    let Some((source, address)) = source.as_ref().zip(chat.platform_chat_id.as_deref()) else {
+        return Ok(transport::TransportFacts::default());
+    };
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+    Ok(transport::stored_facts(
+        &bot,
+        source,
+        address,
+        sender.id,
+        chat.platform_thread_id.as_deref(),
+    ))
+}
+
+struct ChatTurnInput<'a> {
+    text: &'a str,
+    guest: bool,
+    addressed: bool,
+    binding: Option<crate::models::channel_thread_follow::ThreadTurnBinding>,
+    event_key: &'a str,
+}
+
 /// Run the chat's agent on a message from the owner or, as a guest, from
 /// someone else the chat lets talk to it. The owner's private chats continue
 /// the agent's own thread; groups and other people's chats have their own.
-#[allow(clippy::too_many_arguments)]
 async fn start_chat_turn(
     state: &AppState,
     row: &NyxbotChannel,
     chat: &NyxbotThread,
     sender: &Sender<'_>,
-    text: &str,
-    guest: bool,
-    addressed: bool,
-    binding: Option<crate::models::channel_thread_follow::ThreadTurnBinding>,
-    event_key: &str,
+    input: ChatTurnInput<'_>,
 ) -> AppResult<Inbound> {
+    let ChatTurnInput {
+        text,
+        guest,
+        addressed,
+        binding,
+        event_key,
+    } = input;
     crate::services::platform_bot_authority::require_personal_routes(
         &state.db,
         &row.channel_bot_id,
@@ -3504,7 +3677,12 @@ async fn start_chat_turn(
     let private = chat.kind.as_deref() == Some("private");
     // An organization's bot never carries the owner's personal thread.
     let shared = private && !guest && (row.bot_owner_id.is_none() || row.org_specialist.is_some());
-    let agent_id = match chat.agent_id.clone().or_else(|| row.agent_id.clone()) {
+    let agent_id = match binding
+        .as_ref()
+        .map(|binding| binding.agent_id.clone())
+        .or_else(|| chat.agent_id.clone())
+        .or_else(|| row.agent_id.clone())
+    {
         Some(agent_id) => agent_id,
         None => {
             crate::services::assistant_team_service::ensure_nyxbot(&state.db, &row.user_id)
@@ -3555,7 +3733,68 @@ async fn start_chat_turn(
     } else {
         None
     };
-    let (conversation_id, exists) = if shared {
+    use crate::services::channel_guest_access::{self as guest_runtime, GuestAdmission, GuestMode};
+    let channel_guest = if guest {
+        let admission = match sender.guest_mode {
+            Some(admission) => admission,
+            None => guest_runtime::hosted_admission(&state.db, event_key, &row.id).await?,
+        };
+        let Some(mode) = admission.guest_mode() else {
+            return Ok(Inbound::Silent("refused_guest_authority_unavailable"));
+        };
+        let facts = if matches!(mode, GuestMode::AddOn { .. }) {
+            hosted_guest_facts(state, row, chat, sender, event_key).await?
+        } else {
+            Default::default()
+        };
+        let destination = guest_runtime::transport::destination(
+            chat.platform_chat_id.as_deref().unwrap_or(&chat.partition),
+            chat.platform_thread_id.as_deref(),
+        );
+        match guest_runtime::classify_with_meta(
+            &state.db,
+            mode,
+            guest_runtime::VerifiedGuestInput {
+                bot_id: &row.channel_bot_id,
+                binding_id: &row.id,
+                platform: canonical_platform(&row.platform),
+                conversation_id: &destination,
+                source_event_id: event_key,
+                sender_id: facts.sender_id,
+                audience: facts.audience,
+                meta_grant_id: meta_grant.as_ref().map(|grant| grant.grant_id.as_str()),
+            },
+            meta_grant.as_ref(),
+        )
+        .await
+        {
+            Ok(GuestAdmission::Legacy) => None,
+            Ok(GuestAdmission::AddOn(mut turn)) => {
+                turn.hosted_assignment = Some(guest_runtime::assignment::capture(
+                    row,
+                    chat,
+                    origin.thread.as_deref(),
+                    &agent_id,
+                )?);
+                Some(*turn)
+            }
+            Err(AppError::Forbidden(_)) => return Ok(Inbound::Silent("refused_guest_policy")),
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    let (conversation_id, exists) = if let Some(turn) = &channel_guest {
+        let id = turn.hosted_conversation_id();
+        let exists = state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME)
+            .find_one(doc! {"_id": &id, "user_id": &actor})
+            .projection(doc! {"_id": 1})
+            .await?
+            .is_some();
+        (id, exists)
+    } else if shared {
         let (id, exists) = if let Some(access) = &org_access {
             let home = Box::pin(crate::services::assistant_team_service::home_thread_for(
                 &state.db,
@@ -3628,11 +3867,18 @@ async fn start_chat_turn(
         (id, exists)
     };
     if origin.thread.is_some() {
+        let follow_conversation = if channel_guest.is_some() && origin.org_execution.is_none() {
+            chat.conversation_id
+                .as_deref()
+                .ok_or_else(crate::services::channel_thread_follow_service::not_found)?
+        } else {
+            &conversation_id
+        };
         crate::services::channel_thread_follow_service::validate_delivery(
             &state.db,
             &actor,
             &origin,
-            &conversation_id,
+            follow_conversation,
         )
         .await?;
     }
@@ -3670,6 +3916,7 @@ async fn start_chat_turn(
     let source_context = crate::models::assistant_conversation::ChannelTurnContext {
         meta_grant,
         text_completeness: Some(completeness),
+        channel_guest: channel_guest.clone(),
         org_origin: execution.is_some().then(|| Box::new(origin.clone())),
         source_event_id: event_key.to_owned(),
         channel_id: row.id.clone(),
@@ -3689,11 +3936,15 @@ async fn start_chat_turn(
     };
     // Required identity and sender guidance are structured turn-local input,
     // independent of the prose note's length budget and editable display data.
-    let media_event_ids = if had_media
-        && guest
-        && (execution.is_some()
-            || !crate::services::assistant_channel_media::guest::enabled(&state.db, &row.user_id)
-                .await?)
+    let media_event_ids = if channel_guest.is_some()
+        || (had_media
+            && guest
+            && (execution.is_some()
+                || !crate::services::assistant_channel_media::guest::enabled(
+                    &state.db,
+                    &row.user_id,
+                )
+                .await?))
     {
         Vec::new()
     } else {
@@ -3858,11 +4109,18 @@ async fn start_chat_turn(
         state,
         &actor,
         start,
-        Pool::Channel { owner: &actor },
+        if channel_guest.is_some() {
+            Pool::ChannelGuest { owner: &actor }
+        } else {
+            Pool::Channel { owner: &actor }
+        },
     ))
     .await
     {
-        Ok(Started::Turn { receiver, .. }) => Ok(Inbound::Turn(receiver)),
+        Ok(Started::Turn {
+            conversation,
+            receiver,
+        }) => Ok(Inbound::Turn(InboundTurn::new(&conversation, receiver))),
         Ok(Started::Busy | Started::PoolFull) => {
             if let Some(binding) = origin.thread.as_deref() {
                 crate::services::channel_thread_follow_service::note_busy(
@@ -3880,6 +4138,7 @@ async fn start_chat_turn(
             // The same question is never worked on twice: a repeat waits for
             // the answer in progress (sent to this chat too) or already queued.
             if guest
+                && channel_guest.is_none()
                 && exists
                 && origin.thread.is_none()
                 && let Some(key) = question_key.as_deref()
@@ -4240,6 +4499,25 @@ async fn provider_channel_classified(
     headers: &HeaderMap,
     observe: bool,
 ) -> Result<(NyxbotChannel, Zeroizing<String>), ProviderChannelFailure> {
+    provider_channel_with_routes(state, headers, observe)
+        .await
+        .map(|(row, raw, _)| (row, raw))
+}
+
+#[allow(clippy::result_large_err)]
+async fn provider_channel_with_routes(
+    state: &AppState,
+    headers: &HeaderMap,
+    observe: bool,
+) -> Result<
+    (
+        NyxbotChannel,
+        Zeroizing<String>,
+        crate::services::platform_bot_authority::PersonalRouteCheck,
+    ),
+    ProviderChannelFailure,
+> {
+    use crate::services::platform_bot_authority as authority;
     let raw = headers
         .get("authorization")
         .and_then(|value| value.to_str().ok())
@@ -4266,25 +4544,17 @@ async fn provider_channel_classified(
     if observe && row.status != "active" {
         return Err(problem(StatusCode::NOT_FOUND, "conversation_not_found").into());
     }
-    match crate::services::platform_bot_authority::require_personal_routes(
-        &state.db,
-        &row.channel_bot_id,
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(AppError::Forbidden(_)) => {
-            return Err(ProviderChannelFailure::closed(
-                row,
-                problem(
-                    StatusCode::FORBIDDEN,
-                    "shared_entry_requires_native_receipt",
-                ),
-            ));
-        }
-        Err(_) => {
-            return Err(problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable").into());
-        }
+    let checked = authority::read_personal_routes(&state.db, &row.channel_bot_id)
+        .await
+        .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"))?;
+    if !checked.allows(&row.channel_bot_id) {
+        return Err(ProviderChannelFailure::closed(
+            row,
+            problem(
+                StatusCode::FORBIDDEN,
+                "shared_entry_requires_native_receipt",
+            ),
+        ));
     }
     match org_access(state, &row).await {
         Ok(OrgAccess::Holds) => {}
@@ -4305,7 +4575,7 @@ async fn provider_channel_classified(
             return Err(problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable").into());
         }
     }
-    Ok((row, raw))
+    Ok((row, raw, checked))
 }
 
 async fn provider_key(
@@ -5396,8 +5666,17 @@ async fn custom_responses(
         }
         return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable");
     }
+    if let Err(error) =
+        capture_hosted_guest_admission(&state, &destination, &event_key, None, false).await
+    {
+        discard_failed_provider_event(&state.db, &event_key).await;
+        return provider_refusal::error(error);
+    }
     let sender = Sender {
         truncated_original_bytes: None,
+        guest_facts: Default::default(),
+        guest_mode: None,
+        native_discord_activity: None,
         original_kind: None,
         original_message: true,
         media: Vec::new(),
@@ -5411,22 +5690,24 @@ async fn custom_responses(
         &destination,
         &thread,
         &sender,
-        &text,
-        true,
-        true,
-        None,
-        &event_key,
+        ChatTurnInput {
+            text: &text,
+            guest: true,
+            addressed: true,
+            binding: None,
+            event_key: &event_key,
+        },
     ))
     .await;
     let created = json!({"type": "response.created", "response": {"id": &response_id, "status": "in_progress"}});
     match result {
-        Ok(Inbound::Turn(receiver)) => {
+        Ok(Inbound::Turn(turn)) => {
             let mut response = late_delivery::provider_stream_direct(
                 state,
                 event_key,
                 response_id.clone(),
                 created,
-                receiver,
+                turn,
                 now,
             );
             if let Ok(value) = response_id.parse() {
@@ -5552,7 +5833,7 @@ async fn responses_with_producers_impl(
         Ok(None) => {}
         Err(response) => return response,
     }
-    let (row, _) = match provider_channel_classified(&state, &headers, false).await {
+    let (row, _, checked) = match provider_channel_with_routes(&state, &headers, false).await {
         Ok(found) => found,
         Err(failure) => {
             return Box::pin(response_read::closed_post(&state, &headers, &body, failure)).await;
@@ -5575,7 +5856,15 @@ async fn responses_with_producers_impl(
             .unwrap_or(idempotency),
     );
     if row.gateway_source.is_some() {
-        return native_responses::respond(state, row, headers.clone(), request, idempotency).await;
+        return native_responses::respond(
+            state,
+            row,
+            headers.clone(),
+            request,
+            idempotency,
+            checked,
+        )
+        .await;
     }
     let partition = request["conversation"]
         .as_str()
@@ -5902,6 +6191,28 @@ async fn responses_with_producers_impl(
             Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
         }
     }
+    if newly_admitted && matches!(activity["actor"]["kind"].as_str(), Some("human" | "bot")) {
+        let source_unavailable =
+            match gateway_relay_guest_selector_unavailable(&state.db, &row, activity).await {
+                Ok(unavailable) => unavailable,
+                Err(error) => {
+                    discard_failed_provider_event(&state.db, &event_key).await;
+                    return provider_refusal::error(error);
+                }
+            };
+        if let Err(error) = capture_hosted_guest_admission(
+            &state,
+            &row,
+            &event_key,
+            Some(&checked),
+            source_unavailable,
+        )
+        .await
+        {
+            discard_failed_provider_event(&state.db, &event_key).await;
+            return provider_refusal::error(error);
+        }
+    }
     let prepared = if retry_prefix.is_some() {
         relay_responses::Prepared::default()
     } else {
@@ -6068,6 +6379,9 @@ async fn dispatch_relay_response(
         context["event_ref"].as_str(),
         &Sender {
             truncated_original_bytes: None,
+            guest_facts: Default::default(),
+            guest_mode: None,
+            native_discord_activity: None,
             original_kind: None,
             media,
             kind: sender_kind,
@@ -6211,8 +6525,8 @@ async fn dispatch_relay_response(
                 .insert("retry-after", "5".parse().expect("static header"));
             response
         }
-        Ok(Inbound::Turn(receiver)) => {
-            late_delivery::provider_stream(state, event_key, response_id, created, receiver, now)
+        Ok(Inbound::Turn(turn)) => {
+            late_delivery::provider_stream(state, event_key, response_id, created, turn, now)
         }
         Err(_) => {
             discard_failed_provider_event(&state.db, &event_key).await;
@@ -6557,8 +6871,18 @@ async fn gateway_inbound_inner(
                 },
         )
     };
+    let mut sender = sender.clone();
+    if native_evidence
+        .as_ref()
+        .is_some_and(|evidence| evidence.guest_sender_verified)
+    {
+        sender.guest_facts.sender_id = Some(sender.id);
+    }
+    if row.gateway_source.is_some() && row.platform == "discord" && kind == "private" {
+        sender.native_discord_activity = Some(activity);
+    }
     Box::pin(inbound_message(
-        state, row, &chat, sender, text, addressed, event_key,
+        state, row, &chat, &sender, text, addressed, event_key,
     ))
     .await
 }
@@ -6660,6 +6984,26 @@ async fn custom_replay(state: &AppState, event_key: &str, response_id: &str) -> 
             .map(|message| message.text),
         _ => None,
     };
+    if let Some(hosted) = late_delivery::HostedReply::for_event(&event) {
+        let state = state.clone();
+        let event_key = event.id;
+        let response_key = response_id.to_owned();
+        return response_sse(
+            async_stream::stream! {
+                yield created;
+                for frame in message_frames(&response_key, text.as_deref()) {
+                    if late_delivery::frame_has_answer(&frame)
+                        && !late_delivery::hosted_stream_allowed(&state, &event_key, &hosted).await
+                    {
+                        for frame in message_frames(&response_key, None) { yield frame; }
+                        return;
+                    }
+                    yield frame;
+                }
+            },
+            response_id,
+        );
+    }
     response_sse(
         futures::stream::iter(
             std::iter::once(created).chain(message_frames(response_id, text.as_deref())),
@@ -6765,6 +7109,9 @@ async fn deliver_from_source(
     mut decision: supplemental::Decision,
     source: Option<crate::services::channel_supplemental_delivery::ResultSource>,
 ) -> AppResult<()> {
+    if crate::services::channel_guest_access::is_hosted_conversation(&row.id) {
+        return Ok(());
+    }
     let purpose = decision.purpose;
     let turn_id = source.as_ref().map(|source| source.turn_id.clone());
     decision.turn.clone_from(&turn_id);
@@ -7103,19 +7450,18 @@ pub async fn relay_callback(
     {
         return unauthorized();
     }
-    if crate::services::platform_bot_authority::require_personal_routes(
-        &state.db,
-        &row.channel_bot_id,
-    )
-    .await
-    .is_err()
-    {
-        x_diagnostics::for_channel(&state.db, &row, XOutcome::AuthorityChanged).await;
-        return problem(
-            StatusCode::FORBIDDEN,
-            "shared_entry_requires_native_receipt",
-        );
-    }
+    use crate::services::platform_bot_authority as authority;
+    let checked = authority::read_personal_routes(&state.db, &row.channel_bot_id).await;
+    let checked = match checked {
+        Ok(checked) if checked.allows(&row.channel_bot_id) => checked,
+        _ => {
+            x_diagnostics::for_channel(&state.db, &row, XOutcome::AuthorityChanged).await;
+            return problem(
+                StatusCode::FORBIDDEN,
+                "shared_entry_requires_native_receipt",
+            );
+        }
+    };
     // An org bot reaches a person's agent only while they administer the org.
     match org_access(&state, &row).await {
         Ok(OrgAccess::Holds) => {}
@@ -7159,6 +7505,7 @@ pub async fn relay_callback(
             .await;
         }
     };
+    let source_unavailable = sender.hosted_guest_selector_unavailable;
     let mut sender_id = sender.sender_platform_id;
     let mut display = sender.sender_display_name;
     // Dedup redeliveries of the same inbound message.
@@ -7306,6 +7653,22 @@ pub async fn relay_callback(
             return StatusCode::ACCEPTED.into_response();
         }
         Err(_) => return problem(StatusCode::SERVICE_UNAVAILABLE, "provider_unavailable"),
+    }
+    // This internal callback transfers work ownership to NyxID. A transient
+    // selection failure releases the unaccepted event for the existing retry.
+    if sender_kind != crate::models::channel_thread::ThreadSenderKind::Unknown
+        && payload["activity"]["reply_supported"] != false
+        && let Err(error) = capture_hosted_guest_admission(
+            &state,
+            &row,
+            &admitted.id,
+            Some(&checked),
+            source_unavailable,
+        )
+        .await
+    {
+        discard_failed_provider_event(&state.db, &admitted.id).await;
+        return provider_refusal::error(error);
     }
     let text = payload["content"]["text"]
         .as_str()
@@ -7538,6 +7901,9 @@ pub async fn relay_callback(
             };
             let sender = Sender {
                 truncated_original_bytes,
+                guest_facts: Default::default(),
+                guest_mode: None,
+                native_discord_activity: None,
                 original_kind: None,
                 media: if canonical_platform(&row.platform) == "telegram" {
                     chats::native_message(&raw)
@@ -7580,8 +7946,8 @@ pub async fn relay_callback(
                 }
                 Inbound::Silent(_) => None,
                 Inbound::Busy => Some(Notice::Capacity.text(chat.notice_language).into()),
-                Inbound::Turn(receiver) => {
-                    let _ = final_reply(receiver).await;
+                Inbound::Turn(turn) => {
+                    let _ = final_reply(turn.receiver).await;
                     late_delivery::process(&state, &admitted.id).await;
                     None
                 }

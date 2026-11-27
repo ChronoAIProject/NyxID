@@ -403,11 +403,14 @@ async fn prepare_device_event(
     api_key_id: &str,
     envelope: &EventEnvelope,
 ) -> AppResult<PreparedDeviceEvent> {
-    let api_key = db
-        .collection::<ApiKey>(API_KEYS)
+    use super::channel_guest_access::relay::RetainedRelayKey;
+    let retained = db
+        .collection::<RetainedRelayKey>(API_KEYS)
         .find_one(doc! { "_id": api_key_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+    retained.require_broad_access(db).await?;
+    let api_key = retained.key;
     let callback_url = api_key.callback_url.clone().ok_or_else(|| {
         AppError::ChannelRelayFailed(
             "agent_callback_url_not_configured: target API key has no callback_url".to_string(),
@@ -597,6 +600,7 @@ async fn lookup_recent_inbound_thread_id(
             "conversation_id": conversation_id,
             "direction": "inbound",
             "platform": { "$ne": "device" },
+            "guest_relay": null,
             "thread_id": { "$exists": true, "$ne": null },
         })
         .sort(doc! { "created_at": -1 })
@@ -650,6 +654,7 @@ fn build_device_callback_payload(
         correlation_id: String::new(),
         platform: "device".to_string(),
         reply_token: None,
+        guest_access_token: None,
         agent: CallbackAgent {
             api_key_id: api_key.id.clone(),
             name: api_key.name.clone(),
@@ -780,6 +785,24 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn channel_guest_device_event_cannot_mint_guest_identity_or_a_reply() {
+        let mut event = envelope();
+        event.source = "claimed-account".into();
+        event.payload = Some(serde_json::json!({
+            "actor_id": "claimed-account",
+            "conversation_type": "private",
+            "guest_access_token": "external assertion"
+        }));
+        let payload =
+            build_device_callback_payload(&conversation(), &api_key(), &event, "source").unwrap();
+        assert_eq!(payload.platform, "device");
+        assert!(payload.reply_token.is_none());
+        assert!(payload.guest_access_token.is_none());
+        assert!(payload.thread_id.is_none());
+        assert_eq!(payload.sender.platform_id, "claimed-account");
     }
 
     fn api_key() -> ApiKey {

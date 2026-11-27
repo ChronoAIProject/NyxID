@@ -186,11 +186,13 @@ pub(super) async fn inbound(
         row,
         &current,
         sender,
-        text,
-        identity.guest,
-        private || addressed == Some(true),
-        None,
-        event,
+        ChatTurnInput {
+            text,
+            guest: identity.guest,
+            addressed: private || addressed == Some(true),
+            binding: None,
+            event_key: event,
+        },
     ))
     .await
     {

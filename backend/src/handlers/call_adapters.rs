@@ -29,6 +29,8 @@ pub struct BindingDto {
     pub contract_version: u32,
     pub revision: i64,
     pub agent_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_channel_bot_id: Option<String>,
     pub credential: CredentialBinding,
     pub account_id: String,
     pub resource_id: String,
@@ -51,6 +53,7 @@ async fn dto(state: &AppState, b: Binding) -> BindingDto {
         contract_version: b.contract_version,
         revision: b.revision,
         agent_id: b.agent_id,
+        parent_channel_bot_id: b.parent_channel_bot_id,
         credential: b.credential,
         account_id: b.account_id,
         resource_id: b.resource_id,

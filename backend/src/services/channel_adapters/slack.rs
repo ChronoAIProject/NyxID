@@ -58,6 +58,7 @@ use crate::services::channel_platform::{
 type HmacSha256 = Hmac<Sha256>;
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
+const FORMATTING_FALLBACK: &str = "slack_formatting_fallback";
 const SIGNATURE_HEADER: &str = "x-slack-signature";
 const TIMESTAMP_HEADER: &str = "x-slack-request-timestamp";
 /// Replay window per Slack's recommendation
@@ -309,6 +310,25 @@ fn build_post_message_body(reply: &OutboundReply, conversation_id: &str) -> serd
     }
 
     body
+}
+
+tokio::task_local! {
+    static PLANNED_TEXT_PART: std::cell::Cell<bool>;
+}
+
+/// Only the saved and proactive text journals can install fallback authority.
+/// API-supplied metadata is never sufficient to authorize a second send.
+pub(crate) async fn with_planned_text_part<F: std::future::Future>(
+    planned: bool,
+    send: F,
+) -> F::Output {
+    if planned {
+        PLANNED_TEXT_PART
+            .scope(std::cell::Cell::new(true), send)
+            .await
+    } else {
+        send.await
+    }
 }
 
 fn build_update_message_body(
@@ -588,6 +608,9 @@ impl PlatformAdapter for SlackAdapter {
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        let planned = PLANNED_TEXT_PART
+            .try_with(|part| part.replace(false))
+            .unwrap_or(false);
         if !reply.attachments.is_empty() {
             if reply.text.as_deref().is_some_and(|s| !s.is_empty()) {
                 let mut text = reply.clone();
@@ -716,61 +739,85 @@ impl PlatformAdapter for SlackAdapter {
             return Ok(last);
         }
         let bot_token = credentials.token;
-        let body = build_post_message_body(reply, conversation_id);
+        let mut body = build_post_message_body(reply, conversation_id);
+        let can_fall_back = planned && body["mrkdwn"] == false && body.get("blocks").is_some();
+        if can_fall_back && crate::services::telegram_formatting::already_fell_back() {
+            body.as_object_mut().unwrap().remove("blocks");
+        }
 
-        let url = format!("{}/chat.postMessage", self.base_url);
-        crate::services::channel_platform::mark_provider_attempt().await?;
-        let response = http
-            .post(&url)
-            .header("Authorization", format!("Bearer {bot_token}"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
+        loop {
+            let url = format!("{}/chat.postMessage", self.base_url);
+            crate::services::channel_platform::mark_provider_attempt().await?;
+            let response = http
+                .post(&url)
+                .header("Authorization", format!("Bearer {bot_token}"))
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| {
+                    AppError::ChannelPlatformError(format!(
+                        "Slack chat.postMessage request failed: {}",
+                        e.without_url()
+                    ))
+                })?;
+
+            // Rate-limit signal #1: HTTP 429 with a Retry-After header.
+            // https://api.slack.com/docs/rate-limits
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_after = parse_retry_after(response.headers().get("retry-after"));
+                return Err(slack_rate_limited("HTTP 429", retry_after));
+            }
+
+            let status = response.status();
+            let resp: serde_json::Value = response.json().await.map_err(|e| {
                 AppError::ChannelPlatformError(format!(
-                    "Slack chat.postMessage request failed: {}",
+                    "Slack chat.postMessage response parse failed: {}",
                     e.without_url()
                 ))
             })?;
 
-        // Rate-limit signal #1: HTTP 429 with a Retry-After header.
-        // https://api.slack.com/docs/rate-limits
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = parse_retry_after(response.headers().get("retry-after"));
-            return Err(slack_rate_limited("HTTP 429", retry_after));
-        }
+            if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+                let error = resp
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
 
-        let resp: serde_json::Value = response.json().await.map_err(|e| {
-            AppError::ChannelPlatformError(format!(
-                "Slack chat.postMessage response parse failed: {}",
-                e.without_url()
-            ))
-        })?;
+                if can_fall_back
+                    && status == reqwest::StatusCode::OK
+                    && resp["ok"] == false
+                    && matches!(
+                        error,
+                        "invalid_blocks" | "invalid_blocks_format" | "msg_blocks_too_long"
+                    )
+                    && body.as_object_mut().unwrap().remove("blocks").is_some()
+                {
+                    crate::services::telegram_formatting::record_fallback_notice(
+                        FORMATTING_FALLBACK,
+                    )
+                    .await?;
+                    tracing::warn!(code = FORMATTING_FALLBACK, "Slack rejected rich text");
+                    continue;
+                }
 
-        if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-            let error = resp
-                .get("error")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown error");
+                // Rate-limit signal #2: Slack can also return `{"ok":false,
+                // "error":"ratelimited"}` with HTTP 200 on some endpoints.
+                // `response_metadata.messages` may carry a human-readable hint.
+                if error == "ratelimited" || error == "rate_limited" {
+                    return Err(slack_rate_limited(error, None));
+                }
 
-            // Rate-limit signal #2: Slack can also return `{"ok":false,
-            // "error":"ratelimited"}` with HTTP 200 on some endpoints.
-            // `response_metadata.messages` may carry a human-readable hint.
-            if error == "ratelimited" || error == "rate_limited" {
-                return Err(slack_rate_limited(error, None));
+                return Err(
+                    crate::services::channel_platform::classify_upstream_refusal(
+                        "Slack",
+                        error,
+                        UNREACHABLE_TARGET_MARKERS,
+                    ),
+                );
             }
 
-            return Err(
-                crate::services::channel_platform::classify_upstream_refusal(
-                    "Slack",
-                    error,
-                    UNREACHABLE_TARGET_MARKERS,
-                ),
-            );
+            let message_id = resp.get("ts").and_then(|v| v.as_str()).map(String::from);
+            return Ok(message_id);
         }
-
-        let message_id = resp.get("ts").and_then(|v| v.as_str()).map(String::from);
-        Ok(message_id)
     }
 
     async fn edit_reply(
@@ -944,6 +991,280 @@ mod tests {
         assert_eq!(identity.platform_bot_username, "TestBot");
     }
 
+    #[tokio::test]
+    async fn slack_planned_text_and_raw_controls_use_the_existing_adapter_fields() {
+        use crate::services::channel_platform::{MaterializedAttachment, MediaKind};
+        use crate::services::channel_reply_plan::recorded_assistant_parts;
+        use serde_json::json;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+
+        let server = MockServer::start().await;
+        let adapter = SlackAdapter::media_test_adapter(&server.uri());
+        let http = reqwest::Client::new();
+        let credentials = "fixture-token".into();
+        let source = r"\*literal\* **bold**";
+        for (version, text) in [(None, "*literal* *bold*"), (Some(3), "*literal* bold")] {
+            let mut reply = recorded_assistant_parts(source, "slack", "", version)
+                .unwrap()
+                .remove(0);
+            for thread in [None, Some("123.456")] {
+                let mut expected = json!({"channel":"C123","text":text});
+                if version.is_some() {
+                    expected["mrkdwn"] = json!(false);
+                    expected["blocks"] = json!([{"type":"rich_text","elements":[{
+                        "type":"rich_text_section","elements":[
+                            {"type":"text","text":"*literal* "},
+                            {"type":"text","text":"bold","style":{"bold":true}}
+                        ]
+                    }]}]);
+                }
+                if let Some(thread) = thread {
+                    expected["thread_ts"] = thread.into();
+                }
+                reply.reply_to_platform_message_id = thread.map(str::to_owned);
+                Mock::given(method("POST"))
+                    .and(path("/chat.postMessage"))
+                    .and(body_json(expected))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(json!({"ok":true,"ts":"123.457"})),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                assert_eq!(
+                    adapter
+                        .send_reply(&http, &credentials, "C123", &reply)
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some("123.457"),
+                );
+            }
+        }
+        Mock::given(method("POST"))
+            .and(path("/chat.update"))
+            .and(body_json(
+                json!({"channel":"C123","ts":"123.457","text":source}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        adapter
+            .edit_reply(
+                &http,
+                &credentials,
+                "C123",
+                "123.457",
+                &OutboundEdit {
+                    text: Some(source.into()),
+                    metadata: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        for (verb, endpoint, response) in [
+            (
+                "POST",
+                "/files.getUploadURLExternal",
+                json!({
+                    "ok":true, "file_id":"F1", "upload_url":format!("{}/upload", server.uri())
+                }),
+            ),
+            ("PUT", "/upload", json!({})),
+            (
+                "GET",
+                "/files.info",
+                json!({"ok":true,"file":{"shares":{"private":{"C123":[{"ts":"123.458"}]}}}}),
+            ),
+        ] {
+            Mock::given(method(verb))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST")).and(path("/files.completeUploadExternal"))
+            .and(body_json(json!({"files":[{"id":"F1"}],"channel_id":"C123","thread_ts":"123.456","initial_comment":source})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true})))
+            .expect(1).mount(&server).await;
+        let reply = OutboundReply {
+            text: None,
+            reply_to_platform_message_id: Some("123.456".into()),
+            metadata: None,
+            attachments: vec![MaterializedAttachment {
+                kind: MediaKind::File,
+                bytes: bytes::Bytes::from_static(b"fixture"),
+                filename: Some("fixture.txt".into()),
+                mime_type: None,
+                caption: Some(source.into()),
+            }],
+        };
+        assert_eq!(
+            adapter
+                .send_reply(&http, &credentials, "C123", &reply)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("123.458"),
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_rich_text_retries_only_trusted_definite_block_refusals() {
+        use crate::services::channel_platform::{MaterializedAttachment, MediaKind};
+        use crate::services::channel_reply_plan::assistant_parts;
+        use serde_json::{Value, json};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, method, path},
+        };
+
+        let server = MockServer::start().await;
+        let adapter = SlackAdapter::media_test_adapter(&server.uri());
+        let http = reqwest::Client::new();
+        let credentials = "fixture-token".into();
+        for (status, body, trusted, attachment, retry, plain_refuses) in [
+            (
+                200,
+                Some(json!({"ok":false,"error":"invalid_blocks"})),
+                true,
+                false,
+                true,
+                false,
+            ),
+            (
+                200,
+                Some(json!({"ok":false,"error":"invalid_blocks_format"})),
+                true,
+                false,
+                true,
+                false,
+            ),
+            (
+                200,
+                Some(json!({"ok":false,"error":"msg_blocks_too_long"})),
+                true,
+                false,
+                true,
+                true,
+            ),
+            (
+                200,
+                Some(json!({"ok":false,"error":"invalid_blocks"})),
+                false,
+                false,
+                false,
+                false,
+            ),
+            (
+                200,
+                Some(json!({"ok":false,"error":"invalid_blocks"})),
+                true,
+                true,
+                false,
+                false,
+            ),
+            (
+                500,
+                Some(json!({"ok":false,"error":"invalid_blocks"})),
+                true,
+                false,
+                false,
+                false,
+            ),
+            (
+                429,
+                Some(json!({"ok":false,"error":"invalid_blocks"})),
+                true,
+                false,
+                false,
+                false,
+            ),
+            (
+                200,
+                Some(json!({"error":"invalid_blocks"})),
+                true,
+                false,
+                false,
+                false,
+            ),
+            (
+                200,
+                Some(json!({"ok":false,"error":"other_error"})),
+                true,
+                false,
+                false,
+                false,
+            ),
+            (200, None, true, false, false, false),
+        ] {
+            server.reset().await;
+            let mut part = assistant_parts(r"**\*\***", "slack", "").remove(0);
+            // The same metadata, including its renderer marker, also models a
+            // raw request attempting to authorize a fallback.
+            part.metadata.as_mut().unwrap()["thread_ts"] = json!("123.456");
+            if attachment {
+                part.attachments.push(MaterializedAttachment {
+                    kind: MediaKind::File,
+                    bytes: bytes::Bytes::from_static(b"fixture"),
+                    filename: None,
+                    mime_type: None,
+                    caption: None,
+                });
+            }
+            let mut expected =
+                json!({"channel":"C123","text":"**","thread_ts":"123.456","mrkdwn":false});
+            expected["blocks"] = json!([{"type":"rich_text","elements":[{
+                "type":"rich_text_section","elements":[{"type":"text","text":"**","style":{"bold":true}}]
+            }]}]);
+            let mut response = ResponseTemplate::new(status);
+            response = match body {
+                Some(body) => response.set_body_json(body),
+                None => response.set_body_string("malformed"),
+            };
+            Mock::given(method("POST"))
+                .and(path("/chat.postMessage"))
+                .and(body_json(expected.clone()))
+                .respond_with(response)
+                .expect(1)
+                .mount(&server)
+                .await;
+            expected.as_object_mut().unwrap().remove("blocks");
+            if retry {
+                let plain = if plain_refuses {
+                    json!({"ok":false,"error":"invalid_blocks"})
+                } else {
+                    json!({"ok":true,"ts":"123.457"})
+                };
+                Mock::given(method("POST"))
+                    .and(path("/chat.postMessage"))
+                    .and(body_json(expected.clone()))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(plain))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let result = with_planned_text_part(
+                trusted,
+                adapter.send_reply(&http, &credentials, "C123", &part),
+            )
+            .await;
+            assert_eq!(result.is_ok(), retry && !plain_refuses);
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), if retry { 2 } else { 1 });
+            if retry {
+                assert_eq!(requests[1].body_json::<Value>().unwrap(), expected);
+            }
+            server.verify().await;
+        }
+    }
+
     #[test]
     fn update_message_body_preserves_blocks_and_omits_threading() {
         let mut edit = OutboundEdit {
@@ -1062,6 +1383,8 @@ mod tests {
             x_events: None,
             last_verification: None,
             ownership_version: 0,
+            guest_access_v1: false,
+            guest_access_v1_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "slack".to_string(),

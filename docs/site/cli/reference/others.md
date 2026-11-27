@@ -163,6 +163,10 @@ nyxid approval service-configs           # per-service policy list
 nyxid approval set-config <id> --require-approval true --approval-mode grant
 ```
 
+`approve` sends `{"approved": true}` and `deny` sends `{"approved": false}` to `POST /api/v1/approvals/requests/{id}/decide`. A successful denial returns `status: "rejected"` and the command exits 0. With `--output json`, stdout contains the decision response. The optional `--reason` adds a `reason` field to the request that the server does not store.
+
+If approving or denying returns HTTP 422 about a missing `approved` field, check `nyxid --version`. Versions 0.71.0 and 0.78.0 send incompatible `decision` strings. Build a checkout containing #2885 with `cargo build --locked -p nyxid-cli` and use its `./target/debug/nyxid`, or install a published release once it includes the repair. While v0.78.0 is the latest release, `nyxid update` does not provide the repair. Changing `--reason` or `--output` does not correct the request body.
+
 `set-config` takes a `UserService` ID (from [`nyxid service list`](/docs/cli/reference/service)) or a catalog ID; `--approval-mode` is `per_request` (every call) or `grant` (approval mints a reusable grant).
 
 ### Organization service approvers

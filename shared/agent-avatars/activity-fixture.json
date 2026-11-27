@@ -1,0 +1,488 @@
+{
+  "description": "Turn and roster activity fixtures for web Vitest and mobile node:test. The Rust parity test in U2 also reads the turn cases.",
+  "turns": [
+    {
+      "name": "no live turn",
+      "turn": null,
+      "expected": "idle"
+    },
+    {
+      "name": "an admitted turn",
+      "turn": {},
+      "expected": "thinking"
+    },
+    {
+      "name": "stop beats pending action, queue, work and reply",
+      "turn": {
+        "stop_requested": true,
+        "queued": true,
+        "activities": [
+          {
+            "status": "running"
+          }
+        ],
+        "reply": {
+          "text": "Reply"
+        }
+      },
+      "pending_owner_action": true,
+      "expected": "stopping"
+    },
+    {
+      "name": "pending action without a turn",
+      "turn": null,
+      "pending_owner_action": true,
+      "expected": "approval"
+    },
+    {
+      "name": "pending action before queue or work",
+      "turn": {
+        "queued": true,
+        "activities": [
+          {
+            "status": "running"
+          }
+        ]
+      },
+      "pending_owner_action": true,
+      "expected": "approval"
+    },
+    {
+      "name": "queued before work",
+      "turn": {
+        "queued": true,
+        "activities": [
+          {
+            "status": "running"
+          }
+        ]
+      },
+      "expected": "waiting"
+    },
+    {
+      "name": "capacity wait before work and reply",
+      "turn": {
+        "waiting_for_capacity": true,
+        "activities": [
+          {
+            "status": "running"
+          }
+        ],
+        "reply": {
+          "text": "Reply"
+        }
+      },
+      "expected": "waiting"
+    },
+    {
+      "name": "running tool before reply and recovery",
+      "turn": {
+        "activities": [
+          {
+            "status": "error"
+          },
+          {
+            "status": "error"
+          },
+          {
+            "status": "running"
+          }
+        ],
+        "reply": {
+          "text": "Reply"
+        },
+        "continuations": 2
+      },
+      "expected": "working"
+    },
+    {
+      "name": "persisted reply before recovery",
+      "turn": {
+        "activities": [
+          {
+            "status": "error"
+          },
+          {
+            "status": "error"
+          }
+        ],
+        "reply": {
+          "text": "Reply"
+        },
+        "continuations": 1
+      },
+      "expected": "drafting"
+    },
+    {
+      "name": "local reply before recovery",
+      "turn": {
+        "reply": {
+          "text": ""
+        },
+        "continuations": 1
+      },
+      "streamed_text_present": true,
+      "expected": "drafting"
+    },
+    {
+      "name": "whitespace is streamed text",
+      "turn": {
+        "reply": {
+          "text": " "
+        }
+      },
+      "expected": "drafting"
+    },
+    {
+      "name": "local reply alone requires a live turn",
+      "turn": null,
+      "streamed_text_present": true,
+      "expected": "idle"
+    },
+    {
+      "name": "empty reply and one error",
+      "turn": {
+        "activities": [
+          {
+            "status": "error"
+          },
+          {
+            "status": "completed"
+          }
+        ],
+        "reply": {
+          "text": ""
+        },
+        "continuations": 0
+      },
+      "expected": "thinking"
+    },
+    {
+      "name": "repeated errors without a continuation",
+      "turn": {
+        "activities": [
+          {
+            "status": "error"
+          },
+          {
+            "status": "completed"
+          },
+          {
+            "status": "error"
+          }
+        ],
+        "reply": null
+      },
+      "expected": "retry"
+    },
+    {
+      "name": "continuation without errors",
+      "turn": {
+        "continuations": 1
+      },
+      "expected": "retry"
+    },
+    {
+      "name": "completed and future statuses are not running",
+      "turn": {
+        "activities": [
+          {
+            "status": "completed"
+          },
+          {
+            "status": "unknown"
+          }
+        ]
+      },
+      "expected": "thinking"
+    }
+  ],
+  "aggregation": [
+    {
+      "name": "no live details",
+      "input": {
+        "agentId": "specialist"
+      },
+      "expected": "idle"
+    },
+    {
+      "name": "older server with coarse running",
+      "input": {
+        "running": true,
+        "agentId": "specialist"
+      },
+      "expected": "thinking"
+    },
+    {
+      "name": "explicit empty activity beats coarse running",
+      "input": {
+        "activity": [],
+        "running": true,
+        "agentId": "specialist"
+      },
+      "expected": "idle"
+    },
+    {
+      "name": "a projected approval outranks work across threads",
+      "input": {
+        "activity": [
+          {
+            "conversation_id": "a",
+            "state": "working"
+          },
+          {
+            "conversation_id": "b",
+            "state": "approval"
+          }
+        ],
+        "agentId": "specialist"
+      },
+      "expected": "approval"
+    },
+    {
+      "name": "pending count is a fallback without activity metadata",
+      "input": {
+        "agentId": "specialist",
+        "pendingOwnerActions": 1,
+        "running": true
+      },
+      "expected": "approval"
+    },
+    {
+      "name": "an explicit snapshot replaces the coarse pending count",
+      "input": {
+        "agentId": "specialist",
+        "activity": [],
+        "pendingOwnerActions": 1
+      },
+      "expected": "idle"
+    },
+    {
+      "name": "destroyed masks all observations",
+      "input": {
+        "activity": [
+          {
+            "conversation_id": "a",
+            "state": "working"
+          }
+        ],
+        "override": {
+          "conversationId": "b",
+          "state": "drafting",
+          "agentId": "specialist"
+        },
+        "running": true,
+        "destroyed": true,
+        "pendingOwnerActions": 1,
+        "agentId": "specialist"
+      },
+      "expected": "idle"
+    },
+    {
+      "name": "live stopping replaces stale work in its own thread",
+      "input": {
+        "activity": [
+          {
+            "conversation_id": "a",
+            "state": "working"
+          },
+          {
+            "conversation_id": "b",
+            "state": "waiting"
+          }
+        ],
+        "override": {
+          "conversationId": "a",
+          "state": "stopping",
+          "agentId": "specialist"
+        },
+        "agentId": "specialist"
+      },
+      "expected": "waiting"
+    },
+    {
+      "name": "same-agent work in another thread still counts",
+      "input": {
+        "activity": [
+          {
+            "conversation_id": "b",
+            "state": "working"
+          }
+        ],
+        "override": {
+          "conversationId": "a",
+          "state": "stopping",
+          "agentId": "specialist"
+        },
+        "agentId": "specialist"
+      },
+      "expected": "working"
+    },
+    {
+      "name": "live override supplies activity before the roster has a turn",
+      "input": {
+        "activity": [],
+        "override": {
+          "conversationId": "a",
+          "state": "drafting",
+          "agentId": "specialist"
+        },
+        "agentId": "specialist"
+      },
+      "expected": "drafting"
+    },
+    {
+      "name": "coarse running can be another thread when the watched thread stops",
+      "input": {
+        "running": true,
+        "override": {
+          "conversationId": "a",
+          "state": "stopping",
+          "agentId": "specialist"
+        },
+        "agentId": "specialist"
+      },
+      "expected": "thinking"
+    },
+    {
+      "name": "settled cancellation clears stale activity",
+      "input": {
+        "activity": [
+          {
+            "conversation_id": "a",
+            "state": "thinking"
+          }
+        ],
+        "override": {
+          "conversationId": "a",
+          "state": "idle",
+          "agentId": "specialist"
+        },
+        "agentId": "specialist"
+      },
+      "expected": "idle"
+    },
+    {
+      "name": "settled success clears stale activity without a roster one-shot",
+      "input": {
+        "activity": [
+          {
+            "conversation_id": "a",
+            "state": "working"
+          }
+        ],
+        "override": {
+          "conversationId": "a",
+          "state": "success",
+          "agentId": "specialist"
+        },
+        "agentId": "specialist"
+      },
+      "expected": "idle"
+    },
+    {
+      "name": "settled failure clears its thread while a different thread works",
+      "input": {
+        "activity": [
+          {
+            "conversation_id": "a",
+            "state": "approval"
+          },
+          {
+            "conversation_id": "b",
+            "state": "working"
+          }
+        ],
+        "override": {
+          "conversationId": "a",
+          "state": "failure",
+          "agentId": "specialist"
+        },
+        "agentId": "specialist"
+      },
+      "expected": "working"
+    },
+    {
+      "name": "settled failure leaves possible work from another thread",
+      "input": {
+        "running": true,
+        "override": {
+          "conversationId": "a",
+          "state": "failure",
+          "agentId": "specialist"
+        },
+        "agentId": "specialist"
+      },
+      "expected": "thinking"
+    },
+    {
+      "name": "voice activity stays scoped to the voice view",
+      "input": {
+        "activity": [],
+        "override": {
+          "conversationId": "a",
+          "state": "speaking",
+          "agentId": "specialist"
+        },
+        "agentId": "specialist"
+      },
+      "expected": "idle"
+    },
+    {
+      "name": "coarse running survives an idle watched thread",
+      "input": {
+        "agentId": "specialist",
+        "running": true,
+        "override": {
+          "agentId": "specialist",
+          "conversationId": "a",
+          "state": "idle"
+        }
+      },
+      "expected": "thinking"
+    },
+    {
+      "name": "confirmed drafting outranks coarse running",
+      "input": {
+        "agentId": "specialist",
+        "running": true,
+        "override": {
+          "agentId": "specialist",
+          "conversationId": "a",
+          "state": "drafting"
+        }
+      },
+      "expected": "drafting"
+    },
+    {
+      "name": "settled failure without observed work stays idle",
+      "input": {
+        "agentId": "specialist",
+        "override": {
+          "agentId": "specialist",
+          "conversationId": "a",
+          "state": "failure"
+        }
+      },
+      "expected": "idle"
+    },
+    {
+      "name": "another agent cannot replace a cached observation for the same conversation ID",
+      "input": {
+        "agentId": "specialist",
+        "activity": [
+          {
+            "conversation_id": "a",
+            "state": "working"
+          }
+        ],
+        "override": {
+          "agentId": "other",
+          "conversationId": "a",
+          "state": "approval"
+        }
+      },
+      "expected": "working"
+    }
+  ]
+}

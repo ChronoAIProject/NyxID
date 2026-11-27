@@ -110,24 +110,55 @@ pub async fn plan(
     }
 }
 
+#[cfg(test)]
 pub async fn before_effect(db: &Database, event: &str, claim: &str, part: u32) -> AppResult<()> {
+    before_text_effect(db, event, None, claim, part).await
+}
+
+pub(crate) async fn before_text_effect(
+    db: &Database,
+    event: &str,
+    source: Option<&NyxbotEvent>,
+    claim: &str,
+    part: u32,
+) -> AppResult<()> {
     // Repeated provider calls inside a part are allowed only for this still-live
     // irreversible claim (for example Telegram's explicit formatting refusal).
     let filter = doc! {"_id":event,"delivery.version":1,"delivery.claim_id":claim,
     "delivery.preparation.version":1,"delivery.preparation.next":part,
     "delivery.state":{"$in":["preparing_text","sending"]},
     "$expr":{"$gt":["$delivery.preparation.lease_until","$$NOW"]}};
-    let result=db.collection::<Document>(EVENTS).update_one(filter,vec![doc! {"$set":{
+    let pipeline = vec![doc! {"$set":{
         "delivery.preparation.lease_until":{"$cond":[{"$eq":["$delivery.state","preparing_text"]},
             {"$add":["$$NOW",SEND_SECS*1000]},"$delivery.preparation.lease_until"]},
         "delivery.state":"sending","delivery.checked_at":"$$NOW",
         "delivery.gateway_attempted":{"$cond":[{"$eq":["$delivery.transport","gateway"]},true,"$$REMOVE"]},
-    }}]).await?;
-    if result.matched_count == 1 {
-        Ok(())
+    }}];
+    commit_text_effect(db, source, filter, pipeline).await
+}
+
+async fn commit_text_effect(
+    db: &Database,
+    source: Option<&NyxbotEvent>,
+    filter: Document,
+    pipeline: Vec<Document>,
+) -> AppResult<()> {
+    use super::channel_guest_access as guest;
+    let committed = if let Some(event) = source.filter(|event| {
+        event
+            .conversation_id
+            .as_deref()
+            .is_some_and(guest::is_hosted_conversation)
+    }) {
+        guest::claim_hosted_delivery(db, event, filter, pipeline).await?
     } else {
-        Err(lost())
-    }
+        db.collection::<Document>(EVENTS)
+            .update_one(filter, pipeline)
+            .await?
+            .matched_count
+            == 1
+    };
+    if committed { Ok(()) } else { Err(lost()) }
 }
 
 pub async fn accepted(

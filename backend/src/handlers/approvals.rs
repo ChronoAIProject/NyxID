@@ -2376,6 +2376,21 @@ mod tests {
     }
 
     #[test]
+    fn cli_deny_contracts_require_approved_boolean() {
+        for fixture in [
+            include_str!("../../../cli/tests/fixtures/approval-deny.json"),
+            include_str!("../../../cli/tests/fixtures/approval-deny-with-reason.json"),
+        ] {
+            let request: DecideRequest = serde_json::from_str(fixture).unwrap();
+            assert!(!request.approved);
+            assert_eq!(request.duration_sec, None);
+        }
+        for legacy in [r#"{"decision":"approved"}"#, r#"{"decision":"denied"}"#] {
+            assert!(serde_json::from_str::<DecideRequest>(legacy).is_err());
+        }
+    }
+
+    #[test]
     fn decide_response_serialization_with_decided_at() {
         let resp = DecideResponse {
             id: "req_1".to_string(),

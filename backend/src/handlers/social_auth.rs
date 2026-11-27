@@ -65,6 +65,16 @@ pub async fn authorize(
             "Use the mobile-code endpoint for code delivery".into(),
         ));
     }
+    if query.client.as_deref() == Some(SOCIAL_CLIENT_MOBILE) {
+        let uri = query
+            .redirect_uri
+            .as_deref()
+            .filter(|uri| is_supported_mobile_redirect_uri(uri, &state.config))
+            .ok_or_else(|| {
+                AppError::ValidationError("redirect_uri is not allowed for mobile auth".into())
+            })?;
+        return Ok(retired_mobile_redirect(&state, uri));
+    }
     start_social(
         state,
         callback_origin,
@@ -957,6 +967,13 @@ async fn finish_social_sign_in(
     } = input;
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
+    if let SocialRedirectTarget::Mobile {
+        redirect_uri,
+        code_challenge: None,
+    } = redirect_target
+    {
+        return Err(retired_mobile_redirect(state, redirect_uri));
+    }
     let mobile_exempt = user.mfa_enabled
         && matches!(redirect_target, SocialRedirectTarget::Mobile { .. })
         && !crate::services::feature_flag_service::mobile_mfa_required(&state.db, &user.id)
@@ -1011,15 +1028,7 @@ async fn finish_social_sign_in(
             )
             .await;
 
-            build_web_auth_redirect(
-                &session,
-                redirect_target,
-                provider,
-                &user.id,
-                signup_has_name,
-                secure,
-                domain,
-            )
+            build_web_auth_redirect(&session, redirect_target, signup_has_name, secure, domain)
         }
         SocialRedirectTarget::Mobile {
             redirect_uri,
@@ -1029,53 +1038,31 @@ async fn finish_social_sign_in(
                 tracing::error!(error = ?e, "Social auth session creation failed");
                 redirect_with_error(redirect_target, "social_auth_exchange", secure, domain)
             };
-            let (session_id, location) = if let Some(challenge) = code_challenge {
-                let prepared = token_service::prepare_mobile_social_tokens(
-                    &state.db,
-                    &state.config,
-                    &state.jwt_keys,
-                    &user.id,
-                    ip.as_deref(),
-                    ua.as_deref(),
-                    mobile_exempt,
-                )
-                .await
-                .map_err(failed)?;
-                let session_id = prepared.tokens.session_id.clone();
-                let code = mobile::issue_code(
-                    &state.db,
-                    &state.encryption_keys,
-                    prepared,
-                    &user.id,
-                    challenge,
-                )
-                .await
-                .map_err(failed)?;
-                (
-                    session_id,
-                    format!("{redirect_uri}?status=success&provider={provider}&code={code}"),
-                )
-            } else {
-                let tokens = token_service::create_mobile_social_tokens(
-                    &state.db,
-                    &state.config,
-                    &state.jwt_keys,
-                    &user.id,
-                    ip.as_deref(),
-                    ua.as_deref(),
-                    mobile_exempt,
-                )
-                .await
-                .map_err(failed)?;
-                let location = build_success_redirect_url(
-                    redirect_target,
-                    provider,
-                    &user.id,
-                    Some(&tokens),
-                    signup_has_name,
-                );
-                (tokens.session_id, location)
+            let Some(challenge) = code_challenge else {
+                return Err(retired_mobile_redirect(state, redirect_uri));
             };
+            let prepared = token_service::prepare_mobile_social_tokens(
+                &state.db,
+                &state.config,
+                &state.jwt_keys,
+                &user.id,
+                ip.as_deref(),
+                ua.as_deref(),
+                mobile_exempt,
+            )
+            .await
+            .map_err(failed)?;
+            let session_id = prepared.tokens.session_id.clone();
+            let code = mobile::issue_code(
+                &state.db,
+                &state.encryption_keys,
+                prepared,
+                &user.id,
+                challenge,
+            )
+            .await
+            .map_err(failed)?;
+            let location = format!("{redirect_uri}?status=success&provider={provider}&code={code}");
 
             audit_service::log_async(
                 state.db.clone(),
@@ -1156,8 +1143,6 @@ fn append_social_cleanup_cookies(
 fn build_web_auth_redirect(
     session: &token_service::IssuedSession,
     target: &SocialRedirectTarget,
-    provider: &str,
-    user_id: &str,
     signup_has_name: Option<bool>,
     secure: bool,
     domain: Option<&str>,
@@ -1168,7 +1153,8 @@ fn build_web_auth_redirect(
         .map_err(|_| redirect_with_error(target, "social_auth_exchange", secure, domain))?;
     append_social_cleanup_cookies(&mut headers, target, secure, domain)?;
 
-    let redirect_url = build_success_redirect_url(target, provider, user_id, None, signup_has_name);
+    let redirect_url = build_web_success_redirect_url(target, signup_has_name)
+        .ok_or_else(|| redirect_with_error(target, "social_auth_exchange", secure, domain))?;
     headers.insert(
         header::LOCATION,
         redirect_url
@@ -1356,13 +1342,10 @@ pub async fn continue_signup(
     Ok(axum::response::Redirect::to(&query.return_to))
 }
 
-fn build_success_redirect_url(
+fn build_web_success_redirect_url(
     target: &SocialRedirectTarget,
-    provider: &str,
-    user_id: &str,
-    tokens: Option<&token_service::IssuedTokens>,
     signup_has_name: Option<bool>,
-) -> String {
+) -> Option<String> {
     // The release image builds with Rust 1.93, which has no `if let` match guards.
     if let (
         SocialRedirectTarget::Web {
@@ -1389,30 +1372,17 @@ fn build_success_redirect_url(
                 location.push_str(&urlencoding::encode(&resume));
             }
         }
-        return location;
+        return Some(location);
     }
     match target {
         SocialRedirectTarget::Web {
             frontend_url,
             return_to,
-        } => match return_to {
+        } => Some(match return_to {
             Some(url) => url.clone(),
             None => frontend_url.trim_end_matches('/').to_string() + "/",
-        },
-        SocialRedirectTarget::Mobile { redirect_uri, .. } => {
-            let tokens = tokens.expect("mobile redirect requires issued tokens");
-            let joiner = if redirect_uri.contains('?') { "&" } else { "?" };
-            format!(
-                "{}{}status=success&provider={}&user_id={}&access_token={}&refresh_token={}&expires_in={}",
-                redirect_uri,
-                joiner,
-                urlencoding::encode(provider),
-                urlencoding::encode(user_id),
-                urlencoding::encode(&tokens.access_token),
-                urlencoding::encode(&tokens.refresh_token),
-                tokens.access_expires_in
-            )
-        }
+        }),
+        SocialRedirectTarget::Mobile { .. } => None,
     }
 }
 
@@ -1490,6 +1460,18 @@ fn redirect_with_error(
 
 type RedirectReply = (StatusCode, HeaderMap, ());
 
+fn retired_mobile_redirect(app: &AppState, redirect_uri: &str) -> RedirectReply {
+    redirect_with_error(
+        &SocialRedirectTarget::Mobile {
+            redirect_uri: redirect_uri.to_owned(),
+            code_challenge: None,
+        },
+        "social_auth_update_required",
+        app.config.use_secure_cookies(),
+        app.config.cookie_domain(),
+    )
+}
+
 async fn callback_target(
     app: &AppState,
     headers: &HeaderMap,
@@ -1513,7 +1495,7 @@ async fn callback_target(
         // Older starts have no durable receipt. The installed app recognizes
         // the retry error at its fixed login destination.
         if raw.contains(".m.") {
-            return Err(fixed_error("social_auth_csrf"));
+            return Err(retired_mobile_redirect(app, SOCIAL_CALLBACK));
         }
         return Ok((resolve_redirect_target(headers, &app.config), None));
     };
@@ -1534,6 +1516,9 @@ async fn callback_target(
         .map_err(|_| fixed_error("social_auth_exchange"))?
         .filter(|flow| is_supported_mobile_redirect_uri(&flow.redirect_uri, &app.config))
         .ok_or_else(|| fixed_error("social_auth_csrf"))?;
+    if flow.code_challenge.is_none() {
+        return Err(retired_mobile_redirect(app, &flow.redirect_uri));
+    }
     Ok((
         SocialRedirectTarget::Mobile {
             redirect_uri: flow.redirect_uri,
@@ -1758,8 +1743,7 @@ mod tests {
                 return_to: return_to.map(str::to_owned),
             };
             for (has_name, mode) in [(true, "provider"), (false, "empty")] {
-                let signup =
-                    build_success_redirect_url(&target, "github", "user", None, Some(has_name));
+                let signup = build_web_success_redirect_url(&target, Some(has_name)).unwrap();
                 let url = url::Url::parse(&signup).unwrap();
                 assert_eq!(
                     url.origin().ascii_serialization(),
@@ -1782,7 +1766,7 @@ mod tests {
                 assert_eq!(query.next(), None);
             }
             assert_eq!(
-                build_success_redirect_url(&target, "github", "user", None, None),
+                build_web_success_redirect_url(&target, None).unwrap(),
                 return_to.unwrap_or(frontend)
             );
         }
@@ -1815,6 +1799,7 @@ mod tests {
         use crate::services::billing::schedules::eligibility::tests::{
             assert_login_credits, login_test_schedule,
         };
+        use crate::services::oauth_flow::{generate_code_challenge, generate_code_verifier};
         let db =
             crate::test_utils::connect_transaction_test_database("social_credit_loading").await;
         let state = crate::test_utils::test_app_state(db.clone());
@@ -1827,7 +1812,8 @@ mod tests {
             },
             SocialRedirectTarget::Mobile {
                 redirect_uri: "nyxid://auth/social/callback".into(),
-                code_challenge: None,
+                // #3017 requires an S256 challenge for mobile social code delivery.
+                code_challenge: Some(generate_code_challenge(&generate_code_verifier())),
             },
         ] {
             let id = uuid::Uuid::new_v4().to_string();
@@ -1940,9 +1926,12 @@ mod tests {
             .insert_one(&user)
             .await
             .unwrap();
+        let verifier = "v".repeat(43);
         let mobile = SocialRedirectTarget::Mobile {
             redirect_uri: "nyxid://auth/social/callback".into(),
-            code_challenge: None,
+            code_challenge: Some(crate::services::oauth_flow::generate_code_challenge(
+                &verifier,
+            )),
         };
         let web = SocialRedirectTarget::Web {
             frontend_url: "https://app.example.com".into(),
@@ -1968,7 +1957,14 @@ mod tests {
                 url.query_pairs()
                     .any(|(k, v)| k == "status" && v == "success")
             );
-            assert!(url.query_pairs().any(|(k, _)| k == "access_token"));
+            let code = url.query_pairs().find(|(key, _)| key == "code").unwrap().1;
+            assert!(
+                !url.query_pairs()
+                    .any(|(key, _)| key == "access_token" || key == "refresh_token")
+            );
+            mobile::redeem(&state.db, &state.encryption_keys, &code, &verifier)
+                .await
+                .unwrap();
             let (_, headers, _) = finish_social_sign_in(SocialSignIn {
                 state: &state,
                 user: &user,

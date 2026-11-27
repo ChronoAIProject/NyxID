@@ -63,7 +63,17 @@ export type AgentIdentity = {
   readonly name: string;
   readonly kind: "nyxbot" | "specialist" | "unknown";
   readonly display_name?: string | null;
+  /** The chosen avatar; absent, null or unknown derives the default. */
+  readonly avatar?: StoredAvatar | null;
 };
+
+/** An avatar as the server sends it (ids are plain strings). */
+export type StoredAvatar =
+  import("../../../shared/agent-avatars/model").AvatarConfig;
+
+/** Below this many points the blob still is simplified to body and eyes,
+ * and never animates. */
+export const SMALL_AVATAR_PIXELS = 24;
 
 export function agentTintIndex(id: string): number {
   let hash = 0x811c9dc5;

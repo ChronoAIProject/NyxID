@@ -57,7 +57,11 @@ export function useNativeVoice(
   const { t } = useAppLanguage();
   const translate = useRef(t);
   translate.current = t;
-  const [media, setMedia] = useState<NativeVoiceMedia | null>(null);
+  const [mediaSession, setMediaSession] = useState<{
+    media: NativeVoiceMedia;
+    protocol: VoiceProtocol;
+  } | null>(null);
+  const media = mediaSession?.media ?? null;
   const [mediaAttempt, setMediaAttempt] = useState(0);
   const [starting, setStarting] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -240,7 +244,7 @@ export function useNativeVoice(
     nativeConnected.current = false;
     busy.current = false;
     conflictBusy.current = false;
-    setMedia(null);
+    setMediaSession(null);
     latestSnapshot.current = null;
     setSnapshot(null);
     setConnectedAt(undefined);
@@ -708,7 +712,7 @@ export function useNativeVoice(
       });
       current.current = next;
       clientThread.current = thread;
-      setMedia(nextMedia);
+      setMediaSession({ media: nextMedia, protocol });
       setMediaAttempt(generation);
       await next.start(preferences, protocol);
       if (valid() && next.isClosed) current.current = null;
@@ -1149,6 +1153,7 @@ export function useNativeVoice(
 
   return {
     media,
+    mediaProtocol: mediaSession?.protocol,
     mediaAttempt,
     starting,
     connected,

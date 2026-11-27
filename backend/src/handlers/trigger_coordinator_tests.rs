@@ -901,6 +901,7 @@ fn authority(
     crate::services::assistant_acknowledgement_service::ChatAuthority {
         key_version: 0,
         voice_parent_conversation_id: None,
+        channel_guest: None,
         platform_model_context: None,
         automation_work: turn.automation_work.clone(),
         execution_group_id: None,

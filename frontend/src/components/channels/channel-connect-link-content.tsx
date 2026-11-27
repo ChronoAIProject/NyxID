@@ -2,6 +2,7 @@ import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { GuestSetupEditor } from "@/features/channel-guest-access/guest-setup";
 import { ChannelBotSetup } from "@/components/channels/channel-bot-setup";
 import { ChannelConnectionShell } from "@/components/channels/channel-connection-shell";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -166,6 +167,7 @@ function ConnectSession({
                     value1: current.status,
                   })}
           </p>
+          {current.bot_id && <GuestSetupEditor botId={current.bot_id} />}
           {!terminal && (
             <Button
               variant="primary"

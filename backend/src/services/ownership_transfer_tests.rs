@@ -1509,6 +1509,17 @@ async fn bot_transfer_retires_routes_without_moving_history_or_agent_keys() {
     f.db.collection::<Document>(BOTS).update_one(doc! { "_id": &bot.id },
         doc! { "$set": { "updated_at": bson::DateTime::from_millis(bot.updated_at.timestamp_millis() + 1), "status": "active" } })
         .await.unwrap();
+    f.db.collection::<Document>(BOTS)
+        .update_one(doc! {"_id":&bot.id}, doc! {"$set":{
+            "guest_access_v1":true,"guest_access_v1_revision":1_i64,"channel_guest_data_present":true,
+        }})
+        .await.unwrap();
+    let records =
+        f.db.collection::<Document>(crate::models::channel_guest_personal_record::COLLECTION_NAME);
+    records
+        .insert_one(doc! {"_id":"retiring-record","bot_id":&bot.id,"bot_ownership_version":0_i64})
+        .await
+        .unwrap();
     assert!(require_current_bot(&f.db, &bot).await.is_ok());
     let conversation = Uuid::new_v4().to_string();
     let agent = Uuid::new_v4().to_string();
@@ -1551,6 +1562,29 @@ async fn bot_transfer_retires_routes_without_moving_history_or_agent_keys() {
             .unwrap();
     assert_eq!(saved.user_id, f.destination);
     assert_eq!(saved.ownership_version, 1);
+    assert!(saved.guest_access_v1);
+    assert_eq!(saved.guest_access_v1_revision, 2);
+    records
+        .insert_one(doc! {"_id":"current-record","bot_id":&bot.id,"bot_ownership_version":1_i64})
+        .await
+        .unwrap();
+    super::channel_bot_service::sweep_guest_retirement(&f.db)
+        .await
+        .unwrap();
+    assert!(
+        records
+            .find_one(doc! {"_id":"retiring-record"})
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        records
+            .find_one(doc! {"_id":"current-record"})
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert_ne!(saved.bot_token_encrypted, bot.bot_token_encrypted);
     let keys = test_utils::test_encryption_keys();
     assert_eq!(
@@ -3094,4 +3128,115 @@ async fn whatsapp_transfer_retains_the_enrollment_token_under_its_original_gener
     assert!(wa::load(&f.db, &destination).await.unwrap().is_none());
     assert!(rows.find_one(id).await.unwrap().unwrap() == current);
     f.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn enforce_admin_mfa_gates_cross_owner_access_and_preserves_own_transfers() {
+    use crate::handlers::admin_ownership::{self, PreviewRequest, ResourceQuery, TransferRequest};
+    use axum::{
+        Json,
+        extract::{Path, Query, State},
+    };
+
+    let f = fixture("ownership_mfa_session").await;
+    let mut state = test_utils::test_app_state(f.db.clone());
+    state.config.admin_mfa_enforcement = crate::config::AdminMfaEnforcement::Enforce;
+    f.db.collection::<Document>(USERS)
+        .update_one(
+            doc! { "_id": &f.admin },
+            doc! { "$set": { "mfa_enabled": true } },
+        )
+        .await
+        .unwrap();
+
+    let path = || Path((ResourceKind::Service, f.service.id.clone()));
+    let query = || {
+        Query(ResourceQuery {
+            owner_user_id: None,
+            search: None,
+            offset: 0,
+        })
+    };
+    let destination = || {
+        Json(PreviewRequest {
+            new_owner_user_id: f.destination.clone(),
+        })
+    };
+    let mut admin = test_utils::test_auth_user(&f.admin);
+    admin.session_id = Some(Uuid::new_v4());
+    admin.mfa_enabled = Some(true);
+    assert!(matches!(
+        admin_ownership::list_resources(
+            State(state.clone()),
+            admin.clone(),
+            Path(ResourceKind::Service),
+            query()
+        )
+        .await,
+        Err(AppError::MfaStepUpRequired)
+    ));
+    assert!(matches!(
+        Box::pin(admin_ownership::preview(
+            State(state.clone()),
+            admin.clone(),
+            path(),
+            destination()
+        ))
+        .await,
+        Err(AppError::MfaStepUpRequired)
+    ));
+    let request = |version| {
+        Json(TransferRequest {
+            new_owner_user_id: f.destination.clone(),
+            request_id: Uuid::new_v4().to_string(),
+            expected_version: version,
+        })
+    };
+    let owner = test_utils::test_auth_user(&f.owner);
+    let Json(review) = Box::pin(admin_ownership::preview(
+        State(state.clone()),
+        owner.clone(),
+        path(),
+        destination(),
+    ))
+    .await
+    .unwrap();
+    assert!(matches!(
+        Box::pin(admin_ownership::transfer(
+            State(state.clone()),
+            admin.clone(),
+            path(),
+            request(review.version.clone()),
+        ))
+        .await,
+        Err(AppError::MfaStepUpRequired)
+    ));
+    admin.mfa_assured = true;
+    let Json(resources) = admin_ownership::list_resources(
+        State(state.clone()),
+        admin.clone(),
+        Path(ResourceKind::Service),
+        query(),
+    )
+    .await
+    .unwrap();
+    assert!(resources.items.iter().any(|item| item.id == f.service.id));
+    let Json(admin_review) = Box::pin(admin_ownership::preview(
+        State(state.clone()),
+        admin,
+        path(),
+        destination(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(admin_review.previous_owner_user_id, f.owner);
+    let Json(moved) = Box::pin(admin_ownership::transfer(
+        State(state),
+        owner,
+        path(),
+        request(review.version),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(moved.new_owner_user_id, f.destination);
 }

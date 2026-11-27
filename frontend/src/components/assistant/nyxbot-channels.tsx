@@ -1,6 +1,7 @@
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { OrgChannelDisclosure } from "./org-channel-preview";
 import type { OrgChannelPreview } from "@/schemas/org-specialist-channel";
+import { GuestSetupLink } from "@/features/channel-guest-access/guest-setup";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useDrawerSearchEntries } from "@/lib/drawer-search";
@@ -467,6 +468,7 @@ export function ChannelBotsManager({
                 <BotAudienceSettings channel={row} agent={agent?.id === agentOf(row) ? agent : agents.find((candidate) => candidate.id === agentOf(row))}
                   canManage={canManage} busy={busy || !target}
                   onReconnect={() => { if (target) void requestLink(row.channel_bot_id, target.id); }} />
+                {canManage && live ? <GuestSetupLink botId={row.channel_bot_id} /> : null}
                 {row.org_specialist && live ? (
                   <OrgSpecialistChannelSettings id={row.id} />
                 ) : null}

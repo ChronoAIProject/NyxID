@@ -1718,6 +1718,72 @@ The reply-token path skips the API-key branch's "caller must be the assigned age
 
 A leaked reply token authorizes one reply, later edits of that reply, and reads of the bound inbound message's attachments until expiry (default 30 minutes). Contrast with a leaked `full_key`, which grants unbounded access to everything the agent key can do until manually revoked.
 
+#### Guest access rollout
+
+For enrolled external callbacks, NyxID stores the original receipt and guest
+admission together. Callback retries retain that admission and the original
+destination. These callbacks omit `X-NyxID-User-Token` and carry a
+`channel-relay/guest-reply-v1` reply audience. The reply capability permits one
+text reply and subsequent edits at the original destination within its expiry.
+The assigned agent key can send or edit a shared reply against its original
+message while the admission is current. A private reply or edit requires the
+per-message capability. Old callbacks stop working when enrollment, policy
+revision, or assignment changes.
+
+An enrolled external callback requires an ordinary agent key explicitly
+dedicated to its exact route. On route creation or update, set
+`dedicate_agent_key_for_guest_access` to true. The route response
+`guest_access_state` identifies the active mode or preparation reason. An
+untouched route with a shared key continues normal relay. Explicit dedication
+requires a compatible key unused by other routes. PATCH with false releases
+a dedication that has yet to admit guest work.
+
+| Route and rollout state | Key and callback authority |
+| --- | --- |
+| Dedicated route active in the add-on | The durable key can reply to original shared sources. Private replies require the source capability. General key use is blocked. |
+| Live original assignment after global or bot opt-out | Fresh ordinary callbacks use the original assigned key and receive a freshly signed bearer bound to the current rollout, bot preference and route revision. Earlier broad bearers and add-on capabilities remain invalid. |
+| Activated assignment removed, retired, transferred or suspended | Old broad credentials are blocked. To repurpose a previously activated key, rotate it and use the successor. Rotation revokes the predecessor and its children. |
+| Dedicated route waiting for a pending ordinary Aurinko callback | The original receipt resumes the ordinary callback. Pending and failed callbacks keep the route ordinary until they settle or their retained message metadata expires. |
+
+If the guest selector is temporarily unavailable, relay can send a signed
+callback to the original verified hosted route. The stored receipt carries
+the outage through retries, and the callback omits the owner bearer.
+Hosted admission applies the existing verified owner or member authority and
+refuses guest execution until it can classify a fresh source. Generic
+external destinations receive no callback while that selector read fails.
+
+An enrolled callback also carries `guest_access_token`. External runtimes
+use it as the Bearer credential for `POST /api/v1/channel-relay/guest-tools`.
+The `list` operation takes `{"operation":"list"}` and returns `tools`. The
+`call` operation takes `operation`, a UUID `request_id`, `tool_name`, and
+`arguments`. Each call binds to the original guest, destination, provider
+event, bot, assigned key, and policy revision. A committed request ID cannot
+run twice. The endpoint currently runs policy-authorized bot-owned personal
+record operations and observes the owner's approval setting. External
+callbacks need a verified specialist association to use hosted service or
+skill grants. The runtime configures its own conversation isolation and
+provider credentials independently of this capability.
+
+NyxID can positively verify one-to-one delivery from Telegram user messages,
+Lark and Feishu app-bound p2p messages, Discord type-1 DMs, Slack IM events,
+WhatsApp individual inbound messages, and authenticated X DMs whose
+conversation identifies both the sender and the receiving account. Messenger
+and Instagram require the signed participant, current inbox grant, live control,
+and reply window. Guest Discord interaction handles use record-bound encryption
+and require contextual record writers to be enabled before enrollment.
+Supported provider-verified group messages retain their sender identity with
+a shared audience. An adapter without positive evidence uses an unverified
+actor and a shared audience. A normalized gateway event alone provides no
+private destination. Live group membership for named audiences requires
+independent evidence at authorization time.
+
+The one-way device gateway carries a caller-supplied source label and issues
+no guest capability. NyxBot custom events enter the hosted guest lane with a
+shared audience. Phone, SMS, and custom speech adapters use the rollout of
+their verified same-owner parent installation when setup includes
+`parent_channel_bot_id`. An enrolled parent closes unclassified guest
+utterances and tool effects. Standalone bindings keep ordinary behavior.
+
 ### Callback Flow Decision
 
 ```mermaid

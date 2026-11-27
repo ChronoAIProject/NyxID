@@ -293,3 +293,6 @@ pub(super) const MOBILE_SOCIAL_BASE_DIGEST: &str =
 
 pub(super) const META_CONSENT_BASE_DIGEST: &str =
     "72d9fc2dca536136c4a9a4ae34ee542299ec7c517cae2fa5f039912f2a95169d";
+
+pub(super) const BEFORE_CHANNEL_GUEST_DIGEST: &str =
+    "c526844b3d17aa7a1211f84b3e167ffa92c1e7fae23853506517fc966a0a8dae";

@@ -608,7 +608,10 @@ async fn nyxbot_gateway_stream_keeps_alive_while_images_precede_committed_text()
         f.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        receiver,
+        InboundTurn {
+            receiver,
+            hosted_reply: None,
+        },
         Utc::now(),
     );
     let text = body_text(response).await;

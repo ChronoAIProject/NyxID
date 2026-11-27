@@ -215,6 +215,13 @@ const SKILL_RUNS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_AVATARS_FLAG_KEY: &str = "assistant:avatars";
+const ASSISTANT_AVATARS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_AVATARS_FLAG_KEY,
+    description: "Personalised agent avatars and the avatar editor. Stored configurations are retained while disabled.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_MODEL_CONTROLS_FLAG_KEY: &str = "assistant:model-controls";
 const ASSISTANT_MODEL_CONTROLS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_MODEL_CONTROLS_FLAG_KEY,
@@ -446,12 +453,19 @@ const MOBILE_NEW_DOMAINS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+const CHANNEL_GUEST_ACCESS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: super::channel_guest_access::FLAG,
+    description: "Enable the channel guest audience add-on for selected bots. Global only and requires serving-fleet readiness.",
+    default_enabled: false,
+};
+
 /// Flags resolved without a user or organization; only a global override applies.
 const GLOBAL_ONLY_FLAG_KEYS: &[&str] = &[
     OAUTH_REFRESH_CLIENT_AUTH_FLAG_KEY,
     INVITATION_CODE_FLAG_KEY,
     OAUTH_EXACT_REDIRECTS_FLAG_KEY,
     APP_TOKEN_MANAGEMENT_FLAG_KEY,
+    super::channel_guest_access::FLAG,
     MOBILE_NEW_DOMAINS_FLAG_KEY,
     CMA_SANDBOX_RATE_SYNC_FLAG_KEY,
 ];
@@ -554,9 +568,11 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     OAUTH_EXACT_REDIRECTS_FLAG,
     APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
+    CHANNEL_GUEST_ACCESS_FLAG,
     MOBILE_MFA_FLAG,
     STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
+    ASSISTANT_AVATARS_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     ASSISTANT_CMA_SANDBOXES_FLAG,
@@ -636,9 +652,11 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     OAUTH_EXACT_REDIRECTS_FLAG,
     APP_TOKEN_MANAGEMENT_FLAG,
     MOBILE_NEW_DOMAINS_FLAG,
+    CHANNEL_GUEST_ACCESS_FLAG,
     MOBILE_MFA_FLAG,
     STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
+    ASSISTANT_AVATARS_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     ASSISTANT_CMA_SANDBOXES_FLAG,
@@ -1360,6 +1378,10 @@ pub async fn app_token_management_enforced(db: &mongodb::Database) -> AppResult<
 
 pub async fn oauth_exact_redirects_enforced(db: &mongodb::Database) -> AppResult<bool> {
     global_flag_enabled(db, &OAUTH_EXACT_REDIRECTS_FLAG).await
+}
+
+pub(crate) async fn channel_guest_access_enabled(db: &mongodb::Database) -> AppResult<bool> {
+    global_flag_enabled(db, &CHANNEL_GUEST_ACCESS_FLAG).await
 }
 
 async fn global_flag_enabled(db: &mongodb::Database, flag: &FeatureFlagDef) -> AppResult<bool> {
@@ -2246,32 +2268,6 @@ mod tests {
                 .await
                 .unwrap();
         }
-        for flag in FEATURE_FLAGS.iter().filter(|flag| {
-            super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
-        }) {
-            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
-                assert!(matches!(
-                    set_platform_override(&db, flag.key, &target, true, &user).await,
-                    Err(AppError::SecurityReadinessUnavailable)
-                ));
-                assert!(
-                    !set_platform_override(&db, flag.key, &target, false, &user)
-                        .await
-                        .unwrap()
-                        .enabled
-                );
-            }
-            assert!(matches!(
-                set_platform_org_override(&db, &org, flag.key, true, &user).await,
-                Err(AppError::SecurityReadinessUnavailable)
-            ));
-            assert!(
-                !set_platform_org_override(&db, &org, flag.key, false, &user)
-                    .await
-                    .unwrap()
-                    .enabled
-            );
-        }
         // Ordinary flags retain enable/disable behavior without readiness.
         for enabled in [true, false] {
             for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
@@ -2291,24 +2287,44 @@ mod tests {
                 enabled
             );
         }
-        super::super::security_readiness_service::ready_test_replica(&db).await;
-        for flag in FEATURE_FLAGS.iter().filter(|flag| {
-            super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
-        }) {
-            for target in [FlagTarget::Global, FlagTarget::User(user.clone())] {
-                assert!(
-                    set_platform_override(&db, flag.key, &target, true, &user)
-                        .await
-                        .unwrap()
-                        .enabled
-                );
+        for ready in [false, true] {
+            if ready {
+                super::super::security_readiness_service::ready_test_replica(&db).await;
             }
-            assert!(
-                set_platform_org_override(&db, &org, flag.key, true, &user)
-                    .await
-                    .unwrap()
-                    .enabled
-            );
+            for flag in FEATURE_FLAGS.iter().filter(|flag| {
+                super::super::security_readiness_service::CAPABILITIES.contains(&flag.key)
+            }) {
+                for enabled in [true, false] {
+                    let global =
+                        set_platform_override(&db, flag.key, &FlagTarget::Global, enabled, &user)
+                            .await;
+                    let personal = set_platform_override(
+                        &db,
+                        flag.key,
+                        &FlagTarget::User(user.clone()),
+                        enabled,
+                        &user,
+                    )
+                    .await;
+                    let organization =
+                        set_platform_org_override(&db, &org, flag.key, enabled, &user).await;
+                    for (scoped, result) in
+                        [(false, global), (true, personal), (true, organization)]
+                    {
+                        if scoped && is_global_only(flag.key) {
+                            assert!(matches!(result, Err(AppError::BadRequest(message))
+                                if message == format!("{} supports only a global override", flag.key)));
+                        } else if enabled && !ready {
+                            assert!(matches!(
+                                result,
+                                Err(AppError::SecurityReadinessUnavailable)
+                            ));
+                        } else {
+                            assert_eq!(result.unwrap().enabled, enabled);
+                        }
+                    }
+                }
+            }
         }
         db.drop().await.unwrap();
     }
@@ -3596,9 +3612,11 @@ mod tests {
                 "auth:oauth-exact-redirects-v1",
                 "auth:app-token-management-v1",
                 "mobile:new-domains",
+                "nyxbot:guest-audience-v1",
                 "auth:mobile-mfa",
                 "auth:staging-qr-login",
                 "assistant:nyxagent-engine",
+                "assistant:avatars",
                 "assistant:model-controls",
                 "assistant:workspace-preview",
                 "assistant:cma-sandboxes",
