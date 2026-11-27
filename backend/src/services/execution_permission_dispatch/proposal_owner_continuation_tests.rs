@@ -688,7 +688,13 @@ async fn owner_permission_resume_private_success_recovers_before_release_and_nev
 
 #[tokio::test]
 async fn owner_permission_resume_failed_http_and_historical_receipts_never_launch_model() {
-    for (status, missing) in [(200, "historical"), (200, "result"), (400, ""), (500, "")] {
+    for (status, missing) in [
+        (200, "historical"),
+        (200, "result"),
+        (200, "malformed_result"),
+        (400, ""),
+        (500, ""),
+    ] {
         let (f, row) = assistant("owner_resume_terminal_receipts").await;
         set_task(&f, &row).await;
         sheet(&f, status).await;
@@ -726,7 +732,13 @@ async fn owner_permission_resume_failed_http_and_historical_receipts_never_launc
                 .await
                 .unwrap();
         }
-        if missing == "result" {
+        if matches!(missing, "result" | "malformed_result") {
+            // Real retention removes the encrypted value and its context
+            // marker together. A mismatched record must still fail closed.
+            let mut unset = doc! {"execution_proposal.v1.result":""};
+            if missing == "result" {
+                unset.insert("execution_proposal.v1.result_context_version", "");
+            }
             f.state
                 .db
                 .collection::<Document>("approval_requests")
@@ -734,16 +746,21 @@ async fn owner_permission_resume_failed_http_and_historical_receipts_never_launc
                     doc! {"_id":&write.id},
                     proposals::v3::AssistantVersion::of(&write)
                         .unwrap()
-                        .update(doc! {"$unset":{"execution_proposal.v1.result":""}}),
+                        .update(doc! {"$unset":unset}),
                 )
                 .await
                 .unwrap();
         }
-        let result = execute(&f, &resumed).await.unwrap();
-        if missing == "result" {
-            assert!(result.text.contains("no longer available"));
+        let result = execute(&f, &resumed).await;
+        if missing == "malformed_result" {
+            assert_eq!(result.unwrap_err().stage, "permission_resume");
         } else {
-            assert!(result.text.contains(&format!("HTTP {status}")));
+            let result = result.unwrap();
+            if missing == "result" {
+                assert!(result.text.contains("no longer available"));
+            } else {
+                assert!(result.text.contains(&format!("HTTP {status}")));
+            }
         }
         assert_eq!(model.calls.lock().unwrap().len(), 1);
         assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
@@ -813,12 +830,11 @@ async fn owner_permission_resume_release_without_model_receipt_is_irreversible()
     .await
     .unwrap();
     let resumed = event_turn(&f, &row).await;
-    assert!(
-        proposals::continuation::FAIL_AFTER_RELEASE
-            .scope(true, execute(&f, &resumed))
-            .await
-            .is_err()
-    );
+    let error = proposals::continuation::FAIL_AFTER_RELEASE
+        .scope(true, execute(&f, &resumed))
+        .await
+        .unwrap_err();
+    assert_eq!(error.stage, "permission_release");
     assert_eq!(model.calls.lock().unwrap().len(), 1);
     assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
     assert!(
@@ -1126,7 +1142,16 @@ async fn owner_permission_resume_readiness_failure_preserves_known_success_and_a
         } else {
             readiness_dependency(&f, true).await;
         }
-        assert!(execute(&f, &resumed).await.is_err());
+        let error = execute(&f, &resumed).await.unwrap_err();
+        assert_eq!(error.code, "assistant_unavailable");
+        assert_eq!(
+            error.stage,
+            if after_send {
+                "permission_release"
+            } else {
+                "permission_resume"
+            }
+        );
         assert_eq!(
             f.server.received_requests().await.unwrap().len(),
             usize::from(after_send)
@@ -1257,41 +1282,264 @@ async fn owner_permission_resume_private_terminal_receipts_survive_the_task_dead
 
 #[tokio::test]
 async fn owner_permission_resume_reuses_the_runners_verified_credential() {
-    let (f, row) = assistant("owner_resume_existing_credential").await;
-    set_task(&f, &row).await;
-    let _ = sheet(&f, 200).await;
-    let model = model(&f, false).await;
-    run(&f, &row).await;
-    let request = pending(&f, None).await;
-    proposals::decide(
-        &f.state,
-        &f.owner,
-        &request.id,
-        &decision(&request, "persistent"),
-    )
-    .await
-    .unwrap();
-    let resumed = event_turn(&f, &row).await;
-    let credential = load_credential(&f, &resumed).await;
-    assert_eq!(
+    for revoke_relationship in [false, true] {
+        let (f, row) = assistant("owner_resume_existing_credential").await;
+        set_task(&f, &row).await;
+        let _ = sheet(&f, 200).await;
+        let model = model(&f, false).await;
+        run(&f, &row).await;
+        let request = pending(&f, None).await;
+        proposals::decide(
+            &f.state,
+            &f.owner,
+            &request.id,
+            &decision(&request, "persistent"),
+        )
+        .await
+        .unwrap();
+        let resumed = event_turn(&f, &row).await;
+        let credential = load_credential(&f, &resumed).await;
+        let relationships = f
+            .state
+            .db
+            .collection::<Document>("assistant_agent_credentials");
+        if revoke_relationship {
+            assert_eq!(
+                relationships
+                    .delete_many(doc! {"conversation_id":&row.id})
+                    .await
+                    .unwrap()
+                    .deleted_count,
+                1
+            );
+        } else {
+            // Keep the live authority relationship used by normal proxy/model
+            // authentication. Only redundant decryption of the saved copy fails.
+            assert_eq!(relationships.update_one(doc! {"conversation_id":&row.id}, doc! {"$set": {
+            "key_ciphertext": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: Vec::new() },
+        }}).await.unwrap().matched_count, 1);
+            assert!(
+                credentials::load_for_conversation(
+                    &f.state.db,
+                    &f.state.encryption_keys,
+                    &f.owner,
+                    &row.id
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert_eq!(
+            credentials::is_conversation_key(&f.state.db, &f.owner, &f.key)
+                .await
+                .unwrap(),
+            !revoke_relationship
+        );
+        let result = execute_with_credential(&f, &resumed, credential)
+            .await
+            .unwrap();
+        if revoke_relationship {
+            assert!(
+                result
+                    .text
+                    .contains("authority or source is no longer available")
+            );
+        } else {
+            assert_eq!(result.text, "Remaining task continued.");
+        }
+        assert_eq!(
+            f.server.received_requests().await.unwrap().len(),
+            usize::from(!revoke_relationship)
+        );
+        assert_eq!(
+            model.calls.lock().unwrap().len(),
+            if revoke_relationship { 1 } else { 2 }
+        );
+        drop(model);
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn owner_permission_resume_release_lease_limits_use_database_time() {
+    use futures::TryStreamExt;
+    let (f, row) = assistant("owner_resume_lease_limits").await;
+    // $$NOW is fixed throughout each aggregation. Evaluate the production
+    // predicate exactly at and one millisecond either side of both limits,
+    // without a wall-clock race between setting a date and reading it.
+    for lease in ["missing", "null", "explicit"] {
+        for delta in [-1_i64, 0, 1] {
+            let started_at = if lease == "explicit" {
+                // An explicit lease overrides even an expired fallback.
+                doc! {"$subtract": ["$$NOW", (engine::ACTIVE_TURN_TTL_SECS + 60) * 1000]}
+            } else {
+                doc! {"$add": ["$$NOW", delta - engine::ACTIVE_TURN_TTL_SECS * 1000]}
+            };
+            let lease_expires_at = match lease {
+                "missing" => bson::Bson::String("$$REMOVE".into()),
+                "null" => bson::Bson::Null,
+                _ => bson::Bson::Document(doc! {"$add": ["$$NOW", delta]}),
+            };
+            let result = f.state.db.collection::<Document>("assistant_conversations")
+                .aggregate(vec![
+                    doc! {"$match": {"_id": &row.id}},
+                    doc! {"$set": {
+                        "active_turn.started_at": started_at,
+                        "active_turn.lease_expires_at": lease_expires_at,
+                    }},
+                    doc! {"$project": {"_id": 0, "unexpired": proposals::continuation::unexpired_turn()}},
+                ]).await.unwrap().try_next().await.unwrap().unwrap();
+            assert_eq!(
+                result.get_bool("unexpired").unwrap(),
+                delta > 0,
+                "{lease}, {delta}"
+            );
+        }
+    }
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn owner_permission_resume_release_preserves_lease_stop_and_worker_fences() {
+    use crate::models::assistant_conversation::{EngineWorkerInstance, ExecutionAttempt};
+    for lease in ["missing", "null", "explicit"] {
+        let (f, row) = assistant("owner_resume_release_fences").await;
+        set_task(&f, &row).await;
+        let _ = sheet(&f, 200).await;
+        let model = model(&f, false).await;
+        run(&f, &row).await;
+        let request = pending(&f, None).await;
+        proposals::decide(
+            &f.state,
+            &f.owner,
+            &request.id,
+            &decision(&request, "persistent"),
+        )
+        .await
+        .unwrap();
+        let mut resumed = event_turn(&f, &row).await;
+        let credential = load_credential(&f, &resumed).await;
+        let egress = crate::handlers::assistant_nyxagent::http_egress(
+            f.state.clone(),
+            test_utils::test_auth_user(&f.owner),
+        );
+        let outcome = proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential)
+            .await
+            .unwrap()
+            .unwrap();
+        let proposals::ResumeOutcome::Continue(continuation) = outcome else {
+            panic!("known success");
+        };
+        let conversations = f.state.db.collection::<Document>("assistant_conversations");
+        for refusal in [
+            "expired",
+            "stop",
+            "turn",
+            "worker",
+            "epoch",
+            "claim",
+            "model",
+            "key_expired",
+            "key_revoked",
+        ] {
+            let turn = resumed.active_turn.as_mut().unwrap();
+            // Capture one exact admitted worker, then change only the live DB
+            // fence. The runner's stale in-memory row cannot authorize release.
+            turn.worker_instance = Some(EngineWorkerInstance {
+                id: "admitted-worker".into(),
+                hostname: None,
+            });
+            turn.execution_attempt = Some(ExecutionAttempt {
+                epoch: 1,
+                claim_id: "admitted-claim".into(),
+                foreground_delivery: None,
+            });
+            // A valid explicit lease overrides an old start. An expired
+            // explicit lease must refuse even with a fresh fallback.
+            let fallback_ms = if (refusal == "expired" && lease != "explicit")
+                || (lease == "explicit" && refusal != "expired")
+            {
+                -(engine::ACTIVE_TURN_TTL_SECS + 60) * 1000
+            } else {
+                0
+            };
+            let lease_expires_at = match lease {
+                "missing" => bson::Bson::String("$$REMOVE".into()),
+                "null" => bson::Bson::Null,
+                _ => bson::Bson::Document(
+                    doc! {"$add": ["$$NOW", if refusal == "expired" { -60_000_i64 } else { 60_000_i64 }]},
+                ),
+            };
+            conversations.update_one(doc! {"_id": &row.id}, vec![doc! {"$set": {
+                "model": if refusal == "model" { "different-model" } else { &row.model },
+                "active_turn.turn_id": if refusal == "turn" { "different-turn" } else { &turn.turn_id },
+                "active_turn.started_at": {"$add": ["$$NOW", fallback_ms]},
+                "active_turn.lease_expires_at": lease_expires_at,
+                "active_turn.stop_requested": refusal == "stop",
+                "active_turn.worker_instance": {"id": if refusal == "worker" { "different-worker" } else { "admitted-worker" }},
+                "active_turn.execution_attempt": {"epoch": if refusal == "epoch" { 2_i64 } else { 1_i64 }, "claim_id": if refusal == "claim" { "different-claim" } else { "admitted-claim" }},
+            }}]).await.unwrap();
+            f.state.db.collection::<Document>("api_keys").update_one(doc! {"_id": &f.key}, vec![doc! {"$set": {
+                "is_active": refusal != "key_revoked",
+                "expires_at": if refusal == "key_expired" { bson::Bson::String("$$NOW".into()) } else { bson::Bson::Null },
+            }}]).await.unwrap();
+            assert!(
+                continuation
+                    .release(&f.state, &resumed, &credential)
+                    .await
+                    .unwrap_err()
+                    .is_forbidden(),
+                "{lease}, {refusal}"
+            );
+            let receipt = f
+                .state
+                .db
+                .collection::<ApprovalRequest>("approval_requests")
+                .find_one(doc! {"_id": &request.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                proposals::proposal(&receipt)
+                    .unwrap()
+                    .owner_continuation
+                    .as_ref()
+                    .unwrap()
+                    .released_turn_id
+                    .is_none()
+            );
+            assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+            assert_eq!(model.calls.lock().unwrap().len(), 1);
+        }
+        // Restore the exact worker and let the real runner perform the release
+        // and model I/O with each supported lease representation.
+        conversations
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {
+                    "active_turn.execution_attempt.claim_id": "admitted-claim",
+                }},
+            )
+            .await
+            .unwrap();
         f.state
             .db
-            .collection::<Document>("assistant_agent_credentials")
-            .delete_many(doc! {"conversation_id":&row.id},)
+            .collection::<Document>("api_keys")
+            .update_one(
+                doc! {"_id": &f.key},
+                doc! {"$set": {
+                    "is_active": true, "expires_at": bson::Bson::Null,
+                }},
+            )
             .await
-            .unwrap()
-            .deleted_count,
-        1
-    );
-    assert_eq!(
-        execute_with_credential(&f, &resumed, credential)
+            .unwrap();
+        let result = execute_with_credential(&f, &resumed, credential)
             .await
-            .unwrap()
-            .text,
-        "Remaining task continued."
-    );
-    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
-    assert_eq!(model.calls.lock().unwrap().len(), 2);
-    drop(model);
-    f.cleanup().await;
+            .unwrap();
+        assert_eq!(result.text, "Remaining task continued.");
+        assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(model.calls.lock().unwrap().len(), 2);
+        drop(model);
+        f.cleanup().await;
+    }
 }

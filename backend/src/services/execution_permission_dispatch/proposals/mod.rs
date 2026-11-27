@@ -65,6 +65,16 @@ fn label(value: &str) -> String {
         .take(160)
         .collect()
 }
+fn operation_label(method: &str, path: &str) -> String {
+    // Proxy paths are relative. Display their HTTP spelling without changing
+    // the retained payload, digest or operation identity.
+    let path = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{path}")
+    };
+    format!("{} {}", method, label(&path))
+}
 fn binary(bytes: Vec<u8>) -> bson::Binary {
     bson::Binary {
         subtype: bson::spec::BinarySubtype::Generic,
@@ -470,7 +480,7 @@ pub(super) async fn create(
         requester_type: "user".into(),
         requester_id: chat.user_id.clone(),
         requester_label: Some(label(&chat.agent_name)),
-        operation_summary: format!("{} {}", effect.method, label(effect.path)),
+        operation_summary: operation_label(effect.method, effect.path),
         action_description: Some("Review an execution permission for this task".into()),
         http_method: Some(effect.method.into()),
         resource: Some(label(effect.path)),
@@ -923,7 +933,7 @@ async fn review(
     Ok(Review {
         agent:label(&chat.agent_name),
         connection:format!("{} · {} · {}",label(&connection.slug),if effect.owner==chat.user_id{"your connection"}else{"shared connection"},effect.connection.chars().rev().take(8).collect::<String>().chars().rev().collect::<String>()),
-        operation:format!("{} {}",effect.method,label(effect.path)),
+        operation:operation_label(effect.method,effect.path),
         audience:if let Some(source)=chat.execution_task.as_ref().and_then(|t|t.channel_source.as_ref()) {format!("{} — the original channel chat/thread and everyone who can see it. Decide only in NyxID; the result will be replied there while its source is valid.",label(&source.audience_label))}else if chat.execution_group_id.is_some(){"This group and its current participants".into()}else{"This private conversation".into()},
         scope:if reusable{"Only this exact path, query and JSON input in this conversation"}else{"Only this retained operation, including its exact inputs and headers"}.into(),
         inputs:inputs.chars().filter(|c| !c.is_control()).take(12_000).collect(),
@@ -963,6 +973,8 @@ pub(super) fn approve_url(frontend_url: &str) -> String {
 /// Pending/denied/uncertain effects remain task-bound. A completed receipt can
 /// authorize a new occurrence only in a different server-admitted turn after
 /// settlement delivered that receipt; retries of either original/resume turn join it.
+/// Marked owner continuations join it throughout the original task, including
+/// later independently reviewed readbacks. A new human root remains independent.
 pub(super) async fn existing_effect(
     db: &Database,
     context: &RequestContext,

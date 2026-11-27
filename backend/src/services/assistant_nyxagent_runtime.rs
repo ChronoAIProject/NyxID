@@ -1610,6 +1610,19 @@ pub(crate) fn proxy_turn_error(error: AppError) -> TurnError {
     )
 }
 
+fn permission_turn_error(error: AppError, stage: &'static str) -> TurnError {
+    if error.is_forbidden()
+        || matches!(
+            error,
+            AppError::NotFound(_) | AppError::AssistantTurnRequired
+        )
+    {
+        TurnError::internal("cancelled", stage)
+    } else {
+        proxy_turn_error(error).at_stage(stage)
+    }
+}
+
 /// Reads the NyxAgent `error.code` envelope, or NyxID's own flat envelope
 /// (`{"error":"insufficient_credits",...}`) on a 402. Other flat categories are
 /// not turn codes and stay unrecognized.
@@ -1716,7 +1729,7 @@ pub(crate) async fn execute_owner_turn(
     use super::execution_permission_dispatch::proposals::{self, ResumeOutcome};
     let continuation = match proposals::resume_turn(state, egress, row, credential)
         .await
-        .map_err(|_| TurnError::internal("assistant_unavailable", "permission_resume"))?
+        .map_err(|error| permission_turn_error(error, "permission_resume"))?
     {
         Some(ResumeOutcome::Continue(continuation)) => Some(continuation),
         Some(ResumeOutcome::Receipt(text)) => {
@@ -2744,16 +2757,16 @@ async fn execute_turn_inner(
             {
                 return Err(TurnError::internal(
                     "assistant_unavailable",
-                    "permission_resume",
+                    "permission_release",
                 ));
             }
             if credential.api_key_id != row.credential_api_key_id {
-                return Err(TurnError::internal("cancelled", "permission_resume"));
+                return Err(TurnError::internal("cancelled", "permission_release"));
             }
             if !retained
                 .release(state, row, credential)
                 .await
-                .map_err(|_| TurnError::internal("assistant_unavailable", "permission_resume"))?
+                .map_err(|error| permission_turn_error(error, "permission_release"))?
             {
                 let text = retained.receipt_text().to_owned();
                 *partial = text.clone();
@@ -2772,7 +2785,7 @@ async fn execute_turn_inner(
             {
                 return Err(TurnError::internal(
                     "assistant_unavailable",
-                    "permission_resume",
+                    "permission_release",
                 ));
             }
         }

@@ -5,6 +5,18 @@ use crate::services::assistant_nyxagent as engine;
 
 pub(crate) const READINESS: &str = "permissions:execution-owner-continuation-v1";
 
+/// Match the engine's effective lease: an explicit date wins, including an
+/// expired date; only null/missing leases fall back to started_at plus the TTL.
+/// Evaluate expiry against database time in the release transaction.
+pub(in crate::services::execution_permission_dispatch) fn unexpired_turn() -> Document {
+    doc! {"$gt": [
+        {"$ifNull": ["$active_turn.lease_expires_at", {
+            "$add": ["$active_turn.started_at", engine::ACTIVE_TURN_TTL_SECS * 1000],
+        }]},
+        "$$NOW",
+    ]}
+}
+
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static FAIL_BEFORE_RELEASE: bool;
@@ -179,7 +191,7 @@ impl OwnerContinuation {
                     let mut filter = engine::WorkerFence::capture(row)?.filter();
                     filter.extend(doc! {
                         "active_turn.stop_requested": false,
-                        "active_turn.lease_expires_at": {"$gt": bson::DateTime::now()},
+                        "$expr": unexpired_turn(),
                         "model": &row.model, "agent_id": &row.agent_id,
                     });
                     if db.collection::<Document>("assistant_conversations")
@@ -191,7 +203,10 @@ impl OwnerContinuation {
                     if db.collection::<Document>("api_keys").update_one(doc! {
                         "_id": &row.credential_api_key_id, "user_id": &row.user_id, "is_active": true,
                         "key_hash": *key_hash,
-                        "$or": [{"expires_at": null}, {"expires_at": {"$gt": bson::DateTime::now()}}],
+                        "$expr": {"$or": [
+                            {"$eq": [{"$ifNull": ["$expires_at", bson::Bson::Null]}, bson::Bson::Null]},
+                            {"$gt": ["$expires_at", "$$NOW"]},
+                        ]},
                     }, doc! {"$inc": {"execution_dispatch_fence": 1_i64}})
                         .session(&mut *session).await?.matched_count != 1
                     {

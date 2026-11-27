@@ -318,7 +318,9 @@ agent behavior, authority and endpoint snapshots, prepared inputs and eligible
 floors. A keyed digest deduplicates matching pending gaps. Denial and uncertain
 outcomes stay task-bound. Duplicate calls from the original or resume turn return
 the same receipt; after its delivery, a different server-admitted turn can create
-a new occurrence under reusable permission. Identical calls within one server
+a new occurrence under reusable permission, except for the marked original-task
+owner continuations described in [Exact resume and recovery](#exact-resume-and-recovery).
+Identical calls within one server
 turn are conservatively one occurrence; a model request ID cannot override this.
 A task has at most 32 proposal rows. NyxID-generated proxy correlation IDs are excluded from gap/scope identity,
 while retention and send-time checks preserve their exact outbound bytes. Only
@@ -343,6 +345,8 @@ requires that human and accepts only:
 ```
 
 The client cannot author a connection, audience, scope, validity payload or task.
+The review displays the HTTP method and path with its leading slash; relative
+proxy storage does not change the displayed resource or the retained effect.
 Operation is the default. The immutable choices are this operation, this task,
 one displayed hour, and persistent until revoked/binding changes. These existing
 choices remain bound to the current conversation, including Persistent. Reusable
@@ -447,14 +451,20 @@ again from any automatic continuation of that task, including a later readback
 review. A separately gated readback may require its own review before continuing.
 A new human request has its own root and may execute the same reviewed effect.
 Redaction uses the runner's existing verified conversation credential; retained
-resume does not decrypt another copy of it.
+resume does not decrypt another copy of it. Normal egress still requires the
+live conversation-key relationship; reusing the verified bytes does not bypass
+revocation of that relationship or the key.
 
 Every distinct request in a batched wake must have a successful, available receipt
 and a version-1 pending `owner_continuation` marker. The marker commits with the
 known success, after continuation readiness is resolved before provider egress.
 After normal model/context preparation, an atomic batch release fences the live
 worker, task, source, actor and key before the request can be sealed for model
-I/O. Only one release wins. A crash before release leaves the completed effect
+I/O. Release uses MongoDB time for turn/key expiry. An explicit turn lease must
+be strictly in the future; null or missing leases use `started_at` plus the
+engine's active-turn TTL, with the same strict expiry. An explicit expired lease
+never falls back to a fresh start date. Stop and exact worker/epoch/claim fences
+remain required. Only one release wins. A crash before release leaves the completed effect
 recoverable without another provider send. Preparation failure leaves it pending;
 ordinary failed-turn settlement does not mark that receipt delivered or finish
 the root. Existing bounded maintenance can wake that exact unfinished task again.
@@ -473,6 +483,10 @@ Private denied, expired, historical and released receipts remain readable after
 their task deadline. Owner-message source lookup applies only to a possible new
 dispatch or an undelivered eligible continuation marker, never to those terminal
 status paths. An expired task cannot dispatch or release a continuation.
+Encrypted-result retention removes the ciphertext and its context marker together;
+an inconsistent record fails closed. Operational failures report the failing
+`permission_resume` or `permission_release` stage without provider data; live
+authority refusals at these boundaries settle as cancellation.
 
 Marker authoring and release require the optional fleet capability
 `permissions:execution-owner-continuation-v1`. Fresh effects retain receipt-only
