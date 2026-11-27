@@ -129,6 +129,16 @@ pub(super) async fn mcp_response(
     method: &str,
     params: Value,
 ) -> (axum::http::StatusCode, Value) {
+    mcp_response_with_limit(router, key, method, params, 256 * 1024).await
+}
+
+async fn mcp_response_with_limit(
+    router: &axum::Router,
+    key: &str,
+    method: &str,
+    params: Value,
+    response_limit: usize,
+) -> (axum::http::StatusCode, Value) {
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
@@ -151,10 +161,24 @@ pub(super) async fn mcp_response(
     if !status.is_success() {
         return (status, Value::Null);
     }
-    let bytes = axum::body::to_bytes(response.into_body(), 256 * 1024)
+    let bytes = axum::body::to_bytes(response.into_body(), response_limit)
         .await
         .unwrap();
     (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// A full seeded owner catalog includes native tools and Google operations.
+/// Keep its test reader bounded without narrowing the discovery control.
+pub(super) async fn seeded_tools_list(router: &axum::Router, key: &str) -> Value {
+    let (status, body) =
+        mcp_response_with_limit(router, key, "tools/list", json!({}), 2 * 1024 * 1024).await;
+    successful_mcp_result(status, body)
+}
+
+fn successful_mcp_result(status: axum::http::StatusCode, body: Value) -> Value {
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    assert!(body.get("error").is_none(), "{body}");
+    body["result"].clone()
 }
 
 pub(super) async fn mcp_request(
@@ -164,7 +188,5 @@ pub(super) async fn mcp_request(
     params: Value,
 ) -> Value {
     let (status, body) = mcp_response(router, key, method, params).await;
-    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
-    assert!(body.get("error").is_none(), "{body}");
-    body["result"].clone()
+    successful_mcp_result(status, body)
 }

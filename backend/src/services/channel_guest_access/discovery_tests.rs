@@ -1,6 +1,6 @@
 use super::{
     AnswerAudience, policy,
-    test_support::{mcp_request, start_guest_with_audience},
+    test_support::{mcp_request, seeded_tools_list, start_guest_with_audience},
 };
 use crate::{
     models::channel_guest_policy::GuestDataPolicy, services::channel_guest_access::google_sheets,
@@ -292,7 +292,7 @@ async fn enrolled_sheets_discovery_guides_both_catalogs_and_preserves_ordinary_t
             )
             .await
             .unwrap();
-        let list = mcp_request(&router, owner_key.raw_key.as_str(), "tools/list", json!({})).await;
+        let list = seeded_tools_list(&router, owner_key.raw_key.as_str()).await;
         for slug in ["api-google-workspace", "api-google-sheets"] {
             let name = format!("{slug}__sheets_append_values");
             let append = tool(&list, &name);
@@ -341,6 +341,12 @@ async fn enrolled_sheets_discovery_guides_both_catalogs_and_preserves_ordinary_t
         )
         .await
         .unwrap();
+    assert_eq!(
+        crate::services::approval_service::user_approval_mode(db, &f.owner)
+            .await
+            .unwrap(),
+        crate::services::approval_policy::GlobalApprovalMode::WritesOnly
+    );
     guest::ensure_indexes(db).await.unwrap();
     db.collection::<Document>(channel_bot::COLLECTION_NAME)
         .insert_one(doc! {"_id":"bot-1","is_active":true,"guest_access_v1":true,"guest_access_v1_revision":1_i64})
