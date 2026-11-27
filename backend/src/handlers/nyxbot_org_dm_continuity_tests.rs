@@ -17,6 +17,8 @@ const FIRST: &str = "Use amber471 as my project tag and give me a fresh receipt.
 const FOLLOW_UP: &str =
     "What was the receipt for my project tag? Repeat the tag and receipt from your last answer.";
 const AFTER_FAILURE: &str = "Try again with the project tag from my previous message.";
+// A bounded upstream diagnostic, deliberately outside NyxID's public error codes.
+const UPSTREAM_FAILURE: &str = "fixture_engine_failure";
 
 struct ReplyAdapterGuard(String);
 impl Drop for ReplyAdapterGuard {
@@ -89,8 +91,8 @@ async fn engine_answer(
         .active_turn
         .as_ref()
         .expect("live turn at engine boundary");
-    // Capture only fields needed for attribution and continuity. No credentials,
-    // headers, stable instructions or full active-turn snapshot enter diagnostics.
+    // Capture attribution, continuity and the synthetic response identity below.
+    // Credentials, headers and stable instructions stay outside diagnostics.
     let observed = json!({"input":body["input"],"conversation":body["conversation"],
         "actor":conversation.user_id,"home":conversation.id,"key_id":key.id,
         "turn_id":turn.turn_id,"event_id":turn.channel_event_id,"context":turn.channel_context});
@@ -121,14 +123,28 @@ async fn engine_answer(
         (session, None)
     };
     let failed = (engine.first_fails && index == 0) || answer.is_none();
+    // The real engine client validates conv_<32 hex> and
+    // resp_<same session hex>_<32 hex> before persisting either identity.
+    let response_id = format!("resp_{}_{}", &session[5..], Uuid::new_v4().simple());
+    let created = json!({"type":"response.created","sequence_number":0,
+        "response":{"id":response_id,"conversation":{"id":session},
+            "status":"in_progress","output":[]}});
     let completed = json!({"type":if failed {"response.failed"} else {"response.completed"},
-        "sequence_number":1,"response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),
+        "sequence_number":1,"response":{"id":response_id,
         "conversation":{"id":session},"status":if failed {"failed"} else {"completed"},
-        "error":if failed {json!({"code":"upstream_failed","message":"Synthetic engine failure or missing context"})} else {Value::Null},
+        "error":if failed {json!({"code":UPSTREAM_FAILURE,"message":"Synthetic engine failure or missing context"})} else {Value::Null},
         "output":if failed {json!([])} else {message_output(answer.as_deref().unwrap())}}});
-    axum::response::Sse::new(futures::stream::once(async move {
-        Ok::<_, Infallible>(Event::default().data(completed.to_string()))
-    }))
+    let frames = vec![created, completed];
+    {
+        let mut calls = engine.calls.lock().await;
+        calls[index]["engine_session_id"] = json!(session);
+        calls[index]["engine_response_id"] = json!(response_id);
+    }
+    axum::response::Sse::new(futures::stream::iter(
+        frames
+            .into_iter()
+            .map(|frame| Ok::<_, Infallible>(Event::default().data(frame.to_string()))),
+    ))
     .into_response()
 }
 
@@ -249,7 +265,7 @@ struct Source {
 
 async fn continuity(first_fails: bool) {
     let f = Box::pin(fixture(first_fails)).await;
-    let mut originals: Vec<(Source, String)> = Vec::new();
+    let mut originals: Vec<(Source, String, String)> = Vec::new();
     let mut expected_sends = Vec::new();
     for (index, text) in [
         FIRST,
@@ -265,6 +281,8 @@ async fn continuity(first_fails: bool) {
         let source = relay_source(&f, index, text).await;
         let frames = provider_frames(&f.state, &f.key, &source.request, &source.id).await;
         let terminal = frames.last().unwrap();
+        let response_id = frames[0]["response"]["id"].as_str().unwrap().to_owned();
+        assert_eq!(terminal["response"]["id"], response_id);
         let failed = first_fails && index == 0;
         assert_eq!(
             terminal["type"],
@@ -286,9 +304,27 @@ async fn continuity(first_fails: bool) {
         assert!(
             originals
                 .iter()
-                .all(|(_, previous_turn)| *previous_turn != turn)
+                .all(|(_, previous_turn, _)| *previous_turn != turn)
         );
-        if !failed {
+        if failed {
+            // With no partial text, final_reply returns the public error and
+            // late delivery emits response.failed. Simulated CMA sends no text.
+            assert_eq!(terminal["response"]["status"], "failed");
+            assert_eq!(
+                terminal["response"]["error"],
+                json!({
+                    "code":"assistant_unavailable","message":"NyxBot could not finish this turn."
+                })
+            );
+            assert!(terminal["response"].get("output").is_none());
+            assert!(frames.iter().all(|frame| {
+                !frame["type"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("response.output_")
+            }));
+            assert!(f.platform.received_requests().await.unwrap().is_empty());
+        } else {
             let output = terminal["response"]["output"].as_array().unwrap();
             assert_eq!(output.len(), 1, "one provider final per successful source");
             let text = output[0]["content"][0]["text"].as_str().unwrap();
@@ -313,13 +349,12 @@ async fn continuity(first_fails: bool) {
             );
             expected_sends.push((source.native_id, text.to_owned()));
         }
-        originals.push((source, turn));
+        originals.push((source, turn, response_id));
     }
     // C2 follows the original base answer. All replays, including consumed
     // delivery tokens, run only after these two independent messages settle.
-    for (source, turn) in &originals {
+    for (source, turn, response_id) in &originals {
         let replay = provider_frames(&f.state, &f.key, &source.request, &source.id).await;
-        assert_empty_replay(&replay);
         assert_eq!(f.calls.lock().await.len(), 2);
         assert_eq!(
             f.state
@@ -333,11 +368,16 @@ async fn continuity(first_fails: bool) {
         let replayed = f
             .state
             .db
-            .collection::<NyxbotEvent>(EVENTS)
+            .collection::<bson::Document>(EVENTS)
             .find_one(doc! {"channel_id":&f.row.id,"event_id":&source.id})
             .await
             .unwrap()
             .unwrap();
+        let mapping = crate::services::nyxbot_response_read::mapping(&replayed)
+            .unwrap()
+            .unwrap();
+        assert_empty_replay(&replay, response_id, &mapping, &source.request["metadata"]);
+        let replayed: NyxbotEvent = bson::from_document(replayed).unwrap();
         assert_eq!(
             replayed.conversation_id.as_deref(),
             Some(f.home.id.as_str())
@@ -381,19 +421,45 @@ async fn continuity(first_fails: bool) {
     db.drop().await.unwrap();
 }
 
-fn assert_empty_replay(frames: &[Value]) {
-    assert_eq!(
-        frames.len(),
-        2,
-        "legacy streamed replay has only creation and empty completion"
-    );
+fn assert_empty_replay(
+    frames: &[Value],
+    response_id: &str,
+    mapping: &crate::models::nyxbot_response_read::ResponseRead,
+    metadata: &Value,
+) {
+    // Mapped reads observe settlement: created, optional progress, completed.
+    // They retain identity and empty output even when the original turn failed.
+    assert!(frames.len() >= 2);
     assert_eq!(frames[0]["type"], "response.created");
-    assert_eq!(frames[1]["type"], "response.completed");
-    assert_eq!(
-        frames[1]["response"]["output"],
-        json!([]),
-        "replay has no deliverable output"
+    assert_eq!(frames.last().unwrap()["type"], "response.completed");
+    assert!(
+        frames[1..frames.len() - 1]
+            .iter()
+            .all(|frame| frame["type"] == "response.in_progress")
     );
+    for (index, frame) in frames.iter().enumerate() {
+        assert_eq!(frame["sequence_number"], index);
+        let response = &frame["response"];
+        assert_eq!(response["id"], response_id);
+        assert_eq!(
+            response["conversation"],
+            json!({"id":mapping.conversation_id})
+        );
+        assert_eq!(response["metadata"], *metadata);
+        assert_eq!(
+            response["output"],
+            json!([]),
+            "no replay frame carries deliverable output"
+        );
+        let status = if index == 0 {
+            "queued"
+        } else if index == frames.len() - 1 {
+            "completed"
+        } else {
+            "in_progress"
+        };
+        assert_eq!(response["status"], status);
+    }
 }
 
 /// Simulated CMA consumes the provider final and uses the callback's one-use
@@ -420,7 +486,11 @@ async fn relay_final(
     .await
 }
 
-async fn verify_receipts(f: &Fixture, originals: &[(Source, String)], expected: &[(i64, String)]) {
+async fn verify_receipts(
+    f: &Fixture,
+    originals: &[(Source, String, String)],
+    expected: &[(i64, String)],
+) {
     let db = &f.state.db;
     let requests = f.platform.received_requests().await.unwrap();
     assert_eq!(requests.len(), expected.len());
@@ -433,7 +503,7 @@ async fn verify_receipts(f: &Fixture, originals: &[(Source, String)], expected: 
         assert_eq!(body["reply_to_message_id"], *native_id);
         assert_eq!(body["text"], *text);
     }
-    for (source, _) in originals {
+    for (source, _, _) in originals {
         let outbound: Vec<ChannelMessage> = db
             .collection(RELAY_MESSAGES)
             .find(doc! {"direction":"outbound","reply_to_message_id":&source.id})
@@ -512,7 +582,7 @@ async fn relay_source(f: &Fixture, index: usize, text: &str) -> Source {
         &f.row.route_api_key_id,
         "gateway",
         &inbound,
-        Some(reply_token.clone()),
+        Some(reply_token),
         "https://nyxid.example",
     );
     assert!(callback.raw_platform_data.as_ref() == Some(&update));
@@ -615,13 +685,39 @@ async fn settled_answer(
         assert_eq!(contexts[0]["conversation"]["kind"], "private");
     }
     let call = f.calls.lock().await[index].clone();
+    let engine_session_id = call["engine_session_id"].as_str().unwrap();
+    let engine_response_id = call["engine_response_id"].as_str().unwrap();
     assert!(call["input"].as_str().unwrap().ends_with(&source.text));
     if index == 0 || failed {
         assert!(call["conversation"].is_null());
     }
     if failed {
         assert!(saved.nyxagent_session_id.is_none());
-        assert_eq!(answer.error_code.as_deref(), Some("upstream_failed"));
+        assert!(saved.nyxagent_last_response_id.is_none());
+        assert_eq!(saved.context_reset_reason.as_deref(), Some("turn_failed"));
+        assert!(
+            answer.text.is_empty(),
+            "failure has no partial text to hand off"
+        );
+        assert_eq!(answer.error_code.as_deref(), Some("assistant_unavailable"));
+        assert_eq!(
+            answer.upstream_error_code.as_deref(),
+            Some(UPSTREAM_FAILURE)
+        );
+        let detail = answer.error_detail.as_ref().unwrap();
+        assert_eq!(detail.stage, "stream");
+        assert_eq!(detail.turn_id, *turn);
+        assert_eq!(detail.response_id.as_deref(), Some(engine_response_id));
+    } else {
+        assert!(answer.error_code.is_none() && answer.upstream_error_code.is_none());
+        assert_eq!(
+            saved.nyxagent_session_id.as_deref(),
+            Some(engine_session_id)
+        );
+        assert_eq!(
+            saved.nyxagent_last_response_id.as_deref(),
+            Some(engine_response_id)
+        );
     }
     (turn.clone(), answer.text.clone())
 }
