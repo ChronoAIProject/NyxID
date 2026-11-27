@@ -1439,6 +1439,8 @@ async fn owner_permission_resume_release_preserves_lease_stop_and_worker_fences(
             "epoch",
             "claim",
             "model",
+            "task",
+            "key_binding",
             "key_expired",
             "key_revoked",
         ] {
@@ -1470,8 +1472,14 @@ async fn owner_permission_resume_release_preserves_lease_stop_and_worker_fences(
                     doc! {"$add": ["$$NOW", if refusal == "expired" { -60_000_i64 } else { 60_000_i64 }]},
                 ),
             };
+            let mut current_task = turn.execution_task.as_ref().unwrap().clone();
+            if refusal == "task" {
+                current_task.epoch += 1;
+            }
             conversations.update_one(doc! {"_id": &row.id}, vec![doc! {"$set": {
                 "model": if refusal == "model" { "different-model" } else { &row.model },
+                "credential_api_key_id": if refusal == "key_binding" { "different-key" } else { &row.credential_api_key_id },
+                "active_turn.execution_task": {"$literal": bson::to_bson(&current_task).unwrap()},
                 "active_turn.turn_id": if refusal == "turn" { "different-turn" } else { &turn.turn_id },
                 "active_turn.started_at": {"$add": ["$$NOW", fallback_ms]},
                 "active_turn.lease_expires_at": lease_expires_at,

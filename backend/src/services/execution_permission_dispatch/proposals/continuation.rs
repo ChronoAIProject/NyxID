@@ -191,6 +191,8 @@ impl OwnerContinuation {
                     let mut filter = engine::WorkerFence::capture(row)?.filter();
                     filter.extend(doc! {
                         "active_turn.stop_requested": false,
+                        "active_turn.execution_task": bson::to_bson(task).map_err(encoding)?,
+                        "credential_api_key_id": &row.credential_api_key_id,
                         "$expr": unexpired_turn(),
                         "model": &row.model, "agent_id": &row.agent_id,
                     });
