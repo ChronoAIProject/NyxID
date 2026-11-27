@@ -9,17 +9,21 @@ import {
 import { rasterAvatar } from "../../../../../shared/agent-avatars/export";
 import { AvatarSvg } from "./avatar-svg";
 const base = defaultAvatar("nyx", "nyxbot");
-it("paints the gradient face above every backdrop with real apertures", () => {
-  for (const background of [
-    "treatment",
-    "dark",
-    "solid",
-    "gradient",
-    "mesh",
-    "glass",
-    "transparent",
-    "ripple",
-  ]) {
+// Rasterizing 512px exports is CPU-bound and runs about 15x slower under
+// coverage on CI runners than locally, past vitest's default 5 s timeout.
+const RASTER_TIMEOUT_MS = 30_000;
+it.each([
+  "treatment",
+  "dark",
+  "solid",
+  "gradient",
+  "mesh",
+  "glass",
+  "transparent",
+  "ripple",
+])(
+  "paints the gradient face above the %s backdrop with real apertures",
+  (background) => {
     const scene = drawAvatar(
       { ...base, choices: { ...base.choices, background } },
       { resting: true, theme: "dark" },
@@ -51,19 +55,28 @@ it("paints the gradient face above every backdrop with real apertures", () => {
       if (pixels[i] !== backdrop[i] || pixels[i + 2] !== backdrop[i + 2])
         changed++;
     expect(changed, background).toBeGreaterThan(40000);
-  }
-});
-it("keeps a contrasting crisp voice face on all twelve ripple rings", () => {
-  for (const [id, p] of Object.entries(FACE_GEOMETRY.ripples)) {
-    const scene = drawAvatar(
-      {
-        ...base,
-        choices: { ...base.choices, background: "transparent", frame: "none" },
-      },
-      { resting: true, ambient: p.ring, theme: p.light ? "light" : "dark" },
-    );
-    const pixels = rasterAvatar(scene);
-    expect(pixels[(300 * 512 + 256) * 4 + 3], id).toBe(255);
-    expect(scene.foregroundPlane, id).toBeDefined();
-  }
-});
+  },
+  RASTER_TIMEOUT_MS,
+);
+it(
+  "keeps a contrasting crisp voice face on all twelve ripple rings",
+  () => {
+    for (const [id, p] of Object.entries(FACE_GEOMETRY.ripples)) {
+      const scene = drawAvatar(
+        {
+          ...base,
+          choices: {
+            ...base.choices,
+            background: "transparent",
+            frame: "none",
+          },
+        },
+        { resting: true, ambient: p.ring, theme: p.light ? "light" : "dark" },
+      );
+      const pixels = rasterAvatar(scene);
+      expect(pixels[(300 * 512 + 256) * 4 + 3], id).toBe(255);
+      expect(scene.foregroundPlane, id).toBeDefined();
+    }
+  },
+  RASTER_TIMEOUT_MS,
+);
