@@ -1593,7 +1593,22 @@ async fn tools_manager_first_secret_races_and_freeze_survives_admin_clear() {
         .unwrap();
     let actor =
         crate::services::audit_service::AuditActor::from_auth_user(&test_auth_user(&manager));
-    let frozen = doc! {"credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:state.encryption_keys.encrypt(b"fake-race").await.unwrap()},"tools_credential_frozen":true,"updated_at":bson::DateTime::now()};
+    let mut candidate = observed.clone();
+    crate::handlers::credential_record_fixtures::set_catalog_credential(
+        &state.encryption_keys,
+        &mut candidate,
+        b"fake-race",
+    )
+    .await;
+    let frozen = doc! {
+        "credential_encrypted": bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: candidate.credential_encrypted,
+        },
+        "secret_context_versions": bson::to_bson(&candidate.secret_context_versions).unwrap(),
+        "tools_credential_frozen": true,
+        "updated_at": bson::DateTime::now(),
+    };
     let moved = doc! {"base_url":"https://other.example","updated_at":bson::DateTime::from_chrono(observed.updated_at+chrono::Duration::milliseconds(1))};
     let (a, b) = tokio::join!(
         crate::services::tools_manager_service::commit_manager_update(

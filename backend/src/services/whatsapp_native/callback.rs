@@ -445,6 +445,7 @@ pub fn suppress_relay_messages(config: &NativeWhatsapp) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::platform_entry_native::tests::credentials::BotSecret;
     use serde_json::json;
 
     #[test]
@@ -855,18 +856,20 @@ mod tests {
         let db = crate::test_utils::connect_transaction_test_database("wa_enrollment").await;
         let state = crate::test_utils::test_app_state(db.clone());
         let mut bot = super::super::tests::bot();
-        bot.bot_token_encrypted = state
-            .encryption_keys
-            .encrypt(b"fixture-whatsapp-system-token")
-            .await
-            .unwrap();
-        bot.app_secret_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"fixture-whatsapp-app-secret")
-                .await
-                .unwrap(),
-        );
+        BotSecret::Token
+            .set(
+                &state.encryption_keys,
+                &mut bot,
+                "fixture-whatsapp-system-token",
+            )
+            .await;
+        BotSecret::AppSecret
+            .set(
+                &state.encryption_keys,
+                &mut bot,
+                "fixture-whatsapp-app-secret",
+            )
+            .await;
         db.collection::<crate::models::channel_bot::ChannelBot>(
             crate::models::channel_bot::COLLECTION_NAME,
         )

@@ -918,10 +918,13 @@ mod authorization_nonce_tests {
             "_id": "provider", "slug": "provider", "name": "Provider", "provider_type": "oauth2",
             "is_active": true, "created_by": "admin", "created_at": mongodb::bson::DateTime::now(), "updated_at": mongodb::bson::DateTime::now(),
         }).unwrap();
-        provider.client_id_encrypted =
-            Some(state.encryption_keys.encrypt(b"client").await.unwrap());
-        provider.client_secret_encrypted =
-            Some(state.encryption_keys.encrypt(b"secret").await.unwrap());
+        crate::handlers::credential_record_fixtures::set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "client",
+            Some("secret"),
+        )
+        .await;
         for required in [true, false] {
             let mut request: UpdateProviderRequest = serde_json::from_value(
                 serde_json::json!({"authorization_nonce_required":required}),

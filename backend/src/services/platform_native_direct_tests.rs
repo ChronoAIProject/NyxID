@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::platform_entry_identity::NATIVE_RECEIPTS;
+use crate::services::platform_entry_native::tests::credentials::BotSecret;
 use crate::services::{
     channel_platform::*,
     platform_manager_command_service as commands,
@@ -114,38 +115,29 @@ impl Fixture {
         .into();
         bot.app_id = (platform == "whatsapp").then(|| "987654".into());
         bot.public_key = None;
-        bot.bot_token_encrypted = state
-            .encryption_keys
-            .encrypt(if platform == "whatsapp" {
-                b"native-whatsapp-access-token".as_slice()
-            } else {
-                b"cli_native_app:native-app-secret".as_slice()
-            })
-            .await
-            .unwrap();
-        if platform == "whatsapp" {
-            bot.app_secret_encrypted = Some(
-                state
-                    .encryption_keys
-                    .encrypt(b"native-meta-app-secret")
-                    .await
-                    .unwrap(),
-            );
+        let token = if platform == "whatsapp" {
+            "native-whatsapp-access-token"
         } else {
-            bot.lark_verification_token_encrypted = Some(
-                state
-                    .encryption_keys
-                    .encrypt(b"native-verification-token")
-                    .await
-                    .unwrap(),
-            );
-            bot.lark_encrypt_key_encrypted = Some(
-                state
-                    .encryption_keys
-                    .encrypt(b"native-event-encrypt-key")
-                    .await
-                    .unwrap(),
-            );
+            "cli_native_app:native-app-secret"
+        };
+        BotSecret::Token
+            .set(&state.encryption_keys, &mut bot, token)
+            .await;
+        if platform == "whatsapp" {
+            BotSecret::AppSecret
+                .set(&state.encryption_keys, &mut bot, "native-meta-app-secret")
+                .await;
+        } else {
+            BotSecret::LarkVerificationToken
+                .set(
+                    &state.encryption_keys,
+                    &mut bot,
+                    "native-verification-token",
+                )
+                .await;
+            BotSecret::LarkEncryptKey
+                .set(&state.encryption_keys, &mut bot, "native-event-encrypt-key")
+                .await;
         }
         let adapter: Arc<dyn PlatformAdapter> = if platform == "whatsapp" {
             Arc::new(LocalWhatsApp {

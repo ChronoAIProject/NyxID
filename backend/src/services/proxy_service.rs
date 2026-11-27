@@ -5621,6 +5621,7 @@ pub(crate) async fn read_connection_authority(
 
 #[cfg(test)]
 mod tests {
+    use crate::services::credential_record_service::fixtures;
     mod pooled_http {
         include!("proxy_pool_tests.rs");
     }
@@ -6318,10 +6319,14 @@ mod tests {
         service.inject_delegation_token = true;
         service.visibility = "public".to_string();
         service.provider_config_id = None;
-        service.credential_encrypted = test_encryption_keys()
-            .encrypt(b"catalog-secret")
-            .await
-            .expect("encrypt catalog credential");
+        service.credential_encrypted = crate::services::catalog_credential_record_service::encrypt(
+            &fixtures::staged_keys(),
+            &service.id,
+            crate::services::catalog_credential_record_service::owner(&service).unwrap(),
+            b"catalog-secret",
+        )
+        .await
+        .unwrap();
 
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&service)
@@ -7776,7 +7781,13 @@ mod tests {
             ))
             .await
             .unwrap();
-        let encrypted = keys.encrypt(override_secret.as_bytes()).await.unwrap();
+        let encrypted = fixtures::key(
+            &override_credential_id,
+            &user_id,
+            "credential_encrypted",
+            override_secret.as_bytes(),
+        )
+        .await;
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(UserApiKey {
                 secret_context_versions: Default::default(),

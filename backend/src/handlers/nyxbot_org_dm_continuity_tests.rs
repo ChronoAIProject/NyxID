@@ -4,9 +4,11 @@
 use super::*;
 use crate::models::{
     assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
+    channel_bot::ChannelBot,
     channel_conversation::{COLLECTION_NAME as ROUTES, ChannelConversation},
     channel_message::{COLLECTION_NAME as RELAY_MESSAGES, ChannelMessage},
 };
+use crate::services::platform_entry_native::tests::credentials::BotSecret;
 use crate::services::{channel_platform::PlatformAdapter, channel_relay_service as relay};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -91,9 +93,16 @@ async fn engine_answer(
         .active_turn
         .as_ref()
         .expect("live turn at engine boundary");
+    // Reset history belongs in session instructions. Inspect it transiently;
+    // only this boolean is retained, never the instructions or recap text.
+    let reset_recap_has_first = body["conversation"].is_null()
+        && body["instructions"]
+            .as_str()
+            .is_some_and(|instructions| instructions.contains(FIRST));
     // Capture attribution, continuity and the synthetic response identity below.
     // Credentials, headers and stable instructions stay outside diagnostics.
     let observed = json!({"input":body["input"],"conversation":body["conversation"],
+        "reset_recap_has_first":reset_recap_has_first,
         "actor":conversation.user_id,"home":conversation.id,"key_id":key.id,
         "turn_id":turn.turn_id,"event_id":turn.channel_event_id,"context":turn.channel_context});
     let mut calls = engine.calls.lock().await;
@@ -109,9 +118,12 @@ async fn engine_answer(
         *context = Some((session.clone(), answer.clone()));
         (session, Some(answer))
     } else if index == 1 && engine.first_fails {
-        let recap = body["input"].as_str().unwrap_or_default();
-        let answer = (body["conversation"].is_null() && recap.contains(FIRST))
-            .then(|| "Recovered amber471".to_owned());
+        let input = body["input"].as_str().unwrap_or_default();
+        let answer = (body["conversation"].is_null()
+            && reset_recap_has_first
+            && input.ends_with(AFTER_FAILURE)
+            && !input.contains(FIRST))
+        .then(|| "Recovered amber471".to_owned());
         (session, answer)
     } else if index == 1 {
         let (previous_session, previous_answer) = context.as_ref().unwrap();
@@ -195,13 +207,18 @@ async fn fixture(first_fails: bool) -> Fixture {
     );
     ensure_org_partition(&state, &key).await;
     let platform = MockServer::start().await;
-    let token = state
-        .encryption_keys
-        .encrypt(b"123:org-dm-2641-test")
+    let mut bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
         .await
         .unwrap();
-    state.db.collection::<bson::Document>("channel_bots").update_one(doc! {"_id":&row.channel_bot_id},
-        doc! {"$set":{"bot_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:token}}}).await.unwrap();
+    BotSecret::Token
+        .set(&state.encryption_keys, &mut bot, "123:org-dm-2641-test")
+        .await;
+    state
+        .db
+        .collection::<ChannelBot>("channel_bots")
+        .replace_one(doc! {"_id":&bot.id}, &bot)
+        .await
+        .unwrap();
     crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
         .lock()
         .unwrap()
@@ -758,6 +775,15 @@ async fn settled_answer(
     assert!(call["input"].as_str().unwrap().ends_with(&source.text));
     if index == 0 || failed {
         assert!(call["conversation"].is_null());
+    }
+    let reset_after_failure = index == 1 && source.text == AFTER_FAILURE;
+    assert_eq!(call["reset_recap_has_first"], reset_after_failure);
+    if reset_after_failure {
+        assert!(
+            call["conversation"].is_null(),
+            "failed session is not reused"
+        );
+        assert!(!call["input"].as_str().unwrap().contains(FIRST));
     }
     if failed {
         assert!(saved.nyxagent_session_id.is_none());

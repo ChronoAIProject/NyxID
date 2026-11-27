@@ -1705,6 +1705,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             post(handlers::admin_cma_sandbox_reservations::resolve),
         )
         .route(
+            "/cma-sandbox-reservations/{id}/release-empty-inventory",
+            post(handlers::admin_cma_sandbox_reservations::release_empty_inventory),
+        )
+        .route(
             "/channel-platforms/{platform}/delivery",
             axum::routing::put(handlers::channel_meta::platform_delivery),
         )
