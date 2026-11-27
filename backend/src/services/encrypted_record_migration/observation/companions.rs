@@ -12,6 +12,8 @@ impl Family {
     pub(crate) fn parent_joins(&self) -> &'static [(&'static str, &'static str)] {
         match self.entry.adapter {
             Adapter::AssistantCredential => &[("api_keys", "api_key_id")],
+            Adapter::NyxbotChannelKey => &[("api_keys", "agent_api_key_id")],
+            Adapter::EventBinding => &[("api_keys", "provider_api_key_id")],
             Adapter::Attachment => &[("assistant_attachments", "parent_attachment_id")],
             Adapter::Public if self.collection() == "platform_public_sessions" => {
                 &[("api_keys", "credential_api_key_id")]

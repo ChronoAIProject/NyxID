@@ -67,7 +67,7 @@ pub(crate) async fn open(
     ))
 }
 
-fn snapshot(source: &Document) -> AppResult<NyxbotChannel> {
+pub(in crate::services) fn snapshot(source: &Document) -> AppResult<NyxbotChannel> {
     let row: NyxbotChannel = bson::from_document(source.clone()).map_err(|_| unavailable())?;
     if row
         .secret_context_versions

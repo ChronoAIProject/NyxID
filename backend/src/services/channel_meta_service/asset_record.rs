@@ -21,7 +21,7 @@ fn ambiguous() -> AppError {
 }
 
 // JSON distinguishes absent optional identities from every possible string value.
-fn attempt(s: &OAuthSession) -> AppResult<String> {
+pub(in crate::services) fn attempt(s: &OAuthSession) -> AppResult<String> {
     serde_json::to_string(&(
         s.created_at.timestamp_millis(),
         &s.bot_id,
@@ -31,7 +31,11 @@ fn attempt(s: &OAuthSession) -> AppResult<String> {
     .map_err(|_| conflict())
 }
 
-fn path<'a>(s: &'a OAuthSession, subject: &'a str, attempt: &'a str) -> [&'a str; 7] {
+pub(in crate::services) fn path<'a>(
+    s: &'a OAuthSession,
+    subject: &'a str,
+    attempt: &'a str,
+) -> [&'a str; 7] {
     [
         FIELD,
         &s.actor_id,
@@ -102,7 +106,11 @@ pub(super) async fn publication(
     }
 }
 
-fn decode(session: &OAuthSession, subject: &str, bytes: &[u8]) -> AppResult<Vec<AssetCredential>> {
+pub(in crate::services) fn decode(
+    session: &OAuthSession,
+    subject: &str,
+    bytes: &[u8],
+) -> AppResult<Vec<AssetCredential>> {
     let assets: Vec<AssetCredential> = serde_json::from_slice(bytes).map_err(|_| ambiguous())?;
     check_assets(session, subject, &assets)?;
     Ok(assets)

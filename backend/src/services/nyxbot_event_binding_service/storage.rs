@@ -77,7 +77,7 @@ pub(super) async fn install(
     Ok(())
 }
 
-fn snapshot(source: &Document) -> AppResult<NyxbotEventBinding> {
+pub(in crate::services) fn snapshot(source: &Document) -> AppResult<NyxbotEventBinding> {
     let row: NyxbotEventBinding = bson::from_document(source.clone()).map_err(|_| invalid())?;
     let live = match row.status.as_str() {
         "preparing" | "ready" if row.revoked_at.is_none() => true,

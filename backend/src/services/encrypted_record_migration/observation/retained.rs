@@ -106,7 +106,7 @@ fn require(value: bool) -> AppResult<()> {
     value.then_some(()).ok_or_else(invalid)
 }
 
-fn issued_key(parent: Option<&Document>, owner: &str, plain: &[u8]) -> AppResult<()> {
+pub(super) fn issued_key(parent: Option<&Document>, owner: &str, plain: &[u8]) -> AppResult<()> {
     let secret = std::str::from_utf8(plain).map_err(|_| invalid())?;
     let key = parent.ok_or_else(invalid)?;
     require(

@@ -9,6 +9,7 @@ use crate::errors::AppResult;
 use crate::services::{channel_signing_migration, credential_record_service as credentials};
 use bson::{Bson, Document};
 
+mod channels;
 mod companions;
 mod deliveries;
 mod families;
@@ -80,7 +81,8 @@ pub(crate) fn families() -> impl Iterator<Item = Family> {
             Adapter::OAuthWebhook => &["created_by", "secret_context_versions"],
             _ => retained::source_companions(entry)
                 .or_else(|| deliveries::source_companions(entry))
-                .or_else(|| nested::source_companions(entry))?,
+                .or_else(|| nested::source_companions(entry))
+                .or_else(|| channels::source_companions(entry))?,
         };
         Some(Family {
             entry,
@@ -94,6 +96,7 @@ pub(crate) enum Marker {
     Unmarked,
     Version(u32),
     HexPrefixV3,
+    GuestReplyPrefixV3,
     ImplicitV3,
 }
 
@@ -261,6 +264,15 @@ impl Family {
                 Adapter::AgentLogin | Adapter::AuthDevice | Adapter::NodeDevice => {
                     Box::pin(source.delivery(&mut out, parents)).await
                 }
+                Adapter::ChannelBot
+                | Adapter::ChannelReceiver
+                | Adapter::NyxbotChannelKey
+                | Adapter::EventBinding
+                | Adapter::MetaConsentAssets
+                | Adapter::NativeWhatsapp
+                | Adapter::ChannelGuestReplyHandle => {
+                    Box::pin(source.channel(&mut out, parents)).await
+                }
                 _ => Box::pin(source.retained(&mut out, parents)).await,
             }
         }
@@ -271,6 +283,7 @@ impl Family {
             self.entry.adapter,
             Adapter::Node
                 | Adapter::CatalogCa
+                | Adapter::NyxbotChannelKey
                 | Adapter::CmaRequest
                 | Adapter::AssistantCredential
                 | Adapter::GeneratedArtifact
@@ -278,8 +291,14 @@ impl Family {
                 | Adapter::AuthDevice
         ) {
             for (field, storage) in &out.instances {
-                if !(self.collection() == "platform_public_sessions"
-                    && *field == "credential_ciphertext")
+                let corroborated = matches!(
+                    (self.entry.adapter, *field),
+                    (Adapter::EventBinding, "provider_key_ciphertext")
+                        | (Adapter::ChannelBot, "webhook_secret_encrypted")
+                );
+                if !corroborated
+                    && !(self.collection() == "platform_public_sessions"
+                        && *field == "credential_ciphertext")
                     && matches!(
                         storage,
                         Storage::Encrypted {
@@ -315,7 +334,7 @@ impl Source<'_> {
         let version = match marker {
             Marker::Unmarked => None,
             Marker::Version(v) => Some(v),
-            Marker::HexPrefixV3 | Marker::ImplicitV3 => Some(3),
+            Marker::GuestReplyPrefixV3 | Marker::HexPrefixV3 | Marker::ImplicitV3 => Some(3),
         };
         out.open(
             self.keys,
