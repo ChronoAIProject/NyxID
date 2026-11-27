@@ -618,8 +618,18 @@ async fn pdf_legacy_coverage_decryption_deadline_uses_authorized_parent_page_cou
         target: Mutex::new(None),
         reached: tokio::sync::Notify::new(),
     });
-    let keys = EncryptionKeys::with_provider(provider.clone());
-    let encrypted = keys.encrypt(&plaintext).await.unwrap();
+    let mut keys = EncryptionKeys::with_provider(provider.clone());
+    keys.set_contextual_record_writes(false);
+    let encrypted = crate::crypto::record_field::encrypt(
+        &keys,
+        COLLECTION_NAME,
+        &parent.id,
+        &parent.user_id,
+        "text_encrypted",
+        &plaintext,
+    )
+    .await
+    .unwrap();
     state.db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id":&parent.id}, doc! {
         "$set":{"text_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}},
         "$unset":{"pdf":"","secret_context_versions.text_encrypted":""},

@@ -3653,7 +3653,6 @@ mod tests {
             ServicePoolMember,
         };
         use crate::models::user::{COLLECTION_NAME as USERS, UserType};
-        use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
         use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
         use crate::models::user_provider_credentials::{
             COLLECTION_NAME as USER_PROVIDER_CREDENTIALS, UserProviderCredentials,
@@ -3755,43 +3754,30 @@ mod tests {
             .unwrap();
 
         let raw_credential = "delegated-account-read-plaintext-secret-fixture";
-        let actor_external_key_id = Uuid::new_v4().to_string();
-        let encrypted_credential = state
-            .encryption_keys
-            .encrypt(raw_credential.as_bytes())
-            .await
-            .unwrap();
-        db.collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(UserApiKey {
-                secret_context_versions: Default::default(),
-                oauth_app_observation: None,
-                id: actor_external_key_id.clone(),
-                user_id: actor_id.to_string(),
-                label: "Secret-bearing fixture".to_string(),
-                credential_type: "api_key".to_string(),
-                credential_encrypted: Some(encrypted_credential),
-                access_token_encrypted: None,
-                refresh_token_encrypted: None,
+        let actor_external_key_id = crate::services::user_api_key_service::create_api_key(
+            &db,
+            &state.encryption_keys,
+            &actor_id.to_string(),
+            crate::services::user_api_key_service::CreateApiKeyParams {
+                label: "Secret-bearing fixture",
+                credential_type: "api_key",
+                credential: raw_credential,
+                access_token: None,
+                refresh_token: None,
                 token_scopes: None,
                 expires_at: None,
                 provider_config_id: None,
                 connection_id: None,
-                oauth_attempt_nonce: None,
-                user_oauth_client_id_encrypted: None,
-                user_oauth_client_secret_encrypted: None,
-                credential_source: None,
-                status: "active".to_string(),
-                last_used_at: None,
-                last_authorized_at: None,
-                error_message: None,
-                source: Some("user_created".to_string()),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: Some("user_created"),
                 source_id: None,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-                credential_epoch: 1,
-            })
-            .await
-            .unwrap();
+            },
+        )
+        .await
+        .unwrap()
+        .id;
 
         let actor_endpoint_id = Uuid::new_v4().to_string();
         let visible_org_endpoint_id = Uuid::new_v4().to_string();

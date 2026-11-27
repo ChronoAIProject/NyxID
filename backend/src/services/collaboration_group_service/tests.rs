@@ -3063,7 +3063,12 @@ async fn collaboration_only_explicit_images_survive_private_thread_cleanup() {
             data_encrypted: vec![],
             created_at: Utc::now(),
         };
-        image.data_encrypted = f.state.encryption_keys.encrypt(b"png!").await.unwrap();
+        crate::services::assistant_record_service::set_fixture_image_data(
+            &f.state.encryption_keys,
+            &mut image,
+            b"png!",
+        )
+        .await;
         f.state
             .db
             .collection::<image::AssistantAttachment>(image::COLLECTION_NAME)

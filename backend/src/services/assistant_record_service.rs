@@ -574,6 +574,23 @@ pub(crate) async fn migrate_attachment_snapshot(
 }
 
 #[cfg(test)]
+pub(crate) async fn set_fixture_image_data(
+    keys: &EncryptionKeys,
+    row: &mut AssistantAttachment,
+    bytes: &[u8],
+) {
+    row.data_encrypted = encrypt_image(keys, row, bytes).await.unwrap();
+    super::credential_record_service::mark_version(
+        &mut row.secret_context_versions,
+        keys,
+        "data_encrypted",
+    );
+}
+
+#[cfg(test)]
+mod historical;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use bson::{Binary, doc, spec::BinarySubtype};
@@ -621,26 +638,26 @@ mod tests {
         let root_id = uuid::Uuid::new_v4().to_string();
         let collection = crate::models::assistant_attachment::COLLECTION_NAME;
         let rows = db.collection::<bson::Document>(collection);
-        let text = crate::crypto::secret_json::SecretJson(serde_json::json!({
-            "content_type":"text/plain","text":"hello","sections":[{"offset":0,"label":"Page 1"}]}));
-        let encoded = crate::crypto::secret_json::to_secret_string(&text.0).unwrap();
         // The legacy storage is deliberately an integer array, not Binary.
         let root = doc! {"_id":&root_id,"user_id":&owner,"origin":"user_upload",
         "conversation_id":"nyxa-fixture","group_id":bson::Bson::Null,
         "message_id":bson::Bson::Null,"label":"fixture.txt","content_type":"text/plain",
         "size":5_i64,"pages":1_i64,"chunks":1_i64,
-        "text_encrypted":keys.encrypt(encoded.as_bytes()).await.unwrap().iter().map(|b|bson::Bson::Int32(*b as i32)).collect::<Vec<_>>(),
+        "text_encrypted":hex::decode(historical::EXTRACTED_TEXT).unwrap().iter().map(|b|bson::Bson::Int32(*b as i32)).collect::<Vec<_>>(),
         "created_at":bson::DateTime::now()};
         let chunk = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,
         "conversation_id":"nyxa-fixture","group_id":bson::Bson::Null,
         "parent_attachment_id":&root_id,"chunk_index":0_i64,
-        "data_encrypted":Binary{subtype:BinarySubtype::Generic,bytes:keys.encrypt(b"hello").await.unwrap()}};
+        "data_encrypted":Binary{subtype:BinarySubtype::Generic,bytes:hex::decode(historical::CHUNK).unwrap()}};
         let mut sources = vec![root.clone(), chunk];
-        for origin in ["tool", "machine_preview"] {
+        for (origin, ciphertext) in [
+            ("tool", historical::TOOL_IMAGE),
+            ("machine_preview", historical::MACHINE_PREVIEW),
+        ] {
             sources.push(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,
                 "origin":origin,"conversation_id":"nyxa-fixture","turn_id":"turn-fixture",
                 "content_type":if origin=="tool" {"image/png"} else {"text/plain"},"size":5_i64,
-                "data_encrypted":Binary{subtype:BinarySubtype::Generic,bytes:keys.encrypt(b"hello").await.unwrap()},
+                "data_encrypted":Binary{subtype:BinarySubtype::Generic,bytes:hex::decode(ciphertext).unwrap()},
                 "created_at":bson::DateTime::now()});
         }
         rows.insert_many(&sources).await.unwrap();
@@ -741,7 +758,7 @@ mod tests {
             .unwrap();
         let source = doc! {"_id":&id,"user_id":&owner,"api_key_id":&key_id,
         "key_ciphertext":Binary{subtype:BinarySubtype::Generic,
-            bytes:keys.encrypt(raw.as_bytes()).await.unwrap()},
+            bytes:hex::decode(historical::AGENT_KEY).unwrap()},
         "created_at":bson::DateTime::now(),"last_used_at":bson::DateTime::now()};
         assert!(!source.contains_key("conversation_id"));
         assert!(!source.contains_key("secret_context_versions"));
