@@ -1,7 +1,9 @@
 use crate::{
-    crypto::{aes::EncryptionKeys, local_key_provider::LocalKeyProvider},
+    crypto::{aes::EncryptionKeys, local_key_provider::LocalKeyProvider, record_field},
     models::{
+        channel_bot::{COLLECTION_NAME as CHANNEL_BOTS, ChannelBot},
         downstream_service::DownstreamService,
+        mfa_factor::{COLLECTION_NAME as MFA_FACTORS, MfaFactor},
         provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig},
         user_api_key::{COLLECTION_NAME, UserApiKey},
         user_service_connection::{COLLECTION_NAME as CONNECTIONS, UserServiceConnection},
@@ -21,6 +23,175 @@ pub(super) fn unrelated_encryption_keys() -> EncryptionKeys {
     EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x99; 32], None)))
 }
 
+pub(super) fn proxy_node_signing_secret() -> String {
+    "11".repeat(32)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum BotSecret {
+    Token,
+    AppSecret,
+    LarkVerificationToken,
+    LarkEncryptKey,
+}
+
+impl BotSecret {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Token => "bot_token_encrypted",
+            Self::AppSecret => "app_secret_encrypted",
+            Self::LarkVerificationToken => "lark_verification_token_encrypted",
+            Self::LarkEncryptKey => "lark_encrypt_key_encrypted",
+        }
+    }
+
+    async fn encrypt_for_bot(
+        self,
+        keys: &EncryptionKeys,
+        id: &str,
+        owner: &str,
+        plaintext: &[u8],
+    ) -> Vec<u8> {
+        record_field::encrypt(keys, CHANNEL_BOTS, id, owner, self.field(), plaintext)
+            .await
+            .unwrap()
+    }
+
+    pub(super) async fn set(self, keys: &EncryptionKeys, bot: &mut ChannelBot, plaintext: &[u8]) {
+        let bytes = self
+            .encrypt_for_bot(keys, &bot.id, &bot.user_id, plaintext)
+            .await;
+        match self {
+            Self::Token => bot.bot_token_encrypted = bytes,
+            Self::AppSecret => bot.app_secret_encrypted = Some(bytes),
+            Self::LarkVerificationToken => bot.lark_verification_token_encrypted = Some(bytes),
+            Self::LarkEncryptKey => bot.lark_encrypt_key_encrypted = Some(bytes),
+        }
+        credential_record_service::mark_version(
+            &mut bot.secret_context_versions,
+            keys,
+            self.field(),
+        );
+    }
+
+    pub(super) async fn set_document(
+        self,
+        keys: &EncryptionKeys,
+        bot: &mut bson::Document,
+        plaintext: &[u8],
+    ) {
+        let bytes = self
+            .encrypt_for_bot(
+                keys,
+                bot.get_str("_id").unwrap(),
+                bot.get_str("user_id").unwrap(),
+                plaintext,
+            )
+            .await;
+        bot.insert(
+            self.field(),
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes,
+            },
+        );
+        if keys.contextual_record_writes() {
+            if !bot.contains_key(credential_record_service::VERSIONS) {
+                bot.insert(credential_record_service::VERSIONS, bson::Document::new());
+            }
+            bot.get_document_mut(credential_record_service::VERSIONS)
+                .unwrap()
+                .insert(self.field(), 3);
+        } else if let Ok(versions) = bot.get_document_mut(credential_record_service::VERSIONS) {
+            versions.remove(self.field());
+        }
+    }
+
+    pub(super) async fn update(
+        keys: &EncryptionKeys,
+        id: &str,
+        owner: &str,
+        mut set: bson::Document,
+        secrets: &[(Self, &[u8])],
+    ) -> bson::Document {
+        let mut unset = bson::Document::new();
+        for &(secret, plaintext) in secrets {
+            let destination = set.get_str("user_id").unwrap_or(owner);
+            let bytes = secret
+                .encrypt_for_bot(keys, id, destination, plaintext)
+                .await;
+            set.insert(
+                secret.field(),
+                bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic,
+                    bytes,
+                },
+            );
+            credential_record_service::mark_classic_update(
+                &mut set,
+                &mut unset,
+                keys,
+                secret.field(),
+            );
+        }
+        let mut update = bson::doc! {"$set":set};
+        if !unset.is_empty() {
+            update.insert("$unset", unset);
+        }
+        update
+    }
+
+    pub(super) async fn insert(
+        self,
+        db: &mongodb::Database,
+        keys: &EncryptionKeys,
+        mut bot: bson::Document,
+        plaintext: &[u8],
+    ) {
+        self.set_document(keys, &mut bot, plaintext).await;
+        db.collection::<bson::Document>(CHANNEL_BOTS)
+            .insert_one(bot)
+            .await
+            .unwrap();
+    }
+}
+
+pub(super) async fn insert_recovery_factor(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    owner: &str,
+    recovery_hash: &str,
+) {
+    let id = uuid::Uuid::new_v4().to_string();
+    let secret = record_field::encrypt(
+        keys,
+        MFA_FACTORS,
+        &id,
+        owner,
+        "secret_encrypted",
+        b"JBSWY3DPEHPK3PXP",
+    )
+    .await
+    .unwrap();
+    db.collection::<MfaFactor>(MFA_FACTORS)
+        .insert_one(MfaFactor {
+            id,
+            user_id: owner.to_owned(),
+            factor_type: "totp".into(),
+            secret_encrypted: Some(secret),
+            secret_context_version: keys.contextual_record_writes().then_some(3),
+            recovery_codes: Some(serde_json::json!([recovery_hash])),
+            last_totp_counter: None,
+            is_verified: true,
+            is_active: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
+}
+
+#[derive(Clone, Copy)]
 pub(super) enum KeySecret {
     Credential,
     AccessToken,
@@ -28,28 +199,72 @@ pub(super) enum KeySecret {
 }
 
 impl KeySecret {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Credential => "credential_encrypted",
+            Self::AccessToken => "access_token_encrypted",
+            Self::OAuthClientId => "user_oauth_client_id_encrypted",
+        }
+    }
+
     pub(super) async fn set(self, keys: &EncryptionKeys, row: &mut UserApiKey, plaintext: &[u8]) {
-        let (field, slot) = match self {
-            Self::Credential => ("credential_encrypted", &mut row.credential_encrypted),
-            Self::AccessToken => ("access_token_encrypted", &mut row.access_token_encrypted),
-            Self::OAuthClientId => (
-                "user_oauth_client_id_encrypted",
-                &mut row.user_oauth_client_id_encrypted,
-            ),
+        let field = self.field();
+        let encrypted = credential_record_service::encrypt(
+            keys,
+            COLLECTION_NAME,
+            &row.id,
+            &row.user_id,
+            field,
+            plaintext,
+        )
+        .await
+        .unwrap();
+        let slot = match self {
+            Self::Credential => &mut row.credential_encrypted,
+            Self::AccessToken => &mut row.access_token_encrypted,
+            Self::OAuthClientId => &mut row.user_oauth_client_id_encrypted,
         };
-        *slot = Some(
-            credential_record_service::encrypt(
-                keys,
-                COLLECTION_NAME,
-                &row.id,
-                &row.user_id,
-                field,
-                plaintext,
-            )
-            .await
-            .expect("encrypt fixture key field"),
-        );
+        *slot = Some(encrypted);
         credential_record_service::mark_version(&mut row.secret_context_versions, keys, field);
+    }
+
+    pub(super) async fn insert(
+        self,
+        db: &mongodb::Database,
+        keys: &EncryptionKeys,
+        mut row: bson::Document,
+        plaintext: &[u8],
+    ) {
+        let field = self.field();
+        let bytes = credential_record_service::encrypt(
+            keys,
+            COLLECTION_NAME,
+            row.get_str("_id").unwrap(),
+            row.get_str("user_id").unwrap(),
+            field,
+            plaintext,
+        )
+        .await
+        .unwrap();
+        row.insert(
+            field,
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes,
+            },
+        );
+        let mut versions = Default::default();
+        credential_record_service::mark_version(&mut versions, keys, field);
+        if !versions.is_empty() {
+            row.insert(
+                credential_record_service::VERSIONS,
+                bson::to_bson(&versions).unwrap(),
+            );
+        }
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .insert_one(row)
+            .await
+            .unwrap();
     }
 }
 

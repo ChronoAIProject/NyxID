@@ -102,6 +102,9 @@ async fn mixed_thread_reference() {
         // The real supplemental reader validates the reference before checking
         // the agent key. Stop at that local authority boundary in each binary.
         f.channel.agent_key_ciphertext = None;
+        f.channel
+            .secret_context_versions
+            .remove(crate::services::nyxbot_channel_key::FIELD);
         let origin = &f.event.delivery.as_ref().unwrap().origin;
         let mut decision = supplemental::Decision::new(Purpose::CheckingNotice);
         let result = Box::pin(supplemental::relay(
@@ -144,7 +147,9 @@ async fn thread_reference_rewrap_preserves_each_anchor_and_retained_generation()
     use crate::services::{
         encrypted_record_migration as migration, nyxbot_thread_reference as reference,
     };
-    let (f, _, _) = Box::pin(notice_fixture()).await;
+    let mut compatible = crate::test_utils::test_encryption_keys();
+    compatible.set_contextual_record_writes(false);
+    let (f, _, _) = Box::pin(notice_fixture_with_reference_keys(Some(&compatible))).await;
     let source = stored(&f).await.unwrap();
     let rows = f.state.db.collection::<Document>(THREADS);
     let keys = &f.state.encryption_keys;
@@ -171,14 +176,17 @@ async fn thread_reference_rewrap_preserves_each_anchor_and_retained_generation()
                 }
             }
             "stale-bytes" => {
+                let newer = seal_thread_reference(
+                    &compatible,
+                    case,
+                    row.get_str("user_id").unwrap(),
+                    row.get_str("channel_id").unwrap(),
+                    b"new-reference",
+                )
+                .await;
                 row.insert(
                     "event_ref_ciphertext",
-                    keys.encrypt(b"new-reference")
-                        .await
-                        .unwrap()
-                        .into_iter()
-                        .map(i32::from)
-                        .collect::<Vec<_>>(),
+                    newer.into_iter().map(i32::from).collect::<Vec<_>>(),
                 );
             }
             "missing" => {
@@ -282,7 +290,9 @@ async fn thread_reference_authenticates_identity_utf8_marker_and_primary() {
         crypto::{aes::EncryptionKeys, record_field::RecordContext},
         services::nyxbot_thread_reference as reference,
     };
-    let (f, _, _) = Box::pin(notice_fixture()).await;
+    let mut compatible = crate::test_utils::test_encryption_keys();
+    compatible.set_contextual_record_writes(false);
+    let (f, _, _) = Box::pin(notice_fixture_with_reference_keys(Some(&compatible))).await;
     let legacy = stored(&f).await.unwrap();
     let keys = &f.state.encryption_keys;
     migrate_fixture(&f, &legacy).await;

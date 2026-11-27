@@ -8,7 +8,6 @@ use crate::models::{
     channel_conversation::{COLLECTION_NAME as ROUTES, ChannelConversation},
     channel_message::{COLLECTION_NAME as RELAY_MESSAGES, ChannelMessage},
 };
-use crate::services::platform_entry_native::tests::credentials::token_update;
 use crate::services::{channel_platform::PlatformAdapter, channel_relay_service as relay};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -206,12 +205,12 @@ async fn fixture(first_fails: bool) -> Fixture {
     );
     ensure_org_partition(&state, &key).await;
     let platform = MockServer::start().await;
-    let update = token_update(
+    let update = BotSecret::update(
         &state.encryption_keys,
         &row.channel_bot_id,
         &org_id,
-        "123:org-dm-2641-test",
         doc! {},
+        &[(BotSecret::Token, b"123:org-dm-2641-test")],
     )
     .await;
     let updated = state

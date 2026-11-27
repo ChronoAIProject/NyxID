@@ -496,15 +496,13 @@ pub(super) async fn org_channel(
     } else {
         channel(state, "gateway").await
     };
-    state
-        .db
-        .collection::<bson::Document>("channel_bots")
-        .update_one(
-            doc! {"_id":&row.channel_bot_id},
-            doc! {"$set":{"user_id":&org_id}},
-        )
-        .await
-        .unwrap();
+    row.bot_owner_id = Some(org_id.clone());
+    let secrets: &[(BotSecret, &[u8])] = if native {
+        &[(BotSecret::Token, b"test-discord-token")]
+    } else {
+        &[]
+    };
+    set_bot_secrets(state, &row, doc! {"user_id":&org_id}, secrets).await;
     let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id)
         .await
         .unwrap();
@@ -534,7 +532,6 @@ pub(super) async fn org_channel(
         .await
         .unwrap();
     state.db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":&row.id},doc!{"$set":{"bot_owner_id":&org_id,"agent_id":&agent.id,"org_specialist":bson::to_bson(&binding).unwrap()}}).await.unwrap();
-    row.bot_owner_id = Some(org_id.clone());
     row.agent_id = Some(agent.id.clone());
     row.org_specialist = Some(binding);
     (row, key, agent, org_id)
@@ -1007,15 +1004,13 @@ async fn org_guest_group_dm_group(case: GuestGroupCase) {
         .replace_one(doc! {"_id":&row.id}, &row)
         .await
         .unwrap();
-    state
-        .db
-        .collection::<bson::Document>("channel_bots")
-        .update_one(
-            doc! {"_id":&row.channel_bot_id},
-            doc! {"$set":{"platform":"lark","user_id":&org_id,"platform_bot_id":"ou_bot", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: state.encryption_keys.encrypt(b"app:secret").await.unwrap() }}},
-        )
-        .await
-        .unwrap();
+    set_bot_secrets(
+        &state,
+        &row,
+        doc! {"platform":"lark","user_id":&org_id,"platform_bot_id":"ou_bot"},
+        &[(BotSecret::Token, b"app:secret")],
+    )
+    .await;
     state
         .db
         .collection::<bson::Document>("channel_conversations")
@@ -2035,8 +2030,7 @@ async fn supplemental_org_specialist_uses_org_route_and_admitted_member() {
         assert_eq!(origin.org_execution.as_ref().unwrap().actor_id,OWNER);
         assert_eq!(conversation.agent_id.as_deref(),Some(agent.id.as_str()));
         conversation.active_turn=Some(bson::from_document(doc!{"turn_id":&event.turn_id,"origin":"channel","asked_from":bson::to_bson(&origin).unwrap(),"channel_event_id":&event.id,"started_at":bson::DateTime::now(),"stop_requested":false}).unwrap());
-        let cipher=state.encryption_keys.encrypt(b"test-token").await.unwrap();
-        state.db.collection::<bson::Document>("channel_bots").update_one(doc!{"_id":&channel.channel_bot_id},doc!{"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
+        set_bot_secrets(&state, &channel, doc! {}, &[(BotSecret::Token, b"test-token")]).await;
         let platform=MockServer::start().await;
         Mock::given(path_regex("/bot.*/sendMessage")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":43}}))).mount(&platform).await;
         crate::handlers::channel_relay::TEST_REPLY_ADAPTERS.lock().unwrap().insert(channel.channel_bot_id.clone(),Arc::new(crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(&platform.uri())));

@@ -231,13 +231,9 @@ impl Fixture {
         bot.insert("_id", &row.channel_bot_id);
         bot.insert("user_id", row.bot_owner_id.as_deref().unwrap_or(OWNER));
         bot.insert("platform_bot_id", "ou_bot");
-        bot.insert(
-            "bot_token_encrypted",
-            bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: state.encryption_keys.encrypt(b"app:secret").await.unwrap(),
-            },
-        );
+        BotSecret::Token
+            .set_document(&state.encryption_keys, &mut bot, b"app:secret")
+            .await;
         state
             .db
             .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
@@ -849,7 +845,7 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
         }
         let mut attachments = Vec::new();
         for _ in 0..2 {
-            let attachment = AssistantAttachment {
+            let mut attachment = AssistantAttachment {
                 artifact: Default::default(),
                 secret_context_versions: Default::default(),
                 id: Uuid::new_v4().to_string(),
@@ -860,9 +856,10 @@ async fn nyxbot_followed_thread_images_use_native_components_before_direct_or_ga
                 content_type: "image/png".into(),
                 size: 6,
                 chunks: 0,
-                data_encrypted: f.state.encryption_keys.encrypt(b"pixels").await.unwrap(),
+                data_encrypted: Vec::new(),
                 created_at: Utc::now(),
             };
+            set_image_data(&f.state.encryption_keys, &mut attachment, b"pixels").await;
             f.state
                 .db
                 .collection::<AssistantAttachment>(

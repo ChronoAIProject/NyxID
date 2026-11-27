@@ -134,3 +134,43 @@ the runbook's [refresh-record upgrade rules](OAUTH_AUTHORITY_ROLLOUT.md#compatib
 eligible ordinary refresh records upgrade once without reauthorization;
 ineligible records require authorization. Legacy delegation and callback work
 must drain before the cutover.
+
+## Enrolling the encryption ring and recording dependencies
+
+A full administrator can enroll the configuration already in use. Enrollment assigns a deployment UUID, a restore epoch and an opaque UUID to each configured key. A ring with a previous or fallback key starts with an open rotation. Each slot must authenticate its own contextual challenge, including when contextual *application* writes are disabled. The AWS enrollment identity needs `kms:DescribeKey` to resolve the configured resource plus encrypt/decrypt access to each enrolled key. GCP enrollment uses the configured CryptoKey resource. Cloud proof covers the logical resource. A claim about a historical internal version needs separately recorded provider evidence.
+
+The following paths are relative to `/api/v1/admin/key-lifecycle`. Use a first-party person session or access token. The lifecycle observer needs MongoDB catalog access and permission to read the replica-set configuration. Admins and operators can read. Writes require a full admin. The operator read audit identifies the endpoint. Each mutation, including the enrollment, commits a chained audit with the lifecycle revision in the same majority transaction.
+
+| Method and path | Operation |
+|---|---|
+| `GET /` (base path without trailing slash) | Read the enrolled scope, opaque keys, revision, restore blocker and current evidence pointers. A JSON null means enrollment has not occurred. The HMAC file check compares all six configured-file commitments with the durable pin. Fleet activation is a separate check. |
+| `POST /enroll` | Supply `deployment_revision` and `recording` with `expected_revision: 0`. Record the owner of the initial inventory. |
+| `GET /dependencies` | Read dependency records in opening-revision order. Each record retains its parents, key and format scope, owner, last receipt and resolution. |
+| `GET /evidence` | Read immutable entries in revision order. Each includes authenticated producer/issuer, named owner, evidence reference, before/after scope and database-recorded time. |
+| `POST /evidence` | Append a typed assertion, inventory change, ring verification or epoch change. The receipt names the committed revision. |
+
+For either list, `after` is an exclusive revision and `limit` defaults to 50, up to 100. Continue from the last opening revision for dependencies or the last receipt revision for evidence. Use the singleton revision to detect changes between pages.
+
+Every mutation carries the following recording fields.
+
+```json
+{
+  "recording": {
+    "request_id": "0c0845a9-70f1-4129-b4c6-f73b81c200e5",
+    "expected_revision": 0,
+    "owner": "identity-operations",
+    "evidence_ref": "fc9cb60a-b1fc-4249-8220-ba6eeb5011d8"
+  },
+  "deployment_revision": "release-2026-11-26"
+}
+```
+
+Generate fresh v4 UUIDs for request IDs and immutable evidence references. Keep the referenced documents in the owner's controlled inventory. Owner and deployment revision are bounded directory or release labels. Repeating the same request as its original actor yields the original dated receipt. After a revision conflict, reload the scope and review the intervening entries before submitting a new request.
+
+For `POST /evidence`, replace the enrollment's `deployment_revision` field with `scope` from the status response and a `change` object. Scope includes deployment ID, release revision, restore epoch and the affected key references. A dependency with unknown key scope covers every enrolled key. The recording API assigns the issuer and producer. Version-one assertion payloads and immutable scope are independent of how the issuer authenticated, so a future automated attester can use the same stored format.
+
+1. **Inventory.** Submit `open_dependency` with `inventory`, `parents` (IDs of prerequisite dependencies) and `formats`. Its entry ID becomes the dependency ID. Record reader and writer cohorts, independent HMAC adoption, migration canaries, database credentials, full and incremental backups, PITR, clones, archives, restore drills, rollback images, cloud versions and unknown dependencies. Record the parents of each incremental or PITR chain and include their keys and formats. Register a copy before making it restorable. Include a newly discovered restorable copy even if a previous review already closed the inventory.
+2. **Closure.** Submit `close_dependency` with `dependency_id` and a typed `resolution`. Close restorable children before their parents. Backup and PITR evidence must establish verified disposal or a tested survivor restore. A rollback image requires withdrawal or a tested survivor rollback. Record revocation or rotation for credentials and provider-specific verification for a cloud version. An expiry date alone cannot close a dependency. Submit `reopen_dependency` with the same dependency ID to supersede a closure. Use `review_inventory` with `inventory` and disposition `reviewed`, `reviewed_empty` or `withdrawn`. Reader, HMAC and migration-canary dependencies accept the corresponding tested survivor-reader, verified independent-HMAC and tested survivor-canary evidence. A missing review leaves coverage unknown.
+3. **Evidence after the baseline.** Use `attest` with `assertion`, `affirmed` and optional `valid_until_ms` (Unix milliseconds). Record `old_writers_withdrawn`, `database_access_revoked`, `restore_continuity` and `recovery_dependencies_closed`. Include old images, deployments and jobs, obsolete credentials and live sessions, and all restorable backup, PITR and rollback dependencies. A changed dependency clears its prior inventory review and aggregate assertion for the affected keys. A withdrawal or replacement appends a new revision. The decision reader must check those exact entries, their expiry and the singleton at decision commit. To establish strict post-baseline ordering, read the singleton revision at snapshot S and require each relied-on evidence revision to be greater. Wall-clock ties are possible.
+4. **Restore or deployment change.** Submit `advance_restore_epoch` for the complete ring after an announced restore/import, or `change_deployment_revision` with the new release revision when that scope changes. Reread status, start a fresh census and record fresh scoped reviews and attestations. A detected database or lifecycle collection identity change opens a durable restore blocker. Only an explicit epoch advance clears it. NyxID cannot independently prove that an unannounced restore or import did not occur. A restore can roll back the database, journal and evidence together.
+5. **Verification and rollback.** Submit `verify_ring` for the complete scope to challenge the enrolled layout again. The previous release can continue serving under the enrolled configuration and ignores the new collections. Enrollment authorizes neither a key removal nor a second rotation. The census runner and release rehearsal must repeat the fixed-load throughput and tail-latency gate on an isolated rig before enabling certification.
