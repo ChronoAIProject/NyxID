@@ -23,6 +23,9 @@ pub const MAX_ARCHIVE: usize = 4 * 1024 * 1024;
 const MAX_EXPANDED: usize = 8 * 1024 * 1024;
 const MAX_FILES: usize = 256;
 
+#[cfg(test)]
+pub(crate) mod source_fixture;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OrnnCode {
     AuthMissing,
@@ -927,6 +930,9 @@ fn attached_pin<'a>(
     Ok((root, id, version, hash))
 }
 
+/// A source locator is not authority. Authenticate the current selected archive
+/// before comparing it, including on a stale or missing continuation locator.
+/// One locator binds the root and its entire closure, across paths/dependencies.
 pub async fn read(
     reader: &impl OrnnReader,
     agent: &AssistantAgent,
@@ -934,12 +940,29 @@ pub async fn read(
     dependency: Option<&str>,
     path: &str,
     offset: usize,
+    fingerprint: Option<&str>,
 ) -> AppResult<Value> {
-    let (_, id, version, hash) = attached_pin(agent, skill, dependency)?;
+    use crate::errors::skill_read::SkillReadReason;
+
+    let (root, id, version, hash) = attached_pin(agent, skill, dependency)?;
     if path != "/" && !safe_path(path) {
         return Err(invalid("Use a package-relative file path"));
     }
     let files = package(&download(reader, id, version, hash).await?)?;
+    let source = hex::encode(Sha256::digest(
+        serde_json::to_vec(&json!([
+            "nyxid:skill-source:v1",
+            agent.id,
+            root
+        ]))
+        .expect("skill pins serialize"),
+    ));
+    if fingerprint.is_some_and(|expected| expected != source) {
+        return Err(AppError::SkillRead(SkillReadReason::SourceChanged));
+    }
+    if offset > 0 && fingerprint.is_none() {
+        return Err(AppError::SkillRead(SkillReadReason::SourceRequired));
+    }
     let content = if path == "/" {
         files.keys().cloned().collect::<Vec<_>>().join("\n")
     } else {
@@ -951,7 +974,18 @@ pub async fn read(
         )
         .map_err(|_| invalid("This file is binary; only UTF-8 text is readable"))?
     };
-    page(&content, id, version, path, offset)
+    page_with_metadata(
+        &content,
+        (id, version, path),
+        offset,
+        PAGE_BUDGET,
+        CONTINUE_READ,
+        &json!({
+            "source_fingerprint": source,
+            "archive_sha256": hash,
+            "sha256": hex::encode(Sha256::digest(content.as_bytes())),
+        }),
+    )
 }
 
 /// The NYX template outline of an attached root or pinned dependency
@@ -1124,7 +1158,7 @@ pub(crate) async fn pinned_files(
 const PAGE_BUDGET: usize = 9200;
 /// Smallest outline page budget; always leaves room for some content.
 const MIN_OUTLINE_BUDGET: usize = 2500;
-const CONTINUE_READ: &str = "Read again with next_offset to continue.";
+const CONTINUE_READ: &str = "Continue the same skill/dependency/path with offset=next_offset and source_fingerprint. Carry the fingerprint to other files and dependencies, including offset 0. Join content without separators; verify total_bytes and sha256.";
 
 /// Size of `value` as an MCP text result, including its second JSON escape layer.
 pub fn wire_len(value: &Value) -> usize {
@@ -1133,6 +1167,7 @@ pub fn wire_len(value: &Value) -> usize {
         .len()
 }
 
+#[cfg(test)]
 fn page(content: &str, id: &str, version: &str, path: &str, offset: usize) -> AppResult<Value> {
     page_with(
         content,
@@ -1154,6 +1189,18 @@ fn page_with(
     budget: usize,
     hint: &str,
 ) -> AppResult<Value> {
+    page_with_metadata(content, (id, version, path), offset, budget, hint, &json!({}))
+}
+
+fn page_with_metadata(
+    content: &str,
+    identity: (&str, &str, &str),
+    offset: usize,
+    budget: usize,
+    hint: &str,
+    metadata: &Value,
+) -> AppResult<Value> {
+    let (id, version, path) = identity;
     if offset > content.len() || !content.is_char_boundary(offset) {
         return Err(invalid("Offset must be a UTF-8 byte boundary in the file"));
     }
@@ -1163,7 +1210,10 @@ fn page_with(
             end -= 1;
         }
         let complete = end >= content.len();
-        let result = json!({"skill_id":id,"version":version,"path":path,"offset":offset,"next_offset":(!complete).then_some(end),"total_bytes":content.len(),"untrusted_guidance":true,"content":&content[offset..end],"complete":complete,"continuation_hint":(!complete).then_some(hint)});
+        let mut result = json!({"skill_id":id,"version":version,"path":path,"offset":offset,"next_offset":(!complete).then_some(end),"total_bytes":content.len(),"untrusted_guidance":true,"content":&content[offset..end],"complete":complete,"continuation_hint":(!complete).then_some(hint)});
+        result.as_object_mut().expect("page").extend(
+            metadata.as_object().expect("page metadata").clone(),
+        );
         if wire_len(&result) <= budget {
             return Ok(result);
         }

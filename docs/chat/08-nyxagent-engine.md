@@ -172,6 +172,13 @@ same canonical tool and arguments is refused as `retry_duplicate_action` before
 execution. This is a fence for known completed calls, not an exactly-once
 guarantee for unknown outcomes. Ordinary turns are unaffected. Pending
 acknowledgement cards keep their own expiry and are not re-presented by Retry.
+The closed native `get_agent_skills` and `get_agent_operations` readers may run
+again to verify saved setup, through their live target ACLs. Bound skill downloads
+and retained result reads keep the existing exact-call fence; a retained reference
+also expires with its original turn. Source recovery never replays a completed
+write. If a source read remains fenced or unavailable, request review and report
+setup incomplete. Ordinary new turns can read the enabled pin again using the
+[source continuation contract](../AGENT_SKILLS.md#packages-and-disclosure).
 The web client displays `retry_warning` and requires confirmation before retrying
 when actions are recorded or their outcomes are uncertain. Schedule creation uses
 `nyxid__create_schedule`; its UUID is generated server-side, outside the canonical

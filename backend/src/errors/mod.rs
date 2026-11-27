@@ -1795,7 +1795,7 @@ impl AppError {
         }
         if let Self::SkillRead(reason) = self {
             let mut response = reason.legacy_error().response_body();
-            response.details = Some(serde_json::json!({"reason": reason}));
+            response.details = Some(reason.details());
             return response;
         }
         if let Self::RefreshRefused { source, reason } = self {

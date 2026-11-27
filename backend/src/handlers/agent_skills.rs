@@ -1209,6 +1209,7 @@ pub async fn preview_attached(
             None,
             "SKILL.md",
             0,
+            None,
         )
         .await?;
         let text: String = page["content"]
@@ -1322,6 +1323,7 @@ async fn read_attached(
             args["dependency"].as_str(),
             args["path"].as_str().unwrap_or("SKILL.md"),
             offset,
+            args["source_fingerprint"].as_str(),
         )
         .await
     }
@@ -1516,7 +1518,12 @@ pub(crate) async fn dispatch(
                 return Err(AppError::Forbidden("Specialists may read or request only their own skills; skills are managed for them".into()));
             }
             if name == "get_agent_skills" {
-                return Ok((json!(skills::SkillsResponse::from(agent)), false));
+                let mut value = json!(skills::SkillsResponse::from(agent));
+                value["complete"] = json!(true);
+                if skills::wire_len(&value) > 9200 {
+                    return Err(AppError::ValidationError("Saved pins exceed this reader's budget. Inspect the agent's Skills editor; report setup incomplete until independently verified.".into()));
+                }
+                return Ok((value, false));
             }
             if name == "set_agent_skills" && target != agent.id {
                 return Err(AppError::ValidationError(

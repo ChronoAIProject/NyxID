@@ -2760,6 +2760,23 @@ fn chat_retry_digest(params: &serde_json::Value) -> String {
     chat_activity_digest(params)
 }
 
+/// These closed native readers reconstruct source or verify saved setup after
+/// Retry. They dispatch through their normal live ACLs and never write setup.
+/// Do not infer safety from downstream names or HTTP methods.
+fn setup_recovery_read(params: &serde_json::Value) -> bool {
+    let name = if params["name"] == "nyx__call_tool" {
+        params["arguments"]["tool_name"].as_str()
+    } else {
+        params["name"].as_str()
+    };
+    matches!(
+        name,
+        Some(
+            "nyxid__get_agent_skills" | "nyxid__get_agent_operations"
+        )
+    )
+}
+
 /// Refuse a retried turn's repeat of a completed call: an MCP `isError`
 /// result the model can act on, recorded on the live turn (so a retry of this
 /// retry stays fenced) and audited with metadata only.
@@ -3061,6 +3078,7 @@ async fn handle_tools_call_inner(
     // before the call counts as continuation progress or is dispatched.
     if let Some(chat) = &auth.chat
         && let Some(params) = request.params.as_ref()
+        && !setup_recovery_read(params)
     {
         let digest = chat_retry_digest(params);
         let legacy = chat_activity_digest(params);
