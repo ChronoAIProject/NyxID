@@ -25,7 +25,7 @@ impl Source<'_> {
             .collect()
     }
 
-    fn versions(&self) -> AppResult<Option<&Document>> {
+    pub(super) fn versions(&self) -> AppResult<Option<&Document>> {
         self.row
             .get(credentials::VERSIONS)
             .map(|v| v.as_document().ok_or_else(invalid))

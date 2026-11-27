@@ -1696,7 +1696,12 @@ pub(crate) async fn verify_current_capability_snapshot(
     )
     .await?;
     let plain = decrypt_capability(keys, effect).await?;
-    let material: RevocationMaterial = serde_json::from_slice(&plain).map_err(|_| invalid())?;
+    validate_capability(&plain)
+}
+
+pub(crate) fn validate_capability(plain: &[u8]) -> AppResult<()> {
+    let invalid = || AppError::Internal("Invalid preserved capability storage".into());
+    let material: RevocationMaterial = serde_json::from_slice(plain).map_err(|_| invalid())?;
     if material.provider.as_ref().is_some_and(|provider| {
         provider.client_id_encrypted.is_some()
             || provider.client_secret_encrypted.is_some()

@@ -409,7 +409,7 @@ enum Change {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 impl Census<'_> {
     /// Read one bounded page starting at the durable token. Discard the local

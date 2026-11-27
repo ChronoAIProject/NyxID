@@ -45,14 +45,17 @@ pub(super) async fn open(
     Ok(body)
 }
 
-struct Request<'a> {
-    context: RecordContext<'a>,
-    ciphertext: Vec<u8>,
-    version: Option<i32>,
-    hash: &'a str,
+pub(super) struct Request<'a> {
+    pub(super) context: RecordContext<'a>,
+    pub(super) ciphertext: Vec<u8>,
+    pub(super) version: Option<i32>,
+    pub(super) hash: &'a str,
 }
 
-fn snapshot<'a>(collection: &'a str, source: &'a Document) -> AppResult<Option<Request<'a>>> {
+pub(super) fn snapshot<'a>(
+    collection: &'a str,
+    source: &'a Document,
+) -> AppResult<Option<Request<'a>>> {
     let text = |key| source.get_str(key).map_err(|_| unavailable());
     let context = RecordContext::new(collection, text("_id")?, text("user_id")?, &[FIELD])?;
     let version = match source.get(VERSION) {
