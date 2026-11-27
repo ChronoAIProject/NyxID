@@ -548,7 +548,9 @@ async fn telegram_new_start_sends_readable_instructions_before_the_creation_keyb
         assert!(text.contains("send /start once to retry this same live setup"));
         assert!(text.contains("Check this saved setup's progress in NyxID before trying again"));
         assert!(text.contains("wait and check again; do not submit another form"));
-        assert!(text.contains("Do not restart NyxBot, create another assistant or start another setup request"));
+        assert!(text.contains(
+            "Do not restart NyxBot, create another assistant or start another setup request"
+        ));
         assert!(!text.contains(&challenge));
         let keyboard = replies[1].body_json::<Value>().unwrap();
         assert_eq!(keyboard["chat_id"], 700);

@@ -1,7 +1,7 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Check, ExternalLink, Loader2 } from "lucide-react";
 import { useTelegramNew } from "@/hooks/use-telegram-new";
 import { useChannelConnectLinkContext } from "@/hooks/use-channel-connect-link";
@@ -9,6 +9,22 @@ import { useAuthStore } from "@/stores/auth-store";
 import { Button } from "@/components/ui/button";
 import { TelegramPromptStatus } from "./telegram-prompt-status";
 import { ErrorBanner } from "@/components/shared/error-banner";
+import type { TelegramNewRequest } from "@/schemas/telegram-new";
+
+function matchesLiveCreationRequest(
+  candidate: TelegramNewRequest | null | undefined,
+  captured: TelegramNewRequest,
+  checkedAt: number,
+): candidate is TelegramNewRequest {
+  return Boolean(candidate
+    && candidate.id === captured.id
+    && candidate.revision === captured.revision
+    && candidate.owner_user_id === captured.owner_user_id
+    && candidate.status === "waiting_bot"
+    && !candidate.setup_notice
+    && candidate.can_open_creation_form
+    && Date.parse(candidate.expires_at) > checkedAt);
+}
 
 export function TelegramNew({
   label,
@@ -97,10 +113,12 @@ export function TelegramNew({
     };
   }, [actor]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     // Replacing the caller's request or hosted link must invalidate callbacks
-    // that still close over the previous query key, even for the same account.
+    // at commit, before a promise can use the previous query key. Cleanup also
+    // invalidates recovery synchronously when the caller unmounts.
     recoveryContext.current = {};
+    return () => { recoveryContext.current = {}; };
   }, [actor, requestId, link?.id]);
 
   useEffect(() => {
@@ -162,13 +180,10 @@ export function TelegramNew({
     try {
       const result = await creationLink.mutateAsync(captured.id);
       const latest = getCurrentRequest();
-      if (!active.current || currentActor.current !== actor || recoveryContext.current !== context || latest?.id !== captured.id
-        || latest.revision !== captured.revision || latest.status !== "waiting_bot"
-        || latest.setup_notice || !latest.can_open_creation_form || !(Date.parse(latest.expires_at) > Date.now())
-        || result.request.setup_notice || !result.request.can_open_creation_form
-        || !(Date.parse(result.request.expires_at) > Date.now()) || result.request.id !== captured.id
-        || result.request.revision !== captured.revision || result.request.status !== "waiting_bot"
-        || latest.owner_user_id !== captured.owner_user_id || result.request.owner_user_id !== captured.owner_user_id) {
+      const checkedAt = Date.now();
+      if (!active.current || currentActor.current !== actor || recoveryContext.current !== context
+        || !matchesLiveCreationRequest(latest, captured, checkedAt)
+        || !matchesLiveCreationRequest(result.request, captured, checkedAt)) {
         tab?.close();
         return;
       }
