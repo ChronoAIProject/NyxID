@@ -1440,6 +1440,27 @@ pub(crate) async fn reconcile_effect(
 mod reconciliation_tests {
     use super::*;
 
+    pub(super) async fn provider_app_field(
+        keys: &EncryptionKeys,
+        provider: &mut ProviderConfig,
+        field: &str,
+        plaintext: &[u8],
+    ) -> Vec<u8> {
+        use crate::services::credential_record_service as record;
+        let bytes = record::encrypt(
+            keys,
+            crate::models::provider_config::COLLECTION_NAME,
+            &provider.id,
+            record::PLATFORM_OWNER,
+            field,
+            plaintext,
+        )
+        .await
+        .unwrap();
+        record::mark_version(&mut provider.secret_context_versions, keys, field);
+        bytes
+    }
+
     async fn fixture() -> (Database, String, EncryptionKeys, String) {
         let (db, user) = super::super::tests::fixture().await;
         super::super::accept(&db, &user, &user, None).await.unwrap();
@@ -1569,8 +1590,24 @@ mod reconciliation_tests {
             let (db, user, keys, id) = fixture().await;
             let mut provider:ProviderConfig=bson::from_document(doc! {"_id":"provider","slug":"provider","name":"Provider","provider_type":"oauth2",
                 "is_active":true,"created_by":"admin","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).unwrap();
-            provider.client_id_encrypted = Some(keys.encrypt(client_id.as_bytes()).await.unwrap());
-            provider.client_secret_encrypted = Some(keys.encrypt(b"rotated-secret").await.unwrap());
+            provider.client_id_encrypted = Some(
+                provider_app_field(
+                    &keys,
+                    &mut provider,
+                    "client_id_encrypted",
+                    client_id.as_bytes(),
+                )
+                .await,
+            );
+            provider.client_secret_encrypted = Some(
+                provider_app_field(
+                    &keys,
+                    &mut provider,
+                    "client_secret_encrypted",
+                    b"rotated-secret",
+                )
+                .await,
+            );
             db.collection::<ProviderConfig>(crate::models::provider_config::COLLECTION_NAME)
                 .insert_one(&provider)
                 .await
@@ -2606,7 +2643,15 @@ mod scheduling_tests {
         {
             let mut provider = mock_provider(&format!("single-{index}"), url.clone());
             provider.revocation.as_mut().unwrap().effect_scope = None;
-            provider.client_id_encrypted = Some(keys.encrypt(b"test-app").await.unwrap());
+            provider.client_id_encrypted = Some(
+                super::reconciliation_tests::provider_app_field(
+                    &keys,
+                    &mut provider,
+                    "client_id_encrypted",
+                    b"test-app",
+                )
+                .await,
+            );
             db.collection::<ProviderConfig>(crate::models::provider_config::COLLECTION_NAME)
                 .insert_one(&provider)
                 .await

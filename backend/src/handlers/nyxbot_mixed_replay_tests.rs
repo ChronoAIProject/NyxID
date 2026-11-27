@@ -306,15 +306,20 @@ async fn gateway_replay_refresh_and_finish_select_the_writer_encoding() {
     let (state, _, server) = setup("gateway_replay_replacement").await;
     let mut rows = Box::pin(written_rows(&state)).await;
     let source = rows.get_document_mut("gateway").unwrap();
-    let row: GatewayResponse = bson::from_document(source.clone()).unwrap();
+    let mut row: GatewayResponse = bson::from_document(source.clone()).unwrap();
     let payload =
         recovery::Payload::new(&row.response_id, "fixture-conversation", Default::default());
-    let sealed = payload.seal_legacy(&state.encryption_keys).await.unwrap();
+    let mut compatible = crate::test_utils::test_encryption_keys();
+    compatible.set_contextual_record_writes(false);
+    recovery::storage::install(&compatible, &mut row, &payload)
+        .await
+        .unwrap();
+    assert_eq!(row.payload_context_version, None);
     source.insert(
         "payload_ciphertext",
         bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
-            bytes: sealed,
+            bytes: row.payload_ciphertext,
         },
     );
     source.remove("payload_context_version");

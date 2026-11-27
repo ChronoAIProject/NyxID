@@ -612,13 +612,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(legacy.secret_context_version, None);
-        // A compatible old reader receives the exact prior encrypted format.
         assert_eq!(
-            keys.decrypt(&legacy.username_encrypted)
+            materialize(&keys, &legacy, "username", 0)
                 .await
                 .unwrap()
-                .as_slice(),
-            b"legacy-username"
+                .as_str(),
+            "legacy-username"
         );
         assert!(
             migrate_secret_snapshot(&db, &keys, &bson::to_document(&legacy).unwrap())

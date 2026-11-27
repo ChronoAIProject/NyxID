@@ -195,14 +195,22 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let keys = crate::test_utils::test_encryption_keys();
+        let mut legacy = crate::test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
         let collection = "record_field_cas_fixtures";
         let rows = db.collection::<bson::Document>(collection);
         // Exercise both an absent map and an existing map without field B.
         for existing_map in [false, true] {
             let id = uuid::Uuid::new_v4().to_string();
-            let mut source = doc! {"_id":&id,"user_id":"owner",
-            "field_a":Binary{subtype:BinarySubtype::Generic,
-                bytes:keys.encrypt(b"legacy-a").await.unwrap()}};
+            let bytes =
+                record_field::encrypt(&legacy, collection, &id, "owner", "field_a", b"legacy-a")
+                    .await
+                    .unwrap();
+            let mut source = doc! {
+                "_id": &id,
+                "user_id": "owner",
+                "field_a": Binary { subtype: BinarySubtype::Generic, bytes },
+            };
             if existing_map {
                 source.insert("secret_context_versions", doc! {});
             }

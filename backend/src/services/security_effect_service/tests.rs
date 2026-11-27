@@ -297,12 +297,25 @@ async fn cae_occurrence(
         })
         .await
         .unwrap();
-    let encrypted = app
-        .encryption_keys
-        .encrypt(b"fixture-webhook-secret")
-        .await
-        .unwrap();
+    // Registrations created without an owner use this storage identity on read.
+    let encrypted = crate::crypto::record_field::encrypt(
+        &app.encryption_keys,
+        crate::models::oauth_client::COLLECTION_NAME,
+        "client-fixture",
+        "registration:ownerless",
+        crate::services::oauth_client_webhook_record::REVOCATION,
+        b"fixture-webhook-secret",
+    )
+    .await
+    .unwrap();
+    let mut versions = std::collections::BTreeMap::new();
+    crate::services::credential_record_service::mark_version(
+        &mut versions,
+        &app.encryption_keys,
+        crate::services::oauth_client_webhook_record::REVOCATION,
+    );
     db.collection::<Document>("oauth_clients").insert_one(doc! {
+        "secret_context_versions": bson::to_document(&versions).unwrap(),
         "_id":"client-fixture","client_name":"Fixture","client_secret_hash":"fixture-hash",
         "redirect_uris":[],"allowed_scopes":"openid","grant_types":"authorization_code",
         "client_type":"confidential","is_active":true,"created_at":bson::DateTime::now(),

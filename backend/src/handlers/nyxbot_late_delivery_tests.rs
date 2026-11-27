@@ -1236,7 +1236,7 @@ async fn pending_recovery(
         .await
         .unwrap();
     let payload = recovery::Payload::new("recovery-race", "nyxbot-test", Default::default());
-    let stored = GatewayResponse {
+    let mut stored = GatewayResponse {
         id: Uuid::new_v4().to_string(),
         response_id: "recovery-race".into(),
         user_id: OWNER.into(),
@@ -1250,10 +1250,13 @@ async fn pending_recovery(
         answer_delivery: None,
         revision: 0,
         payload_context_version: None,
-        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
+        payload_ciphertext: Vec::new(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
+    recovery::storage::install(&f.state.encryption_keys, &mut stored, &payload)
+        .await
+        .unwrap();
     f.state
         .db
         .collection::<GatewayResponse>(RESPONSES)

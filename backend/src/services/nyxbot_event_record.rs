@@ -347,7 +347,17 @@ mod tests {
                 "sender_kind": "human", "guest": true, "original_message": true,
             },
         })).unwrap();
-        let bytes = keys.encrypt(&plain).await.unwrap();
+        let mut legacy = crate::test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        let bytes = seal(
+            &legacy,
+            "event",
+            "owner",
+            &[CHANNEL_GUEST, "channel"],
+            &plain,
+        )
+        .await
+        .unwrap();
         let source = doc! {
             "_id": "event", "user_id": "owner", "channel_id": "channel",
             "guest_setup_conversation_id": &conversation,
@@ -384,10 +394,17 @@ mod tests {
         let db = crate::test_utils::connect_transaction_test_database("event_generation").await;
         let keys = crate::test_utils::test_encryption_keys();
         let rows = db.collection::<Document>(EVENTS_COLLECTION_NAME);
-        let bytes = keys
-            .encrypt(br#"{"activity":{"event_id":"message"}}"#)
-            .await
-            .unwrap();
+        let mut legacy = crate::test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        let bytes = seal(
+            &legacy,
+            "retained",
+            "owner",
+            &[CONTEXT, "channel"],
+            br#"{"activity":{"event_id":"message"}}"#,
+        )
+        .await
+        .unwrap();
         let source = doc! {
             "_id":"retained", "channel_id":"channel", "user_id":"owner", "event_id":"message",
             CONTEXT: bson::Binary {subtype:bson::spec::BinarySubtype::Generic, bytes},
