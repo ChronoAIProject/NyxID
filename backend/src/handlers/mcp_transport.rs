@@ -4698,19 +4698,17 @@ async fn wait_for_mcp_approval(
         serde_json::json!({"error":"approval_creation_failed","code":"approval_creation_failed","status":"unavailable","message":"The approval request could not be created or verified. No waiting card is confirmed; check Approvals before retrying.","review_url":crate::services::assistant_links::AssistantPage::Approvals.url(&state.config.frontend_url)}).to_string()
     })?;
 
-    if let Some(review) = &supervisor {
-        if !crate::handlers::nyxbot::deliver_supervisor_review(state, &approval_request, review)
+    if let Some(review) = &supervisor
+        && !crate::handlers::nyxbot::deliver_supervisor_review(state, &approval_request, review)
             .await
             .map_err(|_| {
                 "The complete owner-chat write review was not delivered; no write is authorized"
                     .to_owned()
             })?
-        {
-            approval_request =
-                approval_service::fallback_supervisor_review(state, &approval_request)
-                    .await
-                    .map_err(|_| "Review the pending request in Approvals".to_owned())?;
-        }
+    {
+        approval_request = approval_service::fallback_supervisor_review(state, &approval_request)
+            .await
+            .map_err(|_| "Review the pending request in Approvals".to_owned())?;
     }
     if let Some(chat) = auth.chat.as_ref() {
         crate::services::assistant_activity_decision::approval(

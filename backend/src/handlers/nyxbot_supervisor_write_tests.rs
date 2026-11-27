@@ -1211,7 +1211,12 @@ async fn supervisor_write_native_new_reply_event_decides_original_write_and_pres
     let result = tokio::spawn(body_text(response));
     let (review, write_code) = wait_review(&j).await;
     let original = &review.supervisor_write.as_ref().unwrap().source.channel;
-    let decision = native_owner(&j, &format!("yes write-{write_code}"), "805").await;
+    let decision = native_owner(
+        &j,
+        &format!("Yes write-{}", write_code.to_ascii_uppercase()),
+        "805",
+    )
+    .await;
     let response_id = decision.headers()["x-cma-response-id"]
         .to_str()
         .unwrap()

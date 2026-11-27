@@ -546,10 +546,13 @@ pub(crate) async fn confirm_review(db: &Database, request: &ApprovalRequest) -> 
 
 pub(crate) fn parse(text: &str) -> Option<(bool, &str)> {
     let mut words = text.split_whitespace();
-    let allowed = match words.next()? {
-        "yes" => true,
-        "no" => false,
-        _ => return None,
+    let decision = words.next()?;
+    let allowed = if decision.eq_ignore_ascii_case("yes") {
+        true
+    } else if decision.eq_ignore_ascii_case("no") {
+        false
+    } else {
+        return None;
     };
     let code = words.next()?.strip_prefix("write-")?;
     if words.next().is_some() || code.len() != 12 || !code.bytes().all(|c| c.is_ascii_hexdigit()) {
@@ -569,7 +572,7 @@ pub(crate) async fn decide(
     let Some((allowed, code)) = parse(text) else {
         return Ok(None);
     };
-    let digest = fingerprint(b"supervisor-code-v1", code.as_bytes())?;
+    let digest = fingerprint(b"supervisor-code-v1", code.to_ascii_lowercase().as_bytes())?;
     let Some(request) = db.collection::<ApprovalRequest>("approval_requests").find_one(doc! {
         "user_id":owner,"status":"pending","expires_at":{"$gt":bson::DateTime::now()},
         "approval_mode":"per_request","execution_proposal":null,"exact_service":null,"from_org_policy":false,
@@ -837,6 +840,10 @@ mod tests {
         assert_eq!(
             parse("no write-0123456789ab"),
             Some((false, "0123456789ab"))
+        );
+        assert_eq!(
+            parse("Yes write-0123456789AB"),
+            Some((true, "0123456789AB"))
         );
         for input in [
             "yes",
