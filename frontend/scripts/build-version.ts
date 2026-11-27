@@ -19,6 +19,7 @@ export function assistantFingerprint(
   const router = path.join(root, "src/router.tsx");
   const pages = path.join(root, "src/pages/lazy.ts");
   const main = path.join(root, "src/main.tsx");
+  const appEntry = path.join(root, "src/app-entry.tsx");
   const assistant = path.join(root, "src/pages/assistant.tsx");
   if (!getModuleInfo(assistant) || !getModuleInfo(main)) {
     throw new Error("Frontend module graph was unavailable for the assistant fingerprint");
@@ -29,7 +30,7 @@ export function assistantFingerprint(
     visited.add(key);
     const file = id.split("?")[0]!;
     if (file.includes(`${path.sep}node_modules${path.sep}`)) return;
-    if (assistantScope && (file === router || file === pages || file === main)) {
+    if (assistantScope && (file === router || file === pages || file === main || file === appEntry)) {
       throw new Error("Assistant imports the route entrypoints; its update scope must be reviewed");
     }
     if (file.startsWith(path.join(root, "src") + path.sep)) {
@@ -42,7 +43,12 @@ export function assistantFingerprint(
     if (file === pages) return;
     const info = getModuleInfo(id);
     for (const imported of info?.importedIds ?? []) visit(imported, assistantScope);
-    for (const imported of info?.dynamicallyImportedIds ?? []) visit(imported, assistantScope);
+    for (const imported of info?.dynamicallyImportedIds ?? []) {
+      // The dispatcher also loads the independent public website. Only its app
+      // entry belongs to the Assistant's update scope.
+      if (file === main && imported.split("?")[0] !== appEntry) continue;
+      visit(imported, assistantScope);
+    }
   };
   visit(assistant, true);
   visit(main, false);
@@ -108,29 +114,35 @@ export function buildVersion(buildId: string, commit: string | null): Plugin {
         { tag: "meta", attrs: { name: "nyxid-assistant-build-id", content: assistant ?? "" } },
       ];
     },
-    generateBundle(_options, bundle) {
-      const assets = new Set<string>();
-      const visit = (fileName: string) => {
-        if (assets.has(fileName)) return;
-        const chunk = bundle[fileName];
-        if (!chunk || chunk.type !== "chunk") return;
-        assets.add(fileName);
-        const metadata = chunk as typeof chunk & {
-          viteMetadata?: { importedCss: Set<string> };
+    generateBundle: {
+      order: "post",
+      handler(_options, bundle) {
+        const assets = new Set<string>();
+        const visit = (fileName: string) => {
+          if (assets.has(fileName)) return;
+          const chunk = bundle[fileName];
+          if (!chunk || chunk.type !== "chunk") return;
+          assets.add(fileName);
+          const metadata = chunk as typeof chunk & {
+            viteMetadata?: { importedCss: Set<string> };
+          };
+          for (const css of metadata.viteMetadata?.importedCss ?? []) assets.add(css);
+          for (const imported of chunk.imports) visit(imported);
         };
-        for (const css of metadata.viteMetadata?.importedCss ?? []) assets.add(css);
-        for (const imported of chunk.imports) visit(imported);
-      };
-      for (const chunk of Object.values(bundle)) {
-        if (chunk.type === "chunk" && chunk.isEntry && !chunk.isDynamicEntry) visit(chunk.fileName);
-      }
-      const version = parseBuildVersion({ buildId, commit, assistant, assets: [...assets].sort() });
-      if (!version) this.error("Frontend build metadata exceeds the browser update contract");
-      this.emitFile({
-        type: "asset",
-        fileName: "build-version.json",
-        source: JSON.stringify(version),
-      });
+        for (const chunk of Object.values(bundle)) {
+          if (chunk.type === "chunk" && (
+            (chunk.isEntry && !chunk.isDynamicEntry) ||
+            chunk.facadeModuleId === path.join(root, "src/app-entry.tsx")
+          )) visit(chunk.fileName);
+        }
+        const version = parseBuildVersion({ buildId, commit, assistant, assets: [...assets].sort() });
+        if (!version) this.error("Frontend build metadata exceeds the browser update contract");
+        this.emitFile({
+          type: "asset",
+          fileName: "build-version.json",
+          source: JSON.stringify(version),
+        });
+      },
     },
   };
 }

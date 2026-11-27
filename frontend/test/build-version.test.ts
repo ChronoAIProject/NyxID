@@ -14,7 +14,9 @@ function write(file: string, content: string) {
 function fingerprint(buildInputs = "") {
   const graph: Record<string, { importedIds: string[]; dynamicallyImportedIds: string[] }> = {
     "src/pages/assistant.tsx": { importedIds: ["src/lib/shared.ts"], dynamicallyImportedIds: ["src/lib/voice.ts"] },
-    "src/main.tsx": { importedIds: ["src/router.tsx", "src/lib/shared.ts"], dynamicallyImportedIds: [] },
+    "src/main.tsx": { importedIds: ["src/lib/shared.ts"], dynamicallyImportedIds: ["src/app-entry.tsx", "src/features/public-site/bootstrap.tsx"] },
+    "src/app-entry.tsx": { importedIds: ["src/router.tsx", "src/lib/shared.ts"], dynamicallyImportedIds: [] },
+    "src/features/public-site/bootstrap.tsx": { importedIds: ["src/features/website-a/home.tsx"], dynamicallyImportedIds: [] },
     "src/router.tsx": { importedIds: ["src/pages/lazy.ts", "src/lib/shell.ts"], dynamicallyImportedIds: [] },
     "src/pages/lazy.ts": { importedIds: [], dynamicallyImportedIds: ["src/pages/admin.tsx"] },
     "src/lib/shared.ts": { importedIds: ["src/lib/cycle.ts"], dynamicallyImportedIds: [] },
@@ -31,7 +33,7 @@ function fingerprint(buildInputs = "") {
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "nyxid-assistant-fingerprint-"));
-  for (const file of ["src/pages/assistant.tsx", "src/main.tsx", "src/router.tsx", "src/pages/lazy.ts", "src/lib/shell.ts", "src/lib/shared.ts", "src/lib/voice.ts", "src/lib/cycle.ts", "src/pages/admin.tsx", "src/app.css", "src/lib/grok-audio-worklet.js"]) {
+  for (const file of ["src/pages/assistant.tsx", "src/main.tsx", "src/app-entry.tsx", "src/features/public-site/bootstrap.tsx", "src/features/website-a/home.tsx", "src/router.tsx", "src/pages/lazy.ts", "src/lib/shell.ts", "src/lib/shared.ts", "src/lib/voice.ts", "src/lib/cycle.ts", "src/pages/admin.tsx", "src/app.css", "src/lib/grok-audio-worklet.js"]) {
     write(file, `original ${file}`);
   }
   write("package-lock.json", JSON.stringify({ version: "1.0.0", packages: { "": { version: "1.0.0" }, "node_modules/react": { version: "19.0.0" } } }));
@@ -39,7 +41,7 @@ beforeEach(() => {
 afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
 
 describe("assistant deployment identity", () => {
-  it.each(["src/pages/assistant.tsx", "src/lib/shared.ts", "src/lib/voice.ts", "src/lib/shell.ts", "src/app.css", "src/router.tsx", "src/lib/grok-audio-worklet.js"])("changes for assistant, dependencies and shell inputs: %s", (file) => {
+  it.each(["src/pages/assistant.tsx", "src/app-entry.tsx", "src/lib/shared.ts", "src/lib/voice.ts", "src/lib/shell.ts", "src/app.css", "src/router.tsx", "src/lib/grok-audio-worklet.js"])("changes for assistant, dependencies and shell inputs: %s", (file) => {
     const before = fingerprint();
     write(file, "changed");
     expect(fingerprint()).not.toBe(before);
@@ -54,6 +56,8 @@ describe("assistant deployment identity", () => {
   it("stays unchanged for an unrelated route edit or project version bump", () => {
     const before = fingerprint();
     write("src/pages/admin.tsx", "changed admin implementation");
+    write("src/features/public-site/bootstrap.tsx", "changed public boot");
+    write("src/features/website-a/home.tsx", "changed landing design");
     write("package-lock.json", JSON.stringify({ version: "2.0.0", packages: { "": { version: "2.0.0" }, "node_modules/react": { version: "19.0.0" } } }));
     expect(fingerprint()).toBe(before);
   });

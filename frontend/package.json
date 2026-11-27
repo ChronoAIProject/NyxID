@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/check-avatar-emotes.mjs && node scripts/sync-i18n.mjs --overrides-only && tsc -b && vite build && node scripts/prerender-legal.mjs && vite build --config vite.credential-accept.config.ts && node scripts/assert-mock-footprint.mjs && node scripts/collect-crash-artifacts.mjs",
+    "build": "node scripts/check-avatar-emotes.mjs && node scripts/sync-i18n.mjs --overrides-only && tsc -b && vite build && node scripts/prerender-legal.mjs && vite build --config vite.public-render.config.ts && node scripts/prerender-public.mjs && vite build --config vite.credential-accept.config.ts && node scripts/assert-mock-footprint.mjs && node scripts/verify-public-build.mjs && node scripts/collect-crash-artifacts.mjs",
     "build:avatar-emotes": "node scripts/build-avatar-emotes.mjs",
     "check:avatar-emotes": "node scripts/check-avatar-emotes.mjs",
     "build:credential-accept": "vite build --config vite.credential-accept.config.ts",
@@ -23,7 +23,8 @@
     "test:coverage": "NODE_ENV=test vitest run --coverage",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",
-    "test:watch": "NODE_ENV=test vitest"
+    "test:watch": "NODE_ENV=test vitest",
+    "build:public-render": "vite build --config vite.public-render.config.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -63,7 +64,9 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
+    "gsap": "3.15.0",
     "i18next": "^26.0.3",
+    "lenis": "1.1.14",
     "lucide-react": "^0.563.0",
     "motion": "^14.0.0",
     "posthog-js": "^1.280.1",
@@ -106,11 +109,15 @@
     "eslint-plugin-react-refresh": "^0.5.0",
     "globals": "^17.3.0",
     "happy-dom": "^21.0.4",
+    "mdast-util-gfm-table": "2.0.0",
+    "mdast-util-to-markdown": "2.2.2",
     "prettier": "^3.8.1",
     "prettier-plugin-tailwindcss": "^0.7.2",
+    "remark-parse": "^11.0.0",
     "tailwindcss": "^4.2.2",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.54.0",
+    "unified": "^11.0.5",
     "vite": "^8.1.6",
     "vite-plugin-singlefile": "^2.3.3",
     "vitest": "^4.1.4"

@@ -7,5 +7,7 @@ interface ImportMetaEnv {
 /** Injected by `define` in vite.config.ts. See `src/lib/chunk-recovery.ts`. */
 declare const __BUILD_ID__: string
 
+/** Canonical public origin shared by the browser and static renderer. */
+declare const __NYXID_PUBLIC_ORIGIN__: string
 declare const __BUILD_ARTIFACT_ID__: string;
 declare const __APP_VERSION__: string;

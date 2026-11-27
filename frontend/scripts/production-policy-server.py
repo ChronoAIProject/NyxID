@@ -145,7 +145,7 @@ def main():
     files = policy.render({"BACKEND_URL": f"http://127.0.0.1:{args.upstream_port}",
                            "NYXID_PUBLIC_ORIGIN": args.public_origin or f"http://127.0.0.1:{args.port}",
                            "NYXID_BROWSER_CONNECT_ORIGINS": args.connect_origins},
-                          template, output, dist, dist / "legal-cache.conf", args.port)
+                          template, output, dist, dist / "legal-cache.conf", args.port, public_routing=(dist / "public-routing.conf").read_text())
     for name, data in files.items():
         (output / name).write_text(data)
     if args.frontend_image:

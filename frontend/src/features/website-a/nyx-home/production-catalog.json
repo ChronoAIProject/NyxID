@@ -1,0 +1,1017 @@
+{
+  "checkedAt": "2026-11-26T07:49:55.783Z",
+  "groups": [
+    {
+      "id": "ai",
+      "label": "AI & voice",
+      "label_zh": "AI 与语音",
+      "entries": [
+        {
+          "id": "anthropic",
+          "label": "Anthropic",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/claude.svg",
+          "catalogSlugs": [
+            "llm-anthropic"
+          ]
+        },
+        {
+          "id": "cohere",
+          "label": "Cohere",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=cohere.com&sz=64",
+          "catalogSlugs": [
+            "llm-cohere"
+          ]
+        },
+        {
+          "id": "deepseek",
+          "label": "DeepSeek",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=deepseek.com&sz=64",
+          "catalogSlugs": [
+            "llm-deepseek"
+          ]
+        },
+        {
+          "id": "elevenlabs",
+          "label": "ElevenLabs",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/elevenlabs.svg",
+          "catalogSlugs": [
+            "api-elevenlabs"
+          ]
+        },
+        {
+          "id": "google-ai",
+          "label": "Google AI",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=ai.google.dev&sz=64",
+          "catalogSlugs": [
+            "llm-google-ai"
+          ]
+        },
+        {
+          "id": "mistral",
+          "label": "Mistral AI",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=mistral.ai&sz=64",
+          "catalogSlugs": [
+            "llm-mistral"
+          ]
+        },
+        {
+          "id": "openai",
+          "label": "OpenAI",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/openai.svg",
+          "catalogSlugs": [
+            "llm-openai",
+            "llm-openai-codex"
+          ]
+        },
+        {
+          "id": "openrouter",
+          "label": "OpenRouter",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=openrouter.ai&sz=64",
+          "catalogSlugs": [
+            "llm-openrouter"
+          ]
+        },
+        {
+          "id": "xai",
+          "label": "xAI",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=x.ai&sz=64",
+          "catalogSlugs": [
+            "llm-xai"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "apps",
+      "label": "Apps & APIs",
+      "label_zh": "应用与 API",
+      "entries": [
+        {
+          "id": "airtable",
+          "label": "Airtable",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=airtable.com&sz=64",
+          "catalogSlugs": [
+            "api-airtable"
+          ]
+        },
+        {
+          "id": "asana",
+          "label": "Asana",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=asana.com&sz=64",
+          "catalogSlugs": [
+            "api-asana"
+          ]
+        },
+        {
+          "id": "attio",
+          "label": "Attio",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=attio.com&sz=64",
+          "catalogSlugs": [
+            "api-attio"
+          ]
+        },
+        {
+          "id": "aurinko",
+          "label": "Aurinko Email",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=aurinko.io&sz=64",
+          "catalogSlugs": [
+            "api-aurinko"
+          ]
+        },
+        {
+          "id": "aweber",
+          "label": "AWeber",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=aweber.com&sz=64",
+          "catalogSlugs": [
+            "api-aweber"
+          ]
+        },
+        {
+          "id": "aws-cost-explorer",
+          "label": "AWS Cost Explorer",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=aws.amazon.com&sz=64",
+          "catalogSlugs": [
+            "aws-cost-explorer"
+          ]
+        },
+        {
+          "id": "basecamp",
+          "label": "Basecamp",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=basecamp.com&sz=64",
+          "catalogSlugs": [
+            "api-basecamp"
+          ]
+        },
+        {
+          "id": "bitbucket",
+          "label": "Bitbucket",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=bitbucket.org&sz=64",
+          "catalogSlugs": [
+            "api-bitbucket"
+          ]
+        },
+        {
+          "id": "box",
+          "label": "Box",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=box.com&sz=64",
+          "catalogSlugs": [
+            "api-box"
+          ]
+        },
+        {
+          "id": "cal",
+          "label": "Cal.com",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=cal.com&sz=64",
+          "catalogSlugs": [
+            "api-cal"
+          ]
+        },
+        {
+          "id": "calendly",
+          "label": "Calendly",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=calendly.com&sz=64",
+          "catalogSlugs": [
+            "api-calendly"
+          ]
+        },
+        {
+          "id": "canva",
+          "label": "Canva",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=canva.com&sz=64",
+          "catalogSlugs": [
+            "api-canva"
+          ]
+        },
+        {
+          "id": "capsule-crm",
+          "label": "Capsule CRM",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=capsulecrm.com&sz=64",
+          "catalogSlugs": [
+            "api-capsule-crm"
+          ]
+        },
+        {
+          "id": "clickup",
+          "label": "ClickUp",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=clickup.com&sz=64",
+          "catalogSlugs": [
+            "api-clickup"
+          ]
+        },
+        {
+          "id": "close",
+          "label": "Close",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=close.com&sz=64",
+          "catalogSlugs": [
+            "api-close"
+          ]
+        },
+        {
+          "id": "cloudconvert",
+          "label": "CloudConvert",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=cloudconvert.com&sz=64",
+          "catalogSlugs": [
+            "api-cloudconvert"
+          ]
+        },
+        {
+          "id": "cloudflare",
+          "label": "Cloudflare",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=cloudflare.com&sz=64",
+          "catalogSlugs": [
+            "api-cloudflare"
+          ]
+        },
+        {
+          "id": "confluence",
+          "label": "Confluence",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=atlassian.com&sz=64",
+          "catalogSlugs": [
+            "api-confluence"
+          ]
+        },
+        {
+          "id": "crowdin",
+          "label": "Crowdin",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=crowdin.com&sz=64",
+          "catalogSlugs": [
+            "api-crowdin"
+          ]
+        },
+        {
+          "id": "dialpad",
+          "label": "Dialpad",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=dialpad.com&sz=64",
+          "catalogSlugs": [
+            "api-dialpad"
+          ]
+        },
+        {
+          "id": "discord",
+          "label": "Discord",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/discord.svg",
+          "catalogSlugs": [
+            "api-discord",
+            "api-discord-bot"
+          ]
+        },
+        {
+          "id": "disqus",
+          "label": "Disqus",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=disqus.com&sz=64",
+          "catalogSlugs": [
+            "api-disqus"
+          ]
+        },
+        {
+          "id": "dropbox",
+          "label": "Dropbox",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=dropbox.com&sz=64",
+          "catalogSlugs": [
+            "api-dropbox"
+          ]
+        },
+        {
+          "id": "dub",
+          "label": "Dub",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=dub.co&sz=64",
+          "catalogSlugs": [
+            "api-dub"
+          ]
+        },
+        {
+          "id": "eventbrite",
+          "label": "Eventbrite",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=eventbrite.com&sz=64",
+          "catalogSlugs": [
+            "api-eventbrite"
+          ]
+        },
+        {
+          "id": "facebook",
+          "label": "Facebook Pages",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=developers.facebook.com&sz=64",
+          "catalogSlugs": [
+            "api-facebook"
+          ]
+        },
+        {
+          "id": "fathom",
+          "label": "Fathom",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=fathom.ai&sz=64",
+          "catalogSlugs": [
+            "api-fathom"
+          ]
+        },
+        {
+          "id": "feishu",
+          "label": "Feishu",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=feishu.cn&sz=64",
+          "catalogSlugs": [
+            "api-feishu",
+            "api-feishu-bot"
+          ]
+        },
+        {
+          "id": "figma",
+          "label": "Figma",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=figma.com&sz=64",
+          "catalogSlugs": [
+            "api-figma"
+          ]
+        },
+        {
+          "id": "firecrawl",
+          "label": "Firecrawl",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=firecrawl.dev&sz=64",
+          "catalogSlugs": [
+            "api-firecrawl"
+          ]
+        },
+        {
+          "id": "github",
+          "label": "GitHub",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/github.svg",
+          "catalogSlugs": [
+            "api-github",
+            "api-github-pat"
+          ]
+        },
+        {
+          "id": "gitlab",
+          "label": "GitLab",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=about.gitlab.com&sz=64",
+          "catalogSlugs": [
+            "api-gitlab"
+          ]
+        },
+        {
+          "id": "google-gmail",
+          "label": "Gmail",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/gmail.svg",
+          "catalogSlugs": [
+            "api-google-gmail"
+          ]
+        },
+        {
+          "id": "google-calendar",
+          "label": "Google Calendar",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/google-calendar.svg",
+          "catalogSlugs": [
+            "api-google-calendar"
+          ]
+        },
+        {
+          "id": "google-docs",
+          "label": "Google Docs",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/google-docs.svg",
+          "catalogSlugs": [
+            "api-google-docs"
+          ]
+        },
+        {
+          "id": "google-drive",
+          "label": "Google Drive",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/google-drive.svg",
+          "catalogSlugs": [
+            "api-google-drive"
+          ]
+        },
+        {
+          "id": "google-sheets",
+          "label": "Google Sheets",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/google-sheets.svg",
+          "catalogSlugs": [
+            "api-google-sheets"
+          ]
+        },
+        {
+          "id": "google-slides",
+          "label": "Google Slides",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/google-docs.svg",
+          "catalogSlugs": [
+            "api-google-slides"
+          ]
+        },
+        {
+          "id": "google-workspace",
+          "label": "Google Workspace",
+          "detail": "Drive, Docs, Sheets, Slides, Gmail & Calendar",
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=workspace.google.com&sz=64",
+          "catalogSlugs": [
+            "api-google-workspace",
+            "api-google"
+          ]
+        },
+        {
+          "id": "harvest",
+          "label": "Harvest",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=getharvest.com&sz=64",
+          "catalogSlugs": [
+            "api-harvest"
+          ]
+        },
+        {
+          "id": "hubspot",
+          "label": "HubSpot",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=hubspot.com&sz=64",
+          "catalogSlugs": [
+            "api-hubspot"
+          ]
+        },
+        {
+          "id": "ifttt",
+          "label": "IFTTT",
+          "detail": "MCP & webhooks",
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=ifttt.com&sz=64",
+          "catalogSlugs": [
+            "api-ifttt-mcp",
+            "api-ifttt"
+          ]
+        },
+        {
+          "id": "intercom",
+          "label": "Intercom",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=intercom.com&sz=64",
+          "catalogSlugs": [
+            "api-intercom"
+          ]
+        },
+        {
+          "id": "jira",
+          "label": "Jira",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=atlassian.com&sz=64",
+          "catalogSlugs": [
+            "api-jira"
+          ]
+        },
+        {
+          "id": "lark",
+          "label": "Lark",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=larksuite.com&sz=64",
+          "catalogSlugs": [
+            "api-lark",
+            "api-lark-bot"
+          ]
+        },
+        {
+          "id": "lightfunnels",
+          "label": "Lightfunnels",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=services.lightfunnels.com&sz=64",
+          "catalogSlugs": [
+            "api-lightfunnels"
+          ]
+        },
+        {
+          "id": "linear",
+          "label": "Linear",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=linear.app&sz=64",
+          "catalogSlugs": [
+            "api-linear"
+          ]
+        },
+        {
+          "id": "linkedin",
+          "label": "LinkedIn",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=linkedin.com&sz=64",
+          "catalogSlugs": [
+            "api-linkedin"
+          ]
+        },
+        {
+          "id": "microsoft",
+          "label": "Microsoft 365",
+          "detail": "Outlook, Calendar & OneDrive",
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=microsoft.com&sz=64",
+          "catalogSlugs": [
+            "api-microsoft"
+          ]
+        },
+        {
+          "id": "miro",
+          "label": "Miro",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=miro.com&sz=64",
+          "catalogSlugs": [
+            "api-miro"
+          ]
+        },
+        {
+          "id": "monday",
+          "label": "monday.com",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=monday.com&sz=64",
+          "catalogSlugs": [
+            "api-monday"
+          ]
+        },
+        {
+          "id": "mural",
+          "label": "Mural",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=mural.co&sz=64",
+          "catalogSlugs": [
+            "api-mural"
+          ]
+        },
+        {
+          "id": "netlify",
+          "label": "Netlify",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=netlify.com&sz=64",
+          "catalogSlugs": [
+            "api-netlify"
+          ]
+        },
+        {
+          "id": "notion",
+          "label": "Notion",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/notion.svg",
+          "catalogSlugs": [
+            "api-notion"
+          ]
+        },
+        {
+          "id": "pagerduty",
+          "label": "PagerDuty",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=pagerduty.com&sz=64",
+          "catalogSlugs": [
+            "api-pagerduty"
+          ]
+        },
+        {
+          "id": "patreon",
+          "label": "Patreon",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=www.patreon.com&sz=64",
+          "catalogSlugs": [
+            "api-patreon"
+          ]
+        },
+        {
+          "id": "posthog",
+          "label": "PostHog",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=posthog.com&sz=64",
+          "catalogSlugs": [
+            "api-posthog",
+            "api-posthog-eu"
+          ]
+        },
+        {
+          "id": "prisma",
+          "label": "Prisma",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=prisma.io&sz=64",
+          "catalogSlugs": [
+            "api-prisma"
+          ]
+        },
+        {
+          "id": "productboard",
+          "label": "Productboard",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=productboard.com&sz=64",
+          "catalogSlugs": [
+            "api-productboard"
+          ]
+        },
+        {
+          "id": "railway",
+          "label": "Railway",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=railway.com&sz=64",
+          "catalogSlugs": [
+            "api-railway"
+          ]
+        },
+        {
+          "id": "reddit",
+          "label": "Reddit",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=reddit.com&sz=64",
+          "catalogSlugs": [
+            "api-reddit"
+          ]
+        },
+        {
+          "id": "savvycal",
+          "label": "SavvyCal",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=savvycal.com&sz=64",
+          "catalogSlugs": [
+            "api-savvycal"
+          ]
+        },
+        {
+          "id": "sentry",
+          "label": "Sentry",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=sentry.io&sz=64",
+          "catalogSlugs": [
+            "api-sentry"
+          ]
+        },
+        {
+          "id": "shippo",
+          "label": "Shippo",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=goshippo.com&sz=64",
+          "catalogSlugs": [
+            "api-shippo"
+          ]
+        },
+        {
+          "id": "slack",
+          "label": "Slack",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/slack.svg",
+          "catalogSlugs": [
+            "api-slack",
+            "api-slack-bot"
+          ]
+        },
+        {
+          "id": "spotify",
+          "label": "Spotify",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=spotify.com&sz=64",
+          "catalogSlugs": [
+            "api-spotify"
+          ]
+        },
+        {
+          "id": "square",
+          "label": "Square",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=squareup.com&sz=64",
+          "catalogSlugs": [
+            "api-square"
+          ]
+        },
+        {
+          "id": "stripe",
+          "label": "Stripe",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/stripe.svg",
+          "catalogSlugs": [
+            "api-stripe"
+          ]
+        },
+        {
+          "id": "supabase",
+          "label": "Supabase",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=supabase.io&sz=64",
+          "catalogSlugs": [
+            "api-supabase",
+            "api-supabase-management"
+          ]
+        },
+        {
+          "id": "teable",
+          "label": "Teable",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=app.teable.ai&sz=64",
+          "catalogSlugs": [
+            "api-teable"
+          ]
+        },
+        {
+          "id": "telegram-bot",
+          "label": "Telegram",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/telegram.svg",
+          "catalogSlugs": [
+            "api-telegram-bot"
+          ]
+        },
+        {
+          "id": "telnyx",
+          "label": "Telnyx",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=telnyx.com&sz=64",
+          "catalogSlugs": [
+            "api-telnyx",
+            "api-telnyx-oauth"
+          ]
+        },
+        {
+          "id": "ticktick",
+          "label": "TickTick",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=ticktick.com&sz=64",
+          "catalogSlugs": [
+            "api-ticktick"
+          ]
+        },
+        {
+          "id": "tiktok",
+          "label": "TikTok",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=tiktok.com&sz=64",
+          "catalogSlugs": [
+            "api-tiktok"
+          ]
+        },
+        {
+          "id": "todoist",
+          "label": "Todoist",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=todoist.com&sz=64",
+          "catalogSlugs": [
+            "api-todoist"
+          ]
+        },
+        {
+          "id": "twilio",
+          "label": "Twilio",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/twilio.svg",
+          "catalogSlugs": [
+            "api-twilio"
+          ]
+        },
+        {
+          "id": "twist",
+          "label": "Twist",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=twist.com&sz=64",
+          "catalogSlugs": [
+            "api-twist"
+          ]
+        },
+        {
+          "id": "twitch",
+          "label": "Twitch",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=twitch.tv&sz=64",
+          "catalogSlugs": [
+            "api-twitch"
+          ]
+        },
+        {
+          "id": "typeform",
+          "label": "Typeform",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=typeform.com&sz=64",
+          "catalogSlugs": [
+            "api-typeform"
+          ]
+        },
+        {
+          "id": "unsplash",
+          "label": "Unsplash",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=unsplash.com&sz=64",
+          "catalogSlugs": [
+            "api-unsplash"
+          ]
+        },
+        {
+          "id": "vercel",
+          "label": "Vercel",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=vercel.com&sz=64",
+          "catalogSlugs": [
+            "api-vercel"
+          ]
+        },
+        {
+          "id": "webflow",
+          "label": "Webflow",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=webflow.com&sz=64",
+          "catalogSlugs": [
+            "api-webflow"
+          ]
+        },
+        {
+          "id": "whatsapp-business",
+          "label": "WhatsApp Business",
+          "detail": null,
+          "availability": "coming_soon",
+          "icon": "/landing/nyx/icons/whatsapp.svg",
+          "catalogSlugs": [
+            "api-whatsapp-business"
+          ]
+        },
+        {
+          "id": "twitter",
+          "label": "X (Twitter)",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "/landing/nyx/icons/x.svg",
+          "catalogSlugs": [
+            "api-twitter"
+          ]
+        },
+        {
+          "id": "ynab",
+          "label": "YNAB",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=ynab.com&sz=64",
+          "catalogSlugs": [
+            "api-ynab"
+          ]
+        },
+        {
+          "id": "zeplin",
+          "label": "Zeplin",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=zeplin.io&sz=64",
+          "catalogSlugs": [
+            "api-zeplin"
+          ]
+        },
+        {
+          "id": "zoho-mail",
+          "label": "Zoho Mail",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=mail.zoho.com&sz=64",
+          "catalogSlugs": [
+            "api-zoho-mail"
+          ]
+        },
+        {
+          "id": "zoom",
+          "label": "Zoom",
+          "detail": null,
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=zoom.com&sz=64",
+          "catalogSlugs": [
+            "api-zoom"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "custom",
+      "label": "Custom connections",
+      "label_zh": "自定义连接",
+      "entries": [
+        {
+          "id": "google-cloud",
+          "label": "Google Cloud",
+          "detail": "Your endpoint & permissions",
+          "availability": "catalog",
+          "icon": "https://www.google.com/s2/favicons?domain=cloud.google.com&sz=64",
+          "catalogSlugs": [
+            "api-google-cloud"
+          ]
+        }
+      ]
+    }
+  ]
+}

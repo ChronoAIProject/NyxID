@@ -6,7 +6,6 @@ import { DocsLayout, type TocItem } from "./docs-layout";
 import { DocsIndexPage } from "./docs-index-page";
 import { DocMarkdown } from "./docs-markdown";
 import { findDocPage, docTabForSlug, type DocTabId } from "./manifest";
-import { useDocumentTitle } from "@/hooks/use-document-title";
 
 const FRONT_MATTER_RE = /^---\n([\s\S]*?)\n---\n*/;
 
@@ -55,7 +54,6 @@ export function DocsPage() {
   const { _splat } = useParams({ from: "/docs/$" });
   const slug = (_splat ?? "").replace(/\/+$/, "");
   const known = findDocPage(slug);
-  useDocumentTitle(slug ? "nyxid - docs" : null);
 
   // Fetched content is tagged with the slug it belongs to and only ever written
   // from async callbacks — never synchronously inside the effect — so status/doc
@@ -103,10 +101,10 @@ export function DocsPage() {
   // matches the current slug, and "loading" until it catches up.
   const status: Status = !known
     ? "missing"
-    : loaded?.slug === slug
+    : loaded !== null && loaded.slug === slug
       ? loaded.status
       : "loading";
-  const doc = known && loaded?.slug === slug ? loaded.doc : null;
+  const doc = known && loaded !== null && loaded.slug === slug ? loaded.doc : null;
 
   // Build the on-page TOC from rendered h2 headings (ids come from rehype-slug).
   useEffect(() => {

@@ -1,12 +1,13 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { ArrowLeft } from "lucide-react";
 
-import { useLogoHref } from "@/hooks/use-logo-href";
 import { useApplyTheme } from "@/hooks/use-theme";
-import { NyxidLogo } from "@/components/brand/nyxid-logo";
+import { PublicFooter, PublicHeader } from "@/features/public-site/public-chrome";
+import { usePublicThemeElement } from "@/features/public-site/public-theme";
+import "@/features/website-a/public-reading.css";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -37,9 +38,13 @@ function stripFrontMatter(md: string): { content: string; effectiveDate: string 
 }
 
 export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
-  useUiTranslation();
+  const { i18n } = useUiTranslation();
+  // The app's text size and density still apply; colours follow the public
+  // day/night choice, which never changes the app's own theme preference.
   useApplyTheme();
-  const logoHref = useLogoHref();
+  const scope = useRef<HTMLDivElement>(null);
+  usePublicThemeElement(scope);
+  const language = i18n.resolvedLanguage?.startsWith("zh") ? "zh" : "en";
   const [content, setContent] = useState<string>("");
   const [effectiveDate, setEffectiveDate] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -70,31 +75,28 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
     };
   }, [mdPath]);
 
+  // Reading sizes, rules and the prose width live in public-reading.css (.public-legal).
   return (
     <div
-      className="flex min-h-dvh flex-col items-center bg-background px-4 py-8"
-      style={{
-        paddingTop: "max(2rem, var(--sat))",
-        paddingBottom: "max(2rem, var(--sab))",
-      }}
+      ref={scope}
+      className="nyx-public public-reading public-legal flex flex-col"
+      style={{ paddingBottom: "max(0px, var(--sab))" }}
     >
-      <div className="w-full max-w-[680px] space-y-8">
-        <div className="flex flex-col items-center gap-4">
-          <Link to={logoHref} className="flex items-center transition-opacity hover:opacity-80">
-            <NyxidLogo className="h-8 w-auto" />
-          </Link>
-          <h1 className="type-compact-page-title sm:type-page-title text-foreground">{title}</h1>
+      <PublicHeader language={language} />
+      <main className="public-legal-main public-wrap flex-1">
+        <header className="public-legal-head">
+          <h1 className="text-foreground">{title}</h1>
           {effectiveDate && (
-            <p className="text-13 text-text-tertiary">{translateUi("Effective date: ")}{effectiveDate}</p>
+            <p className="public-legal-date">{translateUi("Effective date: ")}{effectiveDate}</p>
           )}
-        </div>
+        </header>
 
         <div
-          className="legal-prose text-foreground space-y-6 rounded-xl border border-border bg-card p-6 sm:p-8"
+          className="legal-prose text-foreground space-y-6 bg-card"
           data-doc-key={docKey}
         >
           {error ? (
-            <p className="text-14 text-destructive">{translateUi("Failed to load the ")}{title.toLowerCase()}: {translateUi(error)}.{" "}
+            <p className="text-destructive">{translateUi("Failed to load the ")}{title.toLowerCase()}: {translateUi(error)}.{" "}
               <a href={mdPath} className="underline">{translateUi("View source")}</a>.
             </p>
           ) : content ? (
@@ -102,16 +104,16 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
               remarkPlugins={[remarkGfm]}
               components={{
                 h2: ({ children }) => (
-                  <h2 className="type-section-heading text-foreground mt-6 first:mt-0">{children}</h2>
+                  <h2 className="text-foreground">{children}</h2>
                 ),
                 h3: ({ children }) => (
-                  <h3 className="type-body-strong text-foreground mt-4">{children}</h3>
+                  <h3 className="text-foreground">{children}</h3>
                 ),
                 p: ({ children }) => (
-                  <p className="text-14 text-muted-foreground">{children}</p>
+                  <p className="text-muted-foreground">{children}</p>
                 ),
                 ul: ({ children }) => (
-                  <ul className="list-inside list-disc space-y-1 pl-2 text-14 text-muted-foreground">
+                  <ul className="list-outside list-disc space-y-2 pl-5 text-muted-foreground">
                     {children}
                   </ul>
                 ),
@@ -127,25 +129,24 @@ export function LegalDocumentPage({ title, mdPath, docKey }: Props) {
                   </a>
                 ),
                 code: ({ children }) => (
-                  <code className="font-mono text-14 text-foreground">{children}</code>
+                  <code className="font-mono text-foreground">{children}</code>
                 ),
               }}
             >
               {content}
             </ReactMarkdown>
           ) : (
-            <p className="text-14 text-muted-foreground">{translateUi("Loading…")}</p>
+            <p className="text-muted-foreground">{translateUi("Loading…")}</p>
           )}
         </div>
 
-        <div className="flex justify-center">
-          <Link
-            to="/"
-            className="flex items-center gap-1.5 type-row-title text-foreground underline transition-colors hover:text-muted-foreground"
-          >
-            <ArrowLeft className="h-3 w-3" />{translateUi("Back to NyxID")}</Link>
-        </div>
-      </div>
+        <Link
+          to="/"
+          className="public-legal-back text-foreground underline transition-colors hover:text-muted-foreground"
+        >
+          <ArrowLeft className="h-3 w-3" aria-hidden />{translateUi("Back to NyxID")}</Link>
+      </main>
+      <PublicFooter language={language} showStatus={false} />
     </div>
   );
 }

@@ -1,0 +1,93 @@
+/* Narrative pages use the same materials as the home, with layouts chosen for the content. */
+.website-a.nyx-public .st-page{font-size:16px;line-height:1.55}
+.website-a.nyx-public .st-wrap{width:100%;max-width:calc(1160px + var(--site-gutter)*2);margin-inline:auto;padding-inline:var(--site-gutter)}
+.website-a.nyx-public .st-page :is(h1,h2,h3){text-wrap:balance;color:var(--site-ink)}
+.website-a.nyx-public .st-page h1{font-size:clamp(42px,5.1vw,74px);font-weight:500;letter-spacing:-.05em;line-height:1.02;max-width:15ch}
+.website-a.nyx-public .st-page h1 em{font-style:normal;font-weight:800}
+.website-a.nyx-public .st-page h2{font-size:clamp(30px,3.2vw,44px);font-weight:500;letter-spacing:-.04em;line-height:1.08;max-width:21ch}
+.website-a.nyx-public .st-page h3{font-size:21px;font-weight:600;letter-spacing:-.025em;line-height:1.2}
+.website-a.nyx-public[lang="zh-CN"] .st-page :is(h1,h2,h3){letter-spacing:0;line-height:1.16}
+.website-a.nyx-public .st-page p{color:var(--site-body);max-width:62ch;text-wrap:pretty}
+.website-a.nyx-public .st-eyebrow{font-family:var(--site-mono);font-size:12px;letter-spacing:.02em;color:var(--site-faint);margin-bottom:24px}
+.website-a.nyx-public .st-lead{font-size:clamp(16px,1.4vw,19px);line-height:1.6;max-width:48ch}
+.website-a.nyx-public .st-hero{padding:64px 0 68px}
+.website-a.nyx-public .st-hero-grid{display:grid;gap:40px 72px;align-items:center}
+.website-a.nyx-public .st-hero-split .st-hero-grid{grid-template-columns:minmax(0,1.05fr) minmax(0,1fr)}
+.website-a.nyx-public .st-hero .st-lead{margin-top:24px}
+.website-a.nyx-public .st-hero-actions{display:flex;align-items:center;gap:14px 28px;flex-wrap:wrap;margin-top:28px}
+.website-a.nyx-public .st-hero-visual{min-width:0;position:relative;padding:24px 12px}
+.website-a.nyx-public .st-hero-visual>*{position:relative}
+.website-a.nyx-public .st-button{display:inline-flex;align-items:center;justify-content:center;gap:16px;min-height:48px;padding:12px 22px;border-radius:999px;background:var(--site-ink);color:var(--site-bg);font-size:15px;font-weight:600;white-space:nowrap;transition:transform .18s,opacity .18s}
+.website-a.nyx-public .st-button:hover{transform:translateY(-2px);opacity:.88}
+.website-a.nyx-public .st-link{display:inline-flex;align-items:center;gap:12px;min-height:44px;padding-block:8px;font-size:15px;font-weight:500;color:var(--site-ink)}
+.website-a.nyx-public .st-link:hover{text-decoration:underline;text-underline-offset:5px}
+.website-a.nyx-public .st-actions{display:flex;align-items:center;gap:12px 28px;flex-wrap:wrap}
+.website-a.nyx-public .st-section{padding:64px 0}
+.website-a.nyx-public .st-section>.st-wrap{position:relative}
+.website-a.nyx-public .st-section>.st-wrap::before{content:"";position:absolute;top:-64px;left:var(--site-gutter);right:var(--site-gutter);height:1px;background:var(--site-rule);pointer-events:none}
+.website-a.nyx-public .st-section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px 64px;margin-bottom:36px}
+.website-a.nyx-public .st-section-head:has(.st-eyebrow){display:block}
+.website-a.nyx-public .st-section-head .st-lead{max-width:46ch}
+.website-a.nyx-public .st-split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:40px 80px;align-items:center}
+.website-a.nyx-public .st-split>*{min-width:0}
+.website-a.nyx-public .st-split-start{align-items:start}
+.website-a.nyx-public .st-split-reverse>:first-child{order:2}
+.website-a.nyx-public .st-split p+h3{margin-top:28px}
+.website-a.nyx-public .st-split h2+p{margin-top:20px}
+.website-a.nyx-public .st-split h3+p{margin-top:12px}
+.website-a.nyx-public .st-split .st-link{margin-top:16px}
+.website-a.nyx-public .st-apps{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.website-a.nyx-public .st-app{display:inline-flex;align-items:center;gap:9px;min-height:42px;padding:8px 12px;background:var(--site-surface);border:1px solid var(--site-rule);border-radius:12px;font-size:13px;color:var(--site-ink);white-space:nowrap}
+.website-a.nyx-public .st-app img{display:block;max-width:20px;max-height:20px;object-fit:contain}
+.website-a.nyx-public .st-app small{font-size:10px;color:var(--site-faint)}
+.website-a.nyx-public[data-theme="dark"] .st-app img:is([src$="x.svg"],[src$="github.svg"],[src$="notion.svg"],[src$="openai.svg"],[src$="cursor.svg"],[src$="elevenlabs.svg"]){filter:invert(1)}
+.website-a.nyx-public .st-receipt{position:relative;background:var(--site-surface);border:1px solid var(--site-rule);border-radius:20px;padding:28px;box-shadow:0 20px 50px -35px rgba(0,0,0,.32)}
+.website-a.nyx-public .st-receipt-top{display:flex;align-items:center;gap:10px;padding-bottom:20px;margin-bottom:22px;border-bottom:1px solid var(--site-rule);font-size:14px;font-weight:500}
+.website-a.nyx-public .st-receipt-top small{margin-left:auto;font-family:var(--site-mono);font-size:10px;font-weight:400;color:var(--site-faint)}
+.website-a.nyx-public .st-receipt h3{max-width:22ch;margin-bottom:22px;font-size:24px}
+.website-a.nyx-public .st-permission-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 0;border-bottom:1px solid var(--site-rule);font-size:14px}
+.website-a.nyx-public .st-status{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border:1px solid currentColor;border-radius:999px;font-size:10px;white-space:nowrap}
+.website-a.nyx-public .st-allowed{color:var(--ok)}
+.website-a.nyx-public .st-ask{color:var(--warn)}
+.website-a.nyx-public .st-blocked{color:var(--err)}
+.website-a.nyx-public .st-receipt-note{display:flex;align-items:center;gap:8px;margin-top:20px;font-size:12px;color:var(--site-faint)}
+.website-a.nyx-public .st-details{border:0;border-bottom:1px solid var(--site-rule);margin:0;padding:0}
+.website-a.nyx-public .st-details:first-child{border-top:1px solid var(--site-rule)}
+.website-a.nyx-public .st-details>summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:22px 0;min-height:64px;font-size:16px;font-weight:500;line-height:1.4;list-style:none}
+.website-a.nyx-public .st-details>summary::after,.website-a.nyx-public .st-details>summary::before{display:none}
+.website-a.nyx-public .st-details>summary::-webkit-details-marker{display:none}
+.website-a.nyx-public .st-details>summary svg{flex:none;transition:transform .2s}
+.website-a.nyx-public .st-details[open]>summary svg{transform:rotate(180deg)}
+.website-a.nyx-public .st-details-body{padding:0 28px 24px 0;font-size:16px;color:var(--site-body);max-width:68ch}
+.website-a.nyx-public .st-details-body p{margin:0}
+.website-a.nyx-public .st-next{padding:28px 0 64px}
+.website-a.nyx-public .st-next-inner{display:flex;align-items:center;justify-content:space-between;gap:36px;padding-top:44px;border-top:1px solid var(--site-rule)}
+.website-a.nyx-public .st-next h2{font-size:clamp(23px,2.2vw,30px);max-width:28ch}
+.website-a.nyx-public .st-next p{margin-top:14px;max-width:48ch}
+.website-a.nyx-public .st-next .st-actions{flex:none}
+.website-a.nyx-public:has(.st-page) .public-footer{margin-top:0}
+@media(max-width:960px){
+ .website-a.nyx-public .st-hero-split .st-hero-grid{gap:36px;grid-template-columns:1fr 1fr}
+ .website-a.nyx-public .st-split{gap:36px}
+ .website-a.nyx-public .st-section-head{display:block}
+ .website-a.nyx-public .st-section-head .st-lead{margin-top:18px}
+ .website-a.nyx-public .st-next-inner{align-items:flex-start;flex-direction:column}
+}
+@media(max-width:700px){
+ .website-a.nyx-public .st-hero{padding:36px 0 44px}
+ .website-a.nyx-public .st-hero-split .st-hero-grid,.website-a.nyx-public .st-split{grid-template-columns:1fr}
+ .website-a.nyx-public .st-hero-grid{gap:24px}
+ .website-a.nyx-public .st-hero h1{max-width:16ch}
+ .website-a.nyx-public .st-hero .st-lead{margin-top:20px}
+ .website-a.nyx-public .st-hero-actions{margin-top:22px}
+ .website-a.nyx-public .st-hero-visual{padding:12px 0}
+ .website-a.nyx-public .st-section{padding:44px 0}
+ .website-a.nyx-public .st-section>.st-wrap::before{top:-44px}
+ .website-a.nyx-public .st-section-head{margin-bottom:28px}
+ .website-a.nyx-public .st-split-reverse>:first-child{order:initial}
+ .website-a.nyx-public .st-receipt{padding:22px}
+ .website-a.nyx-public .st-next{padding-bottom:44px}
+ .website-a.nyx-public .st-next .st-actions{flex-direction:column;align-items:flex-start}
+ .website-a.nyx-public .st-eyebrow{margin-bottom:18px}
+}
+@media(prefers-reduced-motion:reduce){.website-a.nyx-public .st-page *{transition:none!important}}

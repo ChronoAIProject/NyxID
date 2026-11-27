@@ -89,6 +89,14 @@ preference. Local CLI wizards use ephemeral loopback ports, so a saved selection
 is not guaranteed to carry across separate runs on different ports; each run
 also detects the browser language and offers the header selector.
 
+## Public website delivery
+
+The public website in `features/website-a` uses its approved English and Simplified
+Chinese page sources, selected by canonical `/` and `/zh` URLs. It keeps its own
+public typography and authored copy, like the existing landing page; Studio's
+copy and typography audits continue to cover docs and shared app controls.
+The public router's loading and recovery controls use the shared common catalog.
+
 ## Adding translations
 
 `frontend/src/i18n/instance.ts` owns the shared instance, preference listeners,

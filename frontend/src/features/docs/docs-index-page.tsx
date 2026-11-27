@@ -2,19 +2,16 @@ import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Link } from "@tanstack/react-router";
 import { ArrowRight } from "lucide-react";
-import { DocsLayout, SURFACE_ICONS } from "./docs-layout";
+import { DocsLayout, SURFACE_ICONS } from "./docs-layout-view";
 import { DOCS_TABS, DOCS_SHARED } from "./manifest";
-import { useDocumentTitle } from "@/hooks/use-document-title";
 
 export function DocsIndexPage() {
   useUiTranslation();
-  useDocumentTitle("nyxid - docs");
 
   return (
     <DocsLayout activeTab="ai" hideNav>
       <div className="py-6">
-        <p className="font-mono text-13 tracking-widest text-nyx-700 dark:text-nyx-secondary-400 uppercase">{translateUi("NyxID Documentation")}</p>
-        <h1 className="mt-3 max-w-3xl font-display type-compact-page-title sm:type-page-title tracking-tight text-foreground">{translateUi("Broker credentials. Never expose keys.")}</h1>
+        <h1 className="mt-3 max-w-3xl font-display type-compact-page-title sm:type-page-title tracking-tight text-foreground">{translateUi("NyxID Documentation")}</h1>
         <p className="mt-4 max-w-2xl text-15 text-muted-foreground">{translateUi("NyxID holds your API keys, OAuth tokens, and SSH credentials and proxies requests so your agents and apps never touch the raw secret. Pick how you use it.")}</p>
 
         <div className="mt-10 grid gap-4 sm:grid-cols-3">
