@@ -23,6 +23,7 @@ This document details NyxID's security architecture, threat mitigations, and ope
 - [Rate Limiting](#rate-limiting)
 - [Threat Model](#threat-model)
 - [Incident Response](#incident-response)
+- [CASA Reassessment](#casa-reassessment)
 - [Security Controls Reference](#security-controls-reference)
 
 ---
@@ -901,6 +902,11 @@ Production global, per-IP and per-agent enforcement includes MongoDB-backed shar
 8. Rotate affected credentials
 
 ---
+
+## CASA Reassessment
+
+The [CASA reassessment handoff](security/casa/REASSESSMENT.md) links the merged
+remediation work and tracks the evidence required for the assessed release.
 
 ## Security Controls Reference
 
