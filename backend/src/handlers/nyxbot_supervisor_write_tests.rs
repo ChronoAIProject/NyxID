@@ -582,22 +582,16 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
         );
     }
     let chat = MockServer::start().await;
-    let encrypted = state
-        .encryption_keys
-        .encrypt(if direct { b"app:secret" } else { b"ws7-token" })
-        .await
-        .unwrap();
-    state
-        .db
-        .collection::<Document>("channel_bots")
-        .update_one(
-            doc! {"_id":&channel.channel_bot_id},
-            doc! {"$set":{"bot_token_encrypted":bson::Binary {
-                subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted
-            }}},
-        )
-        .await
-        .unwrap();
+    set_bot_secrets(
+        &state,
+        &channel,
+        doc! {},
+        &[(
+            BotSecret::Token,
+            if direct { b"app:secret" } else { b"ws7-token" },
+        )],
+    )
+    .await;
     if direct {
         Mock::given(path_regex(".*/tenant_access_token/internal$"))
             .respond_with(
