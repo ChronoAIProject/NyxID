@@ -15,7 +15,10 @@ fn grok_contract_disables_builtin_tools_vad_and_resumption() {
     assert_eq!(session["tools"].as_array().unwrap().len(), 2);
     assert_eq!(session["tools"][0]["name"], "delegate_to_agent");
     assert_eq!(session["tools"][1]["name"], "get_task_status");
-    assert_eq!(session["tools"][1]["parameters"]["additionalProperties"], false);
+    assert_eq!(
+        session["tools"][1]["parameters"]["additionalProperties"],
+        false
+    );
     assert_eq!(
         session["tools"][0]["parameters"]["additionalProperties"],
         false

@@ -768,10 +768,20 @@ async fn native_voice_status_is_bounded_scoped_and_never_resubmits_work() {
             .await
             .unwrap()
             .unwrap();
-        assert!(super::super::timing::request_report(&original).measurements.iter().any(|m|m.phase == super::super::timing::Phase::Model && m.source == super::super::timing::Source::NativeResponses));
+        assert!(
+            super::super::timing::request_report(&original)
+                .measurements
+                .iter()
+                .any(|m| m.phase == super::super::timing::Phase::Model
+                    && m.source == super::super::timing::Source::NativeResponses)
+        );
         let observed_call = session::refresh(&state.db, &call).await.unwrap();
         let native_timings = super::super::timing::observations(&observed_call);
-        assert!(native_timings.iter().any(|t|t.related_turn_id.as_deref() == Some(original.turn_id.as_str())));
+        assert!(
+            native_timings
+                .iter()
+                .any(|t| t.related_turn_id.as_deref() == Some(original.turn_id.as_str()))
+        );
         let evidence = serde_json::to_string(&native_timings).unwrap();
         assert!(!evidence.contains("native-response") && !evidence.contains("native-call"));
         // More recent finished work must not hide an older pending task.
