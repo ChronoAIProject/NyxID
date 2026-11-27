@@ -47,10 +47,11 @@ pub(super) struct Workers {
     scope: Option<(String, String, String)>,
     contexts: HashMap<String, Arc<tokio::sync::Mutex<Executions>>>,
     pending: FuturesUnordered<Pending>,
-    running: HashSet<String>,
+    running: HashMap<String, String>,
 }
 
 impl Workers {
+    #[cfg(test)]
     pub(super) fn start(
         &mut self,
         state: &AppState,
@@ -58,6 +59,18 @@ impl Workers {
         delegation: &str,
         call_id: &str,
         input: &Invocation,
+    ) -> AppResult<()> {
+        self.start_correlated(state, call, delegation, call_id, input, None)
+    }
+
+    pub(super) fn start_correlated(
+        &mut self,
+        state: &AppState,
+        call: &VoiceSession,
+        delegation: &str,
+        call_id: &str,
+        input: &Invocation,
+        related_turn_id: Option<&str>,
     ) -> AppResult<()> {
         if self.pending.len() >= 10 {
             return Err(AppError::VoiceQueueFull);
@@ -82,11 +95,14 @@ impl Workers {
             call_id.to_owned(),
             input.clone(),
         );
-        self.running.insert(call_id.clone());
+        let timing_id = uuid::Uuid::new_v4().to_string();
+        self.running.insert(call_id.clone(), timing_id.clone());
+        let related_turn_id = related_turn_id.map(str::to_owned);
         self.pending.push(Box::pin(async move {
+            let mut context = context.lock().await;
+            context.timing_parent = related_turn_id;
+            context.timing_id = Some(timing_id);
             let result = context
-                .lock()
-                .await
                 .invoke(&state, &call, &delegation, &call_id, &input)
                 .await;
             Completion {
@@ -123,10 +139,11 @@ impl Workers {
     }
 
     pub(super) fn status(&self) -> Value {
+        let mut ids: Vec<_> = self.running.iter().collect();
+        ids.sort_by_key(|(_, id)| *id);
         json!(
-            self.running
-                .iter()
-                .map(|id| json!({"call_id":id,"state":"pending"}))
+            ids.into_iter()
+                .map(|(call_id, id)| json!({"call_id":call_id,"turn_id":id,"state":"pending"}))
                 .collect::<Vec<_>>()
         )
     }
@@ -361,6 +378,8 @@ impl Execution {
 #[derive(Default)]
 pub(super) struct Executions {
     active: HashMap<String, Execution>,
+    timing_parent: Option<String>,
+    timing_id: Option<String>,
 }
 
 fn unavailable(tool: &str, cause: Value) -> Value {
@@ -528,6 +547,12 @@ impl Executions {
         // Configured server origin only. No provider-selected URL, session
         // fallback, redirect, retry, or forwarding of the caller's credential.
         let endpoint = format!("{}/mcp", state.config.base_url.trim_end_matches('/'));
+        let diagnostic_id = self
+            .timing_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let started_ms = super::timing::offset(call);
+        let timer = std::time::Instant::now();
         let mut result = {
             let request = async {
                 let mut response = crate::services::proxy_service::no_redirect_http_client()
@@ -630,6 +655,34 @@ impl Executions {
                 }
             }
         };
+        let mut phase_timing = super::timing::Report::default();
+        phase_timing.add(
+            super::timing::Phase::ToolStart,
+            super::timing::Source::McpClient,
+            super::timing::Kind::Offset,
+            started_ms,
+        );
+        phase_timing.add(
+            super::timing::Phase::ToolEnd,
+            super::timing::Source::McpClient,
+            super::timing::Kind::Offset,
+            super::timing::offset(call),
+        );
+        phase_timing.add(
+            super::timing::Phase::McpRoundTrip,
+            super::timing::Source::McpClient,
+            super::timing::Kind::Duration,
+            timer.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        );
+        super::timing::record_related(
+            &state.db,
+            call,
+            &diagnostic_id,
+            self.timing_parent.as_deref(),
+            super::timing::ObservationKind::DirectTool,
+            phase_timing,
+        )
+        .await;
         validate_call(state, call).await?;
         if result["isError"] == true {
             result["tool"] = json!(tool);

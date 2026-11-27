@@ -557,6 +557,9 @@ fn checkpoint_order(segment: &Segment) -> (i64, bool) {
     (segment.end_ms, segment.speaker == Speaker::Assistant)
 }
 
+/// Request, spoken text, matching output interval, and announcement offset in milliseconds.
+type PendingAnnouncement = (VoiceRequest, String, Option<(i64, i64)>, i64);
+
 struct Coordinator {
     responses: super::responses::Responses,
     transcripts: Transcripts,
@@ -568,7 +571,8 @@ struct Coordinator {
     owner_review_notices: HashSet<String>,
     announced: HashSet<String>,
     progress: super::progress::Coalescer,
-    pending_audio: VecDeque<(VoiceRequest, String, Option<i64>)>,
+    pending_audio: VecDeque<PendingAnnouncement>,
+    pending_playback: super::timing::PendingPlayback,
     mute_command: Option<(String, bool, i64)>,
     idle_warned: bool,
     checkpoints: std::collections::HashMap<String, Segment>,
@@ -605,6 +609,7 @@ impl Coordinator {
             announced: HashSet::new(),
             progress: Default::default(),
             pending_audio: VecDeque::new(),
+            pending_playback: Default::default(),
             mute_command: None,
             idle_warned: false,
             checkpoints: Default::default(),
@@ -874,12 +879,13 @@ async fn active(
                 // A playback watermark is evidence of delivery, not microphone
                 // activity. Never call output generation itself heard audio.
                 let mut remaining=VecDeque::new();
-                while let Some((mut request,text,end))=c.pending_audio.pop_front() {
-                    if end.is_some_and(|end|call.playback_ms>=end && call.inaudible_until_ms<end) {
-                        super::progress::mark(&state.db,&mut request,"first_audio_ms",elapsed(call)).await?;
-                    } else {remaining.push_back((request,text,end));}
+                while let Some((mut request,text,interval,after))=c.pending_audio.pop_front() {
+                    if interval.is_some_and(|(start,end)|call.playback_ms>=end && call.inaudible_until_ms<=start) {
+                        super::progress::mark(&state.db,&mut request,"playback_confirmed_ms",elapsed(call)).await?;
+                    } else {remaining.push_back((request,text,interval,after));}
                 }
                 c.pending_audio=remaining;
+                c.pending_playback.confirm(&state.db,call,call.playback_ms,call.inaudible_until_ms).await;
                 if !c.transcripts.has_unsealed_user_input() && c.readback.is_none()
                     && let Ok(Some(notification))=super::announcements::claim(&state.db,call).await
                 {
@@ -1061,19 +1067,64 @@ async fn segment_ready(
 ) -> AppResult<()> {
     transcript::persist(&state.db, call, &segment).await?;
     c.checkpoints.remove(&segment.id);
+    if segment.sealed
+        && segment.complete
+        && call.protocol != Some(crate::models::downstream_service::VoiceProtocol::XaiRealtime)
+    {
+        use super::timing::{self, Kind, ObservationKind, Phase, Report, Source};
+        let mut report = Report::default();
+        let (kind, start, end) = if segment.speaker == Speaker::User {
+            (ObservationKind::Input, Phase::InputStart, Phase::InputEnd)
+        } else {
+            (
+                ObservationKind::Output,
+                Phase::OutputStart,
+                Phase::OutputEnd,
+            )
+        };
+        report.add(
+            start,
+            Source::ProviderTranscript,
+            Kind::Offset,
+            segment.start_ms,
+        );
+        report.add(
+            end,
+            Source::ProviderTranscript,
+            Kind::Offset,
+            segment.end_ms,
+        );
+        report.add(
+            Phase::TranscriptObserved,
+            Source::Coordinator,
+            Kind::Offset,
+            elapsed(call),
+        );
+        timing::record(&state.db, call, &segment.id, kind, report.clone()).await;
+        if segment.speaker == Speaker::Assistant && !segment.interrupted {
+            c.pending_playback.push(
+                segment.id.clone(),
+                kind,
+                segment.start_ms,
+                segment.end_ms,
+                report,
+            );
+        }
+    }
     if segment.speaker == Speaker::Assistant {
         if segment.sealed && segment.complete {
             let matches: Vec<_> = c
                 .pending_audio
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, text, end))| {
-                    end.is_none() && confirmation::same_speech(&segment.text, text)
+                .filter(|(_, (_, text, interval, after))| {
+                    interval.is_none()
+                        && super::timing::announcement_matches(&segment, text, *after)
                 })
                 .map(|(i, _)| i)
                 .collect();
             if matches.len() == 1 {
-                c.pending_audio[matches[0]].2 = Some(segment.end_ms);
+                c.pending_audio[matches[0]].2 = Some((segment.start_ms, segment.end_ms));
             }
         }
         c.recent_output
@@ -1453,8 +1504,12 @@ async fn task_updates(
             announce(socket, None, &detail).await?;
             super::progress::mark(&state.db, &mut request, "first_progress_ms", elapsed(call))
                 .await?;
-            if !request.timing.contains_key("first_audio_ms") && c.pending_audio.len() < 256 {
-                c.pending_audio.push_back((request.clone(), detail, None));
+            if !request.timing.contains_key("playback_confirmed_ms")
+                && !request.timing.contains_key("first_audio_ms")
+                && c.pending_audio.len() < 256
+            {
+                c.pending_audio
+                    .push_back((request.clone(), detail, None, elapsed(call)));
             }
         }
         if c.readback
@@ -1536,9 +1591,16 @@ async fn task_updates(
             read_question(socket, &readback.question).await?;
             super::progress::mark(&state.db, &mut request, "first_progress_ms", elapsed(call))
                 .await?;
-            if !request.timing.contains_key("first_audio_ms") && c.pending_audio.len() < 256 {
-                c.pending_audio
-                    .push_back((request.clone(), readback.question.clone(), None));
+            if !request.timing.contains_key("playback_confirmed_ms")
+                && !request.timing.contains_key("first_audio_ms")
+                && c.pending_audio.len() < 256
+            {
+                c.pending_audio.push_back((
+                    request.clone(),
+                    readback.question.clone(),
+                    None,
+                    elapsed(call),
+                ));
             }
             c.readback = Some(readback);
         }
@@ -1605,10 +1667,12 @@ async fn task_updates(
                         announce_when_ready(socket, c, None, &text).await?;
                         // Only matching authoritative output plus playback can
                         // mark audio delivery. Paraphrases remain unknown.
-                        if !request.timing.contains_key("first_audio_ms")
+                        if !request.timing.contains_key("playback_confirmed_ms")
+                            && !request.timing.contains_key("first_audio_ms")
                             && c.pending_audio.len() < 256
                         {
-                            c.pending_audio.push_back((request.clone(), text, None));
+                            c.pending_audio
+                                .push_back((request.clone(), text, None, elapsed(call)));
                         }
                     }
                     super::speech::Presentation::Context(facts) => {

@@ -50,6 +50,7 @@ struct Speech {
     text: String,
     start: i64,
     end: i64,
+    first_audio_ms: Option<i64>,
 }
 pub struct Grok {
     pub(super) socket: openai::Socket,
@@ -76,6 +77,9 @@ pub struct Grok {
     muted: bool,
     evidence: HashMap<String, Input>,
     echo: super::gate::EchoReference,
+    response_timing: Option<(String, i64, std::time::Instant)>,
+    pending_playback: super::super::timing::PendingPlayback,
+    inaudible_until_ms: i64,
 }
 impl Grok {
     pub fn new(
@@ -111,6 +115,9 @@ impl Grok {
             muted: false,
             evidence: HashMap::new(),
             echo: Default::default(),
+            response_timing: None,
+            pending_playback: Default::default(),
+            inaudible_until_ms: 0,
         }
     }
     pub fn started_at(mut self, clock: tokio::time::Instant) -> Self {
@@ -291,6 +298,12 @@ impl Grok {
                 // can drain output for scheduling but never arm a confirmation.
                 if ms <= self.now() {
                     self.arbiter.playback_ms = self.arbiter.playback_ms.max(ms);
+                    if !audible {
+                        self.inaudible_until_ms = self.inaudible_until_ms.max(ms);
+                    }
+                    self.pending_playback
+                        .confirm(&self.state.db, &self.call, ms, self.inaudible_until_ms)
+                        .await;
                 }
                 if !audible && self.arbiter.active.is_none() {
                     self.arbiter.playback_ms = self.arbiter.playback_end_ms;
@@ -309,6 +322,8 @@ impl Grok {
         Ok(())
     }
     pub(super) async fn provider(&mut self, event: Value) -> AppResult<()> {
+        let received_ms = self.now();
+        let received_at = std::time::Instant::now();
         super::super::shared::revalidate(&self.state.db, &self.call).await?;
         match event["type"].as_str().unwrap_or_default() {
             "input_audio_buffer.committed" => {
@@ -349,6 +364,42 @@ impl Grok {
                     complete,
                 };
                 if complete {
+                    use super::super::timing::{
+                        self, Kind, ObservationKind, Phase, Report, Source,
+                    };
+                    let mut report = Report::default();
+                    report.add(
+                        Phase::InputStart,
+                        Source::RelayAudio,
+                        Kind::Offset,
+                        segment.start_ms,
+                    );
+                    report.add(
+                        Phase::InputEnd,
+                        Source::RelayAudio,
+                        Kind::Offset,
+                        segment.end_ms,
+                    );
+                    report.add(
+                        Phase::TranscriptObserved,
+                        Source::Coordinator,
+                        Kind::Offset,
+                        received_ms,
+                    );
+                    report.add(
+                        Phase::TranscriptionTurnaround,
+                        Source::RelayAudio,
+                        Kind::Duration,
+                        received_ms - segment.end_ms,
+                    );
+                    timing::record(
+                        &self.state.db,
+                        &self.call,
+                        &segment.id,
+                        ObservationKind::Input,
+                        report,
+                    )
+                    .await;
                     let cutoff = self.now() - 60_000;
                     self.utterances.retain(|_, end| *end >= cutoff);
                     self.evidence.retain(|_, input| input.end >= cutoff);
@@ -367,6 +418,8 @@ impl Grok {
             "response.created" => {
                 let id = field(&event["response"], "id")?;
                 self.arbiter.created(id.into())?;
+                self.response_timing =
+                    Some((uuid::Uuid::new_v4().to_string(), received_ms, received_at));
                 self.speech = None;
             }
             "response.function_call_arguments.done" => {
@@ -389,6 +442,26 @@ impl Grok {
                     return Ok(());
                 }
                 self.arbiter.unresolved.insert(id.clone());
+                if event["name"] == "get_task_status" {
+                    let status = if event["arguments"]
+                        .as_str()
+                        .and_then(|a| serde_json::from_str::<Value>(a).ok())
+                        == Some(json!({}))
+                    {
+                        super::super::client_key::revalidate(&self.state.db, &self.call).await?;
+                        let current =
+                            super::super::session::refresh(&self.state.db, &self.call).await?;
+                        Box::pin(super::super::progress::task_status(
+                            &self.state.db,
+                            &current,
+                        ))
+                        .await?
+                    } else {
+                        json!({"status":"refused","reason":"invalid_arguments"})
+                    };
+                    self.receipt(&id, status).await?;
+                    return Ok(());
+                }
                 if let Some(args) = protocol::delegation(&event)
                     && let Some(end) = self.utterances.get(&args.utterance_id)
                 {
@@ -403,7 +476,7 @@ impl Grok {
                 }
             }
             "error" => return Err(AppError::VoiceProviderUnavailable),
-            _ => self.response_event(event).await?,
+            _ => self.response_event(event, received_ms, received_at).await?,
         }
         Ok(())
     }
@@ -416,7 +489,12 @@ fn field<'a>(event: &'a Value, name: &str) -> AppResult<&'a str> {
 }
 
 impl Grok {
-    async fn response_event(&mut self, event: Value) -> AppResult<()> {
+    async fn response_event(
+        &mut self,
+        event: Value,
+        received_ms: i64,
+        received_at: std::time::Instant,
+    ) -> AppResult<()> {
         match event["type"].as_str().unwrap_or_default() {
             "response.output_audio.delta" | "response.audio.delta" => {
                 let response = field(&event, "response_id")?;
@@ -438,17 +516,19 @@ impl Grok {
                     return Err(AppError::VoiceProviderUnavailable);
                 }
                 self.echo.output(&bytes);
-                let now = self.now();
+                let now = received_ms;
                 let speech = self.speech.get_or_insert(Speech {
                     id: uuid::Uuid::new_v4().to_string(),
                     item,
                     text: String::new(),
                     start: now,
                     end: now,
+                    first_audio_ms: None,
                 });
                 if speech.item != event["item_id"].as_str().unwrap_or_default() {
                     return Err(AppError::VoiceProviderUnavailable);
                 }
+                speech.first_audio_ms.get_or_insert(now);
                 for chunk in bytes.chunks(1920) {
                     super::super::shared::revalidate(&self.state.db, &self.call).await?;
                     speech.end = speech.end.max(now) + (chunk.len() as i64 / 48);
@@ -480,7 +560,7 @@ impl Grok {
                 if self.arbiter.active.as_deref() != Some(response) {
                     return Err(AppError::VoiceProviderUnavailable);
                 }
-                let now = self.now();
+                let now = received_ms;
                 let item = field(&event, "item_id")?.to_owned();
                 let speech = self.speech.get_or_insert(Speech {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -488,6 +568,7 @@ impl Grok {
                     text: String::new(),
                     start: now,
                     end: now,
+                    first_audio_ms: None,
                 });
                 if speech.item != event["item_id"].as_str().unwrap_or_default() {
                     return Err(AppError::VoiceProviderUnavailable);
@@ -526,6 +607,64 @@ impl Grok {
                     .take()
                     .ok_or(AppError::VoiceProviderUnavailable)?;
                 tokens::settle(&self.state, &meter, &event, &self.call.preferences.model).await?;
+                if let Some((timing_id, started, timer)) = self.response_timing.take() {
+                    use super::super::timing::{
+                        self, Kind, ObservationKind, Phase, Report, Source,
+                    };
+                    let mut report = Report::default();
+                    report.add(
+                        Phase::ResponseStart,
+                        Source::Coordinator,
+                        Kind::Offset,
+                        started,
+                    );
+                    report.add(
+                        Phase::ResponseEnd,
+                        Source::Coordinator,
+                        Kind::Offset,
+                        received_ms,
+                    );
+                    report.add(
+                        Phase::ResponseGeneration,
+                        Source::Coordinator,
+                        Kind::Duration,
+                        received_at
+                            .saturating_duration_since(timer)
+                            .as_millis()
+                            .min(i64::MAX as u128) as i64,
+                    );
+                    if let Some(speech) = &self.speech
+                        && let Some(at) = speech.first_audio_ms
+                    {
+                        report.add(Phase::FirstAudio, Source::RelayAudio, Kind::Offset, at);
+                        report.add(Phase::OutputStart, Source::RelayAudio, Kind::Offset, at);
+                        report.add(
+                            Phase::OutputEnd,
+                            Source::RelayAudio,
+                            Kind::Offset,
+                            speech.end,
+                        );
+                        if !self.arbiter.cancelled.contains(id)
+                            && event["response"]["status"] == "completed"
+                        {
+                            self.pending_playback.push(
+                                timing_id.clone(),
+                                ObservationKind::VoiceResponse,
+                                at,
+                                speech.end,
+                                report.clone(),
+                            );
+                        }
+                    }
+                    timing::record(
+                        &self.state.db,
+                        &self.call,
+                        &timing_id,
+                        ObservationKind::VoiceResponse,
+                        report,
+                    )
+                    .await;
+                }
                 if let Some(speech) = self.speech.take() {
                     self.segment(Segment {
                         interrupted: self.arbiter.cancelled.contains(id)

@@ -133,6 +133,7 @@ pub async fn read(db: &Database, chat: &ChatAuthority, args: &Value) -> AppResul
             tasks.push(json!({"thread_id":thread.id,"thread_title":engine::excerpt(&thread.title,80),"execution_thread_id":request.task_conversation_id,
                 "turn_id":request.turn_id,"request_id":request.id,"root_request_id":request.root_request_id.as_ref().unwrap_or(&request.id),"state":"queued",
                 "last_completed_step":null,"result_excerpt":null,"error_code":null,
+                "phase_timing":super::voice::timing::request_report(request),
                 "started_at":request.started_at,"queued_at":request.created_at,"last_update_at":request.created_at,"settled_at":null}));
         }
         for turn_id in turn_ids {
@@ -275,6 +276,16 @@ pub async fn read(db: &Database, chat: &ChatAuthority, args: &Value) -> AppResul
                         .map(|d| d.to_chrono()),
                 )
                 .max();
+            let phase_timing = if let Some(request) = &request {
+                let timing = active.map(|t| &t.timing).or_else(|| {
+                    reply
+                        .and_then(|r| r.turn_metadata.as_ref())
+                        .and_then(|m| m.timing.as_ref())
+                });
+                Some(super::voice::timing::for_status(db, request, timing, activities).await?)
+            } else {
+                None
+            };
             tasks.push(json!({"thread_id":thread.voice_parent_conversation_id.as_ref().unwrap_or(&thread.id),
                 "thread_title":engine::excerpt(&thread.title,80),"execution_thread_id":request.as_ref().and_then(|r|r.task_conversation_id.as_ref()).unwrap_or(&thread.id),"turn_id":turn_id,"request_id":request.as_ref().map(|r| &r.id),
                 "root_request_id":request.as_ref().map(|r|r.root_request_id.as_ref().unwrap_or(&r.id)),
@@ -283,6 +294,7 @@ pub async fn read(db: &Database, chat: &ChatAuthority, args: &Value) -> AppResul
                 } else { reply.map(|r|&r.id) },
                 "execution_result_message_id":if visible_voice_copy { None } else {reply.map(|r|&r.id)},
                 "state":state,"last_completed_step":completed_step(activities),
+                "phase_timing":phase_timing,
                 "result_excerpt":result_excerpt,"error_code":error_code,
                 "started_at":request.as_ref().map(|r|r.started_at).unwrap_or_else(||active.map(|a|a.started_at).or_else(||input.as_ref().map(|m|m.created_at))),
                 "last_update_at":updated,"settled_at":reply.filter(|_|!unsettled_cancel && matches!(state,"completed"|"failed"|"stopped")).map(|r|r.created_at)}));

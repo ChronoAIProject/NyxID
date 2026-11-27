@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 pub fn configuration(model: &str, voice: &str, instructions: &str) -> Value {
     json!({"type":"session.update","session":{
-        "model":model,"voice":voice,"instructions":format!("{instructions} Delegate using delegate_to_agent with the server-issued utterance_id attached to each input. Never invent an ID. The intent_hint is advisory only."),
+        "model":model,"voice":voice,"instructions":format!("{instructions} Delegate using delegate_to_agent with the server-issued utterance_id attached to each input. Never invent an ID. The intent_hint is advisory only. For task progress or voice latency diagnosis use get_task_status and report only its measured evidence. Missing phases are unavailable. Offsets from call creation are not durations, client playback feedback is not physical hearing, and transcription turnaround includes relay/provider overhead."),
         "turn_detection":{"type":null},"resumption":{"enabled":false},
         "audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transport":"json",
             "transcription":{"model":"grok-transcribe"}},
@@ -18,7 +18,10 @@ pub fn configuration(model: &str, voice: &str, instructions: &str) -> Value {
             "description":"Queue the user's exact utterance with NyxID. Returns a task receipt promptly; results arrive separately.",
             "parameters":{"type":"object","additionalProperties":false,
                 "properties":{"utterance_id":{"type":"string"},"intent_hint":{"type":"string","maxLength":128}},
-                "required":["utterance_id","intent_hint"]}}]
+                "required":["utterance_id","intent_hint"]}},
+            {"type":"function","name":"get_task_status",
+                "description":"Read bounded recent task status and metadata-only phase timings for this exact call. No execution, replay, cancellation or approval. Missing phases are unavailable; distinguish offsets, durations and client playback feedback.",
+                "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}]
     }})
 }
 

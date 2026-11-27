@@ -143,6 +143,7 @@ pub async fn enqueue(
         execution_enrolled: false,
         model_task: None,
         progress: None,
+        execution_timing: None,
         timing: Default::default(),
         started_at: None,
         terminal_error_code: None,
@@ -369,7 +370,8 @@ pub(crate) async fn publish_result(
                     return Ok(None);
                 };
                 if current.result_message_id.is_some() { return Ok(current.result_message_id); }
-                if source.turn_id != current.turn_id || source.user_id != current.user_id {
+                if source.turn_id != current.turn_id || source.user_id != current.user_id
+                    || source.conversation_id != *current.task_conversation_id.as_ref().unwrap_or(&current.conversation_id) {
                     return Ok(None);
                 }
                 // Synthetic failures have seq=0. Resolve again within this
@@ -399,19 +401,18 @@ pub(crate) async fn publish_result(
                 // Timing survives audio closure and fast turns that settle
                 // between coordinator ticks. IDs and timestamps only.
                 if let Some(call) = db.collection::<bson::Document>(crate::models::assistant_voice_session::COLLECTION_NAME)
-                    .find_one(doc!{"_id":&current.session_id,"user_id":&current.user_id})
+                    .find_one(doc!{"_id":&current.session_id,"user_id":&current.user_id,"conversation_id":&current.conversation_id})
                     .projection(doc!{"created_at":1}).session(&mut *session).await?
                     && let Ok(start)=call.get_datetime("created_at") {
                     let offset=|at:chrono::DateTime<Utc>|(at-start.to_chrono()).num_milliseconds().max(0);
                     let mut marks=doc!{"timing.result_ms":offset(source.created_at)};
                     if let Some(first)=source.activities.iter().map(|a|a.started_at).min() {
                         marks.insert("timing.first_activity_ms",offset(first));
-                        marks.insert("timing.tool_started_ms",offset(first));
                     }
-                    if let Some(end)=source.activities.iter().filter_map(|a|a.ended_at).min() {
-                        marks.insert("timing.first_tool_finished_ms",offset(end));
-                    }
-                    requests.update_one(doc!{"_id":&current.id},doc!{"$min":marks}).session(&mut *session).await?;
+                    let timing = super::voice::timing::execution_snapshot(&current.turn_id, start.to_chrono(),
+                        source.turn_metadata.as_ref().and_then(|m|m.timing.as_ref()), &source.activities);
+                    requests.update_one(doc!{"_id":&current.id,"turn_id":&current.turn_id},doc!{"$min":marks,
+                        "$set":{"execution_timing":bson::to_bson(&timing).map_err(|_|AppError::Internal("Voice timing serialization failed".into()))?}}).session(&mut *session).await?;
                 }
                 // Older replicas executed in the visible thread. Adopt their
                 // existing settled reply rather than copying it into that thread twice.
@@ -1179,6 +1180,7 @@ pub(crate) async fn continuation(
             execution_enrolled: parent.execution_enrolled,
             model_task: None,
             progress: None,
+            execution_timing: None,
             timing: Default::default(),
             started_at: None,
             terminal_error_code: None,

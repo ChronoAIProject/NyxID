@@ -36,7 +36,7 @@ pub(super) fn configuration(model: &str, context: Option<&str>) -> Value {
             "description":"Ask this same selected NyxBot to perform the user's complete task under its existing permissions. This is task submission, not a permission grant.",
             "parameters":{"type":"object","properties":{"request":{"type":"string"}},"required":["request"],"additionalProperties":false}},
             {"type":"function","name":STATUS_TOOL,"strict":true,
-            "description":"Read verified current status of tasks already accepted in this call. Use for progress questions instead of submitting another task. This cannot start, repeat, cancel or approve work. Report only the supplied evidence; empty detail means no further detail is known.",
+            "description":"Read verified current task status and bounded recent per-turn phase timings in this exact call. Use for progress or latency questions instead of submitting another task. This cannot start, repeat, cancel or approve work. Timing is metadata only: distinguish source, millisecond offsets from call creation, durations and client playback feedback. Missing ASR, synthesis or physical playback phases are unavailable; never infer them from other stages.",
             "parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}]
     }});
     config["responses"]["tools"]
@@ -66,6 +66,9 @@ struct Call {
 struct Response {
     delegation: String,
     calls: Vec<Call>,
+    timing_id: String,
+    started_ms: i64,
+    timer: std::time::Instant,
 }
 #[derive(Default)]
 pub(super) struct Responses {
@@ -187,6 +190,8 @@ impl Responses {
         outer: &Value,
         confirmation_pending: bool,
     ) -> AppResult<()> {
+        let received_at = std::time::Instant::now();
+        let received_ms = super::timing::offset(call);
         if !actionable(outer) {
             return Ok(());
         }
@@ -227,6 +232,9 @@ impl Responses {
                     .or_insert_with(|| Response {
                         delegation: delegation.into(),
                         calls: Vec::new(),
+                        timing_id: uuid::Uuid::new_v4().to_string(),
+                        started_ms: received_ms,
+                        timer: received_at,
                     });
                 self.current.insert(delegation.into(), response_id.into());
             }
@@ -302,6 +310,38 @@ impl Responses {
                     return Err(invalid());
                 }
                 self.completed.insert(response_id.into());
+                let finished_ms = received_ms;
+                let model_duration_ms = received_at
+                    .saturating_duration_since(response.timer)
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64;
+                let mut phase_timing = super::timing::Report::default();
+                phase_timing.add(
+                    super::timing::Phase::ModelStart,
+                    super::timing::Source::NativeResponses,
+                    super::timing::Kind::Offset,
+                    response.started_ms,
+                );
+                phase_timing.add(
+                    super::timing::Phase::ModelEnd,
+                    super::timing::Source::NativeResponses,
+                    super::timing::Kind::Offset,
+                    finished_ms,
+                );
+                phase_timing.add(
+                    super::timing::Phase::Model,
+                    super::timing::Source::NativeResponses,
+                    super::timing::Kind::Duration,
+                    model_duration_ms,
+                );
+                super::timing::record(
+                    &state.db,
+                    call,
+                    &response.timing_id,
+                    super::timing::ObservationKind::NativeResponse,
+                    phase_timing.clone(),
+                )
+                .await;
                 if kind != "response.completed" {
                     self.tools.finish(state, delegation, true).await?;
                     self.continuations.remove(delegation);
@@ -360,12 +400,13 @@ impl Responses {
                             } else if confirmation_pending && input.can_execute() {
                                 json!({"status":"refused","detail":"An actual confirmation is pending; a tool call cannot approve it."})
                             } else {
-                                match self.tools.start(
+                                match self.tools.start_correlated(
                                     state,
                                     call,
                                     delegation,
                                     &invocation.id,
                                     input,
+                                    Some(&response.timing_id),
                                 ) {
                                     Ok(()) => return Ok(()), // Result is polled alongside voice events.
                                     Err(AppError::VoiceQueueFull) => {
@@ -407,6 +448,28 @@ impl Responses {
                                 .await
                                 {
                                     Ok(mut request) => {
+                                        for (name, ms) in [
+                                            ("native_model_started_ms", response.started_ms),
+                                            ("native_model_finished_ms", finished_ms),
+                                            ("native_model_duration_ms", model_duration_ms),
+                                        ] {
+                                            super::progress::mark(
+                                                &state.db,
+                                                &mut request,
+                                                name,
+                                                ms,
+                                            )
+                                            .await?;
+                                        }
+                                        super::timing::record_related(
+                                            &state.db,
+                                            call,
+                                            &response.timing_id,
+                                            Some(&request.turn_id),
+                                            super::timing::ObservationKind::NativeResponse,
+                                            phase_timing.clone(),
+                                        )
+                                        .await;
                                         super::progress::mark(
                                             &state.db,
                                             &mut request,

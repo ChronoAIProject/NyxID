@@ -34,6 +34,9 @@ impl std::fmt::Debug for VoiceClientKey {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceSession {
+    /// Bounded metadata-only phase observations; mixed/legacy entries are read defensively.
+    #[serde(default)]
+    pub phase_observations: Vec<bson::Bson>,
     /// Non-authorizing enrollment hint copied from the authenticated person.
     #[serde(default)]
     pub execution_enrolled: bool,

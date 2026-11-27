@@ -287,11 +287,13 @@ async fn serve(
                 let notice_states:Vec<_>=notices.iter().map(|n|json!({"request_id":n.request_id,
                     "state":if n.state=="queued" && n.not_after.timestamp_millis()<chrono::Utc::now().timestamp_millis(){"expired"}else{n.state.as_str()}})).collect();
                 let value=json!({"type":"snapshot","session":super::SessionResponse::from(call.clone()),"announcements":notice_states,
+                    "turn_timings":crate::services::voice::timing::observations(&call),
                     "captions":captions.into_iter().map(|m|json!({"id":m.id,"speaker":m.role,"text":m.text,
                         "start_ms":m.voice.as_ref().map(|v|v.start_ms),"end_ms":m.voice.as_ref().map(|v|v.end_ms),
                         "fragments":fragments_response(m.voice.as_ref()),
                         "sealed":m.voice.as_ref().is_some_and(|v|v.sealed),"complete":m.voice.as_ref().is_some_and(|v|v.complete)})).collect::<Vec<_>>(),
                     "tasks":tasks.into_iter().rev().map(|r|json!({"id":r.id,"state":r.state,"outcome":crate::services::assistant_voice::request_outcome(&r),"turn_id":r.turn_id,
+                        "phase_timing":crate::services::voice::timing::request_report(&r),
                         "progress":r.progress.as_ref().map(|p|json!({"stage":p.stage,"detail":p.detail,"last_completed_step":p.last_completed_step,"completed_steps":p.completed_steps,"updated_at":p.updated_at})),
                         "pending_acknowledgement_ids":r.pending_acknowledgement_ids,
                         "title":source_titles.get(&r.message_id),"result_message_id":r.result_message_id})).collect::<Vec<_>>()});

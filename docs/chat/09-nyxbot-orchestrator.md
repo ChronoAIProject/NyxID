@@ -1385,6 +1385,10 @@ completed activity label and time; a ≤600-character settled answer excerpt or
 stable error; start/update/settled timestamps (null when unavailable). No tool
 arguments, raw tool results, credential material or acknowledgement content are
 included. Answer excerpts are explicitly untrusted quoted data.
+Voice items also include the metadata-only `phase_timing` contract in
+[Voice §6](11-voice.md#6-delegation-progress-interruption-and-persistence), joined
+only to their exact execution turn. It distinguishes measured offsets/durations
+and sources, and reports unavailable phases explicitly.
 
 The tool is callable only from a private owner thread (not a channel or group).
 It rechecks the caller's live turn and current conversation key. A guest,

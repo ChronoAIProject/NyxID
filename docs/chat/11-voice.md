@@ -386,7 +386,8 @@ reconciliation deadline. Unknown tail usage remains platform exposure.
 The browser connects only to NyxID with first-party human authentication. NyxID
 connects upstream with the resolved Bearer key. After `session.created`, configure
 the pinned model/voice, manual turn handling (§10), PCM16 mono at 24 kHz,
-transcription and **only** a closed `delegate_to_agent` function. Its arguments
+transcription and two closed functions: `delegate_to_agent` for work and the
+no-argument `get_task_status` read described in §6. The delegation arguments
 reference a server-issued utterance/request identifier and bounded intent hint;
 the coordinator uses authoritative input transcript text, not model-authored
 instructions, to create the work. Ambiguous references ask for clarification.
@@ -623,15 +624,53 @@ redirect the user to a backend conversation or saved answer. An available transp
 Expiry, denied access, interrupted workers and service errors retain explicit
 failure explanations; call closure itself is not a task result.
 
-Each voice request has additive metadata-only `timing` offsets in milliseconds
-from call creation: transcription end, delegation event, queue admission, first
-activity/tool start, first tool finish, first progress, approval wait, result and
-first audio. Existing turn timing supplies model/tool durations. First audio
-requires matching authoritative assistant text plus the browser playback
-watermark and audible interval; interrupted, uncorrelated or paraphrased output
-stays unknown. Marks contain only closed names/numbers and existing request IDs;
-no content enters audit or logs. Old replicas ignore new fields and old rows
-remain readable; complete instrumentation requires upgraded coordinators.
+Voice task snapshots and the call-scoped `get_task_status` read expose additive
+`phase_timing` evidence. The no-argument read returns bounded recent evidence
+from this exact owner, conversation and call. The ordinary `nyxid__task_status`
+read accepts its existing optional `turn_id` and includes the same task timing
+under its existing private same-owner/same-agent authority. Timing grants no
+execution authority and never selects an earlier or unrelated active turn.
+
+Each measurement names its phase, source, kind (`offset` or `duration`) and
+`value_ms`; units are milliseconds and offsets start at call creation. Request
+marks cover transcription end, delegation, queue admission, first activity/tool
+start, first tool finish, first progress, approval wait and result. Exact matching
+live-turn or settled-reply evidence supplies observed model/tool wall durations
+and at most 40 numbered tool intervals from one activity snapshot, without
+activity IDs, labels or content. Final intervals persist as one atomic snapshot;
+live task refreshes retain aggregates and do not merge sliding activity positions.
+Legacy default zero counters do not establish measured zero durations. Unknown
+marks, malformed values and unavailable stages are omitted from measurements.
+Legacy request offsets identify coordinator-recorded boundaries; they do not
+establish provider-internal processing time.
+
+The call also retains at most 32 metadata-only `turn_timings` observations for
+conversational input/output segments, native Responses inference and direct MCP
+calls. Their identifiers are server UUIDs, never provider IDs. Direct MCP timing
+is the observed MCP request interval (including transport and async wait),
+not a pure upstream service duration. Native Responses timing is the observed
+inference interval. Grok records response-generation boundaries and receipt of
+first actual provider audio; generation can include model and synthesis work.
+Input transcript/audio boundaries are not ASR processing durations.
+Grok's committed-input end to its matching final-transcript receipt is a
+`transcription_turnaround` duration including relay and provider overhead;
+provider-internal ASR processing remains unavailable. Separate
+input/output observations do not imply a causal pairing. A task receives input
+or native-model marks only from its explicitly bound source. The call read and
+control snapshot return these observations independently of task admission, so
+ordinary conversation and direct service work remain diagnosable.
+
+`playback_confirmed` is the server observation of a matching complete output
+interval covered by the client's audible playback watermark; it is not first
+audio, a device clock or proof of physical sound. Old `first_audio_ms` marks have
+this same playback meaning. Output preceding the announcement cannot satisfy
+its playback check. Separate ASR processing, synthesis processing, unobservable
+first audio and physical device playback remain explicitly unavailable. No
+caption, queue offset or append acknowledgement substitutes for these stages.
+Instrumentation stores no audio, text, provider IDs, arguments or results and
+adds no diagnostic logs. Old rows remain readable; complete instrumentation
+requires upgraded coordinators. Duplicate spoken details for a task remain
+silent even after an intervening progress stage, with a bounded coalescer.
 
 ### Talking over the assistant is not Stop
 
@@ -1433,6 +1472,8 @@ who cannot use voice. Touch entry must not raise the keyboard automatically.
 Budgets assume a warm service, usable network and already-granted microphone;
 permission-dialog time is excluded. Collect p50/p95 by adapter, region,
 browser/device class and network condition using timestamps/counts only.
+The scoped phase evidence in §6 supplies measured boundaries and durations;
+unavailable stages remain unavailable and budgets are never reported as samples.
 
 | Interval | Target / estimate | Instrumentation |
 | --- | --- | --- |

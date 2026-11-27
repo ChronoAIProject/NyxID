@@ -30,6 +30,7 @@ import { nyxBotApi } from "@/lib/assistant/nyxbot-api";
 import { nyxBotQueryKeys } from "@/hooks/use-nyxbot-agents";
 import type { VoiceView } from "./voice-captions";
 import { useAssistantVoice } from "@/hooks/use-assistant-voice";
+import { VoicePhaseTimings } from "./voice-phase-timing";
 import {
   voiceOptionsSchema,
   type VoiceOption,
@@ -477,10 +478,11 @@ export function VoicePanel({
       <PhoneOff className="h-4 w-4" />{translateUi("End call")}</Button>
   );
   const tasks = (
+    <div>
     <ul className="mt-3 space-y-2" aria-label={translateUi("Voice tasks")}>
       {voice.snapshot?.tasks.map((t, i) => (
         <li key={t.id} className="flex items-center justify-between gap-2">
-          <span className="min-w-0 break-words">
+          <div className="min-w-0 break-words">
             {t.title?.trim() || translateUi("Request {{value1}}", { value1: i + 1 })} ·{" "}
             {(
               {
@@ -506,7 +508,8 @@ export function VoicePanel({
                 href={`#message-${t.result_message_id}`}
               >{translateUi("result")}</a>
             ) : null}
-          </span>
+            {t.phase_timing && <VoicePhaseTimings report={t.phase_timing} />}
+          </div>
           {!["completed", "cancelled"].includes(t.state) && (
             <Button
               size="sm"
@@ -521,6 +524,19 @@ export function VoicePanel({
         </li>
       ))}
     </ul>
+    {(voice.snapshot?.turn_timings?.length ?? 0) > 0 && (
+      <details className="mt-2 text-12 text-text-secondary">
+        <summary className="cursor-pointer">{translateUi("Recent voice timings")}</summary>
+        {voice.snapshot?.turn_timings?.map((turn) => (
+          <div key={turn.turn_id} className="mt-2 break-words">
+            <p>{translateUi("Turn {{id}}", { id: turn.turn_id })}</p>
+            {turn.related_turn_id && <p>{translateUi("Related turn {{id}}", { id: turn.related_turn_id })}</p>}
+            <VoicePhaseTimings report={turn.phase_timing} />
+          </div>
+        ))}
+      </details>
+    )}
+    </div>
   );
   if (onViewChange)
     return (
