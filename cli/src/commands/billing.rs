@@ -1014,7 +1014,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
                 "error": "bad_request",
                 "error_code": 1000,
-                "message": "Minimum credit purchase is 10 credits"
+                "message": "Bad request: Minimum credit purchase is 10 credits"
             })))
             .expect(1)
             .mount(&server)
@@ -1030,12 +1030,16 @@ mod tests {
         .unwrap_err();
         assert!(
             err.to_string()
-                .contains("Minimum credit purchase is 10 credits")
+                .contains("Bad request: Minimum credit purchase is 10 credits")
         );
         let server_error = err.downcast_ref::<crate::api::ApiError>().unwrap();
         assert_eq!(server_error.status().as_u16(), 400);
         assert_eq!(server_error.response().unwrap().error_code, 1000);
         assert_eq!(server_error.response().unwrap().error, "bad_request");
+        assert_eq!(
+            server_error.response().unwrap().message,
+            "Bad request: Minimum credit purchase is 10 credits"
+        );
     }
 
     #[tokio::test]

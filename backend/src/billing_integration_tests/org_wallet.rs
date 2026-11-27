@@ -76,8 +76,12 @@ async fn topup_http_limits_match_for_personal_and_org_wallets_before_provisionin
             ).await;
             assert_eq!(status, StatusCode::BAD_REQUEST, "{amount}: {body}");
             assert_eq!(body["error"], "bad_request");
+            assert_eq!(body["error_code"], 1000);
             if amount == json!(9) {
-                assert_eq!(body["message"], "Minimum credit purchase is 10 credits");
+                assert_eq!(
+                    body["message"],
+                    "Bad request: Minimum credit purchase is 10 credits"
+                );
             }
         }
     }
