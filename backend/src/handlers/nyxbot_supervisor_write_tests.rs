@@ -173,7 +173,8 @@ fn delegation_retry_card(input: &str) -> Option<String> {
     if !context.contains("With this message the owner confirmed the pending action; retry it with its acknowledgement_id.") {
         return None;
     }
-    let (true, Some(code)) = crate::services::assistant_acknowledgement_service::parse_reply(reply)
+    let Some((true, Some(code))) =
+        crate::services::assistant_acknowledgement_service::parse_reply(reply)
     else {
         return None;
     };
