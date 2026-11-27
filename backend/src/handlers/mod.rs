@@ -7,6 +7,7 @@ pub mod admin_encrypted_records;
 pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
+pub(crate) mod admin_key_lifecycle;
 pub mod admin_machine_runtime_billing;
 pub mod admin_nodes;
 pub mod admin_ownership;
