@@ -640,6 +640,7 @@ async fn revoked_incremental_code_returns_invalid_grant_at_token_endpoint() {
     let response = token(
         State(fixture.state),
         TelemetryContext::default(),
+        None,
         HeaderMap::new(),
         Form(request),
     )

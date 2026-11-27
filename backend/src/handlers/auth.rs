@@ -359,7 +359,13 @@ pub async fn register(
     // we reserve one slot up front. When it is disabled (public launch),
     // any invite code the client sent is ignored and registration proceeds
     // without reserving anything.
-    let invite_reservation = if feature_flag_service::invitation_code_required(&state.db).await? {
+    let invite_required = feature_flag_service::invitation_code_required(&state.db).await?;
+    let signup = if invite_required {
+        None
+    } else {
+        super::login_client_context::public_signup_admission(&headers, Some(peer), &state)?
+    };
+    let invite_reservation = if invite_required {
         let raw_code = body
             .invite_code
             .as_deref()
@@ -401,13 +407,14 @@ pub async fn register(
         None
     };
 
-    let register_result = auth_service::register_user(
+    let register_result = auth_service::register_public_user(
         &state.db,
         &body.email,
         &body.password,
         body.display_name.as_deref(),
         invite_reservation.as_ref(),
         state.config.auto_verify_email,
+        signup,
     )
     .await;
 

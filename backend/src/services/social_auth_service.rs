@@ -676,6 +676,7 @@ pub struct FindOrCreateUserResult {
 /// When `allow_new_users` is `false`, first-time social sign-ups are rejected
 /// with `SocialAuthRegistrationClosed`. This mirrors the invite-code gate on
 /// email/password registration — callers should use the global invitation-code flag.
+#[cfg(test)]
 pub async fn find_or_create_user(
     db: &mongodb::Database,
     profile: &SocialProfile,
@@ -684,11 +685,22 @@ pub async fn find_or_create_user(
     find_or_create_user_with_invite(db, profile, allow_new_users, None).await
 }
 
+#[cfg(test)]
 pub async fn find_or_create_user_with_invite(
     db: &mongodb::Database,
     profile: &SocialProfile,
     allow_new_users: bool,
     reservation: Option<&super::invite_code_service::InviteReservation>,
+) -> AppResult<FindOrCreateUserResult> {
+    find_or_create_public_user(db, profile, allow_new_users, reservation, None).await
+}
+
+pub(crate) async fn find_or_create_public_user(
+    db: &mongodb::Database,
+    profile: &SocialProfile,
+    allow_new_users: bool,
+    reservation: Option<&super::invite_code_service::InviteReservation>,
+    signup: Option<super::signup_admission::SignupAdmission>,
 ) -> AppResult<FindOrCreateUserResult> {
     let users = db.collection::<User>(USERS);
 
@@ -737,20 +749,22 @@ pub async fn find_or_create_user_with_invite(
             let default_role_ids = crate::services::role_service::get_default_role_ids(db).await?;
             new_user.role_ids = default_role_ids;
 
-            if let Some(reservation) = reservation {
+            let insertion = if let Some(reservation) = reservation {
                 new_user.invite_code_id = Some(reservation.invite_code_id.clone());
-                super::invite_code_service::commit_signup(db, reservation, &new_user)
-                    .await
-                    .map_err(|error| match error {
-                        AppError::DatabaseError(error) => map_social_link_error(error),
-                        error => error,
-                    })?;
+                super::invite_code_service::commit_signup(db, reservation, &new_user).await
+            } else if let Some(admission) = signup {
+                admission.insert_user(db, &new_user).await
             } else {
                 users
                     .insert_one(&new_user)
                     .await
-                    .map_err(map_social_link_error)?;
-            }
+                    .map(|_| ())
+                    .map_err(AppError::from)
+            };
+            insertion.map_err(|error| match error {
+                AppError::DatabaseError(error) => map_social_link_error(error),
+                error => error,
+            })?;
             super::billing::schedules::eligibility::after_user_created(
                 db,
                 &new_user.id,
@@ -1037,6 +1051,7 @@ mod tests {
             billing_fail_closed: false,
             billing_resale_enabled: false,
             email_auth_enabled: false,
+            public_signup_limits: None,
             auto_verify_email: false,
         }
     }

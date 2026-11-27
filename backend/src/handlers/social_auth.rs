@@ -4,6 +4,7 @@ use axum::{
     Extension,
     extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 
@@ -325,7 +326,7 @@ pub async fn callback(
     Path(provider_name): Path<String>,
     Query(params): Query<CallbackQuery>,
     headers: HeaderMap,
-) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
+) -> Result<(StatusCode, HeaderMap, ()), CallbackError> {
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
 
@@ -336,13 +337,14 @@ pub async fn callback(
         callback_origin.as_ref(),
         params.state.as_deref(),
     )
-    .await?;
+    .await
+    .map_err(CallbackError::from_response)?;
 
     // Parse provider
     let provider = match social_auth_service::SocialProvider::parse(&provider_name) {
         Some(p) => p,
         None => {
-            return Err(redirect_with_error(
+            return Err(callback_error(
                 &redirect_target,
                 "social_auth_unsupported",
                 secure,
@@ -357,7 +359,7 @@ pub async fn callback(
             provider = provider.as_str(),
             "Provider declined social sign-in"
         );
-        return Err(redirect_with_error(
+        return Err(callback_error(
             &redirect_target,
             "social_auth_denied",
             secure,
@@ -369,7 +371,7 @@ pub async fn callback(
     let code = match params.code {
         Some(ref c) if !c.is_empty() => c.as_str(),
         _ => {
-            return Err(redirect_with_error(
+            return Err(callback_error(
                 &redirect_target,
                 "social_auth_invalid",
                 secure,
@@ -380,7 +382,7 @@ pub async fn callback(
     let state_param = match params.state {
         Some(ref s) if !s.is_empty() => s.as_str(),
         _ => {
-            return Err(redirect_with_error(
+            return Err(callback_error(
                 &redirect_target,
                 "social_auth_invalid",
                 secure,
@@ -395,7 +397,7 @@ pub async fn callback(
             extract_cookie_value(&headers, SOCIAL_STATE_COOKIE).as_deref(),
         )
     {
-        return Err(redirect_with_error(
+        return Err(callback_error(
             &redirect_target,
             "social_auth_csrf",
             secure,
@@ -416,7 +418,7 @@ pub async fn callback(
     .await
     .map_err(|e| {
         tracing::warn!(error = %e, "Social auth code exchange failed");
-        redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+        callback_error(&redirect_target, "social_auth_exchange", secure, domain)
     })?;
 
     // Fetch user profile
@@ -425,7 +427,7 @@ pub async fn callback(
             .await
             .map_err(|e| {
                 tracing::warn!(error = %e, "Social auth profile fetch failed");
-                redirect_with_error(&redirect_target, "social_auth_profile", secure, domain)
+                callback_error(&redirect_target, "social_auth_profile", secure, domain)
             })?;
     let profile = fetched.profile;
 
@@ -443,7 +445,7 @@ pub async fn callback(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Invitation-code flag resolution failed");
-            redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            callback_error(&redirect_target, "social_auth_exchange", secure, domain)
         })?;
     let (allow_new_users, reserved_invite, already_redeemed) = if invite_required {
         match invite_code.as_deref() {
@@ -465,11 +467,14 @@ pub async fn callback(
         (true, None, false)
     };
 
-    let create_outcome = social_auth_service::find_or_create_user_with_invite(
+    let signup = super::login_client_context::public_signup_admission(&headers, Some(peer), &state)
+        .map_err(CallbackError::from_response)?;
+    let create_outcome = social_auth_service::find_or_create_public_user(
         &state.db,
         &profile,
         allow_new_users,
         reserved_invite.as_ref(),
+        signup,
     )
     .await
     .map_err(|e| {
@@ -481,6 +486,16 @@ pub async fn callback(
             crate::services::shutdown::process().spawn_cleanup(async move {
                 let _ = invite_code_service::release_reservation(&db, &iid).await;
             });
+        }
+        if matches!(e, AppError::RateLimited) {
+            let mut response = e.into_response();
+            let cleanup = callback_error(&redirect_target, "rate_limited", secure, domain);
+            for cookie in cleanup.0.headers().get_all(header::SET_COOKIE) {
+                response
+                    .headers_mut()
+                    .append(header::SET_COOKIE, cookie.clone());
+            }
+            return CallbackError::from_response(response);
         }
         let error_key = match &e {
             AppError::SocialAuthConflict => "social_auth_conflict",
@@ -495,7 +510,7 @@ pub async fn callback(
             AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
             _ => "social_auth_exchange",
         };
-        redirect_with_error(&redirect_target, error_key, secure, domain)
+        callback_error(&redirect_target, error_key, secure, domain)
     })?;
     let user = create_outcome.user;
     let was_newly_created = create_outcome.was_newly_created;
@@ -582,11 +597,11 @@ pub async fn callback(
             super::login_approval::social_complete(&state, state_param, &user, &headers, peer)
                 .await
                 .map_err(|_| {
-                    redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+                    callback_error(&redirect_target, "social_auth_exchange", secure, domain)
                 })?;
         append_social_cleanup_cookies(&mut response_headers, &redirect_target, secure, domain)
             .map_err(|_| {
-                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+                callback_error(&redirect_target, "social_auth_exchange", secure, domain)
             })?;
         return Ok((status, response_headers, body));
     }
@@ -602,6 +617,7 @@ pub async fn callback(
         tele_social: &tele_social,
     })
     .await
+    .map_err(CallbackError::from_response)
 }
 
 // --- Apple POST callback (response_mode=form_post) ---
@@ -646,7 +662,7 @@ pub async fn apple_callback(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     axum::Form(form): axum::Form<AppleCallbackForm>,
-) -> Result<(StatusCode, HeaderMap, ()), (StatusCode, HeaderMap, ())> {
+) -> Result<(StatusCode, HeaderMap, ()), CallbackError> {
     let secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
     let (redirect_target, mobile_nonce_hash) = callback_target(
@@ -656,10 +672,11 @@ pub async fn apple_callback(
         callback_origin.as_ref(),
         form.state.as_deref(),
     )
-    .await?;
+    .await
+    .map_err(CallbackError::from_response)?;
 
     if form.error.is_some() {
-        return Err(redirect_with_error(
+        return Err(callback_error(
             &redirect_target,
             "social_auth_denied",
             secure,
@@ -670,7 +687,7 @@ pub async fn apple_callback(
     let code = match form.code {
         Some(ref c) if !c.is_empty() => c.as_str(),
         _ => {
-            return Err(redirect_with_error(
+            return Err(callback_error(
                 &redirect_target,
                 "social_auth_invalid",
                 secure,
@@ -681,7 +698,7 @@ pub async fn apple_callback(
     let state_param = match form.state {
         Some(ref s) if !s.is_empty() => s.as_str(),
         _ => {
-            return Err(redirect_with_error(
+            return Err(callback_error(
                 &redirect_target,
                 "social_auth_invalid",
                 secure,
@@ -696,7 +713,7 @@ pub async fn apple_callback(
             extract_cookie_value(&headers, SOCIAL_STATE_COOKIE).as_deref(),
         )
     {
-        return Err(redirect_with_error(
+        return Err(callback_error(
             &redirect_target,
             "social_auth_csrf",
             secure,
@@ -717,13 +734,14 @@ pub async fn apple_callback(
     .await
     .map_err(|e| {
         tracing::warn!(error = %e, "Apple auth code exchange failed");
-        redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+        callback_error(&redirect_target, "social_auth_exchange", secure, domain)
     })?;
 
     // Verify id_token via Apple JWKS
-    let apple_client_id = state.config.apple_client_id.as_deref().ok_or_else(|| {
-        redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
-    })?;
+    let apple_client_id =
+        state.config.apple_client_id.as_deref().ok_or_else(|| {
+            callback_error(&redirect_target, "social_auth_exchange", secure, domain)
+        })?;
 
     let claims = state
         .jwks_cache
@@ -731,7 +749,7 @@ pub async fn apple_callback(
         .await
         .map_err(|e| {
             tracing::warn!(error = %e, "Apple ID token verification failed");
-            redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            callback_error(&redirect_target, "social_auth_exchange", secure, domain)
         })?;
 
     let nonce_cookie = extract_cookie_value(&headers, SOCIAL_NONCE_COOKIE);
@@ -740,7 +758,7 @@ pub async fn apple_callback(
         || (nonce_cookie.is_some()
             && !nonce_matches_cookie_hash(claims.nonce.as_deref(), nonce_cookie.as_deref()))
     {
-        return Err(redirect_with_error(
+        return Err(callback_error(
             &redirect_target,
             "social_auth_csrf",
             secure,
@@ -751,7 +769,7 @@ pub async fn apple_callback(
     // Build profile from verified claims
     let mut profile = social_auth_service::profile_from_apple_id_token(&claims).map_err(|e| {
         tracing::warn!(error = %e, "Apple profile extraction failed");
-        redirect_with_error(&redirect_target, "social_auth_no_email", secure, domain)
+        callback_error(&redirect_target, "social_auth_no_email", secure, domain)
     })?;
 
     // Extract user name from the POST body (only present on first authorization)
@@ -784,7 +802,7 @@ pub async fn apple_callback(
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Invitation-code flag resolution failed");
-            redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+            callback_error(&redirect_target, "social_auth_exchange", secure, domain)
         })?;
     let (allow_new_users, reserved_invite, already_redeemed) = if invite_required {
         match invite_code.as_deref() {
@@ -803,11 +821,14 @@ pub async fn apple_callback(
         (true, None, false)
     };
 
-    let create_outcome = social_auth_service::find_or_create_user_with_invite(
+    let signup = super::login_client_context::public_signup_admission(&headers, Some(peer), &state)
+        .map_err(CallbackError::from_response)?;
+    let create_outcome = social_auth_service::find_or_create_public_user(
         &state.db,
         &profile,
         allow_new_users,
         reserved_invite.as_ref(),
+        signup,
     )
     .await
     .map_err(|e| {
@@ -819,6 +840,16 @@ pub async fn apple_callback(
                 let _ = invite_code_service::release_reservation(&db, &iid).await;
             });
         }
+        if matches!(e, AppError::RateLimited) {
+            let mut response = e.into_response();
+            let cleanup = callback_error(&redirect_target, "rate_limited", secure, domain);
+            for cookie in cleanup.0.headers().get_all(header::SET_COOKIE) {
+                response
+                    .headers_mut()
+                    .append(header::SET_COOKIE, cookie.clone());
+            }
+            return CallbackError::from_response(response);
+        }
         let error_key = match &e {
             AppError::SocialAuthConflict => "social_auth_conflict",
             AppError::SocialAuthNoEmail => "social_auth_no_email",
@@ -829,7 +860,7 @@ pub async fn apple_callback(
             AppError::SocialAuthRegistrationClosed => "social_auth_registration_closed",
             _ => "social_auth_exchange",
         };
-        redirect_with_error(&redirect_target, error_key, secure, domain)
+        callback_error(&redirect_target, error_key, secure, domain)
     })?;
     let user = create_outcome.user;
     let was_newly_created = create_outcome.was_newly_created;
@@ -912,11 +943,11 @@ pub async fn apple_callback(
             super::login_approval::social_complete(&state, state_param, &user, &headers, peer)
                 .await
                 .map_err(|_| {
-                    redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+                    callback_error(&redirect_target, "social_auth_exchange", secure, domain)
                 })?;
         append_social_cleanup_cookies(&mut response_headers, &redirect_target, secure, domain)
             .map_err(|_| {
-                redirect_with_error(&redirect_target, "social_auth_exchange", secure, domain)
+                callback_error(&redirect_target, "social_auth_exchange", secure, domain)
             })?;
         return Ok((status, response_headers, body));
     }
@@ -937,6 +968,7 @@ pub async fn apple_callback(
         tele_social: &tele_social,
     })
     .await
+    .map_err(CallbackError::from_response)
 }
 
 /// Both GET callbacks and Apple's form_post cross this same verified-identity
@@ -1387,6 +1419,29 @@ fn build_web_success_redirect_url(
 }
 
 /// Build an error redirect response that clears social flow cookies.
+pub struct CallbackError(Box<Response>);
+
+impl CallbackError {
+    fn from_response(response: impl IntoResponse) -> Self {
+        Self(Box::new(response.into_response()))
+    }
+}
+
+impl IntoResponse for CallbackError {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
+fn callback_error(
+    target: &SocialRedirectTarget,
+    error: &str,
+    secure: bool,
+    domain: Option<&str>,
+) -> CallbackError {
+    CallbackError::from_response(redirect_with_error(target, error, secure, domain))
+}
+
 fn redirect_with_error(
     target: &SocialRedirectTarget,
     error: &str,

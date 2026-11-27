@@ -53,8 +53,12 @@ async fn cancel(state: &AppState, provider: &str, csrf: &str, headers: HeaderMap
         headers,
     )
     .await
-    .unwrap_err();
-    response.1[header::LOCATION].to_str().unwrap().into()
+    .unwrap_err()
+    .into_response();
+    response.headers()[header::LOCATION]
+        .to_str()
+        .unwrap()
+        .into()
 }
 
 #[tokio::test]
@@ -209,7 +213,7 @@ async fn apple_form_post_requires_state_started_for_apple() {
         "state": csrf, "error": "access_denied"
     }))
     .unwrap();
-    let (_, headers, ()) = apple_callback(
+    let response = apple_callback(
         State(state.clone()),
         None,
         ConnectInfo("127.0.0.1:12345".parse().unwrap()),
@@ -217,9 +221,10 @@ async fn apple_form_post_requires_state_started_for_apple() {
         axum::Form(form),
     )
     .await
-    .unwrap_err();
+    .unwrap_err()
+    .into_response();
     assert!(
-        headers[header::LOCATION]
+        response.headers()[header::LOCATION]
             .to_str()
             .unwrap()
             .contains("social_auth_csrf")

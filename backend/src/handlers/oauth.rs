@@ -1,6 +1,6 @@
 use axum::{
-    Json,
-    extract::{Path, State, rejection::JsonRejection},
+    Extension, Json,
+    extract::{ConnectInfo, Path, State, rejection::JsonRejection},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -2473,11 +2473,16 @@ pub async fn pushed_authorization_request(
 pub async fn token(
     State(state): State<AppState>,
     tele: TelemetryContext,
+    peer: Option<Extension<ConnectInfo<std::net::SocketAddr>>>,
     headers: HeaderMap,
     Form(body): Form<TokenRequest>,
 ) -> Response {
-    match token_inner(&state, &tele, &headers, body).await {
+    let peer = peer.map(|Extension(ConnectInfo(address))| address);
+    let uses_social_exchange = body.grant_type == "urn:ietf:params:oauth:grant-type:token-exchange"
+        && body.provider.is_some();
+    match token_inner_with_peer(&state, &tele, &headers, body, peer).await {
         Ok(json) => json.into_response(),
+        Err(err @ AppError::RateLimited) if uses_social_exchange => err.into_response(),
         Err(err) => oauth_error_response(err),
     }
 }
@@ -2516,11 +2521,22 @@ fn refresh_token_grant_error(error: AppError) -> AppError {
 // (`authorization_code`, `refresh_token`, `client_credentials`, social
 // `urn:ietf:params:oauth:grant-type:token-exchange`) do not emit
 // `OauthTokenIssued` in Part 2. Lift this once §6.5 is resolved.
+#[cfg(test)]
 async fn token_inner(
     state: &AppState,
     tele: &TelemetryContext,
     headers: &HeaderMap,
     body: TokenRequest,
+) -> AppResult<Json<TokenResponse>> {
+    token_inner_with_peer(state, tele, headers, body, None).await
+}
+
+async fn token_inner_with_peer(
+    state: &AppState,
+    tele: &TelemetryContext,
+    headers: &HeaderMap,
+    body: TokenRequest,
+    peer: Option<std::net::SocketAddr>,
 ) -> AppResult<Json<TokenResponse>> {
     match body.grant_type.as_str() {
         "authorization_code" => {
@@ -2826,6 +2842,8 @@ async fn token_inner(
             // - provider present: social token exchange (provider-specific token type validation)
             // - provider absent + access_token type: delegated token exchange
             if let Some(provider) = body.provider.as_deref() {
+                let signup =
+                    super::login_client_context::public_signup_admission(headers, peer, state)?;
                 let result = social_token_exchange_service::exchange_social_token(
                     &state.db,
                     &state.config,
@@ -2837,6 +2855,7 @@ async fn token_inner(
                     subject_token,
                     subject_token_type,
                     provider,
+                    signup,
                 )
                 .await?;
 
@@ -5926,6 +5945,7 @@ mod tests {
             token(
                 State(self.state.clone()),
                 TelemetryContext::default(),
+                None,
                 headers,
                 Form(request),
             )
@@ -6906,6 +6926,7 @@ mod tests {
         let response = token(
             State(state.clone()),
             TelemetryContext::default(),
+            None,
             HeaderMap::new(),
             Form(request),
         )

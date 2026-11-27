@@ -524,6 +524,24 @@ impl RateWindowStore {
         window: Duration,
         session: &mut mongodb::ClientSession,
     ) -> AppResult<bool> {
+        Ok(
+            Self::admit_window_in_session(db, namespace, key, limit, window, None, session)
+                .await?
+                .is_some(),
+        )
+    }
+
+    /// Return the admitted window start. A caller coupling multiple windows
+    /// may reuse the first server-derived start as an anchor for wider windows.
+    pub(crate) async fn admit_window_in_session(
+        db: &mongodb::Database,
+        namespace: &str,
+        key: &str,
+        limit: u64,
+        window: Duration,
+        anchor: Option<chrono::DateTime<chrono::Utc>>,
+        session: &mut mongodb::ClientSession,
+    ) -> AppResult<Option<chrono::DateTime<chrono::Utc>>> {
         let window_ms = duration_millis(window, "rate window")?;
         let limit = i64::try_from(limit)
             .map_err(|_| AppError::Internal("Rate limit out of range".into()))?;
@@ -538,13 +556,16 @@ impl RateWindowStore {
                     &admission_id,
                     limit,
                     window_ms,
+                    anchor,
                 ),
             )
             .upsert(true)
             .return_document(ReturnDocument::After)
             .session(session)
             .await?;
-        Ok(record.is_some_and(|r| r.last_admission_id.as_deref() == Some(&admission_id)))
+        Ok(record
+            .filter(|r| r.last_admission_id.as_deref() == Some(&admission_id))
+            .map(|r| r.window_start))
     }
 
     pub async fn admit(
@@ -561,7 +582,8 @@ impl RateWindowStore {
         let admission_id = uuid::Uuid::new_v4().to_string();
         let id = hash_parts(&[namespace, key]);
         let key_hash = hash_parts(&[key]);
-        let update = rate_window_pipeline(namespace, &key_hash, &admission_id, limit, window_ms);
+        let update =
+            rate_window_pipeline(namespace, &key_hash, &admission_id, limit, window_ms, None);
         let record = db
             .collection::<RateWindowRecord>(RATE_WINDOW_COLLECTION_NAME)
             .find_one_and_update(doc! { "_id": &id }, update)
@@ -1140,9 +1162,13 @@ fn rate_window_start(window_ms: i64) -> Document {
     let now = TEST_RATE_WINDOW_NOW
         .try_with(|clock| Bson::DateTime(clock.get()))
         .unwrap_or(now);
+    truncate_window(now, window_ms)
+}
+
+fn truncate_window(instant: Bson, window_ms: i64) -> Document {
     doc! {
         "$dateTrunc": {
-            "date": now,
+            "date": instant,
             "unit": "millisecond",
             "binSize": window_ms,
         }
@@ -1155,8 +1181,12 @@ fn rate_window_pipeline(
     admission_id: &str,
     limit: i64,
     window_ms: i64,
+    anchor: Option<chrono::DateTime<chrono::Utc>>,
 ) -> Vec<Document> {
-    let current_window = rate_window_start(window_ms);
+    let current_window = match anchor {
+        Some(at) => truncate_window(Bson::DateTime(DateTime::from_chrono(at)), window_ms),
+        None => rate_window_start(window_ms),
+    };
     vec![
         doc! {
             "$set": {

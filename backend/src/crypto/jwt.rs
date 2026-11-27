@@ -1808,6 +1808,7 @@ mod tests {
             billing_fail_closed: false,
             billing_resale_enabled: false,
             email_auth_enabled: false,
+            public_signup_limits: None,
             auto_verify_email: false,
         };
 

@@ -1,5 +1,7 @@
 pub mod domain_aliases;
 pub mod mobile_app_links;
+mod signup_limits;
+pub use signup_limits::SignupLimits;
 
 use std::{
     env,
@@ -775,6 +777,7 @@ pub struct AppConfig {
     /// is NOT gated — existing users can still authenticate via direct API
     /// call even when the UI is hidden.
     pub email_auth_enabled: bool,
+    pub public_signup_limits: Option<SignupLimits>,
 
     // Dev convenience
     /// When `true`, newly registered users are marked as email-verified
@@ -1882,6 +1885,7 @@ impl AppConfig {
             billing_resale_enabled: parse_bool_env("BILLING_RESALE_ENABLED", false),
 
             email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
+            public_signup_limits: SignupLimits::from_env(),
             auto_verify_email: parse_bool_env("AUTO_VERIFY_EMAIL", false),
         }
     }
@@ -2486,6 +2490,7 @@ mod tests {
             billing_fail_closed: false,
             billing_resale_enabled: false,
             email_auth_enabled: false,
+            public_signup_limits: None,
             auto_verify_email: false,
         }
     }
