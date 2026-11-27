@@ -322,7 +322,6 @@ export function startNyxHome(page) {
 
   /* ---------- 1. hero: the chrome N, the falling requests, the done ---------- */
   const hero = $('[data-hero]');
-  requestAnimationFrame(() => requestAnimationFrame(() => hero.classList.add('is-in')));
   const nstage = $('[data-nstage]'), mark = $('[data-mark]'), canvas = $('canvas', mark);
   const heroCopy = $('.hero-copy'), ticks = $('[data-ticks]'), countEl = $('[data-count]');
   /* ap: how far the requests have gone into the N, 0 -> 1. The pinned scroll drives it on a desktop. */

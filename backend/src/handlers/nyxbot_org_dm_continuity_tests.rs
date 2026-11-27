@@ -218,10 +218,16 @@ async fn fixture(first_fails: bool) -> Fixture {
         .and(path("/bot123:org-dm-2641-test/sendMessage"))
         .respond_with(|request: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&request.body).unwrap();
+            // Supplemental admission notices and primary replies need distinct
+            // provider receipts even when anchored to the same inbound message.
+            let base = if body["text"] == Notice::Pending.text(None) {
+                2000
+            } else {
+                1000
+            };
             ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{
-                "message_id":1000 + body["reply_to_message_id"].as_i64().unwrap()}}))
+                "message_id":base + body["reply_to_message_id"].as_i64().unwrap()}}))
         })
-        .expect(if first_fails { 1 } else { 2 })
         .mount(&platform)
         .await;
 
@@ -308,7 +314,8 @@ async fn continuity(first_fails: bool) {
         );
         if failed {
             // With no partial text, final_reply returns the public error and
-            // late delivery emits response.failed. Simulated CMA sends no text.
+            // late delivery emits response.failed. Simulated CMA sends no final;
+            // verify_receipts permits only an optional pending notice here.
             assert_eq!(terminal["response"]["status"], "failed");
             assert_eq!(
                 terminal["response"]["error"],
@@ -323,7 +330,6 @@ async fn continuity(first_fails: bool) {
                     .unwrap()
                     .starts_with("response.output_")
             }));
-            assert!(f.platform.received_requests().await.unwrap().is_empty());
         } else {
             let output = terminal["response"]["output"].as_array().unwrap();
             assert_eq!(output.len(), 1, "one provider final per successful source");
@@ -351,6 +357,7 @@ async fn continuity(first_fails: bool) {
         }
         originals.push((source, turn, response_id));
     }
+    let delivered = verify_receipts(&f, &originals, &expected_sends).await;
     // C2 follows the original base answer. All replays, including consumed
     // delivery tokens, run only after these two independent messages settle.
     for (source, turn, response_id) in &originals {
@@ -392,8 +399,12 @@ async fn continuity(first_fails: bool) {
                 matches!(duplicate, Err(AppError::Unauthorized(message)) if message == "Reply token already used")
             );
         }
+        assert_eq!(
+            verify_receipts(&f, &originals, &expected_sends).await,
+            delivered,
+            "replay must not send another primary reply or pending notice"
+        );
     }
-    verify_receipts(&f, &originals, &expected_sends).await;
     let saved = engine::get(&f.state.db, &f.member, &f.home.id)
         .await
         .unwrap();
@@ -486,24 +497,71 @@ async fn relay_final(
     .await
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct DeliveryCounts {
+    pending: usize,
+    primary: usize,
+}
+
 async fn verify_receipts(
     f: &Fixture,
     originals: &[(Source, String, String)],
     expected: &[(i64, String)],
-) {
+) -> Vec<DeliveryCounts> {
     let db = &f.state.db;
     let requests = f.platform.received_requests().await.unwrap();
-    assert_eq!(requests.len(), expected.len());
-    for (request, (native_id, text)) in requests.iter().zip(expected) {
+    let mut counts = vec![DeliveryCounts::default(); originals.len()];
+    let mut primary_order = Vec::new();
+    for request in &requests {
+        assert_eq!(request.method.as_str(), "POST");
+        assert!(request.url.path() == "/bot123:org-dm-2641-test/sendMessage");
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         assert_eq!(
             body["chat_id"], "7",
-            "final stays in the original private DM"
+            "every send stays in the original private DM"
         );
-        assert_eq!(body["reply_to_message_id"], *native_id);
-        assert_eq!(body["text"], *text);
+        let native_id = body["reply_to_message_id"].as_i64().unwrap();
+        let index = originals
+            .iter()
+            .position(|(source, _, _)| source.native_id == native_id)
+            .expect("send must reply to an original source");
+        if body["text"] == Notice::Pending.text(None) {
+            assert_eq!(
+                counts[index].primary, 0,
+                "pending notice precedes its primary reply"
+            );
+            counts[index].pending += 1;
+            assert!(
+                counts[index].pending <= 1,
+                "at most one pending notice per source"
+            );
+        } else {
+            let (_, text) = expected
+                .iter()
+                .find(|(id, _)| *id == native_id)
+                .expect("failed source has no primary reply");
+            assert_eq!(body["text"], *text, "unexpected primary content");
+            counts[index].primary += 1;
+            primary_order.push(native_id);
+        }
     }
-    for (source, _, _) in originals {
+    assert_eq!(
+        primary_order,
+        expected
+            .iter()
+            .map(|(native, _)| *native)
+            .collect::<Vec<_>>(),
+        "primary replies retain the original source order"
+    );
+    for ((source, _, _), count) in originals.iter().zip(&counts) {
+        let primary = expected
+            .iter()
+            .any(|(native, _)| *native == source.native_id);
+        assert_eq!(
+            count.primary,
+            usize::from(primary),
+            "exactly the expected primary count per source"
+        );
         let outbound: Vec<ChannelMessage> = db
             .collection(RELAY_MESSAGES)
             .find(doc! {"direction":"outbound","reply_to_message_id":&source.id})
@@ -512,15 +570,25 @@ async fn verify_receipts(
             .try_collect()
             .await
             .unwrap();
+        assert_eq!(outbound.len(), count.pending + count.primary);
+        let mut receipt_ids: Vec<_> = outbound
+            .iter()
+            .map(|message| message.platform_message_id.clone().unwrap())
+            .collect();
+        let mut expected_ids = Vec::new();
+        if primary {
+            expected_ids.push((1000 + source.native_id).to_string());
+        }
+        if count.pending == 1 {
+            expected_ids.push((2000 + source.native_id).to_string());
+        }
+        receipt_ids.sort();
+        expected_ids.sort();
         assert_eq!(
-            outbound.len(),
-            usize::from(
-                expected
-                    .iter()
-                    .any(|(native, _)| *native == source.native_id)
-            )
+            receipt_ids, expected_ids,
+            "primary and notice receipts remain distinct"
         );
-        if let Some(outbound) = outbound.first() {
+        for outbound in &outbound {
             assert_eq!(outbound.platform_conversation_id.as_deref(), Some("7"));
             assert_eq!(
                 outbound.channel_bot_id.as_deref(),
@@ -529,7 +597,7 @@ async fn verify_receipts(
             assert_eq!(outbound.user_id, f.org_id);
         }
     }
-    f.platform.verify().await;
+    counts
 }
 
 async fn relay_source(f: &Fixture, index: usize, text: &str) -> Source {
