@@ -23,6 +23,12 @@ test("initial body remains readable with JavaScript disabled", async ({
     await expect(page.locator("main")).not.toBeEmpty();
     if (path === "/" || path === "/zh") {
       await expect(page.locator(".nyx-home #top h1")).toBeVisible();
+      await expect(page.locator(".hero-grid")).toHaveCSS("display", "grid");
+      await expect(page.locator(".hero-facts img")).toHaveCount(5);
+      for (const icon of await page.locator(".hero-facts img").all()) {
+        await expect(icon).toHaveCSS("width", "18px");
+        await expect(icon).toHaveCSS("height", "18px");
+      }
       for (const id of ["pile", "agent", "apps", "jobs", "end"])
         await expect(page.locator(`.nyx-home section#${id}`)).toHaveCount(1);
       await expect(page.locator("#nav .public-language")).toHaveCount(1);
@@ -31,6 +37,55 @@ test("initial body remains readable with JavaScript disabled", async ({
       await expect(page.locator(".stc-map")).toBeVisible();
       await expect(page.locator(".stc-map-tile")).toHaveCount(13);
       await expect(page.locator(".stc-map-tile small")).toHaveText(path.startsWith("/zh") ? "即将上线" : "Coming soon");
+    }
+  }
+  await context.close();
+});
+test("homepage stays styled and visible through delayed hydration and refresh", async ({ browser }) => {
+  const context = await browser.newContext({ baseURL: testOrigin, reducedMotion: "no-preference" });
+  const page = await context.newPage();
+  for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    for (const path of ["/", "/zh"]) {
+      let releaseEntry!: () => void, releaseMotion!: () => void;
+      const entry = new Promise<void>(resolve => { releaseEntry = resolve; });
+      const motion = new Promise<void>(resolve => { releaseMotion = resolve; });
+      await page.route(/\/assets\/index-[^/]+\.js$/, async route => {
+        await entry;
+        await route.continue();
+      });
+      await page.route(/\/assets\/nyx-home-motion-[^/]+\.js$/, async route => {
+        await motion;
+        await route.continue();
+      });
+      await page.goto(path, { waitUntil: "commit" });
+      const hero = page.locator(".hero-copy"), heading = hero.locator("h1");
+      // The browser has only the static document and its CSS at this point.
+      await expect(page.locator(".hero-grid")).toHaveCSS("display", "grid");
+      await expect(heading).toBeVisible();
+      await page.evaluate(() => document.fonts.ready.then(() => undefined));
+      const initial = await heading.boundingBox();
+      for (const icon of await page.locator(".hero-facts img").all()) {
+        await expect(icon).toHaveCSS("width", "18px");
+        await expect(icon).toHaveCSS("height", "18px");
+      }
+      releaseEntry();
+      await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
+      await expect(page.locator(".nyx-home")).toHaveClass(/\bjs\b/);
+      // Motion is still unavailable: hydration must not hide the static content.
+      for (const selector of ["h1", ".lede", ".hero-cta", ".hero-facts"]) {
+        await expect(hero.locator(selector)).toHaveCSS("opacity", "1");
+        await expect(hero.locator(selector)).toHaveCSS("transform", "none");
+      }
+      expect(await heading.boundingBox()).toEqual(initial);
+      releaseMotion();
+      await expect(page.locator(".rain-slip")).toHaveCount(10);
+      await expect(heading).toHaveCSS("opacity", "1");
+      await page.unrouteAll({ behavior: "wait" });
+      // Exercise the same static response on a browser refresh.
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await expect(page.locator(".hero-grid")).toHaveCSS("display", "grid");
+      await expect(heading).toHaveCSS("opacity", "1");
     }
   }
   await context.close();

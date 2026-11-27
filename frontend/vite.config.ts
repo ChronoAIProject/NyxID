@@ -276,6 +276,8 @@ export default defineConfig({
     ],
   },
   build: {
+    // Static public HTML must link its styles before the browser paints the body.
+    manifest: true,
     sourcemap: "hidden",
     rollupOptions: {
       output: {

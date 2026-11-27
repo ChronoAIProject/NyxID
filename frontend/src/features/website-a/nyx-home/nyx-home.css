@@ -594,8 +594,6 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .hero-facts{display:flex;gap:10px 24px;flex-wrap:wrap;align-items:center;margin-top:40px;padding-top:18px;border-top:1px solid var(--line);font-size:14.5px;color:var(--body)}
 .nyx-home .hero-facts span{display:inline-flex;align-items:center;gap:9px}
 .nyx-home .hero-facts img{width:18px;height:18px}
-.nyx-home.js .hero [data-in]{opacity:0;transform:translateY(18px)}
-.nyx-home.js .hero.is-in [data-in]{opacity:1;transform:none;transition:opacity .8s var(--ease),transform .9s var(--ease);transition-delay:calc(var(--d,0)*90ms + 100ms)}
 
 /* the N: chrome mark in its ring */
 .nyx-home .nstage{position:relative;justify-self:end;width:min(100%,540px,64vh);aspect-ratio:1;margin-right:-3%}
@@ -651,9 +649,6 @@ html.lenis,html.lenis body{height:auto}
 @media (max-width:560px){
   .nyx-home .hero h1{font-size:44px}
   .nyx-home .hero-cta .btn{width:100%;justify-content:center}
-}
-@media (prefers-reduced-motion:reduce){
-  .nyx-home.js .hero [data-in]{opacity:1;transform:none}
 }
 
 /* ---------- type: Host Grotesk for headlines and text, JetBrains Mono for small labels ----------
