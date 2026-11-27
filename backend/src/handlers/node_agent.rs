@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
+use crate::handlers::admin_helpers::extract_user_agent;
 use crate::models::node::Node;
 use crate::models::node_pending_credential::NodePendingCredential;
+use crate::mw::rate_limit::AuditIp;
 use crate::services::{
     audit_service, node_pending_credential_service, node_service,
     rci_audit_service::{self, RciAuditEventKind, RciAuditSubject},
@@ -110,6 +111,7 @@ fn pending_completion_audit_event_type(
 }
 
 fn log_pending_completion_audit(
+    ip: Option<String>,
     state: &AppState,
     headers: &HeaderMap,
     pending: &NodePendingCredential,
@@ -126,7 +128,7 @@ fn log_pending_completion_audit(
         rci_audit_service::log_rci_for_node(
             state.db.clone(),
             &pending.owner_user_id,
-            extract_ip(headers),
+            ip,
             extract_user_agent(headers),
             &subject,
             rci_kind,
@@ -142,7 +144,7 @@ fn log_pending_completion_audit(
                 "service_slug": &pending.service_slug,
                 "owner_user_id": &pending.owner_user_id,
             })),
-            extract_ip(headers),
+            ip,
             extract_user_agent(headers),
             None,
             None,
@@ -176,6 +178,7 @@ pub async fn list_pending_credentials(
 
 /// POST /api/v1/node-agent/pending-credentials/{pending_id}/consume
 pub async fn consume_pending_credential(
+    AuditIp(ip): AuditIp,
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(pending_id): Path<String>,
@@ -189,6 +192,7 @@ pub async fn consume_pending_credential(
     .await?;
 
     log_pending_completion_audit(
+        ip,
         &state,
         &headers,
         &pending,
@@ -202,6 +206,7 @@ pub async fn consume_pending_credential(
 
 /// POST /api/v1/node-agent/pending-credentials/{pending_id}/decline
 pub async fn decline_pending_credential(
+    AuditIp(ip): AuditIp,
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(pending_id): Path<String>,
@@ -221,6 +226,7 @@ pub async fn decline_pending_credential(
         .is_some_and(|reason| !reason.trim().is_empty());
     if RciAuditSubject::pending_is_rci(&pending) {
         log_pending_completion_audit(
+            ip,
             &state,
             &headers,
             &pending,
@@ -240,7 +246,7 @@ pub async fn decline_pending_credential(
                 "owner_user_id": &pending.owner_user_id,
                 "reason_present": reason_present,
             })),
-            extract_ip(&headers),
+            ip,
             extract_user_agent(&headers),
             None,
             None,
@@ -568,6 +574,7 @@ mod tests {
         );
 
         let consume_response = consume_pending_credential(
+            super::AuditIp(Some("198.51.100.20".into())),
             State(state.clone()),
             node_headers(raw_auth_token),
             Path(consume_pending.id.clone()),
@@ -578,6 +585,7 @@ mod tests {
         assert_eq!(consume_response.status(), StatusCode::NO_CONTENT);
 
         let decline_response = decline_pending_credential(
+            super::AuditIp(Some("198.51.100.20".into())),
             State(state),
             node_headers(raw_auth_token),
             Path(decline_pending.id.clone()),
@@ -651,6 +659,7 @@ mod tests {
         let consume_other_before = fan_out_target(&consume_before, &consume_other_node_id).clone();
 
         let consume_response = consume_pending_credential(
+            super::AuditIp(Some("198.51.100.20".into())),
             State(state.clone()),
             node_headers(raw_auth_token),
             Path(consume_pending.id.clone()),
@@ -707,6 +716,7 @@ mod tests {
         let decline_other_before = fan_out_target(&decline_before, &decline_other_node_id).clone();
 
         let decline_response = decline_pending_credential(
+            super::AuditIp(Some("198.51.100.20".into())),
             State(state),
             node_headers(raw_auth_token),
             Path(decline_pending.id.clone()),

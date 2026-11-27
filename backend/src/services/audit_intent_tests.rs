@@ -216,6 +216,7 @@ async fn request_revocation(
     use axum_extra::extract::Query;
     match path {
         "client" => crate::handlers::oauth::delete_binding(
+            crate::mw::rate_limit::AuditIp(None),
             State(state),
             HeaderMap::new(),
             Path(raw.into()),
