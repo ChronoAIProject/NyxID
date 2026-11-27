@@ -2,6 +2,8 @@ use super::*;
 use crate::models::{
     downstream_service, service_endpoint, user_api_key, user_endpoint, user_service,
 };
+use crate::services::catalog_credential_record_service as catalog_record;
+use crate::services::credential_record_service as key_record;
 use crate::services::{
     catalog_spec_sync, durable_operation_grant_service, mcp_service, provider_service,
 };
@@ -287,12 +289,23 @@ pub(crate) async fn connect(
         .insert_one(&endpoint)
         .await
         .unwrap();
-    let encrypted = test_encryption_keys()
-        .encrypt(b"test-google-token")
-        .await
-        .unwrap();
+    let key_id = uuid::Uuid::new_v4().to_string();
+    let keys = test_encryption_keys();
+    let encrypted = key_record::encrypt(
+        &keys,
+        crate::models::user_api_key::COLLECTION_NAME,
+        &key_id,
+        owner,
+        "access_token_encrypted",
+        b"test-google-token",
+    )
+    .await
+    .unwrap();
+    let mut versions = Default::default();
+    key_record::mark_version(&mut versions, &keys, "access_token_encrypted");
     let key: user_api_key::UserApiKey = bson::from_document(doc! {
-        "_id": uuid::Uuid::new_v4().to_string(), "user_id": owner, "label": "Google", "credential_type": "oauth2", "status": "active", "access_token_encrypted": bson::Binary{ subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted }, "provider_config_id": &catalog.provider_config_id,
+        "secret_context_versions": bson::to_bson(&versions).unwrap(),
+        "_id": key_id, "user_id": owner, "label": "Google", "credential_type": "oauth2", "status": "active", "access_token_encrypted": bson::Binary{ subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted }, "provider_config_id": &catalog.provider_config_id,
         "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
     }).unwrap();
     db.collection::<user_api_key::UserApiKey>(user_api_key::COLLECTION_NAME)
@@ -1652,11 +1665,15 @@ async fn workspace_platform_keys_are_rejected_before_target_selection_and_catalo
     legacy.requires_user_credential = false;
     legacy.service_category = "internal".into();
     legacy.provider_config_id = None;
-    legacy.credential_encrypted = state
-        .encryption_keys
-        .encrypt(b"platform-token")
-        .await
-        .unwrap();
+    legacy.credential_encrypted = catalog_record::encrypt(
+        &state.encryption_keys,
+        &legacy.id,
+        catalog_record::owner(&legacy).unwrap(),
+        b"platform-token",
+    )
+    .await
+    .unwrap();
+    legacy.secret_context_versions = catalog_record::initial_versions(&state.encryption_keys, true);
     for service in [configured, disabled, legacy] {
         assert!(matches!(
             crate::services::proxy_service::authorize_master_credential_server_chosen(&db, &service).await,
