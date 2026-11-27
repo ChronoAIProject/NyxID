@@ -14,6 +14,31 @@ use crate::errors::AppError;
 use super::key_provider::{KeyProvider, WrappedKey, derive_key_id};
 use super::local_key_provider::LocalKeyProvider;
 
+use super::key_provider::Unwrapped;
+use super::record_field::authenticated::{Authenticated, Format, Slot};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadPurpose {
+    Traffic,
+    Observation,
+}
+
+impl ReadPurpose {
+    async fn unwrap(
+        self,
+        provider: &dyn KeyProvider,
+        wrapped: &WrappedKey,
+    ) -> Result<Unwrapped, AppError> {
+        match self {
+            Self::Traffic => Ok(Unwrapped {
+                dek: provider.unwrap_dek(wrapped).await?,
+                key: None,
+            }),
+            Self::Observation => provider.unwrap_for_observation(wrapped).await,
+        }
+    }
+}
+
 struct AuthenticatedV2<'a> {
     dek: Zeroizing<Vec<u8>>,
     data_portion: &'a [u8],
@@ -394,171 +419,7 @@ impl EncryptionKeys {
     /// 4. Try v0 with previous key
     /// 5. Return error if all fail
     pub async fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        let mut unknown_key_id = None;
-        let current_key_id = self.provider.current_key_id();
-
-        // -- v2 envelope encryption --
-        if looks_like_v2(ciphertext) {
-            let kek_id = ciphertext[1];
-            let wrapped_dek_len = u16::from_be_bytes([ciphertext[2], ciphertext[3]]) as usize;
-            let required_len = V2_HEADER_SIZE + wrapped_dek_len + NONCE_SIZE + TAG_SIZE;
-
-            // Treat oversized wrapped-DEK lengths as a malformed v2 parse and
-            // fall through to the legacy v1/v0 chain. Random nonce bytes from
-            // valid v0 ciphertexts can look like a v2 header.
-            if wrapped_dek_len <= MAX_WRAPPED_DEK_SIZE
-                && wrapped_dek_len > 0
-                && ciphertext.len() >= required_len
-            {
-                let wrapped_dek = &ciphertext[V2_HEADER_SIZE..V2_HEADER_SIZE + wrapped_dek_len];
-                let data_payload = &ciphertext[V2_HEADER_SIZE + wrapped_dek_len..];
-
-                let wrapped = WrappedKey {
-                    key_id: kek_id,
-                    ciphertext: Zeroizing::new(wrapped_dek.to_vec()),
-                };
-
-                match self.provider.unwrap_dek(&wrapped).await {
-                    Ok(dek_bytes) => {
-                        // dek_bytes is Zeroizing<Vec<u8>> -- automatically
-                        // scrubbed from memory when this scope exits.
-
-                        // Track which counter to bump based on kek_id
-                        if kek_id == current_key_id {
-                            self.counters.v2_current.fetch_add(1, Ordering::Relaxed);
-                        } else {
-                            self.counters.v2_previous.fetch_add(1, Ordering::Relaxed);
-                            self.log_once(
-                                &self.counters.logged_v2_previous,
-                                "Decrypted v2 envelope with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                            );
-                        }
-
-                        // Decrypt data with DEK
-                        let dek =
-                            Zeroizing::new(<[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(
-                                |_| AppError::Internal("Unwrapped DEK is not 32 bytes".to_string()),
-                            )?);
-                        return decrypt_raw(data_payload, dek.as_ref());
-                    }
-                    Err(_) => {
-                        // Primary provider could not unwrap; try fallback provider
-                        if let Some(ref fallback) = self.fallback_provider
-                            && fallback.has_key_id(kek_id)
-                            && let Ok(dek_bytes) = fallback.unwrap_dek(&wrapped).await
-                        {
-                            self.counters.v2_fallback.fetch_add(1, Ordering::Relaxed);
-                            self.log_once(
-                                &self.counters.logged_v2_fallback,
-                                "Decrypted v2 envelope via fallback provider; migration from previous provider is still in progress",
-                            );
-
-                            let dek = Zeroizing::new(
-                                <[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(|_| {
-                                    AppError::Internal("Unwrapped DEK is not 32 bytes".to_string())
-                                })?,
-                            );
-                            return decrypt_raw(data_payload, dek.as_ref());
-                        }
-
-                        // Provider could not unwrap; if it is not the current or
-                        // previous key, record the unknown key id for the error
-                        // message later.
-                        if !self.provider.has_key_id(kek_id) {
-                            unknown_key_id = Some(kek_id);
-                        }
-                        // Fall through to v1/v0 fallback
-                    }
-                }
-            }
-        }
-
-        // -- v1 versioned format --
-        if looks_like_v1(ciphertext) {
-            let key_id = ciphertext[1];
-            let payload = &ciphertext[V1_HEADER_SIZE..];
-
-            if let Some(legacy) = self.legacy.as_ref() {
-                if key_id == legacy.current_id {
-                    if let Ok(plain) = decrypt_raw(payload, legacy.current.as_ref()) {
-                        self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
-                        return Ok(plain);
-                    }
-                } else if legacy.previous_id == Some(key_id) {
-                    if let Some(ref prev) = legacy.previous
-                        && let Ok(plain) = decrypt_raw(payload, prev.as_ref())
-                    {
-                        self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
-                        self.log_once(
-                            &self.counters.logged_v1_previous,
-                            "Decrypted ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                        );
-                        return Ok(plain);
-                    }
-                } else if key_id == DRAFT_KEY_ID_CURRENT || key_id == DRAFT_KEY_ID_PREVIOUS {
-                    if let Ok(plain) = decrypt_raw(payload, legacy.current.as_ref()) {
-                        self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
-                        return Ok(plain);
-                    }
-
-                    if let Some(ref prev) = legacy.previous
-                        && let Ok(plain) = decrypt_raw(payload, prev.as_ref())
-                    {
-                        self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
-                        self.log_once(
-                            &self.counters.logged_v1_previous,
-                            "Decrypted draft Phase 1 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                        );
-                        return Ok(plain);
-                    }
-                } else {
-                    unknown_key_id = Some(key_id);
-                }
-            } else {
-                unknown_key_id = Some(key_id);
-            }
-        }
-
-        if let Some(legacy) = self.legacy.as_ref() {
-            // Try v0 format (full ciphertext is nonce || encrypted || tag) with current key
-            if let Ok(plain) = decrypt_raw(ciphertext, legacy.current.as_ref()) {
-                self.counters.v0_current.fetch_add(1, Ordering::Relaxed);
-                self.log_once(
-                    &self.counters.logged_v0_current,
-                    "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY; re-encryption is still pending",
-                );
-                return Ok(plain);
-            }
-
-            // Try v0 with previous key
-            if let Some(ref prev) = legacy.previous
-                && let Ok(plain) = decrypt_raw(ciphertext, prev.as_ref())
-            {
-                self.counters.v0_previous.fetch_add(1, Ordering::Relaxed);
-                self.log_once(
-                    &self.counters.logged_v0_previous,
-                    "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                );
-                return Ok(plain);
-            }
-        }
-
-        if unknown_key_id.is_some() {
-            self.counters
-                .unknown_key_id_failures
-                .fetch_add(1, Ordering::Relaxed);
-            self.log_once(
-                &self.counters.logged_unknown_key_id,
-                "Encountered versioned ciphertext requiring an unavailable wrapping key",
-            );
-        }
-
-        self.counters
-            .decrypt_failures
-            .fetch_add(1, Ordering::Relaxed);
-        Err(AppError::Internal(
-            "AES decryption failed: no key could decrypt the data".to_string(),
-        ))
+        self.decrypt_with_aad(ciphertext, &[]).await
     }
 
     /// Like `decrypt` but verifies the ciphertext was produced with the same
@@ -569,168 +430,171 @@ impl EncryptionKeys {
         ciphertext: &[u8],
         aad: &[u8],
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        let mut unknown_key_id = None;
+        Ok(self
+            .open_historical(ciphertext, aad, ReadPurpose::Traffic)
+            .await?
+            .into_parts()
+            .0)
+    }
+
+    pub(super) async fn open_historical(
+        &self,
+        ciphertext: &[u8],
+        aad: &[u8],
+        purpose: ReadPurpose,
+    ) -> Result<Authenticated, AppError> {
+        let traffic = purpose == ReadPurpose::Traffic;
         let current_key_id = self.provider.current_key_id();
+        let mut unknown_selector = false;
 
-        // -- v2 envelope encryption --
         if looks_like_v2(ciphertext) {
-            let kek_id = ciphertext[1];
-            let wrapped_dek_len = u16::from_be_bytes([ciphertext[2], ciphertext[3]]) as usize;
-            let required_len = V2_HEADER_SIZE + wrapped_dek_len + NONCE_SIZE + TAG_SIZE;
-
-            // Treat oversized wrapped-DEK lengths as a malformed v2 parse and
-            // fall through to the legacy v1/v0 chain. Random nonce bytes from
-            // valid v0 ciphertexts can look like a v2 header.
-            if wrapped_dek_len <= MAX_WRAPPED_DEK_SIZE
-                && wrapped_dek_len > 0
-                && ciphertext.len() >= required_len
+            let id = ciphertext[1];
+            let len = usize::from(u16::from_be_bytes([ciphertext[2], ciphertext[3]]));
+            let end = V2_HEADER_SIZE + len;
+            if (1..=MAX_WRAPPED_DEK_SIZE).contains(&len)
+                && ciphertext.len() >= end + NONCE_SIZE + TAG_SIZE
             {
-                let wrapped_dek = &ciphertext[V2_HEADER_SIZE..V2_HEADER_SIZE + wrapped_dek_len];
-                let data_payload = &ciphertext[V2_HEADER_SIZE + wrapped_dek_len..];
-
                 let wrapped = WrappedKey {
-                    key_id: kek_id,
-                    ciphertext: Zeroizing::new(wrapped_dek.to_vec()),
+                    key_id: id,
+                    ciphertext: Zeroizing::new(ciphertext[V2_HEADER_SIZE..end].to_vec()),
                 };
-
-                match self.provider.unwrap_dek(&wrapped).await {
-                    Ok(dek_bytes) => {
-                        // dek_bytes is Zeroizing<Vec<u8>> -- automatically
-                        // scrubbed from memory when this scope exits.
-
-                        // Track which counter to bump based on kek_id
-                        if kek_id == current_key_id {
+                let unwrapped = match purpose.unwrap(self.provider.as_ref(), &wrapped).await {
+                    Ok(open) => Some((open, false)),
+                    Err(_) => match self.fallback_provider.as_deref() {
+                        Some(provider) if provider.has_key_id(id) => purpose
+                            .unwrap(provider, &wrapped)
+                            .await
+                            .ok()
+                            .map(|open| (open, true)),
+                        _ => None,
+                    },
+                };
+                if let Some((open, fallback)) = unwrapped {
+                    if traffic {
+                        // The existing traffic metric counts an unwrap even if payload authentication fails.
+                        if fallback {
+                            self.counters.v2_fallback.fetch_add(1, Ordering::Relaxed);
+                            self.log_once(&self.counters.logged_v2_fallback, "Decrypted v2 envelope via fallback provider; migration from previous provider is still in progress");
+                        } else if id == current_key_id {
                             self.counters.v2_current.fetch_add(1, Ordering::Relaxed);
                         } else {
                             self.counters.v2_previous.fetch_add(1, Ordering::Relaxed);
-                            self.log_once(
-                                &self.counters.logged_v2_previous,
-                                "Decrypted v2 envelope with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                            );
+                            self.log_once(&self.counters.logged_v2_previous, "Decrypted v2 envelope with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use");
                         }
-
-                        // Decrypt data with DEK
-                        let dek =
-                            Zeroizing::new(<[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(
-                                |_| AppError::Internal("Unwrapped DEK is not 32 bytes".to_string()),
-                            )?);
-                        return decrypt_raw_with_aad(data_payload, dek.as_ref(), aad);
                     }
-                    Err(_) => {
-                        // Primary provider could not unwrap; try fallback provider
-                        if let Some(ref fallback) = self.fallback_provider
-                            && fallback.has_key_id(kek_id)
-                            && let Ok(dek_bytes) = fallback.unwrap_dek(&wrapped).await
-                        {
-                            self.counters.v2_fallback.fetch_add(1, Ordering::Relaxed);
-                            self.log_once(
-                                &self.counters.logged_v2_fallback,
-                                "Decrypted v2 envelope via fallback provider; migration from previous provider is still in progress",
-                            );
-
-                            let dek = Zeroizing::new(
-                                <[u8; 32]>::try_from(dek_bytes.as_slice()).map_err(|_| {
-                                    AppError::Internal("Unwrapped DEK is not 32 bytes".to_string())
-                                })?,
-                            );
-                            return decrypt_raw_with_aad(data_payload, dek.as_ref(), aad);
-                        }
-
-                        // Provider could not unwrap; if it is not the current or
-                        // previous key, record the unknown key id for the error
-                        // message later.
-                        if !self.provider.has_key_id(kek_id) {
-                            unknown_key_id = Some(kek_id);
-                        }
-                        // Fall through to v1/v0 fallback
+                    if open.dek.len() != 32 {
+                        return Err(AppError::Internal(
+                            "Unwrapped DEK is not 32 bytes".to_string(),
+                        ));
                     }
+                    let plaintext = decrypt_raw_with_aad(&ciphertext[end..], &open.dek, aad)?;
+                    return Ok(Authenticated::envelope(
+                        plaintext,
+                        Format::V2,
+                        id,
+                        open.key,
+                        fallback,
+                    ));
                 }
+                unknown_selector = !self.provider.has_key_id(id);
             }
         }
 
-        // -- v1 versioned format --
         if looks_like_v1(ciphertext) {
-            let key_id = ciphertext[1];
-            let payload = &ciphertext[V1_HEADER_SIZE..];
-
-            if let Some(legacy) = self.legacy.as_ref() {
-                if key_id == legacy.current_id {
-                    if let Ok(plain) = decrypt_raw_with_aad(payload, legacy.current.as_ref(), aad) {
-                        self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
-                        return Ok(plain);
-                    }
-                } else if legacy.previous_id == Some(key_id) {
-                    if let Some(ref prev) = legacy.previous
-                        && let Ok(plain) = decrypt_raw_with_aad(payload, prev.as_ref(), aad)
-                    {
-                        self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
-                        self.log_once(
-                            &self.counters.logged_v1_previous,
-                            "Decrypted ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                        );
-                        return Ok(plain);
-                    }
-                } else if key_id == DRAFT_KEY_ID_CURRENT || key_id == DRAFT_KEY_ID_PREVIOUS {
-                    if let Ok(plain) = decrypt_raw_with_aad(payload, legacy.current.as_ref(), aad) {
-                        self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
-                        return Ok(plain);
-                    }
-
-                    if let Some(ref prev) = legacy.previous
-                        && let Ok(plain) = decrypt_raw_with_aad(payload, prev.as_ref(), aad)
-                    {
-                        self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
-                        self.log_once(
-                            &self.counters.logged_v1_previous,
-                            "Decrypted draft Phase 1 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                        );
-                        return Ok(plain);
-                    }
+            let id = ciphertext[1];
+            if let Some(legacy) = &self.legacy {
+                let (format, current, previous) = if id == legacy.current_id {
+                    (Format::V1, true, false)
+                } else if Some(id) == legacy.previous_id {
+                    (Format::V1, false, true)
+                } else if matches!(id, DRAFT_KEY_ID_CURRENT | DRAFT_KEY_ID_PREVIOUS) {
+                    (Format::V1Draft, true, true)
                 } else {
-                    unknown_key_id = Some(key_id);
+                    unknown_selector = true;
+                    (Format::V1, false, false)
+                };
+                let payload = &ciphertext[V1_HEADER_SIZE..];
+                if current
+                    && let Ok(plaintext) =
+                        decrypt_raw_with_aad(payload, legacy.current.as_ref(), aad)
+                {
+                    if traffic {
+                        self.counters.v1_current.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return Ok(Authenticated::direct(
+                        plaintext,
+                        format,
+                        Some(id),
+                        Slot::Current,
+                    ));
+                }
+                if previous
+                    && let Some(key) = &legacy.previous
+                    && let Ok(plaintext) = decrypt_raw_with_aad(payload, key.as_ref(), aad)
+                {
+                    if traffic {
+                        self.counters.v1_previous.fetch_add(1, Ordering::Relaxed);
+                        let message = if format == Format::V1Draft {
+                            "Decrypted draft Phase 1 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use"
+                        } else {
+                            "Decrypted ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use"
+                        };
+                        self.log_once(&self.counters.logged_v1_previous, message);
+                    }
+                    return Ok(Authenticated::direct(
+                        plaintext,
+                        format,
+                        Some(id),
+                        Slot::Previous,
+                    ));
                 }
             } else {
-                unknown_key_id = Some(key_id);
+                unknown_selector = true;
             }
         }
 
-        if let Some(legacy) = self.legacy.as_ref() {
-            // Try v0 format (full ciphertext is nonce || encrypted || tag) with current key
-            if let Ok(plain) = decrypt_raw_with_aad(ciphertext, legacy.current.as_ref(), aad) {
-                self.counters.v0_current.fetch_add(1, Ordering::Relaxed);
-                self.log_once(
-                    &self.counters.logged_v0_current,
-                    "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY; re-encryption is still pending",
-                );
-                return Ok(plain);
+        if let Some(legacy) = &self.legacy {
+            if let Ok(plaintext) = decrypt_raw_with_aad(ciphertext, legacy.current.as_ref(), aad) {
+                if traffic {
+                    self.counters.v0_current.fetch_add(1, Ordering::Relaxed);
+                    self.log_once(&self.counters.logged_v0_current, "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY; re-encryption is still pending");
+                }
+                return Ok(Authenticated::direct(
+                    plaintext,
+                    Format::V0,
+                    None,
+                    Slot::Current,
+                ));
             }
-
-            // Try v0 with previous key
-            if let Some(ref prev) = legacy.previous
-                && let Ok(plain) = decrypt_raw_with_aad(ciphertext, prev.as_ref(), aad)
+            if let Some(key) = &legacy.previous
+                && let Ok(plaintext) = decrypt_raw_with_aad(ciphertext, key.as_ref(), aad)
             {
-                self.counters.v0_previous.fetch_add(1, Ordering::Relaxed);
-                self.log_once(
-                    &self.counters.logged_v0_previous,
-                    "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use",
-                );
-                return Ok(plain);
+                if traffic {
+                    self.counters.v0_previous.fetch_add(1, Ordering::Relaxed);
+                    self.log_once(&self.counters.logged_v0_previous, "Decrypted legacy v0 ciphertext with ENCRYPTION_KEY_PREVIOUS; old-key ciphertexts are still in active use");
+                }
+                return Ok(Authenticated::direct(
+                    plaintext,
+                    Format::V0,
+                    None,
+                    Slot::Previous,
+                ));
             }
         }
-
-        if unknown_key_id.is_some() {
+        if traffic {
+            if unknown_selector {
+                self.counters
+                    .unknown_key_id_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                self.log_once(
+                    &self.counters.logged_unknown_key_id,
+                    "Encountered versioned ciphertext requiring an unavailable wrapping key",
+                );
+            }
             self.counters
-                .unknown_key_id_failures
+                .decrypt_failures
                 .fetch_add(1, Ordering::Relaxed);
-            self.log_once(
-                &self.counters.logged_unknown_key_id,
-                "Encountered versioned ciphertext requiring an unavailable wrapping key",
-            );
         }
-
-        self.counters
-            .decrypt_failures
-            .fetch_add(1, Ordering::Relaxed);
         Err(AppError::Internal(
             "AES decryption failed: no key could decrypt the data".to_string(),
         ))
@@ -872,25 +736,6 @@ fn looks_like_v1(data: &[u8]) -> bool {
 }
 
 /// Low-level AES-256-GCM decryption: expects `nonce(12) || ciphertext || tag`.
-fn decrypt_raw(data: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
-    if data.len() < NONCE_SIZE {
-        return Err(AppError::Internal(
-            "Ciphertext too short to contain nonce".to_string(),
-        ));
-    }
-
-    let (nonce_bytes, encrypted) = data.split_at(NONCE_SIZE);
-    let nonce = Nonce::from_slice(nonce_bytes);
-
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| AppError::Internal(format!("Failed to create AES cipher: {e}")))?;
-
-    cipher
-        .decrypt(nonce, encrypted)
-        .map(Zeroizing::new)
-        .map_err(|e| AppError::Internal(format!("AES decryption failed: {e}")))
-}
-
 /// Low-level AES-256-GCM decryption with AAD: expects `nonce(12) || ciphertext || tag`.
 fn decrypt_raw_with_aad(
     data: &[u8],
@@ -965,7 +810,7 @@ pub fn decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppE
         ));
     }
 
-    decrypt_raw(ciphertext, key)
+    decrypt_raw_with_aad(ciphertext, key, &[])
 }
 
 /// Encrypt plaintext using AES-256-GCM with the v1 format (kept for tests).

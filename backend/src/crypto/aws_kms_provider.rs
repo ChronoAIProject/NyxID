@@ -97,6 +97,36 @@ impl std::fmt::Debug for AwsKmsProvider {
 }
 
 impl AwsKmsProvider {
+    async fn unwrap_response(
+        &self,
+        wrapped: &WrappedKey,
+    ) -> Result<aws_sdk_kms::operation::decrypt::DecryptOutput, AppError> {
+        let key_arn = self.keys.key_arn_for(wrapped.key_id)?;
+
+        self.client
+            .decrypt()
+            .key_id(key_arn)
+            .ciphertext_blob(Blob::new((*wrapped.ciphertext).clone()))
+            .send()
+            .await
+            .map_err(|_| {
+                tracing::error!(
+                    category = "provider_decrypt_failed",
+                    "AWS KMS decrypt failed"
+                );
+                AppError::Internal("AWS KMS decrypt failed".to_string())
+            })
+    }
+
+    fn plaintext(
+        response: aws_sdk_kms::operation::decrypt::DecryptOutput,
+    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        let plaintext = response
+            .plaintext
+            .ok_or_else(|| AppError::Internal("AWS KMS returned empty plaintext".into()))?;
+        Ok(Zeroizing::new(plaintext.into_inner()))
+    }
+
     pub async fn from_config(config: &AppConfig) -> Self {
         let key_arn = config
             .aws_kms_key_arn
@@ -149,29 +179,26 @@ impl KeyProvider for AwsKmsProvider {
     }
 
     async fn unwrap_dek(&self, wrapped: &WrappedKey) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        let key_arn = self.keys.key_arn_for(wrapped.key_id)?;
+        Self::plaintext(self.unwrap_response(wrapped).await?)
+    }
 
-        let resp = self
-            .client
-            .decrypt()
-            .key_id(key_arn)
-            .ciphertext_blob(Blob::new((*wrapped.ciphertext).clone()))
-            .send()
-            .await
-            .map_err(|_| {
-                tracing::error!(
-                    category = "provider_decrypt_failed",
-                    "AWS KMS decrypt failed"
-                );
-                AppError::Internal("AWS KMS decrypt failed".to_string())
-            })?;
-
-        // Consume the SDK response's owned Blob directly. Borrow-and-copy
-        // would leave the original application-owned plaintext allocation live.
-        let plaintext = resp
-            .plaintext
-            .ok_or_else(|| AppError::Internal("AWS KMS returned empty plaintext".into()))?;
-        Ok(Zeroizing::new(plaintext.into_inner()))
+    async fn unwrap_for_observation(
+        &self,
+        wrapped: &WrappedKey,
+    ) -> Result<super::key_provider::Unwrapped, AppError> {
+        use super::record_field::authenticated::Slot;
+        let mut response = self.unwrap_response(wrapped).await?;
+        let slot = if wrapped.key_id == self.keys.current_key_id {
+            Slot::Current
+        } else {
+            Slot::Previous
+        };
+        let arn = response.key_id.take();
+        Ok(super::key_provider::Unwrapped::aws(
+            Self::plaintext(response)?,
+            slot,
+            arn,
+        ))
     }
 
     fn current_key_id(&self) -> u8 {
