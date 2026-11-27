@@ -506,7 +506,7 @@ async fn first_activation_platform_policy_inventory_and_sticky_local_false_remai
 #[tokio::test]
 async fn first_activation_rollout_expires_old_writer_settles_then_refuses_regression() {
     let (db, local) = fixture("settle_rollout", false).await;
-    let cap = CAPABILITIES[0];
+    let cap = crate::services::mcp_session_storage::READINESS;
     let mut old = row(&local, Utc::now());
     old.id = "old".into();
     old.generation_id = "old".into();
