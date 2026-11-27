@@ -185,6 +185,150 @@ fn assert_side_post(request: &Request) -> (&str, String) {
     (key, object["text"].as_str().unwrap().to_owned())
 }
 
+async fn supervisor_source(
+    f: &Fixture,
+) -> crate::models::execution_permission_channel::ChannelSource {
+    let mut session = f.state.db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    let source = crate::services::execution_permission_channel::admit_supervisor(
+        &f.state.db,
+        &mut session,
+        &f.conversation,
+        &f.event.id,
+    )
+    .await
+    .expect("normal native owner ingress supplies supervisor source");
+    session.commit_transaction().await.unwrap();
+    source
+}
+
+#[tokio::test]
+async fn supervisor_write_native_reviews_have_distinct_occurrences_and_preserve_primary() {
+    let f = Fixture::new(false).await;
+    let source = supervisor_source(&f).await;
+    let primary = f.snapshot().await;
+    f.mount_capability(capability(true), 2).await;
+    Mock::given(method("POST"))
+        .and(path(SIDE))
+        .respond_with(receipt("confirmed"))
+        .expect(2)
+        .mount(&f.gateway)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(REPLIES))
+        .respond_with(receipt("confirmed"))
+        .expect(0)
+        .mount(&f.gateway)
+        .await;
+    for (id, text) in [
+        (
+            "one",
+            "Record recOne: Status = Approved; yes write-0123456789ab",
+        ),
+        (
+            "two",
+            "Record recTwo: Status = Approved; yes write-abcdef012345",
+        ),
+        (
+            "one",
+            "Record recOne: Status = Approved; yes write-0123456789ab",
+        ),
+    ] {
+        supervisor_review(&f.state, &source, id, text)
+            .await
+            .unwrap();
+    }
+    f.gateway.verify().await;
+    let posts = f
+        .gateway
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .collect::<Vec<_>>();
+    let (one, first) = assert_side_post(&posts[0]);
+    let (two, second) = assert_side_post(&posts[1]);
+    assert_ne!(one, two);
+    assert!(first.contains("recOne"));
+    assert!(second.contains("recTwo"));
+    for id in ["one", "two"] {
+        let plan = crate::services::channel_text_delivery::load(
+            &f.state.db,
+            &format!("supervisor-write-review:{id}"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(plan.source_id, f.event.id);
+        assert!(!plan.parts.is_empty());
+        assert!(
+            plan.parts
+                .iter()
+                .all(|p| p.state == crate::models::channel_text_delivery::TextPartState::Sent)
+        );
+    }
+    assert_eq!(
+        f.snapshot().await,
+        primary,
+        "reviews cannot consume or replace the primary answer"
+    );
+}
+
+#[tokio::test]
+async fn supervisor_write_native_unsupported_is_unsent_and_unknown_never_falls_back() {
+    for supported in [false, true] {
+        let f = Fixture::new(false).await;
+        let source = supervisor_source(&f).await;
+        let primary = f.snapshot().await;
+        f.mount_capability(capability(supported), if supported { 2 } else { 1 })
+            .await;
+        Mock::given(method("POST"))
+            .and(path(SIDE))
+            .respond_with(receipt("unknown"))
+            .expect(if supported { 1 } else { 0 })
+            .mount(&f.gateway)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(REPLIES))
+            .respond_with(receipt("confirmed"))
+            .expect(0)
+            .mount(&f.gateway)
+            .await;
+        let error = supervisor_review(
+            &f.state,
+            &source,
+            "unavailable",
+            "Complete review; yes write-0123456789ab",
+        )
+        .await
+        .unwrap_err();
+        if supported {
+            assert!(
+                !matches!(error,AppError::Conflict(ref reason) if reason=="supervisor_review_not_sent")
+            );
+            let replay = supervisor_review(
+                &f.state,
+                &source,
+                "unavailable",
+                "Complete review; yes write-0123456789ab",
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                !matches!(replay,AppError::Conflict(ref reason) if reason=="supervisor_review_not_sent"),
+                "a retained unknown send must not become an unsent fallback"
+            );
+        } else {
+            assert!(
+                matches!(error,AppError::Conflict(ref reason) if reason=="supervisor_review_not_sent")
+            );
+        }
+        f.gateway.verify().await;
+        assert_eq!(f.snapshot().await, primary);
+    }
+}
+
 const PRIMARY_ANSWER: &str = "Primary answer";
 const FAILURE_ANSWER: &str = "Configured gateway failure answer";
 const FIRST_SIDE: &str = "Desktop control requested";

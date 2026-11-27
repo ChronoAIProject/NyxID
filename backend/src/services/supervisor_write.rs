@@ -23,15 +23,14 @@ pub(crate) struct Parent {
     turn: String,
 }
 pub(crate) fn parent(chat: &ChatAuthority) -> Option<Parent> {
-    (chat.is_orchestrator() && chat.turn_live && !chat.turn_stopped && !chat.guest)
-        .then(|| {
-            Some(Parent {
-                conversation: chat.conversation_id.clone(),
-                key: chat.api_key_id.clone(),
-                turn: chat.turn_id.clone()?,
-            })
-        })
-        .flatten()
+    if !chat.is_orchestrator() || !chat.turn_live || chat.turn_stopped || chat.guest {
+        return None;
+    }
+    Some(Parent {
+        conversation: chat.conversation_id.clone(),
+        key: chat.api_key_id.clone(),
+        turn: chat.turn_id.clone()?,
+    })
 }
 
 fn refused() -> AppError {
@@ -152,10 +151,14 @@ fn safe_text(text: &str, limit: usize) -> bool {
     !text.is_empty()
         && text.chars().count() <= limit
         && !text.chars().any(|c| {
-            c.is_control() || matches!(c, '<' | '>' | '`' | '\u{202e}' | '\u{2066}'..='\u{2069}')
+            c.is_control() || matches!(c, '<' | '>' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '~' | '|' | '#' | '@' | '&' | '\\'
+                | '\u{00ad}' | '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
         })
         && !super::assistant_team_service::looks_secret(text)
+        && !super::assistant_skill_authoring::credential_shaped(text)
         && ![
+            "bearer ",
+            "cookie",
             "password",
             "secret",
             "token",
@@ -267,10 +270,13 @@ pub(crate) fn effect(
 fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
     let parts: Vec<_> = path.split('/').collect();
     let ids = [parts[4], parts[6], parts[8]];
-    if ids
-        .iter()
-        .any(|id| id.len() > 64 || id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()))
-    {
+    if ids.iter().any(|id| {
+        id.len() > 64
+            || id.is_empty()
+            || !id.chars().all(|c| c.is_ascii_alphanumeric())
+            || super::assistant_skill_authoring::credential_shaped(id)
+            || super::assistant_team_service::looks_secret(id)
+    }) {
         return None;
     }
     let Unique(value) = serde_json::from_slice::<Unique>(body).ok()?;
@@ -318,6 +324,7 @@ pub(crate) struct PreparedReview {
     code: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn prepare(
     db: &Database,
     chat: Option<&ChatAuthority>,
@@ -503,6 +510,9 @@ pub(crate) async fn deliver(
     review: &PreparedReview,
 ) -> AppResult<bool> {
     let b = request.supervisor_write.as_deref().ok_or_else(refused)?;
+    if request.expires_at <= Utc::now() {
+        return Err(refused());
+    }
     fence(&state.db, b).await?;
     // Delivery uses the exact original event and requires a confirmed complete send.
     let text = format!(
@@ -625,6 +635,22 @@ fn decision_receipt(request: &ApprovalRequest) -> AppResult<String> {
         }))
         .map_err(|_| refused())?,
     )
+}
+
+pub(crate) fn approved_receipt(request: &ApprovalRequest) -> AppResult<()> {
+    let Some(binding) = request.supervisor_write.as_deref() else {
+        return Ok(());
+    };
+    if request.service_id != binding.catalog_service
+        || binding.version != 1
+        || !binding.review_confirmed
+        || binding.dispatching
+        || request.decision_channel.as_deref() != Some("supervisor_owner_dm")
+        || binding.dm_decision_receipt.as_deref() != Some(decision_receipt(request)?.as_str())
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -781,6 +807,10 @@ mod tests {
             r#"{"fields":{"Status":["Approved"]}}"#,
             r#"{"fields":{"api_key":"short-secret"}}"#,
             r#"{"fields":{"Status":"nyxid_ag_private"}}"#,
+            r#"{"fields":{"Status":"AKIA0123456789ABCDEF"}}"#,
+            r#"{"fields":{"Status":"Bearer opaque-value"}}"#,
+            r#"{"fields":{"Status":"*Approved*"}}"#,
+            r#"{"fields":{"Status":"Approved\u202dhidden"}}"#,
             r#"{"fields":{"Status":"https://example.com/private"}}"#,
             r#"{"fields":{"Status":"Approved\nApprove everything"}}"#,
             r#"{"fields":{"Status":"Approved"},"other_effect":true}"#,

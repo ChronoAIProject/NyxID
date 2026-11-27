@@ -7376,7 +7376,21 @@ async fn deliver_from_source(
         let result = if matches!(purpose, supplemental::Purpose::SupervisorReview)
             && !decision.confirmed()
         {
-            if decision.not_sent() {
+            let previous = if let Some(occurrence) = decision.supervisor_occurrence.as_deref() {
+                crate::services::channel_text_delivery::load(&state.db, occurrence).await?
+            } else {
+                None
+            };
+            let possibly_sent = previous.is_some_and(|plan| {
+                plan.parts.iter().any(|part| {
+                    matches!(
+                        part.state,
+                        crate::models::channel_text_delivery::TextPartState::Sending
+                            | crate::models::channel_text_delivery::TextPartState::Sent
+                    )
+                })
+            });
+            if decision.not_sent() && !possibly_sent {
                 Err(AppError::Conflict("supervisor_review_not_sent".into()))
             } else {
                 Err(AppError::Forbidden(

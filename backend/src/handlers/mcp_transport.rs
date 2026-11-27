@@ -4672,18 +4672,7 @@ async fn wait_for_mcp_approval(
         .map_err(|_| "The exact owner-chat write review is unavailable".to_owned())?
     };
     if let Some(review) = &supervisor {
-        request_operation.supervisor_write = Some(review.binding.clone());
-        request_operation.connected_deadline = Some(
-            chrono::Utc::now()
-                .checked_add_signed(chrono::Duration::seconds(80))
-                .ok_or_else(|| "Invalid review expiry".to_owned())?
-                .min(review.binding.source.channel.expires_at)
-                .min(
-                    request_operation
-                        .connected_deadline
-                        .unwrap_or(review.binding.source.channel.expires_at),
-                ),
-        );
+        request_operation.bind_supervisor_review(review.binding.clone(), timeout_secs);
     }
     let mut approval_request = approval_service::create_approval_request(
         &state.db,

@@ -5584,16 +5584,7 @@ async fn execute_resolved_proxy_inner<'a>(
             )
             .await?;
             if let Some(review) = &supervisor {
-                request_operation.supervisor_write = Some(review.binding.clone());
-                request_operation.connected_deadline = Some(
-                    (chrono::Utc::now() + chrono::Duration::seconds(80))
-                        .min(review.binding.source.channel.expires_at)
-                        .min(
-                            request_operation
-                                .connected_deadline
-                                .unwrap_or(review.binding.source.channel.expires_at),
-                        ),
-                );
+                request_operation.bind_supervisor_review(review.binding.clone(), timeout_secs);
             }
             let mut approval_request = box_proxy_future(|| {
                 approval_service::create_approval_request(

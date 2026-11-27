@@ -54,12 +54,15 @@ fn find_value(value: &Value, key: &str) -> Option<Value> {
     }
 }
 fn read_sentence(result: &Value) -> String {
-    let marker = find_value(result, "read_marker")
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .expect("actual provider read marker");
-    let status = find_value(result, "Status")
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .expect("actual provider row value");
+    let Some(marker) =
+        find_value(result, "read_marker").and_then(|v| v.as_str().map(str::to_owned))
+    else {
+        return "Independent observation is unavailable; no final value is confirmed.".into();
+    };
+    let Some(status) = find_value(result, "Status").and_then(|v| v.as_str().map(str::to_owned))
+    else {
+        return "Independent observation has no target value; no final value is confirmed.".into();
+    };
     format!(
         "Base bascnLedger, table tblLedger, record recTarget: Status = {status}. Independent observation {marker}."
     )
@@ -129,6 +132,24 @@ async fn model(
                 .await
                 .unwrap();
             json!({"status":response.status().as_u16(),"body":body_text(response).await})
+        } else if stage == 2 {
+            let (first, second) = tokio::join!(
+                mcp(
+                    state,
+                    raw,
+                    "ledger__bitable_record_update",
+                    json!({"app_token":"bascnLedger","table_id":"tblLedger",
+                    "record_id":"recTarget","body":{"fields":{"Status":"Approved"}}})
+                ),
+                mcp(
+                    state,
+                    raw,
+                    "ledger__bitable_record_update",
+                    json!({"app_token":"bascnLedger","table_id":"tblLedger",
+                    "record_id":"recControl","body":{"fields":{"Status":"Approved"}}})
+                )
+            );
+            json!({"first":first,"second":second})
         } else {
             mcp(
                 state,
@@ -222,6 +243,9 @@ struct Journey {
 }
 
 async fn setup_journey(slug: &str, proxy: bool) -> Journey {
+    setup_transport_journey(slug, proxy, false).await
+}
+async fn setup_transport_journey(slug: &str, proxy: bool, direct: bool) -> Journey {
     let runtime = Arc::new(OnceLock::<AppState>::new());
     let observed = Arc::new(Mutex::new(Vec::new()));
     let stage = Arc::new(AtomicUsize::new(0));
@@ -390,39 +414,46 @@ async fn setup_journey(slug: &str, proxy: bool) -> Journey {
     )
     .await
     .unwrap();
-    let (channel, key) = channel(&state, "gateway").await;
+    let (channel, key) = channel(&state, if direct { "direct" } else { "gateway" }).await;
+    let sender = if direct { "ou_owner" } else { "7" };
     state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
         .update_one(
             doc! {"_id":&channel.id},
-            doc! {"$set":{"owner_sender_ids":["7"]}},
+            doc! {"$set":{"owner_sender_ids":[sender]}},
         )
         .await
         .unwrap();
-    assert_eq!(
-        put_binding(
-            State(state.clone()),
-            Path("bnd_ws7".into()),
-            bearer(&key),
-            Json(binding_body(&key, OWNER))
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    assert_eq!(
-        put_conversation(
-            State(state.clone()),
-            Path(("bnd_ws7".into(), PARTITION.into())),
-            bearer(&key)
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
+    if !direct {
+        assert_eq!(
+            put_binding(
+                State(state.clone()),
+                Path("bnd_ws7".into()),
+                bearer(&key),
+                Json(binding_body(&key, OWNER))
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            put_conversation(
+                State(state.clone()),
+                Path(("bnd_ws7".into(), PARTITION.into())),
+                bearer(&key)
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
     let chat = MockServer::start().await;
-    let encrypted = state.encryption_keys.encrypt(b"ws7-token").await.unwrap();
+    let encrypted = state
+        .encryption_keys
+        .encrypt(if direct { b"app:secret" } else { b"ws7-token" })
+        .await
+        .unwrap();
     state
         .db
         .collection::<Document>("channel_bots")
@@ -434,13 +465,43 @@ async fn setup_journey(slug: &str, proxy: bool) -> Journey {
         )
         .await
         .unwrap();
-    Mock::given(path_regex(".*/sendMessage$"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":91}})),
-        )
-        .mount(&chat)
-        .await;
-    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+    if direct {
+        Mock::given(path_regex(".*/tenant_access_token/internal$"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"code":0,"tenant_access_token":"ws7-tenant","expire":7200}),
+                ),
+            )
+            .mount(&chat)
+            .await;
+        Mock::given(path_regex(".*/im/v1/messages$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"message_id":"ws7-receipt"}})),
+            )
+            .mount(&chat)
+            .await;
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .insert(
+                channel.channel_bot_id.clone(),
+                Arc::new(
+                    crate::services::channel_adapters::lark::LarkFamilyAdapter::media_test_adapter(
+                        &chat.uri(),
+                        "lark",
+                    ),
+                ),
+            );
+    } else {
+        Mock::given(path_regex(".*/sendMessage$"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"ok":true,"result":{"message_id":91}})),
+            )
+            .mount(&chat)
+            .await;
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
         .lock()
         .unwrap()
         .insert(
@@ -451,6 +512,7 @@ async fn setup_journey(slug: &str, proxy: bool) -> Journey {
                 ),
             ),
         );
+    }
     // Match normal gateway primary delivery as well as the separate local,
     // source-anchored Telegram supplemental review.
     let mut gateway = crate::models::downstream_service::test_helpers::dummy_service();
@@ -497,6 +559,15 @@ async fn owner(j: &Journey, text: &str, id: &str) -> Response {
     respond(&j.state, &j.key, &input, id).await
 }
 
+fn sent_text(body: &Value) -> Option<String> {
+    body["text"].as_str().map(str::to_owned).or_else(|| {
+        body["content"]
+            .as_str()
+            .and_then(|s| serde_json::from_str::<Value>(s).ok())
+            .and_then(|v| v["text"].as_str().map(str::to_owned))
+    })
+}
+
 async fn wait_review(j: &Journey) -> (ApprovalRequest, String) {
     tokio::time::timeout(std::time::Duration::from_secs(15),async {
         loop {
@@ -504,7 +575,7 @@ async fn wait_review(j: &Journey) -> (ApprovalRequest, String) {
                 .find_one(doc! {"user_id":OWNER,"supervisor_write.review_confirmed":true,"status":"pending"}).await.unwrap() {
                 for request in j.chat.received_requests().await.unwrap() {
                     if let Ok(body)=serde_json::from_slice::<Value>(&request.body)
-                        && let Some(text)=body["text"].as_str()
+                        && let Some(text)=sent_text(&body)
                         && let Some((_,tail))=text.split_once("yes write-") {
                         let code=tail.split_whitespace().next().unwrap().to_owned();
                         assert!(text.contains("recTarget") && text.contains("Approved") && text.contains("Merchant ledger"),"{text}");
@@ -531,7 +602,7 @@ async fn assign_from_sent_card(
     let response = owner(j, &format!("yes {code}"), &format!("{id}-delegation-yes")).await;
     tokio::spawn(body_text(response))
 }
-async fn start(j: &Journey) -> tokio::task::JoinHandle<String> {
+async fn start(j: &Journey, write_stage: usize) -> tokio::task::JoinHandle<String> {
     let listing = assign_from_sent_card(
         j,
         "Ask accountant for today's pending ledger rows",
@@ -551,7 +622,7 @@ async fn start(j: &Journey) -> tokio::task::JoinHandle<String> {
         "actual owner list message: {listed}"
     );
     assert_eq!(j.ledger.lock().unwrap().writes.len(), 0);
-    j.stage.store(1, Ordering::SeqCst);
+    j.stage.store(write_stage, Ordering::SeqCst);
     assign_from_sent_card(
         j,
         "Choose Base bascnLedger table tblLedger record recTarget: Status Pending -> Approved",
@@ -584,7 +655,7 @@ async fn supervisor_write_two_approvals_real_catalog_and_independent_readback() 
             0,
             "implicit mode must work"
         );
-        let result = start(&j).await;
+        let result = start(&j, 1).await;
         let (review, code) = wait_review(&j).await;
         assert_eq!(
             review.approval_mode,
@@ -599,17 +670,18 @@ async fn supervisor_write_two_approvals_real_catalog_and_independent_readback() 
             .await
             .unwrap()
             .unwrap();
-        let ledger = j.ledger.lock().unwrap();
-        assert_eq!(ledger.writes.len(), 1);
-        assert_eq!(ledger.writes[0].0, "recTarget");
-        assert_eq!(ledger.target, "Approved");
-        assert_eq!(ledger.control, "Untouched");
-        assert_eq!(
-            ledger.reads,
-            ["Pending", "Pending", "Approved"],
-            "provider search must read after the write"
-        );
-        drop(ledger);
+        {
+            let ledger = j.ledger.lock().unwrap();
+            assert_eq!(ledger.writes.len(), 1);
+            assert_eq!(ledger.writes[0].0, "recTarget");
+            assert_eq!(ledger.target, "Approved");
+            assert_eq!(ledger.control, "Untouched");
+            assert_eq!(
+                ledger.reads,
+                ["Pending", "Pending", "Approved"],
+                "provider search must read after the write"
+            );
+        }
         assert!(
             j.observed
                 .lock()
@@ -662,7 +734,7 @@ async fn supervisor_write_two_approvals_real_catalog_and_independent_readback() 
 async fn supervisor_write_rejection_and_legacy_approval_never_send() {
     for legacy in [false, true] {
         let j = Box::pin(setup_journey("api-feishu-bot", false)).await;
-        let result = start(&j).await;
+        let result = start(&j, 1).await;
         let (review, code) = wait_review(&j).await;
         if legacy {
             j.state
@@ -683,14 +755,399 @@ async fn supervisor_write_rejection_and_legacy_approval_never_send() {
             .await
             .unwrap()
             .unwrap();
-        let ledger = j.ledger.lock().unwrap();
-        assert!(ledger.writes.is_empty());
-        assert_eq!(ledger.target, "Pending");
-        assert_eq!(ledger.control, "Untouched");
-        drop(ledger);
+        {
+            let ledger = j.ledger.lock().unwrap();
+            assert!(ledger.writes.is_empty());
+            assert_eq!(ledger.target, "Pending");
+            assert_eq!(ledger.control, "Untouched");
+        }
         crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
             .lock()
             .unwrap()
             .remove(&j.channel.channel_bot_id);
     }
+}
+
+#[tokio::test]
+async fn supervisor_write_wrong_chat_sender_expiry_and_revocation_never_send() {
+    for control in ["wrong_chat", "wrong_sender", "expired", "revoked_key"] {
+        let j = Box::pin(setup_journey("api-feishu", false)).await;
+        let result = start(&j, 1).await;
+        let (review, code) = wait_review(&j).await;
+        if control == "wrong_chat" {
+            let other = "conv_11111111111111111111111111111111";
+            assert_eq!(
+                put_conversation(
+                    State(j.state.clone()),
+                    Path(("bnd_ws7".into(), other.into())),
+                    bearer(&j.key)
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            let mut input = event(&format!("yes write-{code}"), "7", "ws7-wrong-chat");
+            input["conversation"] = json!(other);
+            input["event_context"]["conversation_id"] = json!(other);
+            input["event_context"]["activity"]["conversation"]["id"] = json!("456");
+            let _ = body_text(respond(&j.state, &j.key, &input, "ws7-wrong-chat").await).await;
+        } else if control == "wrong_sender" {
+            let mut input = event(&format!("yes write-{code}"), "8", "ws7-wrong-sender");
+            input["event_context"]["activity"]["conversation"]["id"] = json!("123");
+            let _ = body_text(respond(&j.state, &j.key, &input, "ws7-wrong-sender").await).await;
+        } else if control == "expired" {
+            j.state.db.collection::<Document>("approval_requests").update_one(doc! {"_id":&review.id},doc! {
+                "$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(1))}
+            }).await.unwrap();
+            let _ =
+                body_text(owner(&j, &format!("yes write-{code}"), "ws7-expired-decision").await)
+                    .await;
+        } else {
+            let binding = review.supervisor_write.as_ref().unwrap();
+            j.state
+                .db
+                .collection::<Document>("api_keys")
+                .update_one(
+                    doc! {"_id":&binding.specialist_key},
+                    doc! {
+                        "$set":{"allowed_service_ids":[],"allow_all_services":false}
+                    },
+                )
+                .await
+                .unwrap();
+            let _ =
+                body_text(owner(&j, &format!("yes write-{code}"), "ws7-revoked-decision").await)
+                    .await;
+        }
+        let current = j
+            .state
+            .db
+            .collection::<ApprovalRequest>("approval_requests")
+            .find_one(doc! {"_id":&review.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            current
+                .supervisor_write
+                .as_ref()
+                .unwrap()
+                .dm_decision_receipt
+                .is_none(),
+            "{control} must not create a DM receipt"
+        );
+        assert_ne!(current.status, "approved");
+        assert!(j.ledger.lock().unwrap().writes.is_empty(), "{control}");
+        // Advance only this fixture's request expiry to settle the connected
+        // waiter promptly. There is no shared clock, DB or production effect.
+        j.state.db.collection::<Document>("approval_requests").update_one(doc! {"_id":&review.id},doc! {
+            "$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(1))}
+        }).await.unwrap();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(25), result)
+            .await
+            .unwrap()
+            .unwrap();
+        {
+            let ledger = j.ledger.lock().unwrap();
+            assert!(ledger.writes.is_empty(), "{control}");
+            assert_eq!(ledger.target, "Pending");
+            assert_eq!(ledger.control, "Untouched");
+        }
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&j.channel.channel_bot_id);
+    }
+}
+
+async fn all_reviews(j: &Journey, count: usize) -> Vec<(ApprovalRequest, String)> {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let rows = j
+                .state
+                .db
+                .collection::<ApprovalRequest>("approval_requests")
+                .find(doc! {
+                    "user_id":OWNER,"supervisor_write.review_confirmed":true,"status":"pending"
+                })
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let mut found = Vec::new();
+            for request in j.chat.received_requests().await.unwrap() {
+                if let Ok(body) = serde_json::from_slice::<Value>(&request.body)
+                    && let Some(text) = body["text"].as_str()
+                    && let Some((_, tail)) = text.split_once("yes write-")
+                {
+                    assert_eq!(
+                        body["chat_id"].as_str(),
+                        Some("123"),
+                        "review must use the original owner chat"
+                    );
+                    let code = tail.split_whitespace().next().unwrap().to_owned();
+                    let digest = crate::services::audit_service::keyed_fingerprint(
+                        crate::services::audit_service::audit_chain_hmac_key(),
+                        b"supervisor-code-v1",
+                        code.as_bytes(),
+                    )
+                    .unwrap();
+                    if let Some(row) = rows
+                        .iter()
+                        .find(|r| r.supervisor_write.as_ref().unwrap().code_digest == digest)
+                    {
+                        found.push((row.clone(), code));
+                    }
+                }
+            }
+            if found.len() == count {
+                return found;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("all distinct exact-write reviews must reach the original chat")
+}
+
+#[tokio::test]
+async fn supervisor_write_parallel_occurrences_cannot_borrow_a_decision() {
+    let j = Box::pin(setup_journey("api-feishu-bot", false)).await;
+    let result = start(&j, 2).await;
+    let mut reviews = all_reviews(&j, 2).await;
+    reviews.sort_by_key(|(r, _)| r.resource.clone());
+    let (control, control_code) = reviews
+        .iter()
+        .find(|(r, _)| r.resource.as_ref().unwrap().contains("recControl"))
+        .unwrap();
+    let (target, target_code) = reviews
+        .iter()
+        .find(|(r, _)| r.resource.as_ref().unwrap().contains("recTarget"))
+        .unwrap();
+    assert_ne!(control.id, target.id);
+    assert_ne!(control_code, target_code);
+    let accepted =
+        body_text(owner(&j, &format!("yes write-{target_code}"), "ws7-parallel-yes").await).await;
+    assert!(accepted.contains("Write approval saved"));
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while j.ledger.lock().unwrap().writes.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let _ =
+        body_text(owner(&j, &format!("yes write-{target_code}"), "ws7-parallel-yes").await).await;
+    assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
+    let pending = j
+        .state
+        .db
+        .collection::<ApprovalRequest>("approval_requests")
+        .find_one(doc! {"_id":&control.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "pending");
+    assert!(
+        pending
+            .supervisor_write
+            .unwrap()
+            .dm_decision_receipt
+            .is_none()
+    );
+    let denied =
+        body_text(owner(&j, &format!("no write-{control_code}"), "ws7-parallel-no").await).await;
+    assert!(denied.contains("Write rejected"));
+    let final_text = tokio::time::timeout(std::time::Duration::from_secs(25), result)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(owner_text(&final_text).contains("provider-search-3"));
+    {
+        let ledger = j.ledger.lock().unwrap();
+        assert_eq!(ledger.writes.len(), 1);
+        assert_eq!(ledger.target, "Approved");
+        assert_eq!(ledger.control, "Untouched");
+    }
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .remove(&j.channel.channel_bot_id);
+}
+
+fn direct_message(j: &Journey, text: &str, id: &str) -> tokio::task::JoinHandle<()> {
+    let state = j.state.clone();
+    let channel = j.channel.clone();
+    let text = text.to_owned();
+    let id = id.to_owned();
+    tokio::spawn(async move {
+        let (_observer, completed) = watch_relay_callback(&channel.id, &id);
+        assert!(
+            direct_private(&state, &channel, &id, "ou_owner", &text)
+                .await
+                .is_success()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(30), completed)
+            .await
+            .unwrap()
+            .unwrap();
+    })
+}
+
+async fn direct_texts(j: &Journey) -> Vec<String> {
+    j.chat
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|r| {
+            let body = serde_json::from_slice::<Value>(&r.body).ok()?;
+            let text = sent_text(&body)?;
+            assert_eq!(
+                body["receive_id"], "oc_ou_owner",
+                "every owner-facing message must use the original Feishu/Lark DM"
+            );
+            Some(text)
+        })
+        .collect()
+}
+
+fn delegation_code(text: &str) -> String {
+    regex::Regex::new(r"yes ([0-9]{4})")
+        .unwrap()
+        .captures(text)
+        .expect("owner-facing delegation code")[1]
+        .to_owned()
+}
+
+#[tokio::test]
+async fn supervisor_write_signed_feishu_relay_returns_list_review_and_verified_result_to_same_dm() {
+    let j = Box::pin(setup_transport_journey("api-feishu-bot", false, true)).await;
+    direct_message(
+        &j,
+        "Ask accountant for today's pending ledger rows",
+        "ws7-direct-list",
+    )
+    .await
+    .unwrap();
+    let code = delegation_code(direct_texts(&j).await.last().unwrap());
+    direct_message(&j, &format!("yes {code}"), "ws7-direct-list-yes")
+        .await
+        .unwrap();
+    let messages = direct_texts(&j).await;
+    assert!(
+        messages.iter().any(|text| text.contains("recTarget")
+            && text.contains("Pending")
+            && text.contains("provider-search-1")),
+        "actual DM list: {messages:?}"
+    );
+    assert!(j.ledger.lock().unwrap().writes.is_empty());
+    j.stage.store(1, Ordering::SeqCst);
+    direct_message(
+        &j,
+        "Choose Base bascnLedger table tblLedger record recTarget: Status Pending -> Approved",
+        "ws7-direct-write",
+    )
+    .await
+    .unwrap();
+    let code = delegation_code(direct_texts(&j).await.last().unwrap());
+    let completed = direct_message(
+        &j,
+        &format!("yes {code}"),
+        "ws7-direct-write-assignment-yes",
+    );
+    let (review, write_code) = wait_review(&j).await;
+    let binding = review.supervisor_write.as_ref().unwrap();
+    let private_metadata = serde_json::to_string(binding).unwrap();
+    assert!(!private_metadata.contains(&write_code));
+    assert!(!private_metadata.contains("Approved"));
+    assert!(!private_metadata.contains("http://"));
+    let source = j
+        .state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&binding.source.channel.event_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(source.delivery.as_ref().unwrap().sender_id, "ou_owner");
+    assert_eq!(source.delivery.as_ref().unwrap().origin.platform, "lark");
+    direct_message(
+        &j,
+        &format!("yes write-{write_code}"),
+        "ws7-direct-write-yes",
+    )
+    .await
+    .unwrap();
+    completed.await.unwrap();
+    let messages = direct_texts(&j).await;
+    assert!(
+        messages.iter().any(|text| text.contains("recTarget")
+            && text.contains("Approved")
+            && text.contains("provider-search-3")),
+        "actual DM result: {messages:?}"
+    );
+    direct_message(
+        &j,
+        &format!("yes write-{write_code}"),
+        "ws7-direct-write-yes",
+    )
+    .await
+    .unwrap();
+    {
+        let ledger = j.ledger.lock().unwrap();
+        assert_eq!(ledger.writes.len(), 1);
+        assert_eq!(ledger.target, "Approved");
+        assert_eq!(ledger.control, "Untouched");
+        assert_eq!(ledger.reads, ["Pending", "Pending", "Approved"]);
+    }
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .remove(&j.channel.channel_bot_id);
+}
+
+#[tokio::test]
+async fn supervisor_write_review_respects_a_configured_timeout_below_eighty_seconds() {
+    let j = Box::pin(setup_journey("api-feishu", false)).await;
+    crate::services::notification_service::get_or_create_channel(&j.state.db, OWNER)
+        .await
+        .unwrap();
+    j.state
+        .db
+        .collection::<Document>("notification_channels")
+        .update_one(
+            doc! {"user_id":OWNER},
+            doc! {
+                "$set":{"approval_timeout_secs":30}
+            },
+        )
+        .await
+        .unwrap();
+    let result = start(&j, 1).await;
+    let (review, code) = wait_review(&j).await;
+    assert!(review.expires_at <= review.created_at + ChronoDuration::seconds(30));
+    assert!(
+        review.expires_at
+            <= review
+                .supervisor_write
+                .as_ref()
+                .unwrap()
+                .source
+                .channel
+                .expires_at
+    );
+    let denied =
+        body_text(owner(&j, &format!("no write-{code}"), "ws7-short-timeout-no").await).await;
+    assert!(denied.contains("Write rejected"));
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(25), result)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(j.ledger.lock().unwrap().writes.is_empty());
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .remove(&j.channel.channel_bot_id);
 }

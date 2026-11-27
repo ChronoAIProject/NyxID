@@ -879,6 +879,26 @@ impl ApprovalRequestOperation {
         }
     }
 
+    /// Both transports bind the same connected occurrence without extending
+    /// the caller's budget, configured timeout or original channel source.
+    pub(crate) fn bind_supervisor_review(
+        &mut self,
+        binding: Box<crate::models::approval_request::SupervisorWrite>,
+        timeout_secs: u32,
+    ) {
+        let received = CALLBACK_INGRESS
+            .try_with(|at| *at)
+            .unwrap_or_else(|_| approval_now());
+        let deadline = (received
+            + Duration::seconds(i64::from(timeout_secs.min(NYXBOT_CONNECTED_WRITE_SECS))))
+        .min(binding.source.channel.expires_at);
+        self.connected_deadline = Some(
+            self.connected_deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
+        self.supervisor_write = Some(binding);
+    }
+
     pub fn with_exact_service(mut self, binding: ExactServiceApprovalBinding) -> Self {
         self.exact_service = Some(binding);
         self
@@ -2469,7 +2489,10 @@ async fn poll_for_decision(db: &Database, request_id: &str, timeout_secs: u32) -
             return Err(AppError::Forbidden("Approval request expired".into()));
         }
         match request.status.as_str() {
-            "approved" => return Ok(()),
+            "approved" => {
+                super::supervisor_write::approved_receipt(&request)?;
+                return Ok(());
+            }
             "rejected" => {
                 return Err(AppError::Forbidden(
                     "Approval request was rejected".to_string(),

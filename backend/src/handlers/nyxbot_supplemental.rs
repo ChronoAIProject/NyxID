@@ -296,7 +296,21 @@ pub(super) async fn send_local(
     if let Some(occurrence) = &decision.supervisor_occurrence {
         sources::SAVED_RELAY_KEY
             .scope(occurrence.clone(), send)
-            .await
+            .await?;
+        let plan = crate::services::channel_text_delivery::load(&state.db, occurrence)
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Complete review delivery is unconfirmed".into()))?;
+        if plan.parts.is_empty()
+            || plan
+                .parts
+                .iter()
+                .any(|part| part.state != crate::models::channel_text_delivery::TextPartState::Sent)
+        {
+            return Err(AppError::Forbidden(
+                "Complete review delivery is unconfirmed".into(),
+            ));
+        }
+        Ok(())
     } else if decision.saved_result {
         let turn = decision
             .turn
