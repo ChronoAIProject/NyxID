@@ -28,6 +28,10 @@ use crate::services::{approved_sign_in_policy as app_policy, audit_service, toke
 #[cfg(test)]
 mod grant_tests;
 mod grants;
+#[cfg(test)]
+mod mixed_delivery;
+pub(super) mod record;
+pub(super) use grants::prepare_grant;
 pub use grants::{approve_with_agent_key, options, poll_agent_key, sweep_expired};
 
 type HmacSha256 = Hmac<sha2::Sha256>;
@@ -291,6 +295,7 @@ where
             agent_key_grant: None,
             purge_at: None,
             approver_ip_hmac: None,
+            delivery_context_version: None,
             delivery_access_token_encrypted: None,
             delivery_refresh_token_encrypted: None,
             delivery_access_token_expires_in: None,
@@ -409,9 +414,18 @@ pub async fn poll_for_browser(
             let claimed = transaction_codes.find_one_and_update(doc! {
                 "device_code_hmac": &device_hash, "status": "approved", "agent_key_grant": Bson::Null,
                 "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
-            }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-                "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
-                "$unset": {"delivery_access_token_encrypted": "", "delivery_refresh_token_encrypted": ""}})
+            }, doc! {
+                "$set": {
+                    "status": "delivered",
+                    "delivered_at": bson::DateTime::from_chrono(now),
+                    "purge_at": bson::DateTime::from_chrono(now + Duration::days(1)),
+                },
+                "$unset": {
+                    "delivery_access_token_encrypted": "",
+                    "delivery_refresh_token_encrypted": "",
+                    "delivery_context_version": "",
+                },
+            })
                 .session(&mut *session).await?;
             let claimed = claimed.ok_or(AppError::AuthDeviceCodeAlreadyDelivered)?;
             app_policy::fence(db, &browser.user_id, claimed.mfa_policy_revision.as_deref(), session).await?;
@@ -686,8 +700,26 @@ pub(super) async fn approve_bound(
     prepared.set_app_policy_exempt(mfa_policy_revision.is_some());
     let access = Zeroizing::new(std::mem::take(&mut prepared.tokens.access_token));
     let refresh = Zeroizing::new(std::mem::take(&mut prepared.tokens.refresh_token));
-    let encrypted_access = encryption_keys.encrypt(access.as_bytes()).await?;
-    let encrypted_refresh = encryption_keys.encrypt(refresh.as_bytes()).await?;
+    let [access_path, refresh_path] = record::session_paths(&prepared.tokens.session_id);
+    let encrypted_access = record::seal(
+        encryption_keys,
+        collection.name(),
+        &row.id,
+        &input.user_id,
+        &access_path,
+        access.as_bytes(),
+    )
+    .await?;
+    let encrypted_refresh = record::seal(
+        encryption_keys,
+        collection.name(),
+        &row.id,
+        &input.user_id,
+        &refresh_path,
+        refresh.as_bytes(),
+    )
+    .await?;
+    let contextual = encryption_keys.contextual_record_writes();
     let approver_ip_hmac = input
         .approver_ip
         .as_deref()
@@ -753,7 +785,7 @@ pub(super) async fn approve_bound(
     collection
         .find_one_and_update(
             doc! { "_id": &row.id, "status": "approved" },
-            doc! { "$set": set_doc },
+            record::approval_update(set_doc, contextual),
         )
         .return_document(ReturnDocument::After)
         .session(&mut *session)
@@ -865,24 +897,6 @@ pub(super) async fn deny_bound(
     );
 
     Ok(())
-}
-
-pub async fn decrypt_tokens(
-    encryption_keys: &EncryptionKeys,
-    encrypted_access: &[u8],
-    encrypted_refresh: &[u8],
-) -> AppResult<(Zeroizing<String>, Zeroizing<String>)> {
-    let access_plaintext = encryption_keys.decrypt(encrypted_access).await?;
-    let refresh_plaintext = encryption_keys.decrypt(encrypted_refresh).await?;
-
-    let access_token = crate::crypto::guarded_utf8(access_plaintext).map_err(|_| {
-        AppError::Internal("auth-device delivery access token is not valid UTF-8".to_string())
-    })?;
-    let refresh_token = crate::crypto::guarded_utf8(refresh_plaintext).map_err(|_| {
-        AppError::Internal("auth-device delivery refresh token is not valid UTF-8".to_string())
-    })?;
-
-    Ok((access_token, refresh_token))
 }
 
 pub fn normalize_user_code(raw: &str) -> Result<String, AppError> {
@@ -1115,6 +1129,7 @@ async fn claim_approved_delivery(
                 "$unset": {
                     "delivery_access_token_encrypted": "",
                     "delivery_refresh_token_encrypted": "",
+                    "delivery_context_version": "",
                 },
             },
         )
@@ -1130,12 +1145,25 @@ async fn claim_approved_delivery_in_transaction(
     tx: &mut mongodb::ClientSession,
 ) -> AppResult<Option<AuthDeviceCode>> {
     let now = Utc::now();
-    Ok(codes.find_one_and_update(doc! {"_id": id, "status": "approved", "agent_key_grant": Bson::Null,
-        "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
-        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-            "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
-            "$unset": {"delivery_access_token_encrypted": "", "delivery_refresh_token_encrypted": ""}})
-        .session(&mut *tx).await?)
+    Ok(codes
+        .find_one_and_update(
+            doc! {"_id": id, "status": "approved", "agent_key_grant": Bson::Null,
+            "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
+            doc! {
+                "$set": {
+                    "status": "delivered",
+                    "delivered_at": bson::DateTime::from_chrono(now),
+                    "purge_at": bson::DateTime::from_chrono(now + Duration::days(1)),
+                },
+                "$unset": {
+                    "delivery_access_token_encrypted": "",
+                    "delivery_refresh_token_encrypted": "",
+                    "delivery_context_version": "",
+                },
+            },
+        )
+        .session(&mut *tx)
+        .await?)
 }
 
 #[tracing::instrument(name = "auth_device.deliver", skip_all, fields(row_id = %row.id, latency_ms = (now - row.created_at).num_milliseconds()))]
@@ -1151,16 +1179,8 @@ async fn deliver_approved_claim(
         return Ok(PollClaim::AgentKey);
     }
     let prepared = if let Some(encryption) = encryption {
-        let (access_token, refresh_token) = decrypt_tokens(
-            encryption,
-            row.delivery_access_token_encrypted
-                .as_deref()
-                .ok_or_else(|| AppError::Internal("Missing account delivery".into()))?,
-            row.delivery_refresh_token_encrypted
-                .as_deref()
-                .ok_or_else(|| AppError::Internal("Missing account delivery".into()))?,
-        )
-        .await?;
+        let (access_token, refresh_token) =
+            record::open_session(encryption, collection.name(), row).await?;
         Some(AccountDelivery {
             access_token,
             refresh_token,
@@ -2211,13 +2231,9 @@ mod tests {
             .expect("reservation exists");
         assert!(reservation.get("approved_user_id").is_none());
 
-        let (access, refresh) = decrypt_tokens(
-            &encryption_keys,
-            updated.delivery_access_token_encrypted.as_deref().unwrap(),
-            updated.delivery_refresh_token_encrypted.as_deref().unwrap(),
-        )
-        .await
-        .expect("decrypt");
+        let (access, refresh) = record::open_session(&encryption_keys, AUTH_DEVICE_CODES, &updated)
+            .await
+            .expect("decrypt");
         assert_eq!(
             crate::crypto::jwt::verify_token(&jwt_keys, &config, &access)
                 .expect("access token")
@@ -2509,8 +2525,13 @@ mod tests {
         let encrypted_access = encryption_keys.encrypt(access.as_bytes()).await.unwrap();
         let encrypted_refresh = encryption_keys.encrypt(refresh.as_bytes()).await.unwrap();
 
+        let mut row = make_debug_row();
+        row.approved_user_id = Some("owner".into());
+        row.approved_session_id = Some("session".into());
+        row.delivery_access_token_encrypted = Some(encrypted_access);
+        row.delivery_refresh_token_encrypted = Some(encrypted_refresh);
         let (decrypted_access, decrypted_refresh) =
-            decrypt_tokens(&encryption_keys, &encrypted_access, &encrypted_refresh)
+            record::open_session(&encryption_keys, AUTH_DEVICE_CODES, &row)
                 .await
                 .unwrap();
 
@@ -2736,6 +2757,7 @@ mod tests {
             agent_key_grant: None,
             purge_at: None,
             approver_ip_hmac: None,
+            delivery_context_version: None,
             delivery_access_token_encrypted: Some(b"encrypted-access".to_vec()),
             delivery_refresh_token_encrypted: Some(b"encrypted-refresh".to_vec()),
             delivery_access_token_expires_in: Some(900),
@@ -2823,6 +2845,7 @@ mod tests {
             agent_key_grant: None,
             purge_at: None,
             approver_ip_hmac: Some("33334444".repeat(8)),
+            delivery_context_version: None,
             delivery_access_token_encrypted: Some(vec![0xab, 0xcd, 0xef]),
             delivery_refresh_token_encrypted: Some(vec![0x12, 0x34, 0x56]),
             delivery_access_token_expires_in: Some(900),

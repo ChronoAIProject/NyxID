@@ -1,7 +1,21 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render as renderView, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import { ChannelConnectLinkPage } from "./channel-connect-link";
+import { ChannelConnectLinkContent } from "@/components/channels/channel-connect-link-content";
 import type { ChannelConnectLink } from "@/schemas/channel-connect-links";
+
+vi.mock("@/lib/api-client", async (original) => ({
+  ...(await original<typeof import("@/lib/api-client")>()),
+  api: { get: vi.fn().mockResolvedValue({ available: false, enabled: false, bot_revision: 0 }) },
+}));
+
+function render(element: React.ReactElement) {
+  const client = new QueryClient();
+  return renderView(element, {
+    wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+  });
+}
 
 const mocks = vi.hoisted(() => ({
   data: {} as ChannelConnectLink,
@@ -84,6 +98,23 @@ beforeEach(() => {
     last_error: null,
     delivery_status: null,
   };
+});
+
+it("completes hosted setup in the chat without following the app callback or opening another page", async () => {
+  const close = vi.fn();
+  const location = window.location.href;
+  const view = render(<ChannelConnectLinkContent token="nyx_bcl_example" embedded onClose={close} />);
+  fireEvent.click(screen.getByText("Complete setup"));
+  mocks.data = { ...mocks.data, status: "completed", bot_id: "bot", callback_url: "https://example.com/return?status=completed" };
+  view.rerender(<ChannelConnectLinkContent token="nyx_bcl_example" embedded onClose={close} />);
+  expect(screen.getByText("one-time-verification-secret")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Acknowledge secret"));
+  const back = await screen.findByRole("button", { name: "Back to chat" });
+  expect(screen.queryByRole("button", { name: "Open channel bot" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+  fireEvent.click(back);
+  expect(close).toHaveBeenCalledOnce();
+  expect(window.location.href).toBe(location);
 });
 
 it("keeps the setup and one-time secret mounted when completion status arrives", async () => {

@@ -37,6 +37,7 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
   /\/verify-email\/[^/]+/,
   /\/reset-password\/[^/]+/,
   /\/oauth\/callback/,
+  /^\/channel-bots\/meta-callback(?:\/|$)/,
   /^\/oauth-complete$/,
   /\/approve\/[^/]+/,
 ];

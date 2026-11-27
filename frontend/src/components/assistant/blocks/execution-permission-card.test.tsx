@@ -12,6 +12,7 @@ import { ExecutionPermissionCard } from "./execution-permission-card";
 import { ApprovalCard } from "./approval-card";
 import type { ExecutionProposal } from "@/schemas/execution-proposal";
 import { api } from "@/lib/api-client";
+import { DecisionCardPresentation } from "../decision-card-presentation";
 
 vi.mock("@/lib/api-client", () => ({ api: { get: vi.fn(), post: vi.fn() } }));
 const proposal: ExecutionProposal = {
@@ -77,10 +78,10 @@ afterEach(() => {
   client.clear();
   vi.useRealTimers();
 });
-function card(value = proposal) {
+function card(value = proposal, onStateChange?: () => void) {
   return render(
     <QueryClientProvider client={client}>
-      <ExecutionPermissionCard requestId="request" proposal={value} />
+      <ExecutionPermissionCard requestId="request" proposal={value} onStateChange={onStateChange} />
     </QueryClientProvider>,
   );
 }
@@ -199,7 +200,8 @@ it("reloads a lost decision response without blindly retrying the effect", async
 });
 it("refreshes a pending card decided on another device without sending a decision", async () => {
   vi.useFakeTimers();
-  card();
+  const changed = vi.fn();
+  card(proposal, changed);
   expect(screen.getByText("Execution permission required")).toBeInTheDocument();
   vi.mocked(api.get).mockResolvedValue({
     execution_proposal: { ...proposal, state: "completed", can_decide: false },
@@ -210,6 +212,7 @@ it("refreshes a pending card decided on another device without sending a decisio
   expect(screen.getByText("Operation completed")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: /Allow/ })).not.toBeInTheDocument();
   expect(api.post).not.toHaveBeenCalled();
+  expect(changed).toHaveBeenCalledTimes(1);
 });
 it("shows expired and unknown outcomes without an automatic resend action", () => {
   const first = card({ ...proposal, state: "expired", can_decide: false });
@@ -286,6 +289,19 @@ it("does not offer unsupported reusable choices or interpret an unknown version"
     review: null,
   });
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
+});
+
+it("keeps a pinned permission's choices in the full review and preserves the explicit selection across reopening", async () => {
+  render(<QueryClientProvider client={client}><DecisionCardPresentation value="pinned">
+    <ExecutionPermissionCard requestId="request" proposal={proposal} />
+  </DecisionCardPresentation></QueryClientProvider>);
+  expect(screen.queryByRole("button", { name: /Allow this operation/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Review full request" }));
+  fireEvent.click(screen.getByRole("radio", { name: "Until revoked or this account binding changes" }));
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  fireEvent.click(screen.getByRole("button", { name: "Review full request" }));
+  expect(screen.getByRole("radio", { name: "Until revoked or this account binding changes" })).toBeChecked();
+  expect(api.post).not.toHaveBeenCalled();
 });
 
 

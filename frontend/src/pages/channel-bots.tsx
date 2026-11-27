@@ -1,3 +1,4 @@
+import { channelDeleteMessage } from "./channel-bot-detail.helpers";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -23,7 +24,7 @@ import {
   type CreateDeviceConversationFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
-import { TELEGRAM_MANAGER_DELETION_NOTE } from "@/lib/channel-platforms";
+import { channelDeletionNote } from "@/lib/channel-platforms";
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
@@ -303,11 +304,9 @@ function DeleteBotDialog({
     if (!botId) return;
     try {
       const result = await deleteMutation.mutateAsync(botId);
-      if (result?.webhook_cleanup === "failed") {
-        toast.warning(translateUi("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard."));
-      } else {
-        toast.success(translateUi("Bot deleted"));
-      }
+      const message = channelDeleteMessage(result);
+      if (result?.webhook_cleanup === "failed") toast.warning(message);
+      else toast.success(message);
     } catch (err) {
       toast.error(
         translateErrorMessage(err instanceof ApiError ? err.message : "Failed to delete bot"),
@@ -322,7 +321,7 @@ function DeleteBotDialog({
       <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>{translateUi("Delete Channel Bot")}</DialogTitle>
-          <DialogDescription>{translateUi("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && translateUi(" {{deletionNote}}", { deletionNote: deletionNote })}
+          <DialogDescription>{translateUi("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && <> {translateUi(deletionNote)}</>}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -799,6 +798,7 @@ function ChannelBotsList() {
   const [previousConnect, setPreviousConnect] = useState(search.connect);
   const [createDeviceOpen, setCreateDeviceOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const deletingBot = bots?.find((bot) => bot.id === deleteTarget);
   const [viewMode, setViewMode] = useViewMode("channel-bots");
 
   if (search.connect !== previousConnect) {
@@ -872,7 +872,7 @@ function ChannelBotsList() {
         onOpenChange={setCreateDeviceOpen}
         defaultOrgId={deviceOrgId}
       />
-      <DeleteBotDialog botId={deleteTarget} deletionNote={(() => { const bot = bots?.find((bot) => bot.id === deleteTarget); return bot?.credential_source === "telegram_manager" ? TELEGRAM_MANAGER_DELETION_NOTE : bot && bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined; })()} onClose={() => setDeleteTarget(null)} />
+      <DeleteBotDialog botId={deleteTarget} deletionNote={deletingBot && channelDeletionNote(deletingBot, getPlatform(deletingBot.platform).deletionNote)} onClose={() => setDeleteTarget(null)} />
     </div>
   );
 }

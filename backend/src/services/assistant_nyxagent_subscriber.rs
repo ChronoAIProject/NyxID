@@ -3,7 +3,8 @@ use crate::models::assistant_conversation::{
     InstructionBinding, ReattachWindow, RestartAdmission, RunningResponse, SubscriberCheckpoint,
     WindowRefusal,
 };
-use mongodb::bson::{Binary, spec::BinarySubtype};
+#[path = "assistant_reattach_window_record.rs"]
+pub(crate) mod record;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Input {
@@ -80,10 +81,8 @@ impl Input {
         row: &AssistantConversation,
         window: &ReattachWindow,
     ) -> Result<Self, TurnError> {
-        let encrypted = window.input.as_ref().ok_or_else(unknown)?;
-        let bytes = state
-            .encryption_keys
-            .decrypt_with_aad(&encrypted.bytes, &aad(row, &window.key)?)
+        let bytes = record::Identity::of(row, &window.key)
+            .open(&state.encryption_keys, window)
             .await
             .map_err(|_| unknown())?;
         serde_json::from_slice(&bytes).map_err(|_| unknown())
@@ -326,17 +325,6 @@ pub(super) async fn reconnect(
     .await
 }
 
-fn aad(row: &AssistantConversation, key: &str) -> Result<Vec<u8>, TurnError> {
-    serde_json::to_vec(&(
-        "nyxid/reattach-window/1",
-        &row.user_id,
-        &row.id,
-        &row.credential_api_key_id,
-        key,
-    ))
-    .map_err(|_| unknown())
-}
-
 pub(super) async fn seal(
     state: &AppState,
     row: &AssistantConversation,
@@ -345,7 +333,7 @@ pub(super) async fn seal(
     prefix: &str,
     binding: &InstructionBinding,
     follow_up: Option<FollowUp>,
-) -> Result<Binary, TurnError> {
+) -> Result<record::SealedInput, TurnError> {
     let bytes = zeroize::Zeroizing::new(
         serde_json::to_vec(&Input {
             body: body.clone(),
@@ -355,15 +343,30 @@ pub(super) async fn seal(
         })
         .map_err(|_| unknown())?,
     );
-    let encrypted = state
-        .encryption_keys
-        .encrypt_with_aad(&bytes, &aad(row, key)?)
+    record::Identity::of(row, key)
+        .seal(&state.encryption_keys, &bytes)
         .await
-        .map_err(|_| unknown())?;
-    Ok(Binary {
-        subtype: BinarySubtype::Generic,
-        bytes: encrypted,
-    })
+        .map_err(|_| unknown())
+}
+
+fn restarted_window(key: &str, input: record::SealedInput) -> mongodb::bson::Document {
+    let mut set = doc! {
+        "active_turn.restart_admission.window.key": key,
+        "active_turn.restart_admission.window.terminal": false,
+        "active_turn.restart_admission.window.accepted": false,
+        "active_turn.running_response": null,
+    };
+    let mut unset = doc! {
+        "active_turn.reply.upstream": "",
+        "active_turn.restart_admission.window.next_continuation": "",
+    };
+    set.insert(record::INPUT, input.ciphertext);
+    if let Some(version) = input.version {
+        set.insert(record::VERSION, i32::from(version));
+    } else {
+        unset.insert(record::VERSION, "");
+    }
+    doc! {"$set":set,"$unset":unset}
 }
 
 pub(super) fn checkpoint(
@@ -1204,7 +1207,15 @@ async fn recover_window(
                         doc! {"$gt":mongodb::bson::DateTime::now()},
                     );
                 }
-                let changed = state.db.collection::<mongodb::bson::Document>(crate::models::assistant_conversation::COLLECTION_NAME).update_one(filter,doc!{"$set":{"active_turn.restart_admission.window.key":&next,"active_turn.restart_admission.window.terminal":false,"active_turn.restart_admission.window.accepted":false,"active_turn.restart_admission.window.input":saved,"active_turn.running_response":null},"$unset":{"active_turn.reply.upstream":"","active_turn.restart_admission.window.next_continuation":""}}).write_concern(mongodb::options::WriteConcern::majority()).await.map_err(|_|unknown())?;
+                let changed = state
+                    .db
+                    .collection::<mongodb::bson::Document>(
+                        crate::models::assistant_conversation::COLLECTION_NAME,
+                    )
+                    .update_one(filter, restarted_window(&next, saved))
+                    .write_concern(mongodb::options::WriteConcern::majority())
+                    .await
+                    .map_err(|_| unknown())?;
                 if changed.matched_count != 1 {
                     return Err(unknown());
                 }
@@ -1385,3 +1396,7 @@ async fn recover_window(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "assistant_reattach_window_tests.rs"]
+mod record_tests;

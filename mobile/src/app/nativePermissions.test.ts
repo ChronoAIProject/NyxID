@@ -25,6 +25,7 @@ function appConfig(appEnv: "dev" | "prod") {
         if (name === "./scripts/lib/load-env")
           return {
             loadEnv: () => ({}),
+            performanceLaunchBinding: () => "",
             resolveProfile: () => ({
               androidPackage: "dev.nyxid.test",
               androidVersionCode: "1",

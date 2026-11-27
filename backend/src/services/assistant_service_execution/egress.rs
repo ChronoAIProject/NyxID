@@ -4,8 +4,15 @@ use super::*;
 /// Credential preparation can await external services; it does not admit egress.
 pub(crate) struct HttpEgressGuard<'a> {
     attachment: Option<AttachmentEgress<'a>>,
+    guest_data: Option<GuestDataEgress<'a>>,
     model_request: Option<&'a crate::services::assistant_model_observer::ModelRequest>,
     authority: EgressAuthority<'a>,
+}
+
+struct GuestDataEgress<'a> {
+    db: &'a Database,
+    chat: &'a acks::ChatAuthority,
+    operation: Option<&'a crate::services::channel_guest_access::guest_tools::AuthorizedSheets>,
 }
 
 struct AttachmentEgress<'a> {
@@ -134,6 +141,7 @@ impl OwnedHttpEgressGuard {
     ) -> HttpEgressGuard<'a> {
         HttpEgressGuard {
             attachment: None,
+            guest_data: None,
             model_request: None,
             authority: EgressAuthority::Managed(self, target),
         }
@@ -245,6 +253,7 @@ impl OwnedHttpEgressGuard {
                 Some(OwnedEgressAuthority::ExternalJob { job, declared }) => {
                     Some(HttpEgressGuard {
                         attachment: None,
+                        guest_data: None,
                         model_request: None,
                         authority: EgressAuthority::ExternalJob {
                             db: &self.db,
@@ -256,6 +265,7 @@ impl OwnedHttpEgressGuard {
                 Some(OwnedEgressAuthority::AssistantCatalogJob { job, catalog }) => {
                     Some(HttpEgressGuard {
                         attachment: None,
+                        guest_data: None,
                         model_request: None,
                         authority: EgressAuthority::AssistantCatalogJob {
                             db: &self.db,
@@ -284,6 +294,7 @@ impl Admission {
     ) -> HttpEgressGuard<'a> {
         HttpEgressGuard {
             attachment: None,
+            guest_data: None,
             model_request: None,
             authority: EgressAuthority::Assistant(AssistantEgressGuard {
                 admission: self,
@@ -315,6 +326,7 @@ impl<'a> HttpEgressGuard<'a> {
     ) -> Self {
         Self {
             attachment: None,
+            guest_data: None,
             model_request: None,
             authority: EgressAuthority::Lark { guard, row, phase },
         }
@@ -332,6 +344,7 @@ impl<'a> HttpEgressGuard<'a> {
         let mut guard = base.unwrap_or(Self {
             authority: EgressAuthority::AttachmentOnly,
             attachment: None,
+            guest_data: None,
             model_request: None,
         });
         guard.attachment = Some(AttachmentEgress {
@@ -359,6 +372,7 @@ impl<'a> HttpEgressGuard<'a> {
         if let Some(job) = ingress.assistant_job_id() {
             return Some(Self {
                 attachment: None,
+                guest_data: None,
                 model_request: None,
                 authority: EgressAuthority::AssistantCatalogJob {
                     db,
@@ -369,6 +383,7 @@ impl<'a> HttpEgressGuard<'a> {
         }
         Some(Self {
             attachment: None,
+            guest_data: None,
             model_request: None,
             authority: EgressAuthority::ExternalJob {
                 db,
@@ -386,6 +401,7 @@ impl<'a> HttpEgressGuard<'a> {
     ) -> Option<Self> {
         Some(Self {
             attachment: None,
+            guest_data: None,
             model_request: Some(request?),
             authority: EgressAuthority::ModelObservationOnly,
         })
@@ -398,6 +414,46 @@ impl<'a> HttpEgressGuard<'a> {
     ) -> Self {
         self.model_request = request;
         self
+    }
+
+    pub(crate) fn with_channel_guest(
+        base: Option<Self>,
+        db: &'a Database,
+        chat: Option<&'a acks::ChatAuthority>,
+        operation: Option<&'a crate::services::channel_guest_access::guest_tools::AuthorizedSheets>,
+    ) -> Option<Self> {
+        let chat = match chat.filter(|chat| chat.channel_guest.is_some()) {
+            Some(chat) => chat,
+            None => return base,
+        };
+        let mut guard = base.unwrap_or(Self {
+            attachment: None,
+            guest_data: None,
+            model_request: None,
+            authority: EgressAuthority::AttachmentOnly,
+        });
+        guard.guest_data = Some(GuestDataEgress {
+            db,
+            chat,
+            operation,
+        });
+        Some(guard)
+    }
+
+    pub(crate) fn has_guest_data(&self) -> bool {
+        self.guest_data
+            .as_ref()
+            .is_some_and(|guest| guest.operation.is_some())
+    }
+
+    pub(crate) async fn authorize_guest_request(
+        &self,
+        request: &reqwest::Request,
+    ) -> AppResult<()> {
+        use crate::services::channel_guest_access::policy::denied;
+        let guest = self.guest_data.as_ref().ok_or_else(denied)?;
+        let operation = guest.operation.ok_or_else(denied)?;
+        operation.before_send(guest.db, guest.chat, request).await
     }
 
     pub(crate) fn projected(mut self, projection: &'a HttpProjection) -> Self {
@@ -455,6 +511,14 @@ impl<'a> HttpEgressGuard<'a> {
             }
             if let Some(request) = self.model_request {
                 request.dispatched().await?;
+            }
+            if let Some(guest) = &self.guest_data
+                && guest.operation.is_none()
+            {
+                guest
+                    .chat
+                    .ensure_live_turn(guest.db, None, None, "assistant.channel_guest_egress")
+                    .await?;
             }
             Ok(())
         })

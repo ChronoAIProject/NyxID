@@ -16,6 +16,30 @@ use crate::{
 };
 
 use super::ownership_transfer_service::ResourceKind;
+/// Whether the request may use the actor's live platform role.
+#[derive(Clone, Copy)]
+pub(crate) enum OwnershipPlatformAccess {
+    Granted,
+    Absent,
+    Denied,
+    StepUp,
+}
+
+impl OwnershipPlatformAccess {
+    fn granted(self) -> bool {
+        matches!(self, Self::Granted)
+    }
+
+    fn denial_or(self, fallback: impl FnOnce() -> AppError) -> AppError {
+        match self {
+            Self::Denied => {
+                AppError::Forbidden("A first-party admin session with MFA is required".into())
+            }
+            Self::StepUp => AppError::MfaStepUpRequired,
+            _ => fallback(),
+        }
+    }
+}
 
 fn forbidden() -> AppError {
     AppError::Forbidden(
@@ -79,13 +103,14 @@ async fn fence(
 
 /// Returns whether the caller has platform-wide authority. Agent keys always
 /// act through their owner's asset authority, even when that person is an admin.
-pub async fn authorize(
+pub(crate) async fn authorize(
     db: &Database,
     session: &mut ClientSession,
     actor: &str,
     api_key_id: Option<&str>,
     owner: &str,
     for_commit: bool,
+    platform_access: OwnershipPlatformAccess,
 ) -> AppResult<bool> {
     let user = db
         .collection::<User>(USERS)
@@ -116,20 +141,22 @@ pub async fn authorize(
     } else if user.user_type != UserType::Person {
         return Err(forbidden());
     }
-    let platform_admin = api_key_id.is_none()
+    let platform_admin = platform_access.granted()
+        && api_key_id.is_none()
         && super::role_service::resolve_platform_role(db, &user)
             .await?
             .is_admin();
     if !platform_admin && actor != owner {
+        let denied = || platform_access.denial_or(forbidden);
         let org = db
             .collection::<User>(USERS)
             .find_one(doc! { "_id": owner, "user_type": "org", "is_active": true })
             .session(&mut *session)
             .await?
-            .ok_or_else(forbidden)?;
+            .ok_or_else(denied)?;
         let membership = db.collection::<OrgMembership>(MEMBERSHIPS)
             .find_one(doc! { "org_user_id": &org.id, "member_user_id": actor, "revoked_at": null, "role": "admin" })
-            .session(&mut *session).await?.ok_or_else(forbidden)?;
+            .session(&mut *session).await?.ok_or_else(denied)?;
         let scope = if membership.scope_source == MemberScopeSource::Inherit {
             let role_scope = db
                 .collection::<OrgRoleScope>(ROLE_SCOPES)
@@ -148,7 +175,7 @@ pub async fn authorize(
         // These scopes identify connected UserServices, not catalog definitions
         // or bots. They cannot confer ownership rights over unrelated assets.
         if scope.is_some() {
-            return Err(forbidden());
+            return Err(denied());
         }
         if for_commit {
             fence(db, session, MEMBERSHIPS, &membership.id).await?;
@@ -161,6 +188,7 @@ pub async fn authorize(
     Ok(platform_admin)
 }
 
+#[cfg(test)]
 pub async fn require_resource_access(
     db: &Database,
     actor: &str,
@@ -168,6 +196,27 @@ pub async fn require_resource_access(
     first_party_human: bool,
     kind: ResourceKind,
     id: &str,
+) -> AppResult<(String, bool, Document)> {
+    require_resource_access_with_platform(
+        db,
+        actor,
+        api_key_id,
+        first_party_human,
+        kind,
+        id,
+        OwnershipPlatformAccess::Granted,
+    )
+    .await
+}
+
+pub(crate) async fn require_resource_access_with_platform(
+    db: &Database,
+    actor: &str,
+    api_key_id: Option<&str>,
+    first_party_human: bool,
+    kind: ResourceKind,
+    id: &str,
+    platform_access: OwnershipPlatformAccess,
 ) -> AppResult<(String, bool, Document)> {
     let mut session = db.client().start_session().await?;
     let resource = resource_document(db, &mut session, kind, id).await?;
@@ -182,6 +231,7 @@ pub async fn require_resource_access(
         id,
         &owner,
         false,
+        platform_access,
     )
     .await?;
     Ok((owner, admin, resource))
@@ -190,7 +240,7 @@ pub async fn require_resource_access(
 /// Tool reassignment is a platform decision, regardless of current ownership.
 /// Human identity is checked at ingress; API-key owners cannot inherit it here.
 #[allow(clippy::too_many_arguments)]
-pub async fn authorize_resource(
+pub(crate) async fn authorize_resource(
     db: &Database,
     session: &mut ClientSession,
     actor: &str,
@@ -200,6 +250,7 @@ pub async fn authorize_resource(
     id: &str,
     owner: &str,
     for_commit: bool,
+    platform_access: OwnershipPlatformAccess,
 ) -> AppResult<bool> {
     let resource = resource_document(db, session, kind, id).await?;
     if kind == ResourceKind::Service && resource.get_str("offering_kind").ok() == Some("tool") {
@@ -210,11 +261,21 @@ pub async fn authorize_resource(
             api_key_id,
             first_party_human,
             for_commit,
+            platform_access,
         )
         .await?;
         return Ok(true);
     }
-    authorize(db, session, actor, api_key_id, owner, for_commit).await
+    authorize(
+        db,
+        session,
+        actor,
+        api_key_id,
+        owner,
+        for_commit,
+        platform_access,
+    )
+    .await
 }
 
 pub async fn destination_candidates(
@@ -284,7 +345,14 @@ async fn require_tool_admin(
     api_key_id: Option<&str>,
     first_party_human: bool,
     for_commit: bool,
+    platform_access: OwnershipPlatformAccess,
 ) -> AppResult<()> {
+    if matches!(
+        platform_access,
+        OwnershipPlatformAccess::Denied | OwnershipPlatformAccess::StepUp
+    ) {
+        return Err(platform_access.denial_or(forbidden));
+    }
     if !first_party_human || api_key_id.is_some() {
         return Err(AppError::Forbidden(
             "Tool ownership transfers require a first-party human Admin".into(),
@@ -303,7 +371,7 @@ async fn require_tool_admin(
             .await?
             .is_admin()
     };
-    if !admin {
+    if !admin || !platform_access.granted() {
         return Err(AppError::Forbidden(
             "Only an Admin may transfer Tool ownership".into(),
         ));
@@ -313,11 +381,12 @@ async fn require_tool_admin(
 
 /// Receipts for other assets retain previous-owner replay even after deletion.
 /// New receipts bind Tool kind durably; existing live Tools are also protected.
-pub async fn authorize_replay(
+pub(crate) async fn authorize_replay(
     db: &Database,
     session: &mut ClientSession,
     receipt: &crate::models::ownership_transfer::OwnershipTransfer,
     first_party_human: bool,
+    platform_access: OwnershipPlatformAccess,
 ) -> AppResult<()> {
     let live_tool = receipt.resource_kind == "service"
         && db
@@ -335,6 +404,7 @@ pub async fn authorize_replay(
             receipt.actor_api_key_id.as_deref(),
             first_party_human,
             true,
+            platform_access,
         )
         .await
     } else {
@@ -345,6 +415,7 @@ pub async fn authorize_replay(
             receipt.actor_api_key_id.as_deref(),
             &receipt.previous_owner_user_id,
             false,
+            platform_access,
         )
         .await
         .map(|_| ())

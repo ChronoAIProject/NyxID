@@ -3,7 +3,7 @@ import { z } from "zod";
 const metaId = z.string().regex(/^\d{1,32}$/);
 export const managedBootstrapSchema = z.object({
   available: z.boolean(),
-  flow: z.enum(["meta_embedded_signup", "oauth_connection"]).nullable().optional(),
+  flow: z.enum(["meta_embedded_signup", "oauth_connection", "meta_oauth"]).nullable().optional(),
   provider_slug: z.string().nullable().optional(),
   required_scopes: z.array(z.string()).default([]),
   authorize_start_url: z.string().nullable().optional(),

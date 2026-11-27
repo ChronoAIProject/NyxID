@@ -1,0 +1,1117 @@
+{
+  "version": 1,
+  "compiler": "rive 1.11.0",
+  "artboard": "NyxEmotes",
+  "stateMachine": "Emotes",
+  "dataModel": "AvatarEmote",
+  "binding": "emote",
+  "sourceSha256": "454205df57d5853270121822ae6b2e0d3fa8569d42284c5fc5b39312fa9c595e",
+  "assetSha256": "1771e18e749cb12043dbd6d94ffffe476ee25cd971639534b3389d8c1e12b203",
+  "bytes": 46421,
+  "samples": [
+    {
+      "emote": 0,
+      "x": 0,
+      "y": 0,
+      "openness": 1,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    },
+    {
+      "emote": 1,
+      "x": 0.4000000059604645,
+      "y": -0.6499999761581421,
+      "openness": 0.8999999761581421,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    },
+    {
+      "emote": 2,
+      "x": -0.18000000715255737,
+      "y": 0.5,
+      "openness": 0.8199999928474426,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -20.79881477355957,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1.0024142265319824,
+          "scaleY": 0.996781051158905
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    },
+    {
+      "emote": 3,
+      "x": 0.46000000834465027,
+      "y": 0.5199999809265137,
+      "openness": 0.7200000286102295,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -1.77767014503479,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0.5223299264907837,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    },
+    {
+      "emote": 4,
+      "x": 0,
+      "y": 0.07999999821186066,
+      "openness": 0.8399999737739563,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0.3254372477531433,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    },
+    {
+      "emote": 5,
+      "x": 0,
+      "y": -0.20000000298023224,
+      "openness": 1.1299999952316284,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    },
+    {
+      "emote": 6,
+      "x": 0.5,
+      "y": -0.23999999463558197,
+      "openness": 0.9200000166893005,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    },
+    {
+      "emote": 7,
+      "x": 0,
+      "y": 0.11999999731779099,
+      "openness": 0.8799999952316284,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    },
+    {
+      "emote": 8,
+      "x": 0,
+      "y": 0.10000000149011612,
+      "openness": 0.8999999761581421,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        }
+      }
+    },
+    {
+      "emote": 9,
+      "x": 0,
+      "y": -0.18000000715255737,
+      "openness": 1.0800000429153442,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    },
+    {
+      "emote": 10,
+      "x": 0.10000000149011612,
+      "y": -0.07999999821186066,
+      "openness": 1.0199999809265137,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 194,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    },
+    {
+      "emote": 11,
+      "x": 0,
+      "y": 0,
+      "openness": 1,
+      "props": {
+        "Keyboard": {
+          "x": 120,
+          "y": 212,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "TapLeft": {
+          "x": -25,
+          "y": -21,
+          "rotation": -0.11999999731779099,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "TapRight": {
+          "x": 28,
+          "y": -21,
+          "rotation": 0.10000000149011612,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Tool": {
+          "x": 173,
+          "y": 178,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Wrench": {
+          "x": 0,
+          "y": 0,
+          "rotation": -2.200000047683716,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Bolt": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Clock": {
+          "x": 179,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Minute": {
+          "x": 0,
+          "y": 0,
+          "rotation": 0,
+          "scaleX": 1,
+          "scaleY": 1
+        },
+        "Thought": {
+          "x": 174,
+          "y": 54,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Request": {
+          "x": 176,
+          "y": 176,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Retry": {
+          "x": 181,
+          "y": 183,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        },
+        "Warning": {
+          "x": 176,
+          "y": 182,
+          "rotation": 0,
+          "scaleX": 0,
+          "scaleY": 0
+        }
+      }
+    }
+  ]
+}

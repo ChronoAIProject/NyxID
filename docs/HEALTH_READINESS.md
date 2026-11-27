@@ -62,7 +62,8 @@ an unavailable, crashed or stalled checker reports only `checker`. Rate or
 concurrency rejection reports only `overloaded`.
 
 The production image freezes an inventory outside the document root at build
-time. Every admitted readiness request reopens entry HTML and all built JS/CSS,
+time. Every admitted readiness request reopens all built HTML (including the app
+shell and prerendered public pages) and all built JS/CSS,
 including lazy chunks, as nginx UID 101. Files must be nonempty readable regular
 files of their built size, confined to the document root; entry HTML must match
 its built SHA-256. Removal, truncation, permission loss or generic replacement
@@ -101,6 +102,10 @@ The older `frontend/scripts/production-policy-server.py` fixture overrides the
 image entrypoint for CSP/browser tests and does not launch this checker;
 `/frontend/ready` correctly reports `checker` there. Use
 `test-nginx-readiness.py` or the default production entrypoint for readiness.
+
+`Dockerfile.public-test` uses the default entrypoint with the same generated
+inventory and supervised checker as production, alongside its isolated backend
+fixture for public-page HTTP and browser tests.
 
 ## Routes, existing consumers and rollout
 

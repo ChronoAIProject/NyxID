@@ -1,0 +1,919 @@
+{
+  "groups": [
+    {
+      "id": "ai",
+      "label": "AI & voice",
+      "label_zh": "AI 与语音"
+    },
+    {
+      "id": "apps",
+      "label": "Apps & APIs",
+      "label_zh": "应用与 API"
+    },
+    {
+      "id": "custom",
+      "label": "Custom connections",
+      "label_zh": "自定义连接"
+    }
+  ],
+  "entries": [
+    {
+      "id": "airtable",
+      "label": "Airtable",
+      "slugs": [
+        "api-airtable"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=airtable.com&sz=64"
+    },
+    {
+      "id": "anthropic",
+      "label": "Anthropic",
+      "slugs": [
+        "llm-anthropic"
+      ],
+      "group": "ai",
+      "icon": "/landing/nyx/icons/claude.svg"
+    },
+    {
+      "id": "asana",
+      "label": "Asana",
+      "slugs": [
+        "api-asana"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=asana.com&sz=64"
+    },
+    {
+      "id": "attio",
+      "label": "Attio",
+      "slugs": [
+        "api-attio"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=attio.com&sz=64"
+    },
+    {
+      "id": "aurinko",
+      "label": "Aurinko Email",
+      "slugs": [
+        "api-aurinko"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=aurinko.io&sz=64"
+    },
+    {
+      "id": "aweber",
+      "label": "AWeber",
+      "slugs": [
+        "api-aweber"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=aweber.com&sz=64"
+    },
+    {
+      "id": "aws-cost-explorer",
+      "label": "AWS Cost Explorer",
+      "slugs": [
+        "aws-cost-explorer"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=aws.amazon.com&sz=64"
+    },
+    {
+      "id": "basecamp",
+      "label": "Basecamp",
+      "slugs": [
+        "api-basecamp"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=basecamp.com&sz=64"
+    },
+    {
+      "id": "bitbucket",
+      "label": "Bitbucket",
+      "slugs": [
+        "api-bitbucket"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=bitbucket.org&sz=64"
+    },
+    {
+      "id": "box",
+      "label": "Box",
+      "slugs": [
+        "api-box"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=box.com&sz=64"
+    },
+    {
+      "id": "cal",
+      "label": "Cal.com",
+      "slugs": [
+        "api-cal"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=cal.com&sz=64"
+    },
+    {
+      "id": "calendly",
+      "label": "Calendly",
+      "slugs": [
+        "api-calendly"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=calendly.com&sz=64"
+    },
+    {
+      "id": "canva",
+      "label": "Canva",
+      "slugs": [
+        "api-canva"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=canva.com&sz=64"
+    },
+    {
+      "id": "capsule-crm",
+      "label": "Capsule CRM",
+      "slugs": [
+        "api-capsule-crm"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=capsulecrm.com&sz=64"
+    },
+    {
+      "id": "clickup",
+      "label": "ClickUp",
+      "slugs": [
+        "api-clickup"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=clickup.com&sz=64"
+    },
+    {
+      "id": "close",
+      "label": "Close",
+      "slugs": [
+        "api-close"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=close.com&sz=64"
+    },
+    {
+      "id": "cloudconvert",
+      "label": "CloudConvert",
+      "slugs": [
+        "api-cloudconvert"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=cloudconvert.com&sz=64"
+    },
+    {
+      "id": "cloudflare",
+      "label": "Cloudflare",
+      "slugs": [
+        "api-cloudflare"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=cloudflare.com&sz=64"
+    },
+    {
+      "id": "cohere",
+      "label": "Cohere",
+      "slugs": [
+        "llm-cohere"
+      ],
+      "group": "ai",
+      "icon": "https://www.google.com/s2/favicons?domain=cohere.com&sz=64"
+    },
+    {
+      "id": "confluence",
+      "label": "Confluence",
+      "slugs": [
+        "api-confluence"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=atlassian.com&sz=64"
+    },
+    {
+      "id": "crowdin",
+      "label": "Crowdin",
+      "slugs": [
+        "api-crowdin"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=crowdin.com&sz=64"
+    },
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "slugs": [
+        "llm-deepseek"
+      ],
+      "group": "ai",
+      "icon": "https://www.google.com/s2/favicons?domain=deepseek.com&sz=64"
+    },
+    {
+      "id": "dialpad",
+      "label": "Dialpad",
+      "slugs": [
+        "api-dialpad"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=dialpad.com&sz=64"
+    },
+    {
+      "id": "discord",
+      "label": "Discord",
+      "slugs": [
+        "api-discord",
+        "api-discord-bot"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/discord.svg"
+    },
+    {
+      "id": "disqus",
+      "label": "Disqus",
+      "slugs": [
+        "api-disqus"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=disqus.com&sz=64"
+    },
+    {
+      "id": "dropbox",
+      "label": "Dropbox",
+      "slugs": [
+        "api-dropbox"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=dropbox.com&sz=64"
+    },
+    {
+      "id": "dub",
+      "label": "Dub",
+      "slugs": [
+        "api-dub"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=dub.co&sz=64"
+    },
+    {
+      "id": "elevenlabs",
+      "label": "ElevenLabs",
+      "slugs": [
+        "api-elevenlabs"
+      ],
+      "group": "ai",
+      "icon": "/landing/nyx/icons/elevenlabs.svg"
+    },
+    {
+      "id": "eventbrite",
+      "label": "Eventbrite",
+      "slugs": [
+        "api-eventbrite"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=eventbrite.com&sz=64"
+    },
+    {
+      "id": "facebook",
+      "label": "Facebook Pages",
+      "slugs": [
+        "api-facebook"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=developers.facebook.com&sz=64"
+    },
+    {
+      "id": "fathom",
+      "label": "Fathom",
+      "slugs": [
+        "api-fathom"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=fathom.ai&sz=64"
+    },
+    {
+      "id": "feishu",
+      "label": "Feishu",
+      "slugs": [
+        "api-feishu",
+        "api-feishu-bot"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=feishu.cn&sz=64"
+    },
+    {
+      "id": "figma",
+      "label": "Figma",
+      "slugs": [
+        "api-figma"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=figma.com&sz=64"
+    },
+    {
+      "id": "firecrawl",
+      "label": "Firecrawl",
+      "slugs": [
+        "api-firecrawl"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=firecrawl.dev&sz=64"
+    },
+    {
+      "id": "github",
+      "label": "GitHub",
+      "slugs": [
+        "api-github",
+        "api-github-pat"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/github.svg"
+    },
+    {
+      "id": "gitlab",
+      "label": "GitLab",
+      "slugs": [
+        "api-gitlab"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=about.gitlab.com&sz=64"
+    },
+    {
+      "id": "google-gmail",
+      "label": "Gmail",
+      "slugs": [
+        "api-google-gmail"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/gmail.svg"
+    },
+    {
+      "id": "google-ai",
+      "label": "Google AI",
+      "slugs": [
+        "llm-google-ai"
+      ],
+      "group": "ai",
+      "icon": "https://www.google.com/s2/favicons?domain=ai.google.dev&sz=64"
+    },
+    {
+      "id": "google-calendar",
+      "label": "Google Calendar",
+      "slugs": [
+        "api-google-calendar"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/google-calendar.svg"
+    },
+    {
+      "id": "google-cloud",
+      "label": "Google Cloud",
+      "slugs": [
+        "api-google-cloud"
+      ],
+      "group": "custom",
+      "detail": "Your endpoint & permissions",
+      "icon": "https://www.google.com/s2/favicons?domain=cloud.google.com&sz=64"
+    },
+    {
+      "id": "google-docs",
+      "label": "Google Docs",
+      "slugs": [
+        "api-google-docs"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/google-docs.svg"
+    },
+    {
+      "id": "google-drive",
+      "label": "Google Drive",
+      "slugs": [
+        "api-google-drive"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/google-drive.svg"
+    },
+    {
+      "id": "google-sheets",
+      "label": "Google Sheets",
+      "slugs": [
+        "api-google-sheets"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/google-sheets.svg"
+    },
+    {
+      "id": "google-slides",
+      "label": "Google Slides",
+      "slugs": [
+        "api-google-slides"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/google-docs.svg"
+    },
+    {
+      "id": "google-workspace",
+      "label": "Google Workspace",
+      "slugs": [
+        "api-google-workspace",
+        "api-google"
+      ],
+      "detail": "Drive, Docs, Sheets, Slides, Gmail & Calendar",
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=workspace.google.com&sz=64"
+    },
+    {
+      "id": "harvest",
+      "label": "Harvest",
+      "slugs": [
+        "api-harvest"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=getharvest.com&sz=64"
+    },
+    {
+      "id": "hubspot",
+      "label": "HubSpot",
+      "slugs": [
+        "api-hubspot"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=hubspot.com&sz=64"
+    },
+    {
+      "id": "ifttt",
+      "label": "IFTTT",
+      "slugs": [
+        "api-ifttt-mcp",
+        "api-ifttt"
+      ],
+      "detail": "MCP & webhooks",
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=ifttt.com&sz=64"
+    },
+    {
+      "id": "intercom",
+      "label": "Intercom",
+      "slugs": [
+        "api-intercom"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=intercom.com&sz=64"
+    },
+    {
+      "id": "jira",
+      "label": "Jira",
+      "slugs": [
+        "api-jira"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=atlassian.com&sz=64"
+    },
+    {
+      "id": "lark",
+      "label": "Lark",
+      "slugs": [
+        "api-lark",
+        "api-lark-bot"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=larksuite.com&sz=64"
+    },
+    {
+      "id": "lightfunnels",
+      "label": "Lightfunnels",
+      "slugs": [
+        "api-lightfunnels"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=services.lightfunnels.com&sz=64"
+    },
+    {
+      "id": "linear",
+      "label": "Linear",
+      "slugs": [
+        "api-linear"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=linear.app&sz=64"
+    },
+    {
+      "id": "linkedin",
+      "label": "LinkedIn",
+      "slugs": [
+        "api-linkedin"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=linkedin.com&sz=64"
+    },
+    {
+      "id": "microsoft",
+      "label": "Microsoft 365",
+      "slugs": [
+        "api-microsoft"
+      ],
+      "detail": "Outlook, Calendar & OneDrive",
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=microsoft.com&sz=64"
+    },
+    {
+      "id": "miro",
+      "label": "Miro",
+      "slugs": [
+        "api-miro"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=miro.com&sz=64"
+    },
+    {
+      "id": "mistral",
+      "label": "Mistral AI",
+      "slugs": [
+        "llm-mistral"
+      ],
+      "group": "ai",
+      "icon": "https://www.google.com/s2/favicons?domain=mistral.ai&sz=64"
+    },
+    {
+      "id": "monday",
+      "label": "monday.com",
+      "slugs": [
+        "api-monday"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=monday.com&sz=64"
+    },
+    {
+      "id": "mural",
+      "label": "Mural",
+      "slugs": [
+        "api-mural"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=mural.co&sz=64"
+    },
+    {
+      "id": "netlify",
+      "label": "Netlify",
+      "slugs": [
+        "api-netlify"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=netlify.com&sz=64"
+    },
+    {
+      "id": "notion",
+      "label": "Notion",
+      "slugs": [
+        "api-notion"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/notion.svg"
+    },
+    {
+      "id": "openai",
+      "label": "OpenAI",
+      "slugs": [
+        "llm-openai",
+        "llm-openai-codex"
+      ],
+      "group": "ai",
+      "icon": "/landing/nyx/icons/openai.svg"
+    },
+    {
+      "id": "openrouter",
+      "label": "OpenRouter",
+      "slugs": [
+        "llm-openrouter"
+      ],
+      "group": "ai",
+      "icon": "https://www.google.com/s2/favicons?domain=openrouter.ai&sz=64"
+    },
+    {
+      "id": "pagerduty",
+      "label": "PagerDuty",
+      "slugs": [
+        "api-pagerduty"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=pagerduty.com&sz=64"
+    },
+    {
+      "id": "patreon",
+      "label": "Patreon",
+      "slugs": [
+        "api-patreon"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=www.patreon.com&sz=64"
+    },
+    {
+      "id": "posthog",
+      "label": "PostHog",
+      "slugs": [
+        "api-posthog",
+        "api-posthog-eu"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=posthog.com&sz=64"
+    },
+    {
+      "id": "prisma",
+      "label": "Prisma",
+      "slugs": [
+        "api-prisma"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=prisma.io&sz=64"
+    },
+    {
+      "id": "productboard",
+      "label": "Productboard",
+      "slugs": [
+        "api-productboard"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=productboard.com&sz=64"
+    },
+    {
+      "id": "railway",
+      "label": "Railway",
+      "slugs": [
+        "api-railway"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=railway.com&sz=64"
+    },
+    {
+      "id": "reddit",
+      "label": "Reddit",
+      "slugs": [
+        "api-reddit"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=reddit.com&sz=64"
+    },
+    {
+      "id": "savvycal",
+      "label": "SavvyCal",
+      "slugs": [
+        "api-savvycal"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=savvycal.com&sz=64"
+    },
+    {
+      "id": "sentry",
+      "label": "Sentry",
+      "slugs": [
+        "api-sentry"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=sentry.io&sz=64"
+    },
+    {
+      "id": "shippo",
+      "label": "Shippo",
+      "slugs": [
+        "api-shippo"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=goshippo.com&sz=64"
+    },
+    {
+      "id": "slack",
+      "label": "Slack",
+      "slugs": [
+        "api-slack",
+        "api-slack-bot"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/slack.svg"
+    },
+    {
+      "id": "spotify",
+      "label": "Spotify",
+      "slugs": [
+        "api-spotify"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=spotify.com&sz=64"
+    },
+    {
+      "id": "square",
+      "label": "Square",
+      "slugs": [
+        "api-square"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=squareup.com&sz=64"
+    },
+    {
+      "id": "stripe",
+      "label": "Stripe",
+      "slugs": [
+        "api-stripe"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/stripe.svg"
+    },
+    {
+      "id": "supabase",
+      "label": "Supabase",
+      "slugs": [
+        "api-supabase",
+        "api-supabase-management"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=supabase.io&sz=64"
+    },
+    {
+      "id": "teable",
+      "label": "Teable",
+      "slugs": [
+        "api-teable"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=app.teable.ai&sz=64"
+    },
+    {
+      "id": "telegram-bot",
+      "label": "Telegram",
+      "slugs": [
+        "api-telegram-bot"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/telegram.svg"
+    },
+    {
+      "id": "telnyx",
+      "label": "Telnyx",
+      "slugs": [
+        "api-telnyx",
+        "api-telnyx-oauth"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=telnyx.com&sz=64"
+    },
+    {
+      "id": "ticktick",
+      "label": "TickTick",
+      "slugs": [
+        "api-ticktick"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=ticktick.com&sz=64"
+    },
+    {
+      "id": "tiktok",
+      "label": "TikTok",
+      "slugs": [
+        "api-tiktok"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=tiktok.com&sz=64"
+    },
+    {
+      "id": "todoist",
+      "label": "Todoist",
+      "slugs": [
+        "api-todoist"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=todoist.com&sz=64"
+    },
+    {
+      "id": "twilio",
+      "label": "Twilio",
+      "slugs": [
+        "api-twilio"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/twilio.svg"
+    },
+    {
+      "id": "twist",
+      "label": "Twist",
+      "slugs": [
+        "api-twist"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=twist.com&sz=64"
+    },
+    {
+      "id": "twitch",
+      "label": "Twitch",
+      "slugs": [
+        "api-twitch"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=twitch.tv&sz=64"
+    },
+    {
+      "id": "typeform",
+      "label": "Typeform",
+      "slugs": [
+        "api-typeform"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=typeform.com&sz=64"
+    },
+    {
+      "id": "unsplash",
+      "label": "Unsplash",
+      "slugs": [
+        "api-unsplash"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=unsplash.com&sz=64"
+    },
+    {
+      "id": "vercel",
+      "label": "Vercel",
+      "slugs": [
+        "api-vercel"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=vercel.com&sz=64"
+    },
+    {
+      "id": "webflow",
+      "label": "Webflow",
+      "slugs": [
+        "api-webflow"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=webflow.com&sz=64"
+    },
+    {
+      "id": "whatsapp-business",
+      "label": "WhatsApp Business",
+      "availability": "coming_soon",
+      "slugs": [
+        "api-whatsapp-business"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/whatsapp.svg"
+    },
+    {
+      "id": "twitter",
+      "label": "X (Twitter)",
+      "slugs": [
+        "api-twitter"
+      ],
+      "group": "apps",
+      "icon": "/landing/nyx/icons/x.svg"
+    },
+    {
+      "id": "xai",
+      "label": "xAI",
+      "slugs": [
+        "llm-xai"
+      ],
+      "group": "ai",
+      "icon": "https://www.google.com/s2/favicons?domain=x.ai&sz=64"
+    },
+    {
+      "id": "ynab",
+      "label": "YNAB",
+      "slugs": [
+        "api-ynab"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=ynab.com&sz=64"
+    },
+    {
+      "id": "zeplin",
+      "label": "Zeplin",
+      "slugs": [
+        "api-zeplin"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=zeplin.io&sz=64"
+    },
+    {
+      "id": "zoho-mail",
+      "label": "Zoho Mail",
+      "slugs": [
+        "api-zoho-mail"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=mail.zoho.com&sz=64"
+    },
+    {
+      "id": "zoom",
+      "label": "Zoom",
+      "slugs": [
+        "api-zoom"
+      ],
+      "group": "apps",
+      "icon": "https://www.google.com/s2/favicons?domain=zoom.com&sz=64"
+    }
+  ]
+}

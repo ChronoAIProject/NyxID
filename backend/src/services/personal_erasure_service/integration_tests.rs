@@ -587,17 +587,8 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                     if entry.collection == "users" {
                         continue;
                     }
-                    for person in [&owner, &other] {
-                        let id = format!(
-                            "domain-{}-{}-{}",
-                            entry.collection,
-                            field,
-                            if person == &owner {
-                                "target"
-                            } else {
-                                "bystander"
-                            }
-                        );
+                    for person in [&owner, &other, &org] {
+                        let id = format!("domain-{}-{field}-{person}", entry.collection);
                         let mut row = settled_durable_fixture(entry.collection, person, &id)
                             .or_else(|| {
                                 model_inputs
@@ -634,17 +625,7 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                                 row.insert("status", "offline");
                             }
                             "node_pending_credentials" | "node_service_bindings" => {
-                                row.insert(
-                                    "node_id",
-                                    format!(
-                                        "domain-nodes-user_id-{}",
-                                        if person == &owner {
-                                            "target"
-                                        } else {
-                                            "bystander"
-                                        }
-                                    ),
-                                );
+                                row.insert("node_id", format!("domain-nodes-user_id-{person}"));
                             }
                             "oracle_pools" => {
                                 row.insert("is_active", false);
@@ -729,7 +710,7 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                         }
                     } else if entry.collection == "service_change_events" && *field == "owner_id" {
                         covered_fields.insert((entry.collection, (*field).to_owned()));
-                        for person in [&owner, &other] {
+                        for person in [&owner, &other, &org] {
                             let id = format!("history-owner-{person}");
                             let row = doc! {"_id": &id, "owner_id": person};
                             db.collection::<Document>(entry.collection)
@@ -891,14 +872,6 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
     );
     let mut joined_children = Vec::new();
     for (index, (child, parent, field)) in joined_cases.into_iter().enumerate() {
-        let parent_id = format!("registry-joined-parent-{index}");
-        let child_id = if child == "channel_send_claims" {
-            format!("{parent_id}:claim")
-        } else if field == "_id" {
-            parent_id.clone()
-        } else {
-            format!("registry-joined-child-{index}")
-        };
         let parent_owner_field = crate::services::personal_data_registry::find(parent)
             .and_then(|entry| match entry.owner {
                 crate::services::personal_data_registry::OwnerSelector::Fields(fields) => {
@@ -907,24 +880,56 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
                 crate::services::personal_data_registry::OwnerSelector::NotPersonal => None,
             })
             .unwrap_or("user_id");
-        let mut parent_row = doc! {"_id": &parent_id};
-        parent_row.insert(parent_owner_field, &owner);
-        db.collection::<Document>(parent)
-            .insert_one(parent_row)
-            .await
-            .unwrap();
-        let mut child_row = doc! {"_id": &child_id, "fixture_marker": "registry-joined"};
-        if field != "_id" {
-            child_row.insert(field, &parent_id);
+        for person in [&owner, &other, &org] {
+            let parent_id = format!("registry-joined-parent-{index}-{person}");
+            let child_id = if child == "channel_send_claims" {
+                format!("{parent_id}:claim")
+            } else if field == "_id" {
+                parent_id.clone()
+            } else {
+                format!("registry-joined-child-{index}-{person}")
+            };
+            let mut parent_row = doc! {"_id": &parent_id};
+            parent_row.insert(parent_owner_field, person);
+            db.collection::<Document>(parent)
+                .insert_one(&parent_row)
+                .await
+                .unwrap();
+            let mut child_row = doc! {"_id": &child_id, "fixture_marker": "registry-joined"};
+            if field != "_id" {
+                child_row.insert(field, &parent_id);
+            }
+            if child == "channel_send_claims" {
+                child_row.insert("status", "sent");
+            }
+            db.collection::<Document>(child)
+                .insert_one(&child_row)
+                .await
+                .unwrap();
+            if person == &owner {
+                joined_children.push((child, child_id));
+            } else {
+                bystander_rows.push((parent, parent_id.into(), parent_row));
+                bystander_rows.push((child, child_id.into(), child_row));
+            }
         }
-        if child == "channel_send_claims" {
-            child_row.insert("status", "sent");
-        }
-        db.collection::<Document>(child)
-            .insert_one(child_row)
-            .await
-            .unwrap();
-        joined_children.push((child, child_id));
+    }
+    let agents = db.collection::<Document>(crate::models::assistant_agent::COLLECTION_NAME);
+    for (id, fields) in [
+        ("acl-user", doc! {"org_user_ids":[&owner,&other]}),
+        (
+            "acl-maintainer",
+            doc! {"org_maintainer_user_ids":[&owner,&other]},
+        ),
+        (
+            "acl-both",
+            doc! {"org_user_ids":[&owner,&other],"org_maintainer_user_ids":[&owner,&other]},
+        ),
+    ] {
+        let mut agent =
+            doc! {"_id":id,"user_id":&org,"kind":"specialist","org_access_revision":7_i64};
+        agent.extend(fields);
+        agents.insert_one(agent).await.unwrap();
     }
     // Force one lease expiry between pages to cover interruption/resumption.
     step(&state).await;
@@ -942,6 +947,30 @@ async fn registry_table_drives_worker_erasure_and_preserves_bystanders() {
         status(&db, &owner).await.unwrap().unwrap().status,
         ErasureStatus::Complete
     );
+    for (id, used, maintained) in [
+        ("acl-user", true, false),
+        ("acl-maintainer", false, true),
+        ("acl-both", true, true),
+    ] {
+        let agent = agents.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+        assert_eq!(agent.get_str("user_id"), Ok(org.as_str()));
+        assert_eq!(agent.get_i64("org_access_revision"), Ok(8));
+        for (field, revision, pruned) in [
+            ("org_user_ids", "org_use_revision", used),
+            (
+                "org_maintainer_user_ids",
+                "org_maintain_revision",
+                maintained,
+            ),
+        ] {
+            assert_eq!(agent.get_i64(revision), Ok(i64::from(pruned)));
+            if pruned {
+                assert_eq!(agent.get(field), Some(&bson::bson!([&other])));
+            } else {
+                assert!(!agent.contains_key(field));
+            }
+        }
+    }
     for (collection, id, before, target, disposition) in domain_rows {
         let row = db
             .collection::<Document>(collection)
@@ -1550,7 +1579,11 @@ async fn in_flight_old_inventory_reconciles_before_source_and_survives_legacy_wr
 
 #[tokio::test]
 async fn completed_erasure_redacts_every_persisted_attribution_and_global_identity_scan_is_clean() {
-    use crate::services::personal_attribution_service::test_support as attribution;
+    use crate::models::credits::Credits;
+    use crate::services::{
+        audit_chain_service, audit_service, billing::ledger,
+        personal_attribution_service::test_support as attribution,
+    };
     let (db, owner) = tests::fixture().await;
     let org = uuid::Uuid::new_v4().to_string();
     db.collection::<User>(USERS)
@@ -1620,11 +1653,27 @@ async fn completed_erasure_redacts_every_persisted_attribution_and_global_identi
         .await
         .unwrap()
         .unwrap();
-    let ledger =
-        doc! {"_id": "immutable-ledger", "owner_id": &owner, "entry_hash": "immutable-test-hash"};
-    db.collection::<Document>("billing_ledger")
-        .insert_one(ledger.clone())
+    let ledger_key = uuid::Uuid::new_v4().into_bytes();
+    let ledger_entry = ledger::exact_entry(
+        &owner,
+        "immutable-ledger",
+        "usage_settled",
+        "usage-settled:erasure-fixture".into(),
+        ledger::transfer(
+            format!("wallet:{owner}"),
+            "platform:usage".into(),
+            Credits::from_whole(1),
+        ),
+        None,
+    );
+    let ledger_entry = ledger::append_chained_entry(&db, ledger_entry, &ledger_key)
         .await
+        .unwrap();
+    let ledger_before = db
+        .collection::<Document>("billing_ledger")
+        .find_one(doc! {"_id": &ledger_entry.id})
+        .await
+        .unwrap()
         .unwrap();
     let state = test_app_state(db.clone());
     until_source_removed(&state, &owner).await;
@@ -1675,10 +1724,33 @@ async fn completed_erasure_redacts_every_persisted_attribution_and_global_identi
     );
     assert_eq!(
         db.collection::<Document>("billing_ledger")
-            .find_one(doc! {"_id": "immutable-ledger"})
+            .find_one(doc! {"_id": &ledger_entry.id})
             .await
             .unwrap(),
-        Some(ledger)
+        Some(ledger_before)
+    );
+    let audit_report = audit_chain_service::verify_chain(
+        &db,
+        audit_service::audit_chain_hmac_key().expect("fixture audit chain key"),
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        audit_report.status,
+        audit_chain_service::AuditChainStatus::Ok
+    );
+    assert!(audit_report.checked_count > 0);
+    let ledger_report = ledger::verify_chain(&db, &ledger_key, None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(ledger_report.status, ledger::BillingLedgerStatus::Ok);
+    assert_eq!(ledger_report.checked_count, 1);
+    assert_eq!(
+        ledger_report.head_hash.as_deref(),
+        Some(ledger_entry.entry_hash.as_str())
     );
 }
 

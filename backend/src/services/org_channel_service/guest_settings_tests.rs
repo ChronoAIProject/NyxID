@@ -52,13 +52,13 @@ async fn org_channel_guest_settings_one_switch_defaults_and_fences_edits() {
         serde_json::from_value(json!({"enabled":true,"expected_revision":""})).unwrap();
     for actor in [&f.org.member, &f.org.viewer, &f.org.outsider] {
         assert!(
-            management::update(&db, actor, &f.channel, input.clone())
+            management::update(&db, actor, &f.channel, input.clone(), None)
                 .await
                 .is_err()
         );
     }
     let stale = f.channel.clone();
-    management::update(&db, &f.org.admin, &f.channel, input.clone())
+    management::update(&db, &f.org.admin, &f.channel, input.clone(), None)
         .await
         .unwrap();
     reload(&mut f).await;
@@ -70,14 +70,14 @@ async fn org_channel_guest_settings_one_switch_defaults_and_fences_edits() {
     assert_eq!(f.channel.private_chats.as_deref(), Some("everyone"));
     assert!(f.guest("new-guest").await.org_execution.unwrap().guest);
     assert!(matches!(
-        management::update(&db, &f.org.admin, &f.channel, input.clone()).await,
+        management::update(&db, &f.org.admin, &f.channel, input.clone(), None).await,
         Err(AppError::Conflict(_))
     ));
     // Even a legacy client with no revision must not overwrite a concurrently read policy.
     let mut legacy = input;
     legacy.expected_revision = None;
     assert!(matches!(
-        management::update(&db, &f.org.admin, &stale, legacy).await,
+        management::update(&db, &f.org.admin, &stale, legacy, None).await,
         Err(AppError::Conflict(_))
     ));
     assert_eq!(
@@ -103,6 +103,7 @@ async fn org_channel_guest_settings_one_switch_defaults_and_fences_edits() {
             "daily_credits":"2","expected_revision":view["guest_revision"]
         }))
         .unwrap(),
+        None,
     )
     .await
     .unwrap();
@@ -135,7 +136,8 @@ async fn org_channel_guest_settings_inactive_rows_are_readable_but_not_editable(
                 &db,
                 &f.org.admin,
                 &f.channel,
-                serde_json::from_value(json!({"enabled":false})).unwrap()
+                serde_json::from_value(json!({"enabled":false})).unwrap(),
+                None
             )
             .await,
             Err(AppError::Conflict(_))
@@ -521,6 +523,7 @@ async fn org_access_2283_flag_off_management_keeps_forbidden_while_transport_sus
             &f.org.admin,
             &f.channel,
             serde_json::from_value(json!({"enabled":false})).unwrap(),
+            None,
         )
         .await,
     );

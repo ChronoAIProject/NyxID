@@ -1486,6 +1486,8 @@ async fn execution_proposal_personal_policy_coverage_never_satisfies_an_org_or_o
         ApprovalOutcome::NeedsApproval(PendingApproval {
             options: Default::default(),
             resolution: ApprovalResolution {
+                org_config: None,
+                connection_id: None,
                 required: true,
                 mode: ApprovalMode::PerRequest,
                 effect: ApprovalEffect::RequireApproval,
@@ -1750,3 +1752,6 @@ async fn expired_retained_request_is_not_reraised_by_same_turn_retry() {
     assert!(f.server.received_requests().await.unwrap().is_empty());
     f.cleanup().await;
 }
+
+#[path = "proposal_record_tests.rs"]
+mod mixed_records;

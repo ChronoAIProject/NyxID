@@ -68,6 +68,26 @@ class ReaderTests(unittest.TestCase):
         result = trace.report(TURN, [trace.clean_record(link)])
         self.assertEqual(result["coverage"]["ingress_requests_missing"], [REQUEST])
 
+    def test_guest_service_failure_preserves_only_exact_turn_evidence(self):
+        failed = record(stage="mcp", phase="milestone", outcome="failed",
+                        guest_service_failure="downstream_http_error", http_status=500)
+        gap = record(stage="ingress", phase="milestone", turn_id=None, trace_id=None,
+                     gap_reason="missing_parent")
+        unlinked = dict(gap, outcome="rejected", guest_service_failure="approval_required")
+        link = record(stage="admission", phase="link", ingress_request_id=REQUEST)
+        invalid = [dict(failed, guest_service_failure="secret-canary"),
+                   dict(failed, outcome="rejected"), dict(failed, http_status=None),
+                   dict(failed, gap_reason="missing_parent"),
+                   dict(unlinked, gap_reason=None), dict(unlinked, outcome="failed")]
+        rows, invalid_count, _ = read([gap, unlinked, link, failed, *invalid])
+        result = trace.report(TURN, rows, invalid_count)
+        self.assertEqual(invalid_count, len(invalid))
+        self.assertEqual(result["coverage"]["ingress_requests_missing"], [])
+        rendered = trace.render_text(result)
+        self.assertIn("nyxid/mcp milestone: failed, downstream_http_error (HTTP 500)", rendered)
+        self.assertNotIn("approval_required", json.dumps(result))
+        self.assertNotIn("secret-canary", json.dumps(result))
+
     def test_clock_skew_is_not_used_as_duration(self):
         rows, _, _ = read([record(timestamp="2026-11-07T01:00:01Z"), record(phase="end", outcome="completed", duration_ms=5)])
         result = trace.report(TURN, rows)

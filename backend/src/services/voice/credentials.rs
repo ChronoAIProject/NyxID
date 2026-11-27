@@ -580,6 +580,7 @@ async fn authorize_operation(
             auth.api_key_id.as_deref().unwrap_or_default(),
             false,
             selected.source.as_deref() == Some("auto_provision"),
+            Some(&selected.id),
             auth.assistant_chat.as_deref(),
         )
         .await?;

@@ -17,6 +17,26 @@ use mongodb::{
     bson::{self, doc},
 };
 use sha2::{Digest, Sha256};
+
+pub(super) async fn require_legacy_guest_lane(db: &Database, binding: &Binding) -> AppResult<()> {
+    use crate::services::channel_guest_access::{GuestMode, select_mode_for_bot};
+    let Some(parent) = &binding.parent_channel_bot_id else {
+        return Ok(());
+    };
+    let bot = crate::services::channel_bot_service::get_bot(db, parent).await?;
+    if bot.user_id != binding.user_id || !bot.is_active {
+        return Err(AppError::Forbidden(
+            "Call adapter parent is unavailable".into(),
+        ));
+    }
+    if select_mode_for_bot(db, &bot).await? == GuestMode::Legacy {
+        return Ok(());
+    }
+    Err(AppError::Forbidden(
+        "Guest authority is unavailable for this call adapter".into(),
+    ))
+}
+
 pub fn identity(parts: &[&str]) -> String {
     let mut h = Sha256::new();
     for p in parts {
@@ -391,6 +411,7 @@ pub async fn admit(
     if text.is_empty() || text.len() > 8192 {
         return Err(AppError::ValidationError("Utterance exceeds limit".into()));
     }
+    require_legacy_guest_lane(&state.db, b).await?;
     super::binding::live(state, b).await?;
     let mut tx = state.db.client().start_session().await?;
     let db = state.db.clone();
@@ -459,6 +480,7 @@ pub async fn fence(state: &AppState, s: &CallSession) -> AppResult<()> {
         return Err(AppError::AssistantTurnRequired);
     }
     let b = super::binding::load(state, &s.binding_id).await?;
+    require_legacy_guest_lane(&state.db, &b).await?;
     if b.revision != row.binding_revision
         || b.verified_credential_identity != row.credential_identity
         || b.agent_id.is_empty()
@@ -501,6 +523,7 @@ pub async fn fence_tool(
     let now = bson::DateTime::from_chrono(Utc::now());
     let _session=db.collection::<CallSession>(SESSIONS).find_one(doc!{"_id":&a.session_id,"user_id":owner,"binding_id":&a.binding_id,"binding_revision":a.binding_revision,"credential_identity":&a.credential_identity,"generation":a.generation,"active_turn_id":turn,"conversation_id":conversation,"state":{"$in":["prepared","active"]},"expires_at":{"$gt":now},"lease_expires_at":{"$gt":now}}).await?.ok_or(AppError::AssistantTurnRequired)?;
     let b=db.collection::<Binding>(BINDINGS).find_one(doc!{"_id":&a.binding_id,"user_id":owner,"enabled":true,"revision":a.binding_revision,"verified_credential_identity":&a.credential_identity}).await?.ok_or(AppError::AssistantTurnRequired)?;
+    require_legacy_guest_lane(db, &b).await?;
     super::binding::read_authority(db, &b).await?;
     let row=db.collection::<AssistantConversation>(THREADS).find_one(doc!{"_id":conversation,"user_id":owner,"active_turn.turn_id":turn,"active_turn.stop_requested":{"$ne":true}}).await?.ok_or(AppError::AssistantTurnRequired)?;
     if row

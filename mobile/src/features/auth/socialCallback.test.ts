@@ -28,18 +28,11 @@ test("social callbacks require the exact scheme, authority and path", () => {
   }
 });
 
-test("the actual native callback preserves successful session fields", () => {
+test("the native callback returns only a one-time code", () => {
+  const code = "a".repeat(64);
   assert.deepEqual(
-    parseSocialCallback(
-      `${SOCIAL_CALLBACK_URL}?status=success&provider=github&access_token=synthetic-access&refresh_token=synthetic-refresh&expires_in=3600`,
-    ),
-    {
-      status: "success",
-      provider: "github",
-      accessToken: "synthetic-access",
-      refreshToken: "synthetic-refresh",
-      expiresIn: 3600,
-    },
+    parseSocialCallback(SOCIAL_CALLBACK_URL + "?status=success&provider=github&code=" + code),
+    { status: "success", provider: "github", code },
   );
 });
 
@@ -61,8 +54,6 @@ test('Google, GitHub and Apple MFA callbacks carry only a fragment challenge', (
   for (const provider of ['google', 'github', 'apple']) {
     const result = parseSocialCallback(`nyxid://auth/social/callback#status=mfa_required&provider=${provider}&mfa_token=private-challenge`);
     assert.deepEqual(result, { status: 'mfa_required', provider, mfaToken: 'private-challenge' });
-    assert.equal(result?.accessToken, undefined);
-    assert.equal(result?.refreshToken, undefined);
     assert.equal(parseSocialCallback(`nyxid://auth/social/callback?status=mfa_required&provider=${provider}&mfa_token=query-token`)?.mfaToken, undefined);
   }
 });
@@ -73,10 +64,18 @@ test('social callback parser rejects foreign origins and prefix lookalikes', () 
   }
 });
 
-test('non-MFA social login preserves its token response contract', () => {
-  assert.deepEqual(parseSocialCallback('nyxid://auth/social/callback?status=success&provider=apple&access_token=access&refresh_token=refresh&expires_in=900'), {
-    status: 'success', provider: 'apple', accessToken: 'access', refreshToken: 'refresh', expiresIn: 900,
-  });
+test("legacy success and duplicate codes are rejected", () => {
+  const code = "a".repeat(64);
+  for (const query of [
+    "access_token=fixture&refresh_token=fixture",
+    "code=" + code + "&code=" + code,
+    "code=invalid",
+  ]) {
+    assert.deepEqual(
+      parseSocialCallback(SOCIAL_CALLBACK_URL + "?status=success&provider=apple&" + query),
+      { status: "error", provider: "apple", error: "social_auth_invalid_code" },
+    );
+  }
 });
 
 test('MFA callbacks reject missing, query-only or malformed fragment challenges', () => {
@@ -90,7 +89,7 @@ test('MFA callbacks reject missing, query-only or malformed fragment challenges'
 test('success and error never expose an injected fragment MFA challenge', () => {
   for (const status of ['success', 'error']) {
     const result = parseSocialCallback(`nyxid://auth/social/callback?status=${status}&access_token=access#mfa_token=private-challenge`);
-    assert.equal(result?.status, status);
+    assert.equal(result?.status, "error");
     assert.equal(result?.mfaToken, undefined);
   }
 });

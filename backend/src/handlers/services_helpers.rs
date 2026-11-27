@@ -124,10 +124,7 @@ pub(crate) fn is_capability_denial(error: &AppError) -> bool {
 
 /// Verify that the authenticated user has admin privileges.
 pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
-    if !is_admin(state, auth_user).await? {
-        return Err(AppError::Forbidden("Admin access required".to_string()));
-    }
-    Ok(())
+    super::admin_helpers::require_admin(state, auth_user).await
 }
 
 pub async fn is_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<bool> {
@@ -141,7 +138,14 @@ pub async fn is_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<bool>
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
-    Ok(platform_role.is_admin())
+    if !platform_role.is_admin() {
+        return Ok(false);
+    }
+    Ok(
+        super::admin_helpers::privileged_session_denial(state, auth_user, &user_model)
+            .await
+            .is_none(),
+    )
 }
 
 /// Verify admin or service creator.
@@ -166,14 +170,17 @@ pub async fn require_admin_or_creator(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
+    if service.created_by == user_id_str {
+        return Ok(());
+    }
     let platform_role = role_service::resolve_platform_role(&state.db, &user_model).await?;
-    if !platform_role.is_admin() && service.created_by != user_id_str {
+    if !platform_role.is_admin() {
         return Err(AppError::Forbidden(
             "Only admins or the service creator can perform this action".to_string(),
         ));
     }
 
-    Ok(())
+    super::admin_helpers::require_privileged_session(state, auth_user, &user_model).await
 }
 
 /// Fetch a service by ID or return NotFound.

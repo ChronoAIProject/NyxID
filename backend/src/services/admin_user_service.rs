@@ -169,6 +169,7 @@ async fn create_user_with_actor(
         avatar_url: None,
         email_verified: true,
         email_verification_token: None,
+        email_verification_expires_at: None,
         password_reset_token: None,
         password_reset_expires_at: None,
         is_active: true,
@@ -950,6 +951,7 @@ mod tests {
             avatar_url: None,
             email_verified: true,
             email_verification_token: None,
+            email_verification_expires_at: None,
             password_reset_token: None,
             password_reset_expires_at: None,
             is_active: true,
@@ -1582,7 +1584,8 @@ mod tests {
                 State(state),
                 test_auth_user(&admin_id),
                 HeaderMap::new(),
-                Path(org_id)
+                Path(org_id),
+                axum::extract::Query(crate::handlers::users::ErasureResponseQuery::default()),
             )
             .await,
             Err(AppError::ValidationError(_))
@@ -1832,6 +1835,7 @@ mod tests {
             avatar_url: None,
             email_verified: true,
             email_verification_token: None,
+            email_verification_expires_at: None,
             password_reset_token: None,
             password_reset_expires_at: None,
             is_active: true,

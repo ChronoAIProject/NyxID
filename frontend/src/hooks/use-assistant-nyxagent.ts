@@ -1,3 +1,4 @@
+import { ApiError } from "@/lib/api-client";
 import allowedCardContinuation from "../../../shared/allowed-card-continuation.json";
 import { historyErrorMessage, HISTORY_UNSUPPORTED } from "@/schemas/assistant-history-compat";
 import type { UploadedMessage } from "@/lib/assistant/uploads";
@@ -246,6 +247,10 @@ export function useNyxAgentAssistantChat({
             );
     },
   });
+  const historyDenied = history.error instanceof ApiError && (history.error.status === 403 || history.error.status === 404);
+  useEffect(() => {
+    if (historyDenied) void queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.agents(userId) });
+  }, [historyDenied, queryClient, userId]);
   // A settled turn, a decided card or a resolved wait changes the agent's
   // summary and its thread row.
   const seenHistory = useRef<NyxAgentHistory | undefined>(undefined);
@@ -254,9 +259,14 @@ export function useNyxAgentAssistantChat({
     const page = history.data;
     seenHistory.current = page;
     if (!previous || !page || previous.conversation.id !== page.conversation.id) return;
+    const pendingChanged =
+      previous.conversation.pending_acknowledgements !==
+      page.conversation.pending_acknowledgements;
+    if (pendingChanged)
+      void queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.activity(userId) }, { cancelRefetch: false });
     if (
       (previous.conversation.active_turn && !page.conversation.active_turn) ||
-      previous.conversation.pending_acknowledgements !== page.conversation.pending_acknowledgements ||
+      pendingChanged ||
       // Something the thread waited for happened: NyxID resumes it.
       previous.waiting.length > page.waiting.length
     ) {
@@ -355,6 +365,7 @@ export function useNyxAgentAssistantChat({
         queryClient.invalidateQueries({ queryKey: historyKey }, { cancelRefetch: false }),
         queryClient.invalidateQueries({ queryKey: threadsKey }, { cancelRefetch: false }),
         queryClient.invalidateQueries({ queryKey: agentsKey }, { cancelRefetch: false }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.activity(userId) }, { cancelRefetch: false }),
       ]);
     },
   });
@@ -363,7 +374,7 @@ export function useNyxAgentAssistantChat({
   // continuation is sent as soon as its turn has settled and history is fresh.
   useEffect(() => {
     for (const [conversationId, queued] of pendingContinuations.current) {
-      if (queued.owner !== userId) {
+      if (queued.owner !== userId || !enabled || historyDenied) {
         pendingContinuations.current.delete(conversationId);
         continue;
       }
@@ -434,6 +445,7 @@ export function useNyxAgentAssistantChat({
       : { ...viewSession, clientId: "nyxagent-draft", conversationId: undefined },
     continuations: nyxAgentTransport.continuations(viewId),
     isStreaming: nyxAgentTransport.isRunning(viewId),
+    historyDenied,
     isLoading: history.isLoading,
     interruption: nyxAgentTransport.getInterruption(viewId),
     error: historyErrorMessage(history.error ?? threads.threadsError ?? agents.error)

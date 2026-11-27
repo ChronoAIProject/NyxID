@@ -60,7 +60,7 @@ pub async fn capabilities(
     super::super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let row = engine::get(&state.db, &owner, &id).await?;
+    let row = engine::get_public(&state.db, &owner, &id).await?;
     if row.guest_turn
         || row.group_id.is_some()
         || row.voice_parent_conversation_id.is_some()
@@ -175,7 +175,7 @@ pub async fn steer(
     super::super::login_client_context::require_first_party_human(&auth)?;
     let owner = auth.user_id.to_string();
     engine::require_enabled(&state.db, &owner).await?;
-    let row = engine::get(&state.db, &owner, &id).await?;
+    let row = engine::get_public(&state.db, &owner, &id).await?;
     let policy = request.extensions().get::<BillingRoutePolicy>().copied();
     let Ok(bytes) = axum::body::to_bytes(request.into_body(), engine::MAX_REQUEST_BYTES).await
     else {

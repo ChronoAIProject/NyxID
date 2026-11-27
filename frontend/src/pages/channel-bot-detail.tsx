@@ -1,4 +1,5 @@
 import { ChannelBotHealthCard } from "@/components/channels/channel-bot-health-card";
+import { GuestSetupEditor } from "@/features/channel-guest-access/guest-setup";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
@@ -19,7 +20,9 @@ import {
   useVerifyChannelBot,
 } from "@/hooks/use-channel-bots";
 import {
+  useChannelConversation,
   useChannelConversations,
+  useUpdateChannelConversation,
   useCreateChannelConversation,
   useDeleteChannelConversation,
 } from "@/hooks/use-channel-conversations";
@@ -33,10 +36,12 @@ import {
   type UpdateChannelBotFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
-import { editableChannelFields, TELEGRAM_MANAGER_DELETION_NOTE } from "@/lib/channel-platforms";
+import { channelDeletionNote, editableChannelFields, isMetaInbox } from "@/lib/channel-platforms";
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
+import { ManagedMetaDetail } from "@/components/channels/managed-meta";
+import { MetaCustomerSetup } from "@/components/channels/meta-customer-setup";
 import { CredentialVerification, RouteReadiness } from "@/components/channels/bot-readiness";
 import { routeAgentIssue, verificationErrorMessage } from "@/lib/channel-readiness";
 import { PageHeader } from "@/components/shared/page-header";
@@ -101,6 +106,7 @@ import type {
   VerifyChannelBotResponse,
 } from "@/types/channels";
 import {
+  channelDeleteMessage,
   conversationTypeLabel,
   statusBadgeVariant,
   statusLabel,
@@ -111,6 +117,7 @@ function ConversationRow({
   apiKeyNames,
   botId,
   onDelete,
+  onGuestRoute,
   activities,
   latest,
   activityError,
@@ -120,6 +127,7 @@ function ConversationRow({
   readonly apiKeyNames: ReadonlyMap<string, string>;
   readonly botId: string;
   readonly onDelete: (id: string) => void;
+  readonly onGuestRoute: (id: string) => void;
   readonly activities: readonly ChannelActivityDescriptor[];
   readonly latest?: ChannelActivityItem;
   readonly activityError: boolean;
@@ -177,6 +185,9 @@ function ConversationRow({
               >
                 <MessageSquare className="mr-2 h-4 w-4" aria-hidden="true" />{translateUi("View messages")}</Link>
             </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onGuestRoute(conversation.id)}>
+              {translateUi("Route guest access")}
+            </DropdownMenuItem>
             <DropdownMenuItem
               onClick={() => onDelete(conversation.id)}
               className="text-destructive focus:text-destructive"
@@ -219,6 +230,7 @@ function ConversationsSection({
   const keys = useApiKeys({ orgId: ownerOrgId });
   const [addOpen, setAddOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
+  const [guestRoute, setGuestRoute] = useState<string>();
 
   return (
     <div className="space-y-4">
@@ -266,6 +278,9 @@ function ConversationsSection({
                           <Link to={`/channel-bots/${botId}/conversations/${conv.id}` as string}>
                             <MessageSquare className="mr-2 h-4 w-4" />{translateUi(" View messages")}</Link>
                         </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setGuestRoute(conv.id)}>
+                          {translateUi("Route guest access")}
+                        </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => setDeleteTarget(conv.id)} className="text-destructive focus:text-destructive">
                           <Trash2 className="mr-2 h-4 w-4 text-destructive" />{translateUi(" Delete")}</DropdownMenuItem>
                       </DropdownMenuContent>
@@ -310,6 +325,7 @@ function ConversationsSection({
                     apiKeyNames={apiKeyNames}
                     botId={botId}
                     onDelete={setDeleteTarget}
+                    onGuestRoute={setGuestRoute}
                     activities={activities}
                     latest={latest(conv.id)}
                     activityError={!!activityQuery.error}
@@ -330,11 +346,81 @@ function ConversationsSection({
         ownerLabel={ownerLabel}
         isTelegramManager={isTelegramManager}
       />
+      {guestRoute && <GuestRouteDialog key={guestRoute} routeId={guestRoute}
+        ownerOrgId={ownerOrgId} onClose={() => setGuestRoute(undefined)} />}
       <DeleteRouteDialog
         routeId={deleteTarget}
         onClose={() => setDeleteTarget(null)}
       />
     </div>
+  );
+}
+
+function guestRouteStatus(state?: string) {
+  switch (state) {
+    case "guest_access": return translateUi("Guest access v1 is active for this route.");
+    case "hosted": return translateUi("This route uses the hosted bot’s guest settings.");
+    case "ordinary_dedicated_key_required":
+      return translateUi("This route follows ordinary settings until a dedicated compatible key is assigned.");
+    case "ordinary_legacy_callback_pending":
+      return translateUi("This route follows ordinary settings while a legacy callback is pending.");
+    case "guest_access_key_unavailable":
+      return translateUi("Guest access is paused because the dedicated key is unavailable.");
+    case "authority_unavailable":
+      return translateUi("The current guest access status is unavailable.");
+    default: return undefined;
+  }
+}
+
+function GuestRouteDialog({ routeId, ownerOrgId, onClose }: {
+  readonly routeId: string;
+  readonly ownerOrgId: string | null;
+  readonly onClose: () => void;
+}) {
+  useUiTranslation();
+  const route = useChannelConversation(routeId);
+  const keys = useApiKeys({ orgId: ownerOrgId });
+  const update = useUpdateChannelConversation();
+  const [selection, setSelection] = useState<string>();
+  const selectedKey = selection ?? route.data?.agent_api_key_id;
+  const options = (keys.data ?? []).filter((key) => !routeAgentIssue(key, ownerOrgId));
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) onClose(); }}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{translateUi("Route guest access")}</DialogTitle>
+          <DialogDescription>
+            {guestRouteStatus(route.data?.guest_access_state) ?? translateUi("This route follows ordinary channel settings.")}
+          </DialogDescription>
+        </DialogHeader>
+        {route.data && route.data.guest_access_state !== "hosted" && (
+          <div className="space-y-2">
+            <Select value={selectedKey} onValueChange={setSelection}>
+              <SelectTrigger aria-label={translateUi("Agent key")}>
+                <SelectValue placeholder={translateUi("Select an agent key")} />
+              </SelectTrigger>
+              <SelectContent>
+                {options.map((key) => <SelectItem key={key.id} value={key.id}>{key.name}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <p className="type-secondary text-muted-foreground">
+              {translateUi("Dedicate a compatible key used only by this route. A dedicated key loses general proxy and model access while this route is enrolled.")}
+            </p>
+            <Button variant="primary" disabled={update.isPending || !options.some((key) => key.id === selectedKey)}
+              onClick={() => {
+                if (selectedKey) update.mutate({
+                  id: routeId,
+                  agent_api_key_id: selectedKey,
+                  dedicate_agent_key_for_guest_access: true,
+                }, { onSuccess: () => { void route.refetch(); } });
+              }}>
+              {translateUi("Dedicate this key for guest access")}
+            </Button>
+          </div>
+        )}
+        {(route.error || update.error) && <ErrorBanner message={(update.error ?? route.error)?.message ?? ""} />}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -420,8 +506,10 @@ export function AddRouteDialog({
         target_org_id: ownerOrgId ?? undefined,
       },
       {
-        onSuccess: () => {
-          toast.success(translateUi("Conversation route added"));
+        onSuccess: (route) => {
+          toast.success(translateUi("Conversation route added"), {
+            description: guestRouteStatus(route?.guest_access_state),
+          });
           reset();
           onOpenChange(false);
         },
@@ -466,6 +554,19 @@ export function AddRouteDialog({
               </p>
             </div>
           )}
+
+          <div className="space-y-2">
+            <div className="flex items-center gap-3">
+              <Switch id="dedicate_guest_route_key"
+                checked={watch("dedicate_agent_key_for_guest_access") ?? false}
+                onCheckedChange={(checked) => setValue("dedicate_agent_key_for_guest_access", checked || undefined)}
+              />
+              <Label htmlFor="dedicate_guest_route_key">{translateUi("Dedicate this key for guest access")}</Label>
+            </div>
+            <p className="type-secondary text-muted-foreground">
+              {translateUi("Dedicate a compatible key used only by this route. A dedicated key loses general proxy and model access while this route is enrolled.")}
+            </p>
+          </div>
 
           {keysError ? <ErrorBanner message={translateUi("Agent keys could not be loaded for this owner.")} onRetry={() => void refetchKeys()} /> : keysLoading ? <p className="text-13 text-muted-foreground">{translateUi("Loading agent keys…")}</p> : <RouteReadiness keys={apiKeys ?? []} ownerOrgId={ownerOrgId} ownerLabel={ownerLabel} />}
 
@@ -662,7 +763,7 @@ function DeleteBotDialog({
       <DialogContent className="md:max-w-md">
         <DialogHeader>
           <DialogTitle>{translateUi("Delete Channel Bot")}</DialogTitle>
-          <DialogDescription>{translateUi("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && translateUi(" {{deletionNote}}", { deletionNote: deletionNote })}
+          <DialogDescription>{translateUi("This deletes the NyxID connection and its conversation routes. The bot remains on the messaging platform. Reconnecting requires assigning its agents again.")}{deletionNote && <> {translateUi(deletionNote)}</>}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -816,6 +917,10 @@ function EditBotNameDialog({
   );
 }
 
+function MetaVerificationHint() {
+  return <p role="status" className="text-13 text-muted-foreground">{translateUi("Run Verify Bot to check the inbox subscription. When it is active, send a customer message and confirm the reply in the same conversation.")}</p>;
+}
+
 function EditVerificationSection({
   bot,
 }: {
@@ -869,8 +974,10 @@ function EditVerificationSection({
             {errors[field.name] && <p className="text-13 text-destructive">{errors[field.name]?.message}</p>}
           </div>
         ))}
-        {bot.platform === "whatsapp" ? (
-          <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately. Run Verify Bot to check the saved credentials, then confirm a new message exchange with your agent.")}</p>
+        {(bot.platform === "whatsapp" || isMetaInbox(bot.platform)) ? (
+          <p className="text-13 text-muted-foreground">{isMetaInbox(bot.platform) && bot.status === "suspended"
+            ? translateUi("After saving, the inbox owner or organization admin can run {{command}} to resume and verify delivery. If the platform is suspended, ask a platform admin to resume it first. Then send a message and confirm its reply.", { command: `nyxid channel-bot delivery ${bot.id} --resume` })
+            : translateUi("Saving stores these credentials immediately. Run Verify Bot to check the saved credentials, then confirm a new message exchange with your agent.")}</p>
         ) : (bot.status === "pending" || bot.status === "pending_webhook") && (
           <p className="text-13 text-muted-foreground">{translateUi("Saving stores these credentials immediately (watch the Configured badges above). The bot stays pending until the platform delivers its first verified webhook, which changes its status to Active.")}</p>
         )}
@@ -1092,11 +1199,9 @@ export function ChannelBotDetailPage() {
   async function handleDelete() {
     try {
       const result = await deleteMutation.mutateAsync(botId);
-      if (result?.webhook_cleanup === "failed") {
-        toast.warning(translateUi("Bot deleted. Remove its remaining email subscription in the Aurinko dashboard."));
-      } else {
-        toast.success(translateUi("Bot deleted"));
-      }
+      const message = channelDeleteMessage(result);
+      if (result?.webhook_cleanup === "failed") toast.warning(message);
+      else toast.success(message);
       void navigate({ to: "/channel-bots" });
     } catch (err) {
       toast.error(
@@ -1200,9 +1305,13 @@ export function ChannelBotDetailPage() {
         </p>
       ))}
 
-      {bot.status === "pending_webhook" && (bot.credential_source === "telegram_manager" ? <p role="status" className="text-13 text-muted-foreground">{translateUi("Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.")}</p> : bot.credential_source === "platform" ? <p role="status" className="text-13 text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? translateUi("Managed setup needs attention. Review the setup status below.") : translateUi("Waiting for the first verified inbound message.")}</p> : <WebhookSetupChecklist bot={bot} />)}
+      {bot.status === "pending_webhook" && (isMetaInbox(bot.platform) ? <MetaVerificationHint /> : bot.credential_source === "telegram_manager" ? <p role="status" className="text-13 text-muted-foreground">{translateUi("Verify Bot checks the existing manager webhook. Review any setup errors in Admin → Platform Credentials → Telegram — bot creation.")}</p> : bot.credential_source === "platform" ? <p role="status" className="text-13 text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? translateUi("Managed setup needs attention. Review the setup status below.") : translateUi("Waiting for the first verified inbound message.")}</p> : <WebhookSetupChecklist bot={bot} />)}
 
       {(bot.platform === "lark" || bot.platform === "feishu") && <LarkBotSetupStatus bot={bot} />}
+
+      {(bot.platform === "telegram" || bot.platform === "telegram-new") && <ChannelBotHealthCard botId={bot.id} />}
+
+      <GuestSetupEditor botId={bot.id} />
 
       {/* Bot Information */}
       <DetailSection
@@ -1263,6 +1372,11 @@ export function ChannelBotDetailPage() {
       )}
       {(() => {
         if (bot.credential_source === "telegram_manager") return null;
+        if (isMetaInbox(bot.platform)) {
+          return bot.credential_source === "platform"
+            ? <ManagedMetaDetail bot={bot} orgId={ownerOrgId} />
+            : <><MetaCustomerSetup botId={bot.id} orgId={ownerOrgId} /><EditVerificationSection bot={bot} /></>;
+        }
         const flow = getPlatform(bot.platform).managedFlow;
         const ManagedDetail = flow ? MANAGED_FLOW_COMPONENTS[flow].Detail : undefined;
         return bot.credential_source !== "user" && bot.credential_source && ManagedDetail ? <ManagedDetail bot={bot} orgId={ownerOrgId} /> : editableChannelFields(getPlatform(bot.platform)).length > 0 && <EditVerificationSection bot={bot} />;
@@ -1295,7 +1409,7 @@ export function ChannelBotDetailPage() {
       />
       {/* Delete Confirmation */}
       <DeleteBotDialog
-        deletionNote={bot.credential_source === "telegram_manager" ? TELEGRAM_MANAGER_DELETION_NOTE : bot.credential_source !== "user" ? getPlatform(bot.platform).deletionNote : undefined}
+        deletionNote={channelDeletionNote(bot, getPlatform(bot.platform).deletionNote)}
         open={showDeleteDialog}
         onOpenChange={setShowDeleteDialog}
         onConfirm={() => void handleDelete()}

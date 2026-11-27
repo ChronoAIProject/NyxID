@@ -15,6 +15,7 @@ import { fonts, radius, spacing, typeScale } from "../../../theme/designTokens";
 import { DynamicTypeText as Text } from "../../../components/DynamicTypeText";
 import { SettingsRow } from "../../../components/settings/SettingsList";
 import { matchesLanguage } from "./dictationLanguageLabels";
+import { manualDictationLocale } from "./recognitionLocales";
 import type { useDictationLanguage } from "./useDictationLanguage";
 
 type LanguageState = ReturnType<typeof useDictationLanguage>;
@@ -30,6 +31,7 @@ export function DictationLanguagePicker({
 }) {
   const { t } = useAppLanguage();
   const { colors } = useTheme();
+  const [manual, setManual] = useState("");
   const [search, setSearch] = useState("");
   const automatic = language.options[0]!;
   const all = language.options
@@ -148,10 +150,51 @@ export function DictationLanguagePicker({
               </Text>
             }
             ListFooterComponent={
-              <Text style={[styles.section, { color: colors.textMuted }]}>
-                {language.explanation ??
-                  t("Changes apply to the next recording.")}
-              </Text>
+              <View>
+                <Text style={[styles.section, { color: colors.textMuted }]}>
+                  {language.explanation ??
+                    t("Changes apply to the next recording.")}
+                </Text>
+                {language.manualEntry && (
+                  <View style={styles.recovery}>
+                    <SettingsRow
+                      label={t("Retry language list")}
+                      onPress={language.retry}
+                    />
+                    <SettingsRow
+                      label={t("Speech recognition settings")}
+                      onPress={language.openSpeechSettings}
+                    />
+                    <TextInput
+                      accessibilityLabel={t("Language code")}
+                      placeholder={t("Language code (for example zh-CN)")}
+                      value={manual}
+                      onChangeText={setManual}
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      style={[
+                        styles.manual,
+                        {
+                          color: colors.textPrimary,
+                          backgroundColor: colors.groupedFill,
+                        },
+                      ]}
+                    />
+                    <SettingsRow
+                      label={t("Use language code")}
+                      chevron={false}
+                      disabled={!manualDictationLocale(manual)}
+                      onPress={() => {
+                        const locale = manualDictationLocale(manual);
+                        if (locale) {
+                          language.choose(locale);
+                          onClose();
+                        }
+                      }}
+                    />
+                  </View>
+                )}
+              </View>
             }
           />
         </SafeAreaView>
@@ -161,6 +204,8 @@ export function DictationLanguagePicker({
 }
 const styles = StyleSheet.create({
   page: { flex: 1 },
+  recovery: { paddingHorizontal: spacing.xxl, paddingBottom: spacing.xxl },
+  manual: { padding: spacing.lg, borderRadius: radius.md, fontSize: 16 },
   header: {
     flexDirection: "row",
     alignItems: "center",

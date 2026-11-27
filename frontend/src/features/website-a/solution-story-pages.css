@@ -1,0 +1,109 @@
+/* ---- Solutions index: filters, then a grid of the landing page's job tickets ---- */
+.website-a.nyx-public .st-solutions .st-hero{padding-bottom:40px}
+.website-a.nyx-public .st-solutions .st-hero h1{max-width:20ch}
+.website-a.nyx-public .st-job-filters{display:flex;flex-direction:column;gap:16px;margin-bottom:36px}
+.website-a.nyx-public .st-filter-pills{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.website-a.nyx-public .st-filter-pills>span{font-size:12px;color:var(--site-faint);margin-right:8px}
+.website-a.nyx-public .st-filter-pills .pill{min-height:36px;height:auto;padding:8px 14px;font-size:12px}
+/* three tickets across, two on tablets, one on phones; tickets in a row share one height */
+.website-a.nyx-public .st-job-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:32px 24px;align-items:stretch}
+.website-a.nyx-public .st-job{display:flex;min-width:0;color:inherit;transition:transform .25s cubic-bezier(.2,.7,.2,1)}
+.website-a.nyx-public .st-job:hover{transform:translateY(-4px)}
+.website-a.nyx-public .st-job[hidden]{display:none}
+.website-a.nyx-public .st-job-ticket-wrap{display:flex;flex:1;min-width:0;filter:drop-shadow(0 0 1px var(--site-rule-strong)) drop-shadow(0 18px 24px rgba(23,23,26,.1))}
+.website-a.nyx-public[data-theme="dark"] .st-job-ticket-wrap{filter:drop-shadow(0 0 1px var(--site-rule-strong)) drop-shadow(0 18px 26px rgba(0,0,0,.5))}
+/* the torn bottom edge is the landing page's ticket */
+.website-a.nyx-public .st-job-ticket{--z:8px;display:flex;flex-direction:column;flex:1;min-width:0;padding:20px 22px calc(16px + var(--z));border-radius:14px 14px 0 0;background:var(--site-surface);
+  -webkit-mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/calc(2*var(--z)) 100%;
+  mask:conic-gradient(from -45deg at bottom,#0000,#000 1deg 89deg,#0000 90deg) 50%/calc(2*var(--z)) 100%}
+.website-a.nyx-public .st-job-from{display:flex;align-items:center;gap:8px;margin:0;font-family:var(--site-mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--site-faint)}
+.website-a.nyx-public .st-job-from img{display:block;width:16px;height:16px;object-fit:contain}
+.website-a.nyx-public .st-job-from svg{flex:none;color:var(--site-body)}
+.website-a.nyx-public .st-job-from span{margin-left:2px}
+/* shown only on jobs the release settings allow to be switched on */
+.website-a.nyx-public .st-job-from .st-job-ready{margin-left:auto;padding:2px 9px;border-radius:999px;background:var(--site-soft);color:var(--site-ink);font-family:var(--site-sans);font-size:11.5px;font-weight:600;letter-spacing:0;text-transform:none}
+.website-a.nyx-public .st-job h2{max-width:none;margin:12px 0 6px;font-size:22px;font-weight:600;letter-spacing:-.025em;line-height:1.2}
+.website-a.nyx-public .st-job .st-job-desc{flex:1 0 auto;max-width:none;margin:0;padding-bottom:14px;border-bottom:1.5px dashed var(--site-rule-strong);font-size:14.5px;line-height:1.5;color:var(--site-body)}
+.website-a.nyx-public .st-job-lines{margin:0;padding:4px 0 0;list-style:none}
+.website-a.nyx-public .st-job-lines li{display:grid;grid-template-columns:38px minmax(0,1fr);align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--site-rule);font-size:14px;font-weight:500;line-height:1.35;color:var(--site-ink)}
+.website-a.nyx-public .st-job-lines li:last-child{border-bottom:0}
+.website-a.nyx-public .st-job-mark{display:flex;align-items:center;justify-content:flex-start;gap:3px;width:38px;height:22px;color:var(--site-body)}
+.website-a.nyx-public .st-job-mark img{display:block;max-width:18px;max-height:18px;object-fit:contain}
+.website-a.nyx-public .st-job-foot{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px 12px;margin-top:6px;padding-top:14px;border-top:1px solid var(--site-rule)}
+.website-a.nyx-public .st-job-boundary{display:inline-flex;align-items:center;gap:7px;padding:4px 9px;border:1px solid var(--site-rule);border-radius:999px;font-size:11.5px;line-height:1.4;color:var(--site-body)}
+.website-a.nyx-public .st-job-boundary svg{flex:none}
+.website-a.nyx-public .st-job-go{display:inline-flex;align-items:center;gap:6px;font-size:14px;font-weight:600;white-space:nowrap;color:var(--site-ink)}
+.website-a.nyx-public .st-job-go svg{flex:none;transition:transform .2s cubic-bezier(.2,.7,.2,1)}
+.website-a.nyx-public .st-job:hover .st-job-go svg{transform:translateX(4px)}
+/* black glyph marks turn light at night, as on the landing page */
+.website-a.nyx-public[data-theme="dark"] .st-job img:is([src$="/x.svg"],[src$="/notion.svg"],[src$="/elevenlabs.svg"]){filter:invert(1) hue-rotate(180deg)}
+@media(prefers-color-scheme:dark){.website-a.nyx-public:not([data-theme]) .st-job img:is([src$="/x.svg"],[src$="/notion.svg"],[src$="/elevenlabs.svg"]){filter:invert(1) hue-rotate(180deg)}}
+/* anything else: one quiet full-width row under the grid */
+.website-a.nyx-public .st-custom-job{grid-column:1/-1}
+.website-a.nyx-public .st-custom-job:hover{transform:none}
+.website-a.nyx-public .st-custom-in{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px 20px;width:100%;padding:20px 24px;border:1.5px dashed var(--site-rule-strong);border-radius:14px;transition:background .18s}
+.website-a.nyx-public .st-custom-job:hover .st-custom-in{background:var(--site-hover)}
+.website-a.nyx-public .st-custom-in>svg{color:var(--site-violet)}
+.website-a.nyx-public .st-custom-in h2{margin:0;font-size:19px}
+.website-a.nyx-public .st-custom-in p{margin:4px 0 0;font-size:14px}
+
+/* ---- Solution detail ---- */
+.website-a.nyx-public .st-breadcrumb-slash{padding:0 12px;color:var(--site-faint)}
+.website-a.nyx-public .st-solution-detail h1{font-size:clamp(42px,4.7vw,68px)}
+.website-a.nyx-public .st-job-apps{flex-basis:100%;margin-top:8px}
+.website-a.nyx-public .st-hero-actions .st-availability{flex-basis:100%;font-size:14px;max-width:45ch;margin-bottom:4px}
+.website-a.nyx-public .st-availability strong{color:var(--site-ink);font-weight:600}
+.website-a.nyx-public .st-solution-detail .solution-activation{margin-top:16px}
+.website-a.nyx-public .st-job-chat{max-width:500px;margin-inline:auto;border:1px solid var(--site-rule);border-radius:22px;background:var(--site-surface);overflow:hidden;box-shadow:0 22px 50px -40px rgba(0,0,0,.35)}
+.website-a.nyx-public .st-job-chat-head{display:flex;align-items:center;gap:12px;padding:22px;border-bottom:1px solid var(--site-rule);font-size:14px}
+.website-a.nyx-public .st-job-chat-head small{font-size:10px;font-weight:400;color:var(--site-faint);margin-left:auto}
+.website-a.nyx-public .st-job-chat .msgs{padding:24px 20px;gap:12px}
+.website-a.nyx-public .st-job-chat .m{font-size:14px;line-height:1.5;padding:10px 14px;max-width:90%}
+.website-a.nyx-public .st-job-chat .m.out{background:var(--site-soft);color:var(--site-ink)}
+.website-a.nyx-public .st-job-chat .m.sys{font-size:10px;padding:4px 8px;color:var(--site-faint)}
+.website-a.nyx-public .st-job-chat .m.tool{font-size:11px;max-width:100%;padding:5px 8px;color:var(--site-body);background:var(--site-recess);border:1px solid var(--site-rule)}
+.website-a.nyx-public .st-job-flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:24px;margin:0;padding:0;list-style:none}
+.website-a.nyx-public .st-job-flow li{padding-top:18px;border-top:1px solid var(--site-rule)}
+.website-a.nyx-public .st-job-flow .st-step-number{display:block;font-family:var(--site-mono);font-size:10px;color:var(--site-faint);margin-bottom:18px}
+.website-a.nyx-public .st-job-flow h3{font-size:18px;margin-bottom:12px}
+.website-a.nyx-public .st-job-flow p{font-size:13px;line-height:1.5}
+.website-a.nyx-public .st-permission-action{display:block;color:var(--site-faint);font-size:12px;margin-top:4px}
+.website-a.nyx-public .st-read-only{color:var(--info)}
+.website-a.nyx-public .st-setup-list{list-style:none;padding:0;margin:0}
+.website-a.nyx-public .st-setup-list li{display:flex;align-items:flex-start;gap:14px;padding:20px 0;border-top:1px solid var(--site-rule);font-size:16px}
+.website-a.nyx-public .st-setup-list svg{flex:none;margin-top:3px;color:var(--ok)}
+.website-a.nyx-public .st-split .st-job-price-note{font-size:14px;margin-top:24px}
+/* jobs without an approval step show four steps, so the row keeps its proportions */
+.website-a.nyx-public .st-job-flow-4{grid-template-columns:repeat(4,minmax(0,1fr))}
+/* before it starts: what to bring and the proposed permissions, side by side */
+.website-a.nyx-public .st-job-before h2+.st-setup-list{margin-top:28px}
+.website-a.nyx-public .st-job-before .st-details{margin-top:8px}
+.website-a.nyx-public .st-job-permissions{margin:0}
+.website-a.nyx-public .st-job-permissions figcaption{margin-top:14px;font-size:13px;line-height:1.55;color:var(--site-faint)}
+.website-a.nyx-public .st-solution-detail .st-inline-link{color:var(--site-ink);text-decoration:underline 1px;text-underline-offset:4px}
+.website-a.nyx-public .st-solution-detail .st-inline-link:hover{text-decoration-thickness:2px}
+
+@media(max-width:1000px){
+  .website-a.nyx-public .st-job-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .website-a.nyx-public .st-job-flow{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .website-a.nyx-public .st-job-flow-4{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:700px){
+  .website-a.nyx-public .st-filter-pills .pill{font-size:11px;padding:7px 11px}
+  .website-a.nyx-public .st-job-flow{grid-template-columns:1fr;gap:20px}
+  .website-a.nyx-public .st-job-flow .st-step-number{margin-bottom:10px}
+  .website-a.nyx-public .st-job-chat-head{flex-wrap:wrap}
+  .website-a.nyx-public .st-solution-detail .st-hero h1{overflow-wrap:anywhere}
+}
+@media(max-width:640px){
+  .website-a.nyx-public .st-job-grid{grid-template-columns:minmax(0,1fr);gap:24px}
+  .website-a.nyx-public .st-custom-in{grid-template-columns:auto minmax(0,1fr);padding:18px}
+  .website-a.nyx-public .st-custom-in .st-job-go{grid-column:2}
+}
+@media(prefers-reduced-motion:reduce){
+  .website-a.nyx-public :is(.st-job,.st-job-go svg,.st-custom-in){transition:none}
+  .website-a.nyx-public .st-job:hover{transform:none}
+}
+
+.website-a .solution-activation{display:inline-flex;flex-direction:column;gap:8px;align-items:flex-start}
+.website-a .solution-activation button:disabled{background:var(--muted);color:var(--fg3);border:1px solid var(--border);box-shadow:none;cursor:not-allowed;transform:none}

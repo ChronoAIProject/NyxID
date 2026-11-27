@@ -883,7 +883,7 @@ and is capped by the original task and reply-source deadline.
 
 Post-review results have a separate `execution_permission_deliveries` occurrence,
 committed with the ordinary stored assistant message. The outbox retains only
-references, not another copy of the answer. Version-5 deliveries keep a plan
+references, not another copy of the answer. Deliveries in versions 5 and 6 keep a plan
 fingerprint, part count, confirmed-prefix position and receipt identifiers only.
 Their 180-second preparation lease uses MongoDB time and is recoverable until
 an exact claim/part fence commits `dispatching` immediately before provider I/O.
@@ -892,7 +892,10 @@ prefix atomically; recovery sends only the remaining suffix. A reclaimed lease
 fences the original preparer. `dispatching` is irreversible: a crash after that
 boundary, including acceptance without a saved receipt, becomes `unknown` and
 is never automatically resent. Source policy, task epoch, enrollment and
-readiness are fenced again before release. A completed task may release its stored receipt;
+readiness are fenced again before release. A pre-effect authority refusal
+finishes as `refused` with a skipped audit. A validation database error leaves
+an owned `preparing` part eligible for recovery. Only an occurrence in
+`dispatching` can settle as an unknown send. A completed task may release its stored receipt;
 a cancelled task or changed epoch may not. The original terminal stream/native
 replay claim is never reopened. Ordinary initial answers keep their existing
 transport behavior.
@@ -902,7 +905,11 @@ inbound message/topic, including sources with a sealed target; there is no
 fallback to the gateway or a newer local message. Native receipts use a distinct
 occurrence key on the original gateway event. Eligible native receipts retain
 the 29-minute bound and exact native event; no latest-event, proactive-send or alternate-destination fallback is
-allowed. Receipts are text-only; attachments remain accessible in the web thread.
+allowed. A confirmed native side part commits its receipt and promotes the
+occurrence to version 6 atomically. Workers that lease versions 4 and 5 skip the
+promoted occurrence. A remaining side part requires the event's side-message
+capability. A confirmed legacy prefix keeps its version, plan and event-reply
+route. Receipts are text-only; attachments remain accessible in the web thread.
 Expired/refused/unknown delivery is recovered through authenticated web history.
 Terminal outbox metadata is retained for at most 24 hours; TTL is cleanup only.
 

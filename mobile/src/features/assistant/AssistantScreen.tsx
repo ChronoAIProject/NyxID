@@ -22,13 +22,21 @@ import {
   chatSurfaceStyles,
 } from "./ChatSurface";
 import { TranscriptViewport } from "./TranscriptViewport";
+import { useLaunchInput } from "../../lib/performance/launchPerformance";
+import { useChatNativeFrames } from "../../lib/performance/useNativePerformance";
 import { ChatComposerInput, ChatComposerToolbar } from "./ChatComposerInput";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
 import {
   AssistantApprovalCard,
   AssistantWaitingNote,
 } from "./AssistantPendingState";
+import {
+  moodInputFor,
+  settledReplyOf,
+  useAgentMood,
+} from "./agentMood";
 import { AssistantSystemMessage } from "./AssistantSystemMessage";
+import { useOwnNyxBotIdentity } from "../../lib/avatars/useOwnNyxBot";
 import { AssistantLinkContext } from "./AssistantLinkContext";
 import { AssistantComposerSettings } from "./AssistantComposerSettings";
 import { useComposerConnection } from "./useComposerConnection";
@@ -86,6 +94,12 @@ import { useQuery } from "@tanstack/react-query";
 import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import * as WebBrowser from "expo-web-browser";
 import { AssistantReplyBody } from "./AssistantReplyBody";
+import { AssistantTurnPerformance } from "./assistantTurnPerformance";
+import {
+  beginPerformanceSample,
+  submitPerformanceSample,
+  subscribePerformanceConsent,
+} from "../../lib/performance/metrics";
 import { RotateCcw, X } from "lucide-react-native";
 import type {
   AssistantParams,
@@ -109,6 +123,7 @@ import {
   Notice,
 } from "../../components/workspace/WorkspaceUI";
 import { useTheme } from "../../theme/ThemeContext";
+import { conversationTitle } from "../../components/workspace/workspaceChatListModel";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { withVoiceRequestDeadline } from "./voice/voiceRequestDeadline";
 import { chatBubbleColors } from "../../theme/chatAppearance";
@@ -271,6 +286,7 @@ export function AssistantScreen({
   useAppLanguage();
   const navigation = useNavigation<WorkspaceNavigationProp>();
   const focused = useIsFocused();
+  const turnPerformance = useRef<AssistantTurnPerformance | undefined>(undefined);
   const linkHost = useContext(AssistantLinkContext);
   const { colors, mode, bubblePalette } = useTheme();
   const { width: windowWidth, fontScale } = useWindowDimensions();
@@ -381,7 +397,7 @@ export function AssistantScreen({
     panelInsets.left + panelInsets.right,
   ).enabled;
   const chatTitle = assistant.conversationId
-    ? (conversation?.title ?? translateApp("Loading chat…"))
+    ? (conversation ? conversationTitle(conversation) : translateApp("Loading chat…"))
     : homeVisible
       ? translateApp("Home")
       : translateApp("New chat");
@@ -396,7 +412,7 @@ export function AssistantScreen({
       : undefined;
   const headerDetail = chatThreadInfo(
     assistant.conversationId
-      ? conversation?.title
+      ? (conversation ? conversationTitle(conversation) : undefined)
       : homeVisible
         ? translateApp("Home")
         : translateApp("New chat"),
@@ -404,13 +420,11 @@ export function AssistantScreen({
     assistant.conversationId ? conversation?.last_message_at : undefined,
   );
   const running = assistant.sending || !!conversation?.active_turn;
+  const streamedText = assistant.live ? liveReplyText(assistant.live) : "";
   const liveText = sanitizeAssistantMessageContent(
-    assistant.live
-      ? liveReplyText(assistant.live) ||
-          conversation?.active_turn?.reply?.text ||
-          ""
-      : (conversation?.active_turn?.reply?.text ?? ""),
+    streamedText || conversation?.active_turn?.reply?.text || "",
   );
+  const liveTextTurnId = streamedText ? assistant.live?.turnId : conversation?.active_turn?.turn_id;
   const liveAttachments = conversation?.active_turn?.attachments ?? [];
   const liveActivities = conversation?.active_turn?.activities ?? [];
   const destroyed = conversation?.agent?.destroyed;
@@ -428,6 +442,18 @@ export function AssistantScreen({
         message.turn_id === assistant.live?.turnId && message.role === "user",
     );
   const historyMessages = assistant.history?.messages;
+  const nyxbot = useOwnNyxBotIdentity();
+  // Decorative: the header's status text stays the source of truth.
+  const mood = useAgentMood(
+    assistant.conversationId,
+    moodInputFor({
+      activeTurn: conversation?.active_turn,
+      sending: assistant.sending,
+      liveText,
+      pendingOwnerAction: pendingCount > 0,
+    }),
+    settledReplyOf(historyMessages),
+  );
   const voiceEpoch = getAuthEpoch();
   const voiceSurfaceToken = useMemo(() => ({}), [voiceThread, voiceEpoch]);
   const currentVoiceSurface = useRef(voiceSurfaceToken);
@@ -507,6 +533,7 @@ export function AssistantScreen({
   const canCompose =
     !running &&
     !destroyed &&
+    !assistant.restricted &&
     assistant.online &&
     !assistant.loading &&
     !assistant.loadingOlder &&
@@ -516,6 +543,11 @@ export function AssistantScreen({
     (!!assistant.conversationId ||
       (assistant.agent?.can_use === true &&
         assistant.agent.status !== "destroyed"));
+  const frameMetrics = useChatNativeFrames({
+    focused: focused && !homeVisible && !voiceThread && transcriptScroll.ready,
+    streaming: assistant.sending && !!assistant.live?.blocks?.length && !streamPersisted,
+    scope: draftKey,
+  });
   const uploads = useAssistantUploads({
     retainKey: draftKey,
     conversationId: assistant.conversationId,
@@ -532,6 +564,7 @@ export function AssistantScreen({
     disabled:
       !assistant.online ||
       !!destroyed ||
+      !!assistant.restricted ||
       assistant.loading ||
       assistant.recoveryRequired ||
       !!route?.params?.openLatest ||
@@ -622,6 +655,12 @@ export function AssistantScreen({
       conversation?.active_turn?.stop_requested,
   });
   const voiceAvailable = trailingControl.kind === "voice";
+  const launchInputLayout = useLaunchInput(
+    "chat_composer",
+    focused && canCompose && (homeVisible || transcriptScroll.ready) && !sheet && !dictation.active &&
+      !voiceThread && !openingVoice && !voicePreferencesOpen && !uploads.picking && !uploads.session.sending,
+    draftKey,
+  );
   const voiceContext = useRef({
     agentId: assistant.agentId,
     conversationId: assistant.conversationId,
@@ -983,6 +1022,7 @@ export function AssistantScreen({
             name={agentName}
             detail={headerDetail}
             status={headerStatus}
+            mood={mood}
             agent={
               currentAgent ?? {
                 id: assistant.agentId ?? "nyxbot",
@@ -1004,6 +1044,7 @@ export function AssistantScreen({
     agentName,
     headerDetail,
     headerStatus,
+    mood,
     assistant.agentId,
     isNyxBotChat,
     currentAgent,
@@ -1059,6 +1100,15 @@ export function AssistantScreen({
 
   async function sendDraft() {
     if (!(canSend || canGuideSend) || !composerPress.current("send")) return;
+    const epoch = running ? null : beginPerformanceSample();
+    const sample = epoch === null
+      ? undefined
+      : new AssistantTurnPerformance(
+          (timings) => submitPerformanceSample(epoch, "mobile.perf_chat_turn", timings),
+          undefined,
+          subscribePerformanceConsent,
+        );
+    if (!running) turnPerformance.current = sample;
     setStopProtected(true);
     transcriptScroll.follow();
     await perform(() =>
@@ -1068,16 +1118,27 @@ export function AssistantScreen({
         getRevision: () => draftRevision.current,
         send: async (text) => {
           if (running) return guidance.submit(text, uploads.files.length);
-          const accepted = await uploads.session.submit(async (payload) => {
-            const model = assistant.conversationId ? undefined : uploads.session.model;
-            if (model && payload)
-              await uploads.session.applyDraftModel(payload.conversationId, assistantApi.changeModel);
-            return model && !payload
-              ? assistant.send(connection.prefix(text), undefined, undefined, undefined, model)
-              : assistant.send(connection.prefix(text), undefined, payload);
-          });
-          if (accepted) connection.sent();
-          return accepted;
+          try {
+            const accepted = await uploads.session.submit(async (payload) => {
+              const model = assistant.conversationId ? undefined : uploads.session.model;
+              if (model && payload)
+                await uploads.session.applyDraftModel(payload.conversationId, assistantApi.changeModel);
+              return assistant.send(
+                connection.prefix(text),
+                undefined,
+                payload,
+                undefined,
+                payload ? undefined : model,
+                sample,
+              );
+            });
+            if (accepted) connection.sent();
+            else sample?.finish("error");
+            return accepted;
+          } catch (cause) {
+            sample?.finish("error");
+            throw cause;
+          }
         },
       }),
     );
@@ -1117,6 +1178,7 @@ export function AssistantScreen({
       return (
         <AssistantSystemMessage
           message={item}
+          nyxbot={nyxbot}
           conversationId={assistant.conversationId}
           onOpenAutomations={() =>
             navigation.dispatch(workspaceNavigateAction("Automations"))
@@ -1190,6 +1252,11 @@ export function AssistantScreen({
         ) : (
           <AssistantReplyBody
             text={sanitizeAssistantMessageContent(item.text)}
+            onTextCommit={
+              focused && item.role === "assistant"
+                ? turnPerformance.current?.commitFor(item.turn_id)
+                : undefined
+            }
             onLinkPress={openSafeLink}
             activity={
               item.activities.length ||
@@ -1385,7 +1452,7 @@ export function AssistantScreen({
   }
 
   function renderAcknowledgement(row: AssistantAcknowledgement) {
-    if (row.status !== "pending") return null;
+    if (row.status !== "pending" || (assistant.agent?.owner_kind === "org" && assistant.agent.can_maintain === false && row.kind !== "action")) return null;
     return (
       <AssistantAcknowledgementCard
         key={row.id}
@@ -1455,6 +1522,14 @@ export function AssistantScreen({
     />
   ), [homeVisible, currentAgent, conversation, openPanelChat, createPanelAgent]);
 
+  if (assistant.restricted) return (
+    <WorkspacePage title={translateApp("Chat access is restricted.")}>
+      <ActionButton label={translateApp("Back to workspace")} onPress={() => navigation.setParams({
+        conversationId: undefined, agentId: undefined, acknowledgementId: undefined,
+        messageId: undefined, openLatest: false, draft: false, home: true,
+      })} />
+    </WorkspacePage>
+  );
   return (
     <WorkspacePage
       title={chatTitle}
@@ -1624,6 +1699,22 @@ export function AssistantScreen({
                 : undefined
             }
             {...transcriptScroll.listProps}
+            onScrollBeginDrag={() => {
+              transcriptScroll.listProps.onScrollBeginDrag();
+              frameMetrics.beginDrag();
+            }}
+            onScrollEndDrag={(event) => {
+              transcriptScroll.listProps.onScrollEndDrag(event);
+              frameMetrics.endDrag();
+            }}
+            onMomentumScrollBegin={() => {
+              transcriptScroll.listProps.onMomentumScrollBegin();
+              frameMetrics.momentumBegin();
+            }}
+            onMomentumScrollEnd={(event) => {
+              transcriptScroll.listProps.onMomentumScrollEnd(event);
+              frameMetrics.momentumEnd();
+            }}
             onLayout={(event) => {
               transcriptScroll.listProps.onLayout(event);
               transcriptEdges.layout(event.nativeEvent.layout.height);
@@ -1769,6 +1860,7 @@ export function AssistantScreen({
                     </Label>
                     <AssistantReplyBody
                       text={liveText}
+                      onTextCommit={focused ? turnPerformance.current?.commitFor(liveTextTurnId) : undefined}
                       onLinkPress={openSafeLink}
                       activity={
                         liveActivities.length ? (
@@ -1914,6 +2006,7 @@ export function AssistantScreen({
             key={`voice:${voiceThread}`}
             thread={voiceThread}
             agentName={agentName}
+            agent={currentAgent??undefined}
             onClose={() => {
               if (
                 getAuthEpoch() !== voiceEpoch ||
@@ -2000,6 +2093,7 @@ export function AssistantScreen({
               </Label>
             ) : null}
             <ChatComposerInput
+              onInputLayout={launchInputLayout}
               dictation={dictation}
               value={draft}
               onChangeText={updateDraft}
@@ -2018,18 +2112,10 @@ export function AssistantScreen({
                             name: agentName,
                           })
                     }
-              // Phones: idle composers are one row; anything typed, attached,
-              // uploading or dictating keeps the full two-row layout.
-              compactWhenIdle={
-                narrowHeader &&
-                !dictation.active &&
-                uploads.files.length === 0 &&
-                !uploads.picking &&
-                !uploads.session.sending
-              }
+              compactWhenIdle={!dictation.active}
               renderActions={(mentionAction, layout) => (
                 <ChatComposerToolbar
-                  layout={narrowHeader ? layout : undefined}
+                  layout={layout}
                   dictation={dictation}
                   dictationDisabled={
                     !canCompose ||
@@ -2060,6 +2146,7 @@ export function AssistantScreen({
                   mention={mentionAction}
                   settings={
                     <AssistantComposerSettings
+                      hideTrigger={layout.compact}
                       scope={`${getAuthEpoch()}:${draftKey}`}
                       agentOverride={assistant.agent?.access_mode_override}
                       activeTurn={permissionsLocked}
@@ -2168,7 +2255,7 @@ export function AssistantScreen({
                 <Label style={styles.sheetSection}>
                         {translateApp("This thread")}
                       </Label>
-                <Label>{conversation?.title || chatTitle}</Label>
+                <Label>{chatTitle}</Label>
                 <Label muted>{agentName}</Label>
                 {conversation ? (
                   <Label muted>

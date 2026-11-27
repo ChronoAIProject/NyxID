@@ -23,6 +23,8 @@ SERVICES = {"nyxid", "nyxagent", "cma"}
 STAGES = {"ingress", "admission", "execution", "engine", "first_output", "mcp", "proxy", "proxy_headers", "proxy_body", "node_headers", "capacity_wait", "channel", "channel_part", "replay", "gateway", "model", "tool", "platform"}
 OUTCOMES = {"completed", "failed", "cancelled", "unknown", "streamed", "silent", "confirmed", "rejected", "partial"}
 PHASES = {"start", "end", "link", "milestone"}
+GUEST_SERVICE_FAILURES = {"approval_required", "approval_denied", "guest_operation_denied",
+                          "invalid_tool_arguments", "downstream_http_error"}
 
 
 def identifier(value: object) -> str | None:
@@ -88,6 +90,22 @@ def clean_record(raw: object) -> dict | None:
         if not isinstance(reason, str) or reason not in {"missing_parent", "invalid_parent", "mismatched_turn"}:
             return None
         result["gap_reason"] = reason
+    if raw.get("guest_service_failure") is not None:
+        reason = raw["guest_service_failure"]
+        if (not isinstance(reason, str) or reason not in GUEST_SERVICE_FAILURES
+                or raw["service"] != "nyxid" or raw["phase"] != "milestone"):
+            return None
+        if turn:
+            if raw["stage"] not in {"mcp", "proxy"} or "gap_reason" in result:
+                return None
+        elif raw["stage"] != "ingress" or "gap_reason" not in result:
+            return None
+        if reason == "downstream_http_error":
+            if result.get("outcome") != "failed" or not 400 <= result.get("http_status", 0) < 600:
+                return None
+        elif result.get("outcome") != "rejected":
+            return None
+        result["guest_service_failure"] = reason
     return result
 
 
@@ -127,6 +145,8 @@ def read_records(streams, turn: str):
                 invalid += 1
                 continue
             if record["stage"] == "ingress":
+                if "guest_service_failure" in record:
+                    continue  # Unlinked callback evidence needs an exact request-ID lookup.
                 key = (record["request_id"], record["phase"])
                 ingress[key] = record
                 if len(ingress) > MAX_RECORDS:
@@ -231,6 +251,10 @@ def render_text(result: dict) -> str:
         lines.append(f'{"  " * depth}{item["service"]}/{item["stage"]}{part}: {item["outcome"]}, {duration}{suffix}')
     for item in result['milestones']:
         detail = item.get('outcome', 'observed')
+        if 'guest_service_failure' in item:
+            detail += f', {item["guest_service_failure"]}'
+            if 'http_status' in item:
+                detail += f' (HTTP {item["http_status"]})'
         if 'duration_ms' in item:
             detail += f", {item['duration_ms']} ms"
         lines.append(f"{item['service']}/{item['stage']} milestone: {detail}")

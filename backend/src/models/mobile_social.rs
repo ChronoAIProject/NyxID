@@ -25,6 +25,8 @@ pub struct MobileSocialDelivery {
     pub code_hash: String,
     pub code_challenge: String,
     pub ciphertext: bson::Binary,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ciphertext_context_version: Option<u8>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
 }

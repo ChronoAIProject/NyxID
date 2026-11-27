@@ -9,6 +9,8 @@ use super::*;
 pub(super) enum Answer {
     NotRequested,
     NotFound,
+    TerminalRefusalNotFound,
+    CreateFencedAbsent,
     MatchingRecord,
     DifferentVersion,
     AuthRefused,
@@ -42,6 +44,8 @@ pub(crate) fn reason(code: Option<&str>) -> &'static str {
         Some("auth_refused" | "gateway_authority_refused") => "auth_refused",
         Some("destination_changed" | "gateway_destination_changed") => "destination_changed",
         Some("live_reference") => "live_reference",
+        Some("gateway_provider_setup_required") => "gateway_provider_setup_required",
+        Some("gateway_setup_custody_required") => "gateway_setup_custody_required",
         Some("changed_version" | "remote_version_changed") => "changed_version",
         Some("owner_unavailable" | "owner_authority_unavailable") => "owner_unavailable",
         Some("preserved" | "remote_preserved") => "preserved",

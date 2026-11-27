@@ -108,6 +108,8 @@ pub struct ExactServiceApprovalBinding {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_policy: Option<super::service_approval_config::OrgPolicyStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activity_execution: Option<super::assistant_conversation::ActivityExecution>,
@@ -228,17 +230,8 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub decision_idempotency_key: Option<String>,
 
-    /// Users who were notified of this approval request and are authorized
-    /// to decide on it. For personal approvals this is `[user_id]`. For
-    /// org-policy approvals (where the org has set a `service_approval_config`
-    /// on a shared service) this is the list of admin user_ids of the
-    /// owning org at the time the request was created. The decide endpoint
-    /// allows any user in this list to approve/reject in addition to
-    /// `request.user_id` (for backward compat with pre-org rows where this
-    /// field is empty).
-    ///
-    /// Default `vec![]` so legacy rows deserialize cleanly; the decide
-    /// endpoint treats an empty list as "fall back to user_id only".
+    /// Delivery snapshot. For an organization, recheck the person's live Admin
+    /// role, service scope and approval policy before disclosure or decision.
     #[serde(default)]
     pub notify_user_ids: Vec<String>,
 
@@ -272,6 +265,7 @@ mod tests {
 
     fn make_approval_request() -> ApprovalRequest {
         ApprovalRequest {
+            org_policy: None,
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,

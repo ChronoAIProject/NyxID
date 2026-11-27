@@ -2330,8 +2330,9 @@ stores immutable, audited effective-dated prices; a deploy-time seed installs th
 approved first version without enabling billing. Admin writes and admissions
 share a transaction fence. `sandbox_billing_quotes`, `sandbox_billing_windows`,
 `sandbox_billing_cursors` and `sandbox_billing_evidence` retain provider bindings,
-idempotent receipts and ordered evidence checkpoints. All three usage rows and
-funding holds commit atomically. Evidence/cursor finalization is transactional;
+idempotent receipts and ordered evidence checkpoints. A window creates a usage
+row only for each metric with a nonzero quantity; those rows and their funding
+holds commit atomically. Evidence/cursor finalization is transactional;
 the existing settlement journal and Lago reconciler handle recovery and emission.
 Version-specific provider codes retain the original tariff for delayed usage.
 See [CMA billing](CMA_BILLING.md) for the producer and admin contracts.

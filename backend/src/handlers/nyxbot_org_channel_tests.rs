@@ -255,6 +255,56 @@ async fn org_specialist_provider_uses_confirmed_member_thread_dedup_and_live_aut
     org::links::confirm(&state.db, OWNER, &row, challenge["id"].as_str().unwrap())
         .await
         .unwrap();
+    // The same guest-enabled binding must distinguish a denied verified member from a guest.
+    let mut guest_enabled = row.clone();
+    guest_enabled
+        .org_specialist
+        .as_mut()
+        .unwrap()
+        .guests
+        .enabled = true;
+    let agents = state.db.collection::<bson::Document>("assistant_agents");
+    agents
+        .update_one(
+            doc! {"_id": &agent.id},
+            doc! {"$set": {"org_user_ids": [], "org_use_revision": 1_i64}},
+        )
+        .await
+        .unwrap();
+    assert!(
+        org::sender(&state.db, &guest_enabled, "7", true, &agent.id)
+            .await
+            .is_err()
+    );
+    let (guest, _) = org::sender(
+        &state.db,
+        &guest_enabled,
+        "unverified-sender",
+        true,
+        &agent.id,
+    )
+    .await
+    .unwrap();
+    assert!(guest.guest && guest.actor_id == org_id);
+    agents
+        .update_one(
+            doc! {"_id": &agent.id},
+            doc! {"$set": {"org_user_ids": [OWNER]}},
+        )
+        .await
+        .unwrap();
+    crate::services::security_readiness_service::ready_test_replica(&state.db).await;
+    guest_runtime_tests::enable_guest_test_bot(&state, &row.channel_bot_id).await;
+    state
+        .db
+        .collection::<bson::Document>("channel_guest_activation")
+        .delete_one(doc! {"_id": crate::services::channel_guest_access::FLAG})
+        .await
+        .unwrap();
+    assert!(matches!(
+        crate::services::channel_guest_access::select_mode(&state.db, &row.channel_bot_id).await,
+        Err(AppError::SecurityReadinessUnavailable)
+    ));
     let body = event("Summarize today's request", "7", "org-first");
     let answer = body_text(respond(&state, &key, &body, "org-first").await).await;
     assert!(answer.contains("Here is your answer"), "{answer}");
@@ -298,6 +348,79 @@ async fn org_specialist_provider_uses_confirmed_member_thread_dedup_and_live_aut
     assert_eq!(calls.lock().await.len(), 1);
     server.abort();
     state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn org_channel_chat_override_requires_maintenance_on_both_specialists() {
+    let (state, _, server) = setup("org_channel_override_maintenance").await;
+    let (row, _, agent, _) = org_channel(&state, false).await;
+    let db = &state.db;
+    let mut other = agent.clone();
+    other.id = Uuid::new_v4().to_string();
+    other.name = "chat-override".into();
+    other.org_maintainer_user_ids = Some(Vec::new());
+    use crate::models::assistant_agent::{AssistantAgent, COLLECTION_NAME as AGENTS};
+    let agents = db.collection::<AssistantAgent>(AGENTS);
+    agents.insert_one(&other).await.unwrap();
+    let chat = chats::record_chat(
+        &state,
+        &row,
+        &chats::group_partition("test-group", None),
+        &chats::ChatFacts {
+            kind: "group",
+            chat_id: "test-group".into(),
+            thread_id: None,
+            owner: false,
+            title: None,
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let update = chats::ChatSettings {
+        agent_id: Some(other.id.clone()),
+        ..Default::default()
+    };
+    assert!(
+        chats::update_chat(&state, OWNER, &chat.id, &update)
+            .await
+            .is_err()
+    );
+    agents
+        .update_one(
+            doc! {"_id":&other.id},
+            doc! {"$set":{"org_maintainer_user_ids":[OWNER]}},
+        )
+        .await
+        .unwrap();
+    chats::update_chat(&state, OWNER, &chat.id, &update)
+        .await
+        .unwrap();
+    agents
+        .update_one(
+            doc! {"_id":&other.id},
+            doc! {"$set":{"org_maintainer_user_ids":[]},"$inc":{"org_maintain_revision":1_i64}},
+        )
+        .await
+        .unwrap();
+    let restore = chats::ChatSettings {
+        agent_id: Some("default".into()),
+        ..Default::default()
+    };
+    assert!(
+        chats::update_chat(&state, OWNER, &chat.id, &restore)
+            .await
+            .is_err()
+    );
+    let saved = db
+        .collection::<NyxbotThread>(THREADS)
+        .find_one(doc! {"_id":&chat.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.agent_id, Some(other.id));
+    server.abort();
+    db.drop().await.unwrap();
 }
 
 pub(super) async fn org_channel(
@@ -428,17 +551,24 @@ async fn ensure_org_partition(state: &AppState, key: &str) {
 
 #[tokio::test]
 async fn org_channel_cold_guest_model_setup_and_real_platform_model_bill_only_the_org() {
-    cold_guest_model_setup(false).await;
+    Box::pin(cold_guest_model_setup(false, false)).await;
 }
 
 #[tokio::test]
 async fn native_discord_notification_releases_org_guest_for_next_paid_answer() {
-    cold_guest_model_setup(true).await;
+    Box::pin(cold_guest_model_setup(true, false)).await;
 }
 
-async fn cold_guest_model_setup(native: bool) {
+#[tokio::test]
+async fn nyxbot_guest_runtime_organization_specialist_uses_cold_setup_and_org_billing() {
+    Box::pin(cold_guest_model_setup(false, true)).await;
+}
+
+async fn cold_guest_model_setup(native: bool, addon: bool) {
     use tower::ServiceExt;
-    let db_name = if native {
+    let db_name = if addon {
+        "org_channel_cold_model_addon"
+    } else if native {
         "org_guest_discord_deleted"
     } else {
         "org_channel_cold_model"
@@ -530,8 +660,8 @@ async fn cold_guest_model_setup(native: bool) {
                 .body(Body::from(json!({"model":"fixture-model","store":false,"input":body["input"],"stream":false}).to_string())).unwrap()).await.unwrap();
             let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
             sink.lock().await.push(json!({"actor":conversation.user_id,"setup":conversation.guest_model_setup,"guest":conversation.guest_turn,"status":status.as_u16(),"body":String::from_utf8_lossy(&bytes),
-                "contexts":turn_context_tests::contexts(&body),"input":body["input"],
-                "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context}));
+                 "contexts":turn_context_tests::contexts(&body),"input":body["input"],
+                "instructions":body["instructions"], "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context}));
             let session=format!("conv_{}",Uuid::new_v4().simple());
             let event=json!({"type":"response.completed","sequence_number":0,"response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),
                 "conversation":{"id":session},"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Organization answer"}]}]}});
@@ -625,6 +755,9 @@ async fn cold_guest_model_setup(native: bool) {
         assert_eq!(snapshot["output"], json!([]));
         assert!(observations.lock().await.is_empty());
     }
+    if addon {
+        guest_runtime_tests::enable_guest_test_bot(&state, &row.channel_bot_id).await;
+    }
     let body = message("502", "Hello, first visitor");
     let response = body_text(respond(&state, &key, &body, "org-cold-first").await).await;
     assert!(
@@ -651,6 +784,17 @@ async fn cold_guest_model_setup(native: bool) {
     );
     assert_eq!(seen[0]["setup"], true);
     assert_eq!(seen[1]["guest"], true);
+    assert_eq!(
+        !seen[1]["persisted_context"]["channel_guest"].is_null(),
+        addon
+    );
+
+    assert_eq!(
+        seen[1]["instructions"]
+            .to_string()
+            .contains("send a direct message to this bot"),
+        addon,
+    );
     assert!(seen[0]["contexts"].as_array().unwrap().is_empty());
     let contexts = seen[1]["contexts"].as_array().unwrap();
     assert_eq!(contexts.len(), 1);
@@ -668,6 +812,7 @@ async fn cold_guest_model_setup(native: bool) {
     let input = seen[1]["input"].as_str().unwrap();
     assert!(input.contains("The linking administrator supplies transport only"));
     assert!(input.contains("Guest model and tool use is charged to the organization"));
+    assert!(input.contains("including writes that meet the tool's stated conditions"));
     assert!(
         input.contains(
             "Guest execution cannot use account tools, machines, saved logins or approvals"
@@ -818,6 +963,7 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
             service_ids: Some(vec![]),
             daily_credits: Some(crate::models::credits::Credits::from_whole(1)),
         },
+        None,
     )
     .await
     .unwrap();

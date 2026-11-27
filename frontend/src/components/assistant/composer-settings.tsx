@@ -103,6 +103,7 @@ export function ComposerSettings({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
+          data-composer-settings-trigger=""
           disabled={disabled}
           aria-label={translateUi("{{menuLabel}}: {{triggerLabel}}{{value}}", { menuLabel: menuLabel, triggerLabel: triggerLabel, value: advancedControls && mode ? `, ${accessLabel}` : "" })}
           className="flex h-8 min-w-0 max-w-full items-center gap-1.5 rounded-lg px-2 text-14 text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"

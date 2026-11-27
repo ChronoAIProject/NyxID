@@ -13,6 +13,22 @@
 - **Key principle:** Color is earned. Semantic colors (green/amber/red) do the heavy lifting for status. Purple marks identity, interaction, and the "primary" CTA archetype.
 - **Density:** Compact — the entire UI skews small and tight. Elements are visually cohesive at reduced sizes. If in doubt, go smaller.
 
+## Public website
+
+Public pages follow Chloe’s light/night landing design. English and Chinese share
+the same layouts and artwork. Use Host Grotesk, paper/ink surfaces, neutral rules
+and ink pill buttons; violet marks identity and interactive states. Public styles
+are scoped to `.nyx-public`, with tokens in `public-design.css` and a public theme
+preference independent of the app.
+
+Keep each page focused: NyxBot shows the app and channels, How it works follows a
+request, Your agent explains client setup, Security explains permissions, Pricing
+explains billing, and Tools provides the directory. Solutions uses job tickets.
+Use real app captures with fictional data; retain reduced-motion stills and visible
+availability labels. Shared navigation, locale/theme controls and the complete
+footer keep the pages connected. Production HTML contains the readable content
+before controls and motion load.
+
 ## Color
 
 ### Primary Accent
@@ -21,7 +37,7 @@
 - **Primary deep:** `#7c5ce0` — for hover states, pressed states
 
 ### Themes and tokens
-The dashboard has dark and light themes (`html.theme-dark` / `html.theme-light`, chosen in Settings → Display; default follows the OS). Always use the semantic tokens below, never raw hex or `white/[α]` classes, so both themes stay correct. Source of truth: `frontend/src/app.css`. Landing/blog are never themed and keep the `@theme` defaults.
+The dashboard has dark and light themes (`html.theme-dark` / `html.theme-light`, chosen in Settings → Display; default follows the OS). Always use the semantic tokens below, never raw hex or `white/[α]` classes, so both themes stay correct. Source of truth: `frontend/src/app.css`. Public marketing pages use the separate scoped tokens described in Public website.
 
 | Token | Dark | Light | Use |
 |---|---|---|---|
@@ -500,6 +516,115 @@ its controls, including wrapped compact headers. Defer rail position and size
 writes to an animation frame outside ResizeObserver delivery: moving the
 rail's top also changes the measured viewport height during header animation.
 
+### Pending decision stack
+
+NyxAgent private chats pin live human decisions above the composer, between its
+error notice and input. Multiple requests share one card with up to two neutral
+layers peeking above it (6px/12px offsets); use `bg-card`, `bg-muted`,
+`border-border`, `rounded-xl` and `shadow-sm`. Layers are decorative and never
+contain controls. The stack owns the frame; its cards omit transcript margins,
+width limits and duplicate outer frames. The user requested this layered pattern
+on 2026-11-26, with an Opus design consultation.
+
+The desktop header says “Needs your decision” or “N requests need your decision”
+(“N decisions” on mobile); a
+separate “1 out of N” pager has labelled Previous/Next buttons and stops at each
+end. A collapse button retains the header and count. Only the front card is
+accessible and interactive; preserve inactive review state with `hidden` and
+`inert`. New requests do not replace the front card. Settled or expired requests
+leave the stack and keep their history; markers provide Review navigation while
+a request is pinned. Do not add bulk approval or decision keyboard shortcuts.
+
+Keep pinned cards compact. Long requests show their title, effect, target and a
+bounded preview; skill drafts also show file/line counts and any scope omissions.
+Their footer offers Review and Deny (or the request's existing dismissal action).
+Allow is available only in full review. Short requests keep direct decision
+controls in the pinned footer. The footer stays outside the card's scroll area,
+whose height is capped at `min(30dvh,14rem)` on mobile and `min(36dvh,20rem)` on
+desktop. Keep the composer visible and reserve the measured dock height below
+the transcript.
+
+Full review uses a desktop dialog and full-height mobile sheet, with one scrolling
+body and an always-visible decision footer. Full skill files wrap without nested
+scrolling; edits open the existing Skills editor. Preserve scope and validity
+choices when review closes and reopens. Opening review focuses its heading;
+closing returns focus to Review, and changing the selected request closes review.
+Count changes use a
+small live announcement, not a live region around the review content. Arrivals
+never steal focus. Resolving the focused card moves focus to the next card's
+header, or the composer when empty, with a 750ms guard on newly promoted
+decision controls. Layer transitions obey both reduced-motion settings.
+
+### Agent avatars
+
+Behind `assistant:avatars`, `shared/agent-avatars/catalog.json` (template
+`face-v1`) and generated geometry provide one mix-and-match system on web and mobile. NyxBot starts with the round
+notched head, tall eyes, brand-purple gradient face, treatment-derived dark
+background and tile frame. Every appearance choice remains editable; the
+original NyxID logo is an optional NyxBot head. Specialists retain the original
+6/4/6 hash split and six tint roles.
+
+- **Identity and paint**: four source heads, six resting eye designs, eleven
+  colour treatments and 35 palette pairs. Background and framing are independent;
+  choosing the treatment-derived background follows that reference treatment.
+  No destructive-red identity palette is introduced. The approved palette
+  extension applies specifically to avatars.
+- **Texture**: nine dither and nine character styles use portable samples and
+  finite vector glyphs. Decorative characters are pixels, never labels or
+  accessibility status; Name fill stays `nyxid·`. This is the narrow exception
+  to the earlier no-text avatar rule.
+- **Framing**: exact even-odd geometry retains real eye holes, including visor
+  pupil islands. 16/20px are crisp stills, 24–44px use vector/quiet analogues,
+  64–95px retain safe static dither, and 96px+ show the selected style. Unsafe
+  coarse eye grids fall back visibly to a crisp analogue without changing the
+  saved choice. Pixel planes keep gradients seam-free at any display scale.
+- **Reactions**: stopping, owner action, waiting, work, drafting and thinking
+  follow authorized observations. Actual capture and playback govern voice;
+  connection and creation events remain separately scoped. Cancellation is
+  neutral. One-shots do not replay on history load, refocus, or ordinary rerender.
+  Real status text and approval controls remain authoritative.
+- **Activity badges**: a static corner glyph supplements existing status text.
+  Private chat resolves the observed turn and roster avatars aggregate the
+  viewer's thread states. Home cards stay still. Web Natural motion uses a
+  local Rive state machine for interruptible eye poses and long holds; the
+  body never pulses or sways. Temporary activity props include a keyboard,
+  wrench/bolt, clock, thought bubble and state cards. Full scenes appear in
+  details; compact props appear in the expanded chat header. Quiet/Reduce Motion
+  hold props still; they never change saved identity. Prop colour/material follows
+  the avatar palette and texture, with thinner edges and less visual weight.
+  Uneven action timing and glances toward the props keep the performance calm.
+  Reply completion retracts
+  the keyboard without a default celebration.
+  Saved Still and Reduce Motion preserve a static face and badge.
+- **Voice**: expanded web/native views show the selected halftone ripple field
+  behind a crisp custom face and real status/name. Twelve colourways include
+  three light fields. Ripple colour is independent of the body appearance.
+  Native switches bounded precomputed frames on the UI thread; Still, Reduce
+  Motion, hidden and background states retain a complete static frame.
+- **Editor and export**: three steps, Face, Style and Motion, edit one draft.
+  The details avatar starts at 112px and collapses to 32px on scroll, with
+  the name and status retained and no divider above the tabs. It shows
+  that draft; chat and roster retain the saved appearance until confirmed.
+  One top Save/Discard row handles avatar changes. Preview actions never save
+  process state. Unknown versions require explicit adoption/reset. Human
+  profile authority and the rollout flag govern saves. The web editor has no
+  download action. Native retains deterministic 512px PNG export/share.
+- **Pixel emotes**: the complete Natural web scene uses one pixel grid and a
+  palette of at most eight colours. Face, eyes and activity props share stepped
+  edges; Rive poses snap to the same grid. The comparison page uses this style
+  for all twelve scenes, with no mixed Flat/Dither/ASCII defaults. Stored
+  appearance continues to supply shape, eyes, palette and material.
+- **Rive**: a script-free local rig controls shared eye apertures through one
+  lazy worker. Shapes, resting eyes, colours and textures remain configurable.
+  Edge-defined outline/inverted character styles retain static eyes, explained
+  in the editor. Hidden work pauses; runtime failure leaves a complete face.
+  Only the hashed Rive worker has the WASM CSP allowance. Native retains the
+  shared renderer pending a separate native runtime proof.
+
+See `docs/chat/13-agent-avatars.md` for rendering, lifecycle, authority,
+caching and validation. The old orb rig remains removed. The new local rig
+and its editable source live in `shared/agent-avatars/rive/`.
+
 ### Agent drawer search
 
 The agent details drawer has matching circular Search and Close header icon
@@ -883,6 +1008,10 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-27 | Restore the native voice composer's pastel aura | User requested the original mint-and-blush halo around the current compact native voice controls while retaining the voice lifecycle and control fixes. The [voice UI spec](docs/chat/11-voice.md#13-ui-mobile-and-accessibility) defines its behavior. |
+| 2026-11-26 | Pending human decisions share a compact pinned card stack | User-requested layering keeps live decisions above the composer, separates the pending count from card position, and returns settled requests to history. Following Opus visual review, long requests open full review with one scrolling body and a fixed decision footer; short requests keep direct controls in a fixed card footer. One interactive copy, stable selection, preserved choices, inert inactive cards and guarded promotion protect exact approvals. |
+| 2026-11-26 | Natural web emotes use an authored Rive controller | Twelve states animate true eye apertures over configurable shared artwork. Home cards stay still; details retain a 112px pinned preview. Local script-free assets and worker-only WASM CSP preserve the existing SPA policy. Native retains the portable renderer. |
+| 2026-11-25 | Shared configurable face kit behind `assistant:avatars` | The source face kit supplies editable heads, eyes, 35 palette pairs, all dither/character styles, and twelve voice ripple colourways. NyxBot starts in brand purple. One portable composition drives web, native and deterministic export; observed process facts drive decoration while status text remains authoritative. |
 | 2026-11-05 | Account text and range rows use deliberate shared layouts | Stack account text labels above left-aligned borderless inputs, provide explicit password placeholders and an editable-name affordance, and truncate long read-only email values beside their verification context. RangeControl aligns each label and current value above the slider with one muted helper, in both shells and mobile widths. MFA switches reflect the server state through setup/disable confirmation, announce pending/errors, and prevent dismissal during requests. |
 | 2026-11-05 | Conversation previews require an intentional gesture | Passing pointers leave the rail quiet. Press and drag preview until release; keyboard focus retains its preview. Browser coverage includes virtualized-message jumps, isolated wheel scrolling and one roving tab stop. |
 | 2026-11-05 | Account Settings shares inset grouped editing in both shells | Profile, Security, Sessions, MCP, Display and Privacy use sibling groups and external help. The panel header shares its background; visited segmented tabs retain drafts and one dirty-only viewport bar reviews profile/password edits without exposing passwords. Studio reuses the same forms; immediate actions and URL/focus/dismiss behavior stay intact. Mobile uses the full-width dialog sheet with keyboard-aware actions. |
@@ -1231,14 +1360,16 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   Finish circle. Permission, startup, capture and stopping retain the same toolbar.
   Finish adds the words to the draft for editing and explicit Send. Dictation
   errors and their Settings/Dismiss actions sit outside, above the composer pill
-  (user decision 2026-11-11). On narrow phones on both iOS and Android an idle
+  (user decision 2026-11-11). On every window on both iOS and Android an idle
   Home, private, contextual or crew composer is one row:
   unfocused with an empty or whitespace-only draft (the draft itself is never
   trimmed), Attach, dictation and Send overlay its text line and the permission
-  pill hides. Focus, non-whitespace text, attachments, uploads or dictation
-  restore two rows without remounting the input. Wide layouts retain their
-  full-width text row and existing toolbar. Input and toolbar use the same
-  compact layout on ordinary and corner-sensor phones. On corner-sensor windows, a tap outside the composer blurs it as the touch ends, so the tapped control still acts on the
+  pill hides. Focus, non-whitespace text or active dictation restore two rows
+  without remounting the input. Attachments retain their own preview strip;
+  uploads do not expand an idle text input. Crew recipients appear above the
+  active input. Input and toolbar use the same compact layout on ordinary and
+  corner-sensor phones, iPad and wide windows (user clarification 2026-11-24).
+  On corner-sensor windows, a tap outside the composer blurs it as the touch ends, so the tapped control still acts on the
   first tap; dragging the transcript dismisses the keyboard. The jump-to-latest arrow
   dips 6pt and springs back as the transcript scrolls to the newest message
   (immediate under Reduce Motion). Chat pages

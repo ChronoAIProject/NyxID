@@ -1,3 +1,4 @@
+import { ManagedMetaConnect, ManagedMetaDetail } from "./managed-meta";
 import type { ComponentType } from "react";
 import type { ManagedFlow } from "@/lib/channel-platforms";
 import { ManagedWhatsApp, ManagedWhatsAppDetail } from "./managed-whatsapp";
@@ -17,6 +18,7 @@ export const MANAGED_FLOW_COMPONENTS: Record<
     Detail: ComponentType<ManagedDetailProps>;
   }
 > = {
+  meta_oauth: { Connect: ManagedMetaConnect, Detail: ManagedMetaDetail },
   meta_embedded_signup: {
     Connect: ManagedWhatsApp,
     Detail: ManagedWhatsAppDetail,

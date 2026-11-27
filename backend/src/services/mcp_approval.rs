@@ -5,6 +5,7 @@ use crate::services::{mcp_service, proxy_service};
 
 #[derive(Clone, Debug)]
 pub(crate) struct McpApprovalTarget {
+    pub(crate) connection_id: Option<String>,
     pub(crate) service_id: String,
     pub(crate) service_name: String,
     pub(crate) service_slug: String,
@@ -67,6 +68,12 @@ pub(crate) async fn approval_target_for_tool(
     };
 
     Ok(McpApprovalTarget {
+        connection_id: match &service.source {
+            mcp_service::McpToolSource::UserManaged {
+                user_service_id, ..
+            } => Some(user_service_id.clone()),
+            _ => None,
+        },
         service_id: hint.service_id,
         service_name: service.service_name.clone(),
         service_slug: service.service_slug.clone(),
@@ -167,6 +174,7 @@ mod tests {
         let now = chrono::Utc::now();
         db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: owner_id.to_string(),
                 service_id: catalog_id.to_string(),

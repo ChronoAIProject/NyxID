@@ -17,6 +17,7 @@ import {
   listApprovalRequestsRequest,
   listChallengesRequest,
   loginWithPasswordRequest,
+  requestJson,
   verifyMfaRequest,
   registerWithPasswordRequest,
   registerPushTokenRequest,
@@ -106,9 +107,23 @@ export const mobileApi = {
       message: response.message,
     };
   },
-  getSocialAuthorizeUrl(provider: SocialProvider, redirectUri: string): string {
-    const encodedRedirectUri = encodeURIComponent(redirectUri);
-    return buildApiUrl(`/auth/social/${provider}?client=mobile&redirect_uri=${encodedRedirectUri}`);
+  getSocialAuthorizeUrl(provider: SocialProvider, redirectUri: string, codeChallenge: string): string {
+    const redirect = encodeURIComponent(redirectUri);
+    const challenge = encodeURIComponent(codeChallenge);
+    return buildApiUrl(
+      `/auth/social/${provider}/mobile-code?redirect_uri=${redirect}&code_challenge=${challenge}&code_challenge_method=S256`,
+    );
+  },
+  redeemSocialCode(code: string, verifier: string) {
+    return requestJson<{ access_token: string; refresh_token: string; expires_in: number }>(
+      "/auth/social/mobile-code/redeem",
+      {
+        method: "POST",
+        body: { code, code_verifier: verifier },
+        requiresAuth: false,
+        retryOnAuthFailure: false,
+      },
+    );
   },
   async getChallenges(page = 1, perPage = 20): Promise<PageResponse<ChallengeDetail>> {
     return listChallengesRequest(page, perPage);

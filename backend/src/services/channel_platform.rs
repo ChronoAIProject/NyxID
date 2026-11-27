@@ -66,6 +66,17 @@ pub(crate) async fn with_post_effect_guard<F: std::future::Future>(
     guard: PostEffectGuard,
     send: F,
 ) -> F::Output {
+    let guard = match POST_EFFECT_GUARD.try_with(Clone::clone) {
+        Ok(parent) => std::sync::Arc::new(move || {
+            let parent = parent.clone();
+            let guard = guard.clone();
+            Box::pin(async move {
+                parent().await?;
+                guard().await
+            }) as futures::future::BoxFuture<'static, AppResult<()>>
+        }),
+        Err(_) => guard,
+    };
     POST_EFFECT_GUARD.scope(guard, send).await
 }
 
@@ -556,6 +567,28 @@ pub trait PlatformAdapter: Send + Sync {
 
     fn atomic_inbound_admission(&self) -> bool {
         false
+    }
+
+    /// Persist authenticated protocol state before any event is admitted.
+    async fn apply_webhook_state(
+        &self,
+        _db: &mongodb::Database,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _body: &[u8],
+        _snapshot: &super::channel_verification_service::CredentialSnapshot,
+    ) -> AppResult<()> {
+        Ok(())
+    }
+
+    async fn authorize_inbound(
+        &self,
+        _db: &mongodb::Database,
+        _http: &reqwest::Client,
+        _keys: &crate::crypto::aes::EncryptionKeys,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _inbound: &InboundMessage,
+    ) -> AppResult<()> {
+        Ok(())
     }
     async fn send_reply_outcome(
         &self,

@@ -34,3 +34,5 @@ coverage/
 # Playwright (e2e harness)
 test-results
 playwright-report
+
+.public-render/

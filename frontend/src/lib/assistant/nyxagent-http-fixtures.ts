@@ -1,5 +1,6 @@
 import type { AssistantHttpMockHandler } from "@/lib/assistant/assistant-http";
 import type { NotificationReadRequest } from "@/schemas/assistant-notifications";
+import { isValidAvatar, type AvatarConfig } from "@/lib/assistant/agent-avatar-model";
 import { mentionedNames } from "@/lib/assistant/nyxbot-mentions";
 import { createMockConnectReply, mockCreatedBotCount } from "@/lib/assistant/mock-setup-journeys";
 import {
@@ -69,6 +70,8 @@ interface AgentRecord {
   name: string;
   /** Optional in sessions persisted before display names existed. */
   display_name?: string | null;
+  /** Dev fixture: the chosen avatar (absent derives the default). */
+  avatar?: AvatarConfig | null;
   persona?: string | null;
   description: string;
   created_by: "user" | "nyxbot";
@@ -341,11 +344,14 @@ export class NyxAgentHttpFixtures {
     const agent = this.agentOf(row);
     return {
       ...row.history.conversation,
+      handoff_eligible: agent.kind === "specialist" && !row.history.conversation.channel && !agent.destroyed_at,
       role: agent.kind === "specialist" ? "subagent" : "orchestrator",
       agent: {
         id: agent.id,
         kind: agent.kind,
         name: agent.name,
+        display_name: agent.display_name ?? null,
+        avatar: agent.avatar ?? null,
         destroyed: Boolean(agent.destroyed_at),
       },
       pending_acknowledgements: this.pending(row),
@@ -380,6 +386,7 @@ export class NyxAgentHttpFixtures {
       kind: agent.kind,
       name: agent.name,
       display_name: agent.display_name ?? null,
+      avatar: agent.avatar ?? null,
       persona: agent.persona ?? null,
       description: agent.description,
       specialty: null,
@@ -730,7 +737,11 @@ export class NyxAgentHttpFixtures {
         description?: string;
         display_name?: string;
         persona?: string;
+        avatar?: AvatarConfig | null;
       };
+      if (update.avatar !== undefined && update.avatar !== null && !isValidAvatar(update.avatar)) {
+        return failure(400, "Choose every avatar part and colour from the avatar catalogue");
+      }
       const style = this.styleRefusal(update);
       if (style) return style;
       if (update.name !== undefined && update.name !== agent.name) {
@@ -743,6 +754,7 @@ export class NyxAgentHttpFixtures {
       // An empty string clears these.
       if (update.display_name !== undefined) agent.display_name = update.display_name.trim() || null;
       if (update.persona !== undefined) agent.persona = update.persona.trim() || null;
+      if (update.avatar !== undefined) agent.avatar = update.avatar;
       this.save();
       return json({
         id: agent.id,
@@ -750,6 +762,7 @@ export class NyxAgentHttpFixtures {
         description: agent.description,
         display_name: agent.display_name ?? null,
         persona: agent.persona ?? null,
+        avatar: agent.avatar ?? null,
       });
     }
     if (method === "DELETE") {
@@ -1033,6 +1046,7 @@ export class NyxAgentHttpFixtures {
       members: members.map((agent) => ({
         id: agent.id,
         name: this.memberName(agent),
+        avatar: agent.avatar ?? null,
         kind: agent.kind,
         destroyed: Boolean(agent.destroyed_at),
         working: working.includes(agent.id),
@@ -1055,7 +1069,7 @@ export class NyxAgentHttpFixtures {
       id: crypto.randomUUID(),
       seq: (group.messages.at(-1)?.seq ?? 0) + 1,
       role,
-      agent: agent ? { id: agent.id, name: this.memberName(agent), kind: agent.kind } : null,
+      agent: agent ? { id: agent.id, name: this.memberName(agent), avatar: agent.avatar ?? null, kind: agent.kind } : null,
       text,
       created_at: new Date().toISOString(),
     };

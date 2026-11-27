@@ -17,22 +17,31 @@ vi.mock("@/components/channels/channel-connection-shell", () => ({ ChannelConnec
 vi.mock("@/hooks/use-telegram-new", () => ({ useTelegramNewConfiguration: (id?: string) => { mocks.requestIds.push(id); return { data: { request: mocks.request }, isPending: false }; } }));
 vi.mock("./telegram-new", () => ({ TelegramNew: ({ requestId, onStarted, onCancelled, onConnected }: { requestId?: string; onStarted: (id?: string) => void; onCancelled: () => void; onConnected: (id: string, username: string) => void }) => <div><span data-testid="request">{requestId ?? "current"}</span><button type="button" onClick={() => onStarted("11111111-1111-4111-8111-111111111111")}>Start</button><button type="button" onClick={onCancelled}>Cancel</button><button type="button" onClick={() => onConnected("bot-id", "ActualBot")}>Complete</button></div> }));
 
-function Flow({ stayInPlace = false, returnTo }: { stayInPlace?: boolean; returnTo?: string }) {
+function Flow({ stayInPlace = false, returnTo, initialRequestId }: { stayInPlace?: boolean; returnTo?: string; initialRequestId?: string }) {
   const form = useAppForm<CreateChannelBotFormData>({ defaultValues: { platform: "telegram-new", label: "Support" } });
   const [done, setDone] = useState(false);
-  return done ? <p>Connected</p> : <TelegramNewConnect platform="telegram-new" label="Support" orgId={null} form={form} fullPage={!stayInPlace} stayInPlace={stayInPlace} returnTo={returnTo} renderFields={() => null} onConnected={(...args) => { mocks.onConnected(...args); setDone(true); }}>{null}</TelegramNewConnect>;
+  return done ? <p>Connected</p> : <TelegramNewConnect platform="telegram-new" label="Support" orgId={null} form={form} fullPage={!stayInPlace} stayInPlace={stayInPlace} initialRequestId={initialRequestId} returnTo={returnTo} renderFields={() => null} onConnected={(...args) => { mocks.onConnected(...args); setDone(true); }}>{null}</TelegramNewConnect>;
 }
 vi.mock("@/components/channels/channel-bot-setup", () => ({ ChannelBotSetup: ({ returnTo }: { returnTo?: string }) => <Flow returnTo={returnTo} /> }));
 
-function mount(entry: string, inPlace = false) {
+function mount(entry: string, inPlace = false, initialRequestId?: string) {
   const root = createRootRoute({ component: Outlet });
-  const assistant = createRoute({ getParentRoute: () => root, path: "/assistant", component: () => <Flow stayInPlace /> });
+  const assistant = createRoute({ getParentRoute: () => root, path: "/assistant", component: () => <Flow stayInPlace initialRequestId={initialRequestId} /> });
   const setup = createRoute({ getParentRoute: () => root, path: "/channel-bots/connect/$platform", validateSearch: parseChannelBotSetupPageSearch, component: ChannelBotSetupPage });
   const router = createRouter({ routeTree: root.addChildren([assistant, setup]), history: createMemoryHistory({ initialEntries: [entry] }), rewrite: channelBotSetupRewrite });
   const client = new QueryClient();
   const view = render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
   return { ...view, router, inPlace };
 }
+
+it("resumes the exact Telegram request in place and does not resurrect it after cancellation", async () => {
+  const id = "11111111-1111-4111-8111-111111111111";
+  const view = mount("/assistant?c=source", true, id);
+  expect(await screen.findByTestId("request")).toHaveTextContent(id);
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(screen.getByTestId("request")).toHaveTextContent("current"));
+  expect(view.router.state.location.href).toBe("/assistant?c=source");
+});
 beforeEach(() => { mocks.request = undefined; mocks.requestIds.length = 0; mocks.onConnected.mockClear(); });
 afterEach(() => { cleanup(); window.history.replaceState(null, "", "/"); });
 

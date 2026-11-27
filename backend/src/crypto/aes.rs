@@ -14,6 +14,13 @@ use crate::errors::AppError;
 use super::key_provider::{KeyProvider, WrappedKey, derive_key_id};
 use super::local_key_provider::LocalKeyProvider;
 
+struct AuthenticatedV2<'a> {
+    dek: Zeroizing<Vec<u8>>,
+    data_portion: &'a [u8],
+    size: usize,
+    is_current: bool,
+}
+
 mod record;
 pub use record::RecordContext;
 
@@ -747,6 +754,53 @@ impl EncryptionKeys {
         ciphertext: &[u8],
         aad: &[u8],
     ) -> Result<Vec<u8>, AppError> {
+        let authenticated = self.authenticate_v2(ciphertext, aad).await?;
+        if authenticated.is_current {
+            return Ok(ciphertext.to_vec());
+        }
+        let data_portion = authenticated.data_portion;
+
+        // Wrap the authenticated DEK with the current provider.
+        let new_wrapped = self.provider.wrap_dek(&authenticated.dek).await?;
+        if new_wrapped.ciphertext.is_empty() || new_wrapped.ciphertext.len() > MAX_WRAPPED_DEK_SIZE
+        {
+            return Err(AppError::Internal("Invalid wrapped DEK size".into()));
+        }
+        let new_wrapped_len = u16::try_from(new_wrapped.ciphertext.len())
+            .map_err(|_| AppError::Internal("Invalid wrapped DEK size".into()))?;
+
+        // Assemble new v2 envelope with current KEK.
+        let total = V2_HEADER_SIZE + new_wrapped_len as usize + data_portion.len();
+        let mut result = Vec::with_capacity(total);
+        result.push(VERSION_V2);
+        result.push(new_wrapped.key_id);
+        result.extend_from_slice(&new_wrapped_len.to_be_bytes());
+        result.extend_from_slice(&new_wrapped.ciphertext);
+        result.extend_from_slice(data_portion);
+
+        Ok(result)
+    }
+
+    pub(super) async fn authenticated_current_v2_size(
+        &self,
+        ciphertext: &[u8],
+        aad: &[u8],
+    ) -> Result<Option<usize>, AppError> {
+        let verified = self.authenticate_v2(ciphertext, aad).await?;
+        if verified.is_current {
+            // Verification previously opened the current envelope to check its size.
+            self.counters.v2_current.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(verified.size))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn authenticate_v2<'a>(
+        &self,
+        ciphertext: &'a [u8],
+        aad: &[u8],
+    ) -> Result<AuthenticatedV2<'a>, AppError> {
         if !looks_like_v2(ciphertext) {
             return Err(AppError::Internal(
                 "rewrap() only supports v2 envelope format".to_string(),
@@ -792,30 +846,12 @@ impl EncryptionKeys {
         // data. Authenticate the exact v2 payload, without a legacy fallback,
         // before either the no-op or wrapping a new envelope.
         let plaintext = decrypt_raw_with_aad(data_portion, &plaintext_dek, aad)?;
-        drop(plaintext);
-        if primary_unwrapped && kek_id == self.provider.current_key_id() {
-            return Ok(ciphertext.to_vec());
-        }
-
-        // Wrap with current key via provider (plaintext_dek is Zeroizing<Vec<u8>>).
-        let new_wrapped = self.provider.wrap_dek(&plaintext_dek).await?;
-        if new_wrapped.ciphertext.is_empty() || new_wrapped.ciphertext.len() > MAX_WRAPPED_DEK_SIZE
-        {
-            return Err(AppError::Internal("Invalid wrapped DEK size".into()));
-        }
-        let new_wrapped_len = u16::try_from(new_wrapped.ciphertext.len())
-            .map_err(|_| AppError::Internal("Invalid wrapped DEK size".into()))?;
-
-        // Assemble new v2 envelope with current KEK.
-        let total = V2_HEADER_SIZE + new_wrapped_len as usize + data_portion.len();
-        let mut result = Vec::with_capacity(total);
-        result.push(VERSION_V2);
-        result.push(new_wrapped.key_id);
-        result.extend_from_slice(&new_wrapped_len.to_be_bytes());
-        result.extend_from_slice(&new_wrapped.ciphertext);
-        result.extend_from_slice(data_portion);
-
-        Ok(result)
+        Ok(AuthenticatedV2 {
+            dek: plaintext_dek,
+            data_portion,
+            size: plaintext.len(),
+            is_current: primary_unwrapped && kek_id == self.provider.current_key_id(),
+        })
     }
 
     fn log_once(&self, flag: &AtomicBool, message: &str) {
@@ -1069,6 +1105,8 @@ mod tests {
             instance_name: "test-backend".to_string(),
             automation_continuation_v2_enabled: false,
             security_rollout: Default::default(),
+            admin_mfa_enforcement: Default::default(),
+            auth_verification_legacy_cutoff_at: None,
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,
@@ -1147,6 +1185,7 @@ mod tests {
 
     #[derive(Debug)]
     struct MockKeyProvider {
+        wraps: AtomicU64,
         current_key_id: u8,
         current_mask: u8,
         previous: Option<(u8, u8)>,
@@ -1155,6 +1194,7 @@ mod tests {
     impl MockKeyProvider {
         fn new(current_key_id: u8, current_mask: u8, previous: Option<(u8, u8)>) -> Self {
             Self {
+                wraps: AtomicU64::new(0),
                 current_key_id,
                 current_mask,
                 previous,
@@ -1165,6 +1205,7 @@ mod tests {
     #[async_trait]
     impl KeyProvider for MockKeyProvider {
         async fn wrap_dek(&self, plaintext_dek: &[u8]) -> Result<WrappedKey, AppError> {
+            self.wraps.fetch_add(1, Ordering::Relaxed);
             let mut ciphertext = Vec::with_capacity(3 + plaintext_dek.len());
             ciphertext.push(self.current_mask);
             ciphertext.push(0xA5);
@@ -1915,6 +1956,44 @@ mod tests {
             primary_only.decrypt(&rewritten).await.unwrap().as_slice(),
             b"collision fixture"
         );
+    }
+
+    #[tokio::test]
+    async fn oracle_verification_authenticates_before_attributing_a_colliding_selector() {
+        use crate::crypto::record_field::oracle::OracleOuter;
+        let old = Arc::new(MockKeyProvider::new(0x11, 0x33, None));
+        let primary = Arc::new(MockKeyProvider::new(0x11, 0x77, None));
+        let old_keys = EncryptionKeys::with_provider(old.clone());
+        let keys = EncryptionKeys::with_provider_and_fallback(primary.clone(), Some(old));
+        let outer = OracleOuter::snapshot("pool:λ", "", 1);
+        let sealed = b"worker-sealed bytes";
+        let stored = outer.seal(&old_keys, sealed).await.unwrap();
+        assert_eq!(
+            outer.authenticate_current(&keys, &stored).await.unwrap(),
+            None
+        );
+        assert_eq!(primary.wraps.load(Ordering::Relaxed), 0);
+        let current = outer.rewrap(&keys, &stored).await.unwrap();
+        assert_eq!(
+            outer.authenticate_current(&keys, &current).await.unwrap(),
+            Some(sealed.len())
+        );
+        assert_eq!(primary.wraps.load(Ordering::Relaxed), 1);
+        assert_eq!(keys.decrypt_stats().v2_current, 1);
+        assert_eq!(keys.decrypt_stats().v2_fallback, 0);
+        let data = |v: &[u8]| 4 + usize::from(u16::from_be_bytes([v[2], v[3]]));
+        assert_eq!(stored[data(&stored)..], current[data(&current)..]);
+        assert_eq!(
+            outer.open(&keys, &current).await.unwrap().as_slice(),
+            sealed
+        );
+        let swapped = OracleOuter::snapshot("pool", ":λ", 1);
+        assert!(swapped.authenticate_current(&keys, &current).await.is_err());
+        for index in [0, 1, 2, 4, current.len() - 1] {
+            let mut damaged = current.clone();
+            damaged[index] ^= 0x80;
+            assert!(outer.authenticate_current(&keys, &damaged).await.is_err());
+        }
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@
 #[derive(Clone, Copy)]
 enum Units {
     Utf16,
+    Utf8,
     Scalars,
     JsonBytes,
 }
@@ -22,6 +23,8 @@ pub(crate) fn reply_length_guidance(platform: &str) -> String {
         "discord" => "Discord",
         "slack" => "Slack",
         "whatsapp" => "WhatsApp",
+        "messenger" => "Messenger",
+        "instagram" => "Instagram",
         "x" => "X",
         "lark" => "Lark",
         "feishu" => "Feishu",
@@ -32,6 +35,7 @@ pub(crate) fn reply_length_guidance(platform: &str) -> String {
     let budget = format!("{},{:03}", budget / 1000, budget % 1000);
     let units = match limit.units {
         Units::Utf16 => "characters (counted as UTF-16 code units; some emoji count as two)",
+        Units::Utf8 => "UTF-8 bytes (some characters use multiple bytes)",
         Units::Scalars => "characters (Unicode scalar values)",
         Units::JsonBytes => "bytes of JSON-escaped text, after reserving the message wrapper",
     };
@@ -49,6 +53,8 @@ impl TextLimit {
             "lark" | "feishu" => (Units::JsonBytes, 30 * 1024 - "{\"text\":\"\"}".len()),
             "telegram" | "telegram-new" => (Units::Utf16, 4096),
             "discord" => (Units::Utf16, 2000),
+            "messenger" => (Units::Utf16, 2000),
+            "instagram" => (Units::Utf8, 1000),
             "slack" => (Units::Scalars, 40_000),
             "whatsapp" => (Units::Scalars, 4096),
             "x" => (Units::Scalars, 10_000),
@@ -75,6 +81,7 @@ impl TextLimit {
     fn cost(self, ch: char) -> usize {
         match self.units {
             Units::Utf16 => ch.len_utf16(),
+            Units::Utf8 => ch.len_utf8(),
             Units::Scalars => 1,
             Units::JsonBytes => match ch {
                 '"' | '\\' | '\n' | '\r' | '\t' | '\u{08}' | '\u{0c}' => 2,

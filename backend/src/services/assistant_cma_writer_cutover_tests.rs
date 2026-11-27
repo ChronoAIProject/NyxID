@@ -12,15 +12,10 @@ async fn assert_retained_body(
     let ciphertext = row.request_ciphertext.as_deref().unwrap();
     assert!(!ciphertext.windows(body.len()).any(|window| window == body));
     assert_eq!(
-        record_field::decrypt_context(
-            &f.keys,
-            &context,
-            contextual.then_some(3),
-            ciphertext
-        )
-        .await
-        .unwrap()
-        .as_slice(),
+        record_field::decrypt_context(&f.keys, &context, contextual.then_some(3), ciphertext)
+            .await
+            .unwrap()
+            .as_slice(),
         body
     );
     let parent = sandboxes::get_owned(&f.db, &f.owner, &row.sandbox_ref_id)
@@ -77,6 +72,7 @@ async fn assistant_cma_creation_cutover_modes_approval_retry_and_permit() {
             crate::test_utils::set_test_approval_preference(&f.db, &f.owner, true).await;
             f.db.collection::<ServiceApprovalConfig>(CONFIGS)
                 .insert_one(ServiceApprovalConfig {
+                    approvers: Default::default(),
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),
                     service_id: f.catalog.id.clone(),
@@ -232,6 +228,31 @@ async fn assistant_cma_cutover_lost_receipt_replays_both_creation_kinds() {
             let before = bson::to_document(&f.saved(&row.id).await).unwrap();
             recover_owner(&f.db, &f.gateway(), &f.owner).await.unwrap();
             assert_eq!(bson::to_document(&f.saved(&row.id).await).unwrap(), before);
+            // A storage-only pass over an unknown dispatch must preserve both
+            // identities, even when the first response was lost.
+            f.keys.set_contextual_record_writes(true);
+            for (name, id) in [
+                (COLLECTION_NAME, &row.id),
+                (
+                    crate::models::assistant_cma_sandbox::COLLECTION_NAME,
+                    &row.sandbox_ref_id,
+                ),
+            ] {
+                let rows = f.db.collection::<bson::Document>(name);
+                let source = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+                assert_eq!(source.get_str("submission_state"), Ok("unknown"));
+                let changed = crate::services::assistant_cma_request_record::migrate(
+                    &f.db, &f.keys, name, &source,
+                )
+                .await
+                .unwrap();
+                assert_eq!(changed, !contextual);
+                let winner = rows.find_one(doc! {"_id":id}).await.unwrap().unwrap();
+                crate::services::assistant_cma_request_record::verify(&f.keys, name, &winner)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(f.post_count().await, 1);
             f.keys.set_contextual_record_writes(!contextual);
             let result = recover_creation(
                 &f.db,
@@ -439,7 +460,17 @@ async fn assistant_cma_cutover_proven_absence_retry_replaces_ciphertext_and_mark
             .await
             .unwrap();
         assert!(absent.request_ciphertext.is_none() && absent.request_context_version.is_none());
+        // Recreate a losing pre-transaction candidate with a different ID.
+        // It must not attach its envelope to the proven-absent winner.
         f.keys.set_contextual_record_writes(!contextual);
+        let mut wrong = old.clone();
+        wrong.id = uuid::Uuid::new_v4().to_string();
+        let parent = sandboxes::begin_creation(&f.db, &f.keys, &f.gateway(), &f.owner, key, body)
+            .await
+            .unwrap();
+        wrong.sandbox_generation = parent.generation;
+        assert!(store_creation(&f.db, &wrong).await.is_err());
+        assert!(f.saved(&old.id).await.request_ciphertext.is_none());
         let retry = f
             .admit(&f.target, "/api/v1/agents", key, body)
             .await
@@ -470,4 +501,51 @@ async fn assistant_cma_cutover_proven_absence_retry_replaces_ciphertext_and_mark
         f.assert_single_intent().await;
         f.db.drop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn recovery_authenticates_creation_copy_before_replaying_the_sandbox_request() {
+    let f = Fixture::new().await;
+    let body = br#"{"name":"both copies"}"#;
+    let permit = f
+        .admit(&f.target, "/api/v1/sandboxes", "both-copies", body)
+        .await
+        .unwrap();
+    let row = permit.creation.as_ref().unwrap();
+    permit
+        .before_send(&f.request("/api/v1/sandboxes", "both-copies", body))
+        .await
+        .unwrap();
+    let parent = sandboxes::get_owned(&f.db, &f.owner, &row.sandbox_ref_id)
+        .await
+        .unwrap();
+    let rows = f.db.collection::<bson::Document>(COLLECTION_NAME);
+    let source = rows.find_one(doc! {"_id": &row.id}).await.unwrap().unwrap();
+    for change in [
+        doc! {"request_ciphertext": bson::to_bson(&parent.request_ciphertext).unwrap()},
+        doc! {"request_context_version": 259},
+    ] {
+        rows.update_one(doc! {"_id": &row.id}, doc! {"$set": change})
+            .await
+            .unwrap();
+        let before = rows.find_one(doc! {"_id": &row.id}).await.unwrap().unwrap();
+        assert!(
+            recover_creation(
+                &f.db,
+                &f.keys,
+                &f.gateway(),
+                &f.owner,
+                &parent.id,
+                parent.generation
+            )
+            .await
+            .is_err()
+        );
+        assert!(rows.find_one(doc! {"_id": &row.id}).await.unwrap().unwrap() == before);
+        assert_eq!(f.post_count().await, 0);
+        rows.replace_one(doc! {"_id": &row.id}, &source)
+            .await
+            .unwrap();
+    }
+    f.assert_single_intent().await;
 }

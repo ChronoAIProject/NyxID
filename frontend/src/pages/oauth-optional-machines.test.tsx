@@ -1,3 +1,4 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -27,7 +28,11 @@ describe("optional Machines through the actual consent editor", () => {
       response_type: "code", client_id: "client", client_name: "Fixture app", redirect_uri: request.redirect_uri,
       scope: request.scope, code_challenge: "challenge", code_challenge_method: "S256", consent_request: token,
     })}`);
-    render(<OAuthConsentPage />);
+    render(
+      <QueryClientProvider client={new QueryClient()}>
+        <OAuthConsentPage />
+      </QueryClientProvider>,
+    );
     const allow = screen.getByRole("button", { name: incremental ? "Continue" : "Allow access" });
     expect(allow).toBeEnabled();
     expect(screen.getByRole("heading", { name: "Machine access (optional)" })).toBeInTheDocument();

@@ -38,15 +38,21 @@ impl Preview {
                 )
             })
             .collect::<Vec<_>>();
-        format!(
-            "{} {} Guests can use: {}. {}{}",
-            self.description,
-            EXCLUSIONS,
-            if services.is_empty() {
+        let guest_capabilities = if self.guest_enabled {
+            let list = if services.is_empty() {
                 "Model-only chat".into()
             } else {
                 services.join(", ")
-            },
+            };
+            format!(" Guests can use: {list}.")
+        } else {
+            String::new()
+        };
+        format!(
+            "{} {}{} {}{}",
+            self.description,
+            EXCLUSIONS,
+            guest_capabilities,
             self.audience_readiness.summary(),
             self.health
                 .as_ref()
@@ -59,6 +65,7 @@ impl Preview {
 pub(crate) async fn load(
     db: &Database,
     keys: &crate::crypto::aes::EncryptionKeys,
+    base_url: &str,
     actor: &str,
     bot_id: &str,
     agent_id: &str,
@@ -97,18 +104,41 @@ pub(crate) async fn load(
         .ok_or_else(denied)?;
     let channels = db.collection::<NyxbotChannel>("nyxbot_channels");
     let (previous, reused) = if let Some(id) = channel_id {
-        let row = management::load(db, actor, id, true).await?;
+        let mut row = management::load(db, actor, id, true).await?;
         if row.channel_bot_id != bot.id {
             return Err(denied());
         }
-        (Some(row), true)
+        let reused = if row.transport == "direct"
+            && super::super::channel_adapters::meta::is_meta(&row.platform)
+        {
+            super::super::nyxbot_channel_query_service::reusable_meta(
+                db,
+                &row.user_id,
+                &bot.user_id,
+                &row,
+                base_url,
+            )
+            .await?
+        } else {
+            true
+        };
+        if !reused {
+            row.status = "disconnected".into();
+        }
+        (Some(row), reused)
     } else {
         let active =
             super::super::nyxbot_channel_query_service::active_for_bot(db, actor, bot_id).await?;
         let reusable = match &active {
             Some(row) => {
-                super::super::nyxbot_channel_query_service::reusable(db, actor, &bot.user_id, row)
-                    .await?
+                super::super::nyxbot_channel_query_service::reusable_meta(
+                    db,
+                    actor,
+                    &bot.user_id,
+                    row,
+                    base_url,
+                )
+                .await?
             }
             None => false,
         };
@@ -128,8 +158,8 @@ pub(crate) async fn load(
             (previous, false)
         }
     };
-    let mut policy = new_guest_policy(ready);
-    let mut private = "everyone".to_owned();
+    let mut policy = initial_guest_policy(ready, &bot.platform);
+    let mut private = if policy.enabled { "everyone" } else { "owner" }.to_owned();
     let mut carried = false;
     if let Some(previous) = previous {
         if !reused {
@@ -168,14 +198,16 @@ pub(crate) async fn load(
     } else {
         None
     };
-    let mut description = if !policy.enabled {
+    let mut description = if !policy.enabled && !carried {
+        "Customer access starts off. Only verified organization members can use private chats until an administrator enables customer conversations.".to_owned()
+    } else if !policy.enabled {
         "Saved guest access is off and stays off. Only verified organization members can talk to this bot.".to_owned()
     } else if carried && private != "everyone" {
         "Saved guest access stays on. Private chats stay restricted to verified organization members. Guests can talk in groups that allow everyone; the organization pays for their messages and tool use.".to_owned()
     } else {
         EXPOSURE.to_owned()
     };
-    if !(ready && policy.follows_agent_grants) {
+    if policy.enabled && !(ready && policy.follows_agent_grants) {
         description.push_str(" Existing guest service limits apply. Guests can use only the services listed below; an empty list means model-only chat.");
     }
     Ok(Preview {

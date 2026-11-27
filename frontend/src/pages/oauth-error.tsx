@@ -1,5 +1,6 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
+import { translateErrorMessage } from "@/lib/error-messages";
 import { useNavigate } from "@tanstack/react-router";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -26,15 +27,18 @@ export function OAuthErrorPage() {
   const navigate = useNavigate();
   const search = new URLSearchParams(window.location.search);
   const code = search.get("code") ?? "unknown_error";
-  const message =
-    search.get("message") ??
-    "An unexpected error occurred during authorization.";
+  const detail = search.get("message");
+  const message = detail
+    ? translateErrorMessage(detail)
+    : translateUi("An unexpected error occurred during authorization.");
   const serviceSlug = search.get("service_slug")?.trim() ?? "";
   const serviceName = search.get("service_name")?.trim() || serviceSlug;
   const isMissingRequiredService =
     code === "required_service_not_connected" && serviceSlug.length > 0;
 
-  const title = ERROR_LABELS[code] ?? "Authorization Error";
+  const title = Object.prototype.hasOwnProperty.call(ERROR_LABELS, code)
+    ? ERROR_LABELS[code]
+    : translateUi("Authorization Error");
   const connectServiceUrl = `/keys?tab=services&slug=${encodeURIComponent(serviceSlug)}`;
 
   return (

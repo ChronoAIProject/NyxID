@@ -31,6 +31,8 @@ pub const EVENT_KIND: &str = "async_service_operation";
 const CMA_APPROVAL_WATCH_PREFIX: &str = "cma-watch:";
 const ACTIVE: &[&str] = &["submitting", "waiting", "cancelling", "ready", "queued"];
 
+pub(crate) mod meta_lineage;
+
 fn invalid() -> AppError {
     AppError::ValidationError("Invalid async operation contract".into())
 }
@@ -90,6 +92,21 @@ pub fn validate_contract(c: &AsyncOperationContract, spec: &Value) -> AppResult<
 
 pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
     use mongodb::{IndexModel, options::IndexOptions};
+    db.collection::<bson::Document>(WATCHES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"poll_at":1,"lease_until":1})
+                .options(
+                    IndexOptions::builder()
+                        .name("meta_queued_delivery_poll".to_owned())
+                        .partial_filter_expression(
+                            doc! {"state":"queued","meta_contexts.0":{"$exists":true}},
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     for keys in [
         doc! {"state":1,"poll_at":1,"lease_until":1},
         doc! {"state":1,"expires_at":1},
@@ -258,6 +275,7 @@ pub async fn reserve_with_artifacts(
                 return Err(AppError::Conflict("Async operation watch limit reached".into()));
             }
             let turn=row.active_turn.as_ref().ok_or(AppError::AssistantTurnRequired)?;
+            let meta_contexts=meta_lineage::capture(&db,session,&row).await?;
             if let Some(task)=&chat.execution_task { super::execution_permission_dispatch::tasks::fence(&db, session, task).await?; }
             let mut delivery = if let Some(filter) = delivery_watch_filter(&row, false)? {
                 watches.find_one(filter).session(&mut *session).await?.ok_or(AppError::AssistantTurnRequired)?.delivery
@@ -282,6 +300,7 @@ pub async fn reserve_with_artifacts(
             }
             let now=Utc::now();
             let watch=AsyncServiceOperation {
+            meta_contexts,
             execution_task: super::execution_permission_dispatch::tasks::child(&chat),
             artifact_catalog_service_id: artifact_catalog.clone().filter(|_|super::generated_artifacts::web_delivery(&delivery) && turn.origin == TurnOrigin::User && turn.asked_from.is_none() && turn.also_deliver.is_empty() && turn.report_to.is_none()),
             artifact_mode: artifact_catalog.as_ref().filter(|_|super::generated_artifacts::web_delivery(&delivery) && turn.origin == TurnOrigin::User && turn.asked_from.is_none() && turn.also_deliver.is_empty() && turn.report_to.is_none()).map(|_|super::generated_artifacts::sandbox::MODE.to_owned()),
@@ -474,7 +493,8 @@ async fn discard_policy_refusal(db: &Database, watch: &AsyncServiceOperation) ->
 
 pub async fn claim(db: &Database) -> AppResult<Option<AsyncServiceOperation>> {
     let now = Utc::now();
-    Ok(db.collection::<AsyncServiceOperation>(WATCHES).find_one_and_update(doc!{"state":{"$in":["submitting","waiting","cancelling","ready"]},"poll_at":{"$lte":bson::DateTime::from_chrono(now)},"$or":[{"lease_until":null},{"lease_until":{"$lte":bson::DateTime::from_chrono(now)}}]},doc!{"$set":{"lease_id":Uuid::new_v4().to_string(),"lease_until":bson::DateTime::from_chrono(now+Duration::seconds(60))}}).sort(doc!{"poll_at":1}).return_document(ReturnDocument::After).await?)
+    Ok(db.collection::<AsyncServiceOperation>(WATCHES).find_one_and_update(doc!{"$and":[{"$or":[{"state":{"$in":["submitting","waiting","cancelling","ready"]}},{"state":"queued","meta_contexts.0":{"$exists":true}}]},
+        {"$or":[{"lease_until":null},{"lease_until":{"$lte":bson::DateTime::from_chrono(now)}}]}],"poll_at":{"$lte":bson::DateTime::from_chrono(now)}},doc!{"$set":{"lease_id":Uuid::new_v4().to_string(),"lease_until":bson::DateTime::from_chrono(now+Duration::seconds(60))}}).sort(doc!{"poll_at":1}).return_document(ReturnDocument::After).await?)
 }
 pub fn retain_shutdown_release(
     db: &Database,
@@ -692,12 +712,21 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
     let w = w.clone();
     session.start_transaction().and_run2(async move |session| {
         let result:AppResult<bool>=Box::pin(async {
+            if meta_lineage::retire_in_session(&db,session,&w).await? {return Ok(false)}
             let conversations=db.collection::<AssistantConversation>(CONVERSATIONS);
             let Some(row)=conversations.find_one(doc!{"_id":&w.conversation_id,"user_id":&w.user_id}).session(&mut *session).await? else {
                 db.collection::<bson::Document>(WATCHES).delete_one(lease_filter(&w)).session(&mut *session).await?;return Ok(false);
             };
             if !super::assistant_invocation_service::fence_in_session(&db,session,&w.user_id,w.delivery.invocation_id.as_deref()).await? {return Ok(false);}
+            meta_lineage::fence(&db,session,&w.meta_contexts,true).await?;
             if let Some(work) = w.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &w.user_id, &w.conversation_id, work, session).await?;}
+            if let Some(org) = super::org_agent_service::ordinary_member_org(&row)
+                && (row.credential_api_key_id != w.api_key_id ||
+                    !super::org_agent_service::use_revision_is_live(&db, session, &w.user_id, org, &w.agent_id, row.org_use_revision).await?)
+            {
+                db.collection::<bson::Document>(WATCHES).delete_one(lease_filter(&w)).session(&mut *session).await?;
+                return Ok(false);
+            }
             let approval_key = cma_approval_watch_key(&w.id);
             if row.pending_events.iter().filter(|event| {
                 event.kind != super::cma_operation::APPROVAL_EVENT_KIND
@@ -709,11 +738,14 @@ pub async fn enqueue(db: &Database, w: &AsyncServiceOperation) -> AppResult<bool
                 doc!{"$pull":{"pending_events":{"kind":super::cma_operation::APPROVAL_EVENT_KIND,"question_key":approval_key}}})
                 .session(&mut *session).await?;
             let event = AgentEvent {
+                source_owner_id: None,
+                source_org_use_revision: 0,
+                org_use_revision: row.org_use_revision,
                 channel_message: None,
                 wake: None,
                 automation_work: w.delivery.automation_work.clone(),
                 execution_task: w.execution_task.clone(),
-                channel_contexts: Vec::new(),
+                channel_contexts: w.meta_contexts.clone(),
                 delegated_result: None,
                 media_event_ids: Vec::new(),
                 media_declared: None,
@@ -922,7 +954,12 @@ fn delivery_watch_filter(
 }
 
 fn channel_question(event: &AgentEvent) -> bool {
-    !event.source_event_ids.is_empty() || (event.kind == "message" && !event.reply_to.is_empty())
+    !event.source_event_ids.is_empty()
+        || (event.kind == "message" && !event.reply_to.is_empty())
+        || event
+            .channel_contexts
+            .iter()
+            .any(|context| context.meta_grant.is_some())
 }
 
 /// CMA approvals wake a fresh turn independently of the task's result watch.
@@ -1248,6 +1285,7 @@ async fn consume_results_in_session(
     }
     let mut contexts = Vec::with_capacity(rows.len());
     for w in &rows {
+        meta_lineage::fence(db, session, &w.meta_contexts, true).await?;
         contexts.push(quoted_result(keys, w, None).await?);
         watches.update_one(
             doc! {"_id":&w.id,"user_id":&row.user_id,"state":{"$in":["ready","queued","cancelled"]}},
@@ -1324,6 +1362,46 @@ pub async fn bind_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::Conflict("Async operation is no longer deliverable".into()))?;
+    // Queue pruning commits timeout before selecting this event. Recheck at
+    // the actual bind as a deadline may pass during the admission transaction.
+    // A failed bind rolls back; the next attempt retires the exact event.
+    if event_id(row).is_some() && !w.meta_contexts.is_empty() && Utc::now() >= w.deadline {
+        return Err(AppError::Conflict(
+            "Async result delivery deadline passed".into(),
+        ));
+    }
+    meta_lineage::fence(db, session, &w.meta_contexts, true).await?;
+    // Keep the original proof on the admitted event and therefore on input
+    // and settlement even after the encrypted result/watch expires.
+    if let Some(turn) = row.active_turn.as_mut() {
+        for event in turn
+            .events
+            .iter_mut()
+            .filter(|event| watch_delivery_event(event))
+        {
+            if event
+                .channel_contexts
+                .iter()
+                .filter_map(|context| context.meta_grant.as_ref())
+                .any(|proof| {
+                    !w.meta_contexts
+                        .iter()
+                        .any(|context| context.meta_grant.as_ref() == Some(proof))
+                })
+            {
+                return Err(super::channel_meta_service::grants::incomplete());
+            }
+            for context in &w.meta_contexts {
+                if !event
+                    .channel_contexts
+                    .iter()
+                    .any(|existing| existing.meta_grant == context.meta_grant)
+                {
+                    event.channel_contexts.push(context.clone());
+                }
+            }
+        }
+    }
     // A later message may have replaced the conversation's channel anchor.
     // Admission and delivery both check the original source's live authority.
     if let Some(origin) = w.delivery.channel.as_ref().filter(|o| o.thread.is_some()) {

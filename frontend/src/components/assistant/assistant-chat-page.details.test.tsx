@@ -3,6 +3,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { NyxAgentAssistantChatPage } from "./assistant-chat-page";
+import type {
+  AvatarConfig,
+  AvatarMood,
+} from "@/lib/assistant/agent-avatar-model";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 
 /**
@@ -17,6 +21,25 @@ const state = vi.hoisted(() => ({
   sheet: [] as { agentId?: string; tab?: string; open: boolean }[],
   threads: [] as { id: string }[],
   threadsLoaded: false,
+  threadAgent: undefined as { id: string } | undefined,
+  avatar: undefined as AvatarConfig | null | undefined,
+  snapshot: undefined as
+    | {
+        agent: {
+          id: string;
+          name: string;
+          kind: string;
+          avatar?: AvatarConfig | null;
+          destroyed?: boolean;
+        };
+      }
+    | undefined,
+  conversation: undefined as
+    | {
+        id: string;
+        active_turn: { stop_requested: boolean; activities: never[] };
+      }
+    | undefined,
 }));
 const specialist = { id: "agent-researcher", kind: "specialist", name: "researcher", status: "idle", can_use: true };
 const nyxbot = { id: "agent-nyxbot", kind: "nyxbot", name: "NyxBot", status: "idle", can_use: true };
@@ -35,30 +58,64 @@ vi.mock("@tanstack/react-router", async (original) => ({
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: () => false }));
 vi.mock("@/hooks/use-nyxbot-agents", async (original) => ({
   ...await original<typeof import("@/hooks/use-nyxbot-agents")>(),
-  useNyxBotAgents: () => ({ data: { agents: [nyxbot, specialist] } }),
+  useNyxBotAgents: () => ({ data: { agents: [{...nyxbot, avatar:state.avatar}, specialist] } }),
   useNyxBotSettings: () => ({ data: { access_mode: "nyxmode" } }),
   useUpdateNyxBotSettings: () => ({ isPending: false, mutateAsync: vi.fn() }),
   useNyxAgentModels: () => ({ data: [], isPending: false }),
   useChangeNyxAgentModel: () => ({ isPending: false, mutateAsync: vi.fn() }),
 }));
-vi.mock("@/hooks/use-nyxbot-groups", () => ({ useNyxBotGroups: () => ({ data: [] }) }));
-vi.mock("@/hooks/use-assistant-nyxagent", () => ({ useNyxAgentAssistantChat: () => ({
-  conversation: undefined,
-  session: { title: "Thread", messages: [] },
-  isStreaming: false, waiting: [], acknowledgements: [], approvals: [],
-  conversations: state.threads, threadsLoaded: state.threadsLoaded,
-  send: vi.fn(), stop: vi.fn(), refreshHistory: vi.fn(), deleteConversation: vi.fn(),
-}) }));
-vi.mock("@/lib/assistant/nyxagent-transport", () => ({ nyxAgentTransport: {
-  getConversation: () => undefined,
-  capabilities: () => Promise.resolve({ steer: null }),
-} }));
-vi.mock("./assistant-shell", () => ({ AssistantShell: ({ children }: { children: ReactNode }) => <main>{children}</main> }));
-vi.mock("./assistant-engine-sidebar", () => ({ AssistantEngineSidebar: () => null }));
+vi.mock("@/hooks/use-nyxbot-groups", () => ({
+  useNyxBotGroups: () => ({ data: [] }),
+}));
+vi.mock("@/hooks/use-assistant-nyxagent", () => ({
+  useNyxAgentAssistantChat: () => ({
+    conversation: state.conversation,
+    session: { title: "Thread", messages: [] },
+    isStreaming: false,
+    waiting: [],
+    acknowledgements: [],
+    approvals: [],
+    conversations: state.threads,
+    threadsLoaded: state.threadsLoaded,
+    send: vi.fn(),
+    stop: vi.fn(),
+    refreshHistory: vi.fn(),
+    deleteConversation: vi.fn(),
+  }),
+}));
+vi.mock("@/lib/assistant/nyxagent-transport", () => ({
+  nyxAgentTransport: {
+    getConversation: () => state.snapshot ?? (state.threadAgent ? { agent: state.threadAgent } : undefined),
+    forgetAgent: vi.fn(),
+    capabilities: () => Promise.resolve({ steer: null }),
+  },
+}));
+vi.mock("./assistant-shell", () => ({
+  AssistantShell: ({ children }: { children: ReactNode }) => (
+    <main>{children}</main>
+  ),
+}));
+vi.mock("./assistant-engine-sidebar", () => ({
+  AssistantEngineSidebar: () => null,
+}));
 vi.mock("./nyxbot-agent-panels", () => ({
   ThreadPanels: ({ children }: { children: ReactNode }) => <>{children}</>,
-  ThreadHeader: () => <header data-testid="thread-header" />,
-  PendingEventsNote: () => null, WaitingNote: () => null, ChannelBadge: () => null,
+  ThreadHeader: ({
+    avatar,
+    mood,
+  }: {
+    avatar?: AvatarConfig | null;
+    mood?: AvatarMood;
+  }) => (
+    <header
+      data-testid="thread-header"
+      data-avatar={JSON.stringify(avatar)}
+      data-mood={mood}
+    />
+  ),
+  PendingEventsNote: () => null,
+  WaitingNote: () => null,
+  ChannelBadge: () => null,
 }));
 vi.mock("./nyxbot-agent-details", () => ({
   AgentDetailsSheet: (props: { agentId?: string; tab?: string; open: boolean; onOpenChange: (open: boolean) => void }) => {
@@ -85,7 +142,15 @@ vi.mock("./assistant-link-modals", () => ({ AssistantLinkModalHost: ({ children 
 vi.mock("./nyxagent-composer", () => ({ NyxAgentComposer: () => <form aria-label="Composer" /> }));
 
 beforeEach(() => {
-  state.search = {}; state.navigations = []; state.sheet = []; state.threads = []; state.threadsLoaded = false;
+  specialist.can_use = true; state.threadAgent = undefined;
+  state.avatar = undefined;
+  state.snapshot = undefined;
+  state.conversation = undefined;
+  state.search = {};
+  state.navigations = [];
+  state.sheet = [];
+  state.threads = [];
+  state.threadsLoaded = false;
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
 });
 afterEach(cleanup);
@@ -141,4 +206,62 @@ it("tells the owner a direct specialist chat is handled by that specialist, neve
     "Talk to researcher directly. It handles your request itself, remembers across its threads, and tells you if it needs access you have not granted.",
   );
   expect(empty).not.toHaveTextContent(/NyxBot/);
+});
+
+it("closes a cached thread on use revocation and keeps the live specialist profile reachable", async () => {
+  state.search = { c: "private-thread" };
+  state.threadAgent = specialist;
+  const client = new QueryClient();
+  const page = () => <QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>;
+  const view = render(page());
+  expect(screen.getByRole("form", { name: "Composer" })).toBeVisible();
+  specialist.can_use = false;
+  view.rerender(page());
+  expect(screen.queryByRole("form", { name: "Composer" })).not.toBeInTheDocument();
+  expect(screen.getByText("Chat access is restricted.")).toBeVisible();
+  expect(state.navigations.at(-1)).toMatchObject({ replace: true, search: { agent: specialist.id, details: "overview" } });
+});
+
+it("applies the latest saved avatar and explicit resets to an already-open chat", () => {
+  const oldAvatar:AvatarConfig={template:"face-v1",choices:{head:"wide",eyes:"wink",palette:"core-mint"}};
+  const nextAvatar:AvatarConfig={...oldAvatar,choices:{...oldAvatar.choices,head:"round",palette:"core-violet"}};
+  const threadId=`nyxa-${"a".repeat(32)}`;
+  state.search={c:threadId};
+  state.threads=[{id:threadId}];
+  state.threadsLoaded=true;
+  state.snapshot={agent:{...nyxbot,avatar:oldAvatar}};
+  state.avatar=nextAvatar;
+  const client=new QueryClient();
+  const page=()=> <QueryClientProvider client={client}><NyxAgentAssistantChatPage /></QueryClientProvider>;
+  const view=render(page());
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-avatar",JSON.stringify(nextAvatar));
+  state.avatar=null;
+  view.rerender(page());
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-avatar","null");
+});
+it("retains the conversation appearance when that agent is absent from the roster", () => {
+  const avatar:AvatarConfig={template:"face-v1",choices:{head:"wide",eyes:"wink",palette:"core-mint"}};
+  const threadId=`nyxa-${"b".repeat(32)}`;
+  state.search={c:threadId};
+  state.threads=[{id:threadId}];state.threadsLoaded=true;
+  state.snapshot={agent:{id:"unlisted",name:"Guest agent",kind:"specialist",avatar}};
+  mount();
+  expect(screen.getByTestId("thread-header")).toHaveAttribute("data-avatar",JSON.stringify(avatar));
+});
+
+it("keeps the stopping mood in a destroyed agent's open chat", () => {
+  const threadId = `nyxa-${"a".repeat(32)}`;
+  state.search = { c: threadId };
+  state.threads = [{ id: threadId }];
+  state.threadsLoaded = true;
+  state.snapshot = { agent: { ...specialist, destroyed: true } };
+  state.conversation = {
+    id: threadId,
+    active_turn: { stop_requested: true, activities: [] },
+  };
+  mount();
+  expect(screen.getByTestId("thread-header")).toHaveAttribute(
+    "data-mood",
+    "stopping",
+  );
 });

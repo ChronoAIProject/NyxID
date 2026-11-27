@@ -707,6 +707,7 @@ async fn voice_service_policy_refuses_new_approval_but_uses_existing_live_grant(
         .unwrap();
         let now = chrono::Utc::now();
         let grant = crate::models::approval_grant::ApprovalGrant {
+            org_policy: None,
             execution_review: None,
             execution_last_used_at: None,
             execution_use: None,

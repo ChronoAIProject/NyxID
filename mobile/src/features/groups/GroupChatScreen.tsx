@@ -131,6 +131,7 @@ import {
   useVisibleThreadRead,
 } from "../notifications/useNotifications";
 import { useRailScrollIndicator } from "../../components/workspace/workspaceFloatingInset";
+import { groupMemberMood } from "../assistant/agentMood";
 
 export type GroupConversationTarget = {
   conversationId: string;
@@ -226,7 +227,17 @@ function GroupChat({
     setVoiceMinimized(minimized);
   }
   const [localError, setLocalError] = useLocalizedState<string>();
-  const group = chat.isError ? undefined : chat.data?.group;
+  const names = useQuery({
+    queryKey: ["workspace", "agents", "group-labels", chat.epoch],
+    queryFn: ({ signal }) => agentsApi.list(signal),
+    enabled: chat.active,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const roster = chat.isError ? undefined : chat.data?.group;
+  const restricted = new Set(names.data?.agents.filter((agent) => agent.can_use === false).map((agent) => agent.id));
+  const group = roster && { ...roster, members: roster.members.map((member) =>
+    restricted.has(member.id) ? { ...member, unavailable: true } : member) };
   const recipientRoster = useRef<Group["members"]>(
     assistantDraftStore.get<Group["members"]>(`recipient-roster:${draftKey}`) ??
       [],
@@ -274,13 +285,6 @@ function GroupChat({
       );
     else assistantDraftStore.delete(`recipient-mentions:${draftKey}`);
   }, [draftKey, routingMembers, selection]);
-  const names = useQuery({
-    queryKey: ["workspace", "agents", "group-labels", chat.epoch],
-    queryFn: ({ signal }) => agentsApi.list(signal),
-    enabled: chat.active,
-    retry: false,
-    staleTime: 60_000,
-  });
   const identity = useQuery({
     queryKey: [...groupKeys(chat.epoch), "identity"],
     queryFn: ({ signal }) => accountApi.getProfile(signal),
@@ -907,7 +911,15 @@ function GroupChat({
                   )}
                   accessibilityLiveRegion="polite"
                 >
-                  <AgentAvatar agent={working[0]!} size="md" />
+                  <AgentAvatar
+                    agent={working[0]!}
+                    size="md"
+                    mood={groupMemberMood(
+                      working[0]!.id,
+                      chat.data?.pending_actions ?? [],
+                    )}
+                    animated
+                  />
                   <ActivityIndicator size="small" color={colors.primary} />
                   <Label muted>
                     {groupWorkingLabel(
@@ -1090,98 +1102,6 @@ function GroupChat({
             />
           ) : (
             <ComposerDictationFrame dictation={dictation}>
-              <OverflowScrollView
-                fadeColor={colors.composerBg}
-                horizontal
-                style={styles.horizontalStrip}
-                keyboardShouldPersistTaps="handled"
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.recipients}
-              >
-                <Label muted style={styles.small}>
-                  {translateApp("To")}
-                </Label>
-                {recipients.ids.map((id) => {
-                  const member = liveMembers.find((row) => row.id === id);
-                  return member ? (
-                    <Pressable
-                      key={id}
-                      accessibilityRole="button"
-                      accessibilityLabel={translateApp(
-                        "Remove recipient {{title}}",
-                        { title: title(id, member.name) },
-                      )}
-                      disabled={blocked}
-                      onPress={() =>
-                        editRecipients((old) => withRemoved(old, id))
-                      }
-                      style={[
-                        styles.recipient,
-                        {
-                          backgroundColor: colors.navActive,
-                          borderColor: colors.composerBorder,
-                        },
-                      ]}
-                    >
-                      <Label style={styles.small}>
-                        {title(id, member.name)}
-                      </Label>
-                      <X size={12} color={colors.textSecondary} />
-                    </Pressable>
-                  ) : null;
-                })}
-                {unavailableRecipients.map((id) => (
-                  <Pressable
-                    key={`unavailable:${id}`}
-                    accessibilityRole="button"
-                    accessibilityLabel={translateApp(
-                      "Remove unavailable recipient {{title}}",
-                      {
-                        title: title(
-                          id,
-                          routingMembers.find((member) => member.id === id)
-                            ?.name ?? id,
-                        ),
-                      },
-                    )}
-                    disabled={blocked}
-                    onPress={() =>
-                      editRecipients((old) => withRemoved(old, id))
-                    }
-                    style={[styles.recipient, { borderColor: colors.danger }]}
-                  >
-                    <Label style={[styles.small, { color: colors.danger }]}>
-                      {translateApp("{{title}} · Unavailable", {
-                        title: title(
-                          id,
-                          routingMembers.find((member) => member.id === id)
-                            ?.name ?? id,
-                        ),
-                      })}
-                    </Label>
-                    <X size={12} color={colors.danger} />
-                  </Pressable>
-                ))}
-                {(liveMembers.some(
-                  (member) => !recipients.ids.includes(member.id),
-                ) ||
-                  unavailableMembers.length > 0) && (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={translateApp("Add recipient")}
-                    disabled={blocked}
-                    onPress={() => showRecipientPicker("add")}
-                    style={styles.addRecipient}
-                  >
-                    <Plus size={14} color={colors.primaryOnTint} />
-                    <Label
-                      style={[styles.small, { color: colors.primaryOnTint }]}
-                    >
-                      {translateApp("Add")}
-                    </Label>
-                  </Pressable>
-                )}
-              </OverflowScrollView>
               <AssistantPendingUploads
                 files={uploads.files}
                 reselect={uploads.session.reselect}
@@ -1203,6 +1123,100 @@ function GroupChat({
               />
               <ChatComposerInput
                 dictation={dictation}
+                expandedContent={
+                  <OverflowScrollView
+                    fadeColor={colors.composerBg}
+                    horizontal
+                    style={styles.horizontalStrip}
+                    keyboardShouldPersistTaps="handled"
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.recipients}
+                  >
+                    <Label muted style={styles.small}>
+                      {translateApp("To")}
+                    </Label>
+                    {recipients.ids.map((id) => {
+                      const member = liveMembers.find((row) => row.id === id);
+                      return member ? (
+                        <Pressable
+                          key={id}
+                          accessibilityRole="button"
+                          accessibilityLabel={translateApp(
+                            "Remove recipient {{title}}",
+                            { title: title(id, member.name) },
+                          )}
+                          disabled={blocked}
+                          onPress={() =>
+                            editRecipients((old) => withRemoved(old, id))
+                          }
+                          style={[
+                            styles.recipient,
+                            {
+                              backgroundColor: colors.navActive,
+                              borderColor: colors.composerBorder,
+                            },
+                          ]}
+                        >
+                          <Label style={styles.small}>
+                            {title(id, member.name)}
+                          </Label>
+                          <X size={12} color={colors.textSecondary} />
+                        </Pressable>
+                      ) : null;
+                    })}
+                    {unavailableRecipients.map((id) => (
+                      <Pressable
+                        key={`unavailable:${id}`}
+                        accessibilityRole="button"
+                        accessibilityLabel={translateApp(
+                          "Remove unavailable recipient {{title}}",
+                          {
+                            title: title(
+                              id,
+                              routingMembers.find((member) => member.id === id)
+                                ?.name ?? id,
+                            ),
+                          },
+                        )}
+                        disabled={blocked}
+                        onPress={() =>
+                          editRecipients((old) => withRemoved(old, id))
+                        }
+                        style={[styles.recipient, { borderColor: colors.danger }]}
+                      >
+                        <Label style={[styles.small, { color: colors.danger }]}>
+                          {translateApp("{{title}} · Unavailable", {
+                            title: title(
+                              id,
+                              routingMembers.find((member) => member.id === id)
+                                ?.name ?? id,
+                            ),
+                          })}
+                        </Label>
+                        <X size={12} color={colors.danger} />
+                      </Pressable>
+                    ))}
+                    {(liveMembers.some(
+                      (member) => !recipients.ids.includes(member.id),
+                    ) ||
+                      unavailableMembers.length > 0) && (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={translateApp("Add recipient")}
+                        disabled={blocked}
+                        onPress={() => showRecipientPicker("add")}
+                        style={styles.addRecipient}
+                      >
+                        <Plus size={14} color={colors.primaryOnTint} />
+                        <Label
+                          style={[styles.small, { color: colors.primaryOnTint }]}
+                        >
+                          {translateApp("Add")}
+                        </Label>
+                      </Pressable>
+                    )}
+                  </OverflowScrollView>
+                }
                 generation={composerGeneration}
                 accessibilityLabel={translateApp("Message the crew")}
                 placeholder={translateApp("Message the crew")}
@@ -1213,17 +1227,10 @@ function GroupChat({
                     edit(value);
                 }}
                 editable={!blocked && (collaboration || !!liveMembers.length)}
-                // Phones: same one-row idle composer as private chats.
-                compactWhenIdle={
-                  narrow &&
-                  !dictation.active &&
-                  uploads.files.length === 0 &&
-                  !uploads.picking &&
-                  !uploads.session.sending
-                }
+                compactWhenIdle={!dictation.active}
                 renderActions={(mentionAction, layout) => (
                   <ChatComposerToolbar
-                    layout={narrow ? layout : undefined}
+                    layout={layout}
                     dictation={dictation}
                     dictationDisabled={
                       blocked || uploads.picking || uploads.session.sending

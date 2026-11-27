@@ -176,6 +176,7 @@ pub struct SetupInput {
     pub contract_version: u32,
     pub label: String,
     pub agent_id: String,
+    pub parent_channel_bot_id: Option<String>,
     pub credential: CredentialBinding,
     pub account_id: String,
     pub resource_id: String,
@@ -298,6 +299,13 @@ pub async fn create(state: &AppState, owner: &str, input: SetupInput) -> AppResu
         return Err(AppError::ValidationError("Invalid adapter setup".into()));
     }
     validate_agent(state, owner, &input.agent_id).await?;
+    if let Some(parent) = input.parent_channel_bot_id.as_deref() {
+        let bot = crate::services::channel_bot_service::get_bot(&state.db, parent).await?;
+        if bot.user_id != owner || !bot.is_active {
+            return Err(unavailable());
+        }
+        crate::services::ownership_transfer_service::require_current_bot(&state.db, &bot).await?;
+    }
     let resolved = resolve(state, owner, &input.credential, adapter.profile()).await?;
     let now = chrono::Utc::now();
     let mut b = Binding {
@@ -308,6 +316,7 @@ pub async fn create(state: &AppState, owner: &str, input: SetupInput) -> AppResu
         revision: 1,
         label: input.label,
         agent_id: input.agent_id,
+        parent_channel_bot_id: input.parent_channel_bot_id,
         credential: input.credential,
         account_id: input.account_id,
         resource_id: input.resource_id,

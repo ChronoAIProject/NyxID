@@ -1,0 +1,450 @@
+{
+  "description": "Mood precedence for avatarMood() and live settlement for settleAvatarMood()/settledAvatarMood(). Web (vitest) and mobile (node:test) both run every case and sequence.",
+  "cases": [
+    {
+      "name": "no turn, nothing pending",
+      "input": {},
+      "mood": "idle"
+    },
+    {
+      "name": "no turn, latest reply failed",
+      "input": {
+        "latestReply": "failed"
+      },
+      "mood": "failure"
+    },
+    {
+      "name": "no turn, completion observed live",
+      "input": {
+        "latestReply": "completed",
+        "celebrating": true
+      },
+      "mood": "success"
+    },
+    {
+      "name": "a stopped reply never celebrates",
+      "input": {
+        "latestReply": "stopped",
+        "celebrating": true
+      },
+      "mood": "idle"
+    },
+    {
+      "name": "celebration needs a completed reply",
+      "input": {
+        "celebrating": true
+      },
+      "mood": "idle"
+    },
+    {
+      "name": "failure outranks celebration",
+      "input": {
+        "latestReply": "failed",
+        "celebrating": true
+      },
+      "mood": "failure"
+    },
+    {
+      "name": "active turn with no signals",
+      "input": {
+        "activeTurn": {}
+      },
+      "mood": "thinking"
+    },
+    {
+      "name": "stop requested beats everything",
+      "input": {
+        "activeTurn": {
+          "stopRequested": true,
+          "queued": true,
+          "activityStatuses": [
+            "error",
+            "error",
+            "running"
+          ],
+          "continuations": 2,
+          "replyStreaming": true
+        },
+        "pendingOwnerAction": true
+      },
+      "mood": "stopping"
+    },
+    {
+      "name": "owner action card pending",
+      "input": {
+        "activeTurn": {
+          "queued": true,
+          "activityStatuses": [
+            "running"
+          ]
+        },
+        "pendingOwnerAction": true
+      },
+      "mood": "approval"
+    },
+    {
+      "name": "queued",
+      "input": {
+        "activeTurn": {
+          "queued": true,
+          "activityStatuses": [
+            "error",
+            "error"
+          ]
+        }
+      },
+      "mood": "waiting"
+    },
+    {
+      "name": "waiting for capacity",
+      "input": {
+        "activeTurn": {
+          "waitingForCapacity": true,
+          "replyStreaming": true
+        }
+      },
+      "mood": "waiting"
+    },
+    {
+      "name": "running tools outrank a neutral retry treatment",
+      "input": {
+        "activeTurn": {
+          "activityStatuses": [
+            "error",
+            "completed",
+            "error",
+            "running"
+          ]
+        }
+      },
+      "mood": "working"
+    },
+    {
+      "name": "one errored activity is not stress",
+      "input": {
+        "activeTurn": {
+          "activityStatuses": [
+            "error",
+            "running"
+          ]
+        }
+      },
+      "mood": "working"
+    },
+    {
+      "name": "streamed reply outranks continuation history",
+      "input": {
+        "activeTurn": {
+          "continuations": 1,
+          "replyStreaming": true
+        }
+      },
+      "mood": "drafting"
+    },
+    {
+      "name": "running activity",
+      "input": {
+        "activeTurn": {
+          "activityStatuses": [
+            "completed",
+            "running"
+          ],
+          "replyStreaming": true
+        }
+      },
+      "mood": "working"
+    },
+    {
+      "name": "reply streaming",
+      "input": {
+        "activeTurn": {
+          "activityStatuses": [
+            "completed"
+          ],
+          "replyStreaming": true
+        }
+      },
+      "mood": "drafting"
+    },
+    {
+      "name": "completed activities only",
+      "input": {
+        "activeTurn": {
+          "activityStatuses": [
+            "completed",
+            "completed"
+          ]
+        }
+      },
+      "mood": "thinking"
+    },
+    {
+      "name": "an active turn ignores the last failure",
+      "input": {
+        "activeTurn": {},
+        "latestReply": "failed"
+      },
+      "mood": "thinking"
+    },
+    {
+      "name": "pending card remains visible without a turn",
+      "input": {
+        "pendingOwnerAction": true
+      },
+      "mood": "approval"
+    },
+    {
+      "name": "continuation without tools or text uses neutral retry",
+      "input": {
+        "activeTurn": {
+          "continuations": 1
+        }
+      },
+      "mood": "retry"
+    }
+  ],
+  "sequences": [
+    {
+      "name": "a completion seen live celebrates once, then rests",
+      "steps": [
+        {
+          "active": false,
+          "reply": {
+            "id": "r1",
+            "outcome": "completed"
+          },
+          "mood": "idle"
+        },
+        {
+          "active": true,
+          "reply": {
+            "id": "r1",
+            "outcome": "completed"
+          },
+          "mood": "thinking"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "r1",
+            "outcome": "completed"
+          },
+          "mood": "idle"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "r2",
+            "outcome": "completed"
+          },
+          "mood": "success"
+        },
+        {
+          "expire": true,
+          "active": false,
+          "reply": {
+            "id": "r2",
+            "outcome": "completed"
+          },
+          "mood": "idle"
+        }
+      ]
+    },
+    {
+      "name": "a turn the owner stopped settles to idle",
+      "steps": [
+        {
+          "active": false,
+          "reply": {
+            "id": "r1",
+            "outcome": "completed"
+          },
+          "mood": "idle"
+        },
+        {
+          "active": true,
+          "reply": {
+            "id": "r1",
+            "outcome": "completed"
+          },
+          "mood": "thinking"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "r2",
+            "outcome": "stopped"
+          },
+          "mood": "idle"
+        }
+      ]
+    },
+    {
+      "name": "a failure arriving after the turn clears never flashes happy",
+      "steps": [
+        {
+          "active": false,
+          "reply": null,
+          "mood": "idle"
+        },
+        {
+          "active": true,
+          "reply": null,
+          "mood": "thinking"
+        },
+        {
+          "active": false,
+          "reply": null,
+          "mood": "idle"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "r1",
+            "outcome": "failed"
+          },
+          "mood": "failure"
+        }
+      ]
+    },
+    {
+      "name": "an earlier failure does not show while the next turn's reply is awaited",
+      "steps": [
+        {
+          "active": false,
+          "reply": {
+            "id": "r1",
+            "outcome": "failed"
+          },
+          "mood": "failure"
+        },
+        {
+          "active": true,
+          "reply": {
+            "id": "r1",
+            "outcome": "failed"
+          },
+          "mood": "thinking"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "r1",
+            "outcome": "failed"
+          },
+          "mood": "idle"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "r2",
+            "outcome": "completed"
+          },
+          "mood": "success"
+        }
+      ]
+    },
+    {
+      "name": "a thread opened after it finished stays at rest",
+      "steps": [
+        {
+          "active": false,
+          "reply": {
+            "id": "r9",
+            "outcome": "completed"
+          },
+          "mood": "idle"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "r9",
+            "outcome": "completed"
+          },
+          "mood": "idle"
+        }
+      ]
+    },
+    {
+      "name": "a stopped or failed reply re-saved under a new id never celebrates",
+      "steps": [
+        {
+          "active": false,
+          "reply": {
+            "id": "r1",
+            "outcome": "completed"
+          },
+          "mood": "idle"
+        },
+        {
+          "active": true,
+          "reply": {
+            "id": "r1",
+            "outcome": "completed"
+          },
+          "mood": "thinking"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "streamed",
+            "outcome": "failed"
+          },
+          "mood": "failure"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "saved",
+            "outcome": "failed"
+          },
+          "mood": "failure"
+        },
+        {
+          "active": true,
+          "reply": {
+            "id": "saved",
+            "outcome": "failed"
+          },
+          "mood": "thinking"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "forced-stop",
+            "outcome": "stopped"
+          },
+          "mood": "idle"
+        },
+        {
+          "active": false,
+          "reply": {
+            "id": "forced-stop-saved",
+            "outcome": "stopped"
+          },
+          "mood": "idle"
+        }
+      ]
+    },
+    {
+      "name": "switching threads resets settlement",
+      "steps": [
+        {
+          "conversation": "a",
+          "active": true,
+          "reply": null,
+          "mood": "thinking"
+        },
+        {
+          "conversation": "b",
+          "active": false,
+          "reply": {
+            "id": "b1",
+            "outcome": "completed"
+          },
+          "mood": "idle"
+        }
+      ]
+    }
+  ]
+}

@@ -44,6 +44,7 @@ interface AssistantShellProps {
   /** Preview cards docked beside chat on wide screens. */
   readonly aside?: ReactNode;
   readonly cmaOperations?: readonly CmaOperation[];
+  readonly cmaConversationId?: string;
   /** Share of the content area `aside` takes, in percent. */
   readonly asidePercent?: number;
   /** Set by dragging (or keying) the divider between the content and `aside`. */
@@ -54,7 +55,7 @@ interface AssistantShellProps {
 export function AssistantShell(props: AssistantShellProps) {
   useUiTranslation();
   return (
-    <CmaSessionObserver operations={props.cmaOperations}>
+    <CmaSessionObserver operations={props.cmaOperations} conversationId={props.cmaConversationId}>
       {(cmaCards) => <AssistantShellLayout {...props} cmaCards={cmaCards} />}
     </CmaSessionObserver>
   );

@@ -66,27 +66,31 @@ export function AssistantMentionInput({
   onChangeText,
   mentions = [],
   editable,
+  onInputLayout,
   placeholder,
   accessibilityLabel,
   generation = 0,
   style,
+  expandedContent,
   renderActions,
-  compactWhenIdle = false,
+  compactWhenIdle = true,
 }: {
   value: string;
   onChangeText: (value: string) => void;
   mentions?: readonly AssistantMentionOption[];
   editable: boolean;
+  onInputLayout?: (event: import("react-native").LayoutChangeEvent, currentInput: () => TextInput | null) => void;
   placeholder: string;
   accessibilityLabel: string;
   generation?: number | string;
   style?: StyleProp<TextStyle>;
+  expandedContent?: ReactNode;
   /** Put composer controls below the text so multiline drafts use its full width. */
   renderActions?: (
     mentionAction: ReactNode,
     layout: ComposerActionsLayout,
   ) => ReactNode;
-  /** Phones: an unfocused, empty composer collapses to one row (+ field mic send). */
+  /** An unfocused composer with only whitespace collapses to one row on every window. */
   compactWhenIdle?: boolean;
 }) {
   const railIndicator = useRailScrollIndicator();
@@ -316,6 +320,7 @@ export function AssistantMentionInput({
           </ScrollView>
         </View>
       ) : null}
+      {!compact ? expandedContent : null}
       <View
         testID="chat-composer-input-frame"
         style={[
@@ -387,7 +392,10 @@ export function AssistantMentionInput({
             )
               setForcedCursor(null);
           }}
-          onLayout={(event) => overflow.layout(event.nativeEvent.layout.height)}
+          onLayout={(event) => {
+            overflow.layout(event.nativeEvent.layout.height);
+            onInputLayout?.(event, () => input.current);
+          }}
           onContentSizeChange={(event) => {
             if (!mounted.current || scope.current.revision !== revision) return;
             const height = Math.ceil(event.nativeEvent.contentSize.height);
@@ -409,8 +417,10 @@ export function AssistantMentionInput({
               minHeight: composerInputMinHeight(fontScale),
             },
             style,
-            // iOS sizes a multiline input to its text; a measured height pins it at one line.
-            Platform.OS === "ios"
+            // Idle whitespace stays to one line on both native platforms.
+            compact
+              ? { height: composerInputMinHeight(fontScale), maxHeight: composerInputMinHeight(fontScale) }
+              : Platform.OS === "ios"
               ? {
                   height: showPlaceholder
                     ? composerInputMinHeight(fontScale)

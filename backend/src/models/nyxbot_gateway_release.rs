@@ -52,6 +52,10 @@ pub struct NyxbotGatewayRelease {
     pub reason: ReleaseReason,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub dispatch_started_at: Option<DateTime<Utc>>,
+    /// Exact terminal CREATE missing-provider response, recorded by the setup
+    /// writer. This is evidence for absence reconciliation, not deletion authority.
+    #[serde(default)]
+    pub create_provider_refused: bool,
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub provisional_expires_at: Option<DateTime<Utc>>,
     #[serde(default, with = "crate::models::bson_datetime::optional")]

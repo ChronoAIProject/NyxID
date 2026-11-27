@@ -98,10 +98,7 @@ pub struct BindingGrantSnapshot {
 }
 
 pub fn is_binding_hash(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    crate::crypto::record_field::historical::HistoricalAad::broker_binding(value).is_some()
 }
 
 /// Resolve the service grant currently held by one browser-reviewed broker

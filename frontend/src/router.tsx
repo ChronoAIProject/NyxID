@@ -1,4 +1,6 @@
+import { solutionStartHref } from "./features/website-a/auth-links";
 import { validateCliAuthUrl } from "@/pages/cli-auth.helpers";
+import { ChannelMetaCallbackPage } from "@/pages/channel-meta-callback";
 import { PlatformModelsPage } from "@/pages/platform-models";
 import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
@@ -17,6 +19,7 @@ import {
   parseMachineDesktopSearch,
 } from "@/lib/machine-search";
 import { ChannelConnectLinkPage } from "@/pages/channel-connect-link";
+import { ConnectorContinuationPage } from "@/pages/connector-continuation";
 import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
@@ -75,6 +78,7 @@ import {
   PlatformSetupDetailPage,
   AdminPlatformBotsPage,
   LandingPage,
+  ActivityPage,
   NyxbotOnboardingPage,
   AiSetupPage,
   LoginPage,
@@ -155,9 +159,7 @@ import {
   OrgServiceAccountDetailPage,
   OrgDeveloperAppDetailPage,
   OrgJoinPage,
-  BlogIndexPage,
   BlogDetailPage,
-  BlogPreviewPage,
   DesignSystemPage,
   DocsIndexPage,
   DocsPage,
@@ -225,6 +227,12 @@ const loginRoute = createRoute({
   component: LoginPage,
 });
 
+const activityRoute = createRoute({
+  path: "/activity",
+  getParentRoute: () => rootRoute,
+  component: ActivityPage,
+});
+
 const nyxbotOnboardingRoute = createRoute({
   path: "/nyxbot/onboarding",
   getParentRoute: () => rootRoute,
@@ -285,6 +293,12 @@ const oauthLaunchingRoute = createRoute({
   component: OAuthLaunchingPage,
 });
 
+const connectorContinuationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/connector-continuation/$id",
+  component: ConnectorContinuationPage,
+});
+
 export const oauthCompleteRoute = createRoute({
   path: "/oauth-complete",
   getParentRoute: () => rootRoute,
@@ -309,6 +323,69 @@ const termsRoute = createRoute({
   component: TermsPage,
 });
 
+const website0Route = createRoute({
+  path: "/nyxbot",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website1Route = createRoute({
+  path: "/solutions",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website2Route = createRoute({
+  path: "/solutions/$slug",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website3Route = createRoute({
+  path: "/how-it-works",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website4Route = createRoute({
+  path: "/security",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website5Route = createRoute({
+  path: "/agents",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website6Route = createRoute({
+  path: "/integrations",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website7Route = createRoute({
+  path: "/pricing",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const website8Route = createRoute({
+  path: "/contact",
+  getParentRoute: () => rootRoute,
+  component: LandingPage,
+});
+
+const legacyStartRoute = createRoute({
+  path: "/start",
+  getParentRoute: () => rootRoute,
+  beforeLoad: () => {
+    window.location.replace(solutionStartHref(window.location.search));
+  },
+  component: () => null,
+});
+
 const dataDeletionRoute = createRoute({
   path: "/data-deletion",
   getParentRoute: () => rootRoute,
@@ -318,7 +395,7 @@ const dataDeletionRoute = createRoute({
 const blogIndexRoute = createRoute({
   path: "/blog",
   getParentRoute: () => rootRoute,
-  component: BlogIndexPage,
+  component: LandingPage,
 });
 
 const blogDetailRoute = createRoute({
@@ -330,7 +407,7 @@ const blogDetailRoute = createRoute({
 const blogPreviewRoute = createRoute({
   path: "/preview/$id",
   getParentRoute: () => rootRoute,
-  component: BlogPreviewPage,
+  component: AppNotFound,
 });
 
 const docsIndexRoute = createRoute({
@@ -1012,6 +1089,12 @@ export const channelBotSetupRoute = createRoute({
   component: ChannelBotSetupPage,
 });
 
+const channelMetaCallbackRoute = createRoute({
+  path: "/channel-bots/meta-callback/$platform",
+  getParentRoute: () => rootRoute,
+  component: ChannelMetaCallbackPage,
+});
+
 const channelBotDetailRoute = createRoute({
   path: "/channel-bots/$botId",
   getParentRoute: () => dashboardLayout,
@@ -1307,12 +1390,24 @@ const routeTree = rootRoute.addChildren([
   platformBindingReviewRoute,
   platformPersonalLinkRoute,
   landingRoute,
+  legacyStartRoute,
+  website0Route,
+  website1Route,
+  website2Route,
+  website3Route,
+  website4Route,
+  website5Route,
+  website6Route,
+  website7Route,
+  website8Route,
+  activityRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
   ...(oauthConsentPreviewRoute ? [oauthConsentPreviewRoute] : []),
   oauthLaunchingRoute,
   oauthCompleteRoute,
+  connectorContinuationRoute,
   oauthErrorRoute,
   privacyRoute,
   termsRoute,
@@ -1328,6 +1423,7 @@ const routeTree = rootRoute.addChildren([
   loginCodeRoute,
   loginAgentKeyRoute,
   channelBotSetupRoute,
+  channelMetaCallbackRoute,
   connectLinkRoute,
   channelConnectLinkRoute,
   connectLinkReturnRoute,

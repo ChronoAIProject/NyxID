@@ -416,6 +416,10 @@ async fn store_creation(
             if let Some(previous) = collection.find_one(doc! {"user_id":&candidate.user_id,"idempotency_key":&candidate.idempotency_key}).session(&mut *tx).await? {
                 same_request(&previous, candidate)?;
                 if previous.submission_state == "confirmed_not_created" {
+                    // Only publish the candidate envelope under the ID used to seal it.
+                    if candidate.id != previous.id {
+                        return Err(drift());
+                    }
                     let mut next = previous.clone();
                     next.sandbox_generation = candidate.sandbox_generation;
                     next.submission_generation = previous.submission_generation.checked_add(1).ok_or_else(drift)?;
@@ -455,11 +459,21 @@ enum CreationReceipt {
     Sandbox(String),
     Agent(String),
 }
+#[derive(Clone, Copy)]
+enum RefusalEvidence {
+    KeyedOutcome,
+    ThisAttempt,
+}
+
 #[derive(Clone)]
 enum CreationChange {
     Dispatch,
     Receipt(CreationReceipt),
     NoResource,
+    Refused {
+        evidence: RefusalEvidence,
+        status: u16,
+    },
     Confirm {
         sandbox_id: String,
         agent_id: Option<String>,
@@ -586,7 +600,7 @@ fn apply_creation_change(
                 parent.updated_at = Utc::now();
             }
         }
-        CreationChange::NoResource => {
+        CreationChange::NoResource | CreationChange::Refused { .. } => {
             if row.submission_state == "confirmed"
                 || row.operation_id.is_some()
                 || row.cma_agent_id.is_some()
@@ -645,13 +659,23 @@ async fn change_creation(
                 .session(&mut *tx)
                 .await?
                 .ok_or_else(drift)?;
+            // A refusal before CMA consults its key ledger proves only this HTTP attempt.
+            // Each dispatch increments revision in this same transaction protocol.
+            if matches!(change, CreationChange::Refused { evidence: RefusalEvidence::ThisAttempt, .. })
+                && !(expected.submission_state == "pending"
+                    && expected.first_dispatched_at.is_none()
+                    && expected.revision.checked_add(1) == Some(current.revision)
+                    && current.submission_state == "unknown")
+            {
+                return Ok(current);
+            }
             let parent = fence_parent(db, &current, tx).await?;
             let mut next = current.clone();
             let mut next_parent = parent.clone();
             apply_creation_change(&mut next, &mut next_parent, change)?;
             if matches!(
                 change,
-                CreationChange::Dispatch | CreationChange::Receipt(_) | CreationChange::NoResource
+                CreationChange::Dispatch | CreationChange::Receipt(_) | CreationChange::NoResource | CreationChange::Refused { .. }
             ) && current.creates_sandbox
             {
                 let mut set = sandboxes::observation_set(&next_parent)?;
@@ -666,6 +690,16 @@ async fn change_creation(
                 if result.matched_count != 1 {
                     return Err(drift());
                 }
+            }
+            if let CreationChange::Refused { status, .. } = change
+                && current.creates_sandbox && parent.occupies_account_slot
+            {
+                super::audit_service::log_actor_event_in_transaction(db, tx,
+                    &super::audit_service::AuditActor { user_id: parent.user_id.clone(),
+                        ip_address: None, user_agent: None, api_key_id: None, api_key_name: None },
+                    "cma_sandbox_creation_refused", serde_json::json!({
+                        "owner_id": parent.user_id, "reservation_id": parent.id, "upstream_status": status,
+                    })).await?;
             }
             collection
                 .find_one_and_replace(revision_filter(&current), next)
@@ -758,6 +792,18 @@ pub async fn admit(
                 workspace: None
             }
     );
+    if creates_sandbox {
+        let media = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .and_then(|(_, value)| value.parse::<mime::Mime>().ok());
+        if !media.is_some_and(|m| {
+            m.type_() == mime::APPLICATION
+                && (m.subtype() == mime::JSON || m.suffix() == Some(mime::JSON))
+        }) {
+            return Err(AppError::CmaJsonContentTypeRequired);
+        }
+    }
     let creates_agent = matches!(
         &operation,
         Operation::CreateAgent { .. } | Operation::WorkspaceAgent { .. }
@@ -1105,6 +1151,57 @@ fn creation_refusal_confirms_no_resource(path: &str, status: u16, value: &Value)
         }
 }
 
+/// CMA caches the Sandbox body verdict and owner limit under the exact key and
+/// wire digest. Authentication, budget and buffering failures can precede that
+/// ledger. The Agent lifecycle also decodes the body before consulting its ledger.
+fn creation_refusal(
+    creation: &AssistantCmaCreation,
+    status: u16,
+    value: &Value,
+) -> Option<CreationChange> {
+    let path = creation.path.as_str();
+    if creation_refusal_confirms_no_resource(path, status, value) {
+        return Some(CreationChange::NoResource);
+    }
+    if !creation.creates_sandbox
+        || !matches!(path, "/api/v1/sandboxes" | "/api/v1/agents")
+        || value.get("status")?.as_u64()? != u64::from(status)
+        || ["id", "operation_id", "agent_id", "sandbox_id"]
+            .iter()
+            .any(|field| value.get(field).is_some_and(|v| !v.is_null()))
+    {
+        return None;
+    }
+    let kind = value
+        .get("type")?
+        .as_str()?
+        .strip_prefix("https://spec.chrono-ai.fun/cma/1.0/problems/")?;
+    let code = value.get("code")?.as_str()?;
+    let sandbox = path == "/api/v1/sandboxes";
+    let evidence = match (status, kind, code) {
+        (415, "json_content_type_required", "json_content_type_required")
+        | (422, "invalid_json", "invalid_json")
+            if sandbox =>
+        {
+            RefusalEvidence::KeyedOutcome
+        }
+        (429, "resource-limit-reached", "sandbox_limit_reached") if sandbox => {
+            RefusalEvidence::KeyedOutcome
+        }
+        (415, "json_content_type_required", "json_content_type_required")
+        | (422 | 400, "invalid_json", "invalid_json") => RefusalEvidence::ThisAttempt,
+        (401, "not-authenticated", "not_authenticated")
+        | (403, "forbidden", "forbidden")
+        | (429, "rate-limited", "rate_limited")
+            if sandbox =>
+        {
+            RefusalEvidence::ThisAttempt
+        }
+        _ => return None,
+    };
+    Some(CreationChange::Refused { evidence, status })
+}
+
 #[async_trait::async_trait]
 impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
     /// Called after all header/body rewriting, directly before network dispatch.
@@ -1228,11 +1325,8 @@ impl super::service_dispatch_guard::ServiceDispatchGuard for CmaDispatchPermit {
                     {
                         return Err(error);
                     }
-                } else if creation_refusal_confirms_no_resource(&self.path, status.as_u16(), &value)
-                {
-                    // This exact pre-provisioning refusal is authoritative. A
-                    // late refusal cannot erase an already recorded receipt.
-                    change_creation(&self.db, creation, CreationChange::NoResource).await?;
+                } else if let Some(change) = creation_refusal(creation, status.as_u16(), &value) {
+                    change_creation(&self.db, creation, change).await?;
                 }
             } else if status.is_success()
                 && let Some(operation) = self.path.strip_prefix("/api/v1/agent-lifecycle/")
@@ -1467,8 +1561,7 @@ fn recover_occupied_sandbox<'a>(
         let recoverable = match recoverable {
             Ok(value) => value,
             Err(_) => {
-                let _ = sandboxes::audit_occupied_slot(db, &parent).await;
-                return Err(recovery_slot_occupied());
+                return Err(sandboxes::occupied(db, &parent, RECOVERY_SLOT_OCCUPIED).await);
             }
         };
         if recoverable.is_some() {
@@ -1483,19 +1576,14 @@ fn recover_occupied_sandbox<'a>(
             )
             .await;
             if result.is_err() {
-                let _ = sandboxes::audit_occupied_slot(db, &parent).await;
-                return Err(recovery_slot_occupied());
+                return Err(sandboxes::occupied(db, &parent, RECOVERY_SLOT_OCCUPIED).await);
             }
         }
         Ok(())
     })
 }
 
-fn recovery_slot_occupied() -> AppError {
-    AppError::Conflict(
-        "cma_sandbox_account_slot_occupied: the earlier creation is not confirmed absent; retry later to recheck its original request; do not delete or reconnect".into(),
-    )
-}
+const RECOVERY_SLOT_OCCUPIED: &str = "cma_sandbox_account_slot_occupied: the earlier creation is not confirmed absent; retry later to recheck its original request; do not delete or reconnect";
 
 /// Only management recovery requires the optional NyxBot management feature.
 /// Admission recovery can only re-observe a previously dispatched owner intent.
@@ -1577,6 +1665,23 @@ async fn recover_creation_core(
             require_recovery_current(db, &creation).await?;
             let body = sandboxes::recover_creation_request(db, keys, owner, id, generation).await?;
             if sandboxes::prepare_creation_request(&body)?.hash != creation.request_hash {
+                return Err(drift());
+            }
+            let context = RecordContext::new(
+                COLLECTION_NAME,
+                &creation.id,
+                &creation.user_id,
+                &["request_ciphertext"],
+            )?;
+            let retained = super::assistant_cma_request_record::open(
+                keys,
+                &context,
+                creation.request_context_version,
+                creation.request_ciphertext.as_deref(),
+                Some(&creation.request_hash),
+            )
+            .await?;
+            if *body != *retained {
                 return Err(drift());
             }
             if let Err(error) = gateway
@@ -1709,6 +1814,10 @@ mod tests {
         mod admin_reservations {
             use super::*;
             include!("assistant_cma_reservation_tests.rs");
+        }
+
+        mod mixed_requests {
+            include!("assistant_cma_mixed_requests_tests.rs");
         }
 
         mod writer_cutover {

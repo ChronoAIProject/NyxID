@@ -36,8 +36,8 @@ export function OneTimeSecretDialog({
   const { t } = useUiTranslation();
   function copy(value: OneTimeSecretValue) {
     void copyToClipboard(value.value).then(
-      () => toast.success(translateUi("{{label}} copied", { label: value.label })),
-      () => toast.error(translateUi("Failed to copy {{value}}", { value: value.label.toLowerCase() })),
+      () => toast.success(translateUi("{{label}} copied", { label: translateUi(value.label) })),
+      () => toast.error(translateUi("Failed to copy {{value}}", { value: translateUi(value.label).toLowerCase() })),
     );
   }
 
@@ -52,7 +52,7 @@ export function OneTimeSecretDialog({
           {values.map((value) => (
             <div key={value.label} className="space-y-2">
               <p className="type-group-label uppercase tracking-[1.5px] text-text-tertiary">
-                {value.label}
+                {t(value.label)}
               </p>
               <div className="flex items-center gap-2 rounded-lg border border-border bg-muted px-3 py-2">
                 <p className="min-w-0 flex-1 break-all font-mono text-13">
@@ -63,7 +63,7 @@ export function OneTimeSecretDialog({
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 shrink-0"
-                  aria-label={t("Copy {{label}}", { label: value.label })}
+                  aria-label={t("Copy {{label}}", { label: t(value.label) })}
                   onClick={() => copy(value)}
                 >
                   <Copy className="h-3.5 w-3.5" />

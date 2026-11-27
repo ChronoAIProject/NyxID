@@ -1,7 +1,15 @@
-import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { ReactElement } from "react";
+import { render as renderTesting, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OAuthConsentPage } from "./oauth-consent";
+
+function render(page: ReactElement) {
+  return renderTesting(
+    <QueryClientProvider client={new QueryClient()}>{page}</QueryClientProvider>,
+  );
+}
 
 const { serviceState } = vi.hoisted(() => ({
   serviceState: {
@@ -78,7 +86,7 @@ describe("incremental consent", () => {
     expect(screen.getByText("Allow 2 additional services")).toBeInTheDocument();
     expect(screen.getByText("Already authorized")).toBeInTheDocument();
     expect(screen.getAllByText("Required")).toHaveLength(2);
-    expect(screen.getAllByText("Authorized", { exact: true })).toHaveLength(2);
+    expect(within(screen.getByRole("region", { name: "Already authorized services" })).getAllByText("Stays authorized")).toHaveLength(2);
     expect(
       screen.getByRole("button", { name: "Allow 2 services" }),
     ).toBeEnabled();
@@ -110,13 +118,28 @@ describe("incremental consent", () => {
     await user.click(screen.getByText("Add optional services"));
     const optional = screen.getByRole("checkbox", { name: /optional-e/ });
     await user.click(optional);
-    expect(
-      screen.getByRole("button", { name: "Allow 3 services" }),
-    ).toBeEnabled();
+    const allow = screen.getByRole("button", { name: "Allow 3 services" });
+    const form = allow.closest("form")!;
+    const summary = screen.getByRole("region", { name: "Selected service access" });
+    expect(allow).toBeEnabled();
+    const announcement = document.getElementById(allow.getAttribute("aria-describedby")!)!;
+    expect(announcement).toHaveAttribute("aria-live", "polite");
+    expect(summary).not.toHaveAttribute("aria-live");
+    expect(allow).toHaveAccessibleDescription("Full access to 5 selected services.");
+    expect(announcement).not.toHaveTextContent("optional-e");
+    expect(summary).toHaveTextContent("optional-e");
+    expect(summary).toHaveTextContent("Stays authorized");
+    expect(new FormData(form).getAll("allowed_service_ids")).toEqual([
+      "old-a", "old-b", "new-c", "new-d", "optional-e",
+    ]);
+    expect(screen.getByRole("region", { name: "Additional services" })).not.toContainElement(summary);
     await user.click(optional);
-    expect(
-      screen.getByRole("button", { name: "Allow 2 services" }),
-    ).toBeEnabled();
+    expect(allow).toHaveAccessibleName("Allow 2 services");
+    expect(allow).toHaveAccessibleDescription("Full access to 4 selected services.");
+    expect(summary).not.toHaveTextContent("optional-e");
+    expect(new FormData(form).getAll("allowed_service_ids")).toEqual([
+      "old-a", "old-b", "new-c", "new-d",
+    ]);
   });
 
   it("uses signed display data and ignores forged URL hints including the mode", () => {
@@ -146,10 +169,11 @@ describe("incremental consent", () => {
       },
     };
     open();
-    expect(screen.getAllByText("GitHub")).toHaveLength(2);
-    expect(screen.getByText("Organization · Engineering")).toBeInTheDocument();
-    expect(screen.getByText("new-c-slug")).toBeInTheDocument();
-    expect(screen.getByText("new-d-slug")).toBeInTheDocument();
+    const required = within(screen.getByRole("region", { name: "Additional services" }));
+    expect(required.getAllByText("GitHub")).toHaveLength(2);
+    expect(required.getByText("Organization · Engineering")).toBeInTheDocument();
+    expect(required.getByText("new-c-slug")).toBeInTheDocument();
+    expect(required.getByText("new-d-slug")).toBeInTheDocument();
   });
 
   it.each(["missing", "disabled", "forbidden"])(
@@ -239,11 +263,28 @@ describe("incremental consent", () => {
       "openid proxy offline_access account:write";
     open(payload);
     expect(
-      screen.getByText("Allow 1 additional permission"),
+      screen.getByText("Additional identity and app permissions"),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Allow 1 permission" }),
     ).toBeEnabled();
+  });
+
+  it.each([
+    ["offline_access", "Long-lived access"],
+    ["urn:nyxid:scope:broker_binding", "Durable broker access"],
+  ])("lists newly requested %s among the permissions being approved", (scope, title) => {
+    const payload = request({ scope: `openid proxy ${scope}` });
+    payload.incremental_consent.current_scopes = "openid proxy";
+    payload.incremental_consent.scopes = `openid proxy ${scope}`;
+    payload.incremental_consent.required_service_ids = [];
+    open(payload);
+
+    const permissions = screen.getByRole("region", {
+      name: "Additional identity and app permissions",
+    });
+    expect(within(permissions).getByText(title)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Allow 1 permission" })).toBeEnabled();
   });
 
   it.each(["loading", "failed"])(
@@ -258,7 +299,7 @@ describe("incremental consent", () => {
         "openid proxy offline_access account:write";
       open(payload);
       expect(
-        screen.getByText("Allow 1 additional permission"),
+        screen.getByText("Additional identity and app permissions"),
       ).toBeInTheDocument();
       expect(
         screen.getByRole("button", { name: "Allow 1 permission" }),
@@ -267,9 +308,7 @@ describe("incremental consent", () => {
         screen.queryByText(/Services could not be loaded/),
       ).not.toBeInTheDocument();
       expect(
-        screen.getAllByText(
-          /Previously authorized service details unavailable/,
-        ),
+        within(screen.getByRole("region", { name: "Already authorized services" })).getAllByText(kind === "failed" ? "Service details could not be loaded." : "Loading services..."),
       ).toHaveLength(2);
     },
   );
@@ -280,7 +319,7 @@ describe("incremental consent", () => {
     );
     open();
     expect(
-      screen.getByText(/Previously authorized service unavailable/),
+      within(screen.getByRole("region", { name: "Already authorized services" })).getByText("Service details unavailable"),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Allow 2 services" }),

@@ -134,31 +134,34 @@ async fn upsert(
     let user_id = auth.user_id.to_string();
     enforce_feedback_limit(state, &user_id).await?;
     engine::require_enabled(&state.db, &user_id).await?;
-    let (turn_id, eligible, context) = if let Some(cid) = conversation_id.as_deref() {
-        let (conversation, _) = engine::get_authorized(&state.db, &user_id, cid).await?;
-        engine::authorize_thread_read(&state.db, &conversation).await?;
-        let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("message not found".into()))?;
-        let eligible = row.role == "assistant" && row.status == "completed";
-        let context = if eligible {
-            Some(feedback_service::reply_context(&state.db, &row, &conversation).await?)
+    let (turn_id, eligible, context, check_source_grant) =
+        if let Some(cid) = conversation_id.as_deref() {
+            let (conversation, _) = engine::get_public_authorized(&state.db, &user_id, cid).await?;
+            engine::authorize_thread_read(&state.db, &conversation).await?;
+            let row = feedback_service::conversation_message(&state.db, &user_id, cid, message_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound("message not found".into()))?;
+            let check_source_grant = row.needs_grant_check();
+            let row = row.message;
+            let eligible = row.role == "assistant" && row.status == "completed";
+            let context = if eligible {
+                Some(feedback_service::reply_context(&state.db, &row, &conversation).await?)
+            } else {
+                None
+            };
+            (Some(row.turn_id), eligible, context, check_source_grant)
         } else {
-            None
+            let gid = group_id
+                .as_deref()
+                .ok_or_else(|| AppError::NotFound("message not found".into()))?;
+            group_scope(&state.db, &user_id, gid).await?;
+            let row = feedback_service::group_message(&state.db, gid, message_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound("message not found".into()))?;
+            let eligible = row.role == "agent";
+            let context = eligible.then(|| feedback_service::group_reply_context(&row));
+            (None, eligible, context, false)
         };
-        (Some(row.turn_id), eligible, context)
-    } else {
-        let gid = group_id
-            .as_deref()
-            .ok_or_else(|| AppError::NotFound("message not found".into()))?;
-        group_scope(&state.db, &user_id, gid).await?;
-        let row = feedback_service::group_message(&state.db, gid, message_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("message not found".into()))?;
-        let eligible = row.role == "agent";
-        let context = eligible.then(|| feedback_service::group_reply_context(&row));
-        (None, eligible, context)
-    };
     if !eligible {
         return Err(AppError::BadRequest("assistant_feedback_ineligible".into()));
     }
@@ -167,6 +170,7 @@ async fn upsert(
         feedback_service::FeedbackWrite {
             user_id,
             message_id: message_id.to_owned(),
+            check_source_grant,
             conversation_id,
             group_id,
             turn_id,
@@ -229,12 +233,12 @@ async fn withdraw(
                 return Err(AppError::NotFound("message not found".into()));
             }
         } else {
-            let (conversation, _) = engine::get_authorized(&state.db, &user_id, cid).await?;
+            let (conversation, _) = engine::get_public_authorized(&state.db, &user_id, cid).await?;
             engine::authorize_thread_read(&state.db, &conversation).await?;
             let row = feedback_service::conversation_message(&state.db, &user_id, cid, &message_id)
                 .await?
                 .ok_or_else(|| AppError::NotFound("message not found".into()))?;
-            if row.role != "assistant" || row.status != "completed" {
+            if row.message.role != "assistant" || row.message.status != "completed" {
                 return Err(AppError::BadRequest("assistant_feedback_ineligible".into()));
             }
         }

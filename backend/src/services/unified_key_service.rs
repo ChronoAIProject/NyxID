@@ -1483,7 +1483,12 @@ async fn create_key_inner(
 
         let now = Utc::now();
         let base_url = ssh_service::target_base_url(&built_ssh_config.host, built_ssh_config.port);
-        let empty_credential = encryption_keys.encrypt(b"").await?;
+        let empty_credential = super::catalog_credential_record_service::empty_credential(
+            encryption_keys,
+            &ds_id,
+            user_id,
+        )
+        .await?;
         let internal_ds_slug = format!("_ssh_{ds_id}");
         let ds = DownstreamService {
             secret_context_versions: Default::default(),
@@ -1510,7 +1515,7 @@ async fn create_key_inner(
             auth_type: Some("ssh".to_string()),
             auth_scheme: None,
             auth_key_name: String::new(),
-            credential_encrypted: empty_credential.clone(),
+            credential_encrypted: empty_credential,
             platform_key: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -5192,6 +5197,7 @@ async fn enrich_view_with_oauth_client_id(
 
 #[cfg(test)]
 mod tests {
+    mod catalog_placeholders;
     mod optional_provider_tests {
         include!("unified_key_service_optional_provider_tests.rs");
     }

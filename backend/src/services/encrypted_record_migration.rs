@@ -51,11 +51,26 @@ enum Adapter {
     OracleLoginOuter,
     Broker,
     OAuthWebhook,
+    ChannelBot,
+    NativeWhatsapp,
+    NyxbotChannelKey,
+    ThreadReference,
+    NyxbotEvent,
+    GatewayResponse,
+    EventBinding,
+    GatewayTransport,
+    CmaRequest,
+    LearningProposal,
+    ReattachWindow,
+    ApprovalProposal,
     Setup,
+    NativeReplyHandle,
+    MobileSocialDelivery,
     AgentLogin,
-    // These are implementation blockers until their service-owned decoders and
-    // actual writers are converted. They may not be waived by operator input.
-    Pending,
+    NodeDevice,
+    AuthDevice,
+    MetaConsentAssets,
+    ChannelGuestReplyHandle,
 }
 
 struct Entry {
@@ -178,7 +193,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "assistant_agent_learning_proposals",
-        adapter: Adapter::Pending,
+        adapter: Adapter::LearningProposal,
         fields: &[
             "scope_encrypted",
             "body_encrypted",
@@ -192,7 +207,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "auth_device_codes",
-        adapter: Adapter::Pending,
+        adapter: Adapter::AuthDevice,
         fields: &[
             "delivery_access_token_encrypted",
             "delivery_refresh_token_encrypted",
@@ -200,7 +215,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "auth_device_codes_v2",
-        adapter: Adapter::Pending,
+        adapter: Adapter::AuthDevice,
         fields: &[
             "agent_key_grant.delivery_credential_encrypted",
             "delivery_access_token_encrypted",
@@ -209,7 +224,7 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "device_codes",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NodeDevice,
         fields: &[
             "delivery_api_key_encrypted",
             "delivery_refresh_token_encrypted",
@@ -217,15 +232,8 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "channel_bots",
-        adapter: Adapter::Pending,
-        fields: &[
-            "registration_pin_encrypted",
-            "webhook_secret_encrypted",
-            "bot_token_encrypted",
-            "app_secret_encrypted",
-            "lark_verification_token_encrypted",
-            "lark_encrypt_key_encrypted",
-        ],
+        adapter: Adapter::ChannelBot,
+        fields: super::channel_bot_record::FIELDS,
     },
     Entry {
         collection: "channel_connect_links",
@@ -244,26 +252,28 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "nyxbot_channels",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NyxbotChannelKey,
         fields: &["agent_key_ciphertext"],
     },
     Entry {
         collection: "nyxbot_threads",
-        adapter: Adapter::Pending,
+        adapter: Adapter::ThreadReference,
         fields: &["event_ref_ciphertext"],
     },
     Entry {
         collection: "nyxbot_events",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NyxbotEvent,
         fields: &[
             "delivery.target_ciphertext",
             "event_context_ciphertext",
             "guest_setup_payload",
+            "response_reply.ciphertext",
+            "channel_guest_setup_payload",
         ],
     },
     Entry {
         collection: "mobile_social_deliveries",
-        adapter: Adapter::Pending,
+        adapter: Adapter::MobileSocialDelivery,
         fields: &["ciphertext"],
     },
     Entry {
@@ -291,12 +301,12 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "platform_entry_gateway_transports",
-        adapter: Adapter::Pending,
+        adapter: Adapter::GatewayTransport,
         fields: &["request_ciphertext"],
     },
     Entry {
         collection: "platform_native_reply_handles",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NativeReplyHandle,
         fields: &["ciphertext"],
     },
     Entry {
@@ -326,37 +336,37 @@ const REGISTRY: &[Entry] = &[
     },
     Entry {
         collection: "assistant_cma_sandboxes",
-        adapter: Adapter::Pending,
+        adapter: Adapter::CmaRequest,
         fields: &["request_ciphertext"],
     },
     Entry {
         collection: "assistant_cma_creations",
-        adapter: Adapter::Pending,
+        adapter: Adapter::CmaRequest,
         fields: &["request_ciphertext"],
     },
     Entry {
         collection: "nyxbot_event_bindings",
-        adapter: Adapter::Pending,
+        adapter: Adapter::EventBinding,
         fields: &["provider_key_ciphertext", "producer_secret_ciphertext"],
     },
     Entry {
         collection: "nyxbot_gateway_responses",
-        adapter: Adapter::Pending,
+        adapter: Adapter::GatewayResponse,
         fields: &["payload_ciphertext"],
     },
     Entry {
         collection: "channel_whatsapp_native",
-        adapter: Adapter::Pending,
+        adapter: Adapter::NativeWhatsapp,
         fields: &["native_verify_token_encrypted"],
     },
     Entry {
         collection: "assistant_conversations",
-        adapter: Adapter::Pending,
+        adapter: Adapter::ReattachWindow,
         fields: &["active_turn.restart_admission.window.input"],
     },
     Entry {
         collection: "approval_requests",
-        adapter: Adapter::Pending,
+        adapter: Adapter::ApprovalProposal,
         fields: &[
             "execution_proposal.v1.payload",
             "execution_proposal.v1.result",
@@ -367,6 +377,16 @@ const REGISTRY: &[Entry] = &[
             "execution_proposal.v4.payload",
             "execution_proposal.v4.result",
         ],
+    },
+    Entry {
+        collection: "channel_meta_oauth_sessions",
+        adapter: Adapter::MetaConsentAssets,
+        fields: &["assets_encrypted"],
+    },
+    Entry {
+        collection: "channel_messages",
+        adapter: Adapter::ChannelGuestReplyHandle,
+        fields: &["thread_id"],
     },
 ];
 
@@ -531,12 +551,6 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
         return Ok(None);
     };
     let mut blockers = vec!["backup_and_rollback_reader_evidence_required"];
-    if REGISTRY
-        .iter()
-        .any(|entry| matches!(entry.adapter, Adapter::Pending))
-    {
-        blockers.push("implementation_registry_incomplete");
-    }
     if verify_generation(keys, &row).await.is_err() {
         blockers.push("registry_or_primary_provider_changed");
     }
@@ -566,9 +580,59 @@ pub async fn status(db: &Database, keys: &EncryptionKeys) -> AppResult<Option<Re
                 .iter()
                 .map(|entry| (entry.collection, entry.fields)),
         )?,
-        Some(previous_labels::RECONCILED_DIGEST) => {
-            project_labels(&row, previous_labels::reconciled())?
+        Some(previous_labels::BEFORE_CHANNEL_GUEST_DIGEST) => project_labels(
+            &row,
+            REGISTRY
+                .iter()
+                .take_while(|entry| !matches!(entry.adapter, Adapter::ChannelGuestReplyHandle))
+                .map(|entry| {
+                    let fields = if entry.collection == "nyxbot_events" {
+                        &[
+                            "delivery.target_ciphertext",
+                            "event_context_ciphertext",
+                            "guest_setup_payload",
+                            "response_reply.ciphertext",
+                        ]
+                    } else {
+                        entry.fields
+                    };
+                    (entry.collection, fields)
+                }),
+        )?,
+        Some(
+            previous_labels::EVENT_REPLY_DIGEST
+            | previous_labels::EVENT_WRITERS_DIGEST
+            | previous_labels::META_CONSENT_BASE_DIGEST
+            | previous_labels::MOBILE_SOCIAL_BASE_DIGEST
+            | previous_labels::NATIVE_REPLY_BASE_DIGEST
+            | previous_labels::NODE_DEVICE_BASE_DIGEST
+            | previous_labels::DEVICE_BASE_DIGEST,
+        ) => project_labels(
+            &row,
+            previous_labels::event_reply_draft()
+                .chain(std::iter::once(previous_labels::META_ASSETS)),
+        )?,
+        Some(previous_labels::EVENT_REPLY_DRAFT_DIGEST) => {
+            project_labels(&row, previous_labels::event_reply_draft())?
         }
+        Some(digest) if previous_labels::META_DIGESTS.contains(&digest) => project_labels(
+            &row,
+            previous_labels::reconciled().chain(std::iter::once(previous_labels::META_ASSETS)),
+        )?,
+        Some(
+            previous_labels::THREAD_EVENT_DIGEST
+            | previous_labels::REATTACH_WINDOW_DIGEST
+            | previous_labels::APPROVAL_PROPOSAL_DIGEST
+            | previous_labels::LEARNING_PROPOSAL_DIGEST
+            | previous_labels::CMA_REQUEST_DIGEST
+            | previous_labels::GATEWAY_SETUP_DIGEST
+            | previous_labels::EVENT_BINDING_DIGEST
+            | previous_labels::CHANNEL_KEY_DIGEST
+            | previous_labels::WHATSAPP_DIGEST
+            | previous_labels::CHANNEL_BOT_DIGEST
+            | previous_labels::OAUTH_WEBHOOK_DIGEST
+            | previous_labels::RECONCILED_DIGEST,
+        ) => project_labels(&row, previous_labels::reconciled())?,
         Some(previous_labels::DIGEST) => {
             project_labels(&row, previous_labels::LABELS.iter().copied())?
         }
@@ -663,6 +727,12 @@ async fn verify(
     keys: &EncryptionKeys,
     row: &Document,
 ) -> AppResult<()> {
+    if matches!(
+        entry.collection,
+        "provider_configs" | "platform_credentials"
+    ) {
+        super::channel_signing_migration::verify_state(entry.collection, row)?;
+    }
     match entry.adapter {
         Adapter::Trigger => {
             super::trigger_record_service::verify_current_snapshot(keys, entry.collection, row)
@@ -758,6 +828,38 @@ async fn verify(
             super::oracle_login_record_service::verify_current_snapshot(keys, entry.collection, row)
                 .await
         }
+        Adapter::ChannelBot => super::channel_bot_record::verify(keys, row).await,
+        Adapter::GatewayTransport => {
+            super::platform_entry_gateway_service::verify_request(keys, row).await
+        }
+        Adapter::NyxbotChannelKey => super::nyxbot_channel_key::verify(db, keys, row).await,
+        Adapter::NyxbotEvent => Box::pin(super::nyxbot_event_record::verify(keys, row)).await,
+        Adapter::GatewayResponse => {
+            Box::pin(super::nyxbot_response_recovery::storage::verify(keys, row)).await
+        }
+        Adapter::ThreadReference => {
+            Box::pin(super::nyxbot_thread_reference::verify(keys, row)).await
+        }
+        Adapter::ApprovalProposal => {
+            Box::pin(super::execution_permission_dispatch::proposals::record::verify(keys, row))
+                .await
+        }
+        Adapter::ReattachWindow => {
+            Box::pin(super::assistant_nyxagent_runtime::window_record::verify(
+                keys, row,
+            ))
+            .await
+        }
+        Adapter::LearningProposal => {
+            Box::pin(super::assistant_learning_record::storage::verify(keys, row)).await
+        }
+        Adapter::CmaRequest => {
+            super::assistant_cma_request_record::verify(keys, entry.collection, row).await
+        }
+        Adapter::EventBinding => {
+            super::nyxbot_event_binding_service::storage::verify(db, keys, row).await
+        }
+        Adapter::NativeWhatsapp => super::whatsapp_native::token_record::verify(keys, row).await,
         Adapter::OAuthWebhook => super::oauth_client_webhook_record::verify(keys, row).await,
         Adapter::Broker => {
             super::oauth_broker_record_service::verify_current_snapshot(keys, row).await
@@ -765,12 +867,39 @@ async fn verify(
         Adapter::Setup => {
             super::platform_setup_record_service::verify_current_snapshot(keys, row).await
         }
+        Adapter::AuthDevice => {
+            Box::pin(super::auth_device_service::record::verify(
+                keys,
+                entry.collection,
+                row,
+            ))
+            .await
+        }
+        Adapter::NodeDevice => {
+            Box::pin(super::device_code_service::record::verify(keys, row)).await
+        }
+        Adapter::MobileSocialDelivery => {
+            Box::pin(super::mobile_social_service::record::verify(keys, row)).await
+        }
+        Adapter::NativeReplyHandle => {
+            Box::pin(super::platform_native_reply_service::record::verify(
+                db, keys, row,
+            ))
+            .await
+        }
         Adapter::AgentLogin => {
             super::agent_login_record_service::verify_current_snapshot(keys, row).await
         }
-        Adapter::Pending => Err(AppError::Conflict(
-            "Encrypted field adapter implementation is pending".into(),
-        )),
+        Adapter::MetaConsentAssets => {
+            Box::pin(super::channel_meta_service::asset_record::verify(keys, row)).await
+        }
+        Adapter::ChannelGuestReplyHandle => {
+            if !has_material(entry, row) {
+                return Ok(());
+            }
+            Box::pin(super::channel_guest_access::relay::verify_reply_handle_record(keys, row))
+                .await
+        }
     }
 }
 
@@ -788,6 +917,23 @@ fn header_owner<'a>(entry: &Entry, row: &'a Document) -> AppResult<&'a str> {
         return Err(invalid());
     }
     Ok(owner)
+}
+
+async fn prepare_signing(
+    entry: &Entry,
+    db: &Database,
+    keys: &EncryptionKeys,
+    row: &Document,
+) -> AppResult<bool> {
+    if keys.contextual_record_writes()
+        && matches!(
+            entry.collection,
+            "provider_configs" | "platform_credentials"
+        )
+    {
+        return super::channel_signing_migration::prepare_page(db, entry.collection, row).await;
+    }
+    Ok(false)
 }
 
 async fn migrate(
@@ -866,6 +1012,48 @@ async fn migrate(
             super::oracle_login_record_service::migrate_snapshot(db, keys, entry.collection, row)
                 .await
         }
+        Adapter::ChannelBot => Box::pin(super::channel_bot_record::migrate(db, keys, row)).await,
+        Adapter::GatewayTransport => {
+            super::platform_entry_gateway_service::migrate_request(db, keys, row).await
+        }
+        Adapter::NyxbotChannelKey => super::nyxbot_channel_key::migrate(db, keys, row).await,
+        Adapter::NyxbotEvent => Box::pin(super::nyxbot_event_record::migrate(db, keys, row)).await,
+        Adapter::GatewayResponse => {
+            Box::pin(super::nyxbot_response_recovery::storage::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
+        Adapter::ThreadReference => {
+            Box::pin(super::nyxbot_thread_reference::migrate(db, keys, row)).await
+        }
+        Adapter::ApprovalProposal => {
+            Box::pin(
+                super::execution_permission_dispatch::proposals::record::migrate(db, keys, row),
+            )
+            .await
+        }
+        Adapter::ReattachWindow => {
+            Box::pin(super::assistant_nyxagent_runtime::window_record::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
+        Adapter::LearningProposal => {
+            Box::pin(super::assistant_learning_record::storage::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
+        Adapter::CmaRequest => {
+            super::assistant_cma_request_record::migrate(db, keys, entry.collection, row).await
+        }
+        Adapter::EventBinding => {
+            super::nyxbot_event_binding_service::storage::migrate(db, keys, row).await
+        }
+        Adapter::NativeWhatsapp => {
+            super::whatsapp_native::token_record::migrate(db, keys, row).await
+        }
         Adapter::OAuthWebhook => super::oauth_client_webhook_record::migrate(db, keys, row).await,
         Adapter::Broker => {
             super::oauth_broker_record_service::migrate_snapshot(db, keys, row).await
@@ -873,12 +1061,40 @@ async fn migrate(
         Adapter::Setup => {
             super::platform_setup_record_service::migrate_snapshot(db, keys, row).await
         }
+        Adapter::AuthDevice => {
+            Box::pin(super::auth_device_service::record::migrate(
+                db,
+                keys,
+                entry.collection,
+                row,
+            ))
+            .await
+        }
+        Adapter::NodeDevice => {
+            Box::pin(super::device_code_service::record::migrate(db, keys, row)).await
+        }
+        Adapter::MobileSocialDelivery => {
+            Box::pin(super::mobile_social_service::record::migrate(db, keys, row)).await
+        }
+        Adapter::NativeReplyHandle => {
+            Box::pin(super::platform_native_reply_service::record::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
         Adapter::AgentLogin => {
             super::agent_login_record_service::migrate_snapshot(db, keys, row).await
         }
-        Adapter::Pending => Err(AppError::Conflict(
-            "Encrypted field adapter implementation is pending".into(),
-        )),
+        Adapter::MetaConsentAssets => {
+            Box::pin(super::channel_meta_service::asset_record::migrate(
+                db, keys, row,
+            ))
+            .await
+        }
+        Adapter::ChannelGuestReplyHandle => {
+            Box::pin(super::channel_guest_access::relay::migrate_reply_handle_record(db, keys, row))
+                .await
+        }
     }
 }
 
@@ -890,7 +1106,12 @@ fn path<'a>(row: &'a Document, field: &str) -> Option<&'a Bson> {
     }
     Some(value)
 }
-fn field_has_material(row: &Document, field: &str) -> bool {
+fn field_has_material(entry: &Entry, row: &Document, field: &str) -> bool {
+    if matches!(entry.adapter, Adapter::ChannelGuestReplyHandle) {
+        return row.get_str(field).is_ok_and(|thread| {
+            thread.starts_with(super::channel_guest_access::relay::REPLY_HANDLE_PREFIX)
+        });
+    }
     path(row, field).is_some_and(|value| match value {
         Bson::Null => false,
         Bson::Document(map) => !map.is_empty(),
@@ -904,7 +1125,7 @@ fn has_material(entry: &Entry, row: &Document) -> bool {
     entry
         .fields
         .iter()
-        .any(|field| field_has_material(row, field))
+        .any(|field| field_has_material(entry, row, field))
 }
 
 fn diagnostic_id(index: usize, id: &Bson) -> AppResult<String> {
@@ -982,6 +1203,18 @@ pub async fn list_findings(db: &Database, after: Option<&str>) -> AppResult<Find
             return Err(invalid());
         }
         let category = match row.get_str("category").ok() {
+            Some(super::auth_device_service::record::ISSUANCE_MISSING) => {
+                super::auth_device_service::record::ISSUANCE_MISSING
+            }
+            Some(super::device_code_service::record::ISSUANCE_MISSING) => {
+                super::device_code_service::record::ISSUANCE_MISSING
+            }
+            Some(super::platform_native_reply_service::record::RECEIPT_MISSING) => {
+                super::platform_native_reply_service::record::RECEIPT_MISSING
+            }
+            Some(super::channel_meta_service::asset_record::AMBIGUOUS) => {
+                super::channel_meta_service::asset_record::AMBIGUOUS
+            }
             Some("adapter_not_implemented") => "adapter_not_implemented",
             Some("authentication_binding_or_lifecycle_unresolved") => {
                 "authentication_binding_or_lifecycle_unresolved"
@@ -1006,6 +1239,21 @@ pub async fn list_findings(db: &Database, after: Option<&str>) -> AppResult<Find
 struct LookupCursor {
     after: zeroize::Zeroizing<String>,
     expires_at_ms: i64,
+}
+
+async fn lookup_continuation(
+    keys: &EncryptionKeys,
+    context: &crate::crypto::aes::RecordContext<'_>,
+    after: &str,
+) -> AppResult<String> {
+    let cursor = LookupCursor {
+        after: after.to_owned().into(),
+        expires_at_ms: chrono::Utc::now().timestamp_millis() + 900_000,
+    };
+    let plain = crate::crypto::secret_json::to_secret_string(&cursor).map_err(|_| invalid())?;
+    Ok(hex::encode(
+        keys.encrypt_record(plain.as_bytes(), context).await?,
+    ))
 }
 
 /// Bounded privileged resolution of a keyed diagnostic. The client receives
@@ -1036,6 +1284,7 @@ pub async fn lookup_finding(
     let context =
         crate::crypto::aes::RecordContext::new(FINDINGS, finding_id, "platform", &components)?;
     let mut filter = doc! {};
+    let mut filter_after = None;
     if let Some(after) = after {
         if after.len() > 4096 {
             return Err(invalid());
@@ -1047,6 +1296,7 @@ pub async fn lookup_finding(
             return Err(AppError::Conflict("Migration lookup cursor expired".into()));
         }
         filter.insert("_id", doc! {"$gt":cursor.after.as_str()});
+        filter_after = Some(cursor.after);
     }
     let large = matches!(
         entry.adapter,
@@ -1080,7 +1330,7 @@ pub async fn lookup_finding(
         owner_uuid: None,
         next: None,
     };
-    for row in &rows {
+    for (row_index, row) in rows.iter().enumerate() {
         let id = row.get("_id").ok_or_else(invalid)?;
         let candidate = diagnostic_id(index, id)?;
         if candidate != finding_id {
@@ -1100,24 +1350,38 @@ pub async fn lookup_finding(
             });
         result.disposition = if verify(entry, &db, keys, row).await.is_ok() {
             "authenticated_current_new_pass_required"
-        } else if rewrap && !matches!(entry.adapter, Adapter::Pending) {
-            match migrate(entry, &db, keys, row).await {
-                Ok(_) => match db
-                    .collection::<Document>(entry.collection)
-                    .find_one(doc! {"_id":id})
-                    .await?
-                {
-                    Some(current) if verify(entry, &db, keys, &current).await.is_ok() => {
-                        "authenticated_current_new_pass_required"
-                    }
-                    None => "source_removed_new_pass_required",
-                    _ => "storage_or_lifecycle_repair_required",
-                },
+        } else if rewrap {
+            match prepare_signing(entry, &db, keys, row).await {
+                Ok(true) => {
+                    // Keep the matching producer in the next page while its internal cursor advances.
+                    let previous = row_index
+                        .checked_sub(1)
+                        .and_then(|idx| rows[idx].get_str("_id").ok())
+                        .or_else(|| filter_after.as_ref().map(|s| s.as_str()))
+                        .unwrap_or("");
+                    result.next = Some(lookup_continuation(keys, &context, previous).await?);
+                    "lookup_incomplete"
+                }
                 Err(AppError::DatabaseError(error)) => return Err(AppError::DatabaseError(error)),
                 Err(_) => "storage_or_lifecycle_repair_required",
+                Ok(false) => match migrate(entry, &db, keys, row).await {
+                    Ok(_) => match db
+                        .collection::<Document>(entry.collection)
+                        .find_one(doc! {"_id":id})
+                        .await?
+                    {
+                        Some(current) if verify(entry, &db, keys, &current).await.is_ok() => {
+                            "authenticated_current_new_pass_required"
+                        }
+                        None => "source_removed_new_pass_required",
+                        _ => "storage_or_lifecycle_repair_required",
+                    },
+                    Err(AppError::DatabaseError(error)) => {
+                        return Err(AppError::DatabaseError(error));
+                    }
+                    Err(_) => "storage_or_lifecycle_repair_required",
+                },
             }
-        } else if matches!(entry.adapter, Adapter::Pending) {
-            "adapter_implementation_required"
         } else {
             "storage_or_lifecycle_repair_required"
         };
@@ -1128,14 +1392,7 @@ pub async fn lookup_finding(
             .last()
             .and_then(|row| row.get_str("_id").ok())
             .ok_or_else(invalid)?;
-        let cursor = LookupCursor {
-            after: after.to_owned().into(),
-            expires_at_ms: chrono::Utc::now().timestamp_millis() + 900_000,
-        };
-        let plain = crate::crypto::secret_json::to_secret_string(&cursor).map_err(|_| invalid())?;
-        result.next = Some(hex::encode(
-            keys.encrypt_record(plain.as_bytes(), &context).await?,
-        ));
+        result.next = Some(lookup_continuation(keys, &context, after).await?);
     } else {
         result.disposition = "source_absent_new_pass_required";
     }
@@ -1148,12 +1405,29 @@ pub async fn lookup_finding(
 /// malformed material records a finite finding and does not starve later rows.
 pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> AppResult<()> {
     let db = super::transaction_service::durable_database(db);
+    let runs = db.collection::<Document>(RUNS);
+    let mut available = doc! {
+        "_id": RUN_ID, "generation": generation, "phase": "running",
+        "$expr": {"$lte": ["$lease_until", "$$NOW"]},
+    };
+    // Authenticate the generation before taking its lease. Match the same
+    // registry and provider proof when claiming it after the asynchronous check.
+    let proof = runs
+        .find_one(available.clone())
+        .projection(doc! {"_id":0, "generation":1, "registry_digest":1, "provider_proof":1})
+        .await?
+        .ok_or_else(lost)?;
+    verify_generation(keys, &proof).await?;
+    available.extend(proof);
     let token = uuid::Uuid::new_v4().to_string();
-    let run=db.collection::<Document>(RUNS).find_one_and_update(
-        doc!{"_id":RUN_ID,"generation":generation,"phase":"running","$expr":{"$lte":["$lease_until","$$NOW"]}},
-        vec![doc!{"$set":{"lease_token":&token,"lease_until":{"$add":["$$NOW",120_000]}}}])
-        .return_document(ReturnDocument::After).await?.ok_or_else(lost)?;
-    verify_generation(keys, &run).await?;
+    let run = runs
+        .find_one_and_update(
+            available,
+            vec![doc! {"$set":{"lease_token":&token,"lease_until":{"$add":["$$NOW",120_000]}}}],
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(lost)?;
     let index =
         usize::try_from(run.get_i32("entry").map_err(|_| invalid())?).map_err(|_| invalid())?;
     if index == REGISTRY.len() {
@@ -1202,6 +1476,10 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
     if let Some(cursor) = run.get("cursor").filter(|cursor| **cursor != Bson::Null) {
         filter.insert("_id", doc! {"$gt":cursor});
     }
+    if matches!(entry.adapter, Adapter::ChannelGuestReplyHandle) {
+        let prefix = regex::escape(super::channel_guest_access::relay::REPLY_HANDLE_PREFIX);
+        filter.insert("thread_id", doc! {"$regex":format!("^{prefix}")});
+    }
     let large = matches!(
         entry.adapter,
         Adapter::GeneratedArtifact | Adapter::Attachment | Adapter::ToolResult
@@ -1226,6 +1504,7 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
         .try_collect::<Vec<_>>()
         .await?;
     let mut cursor = run.get("cursor").cloned().unwrap_or(Bson::Null);
+    let mut preparing = false;
     for row in &rows {
         let fence = doc! {"_id":RUN_ID,"generation":generation,"lease_token":&token,"$expr":{"$gt":["$lease_until","$$NOW"]}};
         if db
@@ -1250,7 +1529,6 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
         // error, never an exemption based solely on its byte length.
         let exempt = no_material
             && match entry.adapter {
-                Adapter::Pending => true,
                 Adapter::Capability => {
                     row.get("capability_encrypted")
                         .is_none_or(|v| v == &Bson::Null)
@@ -1270,30 +1548,37 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
         } else {
             match verify(entry, &db, keys, row).await {
                 Ok(()) => Ok(false),
-                Err(_) if mode == Mode::Migrate && !matches!(entry.adapter, Adapter::Pending) => {
-                    match migrate(entry, &db, keys, row).await {
-                        Ok(changed) => {
-                            // Reread the actual winner after CAS/no-op. A false
-                            // result is never itself proof of successful rewrap.
-                            match db
-                                .collection::<Document>(entry.collection)
-                                .find_one(doc! {"_id":id})
-                                .await?
-                            {
-                                Some(current) => {
-                                    let checked = verify(entry, &db, keys, &current).await;
-                                    if checked.is_ok() {
-                                        verified_winner = Some(current);
-                                    }
-                                    checked.map(|()| changed)
-                                }
-                                None => {
-                                    verified_winner = None;
-                                    Ok(changed)
-                                }
-                            }
+                Err(_) if mode == Mode::Migrate => {
+                    match prepare_signing(entry, &db, keys, row).await {
+                        Ok(true) => {
+                            preparing = true;
+                            break;
                         }
                         Err(error) => Err(error),
+                        Ok(false) => match migrate(entry, &db, keys, row).await {
+                            Ok(changed) => {
+                                // Reread the actual winner after CAS/no-op. A false
+                                // result is never itself proof of successful rewrap.
+                                match db
+                                    .collection::<Document>(entry.collection)
+                                    .find_one(doc! {"_id":id})
+                                    .await?
+                                {
+                                    Some(current) => {
+                                        let checked = verify(entry, &db, keys, &current).await;
+                                        if checked.is_ok() {
+                                            verified_winner = Some(current);
+                                        }
+                                        checked.map(|()| changed)
+                                    }
+                                    None => {
+                                        verified_winner = None;
+                                        Ok(changed)
+                                    }
+                                }
+                            }
+                            Err(error) => Err(error),
+                        },
                     }
                 }
                 Err(error) => Err(error),
@@ -1307,13 +1592,48 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
                 None
             }
             Err(AppError::DatabaseError(error)) => return Err(AppError::DatabaseError(error)),
+            Err(AppError::Conflict(reason))
+                if matches!(entry.adapter, Adapter::AuthDevice)
+                    && reason == super::auth_device_service::record::ISSUANCE_MISSING =>
+            {
+                unresolved += 1;
+                Some(super::auth_device_service::record::ISSUANCE_MISSING)
+            }
+            Err(AppError::Conflict(reason))
+                if matches!(entry.adapter, Adapter::NodeDevice)
+                    && reason == super::device_code_service::record::ISSUANCE_MISSING =>
+            {
+                unresolved += 1;
+                Some(super::device_code_service::record::ISSUANCE_MISSING)
+            }
+            Err(AppError::Conflict(reason))
+                if matches!(entry.adapter, Adapter::NativeReplyHandle)
+                    && reason == super::platform_native_reply_service::record::RECEIPT_MISSING =>
+            {
+                if db
+                    .collection::<Document>(entry.collection)
+                    .find_one(doc! {"_id": id})
+                    .projection(doc! {"_id":1})
+                    .await?
+                    .is_none()
+                {
+                    verified_winner = None;
+                    None
+                } else {
+                    unresolved += 1;
+                    Some(super::platform_native_reply_service::record::RECEIPT_MISSING)
+                }
+            }
+            Err(AppError::Conflict(reason))
+                if matches!(entry.adapter, Adapter::MetaConsentAssets)
+                    && reason == super::channel_meta_service::asset_record::AMBIGUOUS =>
+            {
+                unresolved += 1;
+                Some(super::channel_meta_service::asset_record::AMBIGUOUS)
+            }
             Err(_) => {
                 unresolved += 1;
-                Some(if matches!(entry.adapter, Adapter::Pending) {
-                    "adapter_not_implemented"
-                } else {
-                    "authentication_binding_or_lifecycle_unresolved"
-                })
+                Some("authentication_binding_or_lifecycle_unresolved")
             }
         };
         // Checkpoint and finding commit together; an expired worker cannot
@@ -1330,7 +1650,7 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
                 "verification_blocked"
             } else if verified_winner.is_none() {
                 "source_removed_observed"
-            } else if !field_has_material(verified_winner.as_ref().unwrap(), field) {
+            } else if !field_has_material(entry, verified_winner.as_ref().unwrap(), field) {
                 "no_material_observed"
             } else {
                 "authenticated_current"
@@ -1363,7 +1683,7 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
         super::transaction_service::commit(&mut session).await?;
         cursor = id.clone();
     }
-    let finished = rows.len() < batch as usize;
+    let finished = !preparing && rows.len() < batch as usize;
     let next = if finished { index + 1 } else { index };
     // One final bounded cleanup phase follows the collection walk.
     let phase = "running";
@@ -1377,9 +1697,16 @@ pub async fn advance(db: &Database, keys: &EncryptionKeys, generation: &str) -> 
 
 #[cfg(test)]
 mod tests {
+    mod channel_bots;
+    mod channel_keys;
+    mod cma_requests;
+    mod event_bindings;
+    mod gateway_transport;
+    mod learning_proposals;
     mod registry;
     mod swaps;
     mod webhooks;
+    mod whatsapp;
 
     use super::*;
     use crate::crypto::{

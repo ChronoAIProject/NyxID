@@ -187,7 +187,17 @@ pub async fn reserve(
             row.message_count += 1;
             row.updated_at = now;
             conversations.replace_one(doc! {"_id": &id, "user_id": &owner}, &row).session(&mut *session).await?;
-            messages.insert_one(&message).session(&mut *session).await?;
+            let grants = engine::turn_meta_grants(row.active_turn.as_ref().ok_or(AppError::AssistantTurnRequired)?);
+            if grants.is_empty() {
+                messages.insert_one(&message).session(&mut *session).await?;
+            } else {
+                for grant in &grants {
+                    super::channel_meta_service::scopes::fence_reference(&db, session, grant, true).await?;
+                }
+                let mut stored = bson::to_document(&message).map_err(|_| AppError::Internal("Steering receipt unavailable".into()))?;
+                stored.insert("meta_grants", bson::to_bson(&grants).map_err(|_| AppError::Internal("Steering receipt unavailable".into()))?);
+                db.collection::<bson::Document>(MESSAGES).insert_one(stored).session(&mut *session).await?;
+            }
             Ok(Admission::Dispatch(message))
         }).await;
         transactions::transaction_result(operation)

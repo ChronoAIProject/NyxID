@@ -107,6 +107,7 @@ describe("legacy i18n delta adoption", () => {
       "src/test-utils/options.tsx", "src/dev/scope-preview.tsx", "src/lib/fixtures/billing.ts",
       "src/components/assistant/chat-fixture.ts", "src/hooks/mock-api.ts", "src/lib/mocks.ts",
       "src/features/landing/hero.tsx", "src/features/nyxbot-onboarding/step.tsx",
+      "src/features/website-a/generated/en/HomePage.tsx",
       "src/i18n/locales/app/zh-CN.ts", "src/pages/billing.json", "src/styles.css",
     ];
     for (const file of excluded) expect(isPlacementSource(file), file).toBe(false);

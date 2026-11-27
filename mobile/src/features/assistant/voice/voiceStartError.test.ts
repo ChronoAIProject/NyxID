@@ -245,6 +245,9 @@ test("local startup stages never display arbitrary media, SDP, socket or network
     );
   }
   const denial = new Error("private microphone identifier");
+  const untyped = new Error("Voice audio is not supported by this app runtime.");
+  untyped.name = "NativeVoiceRuntimeUnavailableError";
+  assert.equal(voiceStartError(untyped, "microphone"), expected.microphone);
   denial.name = "NotAllowedError";
   assert.equal(
     voiceStartError(denial, "microphone"),

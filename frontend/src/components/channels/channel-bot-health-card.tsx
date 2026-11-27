@@ -1,3 +1,4 @@
+import { nyxBotChannelError } from "@/lib/assistant/nyxbot-channel-errors";
 import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { toast } from "sonner";
@@ -56,6 +57,15 @@ function Row({
 }
 
 /** Delivery diagnostics and the server's recovery recommendation. */
+// A server-selected current setup recommendation. Other bot faults keep their
+// own recommendation even when the last failed setup remains in diagnostics.
+function setupAdvice(data: ChannelBotHealth): string | null {
+  const code = data.recommendation_cause;
+  if (!code) return null;
+  const guidance = translateUi(nyxBotChannelError(code));
+  return translateUi("Last connection attempt: {{guidance}} Retry after correcting the issue; health does not probe the gateway.", { guidance });
+}
+
 export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
   useUiTranslation();
   const health = useChannelBotHealth(botId);
@@ -149,6 +159,10 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
           })}
         />
       )}
+      {["messenger", "instagram"].includes(data.platform) && <>
+        <Row label={translateUi("Last successful agent callback")} value={when(d.inbound_outcomes?.callback_accepted?.at ?? null)} />
+        <Row label={translateUi("Failed agent callbacks")} value={String(d.inbound_outcomes?.callback_failed?.count ?? 0)} />
+      </>}
       {inboundOutcomes.length > 0 && (
         <details>
           <summary className="cursor-pointer type-secondary text-muted-foreground">
@@ -194,7 +208,7 @@ export function ChannelBotHealthCard({ botId }: { readonly botId: string }) {
           healthy ? "text-14 text-muted-foreground" : "text-14 text-warning"
         }
       >
-        {translateUi(data.recommended_action_text)}
+        {setupAdvice(data) ?? translateUi(data.recommended_action_text)}
       </p>
       {action && (
         <Button

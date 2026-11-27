@@ -3,6 +3,7 @@ export type KeyboardFrame = { screenY: number; height: number };
 export function visibleKeyboardFrame(
   frame: KeyboardFrame | undefined,
   windowHeight: number,
+  androidContentBottom?: number | null,
 ): KeyboardFrame | undefined {
   if (
     !frame ||
@@ -12,10 +13,24 @@ export function visibleKeyboardFrame(
     !Number.isFinite(frame.height) ||
     frame.height <= 0 ||
     frame.height > windowHeight ||
-    frame.screenY < 0 ||
-    frame.screenY >= windowHeight
+    frame.screenY < 0
   )
     return undefined;
+  // On Android 11+ RN reads the IME height above system bars separately
+  // from the visible display frame. The latter can still end behind the IME.
+  // A window already resized to the correct top needs no correction.
+  if (
+    androidContentBottom != null &&
+    androidContentBottom >= frame.height &&
+    androidContentBottom <= windowHeight + 1 &&
+    frame.screenY <= windowHeight + 1
+  ) {
+    return {
+      screenY: Math.min(frame.screenY, androidContentBottom - frame.height),
+      height: frame.height,
+    };
+  }
+  if (frame.screenY >= windowHeight) return undefined;
   return {
     screenY: frame.screenY,
     height: Math.min(frame.height, windowHeight - frame.screenY),

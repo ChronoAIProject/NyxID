@@ -11,7 +11,7 @@ import { routingPreview } from "./dev/routing-preview"
 import { multilingualPreview } from "./dev/multilingual-preview"
 import { machineSeccomp } from "./scripts/machine-seccomp"
 import { buildVersion } from "./scripts/build-version"
-import { buildLegalMarkdown, buildRobots, buildSitemap } from "./scripts/public-origin.mjs"
+import { buildLegalMarkdown, buildRobots, getPublicOrigin } from "./scripts/public-origin.mjs"
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
 
@@ -110,13 +110,9 @@ interface DocFile {
   raw: string
 }
 
-// Public, indexable routes outside the docs tree.
-const STATIC_SITEMAP_ROUTES = ["/", "/docs", "/blog", "/privacy", "/terms", "/data-deletion"]
-
 function docsSync(): Plugin {
   const srcDir = path.resolve(__dirname, "../docs/site")
   const outDir = path.resolve(__dirname, "public/docs")
-  const sitemapPath = path.resolve(__dirname, "public/sitemap.xml")
   let isBuild = false
   let outputDir = ""
 
@@ -131,17 +127,6 @@ function docsSync(): Plugin {
     return { title, description, headings }
   }
 
-  const writeSitemap = () => {
-    const urls = [
-      ...STATIC_SITEMAP_ROUTES,
-      ...allDocPages().map((p) => `/docs/${p.slug}`),
-    ]
-    fs.writeFileSync(
-      sitemapPath,
-      buildSitemap(urls, process.env),
-    )
-  }
-
   // Mirror /docs/site/** -> public/docs/**, emit the search index + sitemap, and
   // return the markdown files (slug + raw body) for the publish-gate lint.
   const sync = (): DocFile[] => {
@@ -150,27 +135,30 @@ function docsSync(): Plugin {
     fs.mkdirSync(outDir, { recursive: true })
     const index: DocSearchEntry[] = []
     const docs: DocFile[] = []
-    const walk = (dir: string) => {
-      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const abs = path.join(dir, entry.name)
-        if (entry.isDirectory()) {
-          walk(abs)
-          continue
-        }
-        const rel = path.relative(srcDir, abs).replace(/\\/g, "/")
-        const out = path.join(outDir, rel)
-        fs.mkdirSync(path.dirname(out), { recursive: true })
-        fs.copyFileSync(abs, out)
-        if (entry.name.endsWith(".md")) {
-          const raw = fs.readFileSync(abs, "utf8")
-          index.push({ source: rel, ...parseMeta(raw) })
-          docs.push({ slug: rel.replace(/\.md$/, ""), raw })
-        }
+    // Only the explicit documentation manifest is publishable. Private siblings
+    // and future drafts never enter public/docs or search output.
+    for (const page of allDocPages()) {
+      const rel = `${page.slug}.md`
+      const abs = path.join(srcDir, rel)
+      if (!fs.existsSync(abs)) throw new Error(`Missing published docs: ${rel}`)
+      const raw = fs.readFileSync(abs, "utf8")
+      const out = path.join(outDir, rel)
+      fs.mkdirSync(path.dirname(out), { recursive: true })
+      fs.copyFileSync(abs, out)
+      index.push({ source: rel, ...parseMeta(raw) })
+      docs.push({ slug: page.slug, raw })
+      // Copy only referenced local image assets under docs/site, with a root fence.
+      for (const match of raw.matchAll(/!\[[^\]]*\]\(([^)\s]+)\)/g)) {
+        const image = match[1]!
+        if (/^(https?:|data:)/.test(image)) continue
+        const relative = image.startsWith("/docs/") ? image.slice(6) : path.relative(srcDir,path.resolve(path.dirname(abs),image))
+        const input = path.resolve(srcDir,relative)
+        if (!input.startsWith(srcDir + path.sep) || !/\.(png|svg|webp|jpe?g|gif)$/.test(input)) throw new Error(`Invalid doc image: ${image}`)
+        fs.mkdirSync(path.dirname(path.join(outDir,relative)),{recursive:true})
+        fs.copyFileSync(input,path.join(outDir,relative))
       }
     }
-    walk(srcDir)
     fs.writeFileSync(path.join(outDir, "search-index.json"), JSON.stringify(index))
-    writeSitemap()
     return docs
   }
 
@@ -281,6 +269,7 @@ export default defineConfig({
   ],
   define: {
     __BUILD_ID__: JSON.stringify(BUILD_ID),
+    __NYXID_PUBLIC_ORIGIN__: JSON.stringify(getPublicOrigin()),
     __BUILD_ARTIFACT_ID__: JSON.stringify(ARTIFACT_ID),
     __APP_VERSION__: JSON.stringify(APP_VERSION),
     "import.meta.env.VITE_ROUTING_PREVIEW": JSON.stringify(process.env.NYXID_ROUTING_PREVIEW === "1" ? "1" : "0"),

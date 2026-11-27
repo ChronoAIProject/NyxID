@@ -44,6 +44,7 @@ function harness() {
       timing: () => ({ start: () => undefined, stop: () => undefined }),
     },
     Keyboard: { addListener: () => ({ remove: () => undefined }), dismiss: () => undefined },
+    Platform: { OS: "android" },
     Share: { share: async () => ({}) },
     useWindowDimensions: () => ({ width: 390, height: 844, scale: 3, fontScale: 1 }),
     Image: () => null,

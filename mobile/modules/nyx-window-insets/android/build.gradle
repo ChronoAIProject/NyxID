@@ -1,0 +1,15 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'dev.nyxid.insets'
+version = '1.0.0'
+
+android {
+  namespace 'dev.nyxid.insets'
+  defaultConfig {
+    versionCode 1
+    versionName '1.0.0'
+  }
+}

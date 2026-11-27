@@ -132,6 +132,9 @@ async fn discord_relay_service_selection_preserves_gateway_message_text_before_a
             .unwrap();
         let sender = Sender {
             truncated_original_bytes: None,
+            guest_facts: Default::default(),
+            guest_mode: None,
+            native_discord_activity: None,
             original_kind: None,
             original_message: true,
             media: Vec::new(),

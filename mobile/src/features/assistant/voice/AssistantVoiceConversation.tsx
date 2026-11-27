@@ -1,7 +1,21 @@
 import { localizedError } from "../../../i18n/localizedError";
 import { useLocalizedState } from "../../../i18n/useLocalizedState";
 import { translateApp } from "../../../i18n/appTranslation";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { VoiceRippleBanner } from "../../../components/avatar/VoiceRippleBanner";
+import { useAgentAvatarsEnabled } from "../../../lib/avatars/agentAvatarsFlag";
+import { AgentAvatar } from "../../../components/AgentAvatar";
+import type { AgentIdentity } from "../../../components/agentAvatarModel";
+import {
+  resolveAvatar,
+  resolveProcess,
+} from "../../../lib/avatars/agentAvatars";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import {
   ActivityIndicator,
@@ -36,7 +50,9 @@ import { fonts } from "../../../theme/designTokens";
 import { ChatComposerFrame } from "../ChatComposer";
 import { useNativeVoice } from "./useNativeVoice";
 import { useVoiceLevels } from "./useVoiceLevels";
+import { VoiceComposerAura } from "./VoiceComposerAura";
 import { VoiceMediaBridge } from "./VoiceMediaBridge";
+import type { VoiceAuraPhase } from "./voiceAuraState";
 import { withVoiceRequestDeadline } from "./voiceRequestDeadline";
 import {
   chooseVoiceOption,
@@ -55,6 +71,7 @@ import { useRailScrollIndicator } from "../../../components/workspace/workspaceF
 type Props = {
   thread: string;
   agentName: string;
+  agent?: AgentIdentity;
   onClose: () => void;
   onUpdate: () => void;
   /** Scrolls the main chat to the approval; it does not stop the call or task. */
@@ -154,6 +171,7 @@ export function AssistantVoiceConversation(props: Props) {
 function VoiceConversation({
   thread,
   agentName,
+  agent,
   onClose,
   onUpdate,
   onReview,
@@ -169,6 +187,7 @@ function VoiceConversation({
   const { colors } = useTheme();
   const { t } = useAppLanguage();
   const reducedMotion = useReducedMotion();
+  const avatarsEnabled = useAgentAvatarsEnabled();
   const focused = useIsFocused();
   const { isConnected } = useNetworkStatus();
   const voice = useNativeVoice(thread, environment, onUpdate);
@@ -313,6 +332,19 @@ function VoiceConversation({
     !uncertain;
   const outputActive =
     voice.connected && levels.speaking && !voice.speakerMuted && !confirmingEnd;
+  const avatarProcess = resolveProcess({
+    surface: "voice",
+    voice: { inputAccepting: listening, outputPlaying: outputActive },
+    connection: voice.starting
+      ? { status: "connecting" }
+      : voice.connected
+        ? { status: "ready" }
+        : undefined,
+  });
+  const avatarMood =
+    avatarProcess.state === "idle" && avatarProcess.connection
+      ? avatarProcess.connection
+      : avatarProcess.state;
   const tasks = voice.snapshot?.tasks ?? [];
   const needsOk = tasks.some((task) => task.state === "awaiting_confirmation");
   const pendingTasks = tasks.filter(
@@ -883,16 +915,50 @@ function VoiceConversation({
   const showRecovery =
     !ending && (confirmingEnd || !!conflict || uncertain || checking);
   const showPreCall = !active && !showRecovery && !ending && !confirmingEnd;
+  // Use live audio gates and task state; retained captions cannot imply speech.
+  const auraPhase: VoiceAuraPhase =
+    !focused || !isConnected || terminal || ending || showRecovery || restarting
+      ? "resting"
+      : voice.starting
+        ? "connecting"
+        : !voice.connected
+          ? "resting"
+          : outputActive
+            ? "speaking"
+            : muted || session?.input_muted
+              ? "muted"
+              : running
+                ? "thinking"
+                : listening
+                  ? "listening"
+                  : "resting";
   return (
     <>
       {voice.media ? (
         <VoiceMediaBridge
           key={thread + ":" + voice.mediaAttempt}
           media={voice.media}
+          protocol={voice.mediaProtocol}
           origin={environment.origin}
         />
       ) : null}
-      <ChatComposerFrame style={styles.frame} bounce={false}>
+      <VoiceConversationFrame
+        phase={auraPhase}
+        input={levels.input}
+        output={levels.output}
+        reducedMotion={reducedMotion}
+      >
+        {avatarsEnabled && agent ? (
+          <VoiceRippleBanner
+            config={resolveAvatar(agent)}
+            kind={agent.kind}
+            name={agentName}
+            status={status}
+            inputAccepting={listening}
+            outputPlaying={outputActive}
+            outputLevel={levels.output}
+          />
+        ) : null}
         <View
           accessibilityLabel={translateApp(
             "Voice conversation with {{name}}",
@@ -901,6 +967,15 @@ function VoiceConversation({
           style={styles.bar}
         >
           <View style={styles.identity}>
+            {agent ? (
+              <AgentAvatar
+                agent={agent}
+                size="xl"
+                mood={avatarMood}
+                audioLevel={levels.output}
+                animated
+              />
+            ) : null}
             {voice.starting || checking || ending || restarting ? (
               <ActivityIndicator size="small" color={colors.primary} />
             ) : (
@@ -1455,7 +1530,7 @@ function VoiceConversation({
             </ScrollView>
           </View>
         ) : null}
-      </ChatComposerFrame>
+      </VoiceConversationFrame>
       {preferencesVisible && focused && voicePickerScope === selectionScope ? (
         <WorkspaceSelectionSheet
           key={selectionScope}
@@ -1556,6 +1631,20 @@ function Choice({
     </Pressable>
   );
 }
+/** Restore the original halo around the current controls and notices. */
+function VoiceConversationFrame({
+  children,
+  ...aura
+}: ComponentProps<typeof VoiceComposerAura>) {
+  return (
+    <VoiceComposerAura {...aura}>
+      <ChatComposerFrame style={styles.frame} bounce={false}>
+        {children}
+      </ChatComposerFrame>
+    </VoiceComposerAura>
+  );
+}
+
 function VoiceWave({
   input,
   output,

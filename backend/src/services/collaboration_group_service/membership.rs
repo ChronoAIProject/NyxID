@@ -103,6 +103,7 @@ pub(super) async fn create_ready(
 ) -> AppResult<AssistantGroup> {
     let now = Utc::now();
     let group = AssistantGroup {
+        pending_org_use_revisions: Default::default(),
         id: format!("nyxg-{}", Uuid::new_v4().simple()),
         user_id: actor.into(),
         collaboration: Some(model::Collaboration {

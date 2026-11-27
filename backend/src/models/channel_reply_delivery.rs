@@ -6,6 +6,8 @@ pub const COLLECTION_NAME: &str = "channel_reply_deliveries";
 /// One logical reply's send evidence. Never contains text, media or credentials.
 #[derive(Serialize, Deserialize)]
 pub struct ChannelReplyDelivery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_grant: Option<super::channel_meta::GrantRef>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,

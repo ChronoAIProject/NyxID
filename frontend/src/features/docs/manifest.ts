@@ -167,6 +167,15 @@ export function findDocPage(slug: string): DocPageRef | undefined {
   return allDocPages().find((p) => p.slug === slug);
 }
 
+export function storedDocTab(value: string | null): DocTabId {
+  return DOCS_TABS.find((tab) => tab.id === value)?.id ?? "ai";
+}
+
+export function docTabLabel(slug: string): string {
+  const id = docTabForSlug(slug);
+  return DOCS_TABS.find((tab) => tab.id === id)?.label ?? "Concepts";
+}
+
 export function docTabForSlug(slug: string): DocTabId | "shared" {
   const seg = slug.split("/")[0];
   return DOCS_TABS.find((tab) => tab.id === seg)?.id ?? "shared";

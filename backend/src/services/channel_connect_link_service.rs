@@ -113,6 +113,8 @@ pub async fn create(
     {
         return Err(missing());
     }
+    super::channel_adapters::meta_managed::require_enrollment(db, &input.actor, &input.platform)
+        .await?;
     let label = input.label.trim();
     if label.is_empty() || label.len() > 128 {
         return Err(AppError::ValidationError(
@@ -206,6 +208,7 @@ fn build_link(
         flow: None,
         bot_id: None,
         connection_id: None,
+        meta_grant: None,
         telegram_request_id: None,
         claim_id: None,
         claim_until: None,
@@ -353,6 +356,7 @@ fn claim_free(now: chrono::DateTime<Utc>) -> Document {
 pub async fn claim(db: &Database, actor: &str, token: &str, flow: &str) -> AppResult<Claim> {
     let link = by_token(db, token).await?;
     authorize(db, actor, &link).await?;
+    super::channel_adapters::meta_managed::require_enrollment(db, actor, &link.platform).await?;
     reconcile(db, &link).await?;
     let link = get(db, &link.id).await?;
     if link.status != LinkStatus::Pending {
@@ -507,7 +511,11 @@ pub async fn associate(
     if bot.user_id != claim.link.user_id || bot.platform != claim.link.platform {
         return Err(missing());
     }
-    let result = db.collection::<Link>(LINKS).update_one(doc! {"_id": &claim.link.id, "status": "pending", "claim_id": &claim.id, "claim_until": {"$gt": bson::DateTime::now()}, "bot_id": null}, doc! {"$set": {"bot_id": &bot.id}}).session(session).await?;
+    let mut fields = doc! {"bot_id":&bot.id};
+    if let Some(proof) = meta_link_proof(bot) {
+        fields.insert("meta_grant", proof);
+    }
+    let result = db.collection::<Link>(LINKS).update_one(doc! {"_id": &claim.link.id, "status": "pending", "claim_id": &claim.id, "claim_until": {"$gt": bson::DateTime::now()}, "bot_id": null}, doc! {"$set":fields}).session(session).await?;
     if result.matched_count != 1 {
         return Err(busy());
     }
@@ -568,6 +576,10 @@ pub fn callback_url(link: &Link) -> AppResult<Option<String>> {
     Ok(Some(url.into()))
 }
 
+fn meta_link_proof(bot: &ChannelBot) -> Option<Document> {
+    bot.meta_binding.as_ref().map(|binding|doc! {"bot_id":&bot.id,"grant_id":&binding.grant_id,"generation":binding.generation})
+}
+
 fn terminal_update(link: &Link, status: LinkStatus, bot: Option<&ChannelBot>) -> Document {
     let now = Utc::now();
     let data = doc! {
@@ -579,14 +591,23 @@ fn terminal_update(link: &Link, status: LinkStatus, bot: Option<&ChannelBot>) ->
         "last_error": if status == LinkStatus::Completed { None } else { link.last_error.as_deref() },
         "expires_at": link.expires_at.to_rfc3339(),
     };
-    doc! {"$set": {
+    let mut update = doc! {"$set": {
         "last_error": if status == LinkStatus::Completed { None } else { link.last_error.as_deref() },
         "status": status_name(status), "terminal_at": bson::DateTime::from_chrono(now),
         "claim_id": bson::Bson::Null, "claim_until": bson::Bson::Null,
         "event_id": Uuid::new_v4().to_string(), "event_data": data,
         "delivery_status": if link.receiver.is_some() { "pending" } else { "none" },
         "delivery_after": bson::DateTime::from_chrono(now),
-    }}
+    }};
+    let proof=link.meta_grant.as_ref().map(|proof|doc! {"bot_id":&proof.bot_id,"grant_id":&proof.grant_id,"generation":proof.generation})
+        .or_else(||bot.and_then(meta_link_proof));
+    if let Some(proof) = proof {
+        update
+            .get_document_mut("$set")
+            .expect("terminal fields")
+            .insert("meta_grant", proof);
+    }
+    update
 }
 
 fn ready(link: &Link, bot: &ChannelBot) -> bool {
@@ -598,6 +619,15 @@ fn ready(link: &Link, bot: &ChannelBot) -> bool {
         return false;
     }
     match link.flow.as_deref() {
+        Some("meta_oauth") => {
+            super::channel_adapters::meta::is_meta(&bot.platform)
+                && bot.status == "active"
+                && bot.webhook_registered
+                && bot
+                    .meta_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.subscription == "active")
+        }
         Some("manual") => true,
         Some("telegram") => bot.status == "active" && bot.webhook_registered,
         Some("managed") => match &bot.managed_setup {
@@ -639,6 +669,79 @@ pub async fn complete(db: &Database, id: &str) -> AppResult<()> {
         }.await;
         transaction_result(result)
     }).await.map_err(map_transaction_error)
+}
+
+/// Recover Meta subscription completion only for the session still pinned to
+/// this live setup link. Terminal cancellation/expiry never becomes success.
+pub(crate) async fn complete_meta(db: &Database, id: &str, session_id: &str) -> AppResult<()> {
+    let args = (db.clone(), id.to_owned(), session_id.to_owned());
+    super::transaction_service::run_db_only(db, &args, |tx, (db, id, session_id)| {
+        Box::pin(async move {
+            let link = db
+                .collection::<Link>(LINKS)
+                .find_one(doc! {"_id": id, "connection_id": session_id})
+                .session(&mut *tx)
+                .await?
+                .ok_or_else(missing)?;
+            if link.status == LinkStatus::Completed {
+                return Ok(());
+            }
+            if link.status != LinkStatus::Pending || effective_deadline(&link) <= Utc::now() {
+                return Err(AppError::Conflict(
+                    "The tracked inbox setup expired, was cancelled, or was replaced".into(),
+                ));
+            }
+            let oauth = db
+                .collection::<crate::models::channel_meta::OAuthSession>(
+                    crate::models::channel_meta::SESSIONS,
+                )
+                .find_one(
+                    doc! {"_id": session_id, "status": "completed", "owner_id": &link.user_id,
+                    "connect_link_id": id, "bot_id": &link.bot_id},
+                )
+                .session(&mut *tx)
+                .await?
+                .ok_or_else(missing)?;
+            let bot = db
+                .collection::<ChannelBot>(BOTS)
+                .find_one(doc! {"_id": &oauth.bot_id, "user_id": &link.user_id, "platform": &link.platform,
+                    "meta_binding.grant_id":session_id, "is_active": true})
+                .session(&mut *tx)
+                .await?
+                .ok_or_else(missing)?;
+            if bot.meta_binding.as_ref().is_some_and(|binding| {
+                binding.operator_suspended && !binding.grant_reconnect_required && !binding.provider_revoked
+            }) {
+                // The new grant is installed. Reconcile the pending link after explicit resume.
+                return Ok(());
+            }
+            if !ready(&link, &bot) {
+                return Err(AppError::Conflict(
+                    "Inbox subscription setup has not completed".into(),
+                ));
+            }
+            db.collection::<Document>(BOTS)
+                .update_one(
+                    doc! {"_id": &bot.id},
+                    doc! {"$inc": {"channel_connect_revision": 1_i64}},
+                )
+                .session(&mut *tx)
+                .await?;
+            let completed = db
+                .collection::<Link>(LINKS)
+                .update_one(
+                    doc! {"_id": id, "status": "pending", "connection_id": session_id},
+                    terminal_update(&link, LinkStatus::Completed, Some(&bot)),
+                )
+                .session(&mut *tx)
+                .await?;
+            if completed.matched_count != 1 {
+                return Err(busy());
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 pub async fn cancel(db: &Database, link: &Link) -> AppResult<Link> {
@@ -705,7 +808,15 @@ pub async fn reconcile(db: &Database, link: &Link) -> AppResult<()> {
         if bot.as_ref().is_some_and(|bot| ready(link, bot))
             && (link.flow.as_deref() != Some("telegram") || telegram_connected)
         {
-            match complete(db, &link.id).await {
+            let completion = if link.flow.as_deref() == Some("meta_oauth") {
+                match &link.connection_id {
+                    Some(session_id) => complete_meta(db, &link.id, session_id).await,
+                    None => Err(busy()),
+                }
+            } else {
+                complete(db, &link.id).await
+            };
+            match completion {
                 Ok(()) => return Ok(()),
                 Err(AppError::NotFound(_) | AppError::Conflict(_)) => {}
                 Err(error) => return Err(error),

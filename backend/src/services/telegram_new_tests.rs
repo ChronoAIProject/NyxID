@@ -430,6 +430,8 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
     assert_eq!(result.status, "active");
     assert_eq!(result.platform, "telegram-new");
     assert_eq!(result.credential_source, "platform");
+    assert!(result.guest_access_v1);
+    assert_eq!(result.guest_access_v1_revision, 1);
     let provenance = state
         .db
         .collection::<crate::models::telegram_bot_request::ManagedBotEvents>(
@@ -443,11 +445,24 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
         provenance.retired,
         "provisioning permanently consumes the creation identity"
     );
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! {"_id":&result.id},
+            doc! {"$set":{
+                "guest_access_v1":false,"guest_access_v1_revision":2_i64,
+            }},
+        )
+        .await
+        .unwrap();
     let repeated = service
         .connect(&actor, &ready.id, 900, ready.revision)
         .await
         .unwrap();
     assert_eq!(result.id, repeated.id);
+    assert!(!repeated.guest_access_v1);
+    assert_eq!(repeated.guest_access_v1_revision, 2);
     assert_eq!(
         state
             .db
@@ -619,16 +634,12 @@ async fn telegram_new_failed_webhook_resumes_same_saved_bot_after_expiry() {
         .await
         .unwrap_err();
     assert!(!error.to_string().contains(CHILD));
-    crate::services::channel_registration::bind_fixture_fields(
-        &state.db,
-        &state.encryption_keys,
-        &ready.id,
-        &["webhook_secret_encrypted", "bot_token_encrypted"],
-    )
-    .await;
     let saved = super::channel_bot_service::get_bot(&state.db, &ready.id)
         .await
         .unwrap();
+    for field in ["bot_token_encrypted", "webhook_secret_encrypted"] {
+        assert_eq!(saved.secret_context_versions.get(field), Some(&3));
+    }
     assert_eq!(saved.status, "pending");
     state.db.collection::<TelegramBotRequest>(REQUESTS).update_one(doc! {"_id": &ready.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::hours(1))}}).await.unwrap();
     assert_eq!(

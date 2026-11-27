@@ -52,11 +52,13 @@ describe("check-i18n", () => {
     f.write("src/lib/fixtures/billing.tsx", 'import errors from "../../i18n/locales/errors-en.json";\nexport const Page = () => <p>Fixture copy</p>;\n');
     f.write("src/dev/preview.tsx", 'export const load = () => import("../i18n/locales/app/en-full");\n');
     f.write("src/pages/billing.test.tsx", 'import full from "../i18n/locales/app/en-full";\n');
+    f.write("src/features/website-a/contact.tsx", 'import en from "@/i18n/locales/app/billing/en.json";\nexport const Page = () => <p>Public bilingual copy</p>;\n');
     const result = f.check();
     expect(result.status).toBe(1);
     const lines = result.stderr.trim().split("\n").sort();
     expect(lines).toEqual([
       "src/dev/preview.tsx:1: full English catalog is test-only",
+      "src/features/website-a/contact.tsx:1: portion JSON imports are restricted to the catalog barrels and tests",
       "src/lib/fixtures/billing.tsx:1: catalog imports are restricted to sanctioned i18n modules and tests",
       "src/pages/billing.tsx:1: portion JSON imports are restricted to the catalog barrels and tests",
       "src/pages/billing.tsx:2: untranslated UI literal: Audited copy",

@@ -24,7 +24,7 @@ async fn row(f: &Fixture) -> ApprovalRequest {
     }
     row
 }
-fn choice(row: &ApprovalRequest, id: &str) -> Decision {
+pub(super) fn choice(row: &ApprovalRequest, id: &str) -> Decision {
     let p = v2::proposal(row).unwrap();
     let c = p.choices.iter().find(|c| c.id == id).unwrap();
     Decision {
@@ -35,7 +35,7 @@ fn choice(row: &ApprovalRequest, id: &str) -> Decision {
         idempotency_key: Uuid::new_v4().to_string(),
     }
 }
-async fn call(f: &Fixture, path: &str, token: &str) -> (StatusCode, String) {
+pub(super) async fn call(f: &Fixture, path: &str, token: &str) -> (StatusCode, String) {
     let r = f
         .router()
         .oneshot(
@@ -55,7 +55,7 @@ async fn call(f: &Fixture, path: &str, token: &str) -> (StatusCode, String) {
         .unwrap();
     (status, String::from_utf8(body.to_vec()).unwrap())
 }
-async fn run(f: &Fixture, row: &ApprovalRequest) {
+pub(super) async fn run(f: &Fixture, row: &ApprovalRequest) {
     if let Some(r) = v2::execute(&f.state, row).await.unwrap() {
         let _ = axum::body::to_bytes(r.into_body(), 1024 * 1024)
             .await

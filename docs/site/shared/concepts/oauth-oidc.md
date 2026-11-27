@@ -44,6 +44,8 @@ The flow:
 
 Redirect URI types supported: standard HTTPS URLs, loopback redirects (`http://127.0.0.1:*`, `http://localhost:*`), and private-use URI schemes (e.g. `cursor://`, `vscode://`).
 
+See [OAuth consent disclosure](https://github.com/ChronoAIProject/NyxID/blob/main/docs/OIDC.md#oauth-consent-disclosure) for the service review, token lifetime and revocation details shown before approval.
+
 ## Reviewing a broker binding's service access
 
 Broker-capable applications can let a signed-in user review the service grant behind an existing binding without replacing its opaque binding credential. The application starts a normal Authorization Code + PKCE request with `prompt=consent`, the required RFC 8707 `resource` values, the exact external subject, and `binding_grant_id=SHA-256(binding_id)`. The raw `binding_id` must never be placed in a browser-visible URL or form.

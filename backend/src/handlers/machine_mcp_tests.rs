@@ -11,7 +11,7 @@ use mongodb::bson::{self, doc};
 
 /// Persist the same turn/run binding that trigger admission creates, then use
 /// actual chat-key authentication to recover its snapshotted policy and grants.
-async fn trigger_auth(
+pub(super) async fn trigger_auth(
     f: &Fixture,
     policy: Option<crate::models::trigger_schedule::ConfirmationPolicy>,
 ) -> McpAuthContext {

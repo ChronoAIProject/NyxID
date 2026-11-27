@@ -4,9 +4,9 @@
 
 Implement one personal-owner Sandbox slot for resources created through this NyxID instance, durable creation and Agent references, model-facing CMA operations, first-party Sandbox management, and a cloud assistant Conversation/Desktop view. The existing `cma_operation` and assistant watch path remains responsible for returning task results to the originating chat.
 
-Updated 2026-11-06 to include the approved creation-source restriction and conversation-view changes. This document describes the implementation contract; it does not itself establish that every target-deployment scenario has passed.
+This document describes the implementation contract; it does not itself establish that every target-deployment scenario has passed.
 
-The work includes backend persistence/admission, the catalog gateway and OpenAPI overlay, native attachment and read-only guidance bridges, feature-gated frontend routes, history/events, and an RFB Desktop viewer. It does not change CMA's production quota or callback producer, remove Remote Machine, introduce Agent pooling, import externally created resources, add a Sandbox-level Desktop API, or introduce separate compute billing. CMA's own account limits remain independent; origin-aware upstream quota is not required.
+The work includes backend persistence/admission, the catalog gateway with remote OpenAPI discovery, native attachment and read-only guidance bridges, feature-gated frontend routes, history/events, and an RFB Desktop viewer. It does not change CMA's production quota or callback producer, remove Remote Machine, introduce Agent pooling, import externally created resources, add a Sandbox-level Desktop API, or introduce separate compute billing. CMA's own account limits remain independent; origin-aware upstream quota is not required.
 
 ## Durable records and creation identity
 
@@ -180,26 +180,7 @@ refusal; there are no adopted resource rows for an old binary to interpret.
 
 ## First-party HTTP surface
 
-All paths below use the prefix `/api/v1/assistant/nyxagent`. Resource IDs in these management routes are NyxID's local reference IDs.
-
-| Method | Path | Behavior |
-| --- | --- | --- |
-| GET | `/sandboxes` | NyxID-created resources and account allocation status |
-| GET | `/sandboxes/{id}` | Live detail with durable unknown/pending facts |
-| PATCH | `/sandboxes/{id}` | Local label change bound to generation |
-| POST | `/sandboxes/{id}/commands` | `pause` or `revive`, bound to generation and one stable `Idempotency-Key` |
-| DELETE | `/sandboxes/{id}` | Retirement intent; release only after exact retirement observation |
-| GET | `/sandboxes/{id}/events` | Bounded Sandbox lifecycle events |
-| GET | `/cma-agents/{id}` | Exact Agent detail and safe profile |
-| GET | `/cma-agents/{id}/transcript` | Authoritative conversation turns and compatible flat messages |
-| GET | `/cma-agents/{id}/events/snapshot` | Agent snapshot using CMA's `page_cursor` |
-| GET | `/cma-agents/{id}/events` | Agent SSE using `after_cursor` |
-| GET | `/cma-agents/{id}/responses/{response_id}` | Exact response bound to that Agent |
-| GET | `/cma-agents/{id}/responses/{response_id}/events` | Response SSE using numeric `starting_after` |
-| GET | `/cma-agents/{id}/desktop` | Availability/descriptor for the exact Agent |
-| GET | `/cma-agents/{id}/desktop/ws` | Authorized RFB WebSocket relay |
-
-Handlers require a first-party human, active personal owner, and `assistant:cma-sandboxes`; they return dedicated DTOs. The existing delegated-read denial for the assistant route family covers every new read/stream/upgrade path, with explicit regression coverage. Accepted lifecycle commands return `202` while pending; acknowledgement alone is not completion.
+The method/path table, authorization and lifecycle response rules are in [NyxBot CMA Sandbox management scope](../../API.md#nyxbot-cma-sandbox-management-scope).
 
 ## CMA discovery, native tools, and assistant guidance
 

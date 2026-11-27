@@ -68,6 +68,13 @@ impl Default for DiscordAdapter {
     }
 }
 
+#[cfg(test)]
+impl DiscordAdapter {
+    pub(crate) fn with_fixture_url(base_url: String) -> Self {
+        Self { base_url }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -1352,11 +1359,14 @@ mod tests {
 
     fn make_test_bot(public_key: Option<&str>) -> ChannelBot {
         ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
+            guest_access_v1: false,
+            guest_access_v1_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "discord".to_string(),
@@ -1370,6 +1380,7 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
             secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,

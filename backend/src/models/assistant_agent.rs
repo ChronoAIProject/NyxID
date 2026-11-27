@@ -107,6 +107,16 @@ pub struct AssistantAgent {
     /// Polymorphic owner: a person or organization User. Only specialists may be org-owned.
     pub user_id: String,
     pub kind: AgentKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_maintainer_user_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_user_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub org_access_revision: i64,
+    #[serde(default)]
+    pub org_use_revision: i64,
+    #[serde(default)]
+    pub org_maintain_revision: i64,
     /// Display name. Specialists use a short unique slug-like name.
     pub name: String,
     /// A specialist's role and scope (bounded, shown to the owner).
@@ -172,6 +182,9 @@ pub struct AssistantAgent {
     /// A friendly name the user chose ("Luna"); `name` stays the @handle.
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Cosmetic configuration; absent derives a client-side default.
+    #[serde(default)]
+    pub avatar: Option<super::assistant_avatar::Avatar>,
     /// Personality and tone the user asked for. Style only, never authority.
     #[serde(default)]
     pub persona: Option<String>,

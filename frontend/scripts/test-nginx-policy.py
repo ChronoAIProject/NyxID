@@ -41,7 +41,15 @@ class PolicyInputs(unittest.TestCase):
         self.assertIn("https://api.example:8443", spa)
         self.assertIn("microphone=(self)", spa)
         self.assertNotIn("'unsafe-inline'", spa.split("script-src ", 1)[1].split(";", 1)[0])
-        self.assertNotIn("unsafe-eval", spa)
+        script_src = spa.split("script-src ", 1)[1].split(";", 1)[0]
+        self.assertNotIn("'wasm-unsafe-eval'", script_src.split())
+        worker = files["rive-worker-headers.conf"]
+        self.assertIn("script-src 'self' 'wasm-unsafe-eval'", worker)
+        self.assertIn("worker-src 'none'", worker)
+        self.assertNotIn("'unsafe-eval'", worker)
+        self.assertIn("rive-motion\\.worker-", files["default.conf"])
+        self.assertNotIn("'unsafe-eval'", spa.split())
+        self.assertNotIn("'unsafe-eval'", spa)
         self.assertIn("$nyxid_proxy_csp", proxy)
         self.assertNotIn("script-src", proxy)
         self.assertIn('Strict-Transport-Security "max-age=31536000"', spa)
@@ -60,6 +68,18 @@ class PolicyInputs(unittest.TestCase):
             "https://oauth.telegram.org",
         })
 
+    def test_generated_public_locations_use_complete_policy_at_custom_output(self):
+        template = Path(__file__).parents[1].joinpath("nginx.conf.template").read_text()
+        files = policy.render({}, template, Path("/tmp/custom-policy"), Path("/tmp/custom-dist"),
+                              Path("/tmp/custom-dist/legal-cache.conf"),
+                              public_routing="location = /security { include @@STATIC_HEADERS@@; }")
+        self.assertIn(f'include "{Path("/tmp/custom-policy/spa-headers.conf").resolve()}";', files["public-routing.conf"])
+        self.assertIn(f'include "{Path("/tmp/custom-policy/public-routing.conf").resolve()}";', files["default.conf"])
+        self.assertIn(f'include "{Path("/tmp/custom-dist/public-routing-maps.conf").resolve()}";', files["default.conf"])
+        self.assertNotIn("@@", "".join(files.values()))
+        self.assertNotIn("$nyxid_referrer_policy", "".join(files.values()))
+        self.assertNotIn("location = /privacy", files["default.conf"])
+
     def test_export_preserves_length_and_propagates_abort(self):
         config = self.render({})["default.conf"]
         location = config.split("location = /api/v1/users/me/export {", 1)[1].split("}", 1)[0]
@@ -67,6 +87,11 @@ class PolicyInputs(unittest.TestCase):
         self.assertIn("proxy_buffering off;", location)
         self.assertIn("proxy_pass http://backend:3001;", location)
         self.assertIn("proxy_set_header Host $host;", location)
+
+    def test_connector_continuation_ids_are_redacted(self):
+        config = self.render({})["default.conf"]
+        self.assertIn("~*^/connector-continuation(?:/|$) /connector-continuation/:id;", config)
+        self.assertIn("~*^/api/v1/providers/callback/continuation/ /api/v1/providers/callback/continuation/:id;", config)
 
     @staticmethod
     def render(env):

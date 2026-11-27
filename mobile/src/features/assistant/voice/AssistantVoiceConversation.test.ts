@@ -317,6 +317,13 @@ function setup(
   };
   const harness = hookHarness<Element>(
     {
+      "../../../components/AgentAvatar": { AgentAvatar: "AgentAvatar" },
+      "../../../components/avatar/VoiceRippleBanner": {
+        VoiceRippleBanner: "VoiceRippleBanner",
+      },
+      "../../../lib/avatars/agentAvatarsFlag": {
+        useAgentAvatarsEnabled: () => true,
+      },
       "../../../components/workspace/useNativeSheetDismiss": {
         useNativeSheetDismiss: (onClose: () => void) => ({
           modalProps: { visible: true, animationType: "slide" },
@@ -833,7 +840,7 @@ test("billing browser failures keep the recovery error and sanitize platform det
   f.harness.unmount();
 });
 
-test("normal voice is a narrow control strip with no welcome, captions, mode picker or internal transcript", () => {
+test("the aura surrounds the current voice controls without adding a second transcript", () => {
   const f = setup({
     active: true,
     snapshot: {
@@ -849,6 +856,9 @@ test("normal voice is a narrow control strip with no welcome, captions, mode pic
       ],
     },
   });
+  assert.equal(f.aura().phase, "listening");
+  assert.equal(f.aura().input, f.levels.input);
+  assert.equal(f.aura().output, f.levels.output);
   assert.match(f.text(), /Listening/);
   assert.doesNotMatch(
     f.text(),
@@ -913,15 +923,25 @@ test("Listening follows actual input permission, Speaking follows playback, and 
   });
   assert.match(f.text(), /Microphone paused/);
   assert.doesNotMatch(f.text(), /Listening|Assistant is speaking/);
+  assert.equal(f.aura().phase, "resting");
   f.voice.inputEnabled = true;
   f.harness.render();
   assert.match(f.text(), /Listening/);
+  assert.equal(f.aura().phase, "listening");
   f.levels.speaking = true;
   f.harness.render();
   assert.match(f.text(), /Assistant is speaking/);
+  assert.equal(f.aura().phase, "speaking");
   f.voice.speakerMuted = true;
   f.harness.render();
   assert.doesNotMatch(f.text(), /Assistant is speaking/);
+  assert.equal(f.aura().phase, "listening");
+  f.voice.snapshot = {
+    ...snapshot,
+    session: { ...snapshot.session, muted: true },
+  };
+  f.harness.render();
+  assert.equal(f.aura().phase, "muted");
   f.harness.unmount();
 });
 
@@ -1275,6 +1295,9 @@ test("pricing is fetched from the selected option and stays folded by default", 
 test("End silences input and retains its media owner until bounded cleanup finishes, then returns to text without terminal proof", async () => {
   const pending = deferred<boolean>();
   const f = setup({ active: true });
+  f.levels.speaking = true;
+  f.harness.render();
+  assert.equal(f.aura().phase, "speaking");
   const originalSnapshot = structuredClone(f.voice.snapshot);
   const mediaOwner = f.all().find((row) => row.type === "VoiceMediaBridge")!;
   f.setEnd(pending.promise);
@@ -1284,6 +1307,7 @@ test("End silences input and retains its media owner until bounded cleanup finis
   assert.deepEqual(f.events, [["hold", false], ["end"]]);
   assert.equal(f.voice.inputEnabled, false);
   assert.match(f.text(), /Ending/);
+  assert.equal(f.aura().phase, "resting");
   assert.equal(f.find("Mute microphone"), undefined);
   assert.equal(f.find("Try again"), undefined);
   assert.equal(f.button("Return to chat").props.disabled, true);
@@ -1488,6 +1512,7 @@ test("unknown or checking recovery can return to text without an End or a replac
       conflictUnknown: state === "unknown",
       checkingConflict: state === "checking",
     });
+    assert.equal(f.aura().phase, "resting", state);
     assert.equal(f.button("Return to chat").props.disabled, false, state);
     f.button("Return to chat").props.onPress();
     await f.harness.settle();
@@ -1602,22 +1627,36 @@ test("PTT uses press, release and cancellation while respecting server input gat
     inputEnabled: false,
   });
   const hold = f.button("Hold to talk");
+  assert.equal(f.aura().phase, "resting");
   hold.props.onPressIn();
+  f.harness.render();
+  assert.equal(f.aura().phase, "listening");
   hold.props.onPressOut();
+  f.harness.render();
+  assert.equal(f.aura().phase, "resting");
+  hold.props.onPressIn();
+  f.harness.render();
+  assert.equal(f.aura().phase, "listening");
   hold.props.onResponderTerminate();
+  f.harness.render();
+  assert.equal(f.aura().phase, "resting");
   assert.deepEqual(f.events, [
     ["hold", true],
     ["hold", false],
+    ["hold", true],
     ["hold", false],
   ]);
   hold.props.onAccessibilityAction({ nativeEvent: { actionName: "activate" } });
+  f.harness.render();
   assert.equal(f.voice.holding, true);
+  assert.equal(f.aura().phase, "listening");
   f.voice.snapshot = {
     ...snapshot,
     session: { ...snapshot.session, input_muted: true },
   };
   f.harness.render();
   assert.equal(f.button("Hold to talk").props.disabled, true);
+  assert.equal(f.aura().phase, "muted");
   f.harness.unmount();
 });
 
@@ -1811,6 +1850,7 @@ test("only active work contributes to the in-progress task count and stays stopp
       },
     });
     assert.match(f.text(), /1 task in progress/);
+    assert.equal(f.aura().phase, "thinking");
     assert.doesNotMatch(f.text(), /3 tasks in progress/);
     f.button("Show agent tasks").props.onPress();
     assert.match(f.text(), /Tasks can continue after the call ends/);
@@ -2022,11 +2062,15 @@ test("ordinary snapshots keep the media owner and a new attempt remounts only it
 test("offline and focus loss finish local cleanup and return to text without claiming remote termination", async () => {
   for (const change of ["offline", "blur"] as const) {
     const f = setup({ active: true });
+    f.levels.speaking = true;
+    f.harness.render();
+    assert.equal(f.aura().phase, "speaking");
     f.setEnd(Promise.resolve(false));
     if (change === "offline") f.setOnline(false);
     else f.setFocused(false);
     await f.harness.settle();
     assert.deepEqual(f.events, [["end"], ["close"]]);
+    assert.equal(f.aura().phase, "resting");
     assert.equal(f.voice.snapshot?.session.state, "active");
     assert.equal(f.voice.confirmedEnded, false);
     f.harness.unmount();
@@ -2035,6 +2079,7 @@ test("offline and focus loss finish local cleanup and return to text without cla
 
 test("reduced motion keeps the small waveform still while retaining live status", () => {
   const f = setup({ active: true, reducedMotion: true });
+  assert.equal(f.aura().reducedMotion, true);
   const bars = f.all().filter((row) => row.type === "WaveBar");
   assert.equal(bars.length, 5);
   assert.ok(

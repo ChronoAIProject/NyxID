@@ -5,10 +5,15 @@ import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  ActionSheetIOS,
+  Alert,
   FlatList,
+  Keyboard,
+  Platform,
   Pressable,
   RefreshControl,
   StyleSheet,
+  TextInput,
   View,
 } from "react-native";
 import {
@@ -21,13 +26,20 @@ import {
   MessageSquare,
   Bell,
   UserRound,
+  Search,
+  Settings2,
+  X,
   type LucideIcon,
 } from "lucide-react-native";
+import type { NativeStackNavigationOptions } from "@react-navigation/native-stack";
 import type { WorkspaceScreenProps } from "../../app/navigationTypes";
 import {
   useOpenWorkspaceChat,
   useWorkspaceBack,
+  WorkspaceHeaderVisibility,
 } from "../../app/WorkspaceHeader";
+import { FloatingButton } from "../../components/FloatingControl";
+import { searchFieldContent, searchFieldInput } from "../../components/workspace/searchFieldStyles";
 import { DynamicTypeText as Text } from "../../components/DynamicTypeText";
 import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
 import { ChannelPlatformGlyph } from "../../components/ChannelPlatformGlyph";
@@ -40,6 +52,7 @@ import {
 import { Notice, WorkspacePage } from "../../components/workspace/WorkspaceUI";
 import { usePullRefresh } from "../../hooks/usePullRefresh";
 import { firstPartyFrontendUrls } from "../../lib/env";
+import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { fonts, radius, spacing, typeScale } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import type { ThemeColors } from "../../theme/mobileTheme";
@@ -54,14 +67,16 @@ import {
 import {
   notificationAccessibilityLabel,
   notificationCountLabel,
+  notificationFilterCount,
   notificationPending,
   notificationTarget,
   notificationTime,
   notificationTitle,
   notificationSentence,
-  notificationFilterCount,
+  notificationPreview,
   notificationContextLabel,
   notificationTone,
+  notificationMatchesSearch,
   type NotificationTone,
 } from "./notificationPresentation";
 import {
@@ -125,13 +140,15 @@ export function notificationError(error: unknown): string {
 export function notificationRows(
   pages: readonly { items: readonly AssistantNotification[] }[] | undefined,
   filter: NotificationFilter,
+  query = "",
 ): AssistantNotification[] {
   const seen = new Set<string>();
   const rows: AssistantNotification[] = [];
   for (const page of pages ?? []) {
     for (const item of page.items) {
-      if (seen.has(item.id) || !notificationFilterKeeps(filter, item)) continue;
+      if (seen.has(item.id)) continue;
       seen.add(item.id);
+      if (!notificationFilterKeeps(filter, item) || !notificationMatchesSearch(item, query)) continue;
       rows.push(item);
     }
   }
@@ -188,6 +205,7 @@ export function NotificationRow({
   const palette = toneColors(colors, tone);
   const Icon = KIND_ICON[item.kind];
   const sentence = notificationSentence(item);
+  const preview = notificationPreview(item);
   const contextLabel = notificationContextLabel(item);
   const agents = (item.participants ?? [])
     .filter((actor) => actor.type === "agent" && actor.id)
@@ -196,6 +214,7 @@ export function NotificationRow({
       name: actor.name,
       display_name: actor.display_name,
       kind: actor.kind ?? ("unknown" as const),
+      avatar: actor.avatar,
     }));
   const Fallback =
     item.actor?.type === "automation"
@@ -237,6 +256,7 @@ export function NotificationRow({
               name: item.actor.name,
               display_name: item.actor.display_name,
               kind: item.actor.kind ?? "unknown",
+              avatar: item.actor.avatar,
             }}
             size="lg"
           />
@@ -297,13 +317,13 @@ export function NotificationRow({
             )}
           </Text>
         </View>
-        {item.preview ? (
+        {preview ? (
           <Text
             numberOfLines={cornerWindow ? 3 : 2}
             ellipsizeMode="tail"
             style={[styles.preview, { color: colors.textSecondary }]}
           >
-            {item.preview}
+            {preview}
           </Text>
         ) : null}
         <View style={styles.metaLine}>
@@ -360,27 +380,23 @@ export function NotificationsScreen({
   navigation,
 }: WorkspaceScreenProps<"Notifications">) {
   const railIndicator = useRailScrollIndicator();
-  useAppLanguage();
-  const cornerWindow = useContext(WorkspaceCornerSensorContext);
+  const { t } = useAppLanguage();
   const { colors } = useTheme();
   const styles = useMemo(() => createStyles(colors), [colors]);
-  useWorkspaceBack({
-    active: false,
-    defaultRole: "menu",
-    onBack: navigation.goBack,
-  });
   const runtime = useNotificationRuntime();
   const enabled = useNotificationsEnabled(runtime.active);
   const live = useNotificationsLive(enabled && runtime.active);
   const [filter, setFilter] = useState<NotificationFilter>("all");
+  const [query, setQuery] = useState("");
+  const searchQuery = query.normalize("NFKC").trim().toLowerCase();
   const feed = useNotificationFeed(filter, enabled, runtime.active, live);
   const summary = useNotificationSummary(enabled, runtime.active, live);
   const markRead = useMarkNotificationsRead();
   const openChat = useOpenWorkspaceChat();
   const now = Date.now();
   const rows = useMemo(
-    () => notificationRows(feed.data?.pages, filter),
-    [feed.data, filter],
+    () => notificationRows(feed.data?.pages, filter, searchQuery),
+    [feed.data, filter, searchQuery],
   );
   const asOf = feed.data?.pages[0]?.as_of;
   const unread = summary.data?.unread_count ?? 0;
@@ -392,28 +408,82 @@ export function NotificationsScreen({
     !feed.isPending &&
     !feed.isError &&
     feed.hasNextPage;
-  const followed = useRef<{ filter: NotificationFilter; cursors: string[] }>({
+  const followed = useRef<{ filter: NotificationFilter; query: string; cursors: string[] }>({
     filter,
+    query: searchQuery,
     cursors: [],
   });
-  if (followed.current.filter !== filter)
-    followed.current = { filter, cursors: [] };
+  if (followed.current.filter !== filter || followed.current.query !== searchQuery)
+    followed.current = { filter, query: searchQuery, cursors: [] };
   const autoHop =
     searching &&
     !feed.isFetchingNextPage &&
+    !feed.isFetchNextPageError &&
     nextEmptyPageHop(lastCursor, followed.current.cursors);
   const fetchNextPage = feed.fetchNextPage;
   useEffect(() => {
     if (!autoHop || !runtime.active || !lastCursor) return;
     followed.current.cursors.push(lastCursor);
     void fetchNextPage();
-  }, [autoHop, runtime.active, lastCursor, fetchNextPage]);
+  }, [autoHop, runtime.active, lastCursor, fetchNextPage, filter, searchQuery]);
   const { refreshing, onRefresh } = usePullRefresh(() =>
     Promise.all([feed.refetch(), summary.refetch()]),
   );
-  const markAll = useCallback(() => {
-    if (asOf) markRead.mutate({ all: true, before: asOf });
-  }, [asOf, markRead.mutate]);
+  const canMarkAll = enabled && runtime.active && runtime.online && unread > 0 && !!asOf && !markRead.isPending;
+  const actions = useRef({ canMarkAll, active: enabled && runtime.active, asOf, mutate: markRead.mutate });
+  actions.current = { canMarkAll, active: enabled && runtime.active, asOf, mutate: markRead.mutate };
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  const openOptions = useCallback(() => {
+    if (!actions.current.active) return;
+    Keyboard.dismiss();
+    const epoch = getAuthEpoch();
+    const markAll = () => {
+      const current = actions.current;
+      if (mounted.current && getAuthEpoch() === epoch && current.active && current.canMarkAll && current.asOf)
+        current.mutate({ all: true, before: current.asOf });
+    };
+    if (Platform.OS === "ios") {
+      ActionSheetIOS.showActionSheetWithOptions({
+        title: translateApp("Notifications"),
+        options: [translateApp("Mark all as read"), translateApp("Cancel")],
+        cancelButtonIndex: 1,
+        disabledButtonIndices: actions.current.canMarkAll ? [] : [0],
+      }, index => { if (index === 0) markAll(); });
+    } else {
+      Alert.alert(translateApp("Notifications"), undefined, [
+        ...(actions.current.canMarkAll ? [{ text: translateApp("Mark all as read"), onPress: markAll }] : []),
+        { text: translateApp("Cancel"), style: "cancel" },
+      ]);
+    }
+  }, []);
+  const headerOptions = useMemo<NativeStackNavigationOptions>(() => {
+    const button = () => (
+      <WorkspaceHeaderVisibility>
+        <FloatingButton
+          accessibilityLabel={t("Notification options")}
+          disabled={!enabled || !runtime.active}
+          onPress={openOptions}
+          testID="notifications-options"
+        >
+          <Settings2 size={21} color={colors.textPrimary} />
+        </FloatingButton>
+      </WorkspaceHeaderVisibility>
+    );
+    return {
+      headerRight: button,
+      unstable_headerRightItems: () => [{ type: "custom", element: button(), hidesSharedBackground: true }],
+    };
+  }, [enabled, runtime.active, openOptions, colors.textPrimary, t]);
+  useWorkspaceBack({
+    active: false,
+    defaultRole: Platform.OS === "ios" ? "back" : "menu",
+    onBack: navigation.goBack,
+    options: headerOptions,
+  });
 
   const open = useCallback(
     (item: AssistantNotification) => {
@@ -451,11 +521,13 @@ export function NotificationsScreen({
     },
     [markRead.mutate, navigation, openChat],
   );
-  const segments = NOTIFICATION_FILTERS.map((value) => ({
-    id: value,
-    label: NOTIFICATION_FILTER_LABELS[value],
-    count: notificationFilterCount(summary.data, value),
-  }));
+  const segments = NOTIFICATION_FILTERS.map((id) => {
+    const label = NOTIFICATION_FILTER_LABELS[id];
+    const count = Platform.OS === "android" ? notificationFilterCount(summary.data, id) : 0;
+    return count > 0
+      ? { id, label, count, accessibilityLabel: `${label}, ${count}` }
+      : { id, label };
+  });
   const loadMore = () => {
     if (feed.hasNextPage && !feed.isFetchingNextPage) void feed.fetchNextPage();
   };
@@ -495,13 +567,13 @@ export function NotificationsScreen({
       autoHop || feed.isFetchingNextPage ? (
         <SkeletonRows
           rows={2}
-          accessibilityLabel={translateApp("Looking for updates")}
+          accessibilityLabel={translateApp(searchQuery ? "Looking for matching notifications" : "Looking for updates")}
         />
       ) : (
         <SettingsGroup inset={false}>
           <SettingsRow
             tone="action"
-            label={translateApp("Load more")}
+            label={translateApp(searchQuery ? "Search older notifications" : "Load more")}
             centered
             onPress={() => void feed.fetchNextPage()}
           />
@@ -511,25 +583,52 @@ export function NotificationsScreen({
     empty = (
       <View style={styles.empty}>
         <Text style={[styles.emptyTitle, { color: colors.textPrimary }]}>
-          {NOTIFICATION_EMPTY_COPY[filter]}
+          {searchQuery ? translateApp("No matching notifications.") : NOTIFICATION_EMPTY_COPY[filter]}
         </Text>
         <Text style={[styles.emptyText, { color: colors.textMuted }]}>
-          {translateApp(
-            "Automation results, decisions and updates from your chats appear here.",
-          )}
+          {translateApp(searchQuery ? "Try another search." : "Automation results, decisions and updates from your chats appear here.")}
         </Text>
       </View>
     );
   }
   return (
-    <WorkspacePage title={translateApp("Notifications")} scroll={false}>
+    <WorkspacePage title={translateApp("Notifications")} showHeading={false} scroll={false}>
+      <View style={[styles.search, { backgroundColor: colors.cardSoft, borderColor: colors.border }]}>
+        <Search size={18} color={colors.textMuted} accessible={false} />
+        <TextInput
+          accessibilityLabel={translateApp("Search notifications")}
+          placeholder={translateApp("Search notifications")}
+          placeholderTextColor={colors.textMuted}
+          value={query}
+          onChangeText={setQuery}
+          autoCapitalize="none"
+          autoCorrect={false}
+          clearButtonMode="never"
+          returnKeyType="search"
+          onSubmitEditing={Keyboard.dismiss}
+          maxLength={200}
+          style={[searchFieldInput, { color: colors.textPrimary }]}
+        />
+        {query ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={translateApp("Clear notification search")}
+            onPress={() => setQuery("")}
+            style={styles.clearSearch}
+          >
+            <X size={18} color={colors.textMuted} />
+          </Pressable>
+        ) : null}
+      </View>
       <SegmentControl
         segments={segments}
+        compact={Platform.OS === "android"}
         activeIndex={NOTIFICATION_FILTERS.indexOf(filter)}
         accessibilityLabel={translateApp("Filter notifications")}
         style={styles.filters}
         onPress={(index) => setFilter(NOTIFICATION_FILTERS[index] ?? "all")}
       />
+      {markRead.isError ? <Notice tone="error" message={translateApp("Could not mark notifications as read. Try again.")} /> : null}
       <FlatList
         testID="notifications-list"
         data={rows}
@@ -550,6 +649,10 @@ export function NotificationsScreen({
               color={colors.primary}
               style={styles.footer}
             />
+          ) : searchQuery && rows.length > 0 && feed.hasNextPage ? (
+            <SettingsGroup inset={false}>
+              <SettingsRow tone="action" label={translateApp("Search older notifications")} centered onPress={loadMore} />
+            </SettingsGroup>
           ) : null
         }
         onEndReached={loadMore}
@@ -566,52 +669,17 @@ export function NotificationsScreen({
         }
         contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
         {...railIndicator}
       />
-      <View style={[styles.readFooter, { borderTopColor: colors.borderSoft }]}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={translateApp("Mark all notifications as read")}
-          accessibilityState={{
-            disabled: !enabled || unread === 0 || !asOf || markRead.isPending,
-          }}
-          disabled={!enabled || unread === 0 || !asOf || markRead.isPending}
-          onPress={markAll}
-          testID="notifications-mark-all"
-          style={styles.footer}
-        >
-          {/* The pinned bar grows less than the feed so rows keep the
-              screen at the largest text sizes. */}
-          <Text
-            numberOfLines={cornerWindow ? 2 : undefined}
-            ellipsizeMode="tail"
-            maxFontSizeMultiplier={
-              cornerWindow ? FEED_FOOTER_MAX_FONT_SCALE : undefined
-            }
-            style={[
-              styles.footerLabel,
-              {
-                color:
-                  enabled && unread > 0 && asOf && !markRead.isPending
-                    ? colors.primary
-                    : colors.textMuted,
-              },
-            ]}
-          >
-            {translateApp("Mark all notifications as read")}
-          </Text>
-        </Pressable>
-      </View>
     </WorkspacePage>
   );
 }
 
-// Mark-all stays pinned in the feed footer; its label scales to about the
-// first accessibility size, then stops.
-export const FEED_FOOTER_MAX_FONT_SCALE = 1.5;
-
 function createStyles(colors: ThemeColors) {
   return StyleSheet.create({
+    search: { ...searchFieldContent, borderWidth: 1, borderRadius: radius.md, marginBottom: spacing.md },
+    clearSearch: { width: 44, height: 44, alignItems: "center", justifyContent: "center" },
     filters: { marginBottom: spacing.md },
     listContent: { flexGrow: 1, paddingBottom: spacing.xxl },
     separator: { height: StyleSheet.hairlineWidth, marginLeft: 56 },
@@ -649,12 +717,6 @@ function createStyles(colors: ThemeColors) {
       paddingHorizontal: 6,
       paddingVertical: 2,
       borderRadius: radius.sm,
-    },
-    readFooter: { borderTopWidth: StyleSheet.hairlineWidth },
-    footerLabel: {
-      ...typeScale.caption,
-      fontFamily: fonts.bodySemi,
-      textAlign: "center",
     },
     body: { flex: 1, minWidth: 0, gap: 2 },
     titleLine: {

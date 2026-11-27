@@ -21,6 +21,7 @@ import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import { messageTime } from "@/lib/assistant/message-time";
 import { describeToolActivity } from "@/lib/assistant/tool-activity-text";
 import { ReviewCardNavigation } from "./review-card-target";
+import { NyxBotHandoffContext } from "@/lib/assistant/nyxbot-handoff-context";
 
 const BASE: ChatMessage = {
   id: "assistant-1",
@@ -29,6 +30,27 @@ const BASE: ChatMessage = {
   timestamp: 1,
   status: "complete",
 };
+
+describe("handoff presentation authority", () => {
+  const handoff = '```nyxbot-handoff\n{"version":1,"title":"Create a key","task":"Help me create a scoped CI key."}\n```';
+  const controller = { eligible: true, ownerUserId: "owner", sourceConversationId: "source", continue: vi.fn(), open: vi.fn() };
+  it.each([
+    { origin: "event" }, { origin: "trigger" }, { origin: "orchestrator" }, { origin: "channel" },
+    { origin: undefined }, { origin: "user", via: "telegram" }, { origin: "user", status: "stopped" },
+    { origin: "user", status: "streaming" }, { origin: "user", role: "user" },
+  ])("keeps non-owner reply context inert: %j", (overrides) => {
+    render(<NyxBotHandoffContext value={controller}><ChatMessageBubble message={{ ...BASE, content: handoff, ...overrides }} feedbackEnabled={false} /></NyxBotHandoffContext>);
+    expect(screen.queryByRole("button", { name: "Continue with NyxBot" })).not.toBeInTheDocument();
+  });
+  it("requires server-authored thread eligibility even for direct user replies", () => {
+    render(<NyxBotHandoffContext value={{ ...controller, eligible: false }}><ChatMessageBubble message={{ ...BASE, content: handoff, origin: "user" }} feedbackEnabled={false} /></NyxBotHandoffContext>);
+    expect(screen.queryByRole("button", { name: "Continue with NyxBot" })).not.toBeInTheDocument();
+  });
+  it("shows the card for an eligible completed direct-user reply", () => {
+    render(<NyxBotHandoffContext value={controller}><ChatMessageBubble message={{ ...BASE, content: handoff, origin: "user" }} feedbackEnabled={false} /></NyxBotHandoffContext>);
+    expect(screen.getByRole("button", { name: "Continue with NyxBot" })).toBeVisible();
+  });
+});
 
 describe("canonical chat presentation", () => {
   it.each([
@@ -1714,6 +1736,44 @@ it("never renders unrecognized memory diagnostic text", () => {
   expect(screen.queryByText(/untrusted secret/)).toBeNull();
 });
 
+it("shows only the committed parts of a linked memory retry in the settled activity", () => {
+  const original = {
+    id: "20b44753-5c6e-4f19-8931-64c775d64cd4",
+    name: "nyxid__remember", status: "error" as const, startedAt: 1,
+    failure: { kind: "tool_error", reason: "note_too_long" },
+  };
+  const part = (id: string, index: number, committed: boolean, total = 2) => ({
+    id, name: "nyxid__remember", status: "done" as const, startedAt: 2,
+    memoryRecovery: { failed_activity_id: original.id, part: index, total, committed },
+  });
+  const unrelated = { id: "unrelated", name: "nyxid__remember", status: "done" as const, startedAt: 3 };
+  const first = part("first", 1, true);
+  const pending = part("settled with the turn only", 2, false);
+  const { rerender } = render(<ChatMessageBubble message={{
+    ...BASE, toolCalls: [original, first, part("duplicate receipt", 1, true), pending, unrelated],
+  }} />);
+  fireEvent.click(screen.getByRole("button", { name: /actions/ }));
+  expect(screen.getByText("Confirmed saves linked by NyxBot to this failure (1 of 2).")).toBeVisible();
+  expect(screen.getByText("Memory save unconfirmed")).toBeVisible();
+  expect(screen.getByText(/Validation: the note exceeds 500 characters/)).toBeVisible();
+
+  rerender(<ChatMessageBubble message={{
+    ...BASE, toolCalls: [original, first, pending, part("second", 2, true), unrelated],
+  }} />);
+  expect(screen.getByText("Confirmed saves linked by NyxBot to this failure (2 of 2).")).toBeVisible();
+  expect(screen.getByRole("button", { name: /actions/ })).toHaveTextContent("1 failed");
+
+  rerender(<ChatMessageBubble message={{ ...BASE, toolCalls: [original, part("retry", 1, true, 1)] }} />);
+  expect(screen.getByText("Confirmed saves linked by NyxBot to this failure (1 of 1).")).toBeVisible();
+
+  rerender(<ChatMessageBubble message={{
+    ...BASE, activityTotal: 43, toolCalls: [first, pending, unrelated],
+  }} />);
+  expect(screen.getByText("Recent activity shows 1 of 2 confirmed saves linked by NyxBot to an earlier failure.")).toBeVisible();
+  expect(screen.queryByText("Confirmed saves linked by NyxBot to this failure (2 of 2).")).toBeNull();
+  expect(screen.getByText("Memory save unconfirmed")).toBeVisible();
+});
+
 describe("approval-gated step outcomes", () => {
   it.each([
     ["waiting", "Waiting for approval", "1 waiting"],
@@ -1771,4 +1831,29 @@ it("does not expose arbitrary Lark failure text", () => {
   fireEvent.click(screen.getByRole("button", { name: /action/ }));
   expect(screen.getByText(/The tool reported an error/)).toBeVisible();
   expect(screen.queryByText(/private field/)).toBeNull();
+});
+
+it.each([false, true])("shows recovery for an unconfirmed skill save (reviewed %s)", (reviewed) => {
+  render(<ChatMessageBubble message={{ ...BASE, toolCalls: [{
+    id: "skill", name: "nyxid__draft_agent_skill", status: "error", startedAt: 1,
+    failure: { kind: "tool_error", reason: "publication_ambiguous", status: 500 },
+    decision: reviewed ? { kind: "acknowledgement", id: "card", state: "failed" } : undefined,
+  }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /Turn details:/ }));
+  expect(screen.getByText("Skill save unconfirmed")).toBeVisible();
+  expect(screen.getByText(/Check Ornn or use Check again/)).toBeVisible();
+});
+
+it.each([
+  ["source_skill_unavailable", "Source skill unavailable", /Retry the draft/],
+  ["ornn_unavailable", "Skill publication unavailable", /Ornn is unavailable\. Try again later/],
+  ["verify_failed", "Skill verification failed", /Check the existing version in Ornn/],
+] as const)("shows safe recovery for %s", (reason, label, recovery) => {
+  render(<ChatMessageBubble message={{ ...BASE, toolCalls: [{
+    id: "skill", name: "nyxid__draft_agent_skill", status: "error", startedAt: 1,
+    failure: { kind: "tool_error", reason, status: 503 },
+  }] }} />);
+  fireEvent.click(screen.getByRole("button", { name: /Turn details:/ }));
+  expect(screen.getByText(label)).toBeVisible();
+  expect(screen.getByText(recovery)).toBeVisible();
 });

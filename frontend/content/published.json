@@ -1,0 +1,173 @@
+[
+  {
+    "id": "home",
+    "route": "/",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "nyxbot",
+    "route": "/nyxbot",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "solutions",
+    "route": "/solutions",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "how-it-works",
+    "route": "/how-it-works",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "security",
+    "route": "/security",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "agents",
+    "route": "/agents",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "pricing",
+    "route": "/pricing",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "integrations",
+    "route": "/integrations",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "blog",
+    "route": "/blog",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": false
+  },
+  {
+    "id": "contact",
+    "route": "/contact",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "solutions-restaurant-manager",
+    "route": "/solutions/restaurant-manager",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "solutions-help-desk",
+    "route": "/solutions/help-desk",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "solutions-appointment-booker",
+    "route": "/solutions/appointment-booker",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "solutions-callback-queue",
+    "route": "/solutions/callback-queue",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "solutions-stock-analyst",
+    "route": "/solutions/stock-analyst",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "solutions-news-aggregator",
+    "route": "/solutions/news-aggregator",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "solutions-desk-researcher",
+    "route": "/solutions/desk-researcher",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "solutions-x-lead-catcher",
+    "route": "/solutions/x-lead-catcher",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  },
+  {
+    "id": "solutions-back-office-clerk",
+    "route": "/solutions/back-office-clerk",
+    "locales": [
+      "en",
+      "zh"
+    ],
+    "indexable": true
+  }
+]

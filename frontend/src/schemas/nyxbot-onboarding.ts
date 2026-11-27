@@ -13,17 +13,17 @@ export const nyxbotSearchSchema = z.object({
     .enum(["account", "source", "channel", "success", "link"])
     .optional()
     .catch(undefined),
-  channel: z.enum(["telegram", "whatsapp"]).optional().catch(undefined),
+  channel: z.enum(["telegram", "whatsapp", "messenger", "instagram"]).optional().catch(undefined),
   provider_status: z.enum(["success", "error"]).optional().catch(undefined),
   status: z.enum(["success", "error"]).optional().catch(undefined),
 });
 export type NyxbotStep = NonNullable<
   z.infer<typeof nyxbotSearchSchema>["step"]
 >;
-export type NyxbotChannel = "telegram" | "whatsapp";
+export type NyxbotChannel = "telegram" | "whatsapp" | "messenger" | "instagram";
 
 export const nyxbotProgressSchema = z.object({
-  channel: z.enum(["telegram", "whatsapp"]).nullable().default(null),
+  channel: z.enum(["telegram", "whatsapp", "messenger", "instagram"]).nullable().default(null),
   channelUrl: z
     .string()
     .regex(/^https:\/\/t\.me\/[A-Za-z0-9_]{1,64}$/)

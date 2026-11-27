@@ -19,7 +19,11 @@ const nodes = (n: any): E[] =>
       ? nodes(n.type(n.props))
       : [
           n,
-          ...[n.props.children, n.props.ListFooterComponent]
+          ...[
+            n.props.children,
+            n.props.ListFooterComponent,
+            n.type === "Input" ? n.props.expandedContent : null,
+          ]
             .flat(Infinity)
             .flatMap(nodes),
         ]
@@ -438,15 +442,20 @@ test("crew header shows member identity and narrows recipients through its picke
   assert.equal(working.props.accessibilityLiveRegion, "polite");
   assert.ok(
     nodes(working).some(
-      (n) => n.type === "AgentAvatar" && n.props.agent.id === "research",
+      (n) => n.type === "AgentAvatar" &&
+        n.props.agent.id === "research" && n.props.mood === "thinking",
     ),
   );
   assert.ok(nodes(working).some((n) => n.type === "ActivityIndicator"));
   chat.data.pending_actions = [
-    { summary: "Needs confirmation", conversation_id: "chat" },
+    { summary: "Needs confirmation", conversation_id: "chat", agent_id: "research" },
   ];
   h.render();
   assert.equal(identity().props.status, "Needs you");
+  assert.ok(nodes(h.value()).some(
+    (n) => n.type === "AgentAvatar" &&
+      n.props.agent.id === "research" && n.props.mood === "approval",
+  ));
   chat.data.pending_actions = [];
   chat.data.collaboration_decisions = [{ can_decide: true }];
   h.render();
@@ -1010,7 +1019,7 @@ test("scrolling the crew transcript dismisses the keyboard and never swallows a 
   f.h.unmount();
 });
 
-test("ordinary and corner phone crew composers share the idle row and toolbar while wide and busy composers stay expanded", () => {
+test("ordinary, corner and wide crew composers share the idle row while dictation keeps its controls", () => {
   const ordinary = setup();
   assert.equal(ordinary.input().props.compactWhenIdle, true);
   const layout = { compact: true, onLeadingWidth() {}, onTrailingWidth() {} };
@@ -1026,14 +1035,14 @@ test("ordinary and corner phone crew composers share the idle row and toolbar wh
     file: { name: "photo.png" },
   });
   ordinary.h.render();
-  assert.equal(ordinary.input().props.compactWhenIdle, false);
+  assert.equal(ordinary.input().props.compactWhenIdle, true, "attachments keep their own preview strip");
   ordinary.uploads.files.length = 0;
   ordinary.dictation.active = true;
   ordinary.h.render();
   assert.equal(ordinary.input().props.compactWhenIdle, false);
   ordinary.dictation.active = false;
   ordinary.setWidth(1024);
-  assert.equal(ordinary.input().props.compactWhenIdle, false);
+  assert.equal(ordinary.input().props.compactWhenIdle, true, "wide windows use the same idle row");
   ordinary.h.unmount();
   const f = setup({ cornerWindow: true });
   assert.equal(f.input().props.compactWhenIdle, true);

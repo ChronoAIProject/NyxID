@@ -31,6 +31,26 @@ export const NOTIFICATION_KIND_LABEL: Record<NotificationKind, string> = {
 };
 
 export type NotificationTone = "default" | "warning" | "danger" | "success";
+
+/** Search the same human-readable content the feed presents, including identities. */
+export function notificationMatchesSearch(item: AssistantNotification, query: string): boolean {
+  const normalize = (value: string) => value.normalize("NFKC").toLowerCase();
+  const terms = normalize(query).trim().split(/\s+/u).filter(Boolean);
+  if (!terms.length) return true;
+  const text = normalize([
+    notificationTitle(item),
+    notificationSentence(item).text,
+    notificationPreview(item),
+    item.source.label,
+    item.actor?.name,
+    item.actor?.display_name,
+    ...(item.participants ?? []).flatMap(actor => [actor.name, actor.display_name]),
+    notificationContextLabel(item),
+    item.platform,
+  ].filter(Boolean).join(" "));
+  return terms.every(term => text.includes(term));
+}
+
 export function notificationTone(kind: NotificationKind): NotificationTone {
   switch (kind) {
     case "automation_problem":
@@ -81,6 +101,15 @@ export function notificationTitle(
   return label || NOTIFICATION_KIND_LABEL[item.kind];
 }
 
+/** Completed runs can carry an empty-result marker in their stored reply. */
+export function notificationPreview(item: AssistantNotification): string {
+  if (item.kind === "automation_result") {
+    const preview = item.preview.trim();
+    if (!preview || preview === "无（建设中，未发送）") return "";
+  }
+  return item.preview;
+}
+
 export function notificationTime(iso: string, now = Date.now()): string {
   const at = Date.parse(iso);
   return Number.isFinite(at) ? formatRelativeTimeFromMs(at, now, "") : "";
@@ -100,13 +129,14 @@ export function notificationAccessibilityLabel(
   const parts = [
     item.actor ? notificationSentence(item).text : notificationTitle(item),
   ];
-  if (item.preview) parts.push(item.preview);
+  const preview = notificationPreview(item);
+  if (preview) parts.push(preview);
   const time = notificationTime(item.updated_at, now);
   if (time) parts.push(time);
   const count = notificationCountLabel(item.count);
   if (count) parts.push(count);
   if (notificationPending(item)) parts.push(translateApp("needs your decision"));
-  if (!item.read) parts.push("unread");
+  if (!item.read) parts.push(translateApp("unread"));
   return parts.join(", ");
 }
 
@@ -359,7 +389,7 @@ export function notificationSentence(item: AssistantNotification) {
   let showTarget = true;
   switch (item.kind) {
     case "automation_result":
-      action = "finished";
+      action = translateApp("finished");
       showTarget = false;
       break;
     case "automation_problem":

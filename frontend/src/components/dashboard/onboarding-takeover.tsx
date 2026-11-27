@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { ArrowRight, Cable, Github, KeyRound, ShieldCheck, User } from "lucide-react";
 import { useAuthStore } from "@/stores/auth-store";
 import { useCompleteOnboarding } from "@/hooks/use-onboarding";
+import { PrivilegedMfaEnrollmentBanner } from "@/components/auth/privileged-mfa-enrollment-banner";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
@@ -102,6 +103,10 @@ export function OnboardingTakeover() {
             <Github className="h-[14px] w-[14px]" />
           </a>
         </div>
+      </div>
+
+      <div className="px-6 empty:hidden sm:px-10">
+        <PrivilegedMfaEnrollmentBanner />
       </div>
 
       <div className="flex flex-1 flex-col items-center justify-start px-6 pt-[8vh] pb-12">

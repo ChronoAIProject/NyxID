@@ -1,3 +1,4 @@
+import { OrgAgentMemberAccess } from "./org-agent-member-access";
 import { OrgGuestGrantsAdoption } from "./org-guest-grants-adoption";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
@@ -7,8 +8,8 @@ import { useNodes } from "@/hooks/use-nodes";
 import { useSavedLogins } from "@/hooks/use-saved-logins";
 import { describeChanges, changeList, labelValue, recordChanges } from "@/lib/grouped-form-changes";
 import { DrawerSectionInfoContext } from "@/lib/drawer-section-info";
-import { useCompactTitle } from "@/lib/compact-title";
 import { CompactTitleProvider, CompactChrome, CompactScroll } from "@/components/ui/compact-title";
+import { useCompactTitle } from "@/lib/compact-title";
 import { FormViewport } from "@/components/ui/form-viewport";
 import { useVisualViewportBounds } from "@/lib/form-viewport";
 import { DrawerSearchProvider, AgentDrawerSearch } from "./agent-drawer-search";
@@ -92,6 +93,11 @@ import {
   ServiceGrantPicker,
 } from "@/components/assistant/nyxbot-agent-forms";
 import { AgentAvatar } from "@/components/assistant/nyxbot-agent-avatar";
+import { AvatarRenderer } from "./avatar/avatar-renderer";
+import { AvatarPreviewContext, type AvatarPreview } from "./avatar/avatar-preview-context";
+import { useDocumentTheme } from "@/lib/assistant/use-avatar-environment";
+import { useRosterActivity } from "@/hooks/use-agent-activity";
+import { AgentAvatarEditor } from "@/components/assistant/agent-avatar-editor";
 import {
   nyxBotQueryKeys,
   useDeleteNyxBotAgent,
@@ -168,6 +174,13 @@ export function accessAuthorityCopy(
 const GRANTS_SECTION_ID = "agent-details-grants";
 const SKILLS_SECTION_ID = "agent-details-skills";
 
+function orgPermissionDescription(agent: AssistantAgent) {
+  if (agent.can_use && !agent.can_maintain) return translateUi("You can chat with this specialist. Its settings are read-only.");
+  if (!agent.can_use && agent.can_maintain) return translateUi("You can maintain this specialist. Chat access is restricted.");
+  if (!agent.can_use) return translateUi("You can view this specialist's profile.");
+  return translateUi("Chats are private to you. Memory is shared with the organization.");
+}
+
 function isNoAccess(error: unknown): boolean {
   return error instanceof ApiError && (error.status === 403 || error.status === 404);
 }
@@ -241,7 +254,6 @@ function AgentDetailsSheetContent({
   readonly onDeleted: () => void;
 }) {
   useUiTranslation();
-  const compact = useCompactTitle();
   const viewportBounds = useVisualViewportBounds();
   const [detailContainer, setDetailContainer] = useState<HTMLDivElement | null>(
     null,
@@ -249,6 +261,9 @@ function AgentDetailsSheetContent({
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchHost, setSearchHost] = useState<HTMLDivElement | null>(null);
+  const [avatarPreview, setAvatarPreview] = useState<AvatarPreview | null>(null);
+  const avatarTheme = useDocumentTheme();
+  const compact = useCompactTitle();
   const session = `${agentId}:${open}`;
   const [previousSession, setPreviousSession] = useState(session);
   if (previousSession !== session) {
@@ -257,8 +272,16 @@ function AgentDetailsSheetContent({
     setSearchOpen(false);
   }
   const detail = useNyxBotAgent(agentId, open);
+  const activityMood = useRosterActivity(detail.dataUpdatedAt, open);
   const returnFocus = useRef<HTMLElement | null>(null);
-  const agent = detail.data?.agent;
+  const savedAgent = isNoAccess(detail.error) ? undefined : detail.data?.agent;
+  const listed = agents.find((item) => item.id === agentId);
+  const agent = savedAgent?.owner_kind === "org" && listed ? {
+    ...savedAgent,
+    can_use: listed.can_use === false ? false : savedAgent.can_use,
+    can_maintain: listed.can_maintain === false ? false : savedAgent.can_maintain,
+    can_govern: listed.can_govern === false ? false : savedAgent.can_govern,
+  } : savedAgent;
   const requestMode = useNyxBotSettings(open).data?.specialist_access_requests;
   const noAccess = detail.error ? isNoAccess(detail.error) : false;
   const guard = useGroupedDraftGuard();
@@ -297,12 +320,14 @@ function AgentDetailsSheetContent({
           }
         }}
       >
-        <CompactChrome data-agent-header="" data-search-open={searchOpen} className="relative z-30 px-4 pb-2 pt-3">
+        <CompactChrome data-agent-header="" data-search-open={searchOpen} className="relative z-30 px-4 pb-3 pt-3">
           <SheetHeader className="space-y-0 text-left">
             <SheetTitle className="sr-only">{translateUi("Agent details")}</SheetTitle>
-            <div className="agent-header-row relative flex min-h-8 items-center gap-2">
+            <div className={`agent-header-row relative flex min-h-8 items-center ${compact ? "gap-3" : "gap-4"}`}>
               {agent ? <>
-                <span className="agent-header-avatar flex size-8 shrink-0 items-center justify-center"><AgentAvatar agent={agent} size="lg" /></span>
+                <span className={`agent-header-avatar flex shrink-0 items-center justify-center ${compact ? "size-8" : "size-28"}`}>
+                  {avatarPreview?.agentId === agent.id ? <AvatarRenderer config={avatarPreview.config} kind={agent.kind} theme={avatarTheme} mood={avatarPreview.mood} eventKey={avatarPreview.eventKey} pixels={compact ? 32 : 112} animated={!compact} label={translateUi("Avatar preview")} className="block size-full"/> : <AgentAvatar agent={agent} size={compact ? "lg" : "showcase"} animated={!compact} mood={activityMood(agent)} />}
+                </span>
                 <p title={agentTitle(agent)} className={`agent-header-name min-w-0 truncate type-card-title ${searchOpen ? "max-w-[30%] shrink" : "flex-1"}`}>{agentTitle(agent)}</p>
               </> : <span className="min-w-0 flex-1 type-card-title">{translateUi("Agent details")}</span>}
               <div ref={setSearchHost} className={searchOpen ? "min-w-0 flex-1" : "shrink-0"} />
@@ -310,11 +335,11 @@ function AgentDetailsSheetContent({
                 <button type="button" aria-label={translateUi("Close agent details")} data-icon-button="" className="agent-header-icon"><X aria-hidden className="size-4" /></button>
               </SheetClose>
             </div>
-            <div className={`agent-header-subtitle pl-10 pt-1 ${compact ? "pointer-events-none absolute left-4 right-4 top-11" : ""}`} aria-hidden={compact || undefined}>
+            <div className="agent-header-subtitle pt-2">
               {agent ? <>
                 <SheetDescription className="text-13 text-text-tertiary">
-                  {[agentHandle(agent), agent.kind === "nyxbot" ? "Personal agent" : "Specialist", AGENT_STATUS_LABEL[agent.status], `${agent.memory_count} ${agent.memory_count === 1 ? "memory" : "memories"}`].filter(Boolean).join(" · ")}
-                  {agent.kind === "specialist" ? <span className="block">{translateUi("Created by ")}{agent.created_by === "nyxbot" ? translateUi("NyxBot") : translateUi("you")}</span> : null}
+                  {avatarPreview?.agentId === agent.id ? translateUi("Avatar preview") : [agentHandle(agent), agent.kind === "nyxbot" ? "Personal agent" : "Specialist", AGENT_STATUS_LABEL[agent.status], agent.owner_kind === "org" && agent.can_maintain === false ? undefined : `${agent.memory_count} ${agent.memory_count === 1 ? "memory" : "memories"}`].filter(Boolean).join(" · ")}
+                  {agent.kind === "specialist" ? <span className="agent-header-created block">{translateUi("Created by ")}{agent.created_by === "nyxbot" ? translateUi("NyxBot") : translateUi("you")}</span> : null}
                 </SheetDescription>
                 <ReadOnlyNote agent={agent} />
               </> : <SheetDescription>{noAccess ? translateUi("This agent is not available to you.") : translateUi("Loading agent...")}</SheetDescription>}
@@ -341,8 +366,8 @@ function AgentDetailsSheetContent({
           </div>
         ) : null}
         {agent ? (
-          <AgentDetailsContent
-            key={agent.id}
+          <AvatarPreviewContext value={setAvatarPreview}><AgentDetailsContent
+            key={`${agent.id}:${agent.can_maintain}:${agent.can_govern}`}
             searchHost={searchHost}
             searchOpen={searchOpen}
             setSearchOpen={setSearchOpen}
@@ -358,7 +383,7 @@ function AgentDetailsSheetContent({
             onDeleted={onDeleted}
             onClose={() => void close()}
             detailContainer={detailContainer}
-          />
+          /></AvatarPreviewContext>
         ) : null}
         <GroupedDraftDialog />
       </SheetContent>
@@ -421,6 +446,7 @@ function AgentDetailsContent({
   );
   const panels = useRef<HTMLDivElement>(null);
   const [pageContainer, setPageContainer] = useState<HTMLDivElement | null>(null);
+  const [editingAvatar, setEditingAvatar] = useState(false);
   const readOnly = agent.status === "destroyed" || agent.can_maintain === false;
   const tabs = DRAWER_TABS.filter(([value]) =>
     value === "channels"
@@ -510,12 +536,15 @@ function AgentDetailsContent({
                       ) : (
                         <ProfileForm agent={agent} />
                       )}
+                      <AgentAvatarEditor agent={agent} onEditingChange={setEditingAvatar} />
                       <GroupedList
                         title={translateUi("Ownership")}
                         search={{ id: "ownership", title: "Ownership", keywords: [agent.owner_kind === "org" ? agent.owner_name ?? agent.owner_id : agent.share_role ? `Shared by ${agent.owner_name ?? agent.owner_id}` : "Personal agent", agent.org_role, agent.share_role].filter(Boolean).join(" ") }}
                         footer={
                           agent.owner_kind === "org"
-                            ? translateUi("Maintained by Admins and Members. Your role: {{value1}}.{{value2}}", { value1: translateUi(agent.org_role ?? "member"), value2: agent.can_maintain === false ? translateUi(" Read-only; viewers cannot maintain or chat.") : translateUi(" Chats are private to you; memory is shared with the organization.") })
+                            ? agent.can_use !== undefined && agent.can_maintain !== undefined
+                              ? orgPermissionDescription(agent)
+                              : translateUi("Maintained by Admins and Members. Your role: {{value1}}.{{value2}}", { value1: translateUi(agent.org_role ?? "member"), value2: agent.can_maintain === false ? translateUi(" Read-only; viewers cannot maintain or chat.") : translateUi(" Chats are private to you; memory is shared with the organization.") })
                             : agent.share_role
                               ? translateUi("Your role: {{value1}}. Your chats and notes stay private.", { value1: agent.share_role })
                               : undefined
@@ -531,6 +560,9 @@ function AgentDetailsContent({
                           }
                         />
                       </GroupedList>
+                      {agent.kind === "specialist" && agent.owner_kind === "org" && agent.owner_id && agent.can_govern === true && (
+                        <OrgAgentMemberAccess orgId={agent.owner_id} agentId={agent.id} />
+                      )}
                       <ShareAgentDialog agent={agent} />
                       {!agent.share_role && agent.can_use !== false ? (
                         <AgentAutomations agentId={agent.id} />
@@ -549,10 +581,20 @@ function AgentDetailsContent({
                         <>
                           {agent.kind === "specialist" ? (
                             <>
-                              <GrantsForm
+                              {agent.owner_kind === "org" && agent.can_maintain === false ? (
+                                <section aria-label={translateUi("Grants")}>
+                                  <GroupedList title={translateUi("Services")}>
+                                    {agent.services.map((id) => <GroupedRow key={id} title={id} accessory={agent.org_role === "admin" ? agent.guest_access[id] : undefined} />)}
+                                  </GroupedList>
+                                  {Boolean(agent.machines?.length) && <GroupedList title={translateUi("Machines")}>
+                                    {agent.machines?.map((id) => <GroupedRow key={id} title={id} />)}
+                                  </GroupedList>}
+                                  <section aria-label={translateUi("Access authority")} className="p-4 type-secondary">{accessAuthorityCopy(agent, requestMode)}</section>
+                                </section>
+                              ) : <GrantsForm
                                 agent={agent}
                                 requestMode={requestMode}
-                              />
+                              />}
                               {agent.can_maintain !== false ? (
                                 <>
                                   <AgentOperationScopes
@@ -614,7 +656,7 @@ function AgentDetailsContent({
                         agentId={agent.id}
                         readOnly={readOnly || Boolean(agent.share_role)}
                       />
-                      {!agent.share_role ? (
+                      {!agent.share_role && !(agent.owner_kind === "org" && agent.can_maintain === false) ? (
                         <AgentLearningReview
                           key={proposalId ?? ""}
                           agentId={agent.id}
@@ -643,7 +685,7 @@ function AgentDetailsContent({
       </div>
     </SegmentedControl>
     </FormViewport>
-    <GroupedFormBar viewport />
+    {!editingAvatar && <GroupedFormBar viewport />}
     </GroupedFormScope>
     </DrawerSearchProvider></DrawerSectionInfoContext>
   );

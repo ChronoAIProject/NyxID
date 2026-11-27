@@ -3,7 +3,7 @@ import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Search, X } from "lucide-react";
-import { DOCS_TABS, docTabForSlug } from "./manifest";
+import { docTabLabel } from "./manifest";
 
 interface IndexEntry {
   readonly source: string;
@@ -137,8 +137,7 @@ export function DocsSearch({
               {results.map((e, i) => {
                 const slug = e.source.replace(/\.md$/, "");
                 const active = i === activeIndex;
-                const tabId = docTabForSlug(slug);
-                const label = DOCS_TABS.find((tab) => tab.id === tabId)?.label ?? "Concepts";
+                const label = docTabLabel(slug);
                 return (
                   <li key={slug} role="option" aria-selected={active} id={`docs-search-opt-${i}`}>
                     <Link
