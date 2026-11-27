@@ -528,3 +528,49 @@ pub(super) async fn census_scope_revision(
     }
     Ok(None)
 }
+
+/// An unenrolled observational generation uses private, generation-local
+/// references. Enrolled reports carry the same logical references as the ring.
+#[derive(Serialize, serde::Deserialize)]
+pub(crate) struct CensusRing {
+    pub deployment: String,
+    pub revision: i64,
+    pub deployment_revision: String,
+    pub restore_epoch: String,
+    pub proofs: Vec<proof::Proof>,
+}
+
+pub(crate) async fn census_ring(db: &Database, config: &AppConfig) -> AppResult<CensusRing> {
+    let slots = proof::slots(config).await?;
+    if let Some(row) = location::observed(db).await? {
+        if field::<bool>(&row, "restore_required")? {
+            return Err(stale());
+        }
+        let scope: Scope = field(&row, "scope")?;
+        let proofs: Vec<proof::Proof> = field(&row, "proofs")?;
+        proof::verify(&scope.deployment_id, &slots, &proofs).await?;
+        Ok(CensusRing {
+            deployment: scope.deployment_id,
+            revision: field(&row, "scope_revision")?,
+            deployment_revision: scope.deployment_revision,
+            restore_epoch: scope.restore_epoch,
+            proofs,
+        })
+    } else {
+        let deployment = fresh();
+        let proofs = proof::issue(&deployment, &slots).await?;
+        Ok(CensusRing {
+            deployment,
+            revision: 0,
+            deployment_revision: "unenrolled".into(),
+            restore_epoch: "unenrolled".into(),
+            proofs,
+        })
+    }
+}
+
+impl CensusRing {
+    pub(crate) async fn verify(&self, config: &AppConfig) -> AppResult<()> {
+        proof::verify(&self.deployment, &proof::slots(config).await?, &self.proofs).await
+    }
+}

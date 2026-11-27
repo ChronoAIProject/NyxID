@@ -216,6 +216,15 @@ fn bounded_text(bytes: &[u8], max: usize) -> AppResult<()> {
 }
 
 impl Family {
+    pub(crate) fn name(&self) -> String {
+        format!("{}.{:?}", self.collection(), self.entry.adapter)
+    }
+    pub(crate) fn depends_on_clock(&self) -> bool {
+        matches!(
+            self.entry.adapter,
+            Adapter::OracleLoginOuter | Adapter::NativeReplyHandle
+        )
+    }
     pub(crate) fn collection(&self) -> &'static str {
         self.entry.collection
     }

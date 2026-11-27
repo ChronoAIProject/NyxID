@@ -892,3 +892,10 @@ and owner acceptance are specified in [CRASH_REPORTING.md](../CRASH_REPORTING.md
 the opaque admin user ID, never names or emails. Personal erasure does not delete
 these rows: they preserve operational release identity and verification for
 reports from every account, independently of the registering administrator.
+
+The `encrypted_record_census_reports` collection retains generation-private
+encrypted source locators, dependency edges and diagnostic receipts for seven
+days. The census uses them to reconcile updates and deletes at its witnessed
+cut. The personal-data registry classifies them as retained erasure
+bookkeeping and excludes them from personal export. The generation and every
+staged partition share an `expires_at` TTL index.

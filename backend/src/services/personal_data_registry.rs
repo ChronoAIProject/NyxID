@@ -1659,6 +1659,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "encryption_key_evidence retains immutable admin-attributed lifecycle evidence across restore epochs.",
     },
     Entry {
+        collection: "encrypted_record_census_reports",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "encrypted_record_census_reports holds encrypted row receipts, findings and dated manifests for seven days.",
+    },
+    Entry {
         collection: "encrypted_record_census_log",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),

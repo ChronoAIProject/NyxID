@@ -21,6 +21,7 @@ use crate::{
 };
 
 pub(crate) mod replay;
+pub(crate) mod report;
 
 const LOG: &str = "encrypted_record_census_log";
 const PROTOCOL: i32 = 1;

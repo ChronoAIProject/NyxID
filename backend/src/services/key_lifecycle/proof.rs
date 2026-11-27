@@ -173,19 +173,19 @@ async fn cloud_slots(config: &AppConfig, result: &mut Vec<Slot>) -> AppResult<()
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct Proof {
+pub(crate) struct Proof {
     pub key: Key,
     binding: String,
     envelope: bson::Binary,
 }
 
-fn binding(deployment: &str, slot: &Slot) -> String {
+fn resource_binding(deployment: &str, kind: &str, resource: Option<&str>) -> String {
     let mut digest = Sha256::new();
     for part in [
         "nyxid/enrollment/resource/v1",
         deployment,
-        slot.kind,
-        slot.resource.as_deref().unwrap_or(""),
+        kind,
+        resource.unwrap_or(""),
     ] {
         digest.update((part.len() as u64).to_be_bytes());
         digest.update(part.as_bytes());
@@ -197,7 +197,7 @@ pub(super) async fn issue(deployment: &str, slots: &[Slot]) -> AppResult<Vec<Pro
     let mut proofs = Vec::new();
     for slot in slots {
         let reference = uuid::Uuid::new_v4().to_string();
-        let bound = binding(deployment, slot);
+        let bound = resource_binding(deployment, slot.kind, slot.resource.as_deref());
         let fields = ["key_possession", bound.as_str()];
         let ctx = RecordContext::new(HEAD, deployment, &reference, &fields)?;
         let bytes = slot
@@ -229,7 +229,7 @@ pub(super) async fn issue(deployment: &str, slots: &[Slot]) -> AppResult<Vec<Pro
 }
 
 async fn identify<'a>(deployment: &str, slot: &Slot, proofs: &'a [Proof]) -> AppResult<&'a Key> {
-    let bound = binding(deployment, slot);
+    let bound = resource_binding(deployment, slot.kind, slot.resource.as_deref());
     let mut found = None;
     for proof in proofs
         .iter()
@@ -260,6 +260,21 @@ pub(super) async fn verify(deployment: &str, slots: &[Slot], proofs: &[Proof]) -
         }
     }
     Ok(())
+}
+
+impl Proof {
+    pub(crate) fn reference(
+        &self,
+        deployment: &str,
+        role: &str,
+        provider: &str,
+        resource: Option<&str>,
+    ) -> Option<&str> {
+        (self.key.role == role
+            && self.key.provider == provider
+            && self.binding == resource_binding(deployment, provider, resource))
+        .then_some(self.key.key_ref.as_str())
+    }
 }
 
 #[cfg(test)]
