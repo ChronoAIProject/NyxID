@@ -1,4 +1,7 @@
 use super::*;
+use crate::services::platform_entry_native::tests::credentials::{
+    refresh_update, seed_x_access_token,
+};
 use std::sync::Arc;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -1064,6 +1067,7 @@ fn failed_native_setup_can_review_owner_bound_successor_connection_and_retry() {
                 .unwrap();
             let successor_id = uuid::Uuid::new_v4().to_string();
             successor.insert("_id", &successor_id);
+            seed_x_access_token(&fixture.state.encryption_keys, &mut successor).await;
             keys.insert_one(successor).await.unwrap();
             keys.update_one(
                 doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
@@ -1317,15 +1321,19 @@ fn reviewed_native_update_refreshes_expired_same_epoch_oauth_without_invalidatin
                 )
                 .await
                 .unwrap();
-            let encrypted = fixture
+            let update = refresh_update(&fixture.state.encryption_keys, &fixture.bot, doc! {
+                "expires_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::minutes(1)),
+            }).await;
+            fixture
                 .state
-                .encryption_keys
-                .encrypt(b"synthetic-refresh-token")
+                .db
+                .collection::<Document>(crate::models::user_api_key::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
+                    update,
+                )
                 .await
                 .unwrap();
-            fixture.state.db.collection::<Document>(crate::models::user_api_key::COLLECTION_NAME).update_one(doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},doc! {"$set":{
-        "expires_at":bson::DateTime::from_chrono(chrono::Utc::now()-chrono::Duration::minutes(1)),
-        "refresh_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
             let review = review_lifecycle(&fixture.state, &fixture.bot.user_id, &fixture.bot.id)
                 .await
                 .unwrap();
@@ -1630,20 +1638,15 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
             .await
             .unwrap();
         }
-        let refresh = fixture
-            .state
-            .encryption_keys
-            .encrypt(b"synthetic-refresh-token")
-            .await
-            .unwrap();
-        let refresh = bson::Binary {
-            subtype: bson::spec::BinarySubtype::Generic,
-            bytes: refresh,
-        };
+        let refresh = refresh_update(&fixture.state.encryption_keys, &fixture.bot, doc! {}).await;
+        let mut expired = refresh.clone();
+        expired
+            .get_document_mut("$set")
+            .unwrap()
+            .insert("expires_at", bson::DateTime::from_millis(0));
         keys.update_one(
             doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
-            doc! {"$set":{"expires_at":bson::DateTime::from_millis(0),
-            "refresh_token_encrypted":refresh.clone()}},
+            expired,
         )
         .await
         .unwrap();
@@ -1724,7 +1727,10 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
         assert!(snapshot.token_usable_or_refreshable());
         keys.update_one(
             doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
-            doc! {"$unset":{"refresh_token_encrypted":""}},
+            doc! {"$unset":{
+                "refresh_token_encrypted":"",
+                "secret_context_versions.refresh_token_encrypted":"",
+            }},
         )
         .await
         .unwrap();
@@ -1755,7 +1761,7 @@ fn unavailable_oauth_returns_repair_status_and_disconnected_inventory_without_hi
         );
         keys.update_one(
             doc! {"_id":fixture.bot.connection_id.as_ref().unwrap()},
-            doc! {"$set":{"refresh_token_encrypted":refresh}},
+            refresh,
         )
         .await
         .unwrap();

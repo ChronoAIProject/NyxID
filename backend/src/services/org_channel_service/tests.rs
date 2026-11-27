@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::credits::Credits;
+use crate::services::platform_entry_native::tests::credentials::BotSecret;
 
 #[test]
 fn absent_guest_policy_is_closed_and_exact_cap_round_trips() {
@@ -2150,18 +2151,12 @@ async fn lark_credentials_do_not_verify_an_org_member() {
         let adapter = LarkFamilyAdapter::media_test_adapter(&server.uri(), platform);
         let mut bot = f.bot.clone();
         bot.platform = platform.into();
-        bot.bot_token_encrypted = state
-            .encryption_keys
-            .encrypt(b"cli_app:app-secret")
-            .await
-            .unwrap();
-        bot.lark_verification_token_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"verification-token")
-                .await
-                .unwrap(),
-        );
+        BotSecret::Token
+            .set(&state.encryption_keys, &mut bot, "cli_app:app-secret")
+            .await;
+        BotSecret::LarkVerificationToken
+            .set(&state.encryption_keys, &mut bot, "verification-token")
+            .await;
         bot.status = "pending_webhook".into();
         bot.webhook_registered = false;
         db.collection::<ChannelBot>("channel_bots")
