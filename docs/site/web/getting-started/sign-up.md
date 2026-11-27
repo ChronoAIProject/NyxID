@@ -1,33 +1,25 @@
 ---
 title: Sign up & sign in
-description: Create a NyxID account with an invite code, sign in via SSO or email, and find Assistant and Studio.
+description: Use the registration methods offered by your NyxID instance, sign in, and find Assistant and Studio.
 ---
 
-NyxID is available as a hosted service at `https://nyx.chrono-ai.fun` (no setup required) or self-hosted via Docker. This page covers the hosted path. For self-host, bring up the stack first — see the self-host setup guide — then come back here; the sign-in and workspace sections apply identically.
+Use the NyxID instance where you plan to work. An invitation and account belong to that instance. On a self-hosted installation, open your workspace's Studio URL before following these steps.
 
 ## Create an account
 
-Early access to the hosted instance requires an invite code.
+1. Open **Create account** on the sign-in page of that instance or visit its `/register` path. [Open registration on this instance](/register)
+2. If the registration form asks for an invite code, enter the code supplied by your workspace before selecting how to register.
+3. Choose a sign-in provider offered on the registration form and authorize your account. If the form offers email and password, you can also use that option and follow the email verification prompt when it appears.
 
-1. Open **[nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register)** in a new tab.
-2. If prompted, enter the invite code supplied by your workspace.
-3. Sign in with **Google**, **GitHub**, or **Apple** — or create an account with an email address and password.
-
-:::note
-Social sign-in (Google / GitHub / Apple) is the fastest path. Password-based registration requires email verification before you can proceed.
-:::
-
-:::tip
-If you're on a self-hosted instance that was started with `AUTO_VERIFY_EMAIL=true` (the recommended dev default), email verification is skipped automatically.
-:::
+If social sign-in tells you to register with an invite first, start again on this instance's **Create account** page. An instance can require an invitation while offering only social registration. Enter your invitation there and continue with one of its provider buttons. If you already have a NyxID account and want to link a social login, choose the provider account whose verified email matches the email on your NyxID account.
 
 ## Sign in
 
-Return visits: open **[nyx.chrono-ai.fun](https://nyx.chrono-ai.fun)** and use the same sign-in method you registered with. NyxID keeps your session alive with a rotating refresh token (7-day TTL). When the session expires you are redirected back to the login page.
+Return to this instance's sign-in page and use the same account and provider, or your password if you registered with email. [Open sign-in](/login)
 
 ### Forgot password
 
-On the login page, click **Forgot password**. NyxID sends a reset link to your registered email address. The link is single-use and expires after 1 hour.
+If your instance offers password sign-in, click **Forgot password** and follow the reset link sent to your registered email address. For a provider login, use that provider's account recovery.
 
 ## Assistant and Studio at a glance
 
