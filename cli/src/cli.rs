@@ -5371,7 +5371,7 @@ pub enum ApprovalCommands {
     Deny {
         /// Request ID
         id: String,
-        /// Reason for denial
+        /// Optional denial text (not stored by the server)
         #[arg(long)]
         reason: Option<String>,
         #[command(flatten)]

@@ -198,6 +198,77 @@ async fn approval_2874_cli_decision_matches_handler_contract() {
 }
 
 #[tokio::test]
+async fn approval_cli_deny_matches_handler_contract_with_and_without_reason() {
+    // These fixtures are also deserialized into the handler's DecideRequest.
+    for (reason, fixture) in [
+        (None, include_str!("fixtures/approval-deny.json")),
+        (
+            Some("Not authorized for production data"),
+            include_str!("fixtures/approval-deny-with-reason.json"),
+        ),
+    ] {
+        let contract: Value = serde_json::from_str(fixture).unwrap();
+        assert_eq!(contract["approved"], false);
+        let server = MockServer::start().await;
+        let response = json!({
+            "id": ID,
+            "status": "rejected",
+            "decided_at": "2026-11-27T00:00:00+00:00"
+        });
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/approvals/requests/{ID}/decide")))
+            .and(wiremock::matchers::header(
+                "authorization",
+                format!("Bearer {SENTINEL}").as_str(),
+            ))
+            .and(wiremock::matchers::body_json(&contract))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut args = vec!["approval", "deny", ID, "--output", "json"];
+        if let Some(reason) = reason {
+            args.extend(["--reason", reason]);
+        }
+        let out = run(&server, &args).await;
+        assert_eq!(out.status.code(), Some(0), "{}", output_text(&out));
+        assert_eq!(json(&out), response);
+        // Catch retries, fallback routes and any request beyond the decision.
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert!(!output_text(&out).contains(SENTINEL));
+    }
+}
+
+#[tokio::test]
+async fn approval_cli_deny_preserves_authorization_failure_without_reposting() {
+    let server = MockServer::start().await;
+    let contract: Value =
+        serde_json::from_str(include_str!("fixtures/approval-deny.json")).unwrap();
+    let decision_path = format!("/approvals/requests/{ID}/decide");
+    let response = json!({
+        "error": "forbidden",
+        "error_code": 1002,
+        "message": "You are not authorized to act on this approval request"
+    });
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1{decision_path}")))
+        .and(wiremock::matchers::body_json(contract))
+        .respond_with(ResponseTemplate::new(403).set_body_json(&response))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let out = run(&server, &["approval", "deny", ID, "--output", "json"]).await;
+    assert_eq!(out.status.code(), Some(1), "{}", output_text(&out));
+    let error: Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(error["status"], 403);
+    assert_eq!(error["path"], decision_path);
+    assert_eq!(error["body"], response);
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn approval_2874_proxy_returns_pending_and_reads_result_without_reposting() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
