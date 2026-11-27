@@ -424,6 +424,20 @@ async fn model(
                 )
                 .await
             }
+        } else if stage == 4 {
+            let fields = json!({"Amount":12,"Status":"Approved"});
+            if script.proxy {
+                let body = json!({"fields":fields}).to_string();
+                raw_update(state, raw, &script.selected, &body).await
+            } else {
+                mcp(
+                    state,
+                    raw,
+                    "ledger__bitable_record_update",
+                    update_arguments(&script.selected, fields),
+                )
+                .await
+            }
         } else if stage == 3 {
             let first = br#"{"fields":{"Amount":12,"Status":"Approved"}}"#;
             let second = br#"{ "fields": { "Status": "Approved", "Amount": 12.0 } }"#;

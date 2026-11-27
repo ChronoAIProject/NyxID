@@ -133,7 +133,7 @@ pub(crate) async fn assign(
     Ok(())
 }
 
-fn personal(row: &AssistantConversation) -> bool {
+pub(crate) fn personal(row: &AssistantConversation) -> bool {
     !row.guest_turn
         && !row.shared_agent_thread
         && row.agent_owner_id.is_none()

@@ -3,8 +3,10 @@
 **Status: default-off contract, dispatch, and assistant permission authoring.**
 The #2195 Part A flow below adds human permission updates and exact-effect resume
 for enrolled private owner, shared-recipient and collaboration chat turns using
-MCP or HTTP proxy. Other callers retain #2194 Gap → legacy prompts. #2196 legacy
-mapping is not included. Unmarked traffic gains no preparation or database reads.
+MCP or HTTP proxy. Other callers retain #2194 Gap → legacy prompts. The
+[#2196 legacy mapping](#legacy-mapping-and-admission-diagnostics-2196a) preserves
+existing authority without backfilling consent. Unmarked traffic gains no
+preparation or database reads.
 
 Flag enables and clear-that-enables require the same durable activation and live
 observed support as proposal creation/decisions, version selection, channel-source
@@ -317,7 +319,9 @@ agent behavior, authority and endpoint snapshots, prepared inputs and eligible
 floors. A keyed digest deduplicates matching pending gaps. Denial and uncertain
 outcomes stay task-bound. Duplicate calls from the original or resume turn return
 the same receipt; after its delivery, a different server-admitted turn can create
-a new occurrence under reusable permission. Identical calls within one server
+a new occurrence under reusable permission, except for the marked original-task
+owner continuations described in [Exact resume and recovery](#exact-resume-and-recovery).
+Identical calls within one server
 turn are conservatively one occurrence; a model request ID cannot override this.
 A task has at most 32 proposal rows. NyxID-generated proxy correlation IDs are excluded from gap/scope identity,
 while retention and send-time checks preserve their exact outbound bytes. Only
@@ -342,6 +346,8 @@ requires that human and accepts only:
 ```
 
 The client cannot author a connection, audience, scope, validity payload or task.
+The review displays the HTTP method and path with its leading slash; relative
+proxy storage does not change the displayed resource or the retained effect.
 Operation is the default. The immutable choices are this operation, this task,
 one displayed hour, and persistent until revoked/binding changes. These existing
 choices remain bound to the current conversation, including Persistent. Reusable
@@ -411,6 +417,11 @@ scope, audience, source and recent dispatch, and uses existing revocation. It
 never displays the persistent TTL sentinel as a permission expiry. Mobile and
 Telegram remain link-only, with generic notifications through existing configured
 channels and no input preview or legacy Allow/Deny action.
+Dashboard Approval History keeps each execution proposal's server-issued Review
+destination available for pending and terminal rows on desktop and mobile.
+Original-chat decision cues and expiry follow the
+[personal supervisor review contract](chat/09-nyxbot-orchestrator.md#personal-supervisor-ledger-write-review-2605).
+Ordinary legacy requests retain their Approve/Reject actions.
 
 ### Exact resume and recovery
 
@@ -430,6 +441,71 @@ pause the retained effect; their decisions retain their existing semantics.
 Cancellation, departure, source deletion and sharing narrowing fence queued work
 and purge private payloads. Operation permissions receive terminal retention in
 the same terminal update; reusable grants remain subject to their live binding.
+
+For personal owner message-root tasks in private conversations (v1/v3) and
+verified-owner channels (v4), a durably recorded successful HTTP effect with an
+unreleased owner continuation continues through the normal model runner on the same admitted task. The
+runner loads the original human request from that exact live root and supplies
+bounded, redacted operation receipts as quoted, untrusted tool data. It preserves
+the conversation key, selected model, billing lane, task/source audience and
+ordinary model and tool egress checks. The model continues the remaining task;
+the retained effect keeps its original operation identity. A server-owned retained
+owner turn joins earlier marked successes in that task, including during a later
+independent readback review. The current turn's durable continuation release
+establishes this context; a client-supplied receipt or an ordinary follow-up event
+does not. Ordinary distinct admitted follow-ups may use reusable authority for a
+new occurrence after receipt delivery. Original/resume turn retries, pending and
+uncertain outcomes retain their existing deduplication. A separately gated readback
+may require its own review before continuing. A new human request has its own root
+and may execute the same reviewed effect.
+Redaction uses the runner's existing verified conversation credential; retained
+resume does not decrypt another copy of it. Normal egress still requires the
+live conversation-key relationship; reusing the verified bytes does not bypass
+revocation of that relationship or the key.
+
+Every distinct request in a batched wake must have a successful, available receipt
+and a version-1 pending `owner_continuation` marker. The marker commits with the
+known success, after continuation readiness is resolved before provider egress.
+After normal model/context preparation, an atomic batch release fences the live
+worker, task, source, actor and key before the request can be sealed for model
+I/O. Release uses MongoDB time for turn/key expiry. An explicit turn lease must
+be strictly in the future; null or missing leases use `started_at` plus the
+engine's active-turn TTL, with the same strict expiry. An explicit expired lease
+never falls back to a fresh start date. Stop and exact worker/epoch/claim fences
+remain required. Task snapshot predicates compare typed fields independently of
+BSON key order; absent optional parent/source fields match their null form,
+while required identities remain exact. Only one release wins. A crash before release leaves the completed effect
+recoverable without another provider send. Preparation failure leaves it pending;
+ordinary failed-turn settlement does not mark that receipt delivered or finish
+the root. Existing bounded maintenance can wake that exact unfinished task again.
+Release is irreversible: an ambiguous launch or lost model/settlement response
+cannot start another model task. Existing recovery of the same sealed model
+request retains its original lookup, idempotency and egress fences.
+
+Denied, expired, waiting, cancelled, failed HTTP, uncertain and operational-error
+outcomes do not establish continuation eligibility. A mixed terminal wake durably
+blocks its still-pending success markers before publishing its receipt. Historical
+receipts without the marker, unavailable results and released receipts remain
+receipt-only. Shared/group/org/platform/delegated/voice/external sources retain
+their existing receipt behavior. Metadata contains only version, blocked state
+and the releasing turn ID; the encrypted receipt remains the single result copy.
+Private denied, expired, historical and released receipts remain readable after
+their task deadline. Owner-message source lookup applies only to a possible new
+dispatch or an undelivered eligible continuation marker, never to those terminal
+status paths. An expired task cannot dispatch or release a continuation.
+Encrypted-result retention removes the ciphertext and its context marker together;
+an inconsistent record fails closed. Operational failures report the failing
+`permission_resume` or `permission_release` stage without provider data; live
+authority refusals at these boundaries settle as cancellation.
+
+Marker authoring and release require the optional fleet capability
+`permissions:execution-owner-continuation-v1`. Fresh effects retain receipt-only
+behavior until it is ready; pending marked continuations refuse on readiness
+loss. It adds no cohort prerequisite, feature flag, collection, index or backfill.
+Before binary rollback, disable effective execution cohorts and drain/cancel
+pending owner continuations on upgraded workers. Old workers can read the optional
+fields but cannot preserve the pending-release lifecycle. Keep released/uncertain
+claims intact and recover unfinished work through authenticated web history.
 
 Group receipt publication includes only HTTP outcome, never raw provider account
 data. The original requester can read the bounded encrypted result on their
@@ -913,8 +989,27 @@ the existing `v4` storage arm, record binding and historical AAD. Their encrypte
 payload also retains the admitted original assignment, specialist/key/task and
 effect occurrence; no code, raw review or second copy of row values is stored.
 Selection, deduplication, decision, resume, cancellation, purge and uncertainty
-use the same occurrence/state machine as v4. Readers that do not understand
-version 5 refuse it. A current reader refuses an older retained delegated write
+use the same occurrence/state machine as v4. The shared credential-bearing resume
+API returns one typed outcome: terminal notices, a durable original-owner
+continuation, or a v5 assigned-specialist readback. The last variant requires one
+bound `permission_decided` event, the exact retained assignment/source and
+`report_to`, a fresh claimed dispatch and the specialist's live original task.
+The task-root proof stays bound to its stored task, and the assignment proof to
+its retained original assignment and restored specialist turn. Delegation from a
+later admitted Event can refer to a different authenticated message in the same
+owner chat. Cross-proof checks bind owner, NyxBot agent/conversation/key, channel,
+thread/settings, audience and policy revisions; event IDs, original/assigning
+turns, event-specific policy digests and source expiries remain independent.
+Both proofs and their deadlines are checked again after the provider receipt is
+durable, including the original task and assignment context reset. Display-only
+audience labels never supply authority. It creates no owner-continuation release
+marker and grants no owner or supervisor credentials;
+model/tool execution retains the specialist's own current grants. A newly uncertain
+attempt permits only a qualified observation; terminal or replayed receipts cannot
+start another readback. A terminal failed-HTTP receipt retains that failure
+attribution and the unconfirmed final-state qualification. Coalesced outcomes
+retain every request's status and never select a readback target. Readers that
+do not understand version 5 refuse it. A current reader refuses an older retained delegated write
 when the required original assignment proof is absent; missing metadata never
 implies consent. The original task/source deadlines cap the DM review. A
 positively unsent or uncertain marked review keeps its bound requirement visible

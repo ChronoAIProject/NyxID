@@ -332,14 +332,15 @@ through the original assignment to NyxBot. Other retained receipts keep their
 normal result behavior. A failed read reports an unconfirmed final state.
 Only a single execution decision in its own event turn enters this readback
 model path. Its `permission_decided` kind, bound assignment, invocation and task
-must match the durable proposal and current stored turn. Task-root and assigning
-event proofs retain their separate event/turn/deadline identities and live checks;
-display-only audience labels never decide source identity.
+must match the durable proposal and current stored turn.
 Coalesced decisions retain their individual request identifiers and
 safe status notices, and report attempted writes without verified readback;
 they do not select an arbitrary row for the specialist to read.
 Recovery after a terminal receipt or uncertain dispatch never resends the write:
 when independent readback is not verified, it reports that limitation explicitly.
+A stored failed HTTP response remains attributed as a failed attempt during
+terminal recovery. Task-root and assigning-Event source proofs are independently
+bound and validated under the [retained-source contract](../EXECUTION_PERMISSIONS.md#verified-owner-channel-proposals-v4).
 An observation after uncertainty does not prove that this write caused the state.
 A provider non-2xx remains a rejected write attempt even when the HTTP exchange
 is complete or an independent read observes the requested value. A bounded

@@ -1,14 +1,19 @@
 use super::*;
+use crate::handlers::credential_record_fixtures::BotSecret;
 use crate::models::{
     assistant_conversation::ChannelOrigin,
     execution_permission_channel::{COLLECTION_NAME as DELIVERIES, Delivery},
     nyxbot_channel::{ChannelTurnDelivery, NyxbotEvent},
 };
 use crate::services::{
-    execution_permission_channel as channel,
+    execution_permission_channel as channel, nyxbot_channel_key as channel_key,
+    nyxbot_event_record as event_record,
     security_readiness_service::refresh_test_replica_heartbeat,
 };
 use serde_json::Value;
+
+#[path = "proposal_owner_continuation_tests.rs"]
+mod owner_continuation_tests;
 
 pub(super) async fn channel_turn(
     name: &str,
@@ -45,9 +50,26 @@ async fn channel_turn_transport(
     let route = Uuid::new_v4().to_string();
     let thread = Uuid::new_v4().to_string();
     let event = Uuid::new_v4().to_string();
+    let partition = if transport == "direct" {
+        crate::handlers::nyxbot::chats::direct_partition("200", "7", Some("77"))
+    } else {
+        "original-chat".into()
+    };
     let now = bson::DateTime::now();
     let db = &f.state.db;
     db.collection::<Document>("channel_bots").insert_one(doc!{"_id":&bot,"user_id":&f.owner,"platform":platform,"platform_bot_id":if whatsapp {"333"} else {"100"},"label":"Owner bot","platform_bot_username":"owner_bot","webhook_registered":true,"webhook_secret_hash":"hash","bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1]},"is_active":true,"status":"active","created_at":now,"updated_at":now}).await.unwrap();
+    let bot_update = BotSecret::update(
+        &f.state.encryption_keys,
+        &bot,
+        &f.owner,
+        doc! {},
+        &[(BotSecret::Token, b"test-token")],
+    )
+    .await;
+    db.collection::<Document>("channel_bots")
+        .update_one(doc! {"_id": &bot}, bot_update)
+        .await
+        .unwrap();
     db.collection::<Document>("channel_conversations").insert_one(doc!{"_id":&route,"user_id":&f.owner,"channel_bot_id":&bot,"platform":platform,"platform_conversation_id":if whatsapp {"7"} else {"200"},"platform_conversation_type":"private","agent_api_key_id":&f.key,"is_active":true,"created_at":now,"updated_at":now}).await.unwrap();
     let mut c = doc! {"_id":&id,"user_id":&f.owner,"channel_bot_id":&bot,"platform":platform,"bot_label":"Owner bot","status":"active","transport":transport,"route_api_key_id":&f.key,"route_id":&route,"owner_sender_ids":["7"],"agent_id":&previous.agent_id,"created_at":now,"updated_at":now};
     c.insert("agent_api_key_id", &f.key);
@@ -55,14 +77,14 @@ async fn channel_turn_transport(
         "agent_key_ciphertext",
         bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
-            bytes: f
-                .state
-                .encryption_keys
-                .encrypt(f.raw.as_bytes())
+            bytes: channel_key::seal(&f.state.encryption_keys, &id, &f.owner, &f.key, &f.raw)
                 .await
                 .unwrap(),
         },
     );
+    if f.state.encryption_keys.contextual_record_writes() {
+        c.insert("secret_context_versions", doc! {channel_key::FIELD: 3});
+    }
     c.insert("binding_id", "bound");
     if native {
         c.insert(
@@ -81,13 +103,13 @@ async fn channel_turn_transport(
         .insert_one(c)
         .await
         .unwrap();
-    db.collection::<Document>("nyxbot_threads").insert_one(doc!{"_id":&thread,"user_id":&f.owner,"channel_id":&id,"partition":"original-chat","conversation_id":&previous.id,"kind":"private","owner_chat":true,"created_at":now,"updated_at":now}).await.unwrap();
+    db.collection::<Document>("nyxbot_threads").insert_one(doc!{"_id":&thread,"user_id":&f.owner,"channel_id":&id,"partition":&partition,"conversation_id":&previous.id,"kind":"private","owner_chat":true,"created_at":now,"updated_at":now}).await.unwrap();
     let origin = ChannelOrigin {
         org_execution: None,
         native_event_id: native.then(|| event.clone()),
         thread: None,
         nyxbot_channel_id: id.clone(),
-        partition: "original-chat".into(),
+        partition: partition.clone(),
         platform: platform.into(),
     };
     let delivery = ChannelTurnDelivery {
@@ -112,19 +134,22 @@ async fn channel_turn_transport(
         target_ciphertext: None,
         target_expires_at: None,
     };
-    db.collection::<Document>("nyxbot_events").insert_one(doc!{"_id":&event,"channel_id":&id,"user_id":&f.owner,"partition":"original-chat","event_id":"original-provider-event","delivery":bson::to_bson(&delivery).unwrap(),"status":"running","created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(24))}).await.unwrap();
+    db.collection::<Document>("nyxbot_events").insert_one(doc!{"_id":&event,"channel_id":&id,"user_id":&f.owner,"partition":&partition,"event_id":"original-provider-event","delivery":bson::to_bson(&delivery).unwrap(),"status":"running","created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(24))}).await.unwrap();
     if sealed {
-        let target = f
-            .state
-            .encryption_keys
-            .encrypt(b"original-target")
-            .await
-            .unwrap();
-        db.collection::<Document>("nyxbot_events").update_one(doc!{"_id":&event},doc!{"$set":{
+        let target = event_record::seal(
+            &f.state.encryption_keys,
+            &event,
+            &f.owner,
+            &[event_record::TARGET, &id],
+            b"original-target",
+        )
+        .await
+        .unwrap();
+        db.collection::<Document>("nyxbot_events").update_one(doc!{"_id":&event},event_record::set_material(doc! {
             "created_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::hours(1)),
             "delivery.target_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:target},
             "delivery.target_expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(22))
-        }}).await.unwrap();
+        }, "delivery.target_context_version", event_record::version(&f.state.encryption_keys))).await.unwrap();
     }
     let context = if whatsapp {
         // Exercise multipart receipt recovery with explicitly seeded retained
@@ -139,24 +164,23 @@ async fn channel_turn_transport(
     } else {
         json!({"event_ref":"original-relay-ref"})
     };
-    let cipher = f
-        .state
-        .encryption_keys
-        .encrypt(&serde_json::to_vec(&context).unwrap())
-        .await
-        .unwrap();
-    db.collection::<Document>("nyxbot_events").update_one(doc!{"_id":&event},doc!{"$set":{"event_context_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
+    let cipher = event_record::seal(
+        &f.state.encryption_keys,
+        &event,
+        &f.owner,
+        &[event_record::CONTEXT, &id],
+        &serde_json::to_vec(&context).unwrap(),
+    )
+    .await
+    .unwrap();
+    db.collection::<Document>("nyxbot_events").update_one(doc!{"_id":&event},event_record::set_material(
+        doc! {"event_context_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}},
+        "event_context_version", event_record::version(&f.state.encryption_keys),
+    )).await.unwrap();
     if native {
         native_response(&f, &id, &event, "original-response", &previous.id).await;
     }
     if !native {
-        let token = f
-            .state
-            .encryption_keys
-            .encrypt(b"test-token")
-            .await
-            .unwrap();
-        db.collection::<Document>("channel_bots").update_one(doc!{"_id":&bot},doc!{"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token}}}).await.unwrap();
         db.collection::<Document>("channel_messages").insert_one(doc!{"_id":"original-provider-event","conversation_id":&route,"channel_bot_id":&bot,"user_id":&f.owner,"direction":"inbound","platform":"telegram","platform_conversation_id":"200","platform_message_id":"500","sender_platform_id":"7","agent_api_key_id":&f.key,"content_type":"text","thread_id":"77","created_at":now}).await.unwrap();
     }
     if !native {
@@ -551,6 +575,29 @@ async fn another_channel_turn(
         .await
         .unwrap()
         .unwrap();
+    // Contextual records must be opened under their old identity before a new
+    // synthetic event is created; ciphertext never moves between event IDs.
+    let context = match event.event_context_ciphertext.as_deref() {
+        Some(bytes) => Some(
+            event_record::event_context(&f.state.encryption_keys, &event, bytes)
+                .await
+                .unwrap(),
+        ),
+        None => None,
+    };
+    let target = match event.delivery.as_ref().and_then(|delivery| {
+        delivery
+            .target_ciphertext
+            .as_deref()
+            .map(|bytes| (delivery, bytes))
+    }) {
+        Some((delivery, bytes)) => Some(
+            event_record::delivery_target(&f.state.encryption_keys, &event, delivery, bytes)
+                .await
+                .unwrap(),
+        ),
+        None => None,
+    };
     event.id = Uuid::new_v4().to_string();
     event.event_id = Uuid::new_v4().to_string();
     event.turn_id = None;
@@ -558,7 +605,35 @@ async fn another_channel_turn(
     event.status = "running".into();
     event.created_at = Utc::now();
     let id = event.id.clone();
+    if let Some(context) = context {
+        event.event_context_ciphertext = Some(
+            event_record::seal(
+                &f.state.encryption_keys,
+                &id,
+                &event.user_id,
+                &[event_record::CONTEXT, &event.channel_id],
+                &context,
+            )
+            .await
+            .unwrap(),
+        );
+        event.event_context_version = event_record::version(&f.state.encryption_keys);
+    }
     let delivery = event.delivery.as_mut().unwrap();
+    if let Some(target) = target {
+        delivery.target_ciphertext = Some(
+            event_record::seal(
+                &f.state.encryption_keys,
+                &id,
+                &event.user_id,
+                &[event_record::TARGET, &event.channel_id],
+                &target,
+            )
+            .await
+            .unwrap(),
+        );
+        delivery.target_context_version = event_record::version(&f.state.encryption_keys);
+    }
     delivery.execution_source_bound = false;
     if delivery.origin.native_event_id.is_some() {
         delivery.origin.native_event_id = Some(id.clone());
@@ -1598,7 +1673,10 @@ async fn migration_channel_gateway_sealed_target_outlives_event_window_without_r
     f.state
         .db
         .collection::<Document>("nyxbot_events")
-        .update_many(doc! {}, doc! {"$unset":{"event_context_ciphertext":""}})
+        .update_many(
+            doc! {},
+            doc! {"$unset":{"event_context_ciphertext":"","event_context_version":""}},
+        )
         .await
         .unwrap();
     crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
@@ -2675,5 +2753,162 @@ async fn execution_result_unsupported_plan_retires_without_provider_effect_or_re
         .await
         .unwrap();
     assert!(server.received_requests().await.unwrap().is_empty());
+    f.cleanup().await;
+}
+
+/// A carried task keeps its root source, while the engine's independent
+/// assignment constructor captures the sole context of a later admitted Event.
+/// Both sources below come from real channel admission; the Event is a
+/// server-authored continuation fixture, not another human ingress claim.
+#[tokio::test]
+async fn migration_channel_later_supervisor_event_retains_independent_proofs() {
+    use crate::models::assistant_conversation::{AgentRole, ChannelTurnContext};
+    use crate::services::{assistant_team_service as team, supervisor_write};
+
+    let (f, original, original_event) =
+        channel_turn("migration_channel_later_supervisor_event", true).await;
+    let task = original
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .execution_task
+        .clone()
+        .unwrap();
+    let root_source = task.channel_source.as_ref().unwrap();
+    assert!(!root_source.audience_label.is_empty());
+    finish(&f, &original, "Original task waits").await;
+    let later = another_channel_turn(&f, &original, &original_event).await;
+    let later_source = later
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .execution_task
+        .as_ref()
+        .unwrap()
+        .channel_source
+        .as_ref()
+        .unwrap()
+        .clone();
+    assert_ne!(root_source.event_id, later_source.event_id);
+    assert_ne!(root_source.original_turn_id, later_source.original_turn_id);
+    let channel = f
+        .state
+        .db
+        .collection::<Document>("nyxbot_channels")
+        .find_one(doc! {"_id":&later_source.channel_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let context = ChannelTurnContext {
+        channel_guest: None,
+        meta_grant: None,
+        text_completeness: None,
+        org_origin: None,
+        display_name: None,
+        conversation_label: None,
+        followed: false,
+        source_event_id: later_source.event_id.clone(),
+        channel_id: later_source.channel_id.clone(),
+        channel_bot_id: channel.get_str("channel_bot_id").unwrap().into(),
+        conversation_kind: "private".into(),
+        sender_kind: crate::models::channel_thread::ThreadSenderKind::Human,
+        guest: false,
+        original_message: true,
+    };
+    finish(&f, &later, "Later owner message recorded").await;
+    let mut event = team::bound_event(
+        "owner_action_decided",
+        "Continue the original task".into(),
+        None,
+        None,
+    );
+    event.execution_task = Some(task.clone());
+    event.channel_contexts = vec![context];
+    let mut tx = f.state.db.client().start_session().await.unwrap();
+    tx.start_transaction().await.unwrap();
+    assert!(
+        engine::append_events_in_session(&f.state.db, &f.owner, &original.id, &[event], &mut tx)
+            .await
+            .unwrap()
+    );
+    tx.commit_transaction().await.unwrap();
+    let parent = event_turn(&f, &original).await;
+    let assigning = parent.active_turn.as_ref().unwrap();
+    assert_eq!(assigning.origin, TurnOrigin::Event);
+    assert_eq!(assigning.execution_task.as_ref(), Some(&task));
+    let chat = acks::chat_for_conversation(&f.state.db, &parent)
+        .await
+        .unwrap()
+        .unwrap();
+    let causal = supervisor_write::parent(&chat).unwrap();
+    // assign only mutates the engine's not-yet-persisted child. A child shell is
+    // sufficient to exercise that constructor without launching another model.
+    let mut child = parent.clone();
+    child.id = Uuid::new_v4().to_string();
+    child.role = AgentRole::Subagent;
+    let turn = child.active_turn.as_mut().unwrap();
+    turn.origin = TurnOrigin::Orchestrator;
+    turn.report_to = Some(parent.id.clone());
+    turn.supervisor_source = None;
+    tx.start_transaction().await.unwrap();
+    supervisor_write::assign(&f.state.db, &mut tx, &mut child, Some(&causal))
+        .await
+        .unwrap();
+    tx.commit_transaction().await.unwrap();
+    let assigned = child
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .supervisor_source
+        .as_ref()
+        .unwrap();
+    assert_eq!(assigned.channel.event_id, later_source.event_id);
+    assert_eq!(
+        assigned.channel.original_turn_id,
+        later_source.original_turn_id
+    );
+    assert_eq!(assigned.assigning_turn, assigning.turn_id);
+    assert_ne!(assigned.channel.original_turn_id, assigned.assigning_turn);
+    assert_ne!(assigned.channel.policy_digest, root_source.policy_digest);
+    assert_ne!(assigned.channel.expires_at, root_source.expires_at);
+    assert!(assigned.channel.audience_label.is_empty());
+    assert_eq!(
+        child.active_turn.as_ref().unwrap().execution_task.as_ref(),
+        Some(&task)
+    );
+    tasks::check(&f.state.db, &task).await.unwrap();
+    channel::validate_supervisor(&f.state.db, &mut tx, &assigned.channel, false)
+        .await
+        .unwrap();
+    // Each proof's own deadline and event binding remains mandatory.
+    let mut expired_assignment = assigned.channel.clone();
+    expired_assignment.expires_at = Utc::now() - chrono::Duration::seconds(1);
+    assert!(
+        channel::validate_supervisor(&f.state.db, &mut tx, &expired_assignment, false)
+            .await
+            .is_err()
+    );
+    let mut expired_task = task.clone();
+    expired_task.hard_deadline = Utc::now() - chrono::Duration::seconds(1);
+    assert!(tasks::check(&f.state.db, &expired_task).await.is_err());
+    let mut drift = assigned.channel.clone();
+    drift.original_turn_id = root_source.original_turn_id.clone();
+    assert!(
+        channel::validate_supervisor(&f.state.db, &mut tx, &drift, false)
+            .await
+            .is_err()
+    );
+    // Revoking the root event leaves the later assignment proof independently
+    // readable; it still revokes this task and cannot substitute that proof.
+    f.state.db.collection::<Document>("nyxbot_events").update_one(
+        doc! {"_id":&root_source.event_id},
+        doc! {"$set":{"expires_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::seconds(1))}}
+    ).await.unwrap();
+    assert!(tasks::check(&f.state.db, &task).await.is_err());
+    channel::validate_supervisor(&f.state.db, &mut tx, &assigned.channel, false)
+        .await
+        .unwrap();
+    assert!(f.server.received_requests().await.unwrap().is_empty());
+    finish(&f, &parent, "Constructor regression complete").await;
     f.cleanup().await;
 }

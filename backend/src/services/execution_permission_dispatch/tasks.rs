@@ -454,6 +454,9 @@ pub(crate) fn settle<'a>(
         if !receipts.is_empty() && message.status == "completed" {
             for version in proposals::v3::AssistantVersion::ALL {
                 db.collection::<Document>("approval_requests").update_many(version.selector(doc!{"_id":{"$in":&receipts},"user_id":&row.user_id,
+                    "$or":[{"execution_proposal.v1.owner_continuation":null},
+                        {"execution_proposal.v1.owner_continuation.blocked":true},
+                        {"execution_proposal.v1.owner_continuation.released_turn_id":{"$ne":null}}],
                     "execution_proposal.v1.state":{"$in":["completed","not_sent","unknown","denied","expired","cancelled"]}}),
                     version.update(doc!{"$set":{"execution_proposal.v1.delivered_turn_id":&turn.turn_id}})).session(&mut *session).await?;
             }
@@ -489,7 +492,14 @@ pub(crate) fn settle<'a>(
             .is_some();
         let pending_effect = db.collection::<Document>("approval_requests").find_one(proposals::v3::source_selector(doc! {
             "user_id":&row.user_id,"execution_proposal.v1.task.task":&reference,
-            "execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]},
+            "$or":[
+                {"execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]}},
+                {"execution_proposal.v1.state":"completed",
+                    "execution_proposal.v1.delivered_turn_id":null,
+                    "execution_proposal.v1.owner_continuation.version":1,
+                    "execution_proposal.v1.owner_continuation.blocked":{"$ne":true},
+                    "execution_proposal.v1.owner_continuation.released_turn_id":null}
+            ],
             "execution_proposal.v1.task.hard_deadline":{"$gt":bson::DateTime::now()}
         })).session(&mut *session).await?.is_some();
         let mut background = false;

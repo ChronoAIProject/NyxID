@@ -9,6 +9,7 @@ use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+pub(crate) mod continuation;
 mod lifecycle;
 mod presentation;
 pub(crate) mod record;
@@ -16,11 +17,10 @@ mod resume;
 use record::{Arm, Field, Slot};
 pub(crate) mod v2;
 pub(crate) mod v3;
+pub(crate) use continuation::ResumeOutcome;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
 pub(crate) use presentation::delivery_notice;
-#[cfg(test)]
-pub(crate) use resume::resume_turn;
-pub(crate) use resume::{Resume, result_for_human, resume_turn_with_readback};
+pub(crate) use resume::{Resume, result_for_human, resume_turn};
 use v3::{AssistantVersion, assistant_selector};
 pub(crate) const READINESS: &str = "permissions:execution-authoring-v1";
 pub(crate) const MAX_PAYLOAD: usize = 256 * 1024;
@@ -64,6 +64,16 @@ fn label(value: &str) -> String {
         .filter(|c| !c.is_control())
         .take(160)
         .collect()
+}
+fn operation_label(method: &str, path: &str) -> String {
+    // Proxy paths are relative. Display their HTTP spelling without changing
+    // the retained payload, digest or operation identity.
+    let path = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{path}")
+    };
+    format!("{} {}", method, label(&path))
 }
 fn binary(bytes: Vec<u8>) -> bson::Binary {
     bson::Binary {
@@ -410,6 +420,7 @@ pub(super) async fn create(
         choices.push(v3::choice(&contract)?);
     }
     let p = Proposal {
+        owner_continuation: None,
         revision: 1,
         gap_key: gap_key.clone(),
         effect_id: context.operation_id.clone(),
@@ -476,7 +487,7 @@ pub(super) async fn create(
         requester_type: "user".into(),
         requester_id: chat.user_id.clone(),
         requester_label: Some(label(&chat.agent_name)),
-        operation_summary: format!("{} {}", effect.method, label(effect.path)),
+        operation_summary: operation_label(effect.method, effect.path),
         action_description: Some("Review an execution permission for this task".into()),
         http_method: Some(effect.method.into()),
         resource: Some(label(effect.path)),
@@ -849,7 +860,7 @@ pub(crate) fn legacy_refusal(row: &ApprovalRequest) -> AppResult<()> {
 }
 
 fn secret_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
+    let key = key.to_ascii_lowercase().replace('-', "_");
     [
         "password",
         "secret",
@@ -929,7 +940,7 @@ async fn review(
     let mut displayed = Review {
         agent:label(&chat.agent_name),
         connection:format!("{} · {} · {}",label(&connection.slug),if effect.owner==chat.user_id{"your connection"}else{"shared connection"},effect.connection.chars().rev().take(8).collect::<String>().chars().rev().collect::<String>()),
-        operation:format!("{} {}",effect.method,label(effect.path)),
+        operation:operation_label(effect.method,effect.path),
         audience:if let Some(source)=chat.execution_task.as_ref().and_then(|t|t.channel_source.as_ref()) {format!("{} — the original channel chat/thread and everyone who can see it. Decide only in NyxID; the result will be replied there while its source is valid.",label(&source.audience_label))}else if chat.execution_group_id.is_some(){"This group and its current participants".into()}else{"This private conversation".into()},
         scope:if reusable{"Only this exact path, query and JSON input in this conversation"}else{"Only this retained operation, including its exact inputs and headers"}.into(),
         inputs:inputs.chars().filter(|c| !c.is_control()).take(12_000).collect(),
@@ -979,6 +990,8 @@ pub(super) fn approve_url(frontend_url: &str) -> String {
 /// Pending/denied/uncertain effects remain task-bound. A completed receipt can
 /// authorize a new occurrence only in a different server-admitted turn after
 /// settlement delivered that receipt; retries of either original/resume turn join it.
+/// A released retained-owner turn also joins prior marked successes in the task,
+/// including later reviewed readbacks. Ordinary admitted follow-ups stay independent.
 pub(super) async fn existing_effect(
     db: &Database,
     context: &RequestContext,
@@ -988,20 +1001,44 @@ pub(super) async fn existing_effect(
     frontend_url: &str,
 ) -> AppResult<()> {
     let task = chat.execution_task.as_ref().ok_or_else(refused)?;
-    if let Some(row)=db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{
+    // A task has at most 32 assistant proposals. One bounded query preserves
+    // the ordinary no-match cost and lets outstanding retries take precedence
+    // over an older delivered success with the same prepared digest.
+    let rows: Vec<ApprovalRequest> = db.collection::<ApprovalRequest>(REQUESTS).find(assistant_selector(doc! {
         "user_id":&chat.user_id,"execution_proposal.v1.key_id":&chat.api_key_id,
         "execution_proposal.v1.conversation_id":&chat.conversation_id,"execution_proposal.v1.task.task":bson::to_bson(&task.task).map_err(encoding)?,
         "execution_proposal.v1.task.epoch":task.epoch,"execution_proposal.v1.contract.binding.connection_id":connection,
         "execution_proposal.v1.prepared_digest":digest,
         "$or":[{"execution_proposal.v1.state":{"$ne":"completed"}},
+            {"execution_proposal.v1.owner_continuation.version":1},
             {"execution_proposal.v1.delivered_turn_id":null},
             {"execution_proposal.v1.source_turn_id":&chat.turn_id},
             {"execution_proposal.v1.resume_turn_id":&chat.turn_id}]
-    })).await? {
+    })).limit(32).await?.try_collect().await?;
+    let mut existing = None;
+    let mut marked = None;
+    for row in rows {
+        let p = proposal(&row)?;
+        if p.state != "completed"
+            || p.delivered_turn_id.is_none()
+            || Some(p.source_turn_id.as_str()) == chat.turn_id.as_deref()
+            || p.resume_turn_id == chat.turn_id
+        {
+            existing = Some(row);
+            break;
+        }
+        marked = Some(row);
+    }
+    if existing.is_none() && marked.is_some() && continuation::released_for_turn(db, chat).await? {
+        existing = marked;
+    }
+    if let Some(row) = existing {
         if let Ok(p) = proposal(&row) {
             context.observation.replay(&row.status, &p.state);
         }
-        return Err(if row.status=="pending"&&row.expires_at>Utc::now(){AppError::ApprovalRequired{request_id:row.id}}else{
+        return Err(if row.status == "pending" && row.expires_at > Utc::now() {
+            AppError::ApprovalRequired { request_id: row.id }
+        } else {
             AppError::ApprovalFailed{request_id:row.id,reason:"This task already has a decision for this operation. Its retained effect will not be repeated; review its status.".into(),approve_url:approve_url(frontend_url)}
         });
     }

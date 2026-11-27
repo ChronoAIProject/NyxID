@@ -264,14 +264,22 @@ async fn load(j: &Journey, id: &str) -> ApprovalRequest {
 }
 
 async fn wait_proposal(j: &Journey) -> ApprovalRequest {
+    wait_proposal_after(j, None).await
+}
+
+async fn wait_proposal_after(j: &Journey, previous: Option<&str>) -> ApprovalRequest {
     let waited = tokio::time::timeout(Duration::from_secs(15), async {
         loop {
+            let mut filter = doc! {"user_id":OWNER,"execution_proposal.version":5,
+            "resource":{"$regex":format!("/{}$",j.script.selected)}};
+            if let Some(previous) = previous {
+                filter.insert("_id", doc! {"$ne":previous});
+            }
             if let Some(row) = j
                 .state
                 .db
                 .collection::<ApprovalRequest>("approval_requests")
-                .find_one(doc! {"user_id":OWNER,"execution_proposal.version":5,
-                "resource":{"$regex":format!("/{}$",j.script.selected)}})
+                .find_one(filter)
                 .await
                 .unwrap()
             {
@@ -904,7 +912,9 @@ async fn supervisor_write_public_destination_keeps_owner_history_and_refuses_web
 
 #[tokio::test]
 async fn supervisor_write_marked_rejection_survives_readback_recovery_and_later_success() {
-    for (proxy, already_matches) in [(false, false), (true, true)] {
+    for (proxy, already_matches, changed_later_inputs) in
+        [(false, false, false), (true, true, true)]
+    {
         let j = Box::pin(marked_journey(proxy)).await;
         let proposal = initial_gap(&j).await;
         j.script.reject_write.store(true, Ordering::SeqCst);
@@ -942,6 +952,17 @@ async fn supervisor_write_marked_rejection_survives_readback_recovery_and_later_
             j.state.clone(),
             crate::test_utils::test_auth_user(OWNER),
         );
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &j.state.db,
+                &j.state.encryption_keys,
+                &row.user_id,
+                &row.id,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(credential.api_key_id, row.credential_api_key_id);
         for prior_code in [true, false] {
             if !prior_code {
                 // A previously stored failed receipt may predate the explicit
@@ -956,12 +977,16 @@ async fn supervisor_write_marked_rejection_survives_readback_recovery_and_later_
                     .await
                     .unwrap();
             }
-            let recovered = proposals::resume_turn_with_readback(&j.state, egress.as_ref(), &row)
+            let recovered = proposals::resume_turn(&j.state, egress.as_ref(), &row, &credential)
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(recovered.text.contains("provider rejected"));
-            assert!(recovered.specialist_readback.is_none());
+            let proposals::ResumeOutcome::Receipt(text) = recovered else {
+                panic!("a terminal rejection never launches another continuation");
+            };
+            assert!(text.contains("provider rejected"));
+            assert!(text.contains("unconfirmed"));
+            assert!(p.owner_continuation.is_none());
             assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
         }
         j.script.release.add_permits(1);
@@ -972,6 +997,12 @@ async fn supervisor_write_marked_rejection_survives_readback_recovery_and_later_
             "Pending"
         };
         assert_row_report(&final_report, &j, observed, 3);
+        assert_eq!(
+            final_report
+                .matches("The provider rejected this write;")
+                .count(),
+            1
+        );
         assert!(
             final_report.contains("not confirmed as successful")
                 && final_report.contains("observed state only")
@@ -992,22 +1023,114 @@ async fn supervisor_write_marked_rejection_survives_readback_recovery_and_later_
         let binding = review.supervisor_write.as_ref().unwrap();
         wait_idle(&j, &binding.specialist_conversation).await;
         wait_idle(&j, &binding.source.channel.conversation_id).await;
-        // A different current occurrence uses the saved permission, a fresh
-        // exact DM decision, and a real successful exchange. The older failed
-        // receipt must not contaminate its readback or owner-facing result.
+        // A later occurrence must keep its own outcome. Cover both the same
+        // reviewed inputs and a different effect that needs its own web review.
         j.script.reject_write.store(false, Ordering::SeqCst);
-        j.script.hold_readback.store(false, Ordering::SeqCst);
-        let result = marked_assign(&j, &j.script.selection(), "ws7-after-rejection").await;
-        let (next, code) = wait_review(&j).await;
-        assert_ne!(next.id, review.id);
-        let _ = body_text(owner(&j, &format!("yes write-{code}"), "ws7-after-rejection-yes").await)
-            .await;
-        let report = owner_text(
-            &tokio::time::timeout(Duration::from_secs(25), result)
+        j.script
+            .hold_readback
+            .store(changed_later_inputs, Ordering::SeqCst);
+        let task = if changed_later_inputs {
+            j.stage.store(4, Ordering::SeqCst);
+            format!("{}. Also set Amount to 12", j.script.selection())
+        } else {
+            j.script.selection()
+        };
+        let result = marked_assign(&j, &task, "ws7-after-rejection").await;
+        let report = if changed_later_inputs {
+            let initial = owner_text(
+                &tokio::time::timeout(Duration::from_secs(25), result)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert!(initial.contains(NO_CONFIRMATION));
+            let next_proposal = wait_proposal_after(&j, Some(&proposal.id)).await;
+            let later = proposals::proposal(&next_proposal).unwrap();
+            assert_ne!(later.task.task, p.task.task);
+            assert_ne!(later.effect_id, p.effect_id);
+            assert_ne!(later.prepared_digest, p.prepared_digest);
+            assert_eq!(next_proposal.status, "pending");
+            assert_eq!(
+                j.state
+                    .db
+                    .collection::<Document>("approval_requests")
+                    .count_documents(doc! {"execution_proposal.version":5})
+                    .await
+                    .unwrap(),
+                2
+            );
+            assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
+            web_allow(&j, &next_proposal, "operation", &Uuid::new_v4().to_string()).await;
+            let (next, code) = wait_review(&j).await;
+            assert_ne!(next.id, review.id);
+            let next_delivery = cursor(&j).await;
+            let _ =
+                body_text(owner(&j, &format!("yes write-{code}"), "ws7-after-rejection-yes").await)
+                    .await;
+            let success = wait_terminal(&j, &next_proposal.id).await;
+            assert_eq!(success.activity_outcome.as_deref(), Some("completed"));
+            assert!(
+                proposals::proposal(&success)
+                    .unwrap()
+                    .failure_code
+                    .is_none()
+            );
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while !j
+                    .observed
+                    .lock()
+                    .await
+                    .iter()
+                    .skip(next_delivery.observations)
+                    .any(|e| e["stage"] == "readback_started")
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let current = engine::get(&j.state.db, OWNER, &later.conversation_id)
+                .await
+                .unwrap();
+            let credential =
+                crate::services::assistant_agent_credential_service::load_for_conversation(
+                    &j.state.db,
+                    &j.state.encryption_keys,
+                    &current.user_id,
+                    &current.id,
+                )
                 .await
                 .unwrap()
-                .unwrap(),
-        );
+                .unwrap();
+            let recovered =
+                proposals::resume_turn(&j.state, egress.as_ref(), &current, &credential)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let proposals::ResumeOutcome::Receipt(text) = recovered else {
+                panic!("a later successful receipt cannot restart readback");
+            };
+            assert!(!text.contains("provider rejected"));
+            assert!(text.contains("unconfirmed"));
+            assert_eq!(
+                load(&j, &proposal.id).await.activity_outcome.as_deref(),
+                Some("failed")
+            );
+            j.script.release.add_permits(1);
+            later_dm_report(&j, &next_delivery, &next, "provider-search-5:").await
+        } else {
+            let (next, code) = wait_review(&j).await;
+            assert_ne!(next.id, review.id);
+            let _ =
+                body_text(owner(&j, &format!("yes write-{code}"), "ws7-after-rejection-yes").await)
+                    .await;
+            owner_text(
+                &tokio::time::timeout(Duration::from_secs(25), result)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+        };
         assert_row_report(&report, &j, "Approved", 5);
         assert!(
             !report.contains("provider rejected")
@@ -1016,9 +1139,33 @@ async fn supervisor_write_marked_rejection_survives_readback_recovery_and_later_
         let ledger = j.ledger.lock().unwrap();
         assert_eq!(ledger.writes.len(), 2);
         assert_eq!(ledger.rejected.len(), 1);
+        assert_eq!(ledger.reads.len(), 5);
+        assert_eq!(
+            ledger.writes[1].1,
+            if changed_later_inputs {
+                json!({"fields":{"Amount":12,"Status":"Approved"}})
+            } else {
+                json!({"fields":{"Status":"Approved"}})
+            }
+        );
         assert_eq!(ledger.target, "Approved");
         assert_eq!(ledger.control, "Untouched");
         drop(ledger);
+        let actual = j._ledger_server.received_requests().await.unwrap();
+        assert_eq!(
+            actual
+                .iter()
+                .filter(|request| request.method.as_str() == "PUT")
+                .count(),
+            2
+        );
+        assert_eq!(
+            actual
+                .iter()
+                .filter(|request| request.url.path().ends_with("/records/search"))
+                .count(),
+            5
+        );
         remove_adapter(&j);
     }
 }
@@ -1154,6 +1301,15 @@ async fn supervisor_write_marked_retained_http_and_mcp_need_web_and_dm_then_spec
             task,
             &display_only
         ));
+        let root_source = task.channel_source.as_ref().unwrap();
+        assert_eq!(
+            root_source.actor_user_id,
+            binding.source.channel.actor_user_id
+        );
+        assert_eq!(
+            root_source.conversation_id,
+            binding.source.channel.conversation_id
+        );
         assert_eq!(
             binding.marked.as_ref().unwrap().operation_id,
             proposals::proposal(&proposal).unwrap().effect_id
@@ -1608,86 +1764,149 @@ async fn supervisor_write_marked_older_retained_payload_without_assignment_proof
 
 #[tokio::test]
 async fn supervisor_write_marked_terminal_recovery_is_unverifiable_and_never_repeats() {
-    let j = Box::pin(marked_journey(false)).await;
-    j.script.hold_readback.store(true, Ordering::SeqCst);
-    j.script.readback_fault.store(true, Ordering::SeqCst);
-    let proposal = initial_gap(&j).await;
-    web_allow(&j, &proposal, "operation", &Uuid::new_v4().to_string()).await;
-    let (review, code) = wait_review(&j).await;
-    let _ = body_text(owner(&j, &format!("yes write-{code}"), "ws7-recovery-yes").await).await;
-    let completed = wait_terminal(&j, &proposal.id).await;
-    let p = proposals::proposal(&completed).unwrap();
-    assert!(
-        p.payload.is_none(),
-        "terminal recovery must work after payload purge"
-    );
-    tokio::time::timeout(Duration::from_secs(15), async {
-        while !j
-            .observed
-            .lock()
-            .await
-            .iter()
-            .any(|e| e["stage"] == "readback_started")
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+    for (proxy, failed_http) in [(false, false), (true, true)] {
+        let j = Box::pin(marked_journey(proxy)).await;
+        if failed_http {
+            j.script.reject_write.store(true, Ordering::SeqCst);
         }
-    })
-    .await
-    .unwrap();
-    let row = engine::get(&j.state.db, OWNER, &p.conversation_id)
+        j.script.hold_readback.store(true, Ordering::SeqCst);
+        j.script.readback_fault.store(true, Ordering::SeqCst);
+        let proposal = initial_gap(&j).await;
+        web_allow(&j, &proposal, "operation", &Uuid::new_v4().to_string()).await;
+        let (review, code) = wait_review(&j).await;
+        let _ = body_text(owner(&j, &format!("yes write-{code}"), "ws7-recovery-yes").await).await;
+        let completed = wait_terminal(&j, &proposal.id).await;
+        assert_eq!(
+            completed.activity_outcome.as_deref(),
+            Some(if failed_http { "failed" } else { "completed" })
+        );
+        let p = proposals::proposal(&completed).unwrap();
+        assert!(
+            p.payload.is_none(),
+            "terminal recovery must work after payload purge"
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !j
+                .observed
+                .lock()
+                .await
+                .iter()
+                .any(|e| e["stage"] == "readback_started")
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
         .await
         .unwrap();
-    let egress = crate::handlers::assistant_nyxagent::http_egress(
-        j.state.clone(),
-        crate::test_utils::test_auth_user(OWNER),
-    );
-    let recovered = proposals::resume_turn_with_readback(&j.state, egress.as_ref(), &row)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(recovered.text.contains("unconfirmed"));
-    assert!(recovered.specialist_readback.is_none());
-    assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
-    // A process lost after dispatch is recovered from its actual typed source,
-    // without the purged body and without a second provider attempt.
-    j.state.db.collection::<Document>("approval_requests").update_one(doc! {"_id":&proposal.id},doc! {
-        "$set":{"execution_proposal.v4.state":"dispatched",
-            "execution_proposal.v4.claimed_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::minutes(3))}
-    }).await.unwrap();
-    for _ in 0..2 {
-        let recovered = proposals::resume_turn_with_readback(&j.state, egress.as_ref(), &row)
+        let row = engine::get(&j.state.db, OWNER, &p.conversation_id)
+            .await
+            .unwrap();
+        let egress = crate::handlers::assistant_nyxagent::http_egress(
+            j.state.clone(),
+            crate::test_utils::test_auth_user(OWNER),
+        );
+        let credential =
+            crate::services::assistant_agent_credential_service::load_for_conversation(
+                &j.state.db,
+                &j.state.encryption_keys,
+                &row.user_id,
+                &row.id,
+            )
             .await
             .unwrap()
             .unwrap();
-        assert!(recovered.text.contains("unknown") && recovered.text.contains("cannot prove"));
-        assert!(recovered.specialist_readback.is_none());
-        assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
-    }
-    let delivery = cursor(&j).await;
-    j.script.release.add_permits(1);
-    let report = later_dm_report(&j, &delivery, &review, NO_CONFIRMATION).await;
-    assert_eq!(report, NO_CONFIRMATION);
-    wait_idle(&j, &p.conversation_id).await;
-    let source = p.task.channel_source.as_ref().unwrap();
-    j.state
-        .db
-        .collection::<Document>("nyxbot_channels")
-        .update_one(
-            doc! {"_id":&source.channel_id},
-            doc! {"$set":{"owner_sender_ids":[]}},
-        )
-        .await
-        .unwrap();
-    assert!(
-        proposals::resume_turn_with_readback(&j.state, egress.as_ref(), &row)
+        assert_eq!(credential.api_key_id, row.credential_api_key_id);
+        let recovered = proposals::resume_turn(&j.state, egress.as_ref(), &row, &credential)
             .await
-            .is_err()
-    );
-    let ledger = j.ledger.lock().unwrap();
-    assert_eq!(ledger.writes.len(), 1);
-    assert_eq!(ledger.control, "Untouched");
-    drop(ledger);
-    remove_adapter(&j);
+            .unwrap()
+            .unwrap();
+        let proposals::ResumeOutcome::Receipt(text) = recovered else {
+            panic!("terminal recovery must not launch either continuation");
+        };
+        assert!(text.contains("unconfirmed"));
+        assert_eq!(text.contains("provider rejected"), failed_http);
+        if failed_http {
+            assert!(!text.contains("provider receipt"));
+        }
+        assert_eq!(
+            j._ledger_server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.method.as_str() == "PUT")
+                .count(),
+            1
+        );
+        assert!(p.owner_continuation.is_none());
+        assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
+        // A process lost after dispatch is recovered from its actual typed source,
+        // without the purged body and without a second provider attempt.
+        j.state
+            .db
+            .collection::<Document>("approval_requests")
+            .update_one(
+                doc! {"_id":&proposal.id},
+                doc! {"$set":{
+                    "execution_proposal.v4.state":"dispatched",
+                    "execution_proposal.v4.claimed_at":bson::DateTime::from_chrono(
+                        Utc::now()-ChronoDuration::minutes(3)
+                    )
+                }},
+            )
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            let recovered = proposals::resume_turn(&j.state, egress.as_ref(), &row, &credential)
+                .await
+                .unwrap()
+                .unwrap();
+            let proposals::ResumeOutcome::Receipt(text) = recovered else {
+                panic!("uncertain recovery must remain receipt-only");
+            };
+            assert!(text.contains("unknown") && text.contains("cannot prove"));
+            assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
+        }
+        let delivery = cursor(&j).await;
+        j.script.release.add_permits(1);
+        let report = later_dm_report(&j, &delivery, &review, NO_CONFIRMATION).await;
+        assert_eq!(report, NO_CONFIRMATION);
+        wait_idle(&j, &p.conversation_id).await;
+        let source = p.task.channel_source.as_ref().unwrap();
+        j.state
+            .db
+            .collection::<Document>("nyxbot_channels")
+            .update_one(
+                doc! {"_id":&source.channel_id},
+                doc! {"$set":{"owner_sender_ids":[]}},
+            )
+            .await
+            .unwrap();
+        assert!(
+            proposals::resume_turn(&j.state, egress.as_ref(), &row, &credential)
+                .await
+                .is_err()
+        );
+        let ledger = j.ledger.lock().unwrap();
+        assert_eq!(ledger.writes.len(), 1);
+        assert_eq!(ledger.control, "Untouched");
+        assert_eq!(
+            ledger.target,
+            if failed_http { "Pending" } else { "Approved" }
+        );
+        drop(ledger);
+        assert_eq!(
+            j._ledger_server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.method.as_str() == "PUT")
+                .count(),
+            1
+        );
+        remove_adapter(&j);
+    }
 }
 
 #[tokio::test]

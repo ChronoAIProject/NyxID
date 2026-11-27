@@ -8144,6 +8144,14 @@ pub use chats::{list_channel_chats, update_channel_chat};
 #[path = "nyxbot_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+pub(crate) fn watch_relay_callback_for_test(
+    channel_id: &str,
+    message_id: &str,
+) -> (impl Send, tokio::sync::oneshot::Receiver<()>) {
+    tests::watch_relay_callback(channel_id, message_id)
+}
+
 #[path = "nyxbot_images.rs"]
 pub(crate) mod images;
 #[path = "nyxbot_status.rs"]

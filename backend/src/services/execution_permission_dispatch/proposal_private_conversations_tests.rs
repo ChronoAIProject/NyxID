@@ -300,12 +300,13 @@ async fn private_conversations_readiness_loss_blocks_decision_and_resume() {
             assert_eq!(count(&f, "approval_grants").await, 0);
         } else {
             let resumed = event_turn(&f, &first).await;
+            let credential = load_credential(&f, &resumed).await;
             let egress = crate::handlers::assistant_nyxagent::http_egress(
                 f.state.clone(),
                 test_utils::test_auth_user(&f.owner),
             );
             assert!(matches!(
-                proposals::resume_turn(&f.state, egress.as_ref(), &resumed).await,
+                proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential).await,
                 Err(AppError::SecurityReadinessUnavailable)
             ));
             assert_eq!(
@@ -410,6 +411,7 @@ async fn private_conversations_revocation_and_task_stop_fence_the_original_effec
                 .unwrap();
         finish(&f, &first, "Waiting").await;
         let resumed = event_turn(&f, &first).await;
+        let credential = load_credential(&f, &resumed).await;
         match change {
             "revoke" => {
                 crate::services::approval_service::revoke_grant(
@@ -439,12 +441,14 @@ async fn private_conversations_revocation_and_task_stop_fence_the_original_effec
             f.state.clone(),
             test_utils::test_auth_user(&f.owner),
         );
-        let outcome = proposals::resume_turn(&f.state, egress.as_ref(), &resumed).await;
+        let outcome =
+            proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential).await;
         assert!(
             outcome.is_err()
-                || outcome.unwrap().is_some_and(
-                    |text| text.contains("not sent") || text.contains("Nothing was sent")
-                ),
+                || outcome.unwrap().is_some_and(|outcome| {
+                    let text = outcome.into_text();
+                    text.contains("not sent") || text.contains("Nothing was sent")
+                }),
             "{change}"
         );
         assert!(

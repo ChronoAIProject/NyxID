@@ -429,7 +429,7 @@ pub(super) async fn review_v2(
     Ok(Review {
         agent: "API key request".into(),
         connection: label(&connection.slug),
-        operation: format!("{} {}", effect.method, label(effect.path)),
+        operation: operation_label(effect.method, effect.path),
         audience: "Only this authenticated caller".into(),
         scope: if reusable {
             "This exact path, query and JSON input for this API key and audience"

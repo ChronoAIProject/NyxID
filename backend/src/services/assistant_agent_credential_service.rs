@@ -21,6 +21,15 @@ use crate::{
     services::{api_key_mutation_service as mutations, key_service},
 };
 
+/// An empty key never matches or changes ordinary text.
+pub(crate) fn redact_key(text: &str, key: &str) -> String {
+    if key.is_empty() {
+        text.to_owned()
+    } else {
+        text.replace(key, "[redacted]")
+    }
+}
+
 /// The authority a thread key carries. NyxBot threads always run with Full
 /// access; specialist threads carry exactly their agent's grants.
 #[derive(Clone, Debug)]

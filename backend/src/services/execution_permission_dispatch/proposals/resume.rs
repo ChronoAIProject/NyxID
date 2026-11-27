@@ -97,12 +97,24 @@ impl Resume {
     }
 }
 
-/// Runs only typed, server-authored decision events, never ordinary turns. The
-/// normal turn lease and admission remain responsible for requester isolation.
-pub(crate) struct ResumeOutcome {
-    pub(crate) text: String,
-    pub(crate) specialist_readback: Option<String>,
-    pub(crate) provider_notice: Option<&'static str>,
+// A task root and a later assigning Event may authenticate distinct original
+// messages in the same owner chat. Each proof is validated independently; only
+// their shared authorization identity is comparable across those messages.
+fn same_owner_chat(
+    left: &crate::models::execution_permission_channel::ChannelSource,
+    right: &crate::models::execution_permission_channel::ChannelSource,
+) -> bool {
+    left.version == right.version
+        && left.actor_user_id == right.actor_user_id
+        && left.agent_id == right.agent_id
+        && left.conversation_id == right.conversation_id
+        && left.key_id == right.key_id
+        && left.channel_id == right.channel_id
+        && left.thread_id == right.thread_id
+        && left.settings_thread_id == right.settings_thread_id
+        && left.channel_revision == right.channel_revision
+        && left.thread_revision == right.thread_revision
+        && left.audience_id == right.audience_id
 }
 
 const PROVIDER_REJECTION: &str = "The provider rejected this write; this attempt is not confirmed as successful. An independent read reports observed state only, even if it already matches the requested value.";
@@ -169,28 +181,138 @@ async fn require_durable_event(
     Ok(())
 }
 
-#[cfg(test)]
+fn same_supervisor_source(
+    left: &crate::models::approval_request::SupervisorSource,
+    right: &crate::models::approval_request::SupervisorSource,
+) -> bool {
+    // Within one stored assignment, preserve every authorization field. The
+    // audience label is explicitly display-only, never source authority.
+    same_owner_chat(&left.channel, &right.channel)
+        && left.channel.event_id == right.channel.event_id
+        && left.channel.original_turn_id == right.channel.original_turn_id
+        && left.channel.policy_digest == right.channel.policy_digest
+        && left.channel.expires_at == right.channel.expires_at
+        && left.assigning_turn == right.assigning_turn
+        && left.reset_at == right.reset_at
+}
+
+fn specialist_readback(
+    row: &AssistantConversation,
+    proposal: &Proposal,
+    resume: &Resume,
+) -> Option<(String, crate::models::approval_request::SupervisorSource)> {
+    let turn = row.active_turn.as_ref()?;
+    let origin = resume.effect.supervisor.as_deref()?;
+    let task_source = proposal.task.channel_source.as_deref()?;
+    let target = origin.source.channel.conversation_id.as_str();
+    if !crate::services::supervisor_write::personal(row)
+        || !row.is_subagent()
+        || turn.origin != crate::models::assistant_conversation::TurnOrigin::Event
+        || turn.voice_request_id.is_some()
+        || turn.trigger_run_id.is_some()
+        || turn.automation_work.is_some()
+        || turn.invocation_id.is_some()
+        || turn.platform_origin.is_some()
+        || turn.channel_adapter_origin.is_some()
+        || turn.report_to.as_deref() != Some(target)
+        || proposal.report_to.as_deref() != Some(target)
+        || turn
+            .events
+            .first()
+            .is_none_or(|event| !event.bound || event.report_to.as_deref() != Some(target))
+        || row.agent_id.as_deref() != Some(origin.agent.as_str())
+        || origin.conversation != row.id
+        || origin.key != row.credential_api_key_id
+        || origin.connection != resume.effect.connection
+        || origin.catalog != resume.effect.catalog
+        || origin.marked.operation_id != proposal.effect_id
+        || origin.marked.origin_turn != proposal.source_turn_id
+        || !crate::services::supervisor_write::same_task(&origin.marked.task, &proposal.task)
+        || !same_owner_chat(task_source, &origin.source.channel)
+        || origin.source.channel.actor_user_id != row.user_id
+        || turn
+            .supervisor_source
+            .as_deref()
+            .is_some_and(|source| !same_supervisor_source(source, &origin.source))
+    {
+        return None;
+    }
+    crate::services::supervisor_write::readback_instruction(&resume.effect)
+        .map(|instruction| (instruction, origin.source.clone()))
+}
+
+/// Recheck restored assignment after the receipt is durable, before choosing a
+/// model input. Failed optional reads never turn a known effect into uncertainty.
+async fn require_specialist_source(
+    db: &Database,
+    row: &AssistantConversation,
+    expected: &crate::models::approval_request::SupervisorSource,
+) -> AppResult<()> {
+    let task = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.execution_task.as_ref())
+        .ok_or_else(refused)?;
+    tasks::check(db, task).await?;
+    let mut session = db.client().start_session().await?;
+    crate::services::execution_permission_channel::validate_supervisor(
+        db,
+        &mut session,
+        &expected.channel,
+        false,
+    )
+    .await?;
+    let parent = db
+        .collection::<AssistantConversation>("assistant_conversations")
+        .find_one(doc! {
+            "_id": &expected.channel.conversation_id,
+            "user_id": &expected.channel.actor_user_id,
+            "agent_id": &expected.channel.agent_id,
+            "credential_api_key_id": &expected.channel.key_id,
+            "context_reset_at": expected.reset_at.map(bson::DateTime::from_chrono),
+        })
+        .await?
+        .ok_or_else(refused)?;
+    if !crate::services::supervisor_write::personal(&parent) || parent.is_subagent() {
+        return Err(refused());
+    }
+    let mut filter = crate::services::assistant_nyxagent::WorkerFence::capture(row)?.filter();
+    filter.extend(doc! {
+        "credential_api_key_id": &row.credential_api_key_id,
+        "agent_id": &row.agent_id, "model": &row.model,
+        "active_turn.stop_requested": false,
+        "active_turn.report_to": &expected.channel.conversation_id,
+    });
+    let current = db
+        .collection::<AssistantConversation>("assistant_conversations")
+        .find_one(filter)
+        .await?
+        .ok_or_else(refused)?;
+    let live =
+        crate::services::assistant_nyxagent::live_turn(&current, Utc::now()).ok_or_else(refused)?;
+    if !crate::services::supervisor_write::personal(&current)
+        || !current.is_subagent()
+        || live.execution_task.as_ref() != Some(task)
+        || live
+            .supervisor_source
+            .as_deref()
+            .is_none_or(|source| !same_supervisor_source(source, expected))
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
+/// Runs only typed, server-authored decision events, never ordinary turns. The
+/// normal turn lease and admission remain responsible for requester isolation.
 pub(crate) async fn resume_turn(
     state: &crate::AppState,
     egress: &dyn super::super::super::platform_manager_contract::NyxAgentEgress,
     row: &AssistantConversation,
-) -> AppResult<Option<String>> {
-    Ok(resume_turn_with_readback(state, egress, row)
-        .await?
-        .map(|r| r.text))
-}
-
-pub(crate) async fn resume_turn_with_readback(
-    state: &crate::AppState,
-    egress: &dyn super::super::super::platform_manager_contract::NyxAgentEgress,
-    row: &AssistantConversation,
+    credential: &crate::services::assistant_agent_credential_service::AssistantCredential,
 ) -> AppResult<Option<ResumeOutcome>> {
     if let Some(note) = Box::pin(super::v2::resume_voice(state, row)).await? {
-        return Ok(Some(ResumeOutcome {
-            text: note,
-            specialist_readback: None,
-            provider_notice: None,
-        }));
+        return Ok(Some(ResumeOutcome::Receipt(note)));
     }
     let Some(turn) = row.active_turn.as_ref() else {
         return Ok(None);
@@ -219,7 +341,14 @@ pub(crate) async fn resume_turn_with_readback(
     // and unverified readback; none silently chooses another write's target.
     let single_result = decisions.len() == 1 && turn.events.len() == 1;
     let mut notes = Vec::new();
-    let mut readbacks = Vec::new();
+    let mut specialist = None;
+    let mut receipts = Vec::new();
+    let mut withheld = Vec::new();
+    let typed_wake = turn.events.iter().all(|event| {
+        event.kind == "permission_decided" && event.id.starts_with("execution-decision:")
+    });
+    let mut continuation_ready = None;
+    let mut owner_source = None;
     let mut provider_notice = None;
     let mut reviews = presentation::ReviewNotes::default();
     let mut seen = std::collections::HashSet::new();
@@ -238,6 +367,7 @@ pub(crate) async fn resume_turn_with_readback(
         let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id})).await?.ok_or_else(missing)?;
         let p = proposal(&request)?;
         let version = AssistantVersion::of(&request)?;
+        let mut eligible = continuation::eligible(row, p, version);
         if version == AssistantVersion::V5 {
             require_durable_event(&state.db, row, turn, event, p).await?;
         }
@@ -263,13 +393,44 @@ pub(crate) async fn resume_turn_with_readback(
         if p.state == "completed" {
             if version == AssistantVersion::V5 {
                 if rejected(&request, p) {
-                    notes.push(associated(format!("{PROVIDER_REJECTION} No independent readback is verified in this recovery. Do not repeat the write.")));
+                    notes.push(associated(format!("{PROVIDER_REJECTION} No independent readback is verified in this recovery; the final row state is unconfirmed. Do not repeat the write.")));
                     continue;
                 }
                 notes.push(associated("The retained write has a provider receipt, but no independent readback is verified in this recovery. Do not repeat it; the final row state is unconfirmed.".into()));
                 continue;
             }
             notes.push(associated(if matches!(p.contract.context.audience,Audience::Group{..}) {"The operation completed. Its private result is available on your permission card.".into()}else{result_for_human(state,&request).await?.unwrap_or_else(||"The operation completed; its retained result is no longer available.".into())}));
+            if p.owner_continuation.as_ref().is_some_and(|release| {
+                release.version == 1 && !release.blocked && release.released_turn_id.is_none()
+            }) {
+                let receipt = continuation::Receipt {
+                    id: id.into(),
+                    version,
+                    claim_id: p.claim_id.clone().ok_or_else(conflict)?,
+                };
+                if eligible
+                    && request.activity_outcome.as_deref() == Some("completed")
+                    && p.delivered_turn_id.is_none()
+                    && p.result.is_some()
+                {
+                    let source = match owner_source {
+                        Some(source) => source,
+                        None => {
+                            let source =
+                                continuation::original_owner_source(&state.db, row).await?;
+                            owner_source = Some(source);
+                            source
+                        }
+                    };
+                    if source {
+                        receipts.push(receipt);
+                    } else {
+                        withheld.push(receipt);
+                    }
+                } else {
+                    withheld.push(receipt);
+                }
+            }
             continue;
         }
         if p.state == "dispatched"
@@ -338,6 +499,32 @@ pub(crate) async fn resume_turn_with_readback(
             ));
             continue;
         }
+        // This optional readiness read precedes the provider attempt. A failure
+        // cannot discard a known provider success or strand its durable receipt.
+        if eligible && continuation_ready.is_none() {
+            continuation_ready = Some(
+                crate::services::security_readiness_service::serving_report(
+                    &state.db,
+                    continuation::READINESS,
+                )
+                .await?
+                .serving_ready,
+            );
+        }
+        if eligible && continuation_ready == Some(true) {
+            let source = match owner_source {
+                Some(source) => source,
+                None => {
+                    let source = continuation::original_owner_source(&state.db, row).await?;
+                    owner_source = Some(source);
+                    source
+                }
+            };
+            eligible = source;
+        }
+        if credential.api_key_id != row.credential_api_key_id || credential.raw_key.is_empty() {
+            return Err(refused());
+        }
         let raw = Field::Payload
             .open(&state.encryption_keys, &request)
             .await?
@@ -367,25 +554,8 @@ pub(crate) async fn resume_turn_with_readback(
             effect,
             independent_card_id: p.independent_card_id.clone(),
         };
-        let readback = if single_result
-            && version == AssistantVersion::V5
-            && row.is_subagent()
-            && resume.effect.supervisor.as_ref().is_some_and(|origin| {
-                origin.marked.operation_id == p.effect_id
-                    && origin.marked.origin_turn == p.source_turn_id
-                    && super::super::super::supervisor_write::same_task(
-                        &origin.marked.task,
-                        &p.task,
-                    )
-            })
-            && p.report_to.as_deref()
-                == resume
-                    .effect
-                    .supervisor
-                    .as_ref()
-                    .map(|o| o.source.channel.conversation_id.as_str())
-        {
-            super::super::super::supervisor_write::readback_instruction(&resume.effect)
+        let readback = if typed_wake && single_result && version == AssistantVersion::V5 {
+            specialist_readback(row, p, &resume)
         } else {
             None
         };
@@ -404,7 +574,13 @@ pub(crate) async fn resume_turn_with_readback(
             ));
             continue;
         }
-        let sent = proposal(&current)?.state == "dispatched";
+        let dispatched = proposal(&current)?;
+        let sent = dispatched.state == "dispatched";
+        let fresh_readback = sent
+            && dispatched.resume_turn_id.as_deref() == Some(turn.turn_id.as_str())
+            && dispatched.effect_id == p.effect_id
+            && dispatched.prepared_digest == p.prepared_digest
+            && dispatched.authority_digest == p.authority_digest;
         let mut independent_request = None;
         let mut independent_card = None;
         let mut private_result = None;
@@ -423,6 +599,9 @@ pub(crate) async fn resume_turn_with_readback(
                             Ok(mut value)=>{redact(&mut value);value.to_string()},
                             Err(_)=>text.into_owned(),
                         };
+                        let text = crate::services::assistant_agent_credential_service::redact_key(
+                            &text, credential.raw_key.as_str(),
+                        );
                         let result=format!("Operation finished (HTTP {}).\n{}",status.as_u16(),text.chars().take(16_384).collect::<String>());
                         private_result=Some(result.clone());
                         activity_outcome = Some(if status.is_success() {"completed"}else{"failed"});
@@ -507,6 +686,16 @@ pub(crate) async fn resume_turn_with_readback(
             "execution_proposal.v1.independent_request_id": independent_request,
             "execution_proposal.v1.independent_card_id": independent_card,
         };
+        let successful = state_name == "completed" && activity_outcome == Some("completed");
+        let release_pending = eligible && successful && continuation_ready == Some(true);
+        if release_pending {
+            set.insert(
+                "execution_proposal.v1.owner_continuation",
+                doc! {
+                    "version": 1, "released_turn_id": bson::Bson::Null,
+                },
+            );
+        }
         if let Some(version) = marker {
             set.insert(
                 "execution_proposal.v1.result_context_version",
@@ -525,33 +714,61 @@ pub(crate) async fn resume_turn_with_readback(
             }.await;
             super::super::super::api_key_mutation_service::transaction_result(result)
         })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
+        if release_pending {
+            receipts.push(continuation::Receipt {
+                id: id.into(),
+                version,
+                claim_id,
+            });
+        }
         if matches!(state_name, "completed" | "unknown")
-            && sent
-            && let Some(mut readback) = readback
+            && fresh_readback
+            && let Some((mut instruction, source)) = readback
         {
             if state_name == "unknown" {
-                readback.push_str(" The write outcome is unknown. Report any current state as an observation only; it does not prove this write attempt caused it.");
+                instruction.push_str(" The write outcome is unknown. Report any current state as an observation only; it does not prove this write attempt caused it.");
             }
             if activity_outcome == Some("failed") {
-                readback.push_str(&format!(" {PROVIDER_REJECTION} Preserve the rejection in your report to NyxBot; do not infer a successful write from the read."));
+                instruction.push_str(&format!(" {PROVIDER_REJECTION} Preserve the rejection in your report to NyxBot; do not infer a successful write from the read."));
                 provider_notice = Some(PROVIDER_REJECTION);
             }
-            readbacks.push(readback);
+            // This check follows the durable receipt commit. A readiness or
+            // authority read failure cannot discard the already known effect.
+            require_specialist_source(&state.db, row, &source).await?;
+            specialist = Some(instruction);
         }
         if version == AssistantVersion::V5 && sent && activity_outcome == Some("failed") {
             notes.push(associated(format!("{PROVIDER_REJECTION} The independent readback is unverified in this receipt and the final row state is unconfirmed; do not repeat the write.")));
         } else if !single_result && version == AssistantVersion::V5 && sent {
-            notes.push(format!("Request {id}: the write attempt is {state_name}; independent readback is unverified and the final row state is unconfirmed. Do not repeat the write."));
+            let outcome = activity_outcome.unwrap_or(state_name);
+            let qualification = if state_name == "unknown" {
+                " An observation cannot prove this attempt caused the state."
+            } else {
+                ""
+            };
+            notes.push(format!("Request {id}: the write attempt is {outcome}; independent readback is unverified and the final row state is unconfirmed. Do not repeat the write.{qualification}"));
         } else {
             notes.push(associated(text));
         }
     }
     notes.extend(reviews.render());
-    Ok(Some(ResumeOutcome {
-        text: notes.join("\n\n"),
-        specialist_readback: (!readbacks.is_empty()).then(|| readbacks.join("\n\n")),
-        provider_notice,
-    }))
+    let text = notes.join("\n\n");
+    if typed_wake && withheld.is_empty() && receipts.len() == seen.len() && !receipts.is_empty() {
+        return Ok(Some(ResumeOutcome::Continue(
+            continuation::prepare(state, row, receipts, text).await?,
+        )));
+    }
+    receipts.extend(withheld);
+    if !receipts.is_empty() {
+        continuation::withhold(&state.db, &receipts).await?;
+    }
+    if let Some(instruction) = specialist {
+        return Ok(Some(ResumeOutcome::SpecialistReadback {
+            instruction,
+            provider_notice,
+        }));
+    }
+    Ok(Some(ResumeOutcome::Receipt(text)))
 }
 /// Called only after first-party-human ownership checks. Public projections
 /// never decrypt the provider receipt.
@@ -616,4 +833,96 @@ async fn claim_preparation(db: &Database, id: &str, claim: &str, turn: &str) -> 
         }.await;
         super::super::super::api_key_mutation_service::transaction_result(result)
     })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)
+}
+
+#[cfg(test)]
+mod specialist_source_tests {
+    use super::*;
+    use crate::models::{
+        approval_request::SupervisorSource, execution_permission_channel::ChannelSource,
+    };
+
+    fn source() -> SupervisorSource {
+        SupervisorSource {
+            channel: ChannelSource {
+                version: 4,
+                event_id: "root-event".into(),
+                actor_user_id: "owner".into(),
+                agent_id: "nyxbot".into(),
+                conversation_id: "owner-home".into(),
+                key_id: "owner-key".into(),
+                original_turn_id: "root-turn".into(),
+                channel_id: "owner-channel".into(),
+                thread_id: "private-chat".into(),
+                settings_thread_id: "private-chat".into(),
+                channel_revision: 0,
+                thread_revision: 0,
+                audience_id: "owner-audience".into(),
+                audience_label: "Telegram · Owner bot · original chat/thread".into(),
+                policy_digest: "root-event-policy".into(),
+                expires_at: Utc::now() + Duration::minutes(20),
+            },
+            assigning_turn: "assigning-event-turn".into(),
+            reset_at: None,
+        }
+    }
+
+    #[test]
+    fn supervisor_readback_source_proofs_allow_labels_and_distinct_event_identity() {
+        let root = source();
+        let mut assignment = root.clone();
+        assignment.channel.audience_label.clear();
+        assert!(same_owner_chat(&root.channel, &assignment.channel));
+        assert!(same_supervisor_source(&root, &assignment));
+        assignment.channel.event_id = "later-owner-event".into();
+        assignment.channel.original_turn_id = "later-owner-turn".into();
+        assignment.channel.policy_digest = "later-event-policy".into();
+        assignment.channel.expires_at += Duration::minutes(1);
+        assert!(same_owner_chat(&root.channel, &assignment.channel));
+        assert!(!same_supervisor_source(&root, &assignment));
+        // A restored assignment still binds its own complete event proof.
+        let expected = assignment.clone();
+        assignment.channel.audience_label = "another display label".into();
+        assert!(same_supervisor_source(&expected, &assignment));
+        assignment.assigning_turn = "different-assigning-turn".into();
+        assert!(!same_supervisor_source(&expected, &assignment));
+        assignment = expected.clone();
+        assignment.reset_at = Some(Utc::now());
+        assert!(!same_supervisor_source(&expected, &assignment));
+    }
+
+    #[test]
+    fn supervisor_readback_source_proofs_refuse_authorization_identity_drift() {
+        let source = source();
+        let controls: &[fn(&mut ChannelSource)] = &[
+            |s| s.version += 1,
+            |s| s.actor_user_id.push('x'),
+            |s| s.agent_id.push('x'),
+            |s| s.conversation_id.push('x'),
+            |s| s.key_id.push('x'),
+            |s| s.channel_id.push('x'),
+            |s| s.thread_id.push('x'),
+            |s| s.settings_thread_id.push('x'),
+            |s| s.channel_revision += 1,
+            |s| s.thread_revision += 1,
+            |s| s.audience_id.push('x'),
+        ];
+        for change in controls {
+            let mut changed = source.clone();
+            change(&mut changed.channel);
+            assert!(!same_owner_chat(&source.channel, &changed.channel));
+            assert!(!same_supervisor_source(&source, &changed));
+        }
+        for change in [
+            (|s: &mut ChannelSource| s.event_id.push('x')) as fn(&mut ChannelSource),
+            |s| s.original_turn_id.push('x'),
+            |s| s.policy_digest.push('x'),
+            |s| s.expires_at += Duration::seconds(1),
+        ] {
+            let mut changed = source.clone();
+            change(&mut changed.channel);
+            assert!(same_owner_chat(&source.channel, &changed.channel));
+            assert!(!same_supervisor_source(&source, &changed));
+        }
+    }
 }
