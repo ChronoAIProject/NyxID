@@ -205,6 +205,11 @@ function docsSync(): Plugin {
     configResolved(config) {
       isBuild = config.command === "build"
       outputDir = path.resolve(config.root, config.build.outDir)
+      // Vite snapshots publicDir before buildStart when serving a fresh checkout.
+      if (!isBuild) {
+        const errors = lint(sync())
+        if (errors.length) config.logger.warn(`[docs] publish-gate lint:\n  - ${errors.join("\n  - ")}`)
+      }
     },
     writeBundle() {
       if (!isBuild) return
@@ -224,11 +229,11 @@ function docsSync(): Plugin {
       }
     },
     buildStart() {
+      if (!isBuild) return
       const errors = lint(sync())
       if (!errors.length) return
       const msg = `docs publish-gate lint failed:\n  - ${errors.join("\n  - ")}`
-      if (isBuild) this.error(msg)
-      else this.warn(msg)
+      this.error(msg)
     },
     configureServer(server) {
       server.watcher.add(srcDir)

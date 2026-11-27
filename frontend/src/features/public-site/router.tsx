@@ -23,7 +23,7 @@ import { DocsLayout } from "../docs/docs-layout-view";
 import { WebsitePage } from "../website-a/website-page";
 import { PublicDocument, parseDoc } from "./public-document";
 import { parsePublicPath, publishedRoute } from "./publication";
-import { docTabForSlug } from "../docs/manifest";
+import { docTabForSlug, docTabLabel } from "../docs/manifest";
 import { docPaths } from "./routes";
 import { applyMetadata, type PublicMetadata } from "./metadata";
 export interface PublicPayload {
@@ -45,7 +45,7 @@ export async function loadPublicPage(
       : {
           title: "NyxID Documentation",
           description:
-            "Broker credentials. Never expose keys. Guides for AI agents, web apps, and CLI users.",
+            "Set up NyxBot, connect an AI client through MCP, manage services in Studio, or make a request with the NyxID CLI.",
         };
     return {
       Page: () => <PublicDocument slug={slug} markdown={markdown} />,
@@ -54,7 +54,7 @@ export async function loadPublicPage(
         route: pathname,
         locale: "en",
         title: slug
-          ? `${parsed.title} · ${{ ai: "AI-assisted", web: "Web", cli: "CLI", shared: "Concepts" }[docTabForSlug(slug)]} Docs`
+          ? `${parsed.title} · ${docTabLabel(slug)} Docs`
           : parsed.title,
         description: parsed.description,
         translated: false,

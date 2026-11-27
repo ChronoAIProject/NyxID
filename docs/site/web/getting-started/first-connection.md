@@ -1,100 +1,57 @@
 ---
-title: Your first connection
-description: Click-through walkthrough that ends with an HTTP 200 response from your first proxied API call through the NyxID web console.
+title: Your first Studio connection
+description: Connect GitHub in Studio, scope an Agent Key to that connection and use it to read your GitHub username.
 ---
-
-Click-through walkthrough. End state: an `HTTP/1.1 200` response from your first proxied call.
-
-This is the web console flow. If you want the CLI instead, see [CLI: first connection](/docs/cli/getting-started/first-connection). To wire an AI agent directly via MCP, see [Connect your agent](/docs/ai/getting-started/connect-your-agent).
 
 ## Hosted (recommended for first-time users)
 
-Console URL: **https://nyx.chrono-ai.fun**
-
-If you don't have an account yet, see [Sign up & sign in](/docs/web/getting-started/sign-up) — you need an invite code.
-
 ### 1. Sign in
 
-Register at [nyx.chrono-ai.fun/register](https://nyx.chrono-ai.fun/register) with invite code `NYX-FGNY85AF` if you haven't already, then sign in.
+Sign in to NyxID with the account that will own the connection. If your instance requires an invitation to register, use the code supplied by your workspace. You also need a GitHub account you can authorize. [Register with an invitation or recover a first sign-in](/docs/web/getting-started/sign-up#create-an-account)
 
 ### 2. Add an AI Service
 
-1. Click **AI Services** in the left sidebar (you will be on the **External Services** tab). The page shows your existing services and an **Add Service** button at the top right.
-
-   ![AI Services page](img/01-ai-services.png)
-
-2. Click **Add Service**. The **Add AI Service** dialog opens with the catalog.
-
-   ![Add AI Service catalog](img/02-add-service-catalog.png)
-
-3. Pick **OpenAI** from the catalog. (Use OpenAI for your first verification — its example curl works out of the box. You can add Anthropic, GitHub, etc. afterward.)
-
-4. The **Configure Routing** step appears. Click the **Direct** card (NyxID proxies to OpenAI directly — the **Via Node** option is for self-hosted services behind a firewall). Then click **Next: Enter Credentials**.
-
-   ![Configure Routing — Direct vs Via Node](img/03-routing-step.png)
-
-   :::note
-   The **Via Node** option routes requests through a locally-running `nyxid node` agent. Use it when the target service is on a private network or localhost. See [Credential nodes](/docs/shared/concepts/credential-nodes) for the full setup.
-   :::
-
-5. The **Configure Service** step appears. Paste your **provider API key** in the **API Key / Credential** field — for OpenAI, an `sk-...` key. This is the external service's credential, **not** a NyxID `nyx_...` key. NyxID stores it encrypted and never returns it to your agents.
-
-   ![Configure Service — credential entry](img/04-credential-entry.png)
-
-6. Click **Create Service**. NyxID opens the new service's detail page automatically.
-
-   Keep this tab open — you will come back here to copy the **API Usage** curl example. The `nyx_...` shown in that example is a placeholder; you need to create a real Agent Key first.
+1. In the NyxBot account menu choose **Open Studio**, then **AI Services**. The page is titled **Services & Credentials**. [Open the services dashboard](/keys?tab=services)
+2. Under **External Services**, choose **Connect Service** and select **GitHub OAuth**. For a personal connection, select your own account as owner. For a team connection, select an organization where your role allows you to connect services. [Organization access](/docs/web/guides/organizations)
+3. Continue to GitHub, check the GitHub account and requested permissions, and authorize the connection. If Studio asks for a client ID and secret, follow the OAuth app setup below. [Configure a provider app](#self-host)
+4. Return to **External Services** and copy the slug from your connected entry. A first GitHub OAuth connection usually has the slug `api-github`. Additional connections can have a suffix.
 
 ### 3. Create a NyxID Agent Key
 
-The example curl on the service detail page authenticates to NyxID with `X-API-Key: nyx_...` — that is a placeholder, not a working key. Create the real key now.
+Open **Agent Keys** on the same page. Choose **Create API Key** and give the key a recognizable name, such as `github-profile-check`. Select the same owner as the connection, select the `proxy` scope, leave **Allow all services** off and choose only the GitHub connection. Create the key and save the full value privately when it appears.
 
-1. Open a new tab on **AI Services** and switch to the **Agent Keys** tab.
-2. Click **Create API Key**. The **Create API Key** dialog opens.
-
-   ![Create API Key dialog with scope picker](img/06-create-agent-key.png)
-
-3. Give it a name (anything — `quickstart-test` is fine).
-4. Under **Scopes**, click the `proxy` badge so it is highlighted. The `proxy` scope is required for `/api/v1/proxy/...` requests; without it the proxy returns 403.
-5. Click **Create key**. The dialog shows your `nyx_...` key **once** — copy it now.
-
-:::warning
-The key is shown only once at creation time. If you lose it, rotate the key from the Agent Keys tab to get a new one.
-:::
+The service selection limits which connection the key can use. The example below reads a profile. Other operations on that connection may also be authorized by the key's service permissions, the GitHub credential and the applicable approval policies. For an existing key, inspect **Service Scope** in its details.
 
 ### 4. Run the verification curl
 
-1. Return to the service detail tab. Scroll to the **API Usage** section.
+In Bash, set the slug to the value you copied. Enter the full **NyxID Agent Key** at the hidden prompt. The GitHub credential is already stored with the connection.
 
-   If you closed that tab, go to **AI Services** → **External Services**, find the service you just created, and click its service card.
+```bash
+NYXID_API_ORIGIN='https://nyx-api.chrono-ai.fun'
+SERVICE_SLUG='api-github'
+read -rs -p 'NyxID Agent Key: ' AGENT_KEY; echo
+curl --fail-with-body -sS -H "X-API-Key: $AGENT_KEY" \
+  "$NYXID_API_ORIGIN/api/v1/proxy/s/$SERVICE_SLUG/user"
+unset AGENT_KEY
+```
 
-   ![API Usage section on service detail page](img/05-service-detail.png)
-
-2. Click the **copy icon** on the **Example (with API key)** curl block.
-3. Paste it in your terminal. **Replace the literal `nyx_...` placeholder with the Agent Key you just copied** — the example block is a template.
-4. Run it.
-
-You should see a chat-completion JSON response from OpenAI with `"choices": [...]` and a generated message. That is your first proxied call. The same Agent Key works for every service you add later (as long as it has the `proxy` scope).
-
-:::tip
-**Windows users:** Run this curl from WSL Ubuntu or Git Bash. PowerShell and CMD will not parse the JSON body correctly.
-:::
+Look for a GitHub profile containing a `login` field. For the account `octocat`, the result includes `"login":"octocat"`. Studio also offers **Verify key** to inspect the NyxID key itself.
 
 ## Self-host
 
-Console URL: **http://localhost:3000** (API on port 3001).
+Sign in to your instance's Studio and use its API origin for `NYXID_API_ORIGIN` in the verification command. If your administrator has configured a GitHub connector OAuth app, continue directly to GitHub. Otherwise, select **Use your own OAuth app** when offered, or follow the credential setup shown in **Connect Service**.
 
-Same steps as hosted. Sign in with the account you registered against your local instance. If NyxID is not running locally yet, start it with Docker Compose first — refer to the self-host setup in the project README before continuing.
+Copy the **NyxID callback URL** shown by Studio into the GitHub OAuth app's **Authorization callback URL** field. It uses your API origin and the path `/api/v1/providers/callback`. Enter that app's **Client ID** and **Client Secret** in Studio and continue to GitHub. [Register a GitHub OAuth app](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)
+
+If your workspace does not provide an OAuth app and you cannot register one, ask the administrator to configure it. If your organization permits personal access tokens, you can select the **GitHub API (Personal Access Token)** catalog entry instead, supply a token with the access you need, and repeat the key and verification steps using that connection's own slug.
 
 ## Troubleshooting
 
-- **401 Unauthorized from OpenAI** (downstream): the external credential you pasted in step 2 is wrong or revoked. Open the service detail page and update the credential.
-- **403 Forbidden from NyxID**: your Agent Key is missing the `proxy` scope. Go to **Agent Keys**, edit the key (or create a new one), and add `proxy`.
-- **401 from NyxID with `Missing API key`**: you forgot to replace the literal `nyx_...` placeholder with your real Agent Key.
-- **5xx from NyxID**: check `docker logs nyxid-backend` (self-host) or the status page (hosted).
+- **GitHub authorization is unavailable or cancelled.** Confirm the selected provider app and the exact callback URL above if GitHub reports a redirect mismatch. Reopen the connection dialog and authorize the intended account. Check that the entry appears in **External Services** before creating its Agent Key.
+- **NyxID asks for approval.** Open **Approvals** and review the account, connection and `GET /user` operation. A waiting request can finish after approval. If the request has already returned `approval_required`, follow its request ID or approval instructions. A denial or expiry ends that attempt. [Review approvals](/docs/web/guides/approvals)
+- **NyxID rejects the key.** For a 401, check that you supplied the full NyxID Agent Key. For a 403 about scope or service access, compare the owner, `proxy` scope and selected connection with the exact slug in the URL.
+- **GitHub rejects the credential.** Reauthorize the OAuth connection or update its PAT, then repeat the profile read.
 
 ## Next
 
-- **Want your AI agent to use this service?** After verifying the service from **AI Services**, wire MCP — see [First agent call](/docs/ai/getting-started/first-agent-call).
-- **Want to script setup for more services?** See [CLI: first connection](/docs/cli/getting-started/first-connection).
-- **Want to expose a private API behind your firewall?** See [Credential nodes](/docs/shared/concepts/credential-nodes).
+Use the verified connection from [NyxBot](/docs/nyxbot/getting-started/first-chat), [an MCP client](/docs/ai/getting-started/connect-your-agent) or [the CLI](/docs/cli/getting-started/first-connection).

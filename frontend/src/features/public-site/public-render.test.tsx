@@ -53,15 +53,31 @@ describe("window-free public renderer", () => {
       }
     },
   );
-  it("renders manifested Docs from Markdown without the private application", async () => {
-    const path = "/docs/ai/guides/agent-isolation";
-    const { html, meta } = await renderPage(path, (slug) =>
+  it("renders all four first-task cards in the public Docs landing page", async () => {
+    const { html } = await renderPage("/docs", async () => "");
+    for (const slug of [
+      "nyxbot/getting-started/first-chat", "ai/getting-started/connect-your-agent",
+      "web/getting-started/first-connection", "cli/getting-started/install",
+    ]) {
+      expect(html).toContain(`href="/docs/${slug}"`);
+    }
+  });
+
+  it.each([
+    ["nyxbot/getting-started/first-chat", "NyxBot"],
+    ["ai/guides/agent-isolation", "AI clients (MCP)"],
+    ["web/getting-started/first-connection", "Studio"],
+    ["cli/getting-started/install", "CLI"],
+    ["shared/concepts/the-proxy", "Concepts"],
+  ])("renders %s with its surface in the page title", async (slug, label) => {
+    const { html, meta } = await renderPage(`/docs/${slug}`, (source) =>
       fs.readFile(
-        new URL(`../../../../docs/site/${slug}.md`, import.meta.url),
+        new URL(`../../../../docs/site/${source}.md`, import.meta.url),
         "utf8",
       ),
     );
     expect(html).toContain("<h1");
+    expect(meta.title).toContain(` · ${label} Docs`);
     expect(meta.translated).toBe(false);
     expect(metadataHead(meta)).not.toContain("hreflang");
   });

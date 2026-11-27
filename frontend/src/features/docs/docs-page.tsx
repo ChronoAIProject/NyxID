@@ -5,7 +5,7 @@ import { useParams } from "@tanstack/react-router";
 import { DocsLayout, type TocItem } from "./docs-layout";
 import { DocsIndexPage } from "./docs-index-page";
 import { DocMarkdown } from "./docs-markdown";
-import { findDocPage, docTabForSlug, type DocTabId } from "./manifest";
+import { findDocPage, docTabForSlug, storedDocTab, type DocTabId } from "./manifest";
 
 const FRONT_MATTER_RE = /^---\n([\s\S]*?)\n---\n*/;
 
@@ -39,8 +39,7 @@ function parseDoc(md: string): ParsedDoc {
 
 function readLastTab(): DocTabId {
   try {
-    const last = sessionStorage.getItem("nyxid:docs-tab");
-    if (last === "ai" || last === "web" || last === "cli") return last;
+    return storedDocTab(sessionStorage.getItem("nyxid:docs-tab"));
   } catch {
     /* sessionStorage unavailable */
   }

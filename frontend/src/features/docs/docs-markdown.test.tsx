@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,7 +27,6 @@ vi.mock("sonner", () => ({
 }));
 
 import { DocMarkdown } from "./docs-markdown";
-
 const MARKDOWN = [
   "Some intro prose.",
   "",
@@ -92,5 +93,32 @@ describe("DocMarkdown — code block copy button", () => {
     expect(
       screen.getAllByRole("button", { name: /copy code snippet/i }),
     ).toHaveLength(1);
+  });
+});
+
+describe("published getting-started section links", () => {
+  it.each([
+    ["web/getting-started/first-connection", [
+      "hosted-recommended-for-first-time-users", "1-sign-in", "2-add-an-ai-service",
+      "3-create-a-nyxid-agent-key", "4-run-the-verification-curl", "self-host", "troubleshooting", "next",
+    ]],
+    ["ai/getting-started/connect-your-agent", [
+      "install-the-cli", "authenticate-you-the-human", "authorize-an-agent-profile-without-transferring-a-secret",
+      "create-an-agent-key-for-the-agent-to-use", "wire-your-mcp-client", "claude-code", "cursor", "codex",
+      "generate-the-config-automatically", "what-you-see-after-wiring-mcp", "next-steps",
+    ]],
+    ["ai/getting-started/first-agent-call", [
+      "prerequisites", "step-1-add-the-service", "step-2-make-a-proxied-http-request",
+      "step-3-verify-the-proxy-flow", "step-4-invoke-as-an-mcp-tool", "step-5-check-the-audit-log", "whats-next",
+    ]],
+    ["cli/getting-started/first-connection", [
+      "1-set-the-provider-credential", "2-add-the-service-from-the-catalog", "3-copy-the-returned-slug",
+      "4-verify-with-a-proxied-request", "if-it-errors", "next",
+    ]],
+  ] as const)("renders the published anchors for %s", (slug, publishedIds) => {
+    const markdown = readFileSync(resolve(import.meta.dirname, "../../../../docs/site", `${slug}.md`), "utf8");
+    const { container } = render(<DocMarkdown markdown={markdown} baseHref="/docs/" />);
+    const ids = Array.from(container.querySelectorAll("h2[id], h3[id]"), (heading) => heading.id);
+    expect(ids).toEqual(expect.arrayContaining([...publishedIds]));
   });
 });

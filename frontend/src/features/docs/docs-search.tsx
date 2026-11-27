@@ -3,7 +3,7 @@ import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { Search, X } from "lucide-react";
-import { docTabForSlug } from "./manifest";
+import { docTabLabel } from "./manifest";
 
 interface IndexEntry {
   readonly source: string;
@@ -11,13 +11,6 @@ interface IndexEntry {
   readonly description: string;
   readonly headings: readonly string[];
 }
-
-const TAB_LABEL: Record<string, string> = {
-  get ai() { return translateUi("AI-assisted"); },
-  get web() { return translateUi("Web"); },
-  get cli() { return translateUi("CLI"); },
-  get shared() { return translateUi("Concepts"); },
-};
 
 export function DocsSearch({
   open,
@@ -136,7 +129,7 @@ export function DocsSearch({
         </div>
         <div className="max-h-[60vh] overflow-y-auto p-2">
           {query.trim() === "" ? (
-            <p className="px-3 py-6 text-center text-14 text-text-tertiary">{translateUi("Type to search across CLI, Web, AI-assisted, and Concepts.")}</p>
+            <p className="px-3 py-6 text-center text-14 text-text-tertiary">{translateUi("Search all guides and concepts.")}</p>
           ) : results.length === 0 ? (
             <p className="px-3 py-6 text-center text-14 text-text-tertiary">{translateUi("No results for “")}{query}”.</p>
           ) : (
@@ -144,6 +137,7 @@ export function DocsSearch({
               {results.map((e, i) => {
                 const slug = e.source.replace(/\.md$/, "");
                 const active = i === activeIndex;
+                const label = docTabLabel(slug);
                 return (
                   <li key={slug} role="option" aria-selected={active} id={`docs-search-opt-${i}`}>
                     <Link
@@ -157,7 +151,7 @@ export function DocsSearch({
                     >
                       <div className="flex items-center gap-2">
                         <span className="font-mono text-12 tracking-wider text-nyx-secondary-400 uppercase">
-                          {TAB_LABEL[docTabForSlug(slug)] ?? ""}
+                          {translateUi(label)}
                         </span>
                         <span className="type-row-title text-foreground">{e.title}</span>
                       </div>

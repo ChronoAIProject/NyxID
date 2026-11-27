@@ -2,7 +2,7 @@ import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { Search, Menu, X, Bot, LayoutDashboard, Terminal, type LucideIcon } from "lucide-react";
+import { Search, Menu, X, Bot, MessagesSquare, LayoutDashboard, Terminal, type LucideIcon } from "lucide-react";
 import { PublicBrand, PublicFooter, PublicThemeToggle } from "../public-site/public-chrome";
 import { usePublicThemeElement } from "../public-site/public-theme";
 import "../website-a/public-reading.css";
@@ -36,6 +36,7 @@ const GITHUB_URL = "https://github.com/ChronoAIProject";
 
 // Icon per surface — the quick "what is this about" signal in the switcher.
 export const SURFACE_ICONS: Record<DocTabId, LucideIcon> = {
+  nyxbot: MessagesSquare,
   ai: Bot,
   web: LayoutDashboard,
   cli: Terminal,
@@ -60,7 +61,7 @@ function GithubMark() {
   );
 }
 
-// The CLI / Web / AI-assisted switcher. Lives at the top of the sidebar, above
+// The docs surface switcher. Lives at the top of the sidebar, above
 // the surface's own groups, mirroring the app sidebar's icon + label nav rows.
 function SurfaceSwitcher({
   activeTab,
@@ -91,7 +92,7 @@ function SurfaceSwitcher({
               className={`h-4 w-4 shrink-0 ${active ? "text-nyx-700 dark:text-nyx-secondary-400" : ""}`}
               aria-hidden
             />
-            {tab.label}
+            {translateUi(tab.label)}
           </Link>
         );
       })}
@@ -114,7 +115,7 @@ function SidebarGroups({
       {groups.map((group) => (
         <div key={group.group} className="mb-6">
           <p className="mb-2 font-mono text-13 tracking-widest text-text-tertiary uppercase">
-            {group.group}
+            {translateUi(group.group)}
           </p>
           <ul className="space-y-0.5">
             {group.pages.map((page) => {
@@ -131,7 +132,7 @@ function SidebarGroups({
                         : "type-body text-muted-foreground hover:bg-overlay hover:text-foreground"
                     }`}
                   >
-                    {page.title}
+                    {translateUi(page.title)}
                   </Link>
                 </li>
               );

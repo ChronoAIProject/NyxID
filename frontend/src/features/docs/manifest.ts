@@ -4,11 +4,7 @@
 // (mirrored to `frontend/public/docs/<slug>.md` by the `docsSync()` Vite plugin and
 // fetched at runtime). Files under `/docs` that are NOT referenced here stay private.
 //
-// Phase 1 ships three surfaces (AI-assisted leads) plus a pinned shared Concepts
-// group. Phase 2 adds the CLI Guides + Command reference groups (below); a shared
-// Developers group is still to come.
-
-export type DocTabId = "ai" | "web" | "cli";
+export type DocTabId = "nyxbot" | "ai" | "web" | "cli";
 
 export interface DocPageRef {
   /** Route slug = path under /docs/site without `.md`, e.g. "ai/guides/mcp-proxy". */
@@ -29,18 +25,29 @@ export interface DocTab {
   readonly groups: readonly DocGroup[];
 }
 
-// Tab bar order. AI-assisted leads (Phase 1 headline + deepest content).
+// Each first page is the entry point from the public docs landing page.
 export const DOCS_TABS: readonly DocTab[] = [
   {
+    id: "nyxbot",
+    label: "NyxBot",
+    blurb: "Ask a question in chat using one of your connected services.",
+    groups: [
+      {
+        group: "Get Started",
+        pages: [{ slug: "nyxbot/getting-started/first-chat", title: "Your first NyxBot chat" }],
+      },
+    ],
+  },
+  {
     id: "ai",
-    label: "AI-assisted",
-    blurb: "Use NyxID through Claude Code, Cursor, Codex, and MCP — agents never see raw keys.",
+    label: "AI clients (MCP)",
+    blurb: "Give Claude Code, Cursor or Codex access to your services through MCP.",
     groups: [
       {
         group: "Get Started",
         pages: [
-          { slug: "ai/getting-started/what-is-ai-access", title: "What is AI-assisted access" },
           { slug: "ai/getting-started/connect-your-agent", title: "Connect your agent" },
+          { slug: "ai/getting-started/what-is-ai-access", title: "What is AI-assisted access" },
           { slug: "ai/getting-started/first-agent-call", title: "Your first agent call" },
         ],
       },
@@ -60,14 +67,14 @@ export const DOCS_TABS: readonly DocTab[] = [
   },
   {
     id: "web",
-    label: "Web",
-    blurb: "Manage services, keys, approvals, and organizations from the dashboard.",
+    label: "Studio",
+    blurb: "Connect a service and verify its Agent Key in the dashboard.",
     groups: [
       {
         group: "Get Started",
         pages: [
+          { slug: "web/getting-started/first-connection", title: "Your first Studio connection" },
           { slug: "web/getting-started/sign-up", title: "Sign up & sign in" },
-          { slug: "web/getting-started/first-connection", title: "Your first connection" },
         ],
       },
       {
@@ -87,14 +94,14 @@ export const DOCS_TABS: readonly DocTab[] = [
   {
     id: "cli",
     label: "CLI",
-    blurb: "Drive every NyxID operation from the nyxid command line.",
+    blurb: "Sign in from a terminal and make your first read-only request.",
     groups: [
       {
         group: "Get Started",
         pages: [
           { slug: "cli/getting-started/install", title: "Install the CLI" },
           { slug: "cli/getting-started/authenticate", title: "Authenticate" },
-          { slug: "cli/getting-started/first-connection", title: "Your first connection" },
+          { slug: "cli/getting-started/first-connection", title: "Your first CLI request" },
         ],
       },
       {
@@ -160,10 +167,18 @@ export function findDocPage(slug: string): DocPageRef | undefined {
   return allDocPages().find((p) => p.slug === slug);
 }
 
+export function storedDocTab(value: string | null): DocTabId {
+  return DOCS_TABS.find((tab) => tab.id === value)?.id ?? "ai";
+}
+
+export function docTabLabel(slug: string): string {
+  const id = docTabForSlug(slug);
+  return DOCS_TABS.find((tab) => tab.id === id)?.label ?? "Concepts";
+}
+
 export function docTabForSlug(slug: string): DocTabId | "shared" {
   const seg = slug.split("/")[0];
-  if (seg === "ai" || seg === "web" || seg === "cli") return seg;
-  return "shared";
+  return DOCS_TABS.find((tab) => tab.id === seg)?.id ?? "shared";
 }
 
 /** The full sidebar for a surface: that tab's groups, plus the pinned shared groups. */

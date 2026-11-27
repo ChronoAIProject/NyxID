@@ -1,6 +1,6 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
 import type { RefObject } from "react";
-import { docTabForSlug } from "../docs/manifest";
+import { docTabForSlug, storedDocTab } from "../docs/manifest";
 import type { DocTabId } from "../docs/manifest";
 export function useDocumentNavigation(
   slug: string,
@@ -14,8 +14,7 @@ export function useDocumentNavigation(
     },
     () => {
       try {
-        const tab = sessionStorage.getItem("nyxid:docs-tab");
-        return tab === "web" || tab === "cli" ? tab : "ai";
+        return storedDocTab(sessionStorage.getItem("nyxid:docs-tab"));
       } catch {
         return "ai";
       }

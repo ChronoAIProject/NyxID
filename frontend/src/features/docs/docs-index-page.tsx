@@ -14,8 +14,8 @@ export function DocsIndexPage() {
         <h1 className="mt-3 max-w-3xl font-display type-compact-page-title sm:type-page-title tracking-tight text-foreground">{translateUi("NyxID Documentation")}</h1>
         <p className="mt-4 max-w-2xl text-15 text-muted-foreground">{translateUi("NyxID holds your API keys, OAuth tokens, and SSH credentials and proxies requests so your agents and apps never touch the raw secret. Pick how you use it.")}</p>
 
-        <div className="mt-10 grid gap-4 sm:grid-cols-3">
-          {DOCS_TABS.map((tab, i) => {
+        <div className="mt-10 grid gap-4 sm:grid-cols-2">
+          {DOCS_TABS.map((tab) => {
             const first = tab.groups[0]?.pages[0]?.slug ?? "";
             const Icon = SURFACE_ICONS[tab.id];
             return (
@@ -25,16 +25,11 @@ export function DocsIndexPage() {
                 params={{ _splat: first }}
                 className="group rounded-2xl border border-border bg-card p-5 transition-colors hover:border-hairline-strong"
               >
-                <div className="flex items-center justify-between">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-overlay">
-                    <Icon className="h-5 w-5 text-nyx-700 dark:text-nyx-secondary-400" aria-hidden />
-                  </div>
-                  {i === 0 && (
-                    <span className="rounded-full bg-nyx-100 px-2 py-0.5 type-group-label text-nyx-700 dark:bg-nyx-500/15 dark:text-nyx-secondary-400">{translateUi("Start here")}</span>
-                  )}
+                <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border bg-overlay">
+                  <Icon className="h-5 w-5 text-nyx-700 dark:text-nyx-secondary-400" aria-hidden />
                 </div>
-                <h2 className="mt-4 font-display type-section-heading tracking-tight text-foreground">{tab.label}</h2>
-                <p className="mt-2 text-14 text-muted-foreground">{tab.blurb}</p>
+                <h2 className="mt-4 font-display type-section-heading tracking-tight text-foreground">{translateUi(tab.label)}</h2>
+                <p className="mt-2 text-14 text-muted-foreground">{translateUi(tab.blurb)}</p>
                 <span className="mt-4 inline-flex items-center gap-1 type-row-title text-nyx-700 dark:text-nyx-secondary-400">{translateUi("Get started")}<ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
                 </span>
               </Link>
@@ -52,7 +47,7 @@ export function DocsIndexPage() {
                 params={{ _splat: p.slug }}
                 className="rounded-lg border border-border px-4 py-2.5 type-row-title text-muted-foreground transition-colors hover:border-hairline-strong hover:text-foreground"
               >
-                {p.title}
+                {translateUi(p.title)}
               </Link>
             ))}
           </div>
