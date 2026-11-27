@@ -418,7 +418,7 @@ async fn start_to_completion(
                 super::diagnostics::close_unconfirmed(&state.db, &call).await;
                 // Unknown initialization cost is platform exposure; no invented debit.
                 let _ = session::write(&state.db,&call,doc! {"state":"closing","end_requested":true,
-                    "end_reason":"close_unconfirmed","lease_until":bson::DateTime::from_chrono(Utc::now())}).await;
+                    "end_reason":"close_unconfirmed","startup_failed":true,"lease_until":bson::DateTime::from_chrono(Utc::now())}).await;
             }
             Err(match error {
                 Ok(Err(e)) => Stage::Transport.error(e),

@@ -193,6 +193,7 @@ async fn admit_audio(
         input_muted: false,
         end_requested: false,
         end_reason: None,
+        startup_failed: false,
         observed_seconds: 0,
         reserved_until: 0,
         final_usage_confirmed: false,
