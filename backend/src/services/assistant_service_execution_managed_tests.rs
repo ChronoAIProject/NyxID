@@ -142,12 +142,12 @@ async fn fixture(trailing: bool) -> (Fixture, String, String) {
         audience: PlatformKeyAudience::Restricted,
         allowed_owner_ids: vec![f.owner.clone()],
     });
-    service.credential_encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(Uuid::new_v4().to_string().as_bytes())
-        .await
-        .unwrap();
+    crate::services::credential_test_fixtures::catalog_secret(
+        &f.state.encryption_keys,
+        &mut service,
+        Uuid::new_v4().to_string().as_bytes(),
+    )
+    .await;
     service.billing = Some(billing());
     telnyx::validate_catalog(&service).unwrap();
     let catalog = service.id.clone();

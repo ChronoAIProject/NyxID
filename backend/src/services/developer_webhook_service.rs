@@ -511,8 +511,12 @@ mod tests {
         let keys = Arc::new(test_encryption_keys());
         let mut configured = client(&client_id, &owner);
         configured.connection_webhook_url = Some("http://127.0.0.1:1/events".to_string());
-        configured.connection_webhook_secret_encrypted =
-            Some(keys.encrypt(b"body-limit-secret").await.unwrap());
+        crate::services::credential_test_fixtures::connection_webhook_secret(
+            &keys,
+            &mut configured,
+            "body-limit-secret",
+        )
+        .await;
         configured.connection_webhook_key_id = Some("key_body_limit".to_string());
         configured.connection_webhook_enabled = true;
         db.collection::<OauthClient>(OAUTH_CLIENTS)
@@ -638,11 +642,12 @@ mod tests {
         let raw_secret = "nyx_cwh_fixture-secret";
         let mut configured = client(&client_id, &owner);
         configured.connection_webhook_url = Some(format!("http://{address}/events"));
-        configured.connection_webhook_secret_encrypted = Some(
-            keys.encrypt(raw_secret.as_bytes())
-                .await
-                .expect("encrypt signing secret"),
-        );
+        crate::services::credential_test_fixtures::connection_webhook_secret(
+            &keys,
+            &mut configured,
+            raw_secret,
+        )
+        .await;
         configured.connection_webhook_key_id = Some("key_fixture".to_string());
         configured.connection_webhook_enabled = true;
         db.collection::<OauthClient>(OAUTH_CLIENTS)
@@ -729,11 +734,12 @@ mod tests {
         let raw_secret = "nyx_cwh_failure-secret";
         let mut configured = client(&client_id, &owner);
         configured.connection_webhook_url = Some(format!("http://{address}/events"));
-        configured.connection_webhook_secret_encrypted = Some(
-            keys.encrypt(raw_secret.as_bytes())
-                .await
-                .expect("encrypt signing secret"),
-        );
+        crate::services::credential_test_fixtures::connection_webhook_secret(
+            &keys,
+            &mut configured,
+            raw_secret,
+        )
+        .await;
         configured.connection_webhook_key_id = Some("key_failure".to_string());
         configured.connection_webhook_enabled = true;
         db.collection::<OauthClient>(OAUTH_CLIENTS)

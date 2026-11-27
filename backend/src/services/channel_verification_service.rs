@@ -531,22 +531,15 @@ mod tests {
     async fn fixture(managed: bool) -> (mongodb::Database, crate::AppState, ChannelBot) {
         let db = crate::test_utils::connect_transaction_test_database("wa_verification").await;
         let state = crate::test_utils::test_app_state(db.clone());
-        let encrypted = state
-            .encryption_keys
-            .encrypt(b"test-bot-token")
-            .await
-            .unwrap();
-        let secret = state
-            .encryption_keys
-            .encrypt(b"test-app-secret")
-            .await
-            .unwrap();
+        let encrypted =
+            hex::decode(crate::services::channel_registration::historical::WHATSAPP_BOT_TOKEN)
+                .unwrap();
         let bot: ChannelBot = bson::from_document(doc! {
             "_id": uuid::Uuid::new_v4().to_string(), "user_id": uuid::Uuid::new_v4().to_string(), "platform": "whatsapp", "label": "test",
             "platform_bot_id": "123", "platform_bot_username": "+123", "app_id": "456",
             "credential_source": if managed { "platform" } else { "user" },
             "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
-            "app_secret_encrypted": if managed { bson::Bson::Null } else { bson::Bson::Binary(bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: secret.clone() }) },
+            "app_secret_encrypted": if managed { bson::Bson::Null } else { bson::Bson::Binary(bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: hex::decode(crate::services::channel_registration::historical::WHATSAPP_APP_SECRET).unwrap() }) },
             "webhook_secret_hash": "unchanged-verify-token-hash", "webhook_registered": false, "status": "pending_webhook", "is_active": true,
             "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now()
         }).unwrap();
@@ -556,7 +549,7 @@ mod tests {
             .unwrap();
         if managed {
             db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).insert_one(doc! {
-                "_id": uuid::Uuid::new_v4().to_string(), "provider":"meta", "fields":{}, "secrets": {"app_secret": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: secret }},
+                "_id": uuid::Uuid::new_v4().to_string(), "provider":"meta", "fields":{}, "secrets": {"app_secret": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: hex::decode(crate::services::channel_registration::historical::PLATFORM_APP_SECRET).unwrap() }},
                 "updated_by":"test", "updated_at":bson::DateTime::now()
             }).await.unwrap();
         }
@@ -854,16 +847,35 @@ mod tests {
                 .await
                 .unwrap();
             let check = begin(&db, &snapshot).await.unwrap();
+            let mut set = doc! {};
+            let mut unset = doc! {};
             let value = match field {
                 "is_active" => bson::Bson::Boolean(false),
                 "user_id" => bson::Bson::String(uuid::Uuid::new_v4().to_string()),
-                _ => bson::Bson::Binary(bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: state.encryption_keys.encrypt(b"replacement").await.unwrap(),
-                }),
+                _ => {
+                    crate::services::credential_record_service::mark_classic_update(
+                        &mut set,
+                        &mut unset,
+                        &state.encryption_keys,
+                        field,
+                    );
+                    bson::Bson::Binary(bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: crate::services::channel_bot_record::encrypt(
+                            &state.encryption_keys,
+                            &bot.id,
+                            &bot.user_id,
+                            field,
+                            "replacement",
+                        )
+                        .await
+                        .unwrap(),
+                    })
+                }
             };
+            set.insert(field, value);
             db.collection::<ChannelBot>(COLLECTION_NAME)
-                .update_one(doc! {"_id":&bot.id}, doc! {"$set":{field:value}})
+                .update_one(doc! {"_id":&bot.id}, doc! {"$set":set, "$unset":unset})
                 .await
                 .unwrap();
             assert!(!snapshot.activate(&db).await.unwrap());
@@ -891,12 +903,33 @@ mod tests {
             snapshot.send_token(&state.encryption_keys).await.unwrap();
         assert_eq!(token.as_str(), "test-bot-token");
         let check = begin(&db, &snapshot).await.unwrap();
-        let secret = state
-            .encryption_keys
-            .encrypt(b"replacement-shared-secret")
+        let rows = db.collection::<crate::models::platform_credential::PlatformCredential>(
+            crate::models::platform_credential::COLLECTION_NAME,
+        );
+        let id = snapshot
+            .signing_producer()
+            .unwrap()
+            .source_id(crate::models::platform_credential::COLLECTION_NAME)
+            .unwrap();
+        let bytes = crate::services::platform_credential_service::encrypt_platform_field(
+            &state.encryption_keys,
+            id,
+            "app_secret",
+            b"replacement-shared-secret",
+        )
+        .await
+        .unwrap();
+        let mut set = doc! {"secrets.app_secret": bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes}};
+        let mut unset = doc! {};
+        crate::services::credential_record_service::mark_classic_update(
+            &mut set,
+            &mut unset,
+            &state.encryption_keys,
+            "app_secret",
+        );
+        rows.update_one(doc! {"_id": id}, doc! {"$set":set,"$unset":unset})
             .await
             .unwrap();
-        db.collection::<Document>(crate::models::platform_credential::COLLECTION_NAME).update_one(doc! {"provider":"meta"},doc! {"$set":{"secrets.app_secret":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:secret}}}).await.unwrap();
         let actual = snapshot
             .secrets(&state.encryption_keys, &WhatsAppAdapter)
             .await
