@@ -633,7 +633,7 @@ it.each([403, 404])("an off-selection %s fences cards queued during the same sou
   f.unmount();
 });
 
-it("does not resume when Stop settles before an in-flight Allow returns", async () => {
+it.each([false, true])("does not resume when Stop settles before an in-flight Allow returns (later message: %s)", async (laterMessage) => {
   const f = decisionNavigationFixture(true);
   await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
   const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
@@ -642,10 +642,81 @@ it("does not resume when Stop settles before an in-flight Allow returns", async 
   await waitFor(() => expect(requests.some((r) => r.endsWith(`/acknowledgements/${f.card.id}`))).toBe(true));
   f.rerender({ selected: f.second, enabled: true });
   page.messages.push({ ...page.messages[0]!, id: "stopped", seq: 2, role: "assistant", status: "failed", error_code: "cancelled" });
+  if (laterMessage) page.messages.push({ ...page.messages[0]!, id: "unrelated", turn_id: "another-turn", seq: 3 });
   page.conversation.active_turn = null;
   await act(() => nyxAgentTransport.history(id));
   await act(async () => { f.resolve(); await decision; });
   expect(send).not.toHaveBeenCalled();
+  f.unmount();
+});
+
+it("a queued turn's Stop suppresses only the cards bound to that turn", async () => {
+  const f = decisionNavigationFixture(true);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  let now = Date.now();
+  vi.spyOn(Date, "now").mockImplementation(() => now);
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  await act(async () => {
+    const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+    f.resolve(); await decision;
+  });
+  page.conversation.active_turn = { ...page.conversation.active_turn!, turn_id: "next-turn" };
+  page.messages.push({ ...page.messages[0]!, id: "completed", seq: 2, role: "assistant" });
+  page.messages.push({ ...page.messages[0]!, id: "next-user", turn_id: "next-turn", seq: 3 });
+  const secondCard = { ...f.card, id: "12345678-1234-4123-8123-123456789013" };
+  page.acknowledgements = [{ ...f.card, status: "allowed" }, secondCard];
+  await act(() => nyxAgentTransport.history(id));
+  const mock = globalThis.__nyxidAssistantHttpMock!;
+  globalThis.__nyxidAssistantHttpMock = (request) =>
+    request.endpoint.endsWith(`/acknowledgements/${secondCard.id}`)
+      ? json({ ...secondCard, status: "allowed", decided_by: "user" }) : mock(request);
+  now += 750;
+  await act(() => f.result.current.decideAcknowledgement({ id: secondCard.id, choice: "allow" }));
+  expect(send).not.toHaveBeenCalled();
+  page.conversation.active_turn = null;
+  page.messages.push({ ...page.messages[0]!, id: "next-stopped", turn_id: "next-turn", seq: 4, role: "assistant", status: "failed", error_code: "cancelled" });
+  await act(() => nyxAgentTransport.history(id));
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0]?.[1]).toContain(f.card.id);
+  expect(send.mock.calls[0]?.[1]).not.toContain(secondCard.id);
+  expect(send.mock.calls[0]?.[4]).toMatchObject({ acknowledgementId: f.card.id });
+  f.unmount();
+});
+
+it("resumes a valid explicit Allow clicked after an earlier Stop has settled", async () => {
+  page.messages.push({ ...page.messages[0]!, id: "earlier-stop", seq: 2, role: "assistant", status: "failed", error_code: "cancelled" });
+  const f = decisionNavigationFixture(false);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  await act(async () => {
+    const decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" });
+    f.resolve(); await decision;
+  });
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0]?.[0]).toBe(id);
+  f.unmount();
+});
+
+it.each([false, true])("an unrelated turn's cancellation cannot suppress Allow (queued: %s)", async (queued) => {
+  const f = decisionNavigationFixture(queued);
+  await waitFor(() => expect(f.result.current.acknowledgements).toHaveLength(1));
+  const send = vi.spyOn(nyxAgentTransport, "send").mockResolvedValue(undefined);
+  let decision!: Promise<unknown>;
+  act(() => { decision = f.result.current.decideAcknowledgement({ id: f.card.id, choice: "allow" }); });
+  await waitFor(() => expect(requests.some((r) => r.endsWith(`/acknowledgements/${f.card.id}`))).toBe(true));
+  if (queued) {
+    await act(async () => { f.resolve(); await decision; });
+    expect(send).not.toHaveBeenCalled();
+    f.rerender({ selected: f.second, enabled: true });
+  }
+  page.conversation.active_turn = null;
+  page.messages.push({ ...page.messages[0]!, id: "other-stop", turn_id: "another-turn", seq: 2, role: "assistant", status: "failed", error_code: "cancelled" });
+  if (!queued) {
+    await act(() => nyxAgentTransport.history(id));
+    await act(async () => { f.resolve(); await decision; });
+  }
+  await waitFor(() => expect(send).toHaveBeenCalledOnce(), { timeout: 3500 });
+  expect(send.mock.calls[0]?.[0]).toBe(id);
   f.unmount();
 });
 

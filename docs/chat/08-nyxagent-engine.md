@@ -801,7 +801,15 @@ still running (cards appear as soon as the tool call is refused, usually before
 the reply finishes), the running turn cannot observe the decision: NyxAgent ends
 a turn on a card and answers same-turn repeats locally. The browser therefore
 queues the continuation and sends one marked continuation turn covering every card allowed
-during that turn as soon as it settles; nothing is sent if the user pressed Stop.
+during that turn as soon as it settles. A newly settled Stop for the decision's
+turn suppresses that decision's continuation; a cancellation already settled
+before the owner's new explicit Allow does not suppress an otherwise valid card.
+The browser captures the active turn and latest transcript sequence at the click
+and checks for a later failed assistant reply with `cancelled` on that exact turn.
+If an idle source becomes busy while the decision is pending, its queue binds the
+turn active at queueing. Other turns' cancellations do not suppress the decision,
+and cards sharing a queue retain their individual turn fences. Backend card
+validity and task-cancellation checks remain authoritative.
 **Deny** sends nothing.
 
 The browser captures the source conversation and acting account, including its
@@ -822,8 +830,8 @@ does not restore composer focus in another thread or account. Account transition
 (including switching away and back) and disabling the engine discard queued
 continuations. Server-owned continuations remain server-owned. Each allowed-card
 instruction includes the shared task-continuation wording in
-`shared/allowed-card-continuation.json`, so the assistant continues the original
-task until it finishes or needs user input.
+`shared/allowed-card-continuation.json`, which instructs the assistant to continue
+the original task until it finishes or needs user input.
 
 Independently, every turn's input context includes a note listing the cards the
 user allowed or denied since the previous user message, oldest first and at most

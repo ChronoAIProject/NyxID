@@ -146,11 +146,22 @@ interface DecisionSource {
   readonly conversationId: string | undefined;
   readonly owner: string | undefined;
   readonly identityRevision: number;
+  readonly turnId: string | undefined;
+  readonly messageSeq: number;
 }
 
 function isCurrentDecisionActor(source: DecisionSource): boolean {
   return Boolean(source.owner) && source.owner === useAuthStore.getState().user?.id &&
     source.identityRevision === getAssistantIdentityRevision();
+}
+
+/** Only a newly settled cancellation of this decision's turn suppresses resume. */
+function decisionTurnStopped(source: DecisionSource): boolean {
+  if (!source.turnId) return false;
+  return nyxAgentTransport.getHistory(source.conversationId)?.messages.some((message) =>
+    message.seq > source.messageSeq && message.turn_id === source.turnId &&
+    message.role === "assistant" && message.status === "failed" && message.error_code === "cancelled",
+  ) ?? false;
 }
 
 /**
@@ -344,7 +355,10 @@ export function useNyxAgentAssistantChat({
   // running turn cannot observe the decision (NyxAgent ends a turn on a card and
   // answers same-turn repeats locally), so the continuation waits for settlement.
   const pendingContinuations = useRef(
-    new Map<string, { source: DecisionSource; acknowledgements: NyxAgentAcknowledgement[] }>(),
+    new Map<string, {
+      source: DecisionSource;
+      decisions: { source: DecisionSource; acknowledgement: NyxAgentAcknowledgement }[];
+    }>(),
   );
   const [pendingRevision, setPendingRevision] = useState(0);
   const pendingHistoryReads = useRef(new Set<string>());
@@ -399,17 +413,20 @@ export function useNyxAgentAssistantChat({
       const { conversationId } = source;
       if (choice !== "allow" || !conversationId || !enabled || !isCurrentDecisionActor(source)) return;
       if (historyDenied && conversationId === selectedConversationId) return;
+      if (decisionTurnStopped(source)) return;
       if (nyxAgentTransport.isRunning(conversationId)) {
         const previous = pendingContinuations.current.get(conversationId);
         const queued = previous && isCurrentDecisionActor(previous.source) ? previous : undefined;
         pendingContinuations.current.set(conversationId, {
           source,
-          acknowledgements: [...(queued?.acknowledgements ?? []), acknowledgement],
+          decisions: [...(queued?.decisions ?? []), {
+            source: { ...source, turnId: source.turnId ?? nyxAgentTransport.getActiveTurnId(conversationId) },
+            acknowledgement,
+          }],
         });
         setPendingRevision((revision) => revision + 1);
         return;
       }
-      if (nyxAgentTransport.getHistory(conversationId)?.messages.at(-1)?.error_code === "cancelled") return;
       // An existing thread needs no adoption; completion must not change selection.
       void liveSend(conversationId, continuationText(acknowledgement), () => undefined,
         undefined, undefined, undefined, undefined, acknowledgement.id).catch(() => undefined);
@@ -425,8 +442,8 @@ export function useNyxAgentAssistantChat({
     },
   });
 
-  // Runs after every render: transport changes re-render this hook, so a queued
-  // continuation is sent as soon as its turn has settled and history is fresh.
+  // Recheck queued decisions when source history, selection or queue state changes.
+  // Each decision retains its own turn fence when several cards share the queue.
   useEffect(() => {
     let removed = false;
     for (const [conversationId, queued] of pendingContinuations.current) {
@@ -435,17 +452,24 @@ export function useNyxAgentAssistantChat({
         removed = true;
         continue;
       }
+      const decisions = queued.decisions.filter((entry) => !decisionTurnStopped(entry.source));
+      if (!decisions.length) {
+        pendingContinuations.current.delete(conversationId);
+        removed = true;
+        continue;
+      }
+      if (decisions.length !== queued.decisions.length) {
+        pendingContinuations.current.set(conversationId, { ...queued, decisions });
+        removed = true;
+      }
       if (nyxAgentTransport.isRunning(conversationId)) continue;
       pendingContinuations.current.delete(conversationId);
       removed = true;
-      // Stop means the user wants the assistant to halt; do not resume it.
-      const tail = nyxAgentTransport.getHistory(conversationId)?.messages.at(-1);
-      if (tail?.error_code === "cancelled") continue;
       void liveSend(
         conversationId,
-        continuationForAll(queued.acknowledgements),
+        continuationForAll(decisions.map((entry) => entry.acknowledgement)),
         () => undefined,
-        undefined, undefined, undefined, undefined, queued.acknowledgements[0]?.id,
+        undefined, undefined, undefined, undefined, decisions[0]?.acknowledgement.id,
       ).catch(() => undefined);
     }
     if (removed) setPendingRevision((revision) => revision + 1);
@@ -524,7 +548,13 @@ export function useNyxAgentAssistantChat({
     // so both the request and its callbacks retain the exact source of the click.
     decideAcknowledgement: (input: AcknowledgementDecision) => decision.mutateAsync({
       ...input,
-      source: { conversationId: selectedConversationId, owner: userId, identityRevision: getAssistantIdentityRevision() },
+      source: {
+        conversationId: selectedConversationId,
+        owner: userId,
+        identityRevision: getAssistantIdentityRevision(),
+        turnId: nyxAgentTransport.getActiveTurnId(selectedConversationId),
+        messageSeq: nyxAgentTransport.getHistory(selectedConversationId)?.messages.at(-1)?.seq ?? 0,
+      },
     }),
     decidingAcknowledgement: decision.isPending ? decision.variables?.id : undefined,
     deleteConversation: (id: string) => nyxAgentTransport.delete(id),
