@@ -231,6 +231,7 @@ mod tests {
             message_id: "1730000000.000001".into(),
             original_private_human: true,
             content_commitment: String::new(),
+            cleanup_fence: 0,
             received_at: chrono::Utc::now(),
             expires_at: chrono::Utc::now() + chrono::Duration::minutes(5),
         }

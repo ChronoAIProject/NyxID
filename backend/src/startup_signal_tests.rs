@@ -47,16 +47,12 @@ fn startup_signal_child() {
     if std::env::var_os("NYXID_TEST_STARTUP_STEP").is_none() {
         return;
     }
-    let cli = crate::Cli {
-        promote_admin: None,
-        command: std::env::var_os("NYXID_TEST_STARTUP_ONE_SHOT").map(|_| {
-            crate::Commands::CleanupOrphans(crate::cleanup_cli::CleanupArgs {
-                dry_run: true,
-                yes: false,
-            })
-        }),
-    };
-    if cli.command.is_some() {
+    use clap::Parser;
+    assert!(std::env::var_os("NYXID_BOOTSTRAP_DATABASE_URL").is_none());
+    assert!(std::env::var_os("NYXID_DEPLOYMENT_REVISION").is_none());
+    let args = std::env::var("NYXID_TEST_STARTUP_ONE_SHOT").unwrap_or_default();
+    let cli = crate::Cli::parse_from(std::iter::once("nyxid").chain(args.split_whitespace()));
+    if cli.command.is_some() || cli.promote_admin.is_some() {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -85,9 +81,10 @@ async fn read_until(
     None
 }
 
-async fn check_step(step: &str, second: bool, one_shot: bool) {
+async fn check_step(step: &str, second: bool, args: Option<&str>) {
     // This database starts completely empty so the early safe points prove
     // that even schema/seed/readiness writes have not happened.
+    let one_shot = args.is_some();
     let database_url = std::env::var("NYXID_TEST_DATABASE_URL").unwrap();
     let client = mongodb::Client::with_uri_str(&database_url).await.unwrap();
     let db = client.database(&format!(
@@ -154,8 +151,16 @@ async fn check_step(step: &str, second: bool, one_shot: bool) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    if one_shot {
-        command.env("NYXID_TEST_STARTUP_ONE_SHOT", "1");
+    if let Some(args) = args {
+        command.env("NYXID_TEST_STARTUP_ONE_SHOT", args);
+        if args.starts_with("--promote-admin") {
+            let user =
+                crate::test_utils::test_user("startup", crate::models::user::UserType::Person);
+            db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+                .insert_one(user)
+                .await
+                .unwrap();
+        }
     }
     let mut child = command.spawn().unwrap();
     let mut input = child.stdin.take().unwrap();
@@ -306,33 +311,44 @@ async fn check_step(step: &str, second: bool, one_shot: bool) {
 
 #[tokio::test]
 async fn startup_signal_at_entry() {
-    check_step("entry", false, false).await;
+    check_step("entry", false, None).await;
 }
 #[tokio::test]
 async fn startup_signal_after_database() {
-    check_step("database_ready", false, false).await;
+    check_step("database_ready", false, None).await;
 }
 #[tokio::test]
 async fn startup_signal_after_workers_finishes_step_then_drains() {
-    check_step("after_workers", false, false).await;
+    check_step("after_workers", false, None).await;
 }
 #[tokio::test]
 async fn startup_signal_before_listeners_drains_without_binding() {
-    check_step("before_listeners", false, false).await;
+    check_step("before_listeners", false, None).await;
 }
 #[tokio::test]
 async fn startup_signal_second_during_startup_finishes_step_then_cleans_up() {
-    check_step("after_workers", true, false).await;
+    check_step("after_workers", true, None).await;
 }
 #[tokio::test]
 async fn startup_signal_after_listeners_drains() {
-    check_step("serving", false, false).await;
+    check_step("serving", false, None).await;
 }
 #[tokio::test]
 async fn startup_signal_one_shot_starts_no_workers() {
-    check_step("one_shot", false, true).await;
+    check_step("one_shot", false, Some("cleanup-orphans --dry-run")).await;
 }
 #[tokio::test]
 async fn startup_signal_one_shot_keeps_default_termination() {
-    check_step("entry", false, true).await;
+    check_step("entry", false, Some("cleanup-orphans --dry-run")).await;
+}
+
+#[tokio::test]
+async fn unenrolled_database_commands_finish_without_lifecycle_environment() {
+    for args in [
+        "--promote-admin startup@example.com",
+        "telemetry-erasure status",
+        "export-hmac-keyset --path exported.keyset",
+    ] {
+        check_step("one_shot", false, Some(args)).await;
+    }
 }
