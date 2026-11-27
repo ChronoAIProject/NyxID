@@ -9,7 +9,7 @@ test('P1-6 all committed iOS permission rationales have matching Expo and native
   const project = readFileSync(new URL('ios/NyxIDMobile.xcodeproj/project.pbxproj', root), 'utf8');
   for (const language of ['zh-Hans','zh-Hant']) {
     assert.ok(config.includes(`"${language}": "./locales/${language}.json"`));
-    const values = JSON.parse(readFileSync(new URL(`locales/${language}.json`, root), 'utf8'));
+    const { ios: values } = JSON.parse(readFileSync(new URL(`locales/${language}.json`, root), 'utf8'));
     const native = readFileSync(new URL(`ios/NyxIDMobile/Supporting/${language}.lproj/InfoPlist.strings`, root), 'utf8');
     assert.ok(project.includes(`${language}.lproj`));
     for (const key of keys) {
