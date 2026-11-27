@@ -127,3 +127,8 @@ threads-required = "num-cpus"
 [[profile.ci.overrides]]
 filter = "test(db::startup_migration_tests::startup_migration_) | test(::route_sync::route_write_boundaries)"
 threads-required = "num-cpus"
+
+# These exact-time census tests temporarily change MongoDB's snapshot-history window.
+[[profile.ci.overrides]]
+filter = "test(services::encrypted_record_census::tests::stream_replays_) | test(services::encrypted_record_census::tests::ttl_deletes_) | test(services::encrypted_record_census::tests::expired_baseline_)"
+threads-required = "num-cpus"

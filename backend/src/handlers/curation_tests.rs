@@ -1,3 +1,6 @@
+use crate::handlers::credential_record_fixtures::{
+    insert_bearer_connection, set_catalog_credential,
+};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -810,8 +813,9 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         user_endpoint::{COLLECTION_NAME as ENDPOINTS, UserEndpoint},
         user_provider_token::{COLLECTION_NAME as PROVIDER_TOKENS, UserProviderToken},
         user_service::{COLLECTION_NAME as USER_SERVICES, UserService},
-        user_service_connection::{COLLECTION_NAME as CONNECTIONS, UserServiceConnection},
+        user_service_connection::COLLECTION_NAME as CONNECTIONS,
     };
+    use crate::services::credential_record_service;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
@@ -884,12 +888,12 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
     f.service.base_url = catalog.uri();
     f.service.auth_method = "bearer".into();
     f.service.requires_user_credential = true;
-    f.service.credential_encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"master-key-must-not-be-used")
-        .await
-        .unwrap();
+    set_catalog_credential(
+        &f.state.encryption_keys,
+        &mut f.service,
+        b"master-key-must-not-be-used",
+    )
+    .await;
     f.state
         .db
         .collection::<DownstreamService>(SERVICES)
@@ -928,31 +932,14 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         (&f.owner, "owner-broad-key"),
         (&f.sa.id, "dedicated-sa-key"),
     ] {
-        f.state
-            .db
-            .collection::<UserServiceConnection>(CONNECTIONS)
-            .insert_one(UserServiceConnection {
-                secret_context_versions: Default::default(),
-                id: Uuid::new_v4().to_string(),
-                user_id: owner.clone(),
-                service_id: f.service.id.clone(),
-                credential_encrypted: Some(
-                    f.state
-                        .encryption_keys
-                        .encrypt(key.as_bytes())
-                        .await
-                        .unwrap(),
-                ),
-                credential_type: Some("bearer".into()),
-                credential_label: None,
-                metadata: None,
-                is_active: true,
-                state_version: 0,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
-            .await
-            .unwrap();
+        insert_bearer_connection(
+            &f.state.db,
+            &f.state.encryption_keys,
+            owner,
+            &f.service.id,
+            key.as_bytes(),
+        )
+        .await;
     }
     let bearer = token(&f, None).await;
     let route = format!("/api/v1/proxy/{}/packages", f.service.id);
@@ -1237,39 +1224,49 @@ async fn curation_proxy_uses_catalog_endpoint_and_only_dedicated_sa_credentials(
         (&f.owner, "owner-broad-provider-key"),
         (&f.sa.id, "dedicated-sa-provider-key"),
     ] {
+        let mut token = UserProviderToken {
+            secret_context_versions: Default::default(),
+            id: Uuid::new_v4().to_string(),
+            user_id: owner.clone(),
+            provider_config_id: provider.id.clone(),
+            connection_id: None,
+            credential_user_id: None,
+            token_type: "api_key".into(),
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            api_key_encrypted: None,
+            status: "active".into(),
+            state_version: 0,
+            last_refreshed_at: None,
+            last_used_at: None,
+            error_message: None,
+            label: None,
+            metadata: None,
+            gateway_url: Some(owner_endpoint.uri()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let keys = &f.state.encryption_keys;
+        let field = "api_key_encrypted";
+        token.api_key_encrypted = Some(
+            credential_record_service::encrypt(
+                keys,
+                PROVIDER_TOKENS,
+                &token.id,
+                &token.user_id,
+                field,
+                key.as_bytes(),
+            )
+            .await
+            .unwrap(),
+        );
+        credential_record_service::mark_version(&mut token.secret_context_versions, keys, field);
         f.state
             .db
             .collection::<UserProviderToken>(PROVIDER_TOKENS)
-            .insert_one(UserProviderToken {
-                secret_context_versions: Default::default(),
-                id: Uuid::new_v4().to_string(),
-                user_id: owner.clone(),
-                provider_config_id: provider.id.clone(),
-                connection_id: None,
-                credential_user_id: None,
-                token_type: "api_key".into(),
-                access_token_encrypted: None,
-                refresh_token_encrypted: None,
-                token_scopes: None,
-                expires_at: None,
-                api_key_encrypted: Some(
-                    f.state
-                        .encryption_keys
-                        .encrypt(key.as_bytes())
-                        .await
-                        .unwrap(),
-                ),
-                status: "active".into(),
-                state_version: 0,
-                last_refreshed_at: None,
-                last_used_at: None,
-                error_message: None,
-                label: None,
-                metadata: None,
-                gateway_url: Some(owner_endpoint.uri()),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .insert_one(token)
             .await
             .unwrap();
     }

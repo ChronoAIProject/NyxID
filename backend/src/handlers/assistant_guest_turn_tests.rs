@@ -1,5 +1,6 @@
 //! Engine -> fake NyxAgent -> authenticated NyxID model/MCP callbacks.
 use super::*;
+use crate::handlers::credential_record_fixtures::set_catalog_credential;
 use crate::services::assistant_authority_tests::{connected, direct_fixture, orchestrator_fixture};
 use axum::{Extension, routing::any};
 use tower::ServiceExt;
@@ -364,12 +365,7 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
     if bootstrap {
         model.auth_method = "bearer".into();
         model.service_category = "internal".into();
-        model.credential_encrypted = f
-            .state
-            .encryption_keys
-            .encrypt(b"test-only-master")
-            .await
-            .unwrap();
+        set_catalog_credential(&f.state.encryption_keys, &mut model, b"test-only-master").await;
         if scenarios.contains(&"bootstrap_platform") {
             model.platform_key =
                 Some(serde_json::from_value(json!({"enabled":true,"audience":"public"})).unwrap());
@@ -427,6 +423,7 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         unrelated.service_category = "connection".into();
         unrelated.requires_user_credential = true;
         unrelated.credential_encrypted.clear();
+        unrelated.secret_context_versions.clear();
         f.state
             .db
             .collection::<DownstreamService>(SERVICES)
