@@ -1,52 +1,46 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
-import { useState, useEffect } from "react";
+import { useRef } from "react";
 import { Link, Outlet } from "@tanstack/react-router";
 import { GitHubButton } from "@/components/shared/github-button";
 
 import { useLogoHref } from "@/hooks/use-logo-href";
 import { useApplyTheme } from "@/hooks/use-theme";
-import { NyxidLogo } from "@/components/brand/nyxid-logo";
+import { PublicBrand, PublicThemeToggle } from "@/features/public-site/public-chrome";
+import { usePublicThemeElement } from "@/features/public-site/public-theme";
+import "@/features/website-a/public-reading.css";
 
-const AUTH_IMAGES = [
-  "/auth-hero.png",
-  "/auth-hero-2.png",
-  "/auth-hero-3.png",
-  "/auth-hero-4.png",
-];
-
-const INTERVAL_MS = 6000;
-const FADE_MS = 1200;
-
+/**
+ * Sign-in and sign-up wear the public site's material: the form on the paper and
+ * the landing page's closing painting beside it. The app's text size and density
+ * still apply; colours follow the public day/night choice, which never changes
+ * the app's own theme preference.
+ */
 export function AuthLayout() {
-  useUiTranslation();
+  const { i18n } = useUiTranslation();
   useApplyTheme();
-  const [activeIndex, setActiveIndex] = useState(0);
+  const scope = useRef<HTMLDivElement>(null);
+  usePublicThemeElement(scope);
   const logoHref = useLogoHref();
-
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setActiveIndex((prev) => (prev + 1) % AUTH_IMAGES.length);
-    }, INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, []);
+  const language = i18n.resolvedLanguage?.startsWith("zh") ? "zh" : "en";
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-background">
+    <div ref={scope} className="nyx-public public-reading public-auth flex h-dvh overflow-hidden">
       {/* Left — form column */}
       <div
-        className="relative flex w-full shrink-0 flex-col border-r border-border bg-card lg:w-[calc(40%-20px)]"
+        className="public-auth-form relative flex w-full shrink-0 flex-col lg:w-[calc(40%-20px)]"
         style={{
           paddingTop: "max(0px, var(--sat))",
           paddingBottom: "max(0px, var(--sab))",
           paddingLeft: "max(0px, var(--sal))",
         }}
       >
-        {/* Logo — top-left */}
-        <div className="flex shrink-0 items-center px-4 pt-8 sm:px-10">
-          <Link to={logoHref} className="flex items-center">
-            <NyxidLogo className="h-7 w-auto" />
+        {/* Logo and day/night switch — top */}
+        <div className="public-auth-top shrink-0 px-4 pt-8 sm:px-10">
+          <Link to={logoHref} className="public-auth-home">
+            <PublicBrand />
           </Link>
+          <PublicThemeToggle language={language} />
         </div>
 
         {/* Form area — vertically centered */}
@@ -71,23 +65,8 @@ export function AuthLayout() {
         </div>
       </div>
 
-      {/* Right — hero image carousel with fade (hidden on mobile) */}
-      <div className="relative hidden overflow-hidden lg:block lg:w-[calc(60%+20px)]">
-        {AUTH_IMAGES.map((src, i) => (
-          <img
-            key={src}
-            src={src}
-            alt=""
-            className="absolute inset-0 h-full w-full object-cover object-bottom"
-            style={{
-              transform: "scale(1.15)",
-              transformOrigin: "center bottom",
-              opacity: i === activeIndex ? 1 : 0,
-              transition: `opacity ${FADE_MS}ms ease-in-out`,
-            }}
-          />
-        ))}
-      </div>
+      {/* Right — the halftone Nyx from the landing page's close, one still per mode (hidden on mobile) */}
+      <div className="public-auth-art relative hidden lg:block lg:w-[calc(60%+20px)]" />
     </div>
   );
 }

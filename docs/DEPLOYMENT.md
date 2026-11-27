@@ -357,7 +357,8 @@ The **frontend Dockerfile** (`frontend/Dockerfile`) uses a two-stage build:
 2. Unprivileged nginx 1.27 runtime with a validating Python origin/policy renderer
 
 The frontend nginx config (`frontend/nginx.conf.template`) handles:
-- SPA fallback (`try_files $uri /index.html`)
+- Generated public routes serve prerendered HTML; explicit app routes serve the
+  internal `app.html` shell. Unknown routes and raw `/index.html` return 404.
 - Reverse proxy for `/api`, `/oauth`, `/.well-known`, `/health` to the backend
 - Gzip compression and cache headers for hashed assets
 - Response-specific enforcing CSP and complete security headers on every location
@@ -374,7 +375,8 @@ background check within that ten-minute window.
 Frontend metadata is authoritative because frontend and backend images can roll
 independently. Two consecutive observations of a different frontend build stage
 its initial JavaScript and CSS in the browser cache, without executing scripts,
-attaching styles, or remounting the running application. The served `index.html`
+attaching styles, or remounting the running application. The application shell
+served at `/assistant`
 must also identify that build before it is considered ready.
 
 Confirmed updates are saved in a Zustand store persisted to local storage, with

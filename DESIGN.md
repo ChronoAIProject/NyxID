@@ -13,6 +13,22 @@
 - **Key principle:** Color is earned. Semantic colors (green/amber/red) do the heavy lifting for status. Purple marks identity, interaction, and the "primary" CTA archetype.
 - **Density:** Compact — the entire UI skews small and tight. Elements are visually cohesive at reduced sizes. If in doubt, go smaller.
 
+## Public website
+
+Public pages follow Chloe’s light/night landing design. English and Chinese share
+the same layouts and artwork. Use Host Grotesk, paper/ink surfaces, neutral rules
+and ink pill buttons; violet marks identity and interactive states. Public styles
+are scoped to `.nyx-public`, with tokens in `public-design.css` and a public theme
+preference independent of the app.
+
+Keep each page focused: NyxBot shows the app and channels, How it works follows a
+request, Your agent explains client setup, Security explains permissions, Pricing
+explains billing, and Tools provides the directory. Solutions uses job tickets.
+Use real app captures with fictional data; retain reduced-motion stills and visible
+availability labels. Shared navigation, locale/theme controls and the complete
+footer keep the pages connected. Production HTML contains the readable content
+before controls and motion load.
+
 ## Color
 
 ### Primary Accent
@@ -21,7 +37,7 @@
 - **Primary deep:** `#7c5ce0` — for hover states, pressed states
 
 ### Themes and tokens
-The dashboard has dark and light themes (`html.theme-dark` / `html.theme-light`, chosen in Settings → Display; default follows the OS). Always use the semantic tokens below, never raw hex or `white/[α]` classes, so both themes stay correct. Source of truth: `frontend/src/app.css`. Landing/blog are never themed and keep the `@theme` defaults.
+The dashboard has dark and light themes (`html.theme-dark` / `html.theme-light`, chosen in Settings → Display; default follows the OS). Always use the semantic tokens below, never raw hex or `white/[α]` classes, so both themes stay correct. Source of truth: `frontend/src/app.css`. Public marketing pages use the separate scoped tokens described in Public website.
 
 | Token | Dark | Light | Use |
 |---|---|---|---|

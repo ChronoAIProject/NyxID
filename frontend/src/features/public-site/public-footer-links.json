@@ -1,0 +1,117 @@
+[
+  {
+    "title": "Product",
+    "zh": "产品",
+    "links": [
+      [
+        "/nyxbot",
+        "NyxBot",
+        "NyxBot"
+      ],
+      [
+        "/integrations",
+        "Tools",
+        "工具"
+      ],
+      [
+        "/how-it-works",
+        "How it works",
+        "工作原理"
+      ],
+      [
+        "/security",
+        "Security",
+        "安全"
+      ],
+      [
+        "/pricing",
+        "Pricing",
+        "价格"
+      ]
+    ]
+  },
+  {
+    "title": "Solutions",
+    "zh": "解决方案",
+    "links": [
+      [
+        "/solutions/restaurant-manager",
+        "Restaurant manager",
+        "餐厅经理"
+      ],
+      [
+        "/solutions/help-desk",
+        "24-hour help desk",
+        "全天候客服"
+      ],
+      [
+        "/solutions/back-office-clerk",
+        "Back-office clerk",
+        "后台文员"
+      ],
+      [
+        "/solutions",
+        "All solutions",
+        "全部方案"
+      ]
+    ]
+  },
+  {
+    "title": "Developers",
+    "zh": "开发者",
+    "links": [
+      [
+        "/agents",
+        "Your agent",
+        "你的智能体"
+      ],
+      [
+        "/docs/ai/guides/agent-isolation",
+        "Scoped keys guide",
+        "权限密钥指南"
+      ],
+      [
+        "/docs",
+        "Docs",
+        "文档"
+      ],
+      [
+        "/docs/cli/getting-started/install",
+        "CLI",
+        "命令行工具"
+      ]
+    ]
+  },
+  {
+    "title": "Community",
+    "zh": "社区",
+    "links": [
+      [
+        "https://discord.gg/QMvcs8UQBW",
+        "Discord",
+        "Discord"
+      ],
+      [
+        "https://github.com/ChronoAIProject/NyxID",
+        "GitHub",
+        "GitHub"
+      ],
+      [
+        "/blog",
+        "Blog",
+        "博客"
+      ]
+    ]
+  },
+  {
+    "title": "Company",
+    "zh": "公司",
+    "links": [
+      [
+        "/contact",
+        "Contact",
+        "联系"
+      ]
+    ]
+  }
+]

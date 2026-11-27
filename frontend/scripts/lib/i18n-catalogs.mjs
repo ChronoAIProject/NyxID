@@ -34,7 +34,7 @@ export const isPlacementSource = (file) => /\.tsx?$/.test(file) &&
   file !== "src/test-setup.ts" &&
   !/^src\/(?:test-utils|dev)\//.test(file) &&
   !FIXTURE_SOURCE.test(file) &&
-  !/^src\/features\/(?:landing|nyxbot-onboarding)\//.test(file) &&
+  !/^src\/features\/(?:landing|nyxbot-onboarding|website-a)\//.test(file) &&
   !file.includes("/locales/");
 
 export function catalogFiles(locales) {

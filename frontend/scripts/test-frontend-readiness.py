@@ -2,6 +2,7 @@
 """Static readiness contract tests; run the companion nginx test for HTTP routing."""
 import importlib.util
 import copy
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -39,10 +40,43 @@ class StaticReadiness(unittest.TestCase):
         (self.root / "index.html").write_text("<html>Login</html>")
         self.assertEqual(readiness.check(self.root, self.inventory), ["entry_html"])
 
+    def test_app_shell_and_prerendered_pages_fail_closed_and_recover(self):
+        entries = [self.root / "app.html", self.root / "__public/home.html"]
+        for entry in entries:
+            entry.parent.mkdir(exist_ok=True)
+            entry.write_text("<html>Built page</html>")
+        inventory = readiness.inventory(self.root)
+        for entry in entries:
+            content = entry.read_bytes()
+            with self.subTest(entry=entry.name):
+                entry.unlink()
+                self.assertEqual(readiness.check(self.root, inventory), ["entry_html"])
+                entry.write_bytes(b"x" * len(content))
+                self.assertEqual(readiness.check(self.root, inventory), ["entry_html"])
+                entry.write_bytes(content)
+                self.assertEqual(readiness.check(self.root, inventory), [])
+
     def test_remote_fonts_are_optional_but_local_entry_assets_are_required(self):
         entry = self.root / "index.html"
         entry.write_text(entry.read_text() + '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Example">')
         self.assertEqual(readiness.check(self.root, readiness.inventory(self.root)), [])
+
+    def test_dispatcher_requires_app_css_from_matching_build_metadata(self):
+        (self.root / "index.html").write_text('<html><script type="module" src="/assets/app.js"></script></html>')
+        metadata = self.root / "build-version.json"
+        with self.assertRaises(ValueError):
+            readiness.inventory(self.root)
+        for assets in [["assets/app.css"], ["assets/app.js"], ["assets/app.js", "../outside.css"]]:
+            metadata.write_text(json.dumps({"assets": assets}))
+            with self.subTest(assets=assets), self.assertRaises(ValueError):
+                readiness.inventory(self.root)
+        metadata.write_text(json.dumps({"assets": ["assets/app.js", "assets/app.css"]}))
+        inventory = readiness.inventory(self.root)
+        self.assertEqual(readiness.check(self.root, inventory), [])
+        (self.root / "assets/app.css").unlink()
+        self.assertEqual(readiness.check(self.root, inventory), ["static_assets"])
+        with self.assertRaises(ValueError):
+            readiness.inventory(self.root)
 
     def test_missing_entrypoint_stylesheet_or_lazy_chunk(self):
         for filename in ["app.js", "app.css", "lazy.js"]:

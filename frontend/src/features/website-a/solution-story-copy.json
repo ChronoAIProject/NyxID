@@ -1,0 +1,2012 @@
+{
+  "en": [
+    {
+      "slug": "restaurant-manager",
+      "title": "Restaurant manager",
+      "description": "Takes table bookings in Telegram, checks your calendar, notes allergies and sends reminders.",
+      "category": "hosp",
+      "categoryLabel": "Hospitality",
+      "channels": "Telegram",
+      "never": "Never: charge deposits",
+      "apps": [
+        "Telegram",
+        "Google Calendar",
+        "Google Sheets",
+        "Payments"
+      ],
+      "messages": [
+        {
+          "kind": "sys",
+          "text": "Sat 11:42 PM · restaurant closed"
+        },
+        {
+          "kind": "in",
+          "text": "Hi, Sarah here! Table for 4 tomorrow at 7:30? One of us is vegan."
+        },
+        {
+          "kind": "tool",
+          "text": "✓ checked calendar · 7:30 free"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ booking created · note added"
+        },
+        {
+          "kind": "out",
+          "text": "Booked! Table for 4, Sun 7:30 PM under Sarah. I’ve noted vegan, so the kitchen knows."
+        },
+        {
+          "kind": "in",
+          "text": "Perfect, thank you!"
+        }
+      ],
+      "flow": [
+        {
+          "label": "Trigger",
+          "title": "A guest messages your bot",
+          "text": "Telegram, any hour"
+        },
+        {
+          "label": "Assistant",
+          "title": "Understands the request",
+          "text": "date, time, party size, notes"
+        },
+        {
+          "label": "Action",
+          "title": "Checks and books",
+          "text": "Google Calendar + guest sheet"
+        },
+        {
+          "label": "Your OK",
+          "title": "Only for cancellations",
+          "text": "one tap on your phone"
+        },
+        {
+          "label": "Result",
+          "title": "Guest confirmed",
+          "text": "reminder sent the day before"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Telegram",
+          "action": "reply to guests",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google Calendar",
+          "action": "find & book tables",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google Sheets",
+          "action": "guest notes & allergies",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google Calendar",
+          "action": "cancel bookings",
+          "status": "Ask me first",
+          "kind": "b-ask"
+        },
+        {
+          "service": "Payments",
+          "action": "charge deposits",
+          "status": "Not allowed",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "Your opening hours and table sizes",
+        "Which calendar holds bookings",
+        "Your menu or allergy notes (optional)",
+        "Tone and language for replies"
+      ],
+      "faqs": [
+        {
+          "question": "What if we are fully booked?",
+          "answer": "It offers the nearest free times and can add the guest to a waitlist in your sheet."
+        },
+        {
+          "question": "Can guests cancel?",
+          "answer": "Yes, but by default a cancellation comes to you first for a one-tap OK. You can change that."
+        },
+        {
+          "question": "Does it work with my booking system?",
+          "answer": "It works with Google Calendar and Sheets out of the box. Systems with an API can be connected, and systems without one can be used through a connected computer."
+        }
+      ],
+      "workflowHeading": "From a guest’s Telegram message to a confirmed table",
+      "setupHeading": "What to set up before it takes bookings",
+      "faqHeading": "Questions about bookings"
+    },
+    {
+      "slug": "help-desk",
+      "title": "24-hour help desk",
+      "description": "Answers order, delivery and policy questions any time, and hands tricky ones to your team.",
+      "category": "support",
+      "categoryLabel": "Customer support",
+      "channels": "Telegram,X",
+      "never": "Never: issue refunds",
+      "apps": [
+        "Telegram",
+        "X DMs",
+        "Google Sheets",
+        "Gmail",
+        "Payments"
+      ],
+      "messages": [
+        {
+          "kind": "sys",
+          "text": "Tue 3:12 AM"
+        },
+        {
+          "kind": "in",
+          "text": "My order #4821 still hasn’t arrived. Where is it?"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ looked up order #4821"
+        },
+        {
+          "kind": "out",
+          "text": "Sorry for the wait! #4821 shipped yesterday and arrives tomorrow by 6 PM. Tracking: KT-55210."
+        },
+        {
+          "kind": "in",
+          "text": "Can I get a refund if it is late?"
+        },
+        {
+          "kind": "out",
+          "text": "I’ve passed that to the team. They’ll reply by 10 AM."
+        }
+      ],
+      "flow": [
+        {
+          "label": "Trigger",
+          "title": "A customer asks a question",
+          "text": "Telegram or X DM"
+        },
+        {
+          "label": "Assistant",
+          "title": "Finds the answer",
+          "text": "your FAQ + order sheet"
+        },
+        {
+          "label": "Action",
+          "title": "Replies instantly",
+          "text": "with order status or policy"
+        },
+        {
+          "label": "Your OK",
+          "title": "Refunds go to a human",
+          "text": "alert by email"
+        },
+        {
+          "label": "Result",
+          "title": "Question closed",
+          "text": "or handed off with context"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Telegram",
+          "action": "answer customers",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "X DMs",
+          "action": "answer customers",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google Sheets",
+          "action": "look up orders",
+          "status": "Read-only",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Gmail",
+          "action": "alert your team",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Payments",
+          "action": "issue refunds",
+          "status": "Not allowed",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "Your FAQ or help doc",
+        "Where orders live (sheet or store)",
+        "Who gets escalations",
+        "Business hours for human follow-up"
+      ],
+      "faqs": [
+        {
+          "question": "Will it make things up?",
+          "answer": "It answers from the documents and data you connect. When it does not know, it says so and hands off."
+        },
+        {
+          "question": "Can it handle many chats at once?",
+          "answer": "Yes. Every conversation runs in parallel."
+        },
+        {
+          "question": "Can it issue refunds?",
+          "answer": "Not by default. Refunds are “Not allowed” in this template; you can switch them to “Ask me first”."
+        }
+      ],
+      "workflowHeading": "From a customer’s question to an answer, or to your team",
+      "setupHeading": "What it needs to answer like your team",
+      "faqHeading": "Questions about answers and refunds"
+    },
+    {
+      "slug": "appointment-booker",
+      "title": "Appointment booker",
+      "description": "Offers open slots, books the right person, and handles reschedules with your OK.",
+      "category": "hosp",
+      "categoryLabel": "Hospitality",
+      "channels": "Telegram",
+      "never": "Asks before rescheduling",
+      "apps": [
+        "Telegram",
+        "Google Calendar"
+      ],
+      "messages": [
+        {
+          "kind": "in",
+          "text": "Can I get a haircut with Mia this week?"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ checked Mia’s calendar"
+        },
+        {
+          "kind": "out",
+          "text": "Mia has Thursday 2:00 PM or Friday 11:30 AM. Which works?"
+        },
+        {
+          "kind": "in",
+          "text": "Friday please"
+        },
+        {
+          "kind": "out",
+          "text": "Done! Friday 11:30 AM with Mia. See you then ✂️"
+        }
+      ],
+      "flow": [
+        {
+          "label": "Trigger",
+          "title": "Client asks to book",
+          "text": "Telegram"
+        },
+        {
+          "label": "Assistant",
+          "title": "Matches service & staff",
+          "text": "who does what, how long"
+        },
+        {
+          "label": "Action",
+          "title": "Books the slot",
+          "text": "Google Calendar"
+        },
+        {
+          "label": "Your OK",
+          "title": "Reschedules",
+          "text": "one tap"
+        },
+        {
+          "label": "Result",
+          "title": "Confirmed & reminded",
+          "text": "24h before"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Telegram",
+          "action": "chat with clients",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google Calendar",
+          "action": "staff availability",
+          "status": "Read-only",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Google Calendar",
+          "action": "create appointments",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google Calendar",
+          "action": "move appointments",
+          "status": "Ask me first",
+          "kind": "b-ask"
+        }
+      ],
+      "setup": [
+        "Your services and how long each takes",
+        "Staff calendars",
+        "Buffer time between appointments",
+        "Cancellation policy"
+      ],
+      "faqs": [
+        {
+          "question": "Can clients pick a specific staff member?",
+          "answer": "Yes, it reads each person’s calendar separately."
+        },
+        {
+          "question": "What about no-shows?",
+          "answer": "It sends a reminder the day before and can ask the client to confirm."
+        }
+      ],
+      "workflowHeading": "From a booking request to a confirmed slot",
+      "setupHeading": "Your services, staff and cancellation policy",
+      "faqHeading": "Questions about staff and no-shows"
+    },
+    {
+      "slug": "callback-queue",
+      "title": "Callback queue",
+      "description": "Works through your list of customers to call back, has the conversation with an AI voice, and logs the outcome.",
+      "category": "support",
+      "categoryLabel": "Customer support",
+      "channels": "Phone",
+      "never": "Asks before refunds",
+      "apps": [
+        "Google Sheets",
+        "Twilio",
+        "ElevenLabs",
+        "Discounts & refunds"
+      ],
+      "messages": [
+        {
+          "kind": "sys",
+          "text": "Weekdays 10:00 AM · scheduled run"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 14 customers to call"
+        },
+        {
+          "kind": "out",
+          "text": "Calling Maria L. · “asked about weekend slots”"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ booked Sat 2 PM"
+        },
+        {
+          "kind": "out",
+          "text": "James K. wants a discount on his quote. Approve 10%?"
+        },
+        {
+          "kind": "in",
+          "text": "Yes"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ approved · calling back"
+        }
+      ],
+      "flow": [
+        {
+          "label": "Trigger",
+          "title": "New rows in “Call back”",
+          "text": "or every weekday 10 AM"
+        },
+        {
+          "label": "Assistant",
+          "title": "Reads each note",
+          "text": "prepares what to say"
+        },
+        {
+          "label": "Action",
+          "title": "Places the call",
+          "text": "Twilio + AI voice"
+        },
+        {
+          "label": "Your OK",
+          "title": "Discounts or refunds",
+          "text": "yes/no on your phone"
+        },
+        {
+          "label": "Result",
+          "title": "Outcome logged",
+          "text": "booked / no answer / later"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Google Sheets",
+          "action": "read the call list",
+          "status": "Read-only",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Google Sheets",
+          "action": "write outcomes",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Twilio",
+          "action": "call numbers on the list",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "ElevenLabs",
+          "action": "natural voice",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Discounts & refunds",
+          "action": "offer money back",
+          "status": "Ask me first",
+          "kind": "b-ask"
+        }
+      ],
+      "setup": [
+        "Your call-back sheet",
+        "Calling hours",
+        "What the assistant may offer",
+        "A short script or tone guide"
+      ],
+      "faqs": [
+        {
+          "question": "Does it call through NyxID directly?",
+          "answer": "Calls run through your connected Twilio and ElevenLabs accounts; NyxID holds the keys and limits what can be called."
+        },
+        {
+          "question": "Can it call any number?",
+          "answer": "No. In this template it may only call numbers on your list."
+        },
+        {
+          "question": "Is it recorded?",
+          "answer": "Only if you turn on recording in Twilio."
+        }
+      ],
+      "workflowHeading": "From a row in your sheet to a logged call",
+      "setupHeading": "What to decide before the first call",
+      "faqHeading": "Questions about the calls"
+    },
+    {
+      "slug": "stock-analyst",
+      "title": "Stock analyst",
+      "description": "Watches your watchlist, scans market chatter and briefs you in plain English. Reads, never trades.",
+      "category": "research",
+      "categoryLabel": "Research & insights",
+      "channels": "Telegram",
+      "never": "Never: place trades",
+      "apps": [
+        "Market data",
+        "X (Twitter)",
+        "Claude / GPT",
+        "Google Sheets",
+        "Brokerage"
+      ],
+      "messages": [
+        {
+          "kind": "sys",
+          "text": "Mon 4:05 PM · market closed"
+        },
+        {
+          "kind": "in",
+          "text": "How did my watchlist close today? Anything I should know?"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ pulled closing prices"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ scanned posts on X"
+        },
+        {
+          "kind": "out",
+          "text": "NVDA +2.1%, AAPL −0.4%, TSLA −1.8%. TSLA chatter is mostly about delivery numbers. Notes are in your sheet."
+        }
+      ],
+      "flow": [
+        {
+          "label": "Trigger",
+          "title": "You ask, or market close",
+          "text": "Telegram or schedule"
+        },
+        {
+          "label": "Assistant",
+          "title": "Gathers prices & news",
+          "text": "your data source + X"
+        },
+        {
+          "label": "Action",
+          "title": "Summarises",
+          "text": "with the model you choose"
+        },
+        {
+          "label": "Your OK",
+          "title": "Not needed",
+          "text": "it can only read"
+        },
+        {
+          "label": "Result",
+          "title": "Brief in Telegram",
+          "text": "notes in your sheet"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Market data",
+          "action": "your own data API",
+          "status": "Read-only",
+          "kind": "b-ro"
+        },
+        {
+          "service": "X (Twitter)",
+          "action": "search posts",
+          "status": "Read-only",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Claude / GPT",
+          "action": "summarise",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google Sheets",
+          "action": "write notes",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Brokerage",
+          "action": "place trades",
+          "status": "Not allowed",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "Your watchlist",
+        "Your market data source",
+        "When you want daily briefs"
+      ],
+      "faqs": [
+        {
+          "question": "Is this financial advice?",
+          "answer": "No. It summarises information; decisions stay with you."
+        },
+        {
+          "question": "Can it trade for me?",
+          "answer": "No. Trading is “Not allowed” in this template and the assistant cannot switch it on."
+        }
+      ],
+      "workflowHeading": "From your watchlist to a brief in Telegram",
+      "setupHeading": "Your watchlist, data source and brief time",
+      "faqHeading": "Questions about advice and trading"
+    },
+    {
+      "slug": "news-aggregator",
+      "title": "News aggregator",
+      "description": "Reads the sources you care about every morning and sends one tidy brief without duplicates.",
+      "category": "research",
+      "categoryLabel": "Research & insights",
+      "channels": "Telegram",
+      "never": "Read-only",
+      "apps": [
+        "Firecrawl",
+        "X (Twitter)",
+        "Tavily",
+        "Telegram"
+      ],
+      "messages": [
+        {
+          "kind": "sys",
+          "text": "8:00 AM · daily brief"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ read 42 sources"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ removed duplicates"
+        },
+        {
+          "kind": "out",
+          "text": "Good morning! Today: 1) New EU guidance on AI rules 2) A payments firm launches stablecoin payouts 3) Chip stocks rally on earnings."
+        },
+        {
+          "kind": "in",
+          "text": "More on #2?"
+        },
+        {
+          "kind": "out",
+          "text": "Here’s the summary and 3 sources…"
+        }
+      ],
+      "flow": [
+        {
+          "label": "Trigger",
+          "title": "Every morning",
+          "text": "8:00 AM, your timezone"
+        },
+        {
+          "label": "Assistant",
+          "title": "Reads your sources",
+          "text": "sites, X, search"
+        },
+        {
+          "label": "Action",
+          "title": "Ranks & de-duplicates",
+          "text": "by your topics"
+        },
+        {
+          "label": "Your OK",
+          "title": "Not needed",
+          "text": "read-only"
+        },
+        {
+          "label": "Result",
+          "title": "One brief",
+          "text": "ask follow-ups in chat"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Firecrawl",
+          "action": "read news sites",
+          "status": "Read-only",
+          "kind": "b-ro"
+        },
+        {
+          "service": "X (Twitter)",
+          "action": "search posts",
+          "status": "Read-only",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Tavily",
+          "action": "web search",
+          "status": "Read-only",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Telegram",
+          "action": "send your brief",
+          "status": "Allowed",
+          "kind": "b-ok"
+        }
+      ],
+      "setup": [
+        "Topics you follow",
+        "Sources to include or skip",
+        "Delivery time"
+      ],
+      "faqs": [
+        {
+          "question": "Can I send it to a group?",
+          "answer": "Yes, it can post into a Telegram group you choose."
+        },
+        {
+          "question": "Can I change topics later?",
+          "answer": "Just tell it in chat: “add fintech, drop crypto.”"
+        }
+      ],
+      "workflowHeading": "From your sources to one morning brief",
+      "setupHeading": "Your topics, sources and delivery time",
+      "faqHeading": "Questions about the brief"
+    },
+    {
+      "slug": "desk-researcher",
+      "title": "Desk researcher",
+      "description": "Searches, reads and compares, then writes a finished report into your Google Docs.",
+      "category": "research",
+      "categoryLabel": "Research & insights",
+      "channels": "Telegram",
+      "never": "Never: delete files",
+      "apps": [
+        "Tavily",
+        "Firecrawl",
+        "Google Docs",
+        "Google Drive"
+      ],
+      "messages": [
+        {
+          "kind": "in",
+          "text": "Find 5 competitors to our booking app and compare their pricing."
+        },
+        {
+          "kind": "tool",
+          "text": "✓ searched 18 pages"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ wrote report"
+        },
+        {
+          "kind": "out",
+          "text": "Done! 5 competitors compared: plans range from free to $79/mo. The report is in your Google Doc “Competitor scan”."
+        }
+      ],
+      "flow": [
+        {
+          "label": "Trigger",
+          "title": "You ask a question",
+          "text": "Telegram"
+        },
+        {
+          "label": "Assistant",
+          "title": "Plans the research",
+          "text": "what to search, what to read"
+        },
+        {
+          "label": "Action",
+          "title": "Searches & reads",
+          "text": "Tavily + Firecrawl"
+        },
+        {
+          "label": "Your OK",
+          "title": "Not needed",
+          "text": "writes only new docs"
+        },
+        {
+          "label": "Result",
+          "title": "A finished report",
+          "text": "in Google Docs"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Tavily",
+          "action": "web search",
+          "status": "Read-only",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Firecrawl",
+          "action": "read pages",
+          "status": "Read-only",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Google Docs",
+          "action": "write the report",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google Drive",
+          "action": "delete files",
+          "status": "Not allowed",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "Where reports should be saved",
+        "Preferred format (table, memo, bullets)"
+      ],
+      "faqs": [
+        {
+          "question": "Does it cite sources?",
+          "answer": "Yes, every report lists the pages it used."
+        },
+        {
+          "question": "Can it edit my existing docs?",
+          "answer": "Not in this template; it only creates new documents."
+        }
+      ],
+      "workflowHeading": "From a question to a finished report in Google Docs",
+      "setupHeading": "Where the report goes and how it reads",
+      "faqHeading": "Questions about sources and documents"
+    },
+    {
+      "slug": "x-lead-catcher",
+      "title": "X lead catcher",
+      "description": "Replies to product questions in your X DMs, qualifies the lead and adds it to your sheet.",
+      "category": "sales",
+      "categoryLabel": "Sales & marketing",
+      "channels": "X",
+      "never": "Never: post publicly",
+      "apps": [
+        "X DMs",
+        "Google Sheets",
+        "X (Twitter)"
+      ],
+      "messages": [
+        {
+          "kind": "in",
+          "text": "Hey, does your app work for a team of 20?"
+        },
+        {
+          "kind": "out",
+          "text": "It does! The Teams plan starts at 10 seats. Want me to set up a quick demo?"
+        },
+        {
+          "kind": "in",
+          "text": "Sure, next week"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ lead added · demo requested"
+        }
+      ],
+      "flow": [
+        {
+          "label": "Trigger",
+          "title": "New DM",
+          "text": "X"
+        },
+        {
+          "label": "Assistant",
+          "title": "Answers & qualifies",
+          "text": "size, need, timing"
+        },
+        {
+          "label": "Action",
+          "title": "Logs the lead",
+          "text": "Google Sheets"
+        },
+        {
+          "label": "Your OK",
+          "title": "Not needed",
+          "text": "it can’t post publicly"
+        },
+        {
+          "label": "Result",
+          "title": "Warm lead in your sheet",
+          "text": "ready for follow-up"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "X DMs",
+          "action": "reply to messages",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google Sheets",
+          "action": "add leads",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "X (Twitter)",
+          "action": "post publicly",
+          "status": "Not allowed",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "Your product facts & pricing",
+        "Which questions qualify a lead",
+        "Your lead sheet"
+      ],
+      "faqs": [
+        {
+          "question": "Can it tweet for me?",
+          "answer": "No. Public posting is off in this template."
+        }
+      ],
+      "workflowHeading": "From a new X DM to a lead in your sheet",
+      "setupHeading": "Your product facts and what counts as a lead",
+      "faqHeading": "Questions about posting"
+    },
+    {
+      "slug": "back-office-clerk",
+      "title": "Back-office clerk",
+      "description": "Logs in to supplier and booking portals that have no API, reorders stock, downloads invoices and files them, on your computer or a hosted VM.",
+      "category": "ops",
+      "categoryLabel": "Operations",
+      "channels": "Telegram,Computer",
+      "never": "Never: run commands",
+      "apps": [
+        "Computer · browser",
+        "Computer · files",
+        "Google Sheets",
+        "Computer · checkout",
+        "Computer · shell"
+      ],
+      "messages": [],
+      "flow": [
+        {
+          "label": "Trigger",
+          "title": "You ask, or stock runs low",
+          "text": "Telegram or schedule"
+        },
+        {
+          "label": "Assistant",
+          "title": "Plans the clicks",
+          "text": "which site, what to order"
+        },
+        {
+          "label": "Action",
+          "title": "Uses the browser",
+          "text": "on your computer or a hosted VM"
+        },
+        {
+          "label": "Your OK",
+          "title": "Before submitting",
+          "text": "order total shown on the card"
+        },
+        {
+          "label": "Result",
+          "title": "Order placed",
+          "text": "invoice filed, sheet updated"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Computer · browser",
+          "action": "use portals with saved logins",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Computer · files",
+          "action": "save invoices to a folder",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google Sheets",
+          "action": "update the stock sheet",
+          "status": "Allowed",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Computer · checkout",
+          "action": "submit orders",
+          "status": "Ask me first",
+          "kind": "b-ask"
+        },
+        {
+          "service": "Computer · shell",
+          "action": "run commands",
+          "status": "Not allowed",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "Which machine: your computer or a hosted VM",
+        "The websites and saved logins it may use",
+        "Folder for invoices",
+        "Spending limit per order"
+      ],
+      "faqs": [
+        {
+          "question": "Does the AI see my portal password?",
+          "answer": "No. Saved logins are encrypted and filled directly into the exact website; the AI never sees them."
+        },
+        {
+          "question": "Can I watch what it’s doing?",
+          "answer": "Yes. Open the live desktop from your browser and take over at any moment."
+        },
+        {
+          "question": "Is it safe to use my own computer?",
+          "answer": "Machine access is off by default and you switch on browser, files or shell one by one. For stronger isolation, use the NyxID container or a hosted VM."
+        }
+      ],
+      "workflowHeading": "From low stock to a placed order",
+      "setupHeading": "The machine, logins and limits it may use",
+      "faqHeading": "Questions about passwords and watching it work"
+    }
+  ],
+  "zh": [
+    {
+      "slug": "restaurant-manager",
+      "title": "餐厅经理",
+      "description": "在 Telegram 上接受订位，查看你的日历，记录忌口并发送提醒。",
+      "category": "hosp",
+      "categoryLabel": "餐饮与服务",
+      "channels": "Telegram",
+      "never": "禁止：收取订金",
+      "apps": [
+        "Telegram",
+        "Google 日历",
+        "Google 表格",
+        "支付"
+      ],
+      "messages": [
+        {
+          "kind": "sys",
+          "text": "周六 晚上 11:42 · 餐厅已打烊"
+        },
+        {
+          "kind": "in",
+          "text": "你好，我是 Sarah！明晚 7:30 有 4 人位吗？我们有一位吃素。"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已查日历 · 7:30 有空"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已订位 · 已添加备注"
+        },
+        {
+          "kind": "out",
+          "text": "订好了！周日晚上 7:30，4 人桌，Sarah 名下。已备注素食，厨房会知道。"
+        },
+        {
+          "kind": "in",
+          "text": "太好了，谢谢！"
+        }
+      ],
+      "flow": [
+        {
+          "label": "触发",
+          "title": "客人给你的机器人发消息",
+          "text": "Telegram，随时"
+        },
+        {
+          "label": "助手",
+          "title": "理解需求",
+          "text": "日期、时间、人数、备注"
+        },
+        {
+          "label": "执行",
+          "title": "查询并订位",
+          "text": "Google 日历 + 客人表格"
+        },
+        {
+          "label": "需你确认",
+          "title": "仅限取消",
+          "text": "手机上一键确认"
+        },
+        {
+          "label": "结果",
+          "title": "客人收到确认",
+          "text": "前一天发送提醒"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Telegram",
+          "action": "回复客人",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google 日历",
+          "action": "查空位并订桌",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google 表格",
+          "action": "客人备注与过敏信息",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google 日历",
+          "action": "取消订位",
+          "status": "先问我",
+          "kind": "b-ask"
+        },
+        {
+          "service": "支付",
+          "action": "收取订金",
+          "status": "禁止",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "营业时间和桌位大小",
+        "订位使用的日历",
+        "菜单或过敏说明（可选）",
+        "回复的语气和语言"
+      ],
+      "faqs": [
+        {
+          "question": "如果订满了怎么办？",
+          "answer": "它会推荐最近的空闲时段，也可以把客人加入表格中的候补名单。"
+        },
+        {
+          "question": "客人可以取消吗？",
+          "answer": "可以。但默认情况下，取消需要你先一键确认，你也可以更改这一设置。"
+        },
+        {
+          "question": "能和我的订位系统配合吗？",
+          "answer": "开箱即用支持 Google 日历和表格。提供 API 的系统可以直接接入，没有 API 的系统也可以通过连接的电脑来操作。"
+        }
+      ],
+      "workflowHeading": "从客人的 Telegram 消息到确认的订位",
+      "setupHeading": "接受订位前要设置的内容",
+      "faqHeading": "关于订位的问题"
+    },
+    {
+      "slug": "help-desk",
+      "title": "24 小时客服",
+      "description": "随时回答订单、配送和政策问题，把棘手的问题转给你的团队。",
+      "category": "support",
+      "categoryLabel": "客户支持",
+      "channels": "Telegram,X",
+      "never": "禁止：办理退款",
+      "apps": [
+        "Telegram",
+        "X 私信",
+        "Google 表格",
+        "Gmail",
+        "支付"
+      ],
+      "messages": [
+        {
+          "kind": "sys",
+          "text": "周二 凌晨 3:12"
+        },
+        {
+          "kind": "in",
+          "text": "我的订单 #4821 还没到，在哪里？"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已查询订单 #4821"
+        },
+        {
+          "kind": "out",
+          "text": "抱歉让你久等！#4821 昨天已发货，明天下午 6 点前送达。物流单号：KT-55210。"
+        },
+        {
+          "kind": "in",
+          "text": "如果晚到了能退款吗？"
+        },
+        {
+          "kind": "out",
+          "text": "我已转给团队，他们会在上午 10 点前回复你。"
+        }
+      ],
+      "flow": [
+        {
+          "label": "触发",
+          "title": "客户提问",
+          "text": "Telegram 或 X 私信"
+        },
+        {
+          "label": "助手",
+          "title": "查找答案",
+          "text": "你的常见问题 + 订单表"
+        },
+        {
+          "label": "执行",
+          "title": "即时回复",
+          "text": "订单状态或政策"
+        },
+        {
+          "label": "需你确认",
+          "title": "退款交给人工",
+          "text": "邮件提醒"
+        },
+        {
+          "label": "结果",
+          "title": "问题解决",
+          "text": "或附上下文转交"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Telegram",
+          "action": "回复客户",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "X 私信",
+          "action": "回复客户",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google 表格",
+          "action": "查询订单",
+          "status": "只读",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Gmail",
+          "action": "通知团队",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "支付",
+          "action": "办理退款",
+          "status": "禁止",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "你的常见问题或帮助文档",
+        "订单存放位置（表格或店铺）",
+        "升级问题由谁处理",
+        "人工跟进的工作时间"
+      ],
+      "faqs": [
+        {
+          "question": "它会胡编乱造吗？",
+          "answer": "它只根据你连接的文档和数据回答。不知道时会直说，并转交人工。"
+        },
+        {
+          "question": "能同时处理很多对话吗？",
+          "answer": "可以，每个对话并行进行。"
+        },
+        {
+          "question": "它能退款吗？",
+          "answer": "默认不能。此方案中退款设为“禁止”，你可以改为“先问我”。"
+        }
+      ],
+      "workflowHeading": "从客户提问到回复，或转交给你的团队",
+      "setupHeading": "让它像你的团队一样回答所需的资料",
+      "faqHeading": "关于回答和退款的问题"
+    },
+    {
+      "slug": "appointment-booker",
+      "title": "预约助手",
+      "description": "提供可预约时段，约到合适的人员，改期需经你确认。",
+      "category": "hosp",
+      "categoryLabel": "餐饮与服务",
+      "channels": "Telegram",
+      "never": "改期前先问你",
+      "apps": [
+        "Telegram",
+        "Google 日历"
+      ],
+      "messages": [
+        {
+          "kind": "in",
+          "text": "这周能约 Mia 剪头发吗？"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已查看 Mia 的日历"
+        },
+        {
+          "kind": "out",
+          "text": "Mia 周四下午 2:00 或周五上午 11:30 有空，哪个合适？"
+        },
+        {
+          "kind": "in",
+          "text": "周五吧"
+        },
+        {
+          "kind": "out",
+          "text": "好了！周五上午 11:30，Mia 为你服务，到时见 ✂️"
+        }
+      ],
+      "flow": [
+        {
+          "label": "触发",
+          "title": "客户请求预约",
+          "text": "Telegram"
+        },
+        {
+          "label": "助手",
+          "title": "匹配服务与人员",
+          "text": "谁做什么、多长时间"
+        },
+        {
+          "label": "执行",
+          "title": "预约时段",
+          "text": "Google 日历"
+        },
+        {
+          "label": "需你确认",
+          "title": "改期",
+          "text": "一键确认"
+        },
+        {
+          "label": "结果",
+          "title": "确认并提醒",
+          "text": "提前 24 小时"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Telegram",
+          "action": "与客户沟通",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google 日历",
+          "action": "员工空闲时间",
+          "status": "只读",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Google 日历",
+          "action": "创建预约",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google 日历",
+          "action": "调整预约",
+          "status": "先问我",
+          "kind": "b-ask"
+        }
+      ],
+      "setup": [
+        "服务项目及各自时长",
+        "员工日历",
+        "预约之间的缓冲时间",
+        "取消政策"
+      ],
+      "faqs": [
+        {
+          "question": "客户能指定员工吗？",
+          "answer": "可以，它会分别读取每个人的日历。"
+        },
+        {
+          "question": "客户爽约怎么办？",
+          "answer": "它会提前一天提醒，并请客户确认。"
+        }
+      ],
+      "workflowHeading": "从预约请求到确认的时段",
+      "setupHeading": "你的服务、员工和取消政策",
+      "faqHeading": "关于员工和爽约的问题"
+    },
+    {
+      "slug": "callback-queue",
+      "title": "回访队列",
+      "description": "按名单逐一回电客户，用 AI 语音完成通话，并记录结果。",
+      "category": "support",
+      "categoryLabel": "客户支持",
+      "channels": "Phone",
+      "never": "退款或优惠前先问你",
+      "apps": [
+        "Google 表格",
+        "Twilio",
+        "ElevenLabs",
+        "折扣与退款"
+      ],
+      "messages": [
+        {
+          "kind": "sys",
+          "text": "工作日上午 10:00 · 定时运行"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 14 位客户待回电"
+        },
+        {
+          "kind": "out",
+          "text": "正在呼叫 Maria L. ·“询问周末时段”"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已预约周六下午 2 点"
+        },
+        {
+          "kind": "out",
+          "text": "James K. 希望报价打折，同意打九折吗？"
+        },
+        {
+          "kind": "in",
+          "text": "同意"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已批准 · 正在回电"
+        }
+      ],
+      "flow": [
+        {
+          "label": "触发",
+          "title": "“待回电”表新增行",
+          "text": "或每个工作日上午 10 点"
+        },
+        {
+          "label": "助手",
+          "title": "读取每条备注",
+          "text": "准备通话内容"
+        },
+        {
+          "label": "执行",
+          "title": "拨打电话",
+          "text": "Twilio + AI 语音"
+        },
+        {
+          "label": "需你确认",
+          "title": "折扣或退款",
+          "text": "手机上点“是”或“否”"
+        },
+        {
+          "label": "结果",
+          "title": "记录结果",
+          "text": "已预约 / 未接 / 稍后再打"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Google 表格",
+          "action": "读取通话名单",
+          "status": "只读",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Google 表格",
+          "action": "写入结果",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Twilio",
+          "action": "拨打名单上的号码",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "ElevenLabs",
+          "action": "自然语音",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "折扣与退款",
+          "action": "提供退款或优惠",
+          "status": "先问我",
+          "kind": "b-ask"
+        }
+      ],
+      "setup": [
+        "你的回电表格",
+        "拨打时间",
+        "助手可以提供的优惠",
+        "简短话术或语气指南"
+      ],
+      "faqs": [
+        {
+          "question": "是通过 NyxID 直接拨打的吗？",
+          "answer": "通话通过你连接的 Twilio 和 ElevenLabs 账号进行；NyxID 保管密钥，并限制可以拨打的号码。"
+        },
+        {
+          "question": "它能拨打任何号码吗？",
+          "answer": "不能。此方案中只能拨打名单上的号码。"
+        },
+        {
+          "question": "会录音吗？",
+          "answer": "只有你在 Twilio 中开启录音才会。"
+        }
+      ],
+      "workflowHeading": "从表格中的一行到记录在案的电话",
+      "setupHeading": "第一通电话之前要决定的事",
+      "faqHeading": "关于通话的问题"
+    },
+    {
+      "slug": "stock-analyst",
+      "title": "股票分析师",
+      "description": "盯住你的自选股，扫描市场讨论，用大白话给你简报。只读，从不交易。",
+      "category": "research",
+      "categoryLabel": "研究与洞察",
+      "channels": "Telegram",
+      "never": "禁止：下单交易",
+      "apps": [
+        "行情数据",
+        "X（推特）",
+        "Claude / GPT",
+        "Google 表格",
+        "券商"
+      ],
+      "messages": [
+        {
+          "kind": "sys",
+          "text": "周一 下午 4:05 · 已收盘"
+        },
+        {
+          "kind": "in",
+          "text": "我的自选股今天收盘怎么样？有什么要注意的吗？"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已获取收盘价"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已扫描 X 上的帖子"
+        },
+        {
+          "kind": "out",
+          "text": "NVDA +2.1%，AAPL −0.4%，TSLA −1.8%。TSLA 的讨论主要围绕交付数据。笔记已写入你的表格。"
+        }
+      ],
+      "flow": [
+        {
+          "label": "触发",
+          "title": "你提问或收盘时",
+          "text": "Telegram 或定时"
+        },
+        {
+          "label": "助手",
+          "title": "收集价格和新闻",
+          "text": "你的数据源 + X"
+        },
+        {
+          "label": "执行",
+          "title": "生成总结",
+          "text": "使用你选择的模型"
+        },
+        {
+          "label": "需你确认",
+          "title": "不需要",
+          "text": "它只能读取"
+        },
+        {
+          "label": "结果",
+          "title": "Telegram 简报",
+          "text": "笔记写入表格"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "行情数据",
+          "action": "你自己的数据 API",
+          "status": "只读",
+          "kind": "b-ro"
+        },
+        {
+          "service": "X（推特）",
+          "action": "搜索帖子",
+          "status": "只读",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Claude / GPT",
+          "action": "总结",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google 表格",
+          "action": "写入笔记",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "券商",
+          "action": "下单交易",
+          "status": "禁止",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "你的自选股",
+        "你的行情数据源",
+        "每日简报时间"
+      ],
+      "faqs": [
+        {
+          "question": "这算投资建议吗？",
+          "answer": "不算。它只汇总信息，决定权在你。"
+        },
+        {
+          "question": "它能替我交易吗？",
+          "answer": "不能。此方案中交易设为“禁止”，助手无法自行开启。"
+        }
+      ],
+      "workflowHeading": "从你的自选股到 Telegram 简报",
+      "setupHeading": "你的自选股、数据源和简报时间",
+      "faqHeading": "关于建议和交易的问题"
+    },
+    {
+      "slug": "news-aggregator",
+      "title": "新闻聚合",
+      "description": "每天早上阅读你关注的信息源，去重后发你一份清爽的简报。",
+      "category": "research",
+      "categoryLabel": "研究与洞察",
+      "channels": "Telegram",
+      "never": "只读",
+      "apps": [
+        "Firecrawl",
+        "X（推特）",
+        "Tavily",
+        "Telegram"
+      ],
+      "messages": [
+        {
+          "kind": "sys",
+          "text": "早上 8:00 · 每日简报"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已阅读 42 个来源"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已去除重复"
+        },
+        {
+          "kind": "out",
+          "text": "早上好！今天：1）欧盟发布 AI 规则新指引 2）一家支付公司推出稳定币付款 3）芯片股因财报上涨。"
+        },
+        {
+          "kind": "in",
+          "text": "多讲讲第 2 条？"
+        },
+        {
+          "kind": "out",
+          "text": "这是摘要和 3 个来源……"
+        }
+      ],
+      "flow": [
+        {
+          "label": "触发",
+          "title": "每天早上",
+          "text": "你所在时区 8:00"
+        },
+        {
+          "label": "助手",
+          "title": "阅读你的信息源",
+          "text": "网站、X、搜索"
+        },
+        {
+          "label": "执行",
+          "title": "排序并去重",
+          "text": "按你的主题"
+        },
+        {
+          "label": "需你确认",
+          "title": "不需要",
+          "text": "只读"
+        },
+        {
+          "label": "结果",
+          "title": "一份简报",
+          "text": "可在聊天中追问"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Firecrawl",
+          "action": "读取新闻网站",
+          "status": "只读",
+          "kind": "b-ro"
+        },
+        {
+          "service": "X（推特）",
+          "action": "搜索帖子",
+          "status": "只读",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Tavily",
+          "action": "网页搜索",
+          "status": "只读",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Telegram",
+          "action": "发送简报",
+          "status": "允许",
+          "kind": "b-ok"
+        }
+      ],
+      "setup": [
+        "你关注的主题",
+        "要包含或排除的来源",
+        "发送时间"
+      ],
+      "faqs": [
+        {
+          "question": "能发到群里吗？",
+          "answer": "可以，它能发到你指定的 Telegram 群组。"
+        },
+        {
+          "question": "之后能改主题吗？",
+          "answer": "直接在聊天里说：“加上金融科技，去掉加密货币。”"
+        }
+      ],
+      "workflowHeading": "从你的信息源到一份早间简报",
+      "setupHeading": "你的主题、来源和发送时间",
+      "faqHeading": "关于简报的问题"
+    },
+    {
+      "slug": "desk-researcher",
+      "title": "案头研究员",
+      "description": "搜索、阅读、比较，然后把完整报告写进你的 Google 文档。",
+      "category": "research",
+      "categoryLabel": "研究与洞察",
+      "channels": "Telegram",
+      "never": "禁止：删除文件",
+      "apps": [
+        "Tavily",
+        "Firecrawl",
+        "Google 文档",
+        "Google 云端硬盘"
+      ],
+      "messages": [
+        {
+          "kind": "in",
+          "text": "找 5 个和我们订位应用竞争的产品，比较一下价格。"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已搜索 18 个网页"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已撰写报告"
+        },
+        {
+          "kind": "out",
+          "text": "完成！已比较 5 个竞品：价格从免费到每月 79 美元不等。报告在你的 Google 文档“竞品扫描”里。"
+        }
+      ],
+      "flow": [
+        {
+          "label": "触发",
+          "title": "你提出问题",
+          "text": "Telegram"
+        },
+        {
+          "label": "助手",
+          "title": "规划研究",
+          "text": "搜什么、读什么"
+        },
+        {
+          "label": "执行",
+          "title": "搜索并阅读",
+          "text": "Tavily + Firecrawl"
+        },
+        {
+          "label": "需你确认",
+          "title": "不需要",
+          "text": "只创建新文档"
+        },
+        {
+          "label": "结果",
+          "title": "完整报告",
+          "text": "在 Google 文档中"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "Tavily",
+          "action": "网页搜索",
+          "status": "只读",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Firecrawl",
+          "action": "读取网页",
+          "status": "只读",
+          "kind": "b-ro"
+        },
+        {
+          "service": "Google 文档",
+          "action": "撰写报告",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google 云端硬盘",
+          "action": "删除文件",
+          "status": "禁止",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "报告保存位置",
+        "偏好格式（表格、备忘录、要点）"
+      ],
+      "faqs": [
+        {
+          "question": "会注明来源吗？",
+          "answer": "会，每份报告都列出所用网页。"
+        },
+        {
+          "question": "能编辑我现有的文档吗？",
+          "answer": "此方案中不能，它只创建新文档。"
+        }
+      ],
+      "workflowHeading": "从一个问题到 Google 文档中的完整报告",
+      "setupHeading": "报告保存在哪里、写成什么样",
+      "faqHeading": "关于来源和文档的问题"
+    },
+    {
+      "slug": "x-lead-catcher",
+      "title": "X 线索捕手",
+      "description": "在 X 私信中回答产品问题，筛选线索并加入你的表格。",
+      "category": "sales",
+      "categoryLabel": "销售与营销",
+      "channels": "X",
+      "never": "禁止：公开发帖",
+      "apps": [
+        "X 私信",
+        "Google 表格",
+        "X（推特）"
+      ],
+      "messages": [
+        {
+          "kind": "in",
+          "text": "你好，你们的应用适合 20 人团队吗？"
+        },
+        {
+          "kind": "out",
+          "text": "适合！团队版 10 个席位起。要不要帮你约个演示？"
+        },
+        {
+          "kind": "in",
+          "text": "好，下周吧"
+        },
+        {
+          "kind": "tool",
+          "text": "✓ 已添加线索 · 已申请演示"
+        }
+      ],
+      "flow": [
+        {
+          "label": "触发",
+          "title": "新私信",
+          "text": "X"
+        },
+        {
+          "label": "助手",
+          "title": "回答并筛选",
+          "text": "规模、需求、时间"
+        },
+        {
+          "label": "执行",
+          "title": "记录线索",
+          "text": "Google 表格"
+        },
+        {
+          "label": "需你确认",
+          "title": "不需要",
+          "text": "它不能公开发帖"
+        },
+        {
+          "label": "结果",
+          "title": "表格中的优质线索",
+          "text": "随时跟进"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "X 私信",
+          "action": "回复消息",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google 表格",
+          "action": "添加线索",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "X（推特）",
+          "action": "公开发帖",
+          "status": "禁止",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "产品信息和价格",
+        "用哪些问题筛选线索",
+        "你的线索表格"
+      ],
+      "faqs": [
+        {
+          "question": "它能替我发帖吗？",
+          "answer": "不能。此方案中关闭了公开发帖。"
+        }
+      ],
+      "workflowHeading": "从新的 X 私信到表格中的线索",
+      "setupHeading": "产品信息，以及什么样的人算线索",
+      "faqHeading": "关于发帖的问题"
+    },
+    {
+      "slug": "back-office-clerk",
+      "title": "后台文员",
+      "description": "登录没有 API 的供应商和预订后台，补货、下载发票并归档，在你的电脑或托管虚拟机上完成。",
+      "category": "ops",
+      "categoryLabel": "运营",
+      "channels": "Telegram,Computer",
+      "never": "禁止：运行命令",
+      "apps": [
+        "电脑 · 浏览器",
+        "电脑 · 文件",
+        "Google 表格",
+        "电脑 · 结账",
+        "电脑 · 命令行"
+      ],
+      "messages": [],
+      "flow": [
+        {
+          "label": "触发",
+          "title": "你提出或库存不足时",
+          "text": "Telegram 或定时"
+        },
+        {
+          "label": "助手",
+          "title": "规划操作步骤",
+          "text": "哪个网站、订什么"
+        },
+        {
+          "label": "执行",
+          "title": "使用浏览器",
+          "text": "在你的电脑或托管虚拟机上"
+        },
+        {
+          "label": "需你确认",
+          "title": "提交前",
+          "text": "卡片上显示订单金额"
+        },
+        {
+          "label": "结果",
+          "title": "已下单",
+          "text": "发票归档，表格已更新"
+        }
+      ],
+      "permissions": [
+        {
+          "service": "电脑 · 浏览器",
+          "action": "用已保存的登录使用后台",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "电脑 · 文件",
+          "action": "把发票存到文件夹",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "Google 表格",
+          "action": "更新库存表",
+          "status": "允许",
+          "kind": "b-ok"
+        },
+        {
+          "service": "电脑 · 结账",
+          "action": "提交订单",
+          "status": "先问我",
+          "kind": "b-ask"
+        },
+        {
+          "service": "电脑 · 命令行",
+          "action": "运行命令",
+          "status": "禁止",
+          "kind": "b-no"
+        }
+      ],
+      "setup": [
+        "使用哪台机器：你的电脑或托管虚拟机",
+        "它可以使用的网站和已保存登录",
+        "发票存放文件夹",
+        "每笔订单的消费上限"
+      ],
+      "faqs": [
+        {
+          "question": "AI 能看到我的后台密码吗？",
+          "answer": "不能。已保存的登录信息经过加密，只会直接填入指定网站，AI 永远看不到。"
+        },
+        {
+          "question": "我能看到它在做什么吗？",
+          "answer": "可以。在浏览器中打开实时桌面，随时可以接管。"
+        },
+        {
+          "question": "用我自己的电脑安全吗？",
+          "answer": "电脑访问默认关闭，浏览器、文件、命令行需要你逐项开启。如需更强隔离，可使用 NyxID 容器或托管虚拟机。"
+        }
+      ],
+      "workflowHeading": "从库存不足到完成下单",
+      "setupHeading": "它可以使用的机器、登录和上限",
+      "faqHeading": "关于密码和查看操作的问题"
+    }
+  ]
+}

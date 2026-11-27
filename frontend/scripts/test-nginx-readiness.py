@@ -39,6 +39,17 @@ class NginxReadiness(unittest.TestCase):
             dist = context / "dist"
             (dist / "assets").mkdir(parents=True)
             (dist / "index.html").write_text('<html><script type="module" src="/assets/app.js"></script><link rel="stylesheet" href="/assets/app.css"></html>')
+            (dist / "app.html").write_text((dist / "index.html").read_text())
+            (dist / "__public").mkdir()
+            (dist / "__public/home.html").write_text("<html><h1>Public home</h1></html>")
+            (dist / "public-routing-maps.conf").write_text("# Public routing fixture\n")
+            (dist / "public-routing.conf").write_text("""
+location = /index.html { return 404; }
+location = /app.html { internal; }
+location ^~ /__public/ { internal; }
+location = / { try_files /__public/home.html =404; }
+location = /assistant { try_files /app.html =404; }
+""")
             for filename in ["app.js", "lazy.js", "app.css"]:
                 (dist / "assets" / filename).write_text("/* static fixture */")
             (dist / "legal-cache.conf").write_text('map $uri $nyxid_legal_etag { default ""; }\n')
@@ -135,7 +146,8 @@ for p in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
         self.assertEqual(self.request("/ready")[0], 502)
 
     def test_02_missing_or_unreadable_artifacts_fail_then_recover(self):
-        for path, reason in [("index.html", "entry_html"), ("assets/app.js", "static_assets"),
+        for path, reason in [("index.html", "entry_html"), ("app.html", "entry_html"),
+                             ("__public/home.html", "entry_html"), ("assets/app.js", "static_assets"),
                              ("assets/app.css", "static_assets"), ("assets/lazy.js", "static_assets")]:
             target = "/usr/share/nginx/html/" + path
             for operation in ["missing", "unreadable"]:
