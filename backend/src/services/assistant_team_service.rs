@@ -270,6 +270,7 @@ fn nyxbot_profile(owner: &str, model: String) -> AssistantAgent {
         channel_checking_notice: false,
         skills: Vec::new(),
         skills_revision: 0,
+        system_skill_overrides: Default::default(),
         skill_metadata: BTreeMap::new(),
         machine_access: Some(Box::default()),
         machine_node_ids: Vec::new(),
@@ -1550,6 +1551,7 @@ async fn create_specialist_inner(
         channel_checking_notice: false,
         skills: Vec::new(),
         skills_revision: 0,
+        system_skill_overrides: Default::default(),
         skill_metadata: BTreeMap::new(),
         machine_access: Some(Box::new(crate::models::machine_access::Policy {
             assignments: Box::pin(super::machine_access_service::new_assignments(

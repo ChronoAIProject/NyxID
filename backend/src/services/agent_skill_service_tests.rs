@@ -5,6 +5,66 @@ use crate::services::{
 };
 use std::{io::Write, sync::Mutex};
 
+#[tokio::test]
+async fn history_serialization_omits_toggle_fields_for_ordinary_events_when_system_skills_off() {
+    use crate::services::{audit_service, feature_flag_service as flags};
+    let f = fixture("agent_skill_history_toggle_serialization").await;
+    flags::set_platform_override(
+        &f.state.db,
+        flags::SYSTEM_SKILLS_FLAG_KEY,
+        &flags::FlagTarget::User(f.owner.clone()),
+        false,
+        &f.owner,
+    )
+    .await
+    .unwrap();
+    let actor =
+        audit_service::AuditActor::from_auth_user(&crate::test_utils::test_auth_user(&f.owner));
+    for (event, enabled) in [
+        ("assistant_skills_updated", Some(true)),
+        ("assistant_skill_preload_updated", Some(false)),
+        ("assistant_system_skill_toggled", None),
+        ("assistant_system_skill_toggled", Some(false)),
+        ("assistant_system_skill_toggled", Some(true)),
+    ] {
+        audit_service::log_actor_event(
+            f.state.db.clone(),
+            &actor,
+            event,
+            Some(serde_json::json!({
+                "agent_id":f.chat.agent_id, "skill_id":"skill", "enabled":enabled,
+            })),
+        )
+        .await
+        .unwrap();
+    }
+    let agent = team::agent(&f.state.db, &f.owner, &f.chat.agent_id)
+        .await
+        .unwrap();
+    let serialized = serde_json::to_value(history(&f.state.db, &agent).await.unwrap()).unwrap();
+    let entries = serialized["items"].as_array().unwrap();
+    assert_eq!(entries.len(), 5);
+    let mut toggle_values = Vec::new();
+    for entry in entries {
+        if entry["event_type"] == "assistant_system_skill_toggled" {
+            assert_eq!(entry["skill_id"], "skill");
+            toggle_values.push(
+                entry
+                    .get("enabled")
+                    .expect("inherit is explicit null")
+                    .clone(),
+            );
+        } else {
+            assert!(entry.get("skill_id").is_none());
+            assert!(entry.get("enabled").is_none());
+        }
+    }
+    for value in [Value::Null, Value::Bool(false), Value::Bool(true)] {
+        assert!(toggle_values.contains(&value));
+    }
+    f.state.db.drop().await.unwrap();
+}
+
 #[test]
 fn problem_body_reads_only_the_root_code_and_never_detail() {
     assert_eq!(

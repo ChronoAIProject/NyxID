@@ -812,6 +812,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "assistant_skill_draft_attempts stores the person-owned assistant skill draft attempts record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
     },
     Entry {
+        collection: "assistant_system_skills",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::SharedAttribution),
+        export: Export::Excluded(ExclusionReason::RetainedRecord),
+        export_selector: ExportSelector::None,
+        why: "assistant_system_skills is shared platform configuration for public packages. updated_by retains an opaque administrator UUID as shared attribution alongside the audited change.",
+    },
+    Entry {
         collection: "assistant_tool_results",
         owner: OwnerSelector::Fields(&["user_id", "actor_id"]),
         erasure: Erasure::LocalInventory,
