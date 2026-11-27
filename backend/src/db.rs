@@ -74,9 +74,16 @@ pub type DbHandle = Database;
 /// Parses the connection string, configures the connection pool, verifies
 /// connectivity and transaction support without writing application data.
 pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::error::Error> {
-    let mut client_options = ClientOptions::parse(&config.database_url).await?;
+    create_connection_with_url(&config.database_url, config.database_max_connections).await
+}
 
-    client_options.max_pool_size = Some(config.database_max_connections);
+pub(crate) async fn create_connection_with_url(
+    database_url: &str,
+    max_pool_size: u32,
+) -> Result<DbHandle, mongodb::error::Error> {
+    let mut client_options = ClientOptions::parse(database_url).await?;
+
+    client_options.max_pool_size = Some(max_pool_size);
     client_options.min_pool_size = Some(2);
     client_options.connect_timeout = Some(Duration::from_secs(10));
     client_options.server_selection_timeout = Some(Duration::from_secs(10));
