@@ -7,11 +7,11 @@ Use the NyxID instance where you plan to work. An invitation and account belong 
 
 ## Create an account
 
-1. Open **Create account** on the sign-in page of that instance or visit its `/register` path. [Open registration on this instance](/register)
+1. Select **Sign up** on the sign-in page of that instance or visit its `/register` path. [Open registration on this instance](/register)
 2. If the registration form asks for an invite code, enter the code supplied by your workspace before selecting how to register.
 3. Choose a sign-in provider offered on the registration form and authorize your account. If the form offers email and password, you can also use that option and follow the email verification prompt when it appears.
 
-If social sign-in tells you to register with an invite first, start again on this instance's **Create account** page. An instance can require an invitation while offering only social registration. Enter your invitation there and continue with one of its provider buttons. If you already have a NyxID account and want to link a social login, choose the provider account whose verified email matches the email on your NyxID account.
+If social sign-in tells you to register with an invite first, return to this instance's **Create your account** page. An instance can require an invitation while offering only social registration. Enter your invitation there and continue with one of its provider buttons. If you already have a NyxID account and want to link a social login, choose the provider account whose verified email matches the email on your NyxID account.
 
 ## Sign in
 
