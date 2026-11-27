@@ -2771,9 +2771,7 @@ fn setup_recovery_read(params: &serde_json::Value) -> bool {
     };
     matches!(
         name,
-        Some(
-            "nyxid__get_agent_skills" | "nyxid__get_agent_operations"
-        )
+        Some("nyxid__get_agent_skills" | "nyxid__get_agent_operations")
     )
 }
 

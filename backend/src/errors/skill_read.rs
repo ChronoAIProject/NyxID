@@ -85,4 +85,22 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn skill_read_source_errors_are_content_free_restart_contracts() {
+        for reason in [
+            SkillReadReason::SourceChanged,
+            SkillReadReason::SourceRequired,
+        ] {
+            let error = AppError::SkillRead(reason);
+            let body = serde_json::to_value(error.response_body()).unwrap();
+            assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+            assert_eq!(body["details"]["complete"], false);
+            assert_eq!(body["details"]["restart_required"], true);
+            assert_eq!(body["details"]["next_offset"], 0);
+            assert!(body.get("content").is_none());
+            assert!(body["details"].get("source_fingerprint").is_none());
+            assert!(body.to_string().len() < 1000);
+        }
+    }
 }

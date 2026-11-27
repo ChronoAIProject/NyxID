@@ -1509,12 +1509,49 @@ pub(crate) async fn dispatch(
                 return Err(AppError::Forbidden("Specialists may read or request only their own skills; skills are managed for them".into()));
             }
             if name == "get_agent_skills" {
-                let mut value = json!(system::response(db, &chat.user_id, agent).await?);
-                value["complete"] = json!(true);
-                if skills::wire_len(&value) > 9200 {
-                    return Err(AppError::ValidationError("Saved pins exceed this reader's budget. Inspect the agent's Skills editor; report setup incomplete until independently verified.".into()));
+                if let Some(id) = args["skill_id"].as_str() {
+                    let id = uuid::Uuid::parse_str(id)
+                        .map_err(|_| {
+                            AppError::ValidationError("skill_id must be an exact GUID".into())
+                        })?
+                        .to_string();
+                    let context = system::for_person(db, &chat.user_id, false).await?;
+                    let attached = agent.skills.iter().find(|pin| pin.skill_id == id);
+                    let builtin = context.as_ref().and_then(|context| {
+                        context
+                            .system
+                            .skills
+                            .iter()
+                            .find(|entry| entry.reference.skill_id == id)
+                    });
+                    let pin = attached.or_else(|| builtin.map(|entry| &entry.reference));
+                    let provenance = if attached.is_some() {
+                        Some("attached")
+                    } else if builtin.is_some() {
+                        Some("built_in")
+                    } else {
+                        None
+                    };
+                    let status = context.as_ref().and_then(|context| {
+                        system::statuses(&agent, context)
+                            .into_iter()
+                            .find(|status| status.skill_id == id)
+                    });
+                    let value = json!({
+                        "agent_id": agent.id, "revision": agent.skills_revision,
+                        "skill_id": id, "complete": true, "pin": pin,
+                        "provenance": provenance, "system_status": status,
+                        "effective": system::resolve(&agent, context.as_ref(), &id).is_some(),
+                    });
+                    if skills::wire_len(&value) > 9200 {
+                        return Err(AppError::ValidationError("This pin cannot fit the targeted readback budget; saved-state verification is incomplete.".into()));
+                    }
+                    return Ok((value, false));
                 }
-                return Ok((value, false));
+                return Ok((
+                    json!(system::response(db, &chat.user_id, agent).await?),
+                    false,
+                ));
             }
             if name == "set_agent_skills" && target != agent.id {
                 return Err(AppError::ValidationError(

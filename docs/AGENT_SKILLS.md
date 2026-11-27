@@ -122,11 +122,19 @@ configured Ornn operation scope from the already loaded agent into proxy
 enforcement; attachment cannot bypass an explicit operation restriction. Other agents, guests, other
 owners and non-assistant callers cannot use this reader.
 
-Verify saved pins independently with `get_agent_skills`; its successful native
-response has `complete: true`. If the complete response cannot fit the same
-budget, it refuses and directs the owner to the Skills editor. It does not keep
-a snapshot of a target agent's private pins. A source or saved-state read that
-cannot be completed leaves setup explicitly incomplete. Large onboarding source
+Verify a known saved pin independently with
+`get_agent_skills {agent, skill_id: "<exact GUID>"}`. Its live targeted response
+fits the same budget and reports `complete: true`, `pin` (including a disabled
+attached pin), `provenance` (`attached`, `built_in`, or null), `effective` and
+matching `system_status`. A null pin means absent. An attached pin wins over a
+built-in with the same ID, including while disabled; the effective flag uses the
+same live built-in/attached resolver as the reader. Unrelated inventory is omitted.
+Each read enforces the existing target ACL; no snapshot of private target pins
+is retained. A single pin too large to fit returns an explicit incomplete-read
+error without clipping. Omitting `skill_id` preserves the existing full inventory
+response, which can exceed model context limits; it does not claim bounded
+completion. A source or saved-state read that cannot be completed leaves setup
+explicitly incomplete. Large onboarding source
 packages do not expand authored-draft limits or justify an incomplete private copy;
 see [Owner-requested authoring](#owner-requested-authoring).
 

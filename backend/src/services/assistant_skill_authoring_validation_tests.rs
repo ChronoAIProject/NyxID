@@ -248,6 +248,37 @@ fn authored_file_and_byte_caps_have_positioned_diagnostics() {
     );
 }
 
+#[test]
+fn skill_read_recovery_large_input_cannot_be_claimed_as_a_complete_private_copy() {
+    let files = crate::services::agent_skill_service::source_fixture::files();
+    assert_eq!(
+        files.iter().map(|(_, bytes)| bytes.len()).sum::<usize>(),
+        49152
+    );
+    let mut draft = body();
+    // Flattening the input does not avoid the authored total-character limit.
+    draft.skill_md = files
+        .iter()
+        .map(|(_, bytes)| std::str::from_utf8(bytes).unwrap())
+        .collect();
+    assert!(draft.skill_md.chars().count() > 7500);
+    assert_eq!(
+        details(validate_body(&draft).unwrap_err())["rule"],
+        "too_large"
+    );
+    // Keeping its original layout also retains per-file and format constraints.
+    draft.skill_md = "# Personal procedure".into();
+    draft.files = files
+        .into_iter()
+        .skip(1)
+        .map(|(path, bytes)| GeneratedFile {
+            path: path.into(),
+            content: String::from_utf8(bytes).unwrap(),
+        })
+        .collect();
+    assert!(validate_body(&draft).is_err());
+}
+
 #[tokio::test]
 async fn authored_refusal_creates_no_proposal_or_card() {
     let f = fixture("authoring_refusal_diagnostic").await;

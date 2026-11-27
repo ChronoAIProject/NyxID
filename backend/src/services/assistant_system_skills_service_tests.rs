@@ -515,6 +515,122 @@ async fn reads_dependencies_shadowing_hash_and_destroyed_agents() {
 }
 
 #[tokio::test]
+async fn skill_read_source_effective_builtins_and_explicit_roots_keep_exact_source() {
+    let registry = Registry::with_markdown(&"中文🙂\n".repeat(2000));
+    let mut system = resolved(system(&registry));
+    let mut agent = agent();
+    let first = skills::read(
+        &registry,
+        &read_view(&agent, Some(&system)),
+        ID,
+        None,
+        "/",
+        0,
+        None,
+    )
+    .await
+    .unwrap();
+    let source = first["source_fingerprint"].as_str().unwrap();
+    for dependency in [None, Some(DEP)] {
+        let page = skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            dependency,
+            "SKILL.md",
+            6000,
+            Some(source),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page["source_fingerprint"], source);
+        assert_eq!(page["archive_sha256"], registry.reference().sha256);
+    }
+    // Platform/config revisions and unrelated pin edits retain identical content.
+    system.system.revision += 1;
+    agent.skills_revision += 1;
+    let mut unrelated = registry.reference();
+    unrelated.skill_id = uuid::Uuid::new_v4().to_string();
+    unrelated.name = "unrelated".into();
+    agent.skills.push(unrelated);
+    assert!(
+        skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            None,
+            "SKILL.md",
+            6000,
+            Some(source)
+        )
+        .await
+        .is_ok()
+    );
+    system.system.skills[0].reference.dependencies[0].version = "1.1".into();
+    assert!(matches!(
+        skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            None,
+            "SKILL.md",
+            0,
+            Some(source)
+        )
+        .await,
+        Err(AppError::SkillRead(
+            crate::errors::skill_read::SkillReadReason::SourceChanged
+        ))
+    ));
+    // Explicit root shadows the built-in. Its exact closure must be read anew.
+    agent.skills.push(registry.reference());
+    assert!(
+        skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            None,
+            "SKILL.md",
+            6000,
+            Some(source)
+        )
+        .await
+        .is_ok()
+    );
+    agent.skills.last_mut().unwrap().disabled = true;
+    assert!(matches!(
+        skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            None,
+            "/",
+            0,
+            Some(source)
+        )
+        .await,
+        Err(AppError::SkillRead(
+            crate::errors::skill_read::SkillReadReason::SkillNotBound
+        ))
+    ));
+    agent.skills.pop();
+    agent.system_skill_overrides.insert(ID.into(), false);
+    assert!(
+        skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            None,
+            "/",
+            0,
+            Some(source)
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
 async fn guidance_without_an_agent_is_empty_for_configured_flag_on_users() {
     let f = orchestrator_fixture("system_skills_no_agent").await;
     flag(&f.state.db, &f.owner, true).await;

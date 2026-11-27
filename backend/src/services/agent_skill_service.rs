@@ -1085,12 +1085,8 @@ pub async fn read(
     }
     let files = package(&download(reader, id, version, hash).await?)?;
     let source = hex::encode(Sha256::digest(
-        serde_json::to_vec(&json!([
-            "nyxid:skill-source:v1",
-            agent.id,
-            root
-        ]))
-        .expect("skill pins serialize"),
+        serde_json::to_vec(&json!(["nyxid:skill-source:v1", agent.id, root]))
+            .expect("skill pins serialize"),
     ));
     if fingerprint.is_some_and(|expected| expected != source) {
         return Err(AppError::SkillRead(SkillReadReason::SourceChanged));
@@ -1324,7 +1320,14 @@ fn page_with(
     budget: usize,
     hint: &str,
 ) -> AppResult<Value> {
-    page_with_metadata(content, (id, version, path), offset, budget, hint, &json!({}))
+    page_with_metadata(
+        content,
+        (id, version, path),
+        offset,
+        budget,
+        hint,
+        &json!({}),
+    )
 }
 
 fn page_with_metadata(
@@ -1346,9 +1349,10 @@ fn page_with_metadata(
         }
         let complete = end >= content.len();
         let mut result = json!({"skill_id":id,"version":version,"path":path,"offset":offset,"next_offset":(!complete).then_some(end),"total_bytes":content.len(),"untrusted_guidance":true,"content":&content[offset..end],"complete":complete,"continuation_hint":(!complete).then_some(hint)});
-        result.as_object_mut().expect("page").extend(
-            metadata.as_object().expect("page metadata").clone(),
-        );
+        result
+            .as_object_mut()
+            .expect("page")
+            .extend(metadata.as_object().expect("page metadata").clone());
         if wire_len(&result) <= budget {
             return Ok(result);
         }

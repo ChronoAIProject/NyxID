@@ -1405,7 +1405,7 @@ pub(crate) async fn setup_ornn(f: &Fixture) -> MockServer {
         .unwrap();
     server
 }
-async fn mount_publication(
+pub(crate) async fn mount_publication(
     f: &Fixture,
     server: &MockServer,
     row: &AssistantAgentLearningProposal,
