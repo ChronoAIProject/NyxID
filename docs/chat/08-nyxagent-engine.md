@@ -804,6 +804,27 @@ queues the continuation and sends one marked continuation turn covering every ca
 during that turn as soon as it settles; nothing is sent if the user pressed Stop.
 **Deny** sends nothing.
 
+The browser captures the source conversation and acting account, including its
+identity revision, when the owner submits the decision, before asynchronous
+mutation middleware. The request, continuation and history invalidation retain
+that source across navigation. An idle source resumes immediately; an active
+source keeps its own queue until settlement, even while another thread is open.
+While an unselected source has a queued continuation, the browser refreshes its
+history every two seconds, with at most one such read in flight per source and
+identity revision. The selected source uses its existing history observer. This
+also observes server-started turns that have no local stream subscription. The
+additional timer and reads stop when no unselected source has queued work. A
+source read's 403/404 discards all surviving entries for that source and identity,
+including cards queued while the read was pending; a refusal for another selected
+thread cannot erase valid work.
+Automatic continuations never change the selected thread, and a late decision
+does not restore composer focus in another thread or account. Account transitions
+(including switching away and back) and disabling the engine discard queued
+continuations. Server-owned continuations remain server-owned. Each allowed-card
+instruction includes the shared task-continuation wording in
+`shared/allowed-card-continuation.json`, so the assistant continues the original
+task until it finishes or needs user input.
+
 Independently, every turn's input context includes a note listing the cards the
 user allowed or denied since the previous user message, oldest first and at most
 ten (`- allowed: service <slug>`, `- denied: account management`,
