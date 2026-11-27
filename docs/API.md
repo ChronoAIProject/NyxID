@@ -9326,6 +9326,27 @@ access and returns `configured`, fleet `readiness`, `rollback_safe` and
 `drain_blockers`. It reads bounded, indexed metadata only; it neither changes
 rollout state nor returns instructions, transcripts, result bodies or credentials.
 
+#### Webhook delivery signing
+
+Webhook targets receive the event ID in both the JSON envelope and
+`X-NyxID-Delivery-Id`. Retries and redeliveries retain this ID.
+`X-NyxID-Signature-V2` has the form `sha256=<lowercase hex>`. Compute
+HMAC-SHA256 with the delivery signing secret over the following byte sequence:
+
+```text
+"nyxid-trigger-v2" || NUL || timestamp || NUL || delivery_id || NUL || raw_body
+```
+
+Each NUL is one zero byte. Use the ASCII bytes of `X-NyxID-Timestamp` and
+`X-NyxID-Delivery-Id` and the exact request body. Select the secret by
+`X-NyxID-Key-Id`, check timestamp freshness and compare signatures in constant
+time before deduplicating by the header ID.
+
+The existing `X-NyxID-Signature` still authenticates `timestamp + "." + raw_body`.
+During a rolling deployment, a receiver accepting that signature can use the
+verified envelope's `event_id` for deduplication. Once all sending replicas
+support v2, receivers using the header ID can require v2 on every delivery.
+
 #### Public ingress
 
 ```http
