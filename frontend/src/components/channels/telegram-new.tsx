@@ -36,6 +36,7 @@ export function TelegramNew({
   const actor = useAuthStore((state) => state.user?.id);
   const active = useRef(true);
   const currentActor = useRef(actor);
+  const recoveryContext = useRef({});
   const completed = useRef<string | null>(null);
   const [handoff, setHandoff] = useState<{
     actor: string;
@@ -53,7 +54,15 @@ export function TelegramNew({
     return () => window.clearTimeout(timer);
   }, [requestExpiresAt, canOpenCreationForm]);
   const recoveryUnexpired = Boolean(request && Date.parse(request.expires_at) > now);
-  const [recovery, setRecovery] = useState<{ actor: string; id: string; revision: number; username?: string; url: string } | null>(null);
+  const [recovery, setRecovery] = useState<{ actor: string; requestId?: string; linkId?: string; id: string; revision: number; username?: string; url: string } | null>(null);
+  const recoveryMatchesRequest = recovery && request && !configuration.error
+    && recovery.actor === actor && recovery.requestId === requestId && recovery.linkId === link?.id
+    && recovery.id === request.id && recovery.revision === request.revision
+    && (!recovery.username || request.username_suggestions?.includes(recovery.username))
+    && request.status === "waiting_bot" && !request.setup_notice && request.can_open_creation_form && recoveryUnexpired;
+  // Recovering a read or returning to an earlier context cannot restore an old
+  // link. The owner must explicitly request a fresh, validated form URL.
+  if (recovery && !recoveryMatchesRequest) setRecovery(null);
   const terminal = Boolean(
     request && ["cancelled", "expired", "suspended"].includes(request.status),
   );
@@ -87,6 +96,12 @@ export function TelegramNew({
       active.current = false;
     };
   }, [actor]);
+
+  useEffect(() => {
+    // Replacing the caller's request or hosted link must invalidate callbacks
+    // that still close over the previous query key, even for the same account.
+    recoveryContext.current = {};
+  }, [actor, requestId, link?.id]);
 
   useEffect(() => {
     if (
@@ -136,8 +151,10 @@ export function TelegramNew({
   }
 
   async function openCreationForm(index = 0) {
-    if (!request?.can_open_creation_form || !actor || Date.parse(request.expires_at) <= Date.now()) return;
+    if (!request?.can_open_creation_form || request.setup_notice || request.status !== "waiting_bot"
+      || pending || !actor || !(Date.parse(request.expires_at) > Date.now())) return;
     const captured = request;
+    const context = recoveryContext.current;
     const tab = window.open("about:blank", "_blank");
     if (tab) tab.opener = null;
     creationLink.reset();
@@ -145,11 +162,13 @@ export function TelegramNew({
     try {
       const result = await creationLink.mutateAsync(captured.id);
       const latest = getCurrentRequest();
-      if (!active.current || currentActor.current !== actor || latest?.id !== captured.id
+      if (!active.current || currentActor.current !== actor || recoveryContext.current !== context || latest?.id !== captured.id
         || latest.revision !== captured.revision || latest.status !== "waiting_bot"
-        || !latest.can_open_creation_form || Date.parse(latest.expires_at) <= Date.now()
-        || Date.parse(result.request.expires_at) <= Date.now() || result.request.id !== captured.id
-        || result.request.revision !== captured.revision || result.request.status !== "waiting_bot") {
+        || latest.setup_notice || !latest.can_open_creation_form || !(Date.parse(latest.expires_at) > Date.now())
+        || result.request.setup_notice || !result.request.can_open_creation_form
+        || !(Date.parse(result.request.expires_at) > Date.now()) || result.request.id !== captured.id
+        || result.request.revision !== captured.revision || result.request.status !== "waiting_bot"
+        || latest.owner_user_id !== captured.owner_user_id || result.request.owner_user_id !== captured.owner_user_id) {
         tab?.close();
         return;
       }
@@ -161,7 +180,7 @@ export function TelegramNew({
         return;
       }
       const url = choice?.creation_url ?? result.creation_url;
-      setRecovery({ actor, id: captured.id, revision: captured.revision, username: choice?.username, url });
+      setRecovery({ actor, requestId, linkId: link?.id, id: captured.id, revision: captured.revision, username: choice?.username, url });
       if (tab && !tab.closed) tab.location.replace(url);
     } catch {
       tab?.close();
@@ -358,7 +377,13 @@ export function TelegramNew({
         <TelegramPromptStatus request={request} recoveryUnexpired={recoveryUnexpired} pending={pending} recovering={creationLink.isPending}
           onRecover={(index) => void openCreationForm(index)}
           onRegenerate={() => void regenerate()} regenerating={regenerateUsername.isPending}
-          recoveryUrl={recovery && recovery.actor === actor && recovery.id === request.id && recovery.revision === request.revision && (!recovery.username || request.username_suggestions?.includes(recovery.username)) && request.can_open_creation_form && recoveryUnexpired ? recovery.url : undefined} />
+          recoveryUrl={recoveryMatchesRequest ? recovery.url : undefined} />
+      )}
+      {request && !terminal && !connected && (
+        !fullPage || (!request.setup_notice && request.status === "waiting_bot" && request.can_open_creation_form && recoveryUnexpired)
+      ) && (
+        <Button type="button" variant="ghost" size="sm" disabled={pending || configuration.isFetching}
+          onClick={() => void configuration.refetch()}>{translateUi("Check progress")}</Button>
       )}
       {request && !request.auto_connect && !terminal && (
         <div className="space-y-2 rounded-lg border border-border p-3 text-13">
@@ -401,13 +426,6 @@ export function TelegramNew({
               </>
             )}
           </p>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            disabled={pending}
-            onClick={() => void configuration.refetch()}
-          >{translateUi("Check progress")}</Button>
           {request.status !== "provisioning" && (
             <Button
               type="button"

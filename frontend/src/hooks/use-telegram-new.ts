@@ -114,6 +114,9 @@ export function useTelegramNew(requestId?: string) {
     },
   });
   return { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect,
-    getCurrentRequest: () => client.getQueryData<{ request: TelegramNewRequest | null }>(["telegram-new", actor, requestId, link?.id])?.request,
+    getCurrentRequest: () => {
+      const current = client.getQueryState<{ request: TelegramNewRequest | null }>(["telegram-new", actor, requestId, link?.id]);
+      return current?.status === "success" && !current.isInvalidated ? current.data?.request : undefined;
+    },
   };
 }

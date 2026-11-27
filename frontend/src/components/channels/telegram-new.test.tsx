@@ -484,6 +484,7 @@ it("shows the server setup reason and recovery actions instead of stale creation
   expect(screen.queryByText(/Waiting for a verified bot creation/)).not.toBeInTheDocument();
   expect(screen.queryByText(/Saved until/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Cancel setup" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Check progress" })).toBeEnabled();
   expect(mockPost).not.toHaveBeenCalled();
 });
 
@@ -579,3 +580,111 @@ it("keeps the primary form usable when an older replica omits username alternati
   await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
   expect(replace).toHaveBeenCalledWith(creationUrl);
 });
+
+const closedSetup = {
+  reason: "context_changed",
+  message: "Review this saved setup in NyxID.",
+  status_url: "https://app.nyxid.test/channel-bots?request_id=saved",
+  new_setup_url: "https://app.nyxid.test/channel-bots",
+  agent_url: null,
+};
+
+it.each(["polled notice", "returned notice", "returned refusal", "failed refresh", "different request", "polled destination", "returned destination", "returned request", "returned revision", "returned expiry", "returned status"])(
+  "suppresses an outstanding creation form after %s",
+  async (change) => {
+    mockGet.mockResolvedValue(configuration(recoverable));
+    let settle: (value: unknown) => void = () => {};
+    mockPost.mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+    const view = setup(request.id);
+    await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
+    if (change === "polled notice") {
+      mockGet.mockResolvedValue(configuration({ ...recoverable, setup_notice: closedSetup }));
+      await act(() => view.client.invalidateQueries({ queryKey: ["telegram-new"] }));
+    } else if (change === "polled destination") {
+      mockGet.mockResolvedValue(configuration({ ...recoverable, owner_user_id: "different-owner" }));
+      await act(() => view.client.invalidateQueries({ queryKey: ["telegram-new"] }));
+    } else if (change === "failed refresh") {
+      mockGet.mockRejectedValue(new Error("Progress unavailable"));
+    } else if (change === "different request") {
+      const other = { ...recoverable, id: "c7235ce6-7b7b-409a-b13a-7b6b5d6c3a9a" };
+      mockGet.mockResolvedValue(configuration(other));
+      view.rerender(<QueryClientProvider client={view.client}><TelegramNew label="Other setup" orgId={null} requestId={other.id} onConnected={view.onConnected} /></QueryClientProvider>);
+      await waitFor(() => expect(mockGet).toHaveBeenCalledWith(`/channel-bots/telegram-new?request_id=${other.id}`));
+    }
+    await act(async () => settle({
+      request: {
+        ...recoverable,
+        ...(change === "returned notice" ? { setup_notice: closedSetup } : {}),
+        ...(change === "returned refusal" ? { can_open_creation_form: false } : {}),
+        ...(change === "returned destination" ? { owner_user_id: "different-owner" } : {}),
+        ...(change === "returned request" ? { id: "c7235ce6-7b7b-409a-b13a-7b6b5d6c3a9a" } : {}),
+        ...(change === "returned revision" ? { revision: recoverable.revision + 1 } : {}),
+        ...(change === "returned expiry" ? { expires_at: new Date(Date.now() - 1000).toISOString() } : {}),
+        ...(change === "returned status" ? { status: "ready" } : {}),
+      },
+      creation_url: creationUrl,
+    }));
+    expect(replace).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+    expect(mockPost).toHaveBeenCalledExactlyOnceWith(`/channel-bots/telegram-new/requests/${request.id}/creation-link`);
+    expect(view.onStarted).not.toHaveBeenCalled();
+  },
+);
+
+it("discards a cached form after failed progress and requires fresh issuance after reads recover", async () => {
+  vi.mocked(window.open).mockReturnValue(null);
+  mockGet.mockResolvedValue(configuration(recoverable));
+  mockPost.mockResolvedValue({ request: recoverable, creation_url: creationUrl });
+  const view = setup(request.id);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(await screen.findByRole("link", { name: "Open Telegram creation form" })).toBeVisible();
+  mockGet.mockRejectedValue(new Error("Progress unavailable"));
+  await user.click(screen.getByRole("button", { name: "Check progress" }));
+  expect(await screen.findByText("Progress unavailable")).toBeVisible();
+  expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+  mockGet.mockResolvedValue(configuration(recoverable));
+  await act(() => view.client.invalidateQueries({ queryKey: ["telegram-new"] }));
+  expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Open creation form" }));
+  expect(await screen.findByRole("link", { name: "Open Telegram creation form" })).toBeVisible();
+  expect(mockPost.mock.calls).toEqual(Array(2).fill([`/channel-bots/telegram-new/requests/${request.id}/creation-link`]));
+  expect(view.onStarted).not.toHaveBeenCalled();
+});
+
+it("does not restore a cached form after switching away from and back to the saved request", async () => {
+  vi.mocked(window.open).mockReturnValue(null);
+  mockGet.mockImplementation(async (path: string) => configuration({ ...recoverable,
+    id: new URL(`https://app.nyxid.test${path}`).searchParams.get("request_id") ?? request.id,
+  }));
+  mockPost.mockResolvedValue({ request: recoverable, creation_url: creationUrl });
+  const view = setup(request.id);
+  await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
+  expect(await screen.findByRole("link", { name: "Open Telegram creation form" })).toBeVisible();
+  for (const id of ["c7235ce6-7b7b-409a-b13a-7b6b5d6c3a9a", request.id]) {
+    view.rerender(<QueryClientProvider client={view.client}><TelegramNew label="Support" orgId={null} requestId={id} onConnected={view.onConnected} /></QueryClientProvider>);
+    await screen.findByRole("button", { name: "Open creation form" });
+    expect(screen.queryByRole("link", { name: "Open Telegram creation form" })).not.toBeInTheDocument();
+  }
+  expect(mockPost).toHaveBeenCalledTimes(1);
+});
+
+it.each(["waiting_telegram", "waiting_consent", "ready", "provisioning", "connected", "cancelled", "expired", "suspended", "notice", "not allowed", "deadline"])(
+  "does not offer alternate-client recovery for %s",
+  async (state) => {
+    const saved = {
+      ...recoverable,
+      ...(state === "notice" ? { setup_notice: closedSetup }
+        : state === "not allowed" ? { can_open_creation_form: false }
+          : state === "deadline" ? { expires_at: new Date(Date.now() - 1000).toISOString() }
+            : { status: state as TelegramNewRequest["status"] }),
+    };
+    mockGet.mockResolvedValue(configuration(saved));
+    setup(request.id);
+    await waitFor(() => expect(screen.queryByText("Checking Telegram setup…")).not.toBeInTheDocument());
+    expect(screen.queryByText(/same Telegram account on an up-to-date/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open creation form" })).not.toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
+  },
+);

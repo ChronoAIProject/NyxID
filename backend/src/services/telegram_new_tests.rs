@@ -541,7 +541,14 @@ async fn telegram_new_start_sends_readable_instructions_before_the_creation_keyb
         assert!(text.contains("Personal account:"));
         assert!(text.contains("https://app.nyxid.test"));
         assert!(text.contains("Open creation form"));
-        assert!(text.contains("update Telegram to the latest version"));
+        assert!(text.contains("If Create bot or the native form will not open"));
+        assert!(text.contains("same Telegram account on an up-to-date official Telegram client"));
+        assert!(text.contains("this manager's existing private chat"));
+        assert!(text.contains("Show its bot keyboard and tap Create bot"));
+        assert!(text.contains("send /start once to retry this same live setup"));
+        assert!(text.contains("Check this saved setup's progress in NyxID before trying again"));
+        assert!(text.contains("wait and check again; do not submit another form"));
+        assert!(text.contains("Do not restart NyxBot, create another assistant or start another setup request"));
         assert!(!text.contains(&challenge));
         let keyboard = replies[1].body_json::<Value>().unwrap();
         assert_eq!(keyboard["chat_id"], 700);
@@ -554,6 +561,14 @@ async fn telegram_new_start_sends_readable_instructions_before_the_creation_keyb
     assert_eq!(bound.status, Status::WaitingBot);
     assert_eq!(bound.telegram_user_id, Some(700));
     assert_eq!(bound.start_update_id, Some(1));
+    assert_eq!(bound.owner_user_id, request.owner_user_id);
+    assert_eq!(
+        bound.expires_at.timestamp_millis(),
+        request.expires_at.timestamp_millis()
+    );
+    assert_eq!(bound.label, request.label);
+    assert!(bound.telegram_bot_id.is_none());
+    assert!(bound.channel_bot_id.is_none());
 }
 
 #[tokio::test]

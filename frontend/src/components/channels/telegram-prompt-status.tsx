@@ -18,20 +18,20 @@ export function TelegramPromptStatus({ request, pending, recovering, onRecover, 
   const delivery = request.prompt_delivery;
   const outcome = delivery?.outcome;
   const text = request.status === "waiting_telegram"
-    ? "Open Telegram and press Start to link this setup to your Telegram account."
+    ? translateUi("Open Telegram and press Start to link this setup to your Telegram account.")
     : !delivery
-      ? "Delivery details were not recorded for this setup. Continue in Telegram to create your bot."
+      ? translateUi("Delivery details were not recorded for this setup. Continue in Telegram to create your bot.")
       : outcome === "sending"
-      ? "Sending the creation instructions and button to Telegram…"
+      ? translateUi("Sending the creation instructions and button to Telegram…")
       : outcome === "rejected"
-        ? "Telegram rejected the creation message. NyxID has not yet confirmed bot creation."
+        ? translateUi("Telegram rejected the creation message. NyxID has not yet confirmed bot creation.")
         : outcome === "accepted" && delivery?.phase === "keyboard"
-          ? "Telegram accepted the Create bot message. This does not confirm the button appeared in your app."
-          : "Delivery of the Create bot message is unconfirmed. NyxID has not yet confirmed bot creation.";
+          ? translateUi("Telegram accepted the Create bot message. This does not confirm the button appeared in your app.")
+          : translateUi("Delivery of the Create bot message is unconfirmed. NyxID has not yet confirmed bot creation.");
   const reason = delivery?.reason === "rate_limited"
-    ? "Telegram is limiting requests. Wait before sending a new /start."
+    ? translateUi("Telegram is limiting requests. Wait before sending a new /start.")
     : delivery?.reason === "unauthorized" || delivery?.reason === "forbidden"
-      ? "An administrator may need to check the manager configuration."
+      ? translateUi("An administrator may need to check the manager configuration.")
       : undefined;
   return (
     <div className="space-y-3 text-13 text-muted-foreground">
@@ -40,7 +40,10 @@ export function TelegramPromptStatus({ request, pending, recovering, onRecover, 
       {request.status === "waiting_bot" && <p>{translateUi("Waiting for a verified bot creation from the Telegram account that opened this setup.")}</p>}
       {request.can_open_creation_form && recoveryUnexpired && request.status === "waiting_bot" && (
         <>
+          <p>{translateUi("Already submitted Telegram’s form? Check progress before trying again. If creation is still unconfirmed, wait and check again; do not submit another form.")}</p>
           <p>{translateUi("Button missing? Open the same creation form for ")}<strong className="break-words">{request.label}</strong>{translateUi(". Use the same Telegram account and check the NyxID destination shown in the setup chat.")}</p>
+          <p>{translateUi("If Create bot or the native form will not open, use the same Telegram account on an up-to-date official Telegram client that supports managed creation, such as the official mobile app, and open this manager’s existing private chat. Show its bot keyboard and tap Create bot; if the keyboard is missing, send /start once to retry this same live setup and check the destination shown above.")}</p>
+          <p>{translateUi("Keep this setup and destination. Do not restart NyxBot, create another assistant or start another setup request.")}</p>
           {request.username_suggestions && (
             <div className="space-y-2 type-secondary" aria-label={translateUi("Username suggestions")}>
               <p>{translateUi("Suggested username: ")}<code>{request.username_suggestions[0]}</code></p>

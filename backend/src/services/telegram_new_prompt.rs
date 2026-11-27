@@ -154,7 +154,7 @@ impl TelegramNewService<'_> {
             {
                 Ok((_, url)) => {
                     choices = creation_suggestions(&request, &url)?;
-                    text.push_str("\n\nButton missing? Choose Open creation form below, or use an alternative username. Use the same Telegram account and check the NyxID destination above.");
+                    text.push_str("\n\nAlready submitted Telegram's form? Check this saved setup's progress in NyxID before trying again. If creation is still unconfirmed, wait and check again; do not submit another form.\n\nButton missing? Choose Open creation form below, or use an alternative username. Use the same Telegram account and check the NyxID destination above.\n\nIf Create bot or the native form will not open, use the same Telegram account on an up-to-date official Telegram client that supports managed creation, such as the official mobile app, and open this manager's existing private chat. Show its bot keyboard and tap Create bot; if the keyboard is missing, send /start once to retry this same live setup and check the destination shown above.\n\nKeep this setup and destination. Do not restart NyxBot, create another assistant or start another setup request.");
                 }
                 Err(_) => {
                     tracing::info!(request_id = %request.id, "Telegram instruction recovery link unavailable")
@@ -175,7 +175,10 @@ impl TelegramNewService<'_> {
         if !prompt_dispatch_has_budget(phase_started_at, Utc::now()) {
             return Ok(());
         }
-        let instructions = self.api.send_prompt(token, json!({"chat_id": user, "text": format!("{text}\n\nIf no Create bot button appears, update Telegram to the latest version, then send /start to try again."), "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}, "reply_markup": usernames::username_keyboard(&request, &choices)})).await;
+        if choices.is_empty() {
+            text.push_str("\n\nIf no Create bot button appears, update Telegram to the latest version, then send /start to try again.");
+        }
+        let instructions = self.api.send_prompt(token, json!({"chat_id": user, "text": text, "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}, "reply_markup": usernames::username_keyboard(&request, &choices)})).await;
         if let Err(diagnostic) = instructions {
             self.set_prompt_outcome(
                 &request,
