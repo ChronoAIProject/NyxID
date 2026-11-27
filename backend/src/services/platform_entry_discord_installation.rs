@@ -863,7 +863,10 @@ mod tests {
     }
 
     impl Fixture {
-        async fn captured_authority(&self) -> (crate::AppState, InstallationAuthority) {
+        async fn captured_authority(
+            &self,
+            contextual_token: bool,
+        ) -> (crate::AppState, InstallationAuthority) {
             let state = crate::test_utils::test_app_state(self.db.clone());
             let user =
                 crate::test_utils::test_user(&self.admin, crate::models::user::UserType::Person);
@@ -887,20 +890,20 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let encrypted = state
-                .encryption_keys
-                .encrypt(b"local-fixture-only")
-                .await
-                .unwrap();
             let profile_id = uuid::Uuid::new_v4().to_string();
             let mut bot: crate::models::channel_bot::ChannelBot = bson::from_document(doc! {
                 "_id":&self.bot_id,"user_id":&self.admin,"platform":"discord","label":"native installer",
                 "platform_bot_id":"200","platform_bot_username":"local","app_id":"100","public_key":&self.key,
-                "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
+                "bot_token_encrypted":[],
                 "webhook_secret_hash":"local","webhook_registered":true,"status":"active","is_active":true,
                 "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
             }).unwrap();
             bot.credential_source = "user".into();
+            let mut writer = crate::test_utils::test_encryption_keys();
+            writer.set_contextual_record_writes(contextual_token);
+            crate::services::platform_entry_native::tests::credentials::BotSecret::Token
+                .set(&writer, &mut bot, "local-fixture-only")
+                .await;
             let snapshot = super::super::platform_entry_credentials::EntryCredentialSnapshot::load(
                 &self.db,
                 &super::super::channel_adapters::discord::DiscordAdapter::default(),
@@ -975,7 +978,7 @@ mod tests {
             "funding_org",
         ] {
             let fixture = Fixture::new().await;
-            let (state, authority) = fixture.captured_authority().await;
+            let (state, authority) = fixture.captured_authority(true).await;
             let barrier = Arc::new(tokio::sync::Barrier::new(2));
             let http = reqwest::Client::new();
             let base = fixture.server.uri();
@@ -1010,12 +1013,15 @@ mod tests {
                             .unwrap();
                     }
                     "credential" => {
-                        let next = state
-                            .encryption_keys
-                            .encrypt(b"replacement-token")
+                        let update = crate::services::platform_entry_native::tests::credentials::token_update(
+                            &state.encryption_keys, &fixture.bot_id, &fixture.admin, "replacement-token", doc! {},
+                        ).await;
+                        fixture
+                            .db
+                            .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+                            .update_one(doc! {"_id":&fixture.bot_id}, update)
                             .await
                             .unwrap();
-                        fixture.db.collection::<Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&fixture.bot_id},doc! {"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:next}}}).await.unwrap();
                     }
                     "profile" => {
                         fixture.db.collection::<Document>(crate::models::platform_bot_config::COLLECTION_NAME).update_one(doc! {"channel_bot_id":&fixture.bot_id},doc! {"$inc":{"generation":1_i64,"native_entry.transport_generation":1_i64}}).await.unwrap();
@@ -1107,7 +1113,7 @@ mod tests {
     #[tokio::test]
     async fn exact_captured_admin_authority_installs_and_reuses_only_the_owned_command() {
         let fixture = Fixture::new().await;
-        let (state, authority) = fixture.captured_authority().await;
+        let (state, authority) = fixture.captured_authority(false).await;
         let http = reqwest::Client::new();
         let base = fixture.server.uri();
         let first = install_captured_at(

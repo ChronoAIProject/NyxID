@@ -7,6 +7,7 @@ use crate::models::usage_meter::{
 };
 use crate::models::usage_rollup_hourly::UsageRollupMeasures;
 use crate::models::usage_rollup_state::STATE_ID;
+use crate::services::catalog_credential_record_service as catalog_record;
 use crate::test_utils::test_auth_user;
 use axum::extract::{Query, State};
 use futures::TryStreamExt;
@@ -827,11 +828,16 @@ async fn org_credential_request(platform_key: bool) {
     catalog.slug = "llm-org-payer".into();
     catalog.base_url = downstream_url.clone();
     catalog.auth_method = "bearer".into();
-    catalog.credential_encrypted = state
-        .encryption_keys
-        .encrypt(b"platform-test-key")
-        .await
-        .unwrap();
+    catalog.credential_encrypted = catalog_record::encrypt(
+        &state.encryption_keys,
+        &catalog.id,
+        catalog_record::owner(&catalog).unwrap(),
+        b"platform-test-key",
+    )
+    .await
+    .unwrap();
+    catalog.secret_context_versions =
+        catalog_record::initial_versions(&state.encryption_keys, true);
     catalog.platform_key = Some(PlatformKeyConfig {
         purpose: Default::default(),
         enabled: true,

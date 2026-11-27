@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::credential_record_service as key_record;
 use crate::{
     models::{user::UserType, user_api_key::UserApiKey},
     test_utils::*,
@@ -44,20 +45,30 @@ async fn fixture() -> (crate::AppState, String, String) {
         .unwrap();
     let credential_id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
+    let encrypted = key_record::encrypt(
+        &state.encryption_keys,
+        crate::models::user_api_key::COLLECTION_NAME,
+        &credential_id,
+        &owner,
+        "access_token_encrypted",
+        b"test-token-never-dispatched",
+    )
+    .await
+    .unwrap();
+    let mut versions = Default::default();
+    key_record::mark_version(
+        &mut versions,
+        &state.encryption_keys,
+        "access_token_encrypted",
+    );
     let credential = UserApiKey {
-        secret_context_versions: Default::default(),
+        secret_context_versions: versions,
         id: credential_id.clone(),
         user_id: owner.clone(),
         label: "Drive test".into(),
         credential_type: "oauth2".into(),
         credential_encrypted: None,
-        access_token_encrypted: Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-token-never-dispatched")
-                .await
-                .unwrap(),
-        ),
+        access_token_encrypted: Some(encrypted),
         refresh_token_encrypted: None,
         token_scopes: None,
         expires_at: None,
@@ -703,8 +714,31 @@ async fn permission_keys_google_supports_registered_apis_and_private_api_keys() 
             )
             .await
             .unwrap();
-        state.db.collection::<Document>(CREDENTIALS).update_one(doc! {"_id": &service.api_key_id},
-            doc! {"$set": {"credential_type": credential_type, "credential_encrypted": bson::to_bson(&state.encryption_keys.encrypt(b"fixture-key-never-dispatched").await.unwrap()).unwrap()}}).await.unwrap();
+        let key_id = service.api_key_id.as_deref().unwrap();
+        let encrypted = key_record::encrypt(
+            &state.encryption_keys,
+            crate::models::user_api_key::COLLECTION_NAME,
+            key_id,
+            &owner,
+            "credential_encrypted",
+            b"fixture-key-never-dispatched",
+        )
+        .await
+        .unwrap();
+        let mut set = doc! {"credential_type":credential_type, "credential_encrypted":bson::to_bson(&encrypted).unwrap()};
+        let mut unset = Document::new();
+        key_record::mark_classic_update(
+            &mut set,
+            &mut unset,
+            &state.encryption_keys,
+            "credential_encrypted",
+        );
+        state
+            .db
+            .collection::<Document>(CREDENTIALS)
+            .update_one(doc! {"_id":key_id}, doc! {"$set":set, "$unset":unset})
+            .await
+            .unwrap();
         let (_, binding) = create(
             &state.db,
             &state.encryption_keys,

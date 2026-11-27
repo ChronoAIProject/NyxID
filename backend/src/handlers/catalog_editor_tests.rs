@@ -1,3 +1,6 @@
+use crate::handlers::credential_record_fixtures::{
+    insert_bearer_connection, set_catalog_credential,
+};
 use axum::http::StatusCode;
 use mongodb::bson::{self, Document, doc};
 use serde_json::json;
@@ -108,30 +111,14 @@ fn assert_ornn_identity(f: &Fixture, request: &wiremock::Request, permissions: &
 }
 
 async fn add_ornn_connection(f: &Fixture, owner: &str, credential: &[u8]) -> String {
-    use crate::models::user_service_connection::{
-        COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
-    };
-    let id = Uuid::new_v4().to_string();
-    f.state
-        .db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .insert_one(UserServiceConnection {
-            secret_context_versions: Default::default(),
-            id: id.clone(),
-            user_id: owner.into(),
-            service_id: f.service.id.clone(),
-            credential_encrypted: Some(f.state.encryption_keys.encrypt(credential).await.unwrap()),
-            credential_type: Some("bearer".into()),
-            credential_label: None,
-            metadata: None,
-            is_active: true,
-            state_version: 0,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        })
-        .await
-        .unwrap();
-    id
+    insert_bearer_connection(
+        &f.state.db,
+        &f.state.encryption_keys,
+        owner,
+        &f.service.id,
+        credential,
+    )
+    .await
 }
 
 async fn editor(label: &str) -> (Fixture, String, String) {
@@ -1093,12 +1080,12 @@ async fn editor_ornn_internal_transport_credential_requires_signed_sa_identity()
 
     let (mut f, upstream, role_id) = ornn_account("editor_ornn_transport").await;
     f.service.auth_method = "bearer".into();
-    f.service.credential_encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"server-transport-key")
-        .await
-        .unwrap();
+    set_catalog_credential(
+        &f.state.encryption_keys,
+        &mut f.service,
+        b"server-transport-key",
+    )
+    .await;
     let services = f.state.db.collection::<Document>(CATALOG);
     let original = bson::to_document(&f.service).unwrap();
     services
@@ -1160,7 +1147,10 @@ async fn editor_ornn_internal_transport_credential_requires_signed_sa_identity()
         ),
         (
             "empty transport credential",
-            doc! {"credential_encrypted": bson::to_bson(&Vec::<u8>::new()).unwrap()},
+            doc! {
+                "credential_encrypted": bson::to_bson(&Vec::<u8>::new()).unwrap(),
+                "secret_context_versions": {},
+            },
         ),
         ("inactive target", doc! {"is_active": false}),
         ("non HTTP target", doc! {"service_type": "ssh"}),
@@ -1305,9 +1295,6 @@ async fn editor_ornn_internal_transport_credential_requires_signed_sa_identity()
 
 #[tokio::test]
 async fn editor_proxy_permits_ornn_skill_cru_with_only_sa_credential() {
-    use crate::models::user_service_connection::{
-        COLLECTION_NAME as CONNECTIONS, UserServiceConnection,
-    };
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
@@ -1347,12 +1334,12 @@ async fn editor_proxy_permits_ornn_skill_cru_with_only_sa_credential() {
     service.identity_propagation_mode = "both".into();
     service.identity_include_user_id = true;
     service.identity_jwt_audience = Some("ornn-editor-test".into());
-    service.credential_encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"master-key-must-not-be-used")
-        .await
-        .unwrap();
+    set_catalog_credential(
+        &f.state.encryption_keys,
+        &mut service,
+        b"master-key-must-not-be-used",
+    )
+    .await;
     service.proxy_operation_policy = Some(
         serde_json::from_value(json!({"rules": [
             {"method": "GET", "path_template": "/api/v1/skills/{id}"},
@@ -1367,31 +1354,14 @@ async fn editor_proxy_permits_ornn_skill_cru_with_only_sa_credential() {
         .replace_one(doc! {"_id": &service.id}, &service)
         .await
         .unwrap();
-    f.state
-        .db
-        .collection::<UserServiceConnection>(CONNECTIONS)
-        .insert_one(UserServiceConnection {
-            secret_context_versions: Default::default(),
-            id: Uuid::new_v4().to_string(),
-            user_id: f.sa.id.clone(),
-            service_id: service.id.clone(),
-            credential_encrypted: Some(
-                f.state
-                    .encryption_keys
-                    .encrypt(b"dedicated-sa-key")
-                    .await
-                    .unwrap(),
-            ),
-            credential_type: Some("bearer".into()),
-            credential_label: None,
-            metadata: None,
-            is_active: true,
-            state_version: 0,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        })
-        .await
-        .unwrap();
+    insert_bearer_connection(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.sa.id,
+        &service.id,
+        b"dedicated-sa-key",
+    )
+    .await;
 
     for (verb, skill_path) in [
         ("GET", "/api/v1/skills/owned"),

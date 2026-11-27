@@ -933,6 +933,7 @@ async fn notify(db: mongodb::Database, actor: &str, agent: &str, profile: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::catalog_credential_record_service as catalog_record;
     use uuid::Uuid;
 
     #[tokio::test]
@@ -1282,7 +1283,16 @@ mod tests {
         service.slug = "legacy-model".into();
         service.service_category = "internal".into();
         service.auth_method = "bearer".into();
-        service.credential_encrypted = f.state.encryption_keys.encrypt(b"test-key").await.unwrap();
+        service.credential_encrypted = catalog_record::encrypt(
+            &f.state.encryption_keys,
+            &service.id,
+            catalog_record::owner(&service).unwrap(),
+            b"test-key",
+        )
+        .await
+        .unwrap();
+        service.secret_context_versions =
+            catalog_record::initial_versions(&f.state.encryption_keys, true);
         f.state
             .db
             .collection::<crate::models::downstream_service::DownstreamService>(

@@ -589,12 +589,16 @@ async fn two_accounts_keep_real_credentials_memory_tools_payers_and_web_continui
         voice: None,
     });
     model.auth_method = "bearer".into();
-    model.credential_encrypted = j
-        .state
-        .encryption_keys
-        .encrypt(b"synthetic-inner-model-key")
-        .await
-        .unwrap();
+    use crate::services::catalog_credential_record_service as catalog;
+    model.credential_encrypted = catalog::encrypt(
+        &j.state.encryption_keys,
+        &model.id,
+        catalog::owner(&model).unwrap(),
+        b"synthetic-inner-model-key",
+    )
+    .await
+    .unwrap();
+    model.secret_context_versions = catalog::initial_versions(&j.state.encryption_keys, true);
     model.platform_key = Some(crate::models::downstream_service::PlatformKeyConfig {
         purpose: Default::default(),
         enabled: true,

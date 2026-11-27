@@ -23,10 +23,7 @@ async fn legacy_array_cas_strict_readiness_and_rewrap_preserve_authority() {
     ] {
         let mut source = doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"credential_epoch":17_i64,"state_version":9_i64,"status":"active","provider_config_id":"provider","connection_id":"connection","opaque_metadata_id":"preserved-metadata","updated_at":bson::DateTime::now()};
         for field in fields(collection).unwrap() {
-            let encrypted = keys
-                .encrypt(format!("distinctive-material-{field}").as_bytes())
-                .await
-                .unwrap();
+            let encrypted = fixtures::historical::credential_field(field);
             source.insert(
                 *field,
                 Bson::Array(
@@ -214,8 +211,16 @@ async fn held_live_copy_and_startup_migration_cannot_install_after_source_refres
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"access_token":"new-access","refresh_token":"new-refresh","expires_in":3600})))
             .mount(&server).await;
         let mut provider: ProviderConfig=bson::from_document(doc! {"_id":uuid::Uuid::new_v4().to_string(),"slug":"copy-source-fixture","name":"Copy source","provider_type":"oauth2","credential_mode":"both","is_active":true,"created_by":"admin","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"token_url":format!("{}/token",server.uri())}).unwrap();
-        provider.client_id_encrypted = Some(keys.encrypt(b"copy-client").await.unwrap());
-        provider.client_secret_encrypted = Some(keys.encrypt(b"copy-client-secret").await.unwrap());
+        provider.client_id_encrypted =
+            Some(fixtures::provider(&provider.id, "client_id_encrypted", b"copy-client").await);
+        provider.client_secret_encrypted = Some(
+            fixtures::provider(
+                &provider.id,
+                "client_secret_encrypted",
+                b"copy-client-secret",
+            )
+            .await,
+        );
         db.collection::<ProviderConfig>(crate::models::provider_config::COLLECTION_NAME)
             .insert_one(&provider)
             .await
@@ -233,7 +238,8 @@ async fn held_live_copy_and_startup_migration_cannot_install_after_source_refres
             .await
             .unwrap();
         }
-        let token: UserProviderToken=bson::from_document(doc! {"_id":uuid::Uuid::new_v4().to_string(),"user_id":&owner,"provider_config_id":&provider.id,"credential_user_id":if winner=="byo" {Bson::String(owner.clone())} else {Bson::Null},"token_type":"oauth2","status":"active","state_version":1_i64,"access_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:keys.encrypt(b"old-access").await.unwrap()},"refresh_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:keys.encrypt(b"old-refresh").await.unwrap()},"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).unwrap();
+        let token_id = uuid::Uuid::new_v4().to_string();
+        let token: UserProviderToken=bson::from_document(doc! {"_id":&token_id,"user_id":&owner,"provider_config_id":&provider.id,"credential_user_id":if winner=="byo" {Bson::String(owner.clone())} else {Bson::Null},"token_type":"oauth2","status":"active","state_version":1_i64,"access_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:fixtures::token(&token_id, &owner, "access_token_encrypted", b"old-access").await},"refresh_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:fixtures::token(&token_id, &owner, "refresh_token_encrypted", b"old-refresh").await},"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).unwrap();
         db.collection::<UserProviderToken>(TOKENS)
             .insert_one(&token)
             .await
@@ -397,9 +403,9 @@ async fn startup_migration_skips_accepted_owner_without_starving_active_owner() 
             .unwrap();
         let now = bson::DateTime::now();
         db.collection::<Document>(crate::models::user_provider_token::COLLECTION_NAME).insert_one(doc! {
-            "_id":token_id,"user_id":&owner,"provider_config_id":"missing-provider",
+            "_id":&token_id,"user_id":&owner,"provider_config_id":"missing-provider",
             "token_type":"api_key","status":"active","state_version":1_i64,
-            "api_key_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:keys.encrypt(b"retained-api-key").await.unwrap()},
+            "api_key_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:fixtures::token(&token_id, &owner, "api_key_encrypted", b"retained-api-key").await},
             "created_at":now,"updated_at":now,
         }).await.unwrap();
         owners.push(owner);

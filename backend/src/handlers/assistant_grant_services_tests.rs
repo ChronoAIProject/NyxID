@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::credential_record_fixtures::set_catalog_credential;
 use crate::{
     models::downstream_service::{
         DownstreamService, PlatformKeyAudience, PlatformKeyConfig, PlatformKeyPurpose,
@@ -34,12 +35,7 @@ async fn catalog(
     row.name = format!("Display {slug}");
     row.service_category = "internal".into();
     row.auth_method = "bearer".into();
-    row.credential_encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"fixture-only")
-        .await
-        .unwrap();
+    set_catalog_credential(&f.state.encryption_keys, &mut row, b"fixture-only").await;
     row.platform_key = audience.map(|audience| PlatformKeyConfig {
         purpose: Default::default(),
         enabled: true,
