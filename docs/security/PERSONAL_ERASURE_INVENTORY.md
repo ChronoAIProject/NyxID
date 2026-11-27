@@ -464,6 +464,7 @@ backend/src/models/assistant_invocation.rs: COLLECTION_NAME=assistant_invocation
 backend/src/models/assistant_message.rs: COLLECTION_NAME=assistant_messages | user_id
 backend/src/models/assistant_message_feedback.rs: COLLECTION_NAME=assistant_message_feedback | user_id
 backend/src/models/assistant_settings.rs: COLLECTION_NAME=assistant_settings | user_id
+backend/src/models/assistant_system_skills.rs: COLLECTION_NAME=assistant_system_skills | updated_by (retained platform administrator attribution)
 backend/src/models/assistant_skill_draft_attempt.rs: COLLECTION_NAME=assistant_skill_draft_attempts | user_id
 backend/src/models/assistant_voice.rs: REQUESTS=assistant_voice_requests | user_id
 backend/src/models/assistant_voice_session.rs: COLLECTION_NAME=assistant_voice_sessions | user_id
@@ -776,7 +777,10 @@ all definitions before/after and replay the old startup fixture afterward.
 
 Three growing history collections also need export selector indexes. Actor selection is
 independent of resource ownership: an organization or group can retain many events
-authored by other people. These are the only additional selector
+authored by other people. Attachment selection must cover every origin, including
+tool images without a channel source. The non-partial owner-prefix compound
+indexes created by `channel_meta_service::scope_erasure::ensure_indexes` cover
+attachment exports across all origins. These are the only additional selector
 indexes; small configuration, relationship and lifecycle inventories retain their
 existing index sets.
 

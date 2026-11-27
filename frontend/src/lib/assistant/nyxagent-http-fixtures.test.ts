@@ -1,7 +1,10 @@
+import { agentSkillsSchema, attachedSkillPreviewSchema, skillSearchSchema, skillVersionsSchema, skillPreviewSchema } from "@/schemas/agent-skills";
+import { getMockResponse } from "@/lib/mock-data";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NYXAGENT_FIXTURE_RESEARCHER_REPLY, NyxAgentHttpFixtures } from "./nyxagent-http-fixtures";
+import { NYXAGENT_FIXTURE_RESEARCHER_REPLY, NYXAGENT_FIXTURE_NYXBOT_ID, NYXAGENT_FIXTURE_RESEARCHER_ID, NyxAgentHttpFixtures } from "./nyxagent-http-fixtures";
 import {
   assistantAgentListSchema,
+  nyxAgentSettingsSchema,
   assistantGroupMessagesSchema,
   assistantGroupPostedSchema,
   assistantGroupSchema,
@@ -268,5 +271,115 @@ describe("NyxAgent fixture agent display name and persona", () => {
     const { nyxbot } = await agentIds();
     const nyx = await call("PATCH", `/agents/${nyxbot}`, { display_name: "Nyx" });
     expect(nyx.body).toMatchObject({ name: "NyxBot", display_name: "Nyx" });
+  });
+});
+
+describe("built-in skills HTTP fixtures", () => {
+  const basic = "b56b5bca-09d6-45f4-991a-05e945ac7eb4";
+  const ornn = "9b2b3798-6c7a-4ed9-9c15-43cfb92d342b";
+  const cma = "959472fc-c4b5-4ede-8d6d-a5e5bf3ec749";
+  async function skills(id: string) {
+    return agentSkillsSchema.parse((await call("GET", `/agents/${id}/skills`)).body);
+  }
+
+  it("renders NyxBot choices and specialist inheritance, own choices and pin shadowing", async () => {
+    const { nyxbot, researcher } = await agentIds();
+    expect(nyxbot).toBe(NYXAGENT_FIXTURE_NYXBOT_ID);
+    expect(researcher).toBe(NYXAGENT_FIXTURE_RESEARCHER_ID);
+    expect((await skills(nyxbot)).system_skills).toEqual(expect.arrayContaining([
+      expect.objectContaining({ skill_id: basic, source: "platform", effective: true }),
+      expect.objectContaining({ skill_id: ornn, source: "agent", override: false, enabled: false }),
+    ]));
+    const specialist = await skills(researcher);
+    expect(specialist.system_skills_for_specialists).toBe("default");
+    expect(specialist.system_skills).toEqual([
+      expect.objectContaining({ skill_id: basic, source: "nyxbot_default", effective: true, override: null }),
+      expect.objectContaining({ skill_id: ornn, source: "agent", effective: true, override: true }),
+      expect.objectContaining({ skill_id: cma, source: "pin", effective: false, shadowed_by_pin: true }),
+    ]);
+    expect(specialist.skills).toEqual([expect.objectContaining({ skill_id: cma, version: "0.1" })]);
+  });
+
+  it("supports true, false and null overrides and persists them across reload", async () => {
+    const { researcher } = await agentIds();
+    for (const enabled of [false, true, null]) {
+      const result = await call("PUT", `/agents/${researcher}/system-skills/${basic}`, { enabled });
+      expect(result.status).toBe(200);
+      expect(agentSkillsSchema.parse(result.body).system_skills?.[0]).toMatchObject({
+        override: enabled, enabled: enabled ?? true, source: enabled === null ? "nyxbot_default" : "agent",
+      });
+    }
+    await call("PUT", `/agents/${researcher}/system-skills/${basic}`, { enabled: false });
+    fixture = new NyxAgentHttpFixtures();
+    expect((await skills(researcher)).system_skills?.[0]).toMatchObject({ override: false, effective: false });
+    expect((await call("PUT", `/agents/${researcher}/system-skills/removed`, { enabled: null })).status).toBe(200);
+    expect((await call("PUT", `/agents/${researcher}/system-skills/removed`, { enabled: true })).status).toBe(400);
+    expect((await call("PUT", `/agents/${researcher}/system-skills/${basic}`, { enabled: "yes" })).status).toBe(400);
+  });
+
+  it("round-trips settings, locks specialists with 409, and preserves their own choices", async () => {
+    const { researcher, nyxbot } = await agentIds();
+    expect(nyxAgentSettingsSchema.parse((await call("GET", "/settings")).body).system_skills_for_specialists).toBe("default");
+    const updated = await call("PUT", "/settings", { system_skills_for_specialists: "override" });
+    expect(nyxAgentSettingsSchema.parse(updated.body).system_skills_for_specialists).toBe("override");
+    expect((await skills(researcher)).system_skills?.[1]).toMatchObject({ source: "nyxbot_override", override: true, effective: false });
+    for (const enabled of [true, false, null]) {
+      expect(await call("PUT", `/agents/${researcher}/system-skills/${ornn}`, { enabled })).toMatchObject({
+        status: 409,
+        body: { error: "conflict", error_code: 1004, message: "Built-in skills for specialists are managed by NyxBot settings" },
+      });
+    }
+    expect((await call("PUT", `/agents/${nyxbot}/system-skills/${basic}`, { enabled: false })).status).toBe(200);
+    expect((await skills(researcher)).system_skills?.[0]).toMatchObject({ source: "nyxbot_override", effective: false });
+    const listed = assistantAgentListSchema.parse((await call("GET", "/agents")).body);
+    expect(listed.limits.system_skills_for_specialists).toBe("override");
+    fixture = new NyxAgentHttpFixtures();
+    expect(nyxAgentSettingsSchema.parse((await call("GET", "/settings")).body).system_skills_for_specialists).toBe("override");
+    await call("PUT", "/settings", { system_skills_for_specialists: "default" });
+    expect((await skills(researcher)).system_skills?.[1]).toMatchObject({ source: "agent", override: true, effective: true });
+    expect((await call("PUT", "/settings", { system_skills_for_specialists: "invalid" })).status).toBe(400);
+  });
+
+  it("serves placeholder SKILL.md for effective built-ins and attached pins", async () => {
+    const { researcher } = await agentIds();
+    for (const skillId of [basic, cma]) {
+      const preview = attachedSkillPreviewSchema.parse((await call("GET", `/agents/${researcher}/skills/${skillId}/preview`)).body);
+      expect(preview).toMatchObject({ skill_id: skillId, version: "0.1", readable: true });
+      expect(preview.excerpt).toMatch(/^---\nname: [^\n]+\ndescription:/);
+      expect(preview.excerpt).not.toContain("\\n");
+      expect(preview.excerpt).toContain("SKILL.md");
+      expect(preview.excerpt).toContain("Skills never grant permissions");
+    }
+    await call("PUT", `/agents/${researcher}/system-skills/${basic}`, { enabled: false });
+    expect((await call("GET", `/agents/${researcher}/skills/${basic}/preview`)).status).toBe(403);
+  });
+
+  it("serves catalog search, versions and exact previews and shares admin selections", async () => {
+    const search = skillSearchSchema.parse((await call("GET", "/skills/catalog?q=cma&page=1")).body);
+    expect(search.items).toEqual([expect.objectContaining({ id: cma, name: "nyxbot-cma" })]);
+    expect(skillVersionsSchema.parse((await call("GET", `/skills/catalog?skill=${basic}`)).body).items)
+      .toEqual([expect.objectContaining({ version: "0.1", deprecated: false })]);
+    expect(skillPreviewSchema.parse((await call("GET", `/skills/catalog?skill=${basic}&version=0.1`)).body).reference)
+      .toMatchObject({ skill_id: basic, source: "ornn", version: "0.1" });
+    expect((await call("GET", `/skills/catalog?skill=${basic}&version=0.2`)).status).toBe(404);
+    getMockResponse("/admin/assistant/system-skills", "PUT", { expected_revision: 1, skills: [{ skill: basic, version: "0.1" }] });
+    const { researcher } = await agentIds();
+    expect((await skills(researcher)).system_skills).toHaveLength(1);
+    expect((await call("GET", `/agents/${researcher}/skills/history`)).body).toEqual({ items: [] });
+  });
+
+  it.each(["default", "override"])("supports the exact %s preview URL and keeps its mode after navigation", async (mode) => {
+    const previous = window.location.href;
+    try {
+      window.history.replaceState(null, "", `/assistant?mock=1&nyxbot=1&systemSkills=${mode}`);
+      fixture = new NyxAgentHttpFixtures();
+      const { researcher } = await agentIds();
+      expect((await skills(researcher)).system_skills_for_specialists).toBe(mode);
+      window.history.replaceState(null, "", "/assistant?mock=1");
+      fixture = new NyxAgentHttpFixtures();
+      expect((await skills(researcher)).system_skills_for_specialists).toBe(mode);
+    } finally {
+      window.history.replaceState(null, "", previous);
+    }
   });
 });

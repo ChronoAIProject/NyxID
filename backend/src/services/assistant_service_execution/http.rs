@@ -8,8 +8,8 @@ pub struct HttpProjection {
     pub replace_headers: bool,
     pub base_url: Option<String>,
     pub extra_headers: Vec<(String, String)>,
-    /// Server-only marker for an exact attached Ornn package read.
-    pub(crate) skill_read: bool,
+    /// Server-only binding for an enabled attached or effective built-in package.
+    pub(crate) skill_read: Option<crate::services::agent_skill_service::OrnnSkillRead>,
     /// Purpose-limited Ornn org membership callback, never a user bearer.
     pub(crate) org_skill_lookup: bool,
     pub(crate) machine_git: Option<crate::models::downstream_service::GitHttp>,
@@ -22,7 +22,7 @@ impl Default for HttpProjection {
             replace_headers: false,
             base_url: None,
             extra_headers: Vec::new(),
-            skill_read: false,
+            skill_read: None,
             org_skill_lookup: false,
             machine_git: None,
         }
@@ -126,7 +126,8 @@ pub(super) async fn verify_resolved_projected_inner(
     projection: &HttpProjection,
     model: bool,
 ) -> AppResult<()> {
-    resolve_projected(
+    // Keep the large resolution state off the proxy caller's debug stack.
+    Box::pin(resolve_projected(
         db,
         keys,
         chat,
@@ -137,7 +138,7 @@ pub(super) async fn verify_resolved_projected_inner(
         projection,
         !actual.credential_deferred,
         model,
-    )
+    ))
     .await
     .map(|_| ())
 }
@@ -155,6 +156,11 @@ async fn resolve_projected(
     materialize: bool,
     model: bool,
 ) -> AppResult<crate::services::proxy_service::ProxyTarget> {
+    if let Some(binding) = &projection.skill_read {
+        binding
+            .revalidate(db, &chat.user_id, Some(chat), Some(id), method, path)
+            .await?;
+    }
     let before = connection_binding(db, id, &chat.api_key_id).await?;
     let mut fresh = if materialize {
         crate::services::proxy_service::resolve_proxy_target_by_user_service_id(
@@ -328,6 +334,23 @@ async fn check_http_projected_inner(
     headers: &axum::http::HeaderMap,
     projection: &HttpProjection,
 ) -> AppResult<Decision> {
+    if let Some(binding) = &projection.skill_read {
+        if query.is_some() || !body.is_empty() || pool.is_some() {
+            return Err(AppError::SkillRead(
+                crate::errors::skill_read::SkillReadReason::SkillNotBound,
+            ));
+        }
+        binding
+            .revalidate(
+                &state.db,
+                &auth.user_id.to_string(),
+                auth.assistant_chat.as_deref(),
+                id,
+                method,
+                path,
+            )
+            .await?;
+    }
     if auth
         .org_agent_access
         .as_ref()
@@ -666,7 +689,7 @@ async fn check_http_projected_inner(
         )),
     )
     .await?;
-    if projection.skill_read
+    if projection.skill_read.is_some()
         && let Some(admission) = decision.admission.as_mut()
     {
         admission.bound_skill_read = true;
@@ -763,7 +786,7 @@ impl Admission {
             return Ok(());
         }
         self.revalidate(db, &self.connection, Some(target)).await?;
-        let fresh = resolve_projected(
+        let fresh = Box::pin(resolve_projected(
             db,
             keys,
             &self.chat,
@@ -774,7 +797,7 @@ impl Admission {
             projection,
             true,
             self.operation_identity["kind"] == "raw_inference" && !is_shared_chat(&self.chat),
-        )
+        ))
         .await?;
         self.revalidate(db, &self.connection, Some(target)).await?;
         target.credential = fresh.credential;
