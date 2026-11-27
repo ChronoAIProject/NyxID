@@ -1,5 +1,6 @@
 use super::*;
 use crate::errors::AppResult;
+use crate::handlers::credential_record_fixtures::set_catalog_credential;
 use crate::models::billing_wallet::BillingWallet;
 use crate::models::credits::Credits;
 use crate::models::downstream_service::DownstreamService;
@@ -100,12 +101,12 @@ async fn billed_fixture(label: &str, first_response: ResponseTemplate) -> Billed
     catalog.auth_key_name = "Authorization".into();
     catalog.platform_key =
         Some(serde_json::from_value(json!({ "enabled": true, "audience": "public" })).unwrap());
-    catalog.credential_encrypted = proxy
-        .state
-        .encryption_keys
-        .encrypt(b"review-platform-secret")
-        .await
-        .unwrap();
+    set_catalog_credential(
+        &pool_credential_writer(),
+        &mut catalog,
+        b"review-platform-secret",
+    )
+    .await;
     let lane = |code: &str| LanePricing {
         model_prices: Vec::new(),
         metric: BillingMetric::Tokens,
@@ -146,20 +147,7 @@ async fn billed_fixture(label: &str, first_response: ResponseTemplate) -> Billed
     db.collection::<Document>("user_services").update_one(doc! { "slug": "review-first" }, doc! { "$set": {
         "credential_binding": "platform", "auth_method": "bearer", "auth_key_name": "Authorization"
     } }).await.unwrap();
-    let key_id = Uuid::new_v4().to_string();
-    let encrypted = proxy
-        .state
-        .encryption_keys
-        .encrypt(b"review-byok-secret")
-        .await
-        .unwrap();
-    let now = mongodb::bson::DateTime::now();
-    db.collection::<Document>("user_api_keys").insert_one(doc! {
-        "_id": &key_id, "user_id": &owner, "label": "Review BYOK", "credential_type": "bearer",
-        "status": "active", "credential_epoch": 1_i64,
-        "credential_encrypted": mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: encrypted },
-        "created_at": now, "updated_at": now,
-    }).await.unwrap();
+    let key_id = insert_pool_bearer_key(&proxy, &owner, "Review BYOK", b"review-byok-secret").await;
     db.collection::<Document>("user_services")
         .update_one(
             doc! { "slug": "review-second" },
@@ -169,6 +157,7 @@ async fn billed_fixture(label: &str, first_response: ResponseTemplate) -> Billed
         )
         .await
         .unwrap();
+    let now = mongodb::bson::DateTime::now();
     db.collection::<Document>("billing_wallet").insert_one(doc! {
         "_id": Uuid::new_v4().to_string(), "owner_id": &owner, "lago_customer_id": &owner,
         "lago_wallet_id": "review-wallet", "lago_subscription_id": "review-plan", "plan_kind": "prepaid",

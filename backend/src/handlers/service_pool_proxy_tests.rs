@@ -1079,6 +1079,55 @@ async fn pool_proxy_org_viewer_cannot_execute_any_member() {
     fixture.state.db.drop().await.unwrap();
 }
 
+// Pool selection tests observe credential opens through the v2 decrypt counters.
+fn pool_credential_writer() -> crate::crypto::aes::EncryptionKeys {
+    let mut keys = crate::test_utils::test_encryption_keys();
+    keys.set_contextual_record_writes(false);
+    keys
+}
+
+async fn insert_pool_bearer_key(
+    fixture: &Fixture,
+    owner: &str,
+    label: &str,
+    secret: &[u8],
+) -> String {
+    use crate::models::user_api_key::COLLECTION_NAME;
+    use crate::services::credential_record_service as records;
+    let id = Uuid::new_v4().to_string();
+    let now = mongodb::bson::DateTime::now();
+    let field = "credential_encrypted";
+    let encrypted = records::encrypt(
+        &pool_credential_writer(),
+        COLLECTION_NAME,
+        &id,
+        owner,
+        field,
+        secret,
+    )
+    .await
+    .unwrap();
+    let document = doc! {
+        "_id": &id,
+        "user_id": owner,
+        "label": label,
+        "credential_type": "bearer",
+        "status": "active",
+        "credential_epoch": 1_i64,
+        field: mongodb::bson::Binary { subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: encrypted },
+        "created_at": now,
+        "updated_at": now,
+    };
+    fixture
+        .state
+        .db
+        .collection::<Document>(COLLECTION_NAME)
+        .insert_one(document)
+        .await
+        .unwrap();
+    id
+}
+
 async fn bind_first_credential(fixture: &Fixture) {
     let service = fixture
         .state
@@ -1088,23 +1137,13 @@ async fn bind_first_credential(fixture: &Fixture) {
         .await
         .unwrap()
         .unwrap();
-    let key_id = Uuid::new_v4().to_string();
-    let encrypted = fixture
-        .state
-        .encryption_keys
-        .encrypt(b"pool-review-fixture")
-        .await
-        .unwrap();
-    fixture.state.db.collection::<Document>("user_api_keys")
-        .insert_one(doc! {
-            "_id": &key_id, "user_id": service.get_str("user_id").unwrap(),
-            "label": "Review credential", "credential_type": "bearer", "status": "active",
-            "credential_encrypted": mongodb::bson::Binary {
-                subtype: mongodb::bson::spec::BinarySubtype::Generic, bytes: encrypted,
-            },
-            "credential_epoch": 1_i64,
-            "created_at": mongodb::bson::DateTime::now(), "updated_at": mongodb::bson::DateTime::now(),
-        }).await.unwrap();
+    let key_id = insert_pool_bearer_key(
+        fixture,
+        service.get_str("user_id").unwrap(),
+        "Review credential",
+        b"pool-review-fixture",
+    )
+    .await;
     fixture
         .state
         .db
