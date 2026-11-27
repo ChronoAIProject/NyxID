@@ -1341,12 +1341,13 @@ async fn org_guest_group_dm_group(case: GuestGroupCase) {
     }
     let pending_notice = Notice::Pending.text(route_retry.then_some(NoticeLanguage::Simplified));
     if followed {
+        let pending_content = json!({"text":pending_notice}).to_string();
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/open-apis/im/v1/messages/om_root/reply"))
             .and(wiremock::matchers::body_partial_json(json!({"reply_in_thread":true})))
             .respond_with(move |request: &wiremock::Request| {
                 let body: Value = request.body_json().unwrap();
-                if body["content"] == json!({"text":pending_notice}).to_string() {
+                if body["content"].as_str() == Some(pending_content.as_str()) {
                     capacity_notice.notify_one();
                 }
                 wiremock::ResponseTemplate::new(200).set_body_json(json!({
