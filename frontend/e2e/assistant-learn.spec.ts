@@ -53,7 +53,8 @@ async function fixture(page: Page, options: {
 } = {}) {
   let revision = 2;
   let skills = Array.from({ length: options.skillCount ?? 1 }, (_, index) => ({
-    ...other, skill_id: `22222222-2222-4222-8222-${String(index).padStart(12, "0")}`,
+    ...other, name: `attached-skill-${index + 1}`,
+    skill_id: `22222222-2222-4222-8222-${String(index).padStart(12, "0")}`,
   }));
   const writes: { expected_revision: number; skills: typeof skills }[] = [];
   const turns: { agent_id?: string; conversation_id?: string; text: string }[] = [];
@@ -98,6 +99,11 @@ async function fixture(page: Page, options: {
     if (path === "/assistant/nyxagent/skills/catalog") {
       const skill = url.searchParams.get("skill");
       const version = url.searchParams.get("version");
+      if (!version) {
+        const attached = skills.find((entry) => entry.skill_id === skill);
+        const items = attached ? [{ version: attached.version, sha256: attached.sha256, deprecated: false }] : [];
+        return ok({ page: 1, total_pages: 1, items });
+      }
       previewRequests.push([skill, version]);
       if (options.previewError) return route.fulfill(options.previewError);
       const template = [research, claims].find((entry) => entry.skillId === skill && entry.version === version);
@@ -112,6 +118,8 @@ async function fixture(page: Page, options: {
     if (path === "/assistant/nyxagent/agents") {
       return ok({ agents: [agent], limits });
     }
+    if (path === `/assistant/nyxagent/agents/${agentId}`) return ok({ agent, memory: [], threads: [] });
+    if (path === `/assistant/nyxagent/agents/${agentId}/skills/history`) return ok({ items: [] });
     if (path === "/assistant/nyxagent/settings") return ok(limits);
     if (path === `/assistant/nyxagent/agents/${agentId}/skills`) {
       if (request.method() === "PUT") {
@@ -212,7 +220,6 @@ for (const scenario of [
   { name: "a pinned-version mismatch during preview", options: { previewError: pinMismatch }, message: "could not verify the published package", action: "Choose another template" },
   { name: "a pinned-version mismatch during attachment", options: { attachmentError: pinMismatch }, message: "could not verify the published package", action: "Choose another template" },
   { name: "revoked catalog access during attachment", options: { attachmentError: catalogDenied }, message: "Check your Ornn access", action: "Choose another template" },
-  { name: "the 16-skill limit", options: { skillCount: 16 }, message: "has 16 skills", action: "Manage NyxBot skills" },
 ]) {
   test(`Learn explains ${scenario.name} and links to recovery without opening a starter`, async ({ page }) => {
     const state = await fixture(page, { ...scenario.options });
@@ -221,22 +228,42 @@ for (const scenario of [
       .getByRole("button", { name: "Try this · Audit research claims" }).click();
     await page.getByRole("dialog").getByRole("button", { name: "Open NyxBot" }).click();
     await expect(page.getByRole("alert")).toContainText(scenario.message);
-    if (scenario.options.skillCount) {
-      const link = page.getByRole("link", { name: scenario.action });
-      const destination = new URL((await link.getAttribute("href"))!, page.url());
-      expect(destination.pathname).toBe("/assistant");
-      expect(destination.searchParams.get("agent")).toBe(agentId);
-      expect(destination.searchParams.get("details")).toBe("skills");
-    } else {
-      await page.getByRole("button", { name: scenario.action }).click();
-      await expect(page.getByRole("dialog")).toHaveCount(0);
-      await expect(page).toHaveURL(/\/assistant\/learn$/);
-    }
+    await page.getByRole("button", { name: scenario.action }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await expect(page).toHaveURL(/\/assistant\/learn$/);
     await expect(composerInput(page)).toHaveCount(0);
     expect(state.writes).toEqual([]);
     expect(state.turns).toEqual([]);
   });
 }
+
+test("a full NyxBot can free a slot in Skills and open the template without sending", async ({ page }) => {
+  const state = await fixture(page, { skillCount: 16 });
+  const template = page.getByRole("button", { name: "Try this · Audit research claims" });
+  const confirm = page.getByRole("button", { name: "Open NyxBot" });
+  await page.goto("/assistant/learn");
+  await template.click();
+  await confirm.click();
+  await expect(page.getByRole("alert")).toContainText("has 16 skills");
+  expect(state.writes).toEqual([]);
+  expect(state.turns).toEqual([]);
+  await page.getByRole("link", { name: "Manage NyxBot skills" }).click();
+  const list = page.getByRole("region", { name: "Skills", exact: true });
+  await expect(list.getByText("16/16 skills · Revision 2")).toBeVisible();
+  await list.getByRole("button", { name: /attached-skill-1\b/ }).click();
+  const remove = page.getByRole("button", { name: "Remove attached-skill-1", exact: true });
+  await expect(remove).toBeEnabled();
+  await remove.click();
+  await expect(list.getByText("15/16 skills · Revision 3")).toBeVisible();
+  await page.getByRole("button", { name: "Close agent details" }).click();
+  await page.getByRole("link", { name: "Learn", exact: true }).click();
+  await template.click();
+  await confirm.click();
+  await expect(composerInput(page)).toContainText(claims.slug);
+  expect(state.writes.map((write) => write.skills.length)).toEqual([15, 16]);
+  expect(state.writes[1]?.skills.at(-1)?.skill_id).toBe(claims.skillId);
+  expect(state.turns).toEqual([]);
+});
 
 test("Learn shows the template starter with the NyxBot engine unavailable", async ({ page }) => {
   const state = await fixture(page, { unavailable: true });
