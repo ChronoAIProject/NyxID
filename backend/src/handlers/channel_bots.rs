@@ -2060,6 +2060,7 @@ pub(crate) async fn verify_bot_with_adapter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::credential_record_fixtures::BotSecret;
 
     #[test]
     fn health_without_loaded_intake_preserves_legacy_recommendations() {
@@ -2218,7 +2219,9 @@ mod tests {
             let mut bot = make_telegram_bot();
             bot.platform = "discord".into();
             bot.public_key = Some("a".repeat(64));
-            bot.bot_token_encrypted = state.encryption_keys.encrypt(b"test-token").await.unwrap();
+            BotSecret::Token
+                .set(&state.encryption_keys, &mut bot, b"test-token")
+                .await;
             bot.status = status.into();
             if status == "active" {
                 bot.diagnostics.discord_gateway =

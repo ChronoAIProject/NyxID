@@ -36,7 +36,7 @@ fn dm(bot_id: &str, id: &str, sender: &str, text: &str) -> Vec<u8> {
 }
 
 /// The owner's X connection, the shared X app credentials and a registered X bot.
-async fn x_bot(state: &AppState) -> ChannelBot {
+async fn x_bot(state: &AppState, owner: &str) -> ChannelBot {
     let db = &state.db;
     let provider = Uuid::new_v4().to_string();
     db.collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
@@ -48,17 +48,19 @@ async fn x_bot(state: &AppState) -> ChannelBot {
         .await
         .unwrap();
     let connection = Uuid::new_v4().to_string();
-    let token = state.encryption_keys.encrypt(b"user-token").await.unwrap();
-    db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
-        .insert_one(doc! {
-            "_id": &connection, "user_id": OWNER, "label": "X", "credential_type": "oauth2",
+    KeySecret::AccessToken
+        .insert(
+            db,
+            &state.encryption_keys,
+            doc! {
+            "_id": &connection, "user_id": owner, "label": "X", "credential_type": "oauth2",
             "credential_source": "platform", "provider_config_id": &provider, "status": "active",
             "token_scopes": REQUIRED_SCOPES.join(" "),
-            "access_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: token },
             "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
-        })
-        .await
-        .unwrap();
+            },
+            b"user-token",
+        )
+        .await;
     crate::services::platform_credential_service::update(
         db,
         &state.encryption_keys,
@@ -80,7 +82,7 @@ async fn x_bot(state: &AppState) -> ChannelBot {
     .await
     .unwrap();
     let bot: ChannelBot = bson::from_document(doc! {
-        "_id": Uuid::new_v4().to_string(), "user_id": OWNER, "platform": "x", "label": "Support",
+        "_id": Uuid::new_v4().to_string(), "user_id": owner, "platform": "x", "label": "Support",
         "credential_source": "connection", "connection_id": &connection,
         "platform_bot_id": "10", "platform_bot_username": "support", "webhook_registered": true,
         "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![] },
@@ -220,7 +222,7 @@ async fn mount_send(server: &MockServer, conversation: &str, response: ResponseT
 #[tokio::test]
 async fn x_dm_reaches_nyxbot_and_the_reply_reaches_x_with_diagnostics() {
     let (state, calls, model) = setup("nyxbot_x_bus").await;
-    let bot = x_bot(&state).await;
+    let bot = x_bot(&state, OWNER).await;
     let x = MockServer::start().await;
     crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
         .lock()
@@ -436,7 +438,6 @@ async fn org_x_verification_then_personal_specialist_dm_is_answered_and_private_
 {
     use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole};
     let (mut state, calls, model) = setup("x_2043_org_personal").await;
-    let mut bot = x_bot(&state).await;
     let org = Uuid::new_v4().to_string();
     state
         .db
@@ -455,22 +456,7 @@ async fn org_x_verification_then_personal_specialist_dm_is_answered_and_private_
         ))
         .await
         .unwrap();
-    bot.user_id.clone_from(&org);
-    state
-        .db
-        .collection::<bson::Document>(BOTS)
-        .update_one(doc! {"_id":&bot.id}, doc! {"$set":{"user_id":&org}})
-        .await
-        .unwrap();
-    state
-        .db
-        .collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&bot.connection_id},
-            doc! {"$set":{"user_id":&org}},
-        )
-        .await
-        .unwrap();
+    let bot = x_bot(&state, &org).await;
     let (specialist, _) = crate::services::assistant_team_service::create_specialist(
         &state.db,
         &state.encryption_keys,
