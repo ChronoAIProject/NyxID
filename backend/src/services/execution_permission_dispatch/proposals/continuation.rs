@@ -17,6 +17,31 @@ pub(in crate::services::execution_permission_dispatch) fn unexpired_turn() -> Do
     ]}
 }
 
+/// Match typed authority fields independently of BSON document key order.
+/// A null optional value also matches its previously readable missing form;
+/// required root/source identities retain their exact non-null values.
+fn current_task_filter(task: &TaskAdmission) -> AppResult<Document> {
+    fn fields(filter: &mut Document, prefix: &str, expected: Document) {
+        for (field, value) in expected {
+            let path = format!("{prefix}.{field}");
+            match value {
+                bson::Bson::Document(nested) => fields(filter, &path, nested),
+                value => {
+                    filter.insert(path, value);
+                }
+            }
+        }
+    }
+    let mut expected = bson::to_document(task).map_err(encoding)?;
+    // Serde omits an absent channel source, so add its explicit absence fence.
+    if task.channel_source.is_none() {
+        expected.insert("channel_source", bson::Bson::Null);
+    }
+    let mut filter = Document::new();
+    fields(&mut filter, "active_turn.execution_task", expected);
+    Ok(filter)
+}
+
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static FAIL_BEFORE_RELEASE: bool;
@@ -189,9 +214,9 @@ impl OwnerContinuation {
                 let result: AppResult<bool> = async {
                     tasks::fence(db, session, task).await?;
                     let mut filter = engine::WorkerFence::capture(row)?.filter();
+                    filter.extend(current_task_filter(task)?);
                     filter.extend(doc! {
                         "active_turn.stop_requested": false,
-                        "active_turn.execution_task": bson::to_bson(task).map_err(encoding)?,
                         "credential_api_key_id": &row.credential_api_key_id,
                         "$expr": unexpired_turn(),
                         "model": &row.model, "agent_id": &row.agent_id,

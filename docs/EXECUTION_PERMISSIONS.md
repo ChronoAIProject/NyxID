@@ -464,7 +464,9 @@ I/O. Release uses MongoDB time for turn/key expiry. An explicit turn lease must
 be strictly in the future; null or missing leases use `started_at` plus the
 engine's active-turn TTL, with the same strict expiry. An explicit expired lease
 never falls back to a fresh start date. Stop and exact worker/epoch/claim fences
-remain required. Only one release wins. A crash before release leaves the completed effect
+remain required. Task snapshot predicates compare typed fields independently of
+BSON key order; absent optional parent/source fields match their null form,
+while required identities remain exact. Only one release wins. A crash before release leaves the completed effect
 recoverable without another provider send. Preparation failure leaves it pending;
 ordinary failed-turn settlement does not mark that receipt delivered or finish
 the root. Existing bounded maintenance can wake that exact unfinished task again.

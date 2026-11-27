@@ -1440,6 +1440,11 @@ async fn owner_permission_resume_release_preserves_lease_stop_and_worker_fences(
             "claim",
             "model",
             "task",
+            "task_root",
+            "task_actor",
+            "task_parent",
+            "task_missing_actor",
+            "task_null_root",
             "key_binding",
             "key_expired",
             "key_revoked",
@@ -1473,13 +1478,27 @@ async fn owner_permission_resume_release_preserves_lease_stop_and_worker_fences(
                 ),
             };
             let mut current_task = turn.execution_task.as_ref().unwrap().clone();
-            if refusal == "task" {
-                current_task.epoch += 1;
+            match refusal {
+                "task" => current_task.epoch += 1,
+                "task_root" => current_task.task.root_id = "different-root".into(),
+                "task_actor" => current_task.actor_user_id = "different-actor".into(),
+                "task_parent" => current_task.parent_turn_id = Some("different-parent".into()),
+                _ => {}
+            }
+            let mut stored_task = bson::to_document(&current_task).unwrap();
+            if refusal == "task_missing_actor" {
+                stored_task.remove("actor_user_id");
+            }
+            if refusal == "task_null_root" {
+                stored_task
+                    .get_document_mut("task")
+                    .unwrap()
+                    .insert("root_id", bson::Bson::Null);
             }
             conversations.update_one(doc! {"_id": &row.id}, vec![doc! {"$set": {
                 "model": if refusal == "model" { "different-model" } else { &row.model },
                 "credential_api_key_id": if refusal == "key_binding" { "different-key" } else { &row.credential_api_key_id },
-                "active_turn.execution_task": {"$literal": bson::to_bson(&current_task).unwrap()},
+                "active_turn.execution_task": {"$literal": stored_task},
                 "active_turn.turn_id": if refusal == "turn" { "different-turn" } else { &turn.turn_id },
                 "active_turn.started_at": {"$add": ["$$NOW", fallback_ms]},
                 "active_turn.lease_expires_at": lease_expires_at,
@@ -1541,6 +1560,53 @@ async fn owner_permission_resume_release_preserves_lease_stop_and_worker_fences(
             )
             .await
             .unwrap();
+        // Older readable task rows can order fields differently and omit the
+        // optional private parent/source. Preserve their typed authority while
+        // proving the actual runner releases them and sends the model once.
+        let task = resumed
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .execution_task
+            .as_ref()
+            .unwrap();
+        assert!(task.parent_turn_id.is_none());
+        assert!(task.channel_source.is_none());
+        let mut stored_task = bson::to_document(task).unwrap();
+        stored_task.remove("parent_turn_id");
+        if lease == "null" {
+            stored_task.insert("channel_source", bson::Bson::Null);
+        } else {
+            stored_task.remove("channel_source");
+        }
+        for field in ["task", "audience"] {
+            let nested = stored_task.remove(field).unwrap();
+            let mut pairs: Vec<_> = nested.as_document().unwrap().clone().into_iter().collect();
+            pairs.reverse();
+            stored_task.insert(field, pairs.into_iter().collect::<Document>());
+        }
+        let mut pairs: Vec<_> = stored_task.into_iter().collect();
+        pairs.reverse();
+        let reordered: Document = pairs.into_iter().collect();
+        conversations
+            .update_one(
+                doc! {"_id": &row.id},
+                doc! {"$set": {
+                    "active_turn.execution_task": reordered,
+                }},
+            )
+            .await
+            .unwrap();
+        let compatible = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+        assert_eq!(
+            compatible
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .execution_task
+                .as_ref(),
+            Some(task)
+        );
         let result = execute_with_credential(&f, &resumed, credential)
             .await
             .unwrap();
