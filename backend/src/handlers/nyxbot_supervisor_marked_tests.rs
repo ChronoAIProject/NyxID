@@ -25,6 +25,15 @@ async fn marked_transport(proxy: bool, transport: &str) -> Journey {
     let mut j = setup_transport_journey("api-feishu", proxy, transport).await;
     j.script.marked.store(true, Ordering::SeqCst);
     phase_b_tests::enroll_global(&j.state.db, OWNER).await;
+    // Own the production refresh/watch loop for the whole journey, including
+    // multi-case tests that outlast the snapshot TTL. Dropping the handle aborts
+    // Cache.run and its owned change-stream JoinSet with the isolated fixture.
+    let snapshot = j.state.execution_enrollment.clone();
+    snapshot.refresh(&j.state.db).await.unwrap();
+    let db = j.state.db.clone();
+    j._enrollment_snapshot_worker = Some(tokio_util::task::AbortOnDropHandle::new(tokio::spawn(
+        async move { snapshot.run(db).await },
+    )));
     j._readiness_heartbeat = Some(tokio_util::task::AbortOnDropHandle::new(
         crate::services::security_readiness_service::controlled_ready_test_replica(&j.state.db)
             .await,
@@ -48,6 +57,13 @@ async fn marked_transport(proxy: bool, transport: &str) -> Journey {
 }
 
 async fn marked_owner(j: &Journey, text: &str, id: &str) -> Response {
+    assert!(
+        crate::services::execution_permission_enrollment::snapshot::channel_candidate(
+            &j.state.db,
+            OWNER
+        ),
+        "the marked fixture must present a fresh real enrollment hint"
+    );
     if j.channel.platform == "discord" {
         let provider_id = u64::from_str_radix(&sha256_hex(id.as_bytes())[..16], 16)
             .unwrap()
@@ -82,6 +98,12 @@ async fn marked_assign(j: &Journey, text: &str, id: &str) -> tokio::task::JoinHa
         .unwrap()
         .unwrap();
     assert_eq!(source.get_str("status").unwrap(), "pending");
+    let original_root = source
+        .get_document("execution_task")
+        .and_then(|task| task.get_document("task"))
+        .and_then(|task| task.get_str("root_id"))
+        .unwrap_or_else(|_| panic!("marked card {card_id} must retain its admitted channel task"))
+        .to_owned();
     let code = delegation_code(&card);
     let response = marked_owner(j, &format!("yes {code}"), &format!("{id}-assign")).await;
     let state = j.state.clone();
@@ -120,7 +142,7 @@ async fn marked_assign(j: &Journey, text: &str, id: &str) -> tokio::task::JoinHa
         let reply_root = retry["task_root"].clone();
         observations.push(json!({"stage":"delegation_card_used","acknowledgement_id":card_id,
             "conversation_id":conversation,"requested_turn_id":source.get_str("requested_turn_id").unwrap(),
-            "original_root":source.get_document("execution_task").unwrap().get_document("task").unwrap().get_str("root_id").unwrap(),
+            "original_root":original_root,
             "reply_turn":reply_turn,"reply_root":reply_root}));
         text
     })
@@ -346,6 +368,172 @@ async fn cursor(j: &Journey) -> DeliveryCursor {
         observations: j.observed.lock().await.len(),
     }
 }
+
+async fn confirmed_dm_report(
+    j: &Journey,
+    cursor: &DeliveryCursor,
+    turn: &str,
+    message: &Value,
+    task: &crate::models::execution_permission::TaskAdmission,
+    progress: &mut Value,
+) -> Option<String> {
+    use crate::models::{
+        channel_reply_delivery::{ChannelReplyDelivery, PartStatus},
+        execution_permission_channel::Delivery,
+    };
+    use crate::services::{channel_platform::OutboundReply, channel_reply_plan as plan};
+
+    let source = task.channel_source.as_ref().unwrap();
+    let delivery = j
+        .state
+        .db
+        .collection::<Delivery>("execution_permission_deliveries")
+        .find_one(doc! {
+            "user_id":OWNER,"conversation_id":&source.conversation_id,
+            "turn_id":turn,"message_id":message["id"].as_str().unwrap(),
+            "task.task.root_id":&task.task.root_id,"task.epoch":task.epoch,
+            "task.channel_source.event_id":&source.event_id
+        })
+        .await
+        .unwrap()?;
+    *progress = json!({"owner_turn":turn,"delivery":delivery.id,"state":delivery.state,
+        "parts":delivery.preparation.as_ref().map(|p| (p.next,p.total,p.receipts.len()))});
+    if delivery.state != "confirmed" {
+        return None;
+    }
+    assert_eq!(j.channel.platform, "telegram");
+    assert!(j.channel.gateway_source.is_none());
+    assert_eq!(message["status"], "completed");
+    assert!(message["attachments"].as_array().unwrap().is_empty());
+    let parts = plan::ordinary(
+        &OutboundReply {
+            text: Some(message["text"].as_str().unwrap().to_owned()),
+            attachments: vec![],
+            reply_to_platform_message_id: None,
+            metadata: plan::assistant_metadata("telegram"),
+        },
+        "telegram",
+        "123",
+    )
+    .unwrap()
+    .unwrap();
+    assert!(!parts.is_empty());
+    let prepared = delivery.preparation.as_ref().unwrap();
+    assert_eq!(prepared.fingerprint, plan::fingerprint(&parts));
+    assert_eq!(prepared.total as usize, parts.len());
+    assert_eq!(prepared.next, prepared.total);
+    assert_eq!(prepared.receipts.len(), parts.len());
+
+    // Bind every confirmed transport receipt to the original source. Provider
+    // message IDs alone are insufficient: the mock deliberately reuses ID 91.
+    let event = j
+        .state
+        .db
+        .collection::<Document>("nyxbot_events")
+        .find_one(doc! {"_id":&source.event_id,"user_id":OWNER,"channel_id":&j.channel.id})
+        .projection(doc! {"relay_message_id":1})
+        .await
+        .unwrap()
+        .unwrap();
+    let anchor = event.get_str("relay_message_id").unwrap();
+    let original = j
+        .state
+        .db
+        .collection::<Document>("channel_messages")
+        .find_one(
+            doc! {"_id":anchor,"user_id":OWNER,"channel_bot_id":&j.channel.channel_bot_id,
+            "conversation_id":&j.channel.route_id,"direction":"inbound","platform":"telegram",
+            "platform_conversation_id":"123","sender_platform_id":"7","original_message":true,
+            "thread_id":null},
+        )
+        .projection(doc! {"platform_message_id":1})
+        .await
+        .unwrap()
+        .expect("the result must use the exact verified owner's original DM source");
+    let reply_to = original
+        .get_str("platform_message_id")
+        .unwrap()
+        .parse::<i64>()
+        .ok();
+    for receipt in &prepared.receipts {
+        let outbound = receipt.outbound_message_id.as_deref().unwrap();
+        assert_eq!(receipt.platform_message_ids.len(), 1);
+        let count = j
+            .state
+            .db
+            .collection::<Document>("channel_messages")
+            .count_documents(doc! {
+                "_id":outbound,"user_id":OWNER,"channel_bot_id":&j.channel.channel_bot_id,
+                "conversation_id":&j.channel.route_id,"direction":"outbound","platform":"telegram",
+                "platform_conversation_id":"123","reply_to_message_id":anchor,
+                "platform_message_id":&receipt.platform_message_ids[0]
+            })
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "each result part must retain its original source");
+        let transport = j
+            .state
+            .db
+            .collection::<ChannelReplyDelivery>("channel_reply_deliveries")
+            .find_one(
+                doc! {"user_id":OWNER,"channel_bot_id":&j.channel.channel_bot_id,
+                "inbound_message_id":anchor,"parts.outbound_message_id":outbound},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(transport.complete);
+        assert_eq!(transport.expected_parts, 1);
+        assert_eq!(transport.parts.len(), 1);
+        assert!(transport.parts[0].status == PartStatus::Accepted);
+        assert_eq!(
+            transport.parts[0].platform_message_ids,
+            receipt.platform_message_ids
+        );
+        assert!(transport.parts[0].formatting_fallback.is_none());
+    }
+
+    // Telegram receives the complete rendered plan, including entities and the
+    // source reply anchor when numeric. Compare whole bodies for every part;
+    // marker-only matching could hide a missing denial or rejection notice.
+    let expected: Vec<Value> = parts
+        .iter()
+        .map(|part| {
+            let mut body = json!({"chat_id":"123","text":part.text.as_deref().unwrap()});
+            if let Some(entities) = part.metadata.as_ref().and_then(|m| m.get("entities")) {
+                body["entities"] = entities.clone();
+            } else {
+                body["parse_mode"] = json!("Markdown");
+            }
+            if let Some(id) = reply_to {
+                body["reply_to_message_id"] = json!(id);
+            }
+            body
+        })
+        .collect();
+    let received: Vec<Value> = j
+        .chat
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .skip(cursor.requests)
+        .filter(|request| request.url.path().ends_with("/sendMessage"))
+        .map(|request| serde_json::from_slice(&request.body).unwrap())
+        .collect();
+    progress["later_sends"] = json!(received.len());
+    received
+        .windows(expected.len())
+        .find(|window| *window == expected.as_slice())
+        .map(|bodies| {
+            bodies
+                .iter()
+                .map(|body| body["text"].as_str().unwrap())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+}
+
 async fn later_dm_report(
     j: &Journey,
     cursor: &DeliveryCursor,
@@ -355,6 +543,7 @@ async fn later_dm_report(
     let binding = review.supervisor_write.as_ref().unwrap();
     let task = &binding.marked.as_ref().unwrap().task;
     assert_eq!(binding.source.channel.channel_id, j.channel.id);
+    let mut progress = json!({"phase":"matching_owner_event"});
     let result = tokio::time::timeout(Duration::from_secs(25), async {
         loop {
             let owner_turn = j
@@ -376,29 +565,18 @@ async fn later_dm_report(
                 .and_then(|event| event["turn_id"].as_str().map(str::to_owned));
             if let Some(turn) = owner_turn {
                 let history = owner_history(j, &binding.source.channel.conversation_id).await;
-                if let Some(text) = history["messages"]
+                progress = json!({"owner_turn":turn,"phase":"matching_saved_result"});
+                if let Some(message) = history["messages"]
                     .as_array()
                     .unwrap()
                     .iter()
                     .find(|m| m["role"] == "assistant" && m["turn_id"] == turn)
-                    .and_then(|m| m["text"].as_str())
-                    .filter(|text| text.contains(marker))
+                    .filter(|m| m["text"].as_str().is_some_and(|text| text.contains(marker)))
+                    && let Some(report) =
+                        confirmed_dm_report(j, cursor, &turn, message, task, &mut progress).await
                 {
-                    for request in j
-                        .chat
-                        .received_requests()
-                        .await
-                        .unwrap()
-                        .iter()
-                        .skip(cursor.requests)
-                    {
-                        if request.url.path().ends_with("/sendMessage") {
-                            let body: Value = serde_json::from_slice(&request.body).unwrap();
-                            if body["chat_id"] == "123" && body["text"] == text {
-                                return text.to_owned();
-                            }
-                        }
-                    }
+                    j.settlements.lock().await.wait(&turn).await;
+                    return report;
                 }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -408,7 +586,7 @@ async fn later_dm_report(
     match result {
         Ok(report) => report,
         Err(_) => panic!(
-            "a later send must match specialist turn {}, agent {}, task {} and owner {}: {}",
+            "a later complete rendered send must match specialist turn {}, agent {}, task {} and owner {}: progress={progress}; {}",
             binding.specialist_turn,
             binding.specialist_agent,
             task.task.root_id,
@@ -881,6 +1059,7 @@ async fn supervisor_write_marked_persistent_coverage_keeps_a_fresh_exact_dm_floo
         let proposal = initial_gap(&j).await;
         web_allow(&j, &proposal, "persistent", &Uuid::new_v4().to_string()).await;
         let (review, code) = wait_review(&j).await;
+        let delivery = cursor(&j).await;
         assert_no_write(&j);
         let _ =
             body_text(owner(&j, &format!("no write-{code}"), "ws7-marked-deny-first").await).await;
@@ -891,17 +1070,10 @@ async fn supervisor_write_marked_persistent_coverage_keeps_a_fresh_exact_dm_floo
             "not_sent"
         );
         assert_no_write(&j);
-        wait_idle(
-            &j,
-            &review
-                .supervisor_write
-                .as_ref()
-                .unwrap()
-                .source
-                .channel
-                .conversation_id,
-        )
-        .await;
+        later_dm_report(&j, &delivery, &review, NO_CONFIRMATION).await;
+        let binding = review.supervisor_write.as_ref().unwrap();
+        wait_idle(&j, &binding.specialist_conversation).await;
+        wait_idle(&j, &binding.source.channel.conversation_id).await;
         let result = marked_assign(&j, &j.script.selection(), "ws7-marked-covered").await;
         let (next, code) = wait_review(&j).await;
         assert_ne!(review.id, next.id);

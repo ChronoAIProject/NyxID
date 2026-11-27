@@ -539,7 +539,7 @@ pub(crate) async fn resume_turn_with_readback(
             readbacks.push(readback);
         }
         if version == AssistantVersion::V5 && sent && activity_outcome == Some("failed") {
-            notes.push(associated(format!("{PROVIDER_REJECTION} The independent readback is unverified in this receipt; do not repeat the write.")));
+            notes.push(associated(format!("{PROVIDER_REJECTION} The independent readback is unverified in this receipt and the final row state is unconfirmed; do not repeat the write.")));
         } else if !single_result && version == AssistantVersion::V5 && sent {
             notes.push(format!("Request {id}: the write attempt is {state_name}; independent readback is unverified and the final row state is unconfirmed. Do not repeat the write."));
         } else {

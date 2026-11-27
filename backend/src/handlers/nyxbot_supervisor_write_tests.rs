@@ -600,6 +600,7 @@ async fn model(
 
 struct Journey {
     _readiness_heartbeat: Option<tokio_util::task::AbortOnDropHandle<()>>,
+    _enrollment_snapshot_worker: Option<tokio_util::task::AbortOnDropHandle<()>>,
     state: AppState,
     channel: NyxbotChannel,
     key: String,
@@ -954,6 +955,7 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
     }
     Journey {
         _readiness_heartbeat: None,
+        _enrollment_snapshot_worker: None,
         state,
         channel,
         key,

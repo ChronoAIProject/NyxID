@@ -1769,11 +1769,10 @@ pub(crate) async fn execute_owner_turn(
     .await;
     if let Some(mut fallback) = model_card_fallback(state, &attempt, row, &outcome, partial)
         .await
-        .map_err(|error| {
+        .inspect_err(|_| {
             if let Some(notice) = provider_notice {
                 prepend_provider_notice_once(partial, notice);
             }
-            error
         })?
     {
         preserve_provider_notice(&mut fallback, partial);
