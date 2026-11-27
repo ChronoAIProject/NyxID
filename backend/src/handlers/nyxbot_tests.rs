@@ -1,4 +1,7 @@
 use super::*;
+use crate::handlers::credential_record_fixtures::{BotSecret, KeySecret, set_catalog_credential};
+use crate::services::nyxbot_event_record as event_record;
+
 use crate::{
     models::{
         assistant_conversation::{AssistantConversation, COLLECTION_NAME as CONVERSATIONS},
@@ -330,11 +333,7 @@ async fn setup_with_engine(
     model.service_category = "internal".into();
     model.auth_method = "bearer".into();
     model.requires_user_credential = false;
-    model.credential_encrypted = state
-        .encryption_keys
-        .encrypt(b"fixture-model-key")
-        .await
-        .unwrap();
+    set_catalog_credential(&state.encryption_keys, &mut model, b"fixture-model-key").await;
     model.inference =
         Some(serde_json::from_value(json!({"wire_protocol":"openai_responses"})).unwrap());
     db.collection::<DownstreamService>(SERVICES)
@@ -410,12 +409,68 @@ async fn guest_setup_2092_closed_private_chat_settings_do_not_start_billed_setup
     state.db.drop().await.unwrap();
 }
 
+async fn set_bot_secrets(
+    state: &AppState,
+    row: &NyxbotChannel,
+    fields: bson::Document,
+    secrets: &[(BotSecret, &[u8])],
+) {
+    let update = BotSecret::update(
+        &state.encryption_keys,
+        &row.channel_bot_id,
+        bot_owner(row),
+        fields,
+        secrets,
+    )
+    .await;
+    state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(doc! {"_id": &row.channel_bot_id}, update)
+        .await
+        .unwrap();
+}
+
+async fn set_image_data(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    row: &mut crate::models::assistant_attachment::AssistantAttachment,
+    bytes: &[u8],
+) {
+    row.data_encrypted = crate::services::assistant_record_service::encrypt_image(keys, row, bytes)
+        .await
+        .unwrap();
+    crate::services::credential_record_service::mark_version(
+        &mut row.secret_context_versions,
+        keys,
+        "data_encrypted",
+    );
+}
+
+async fn set_event_context(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    event: &mut NyxbotEvent,
+    bytes: &[u8],
+) {
+    event.event_context_ciphertext = Some(
+        event_record::seal(
+            keys,
+            &event.id,
+            &event.user_id,
+            &[event_record::CONTEXT, &event.channel_id],
+            bytes,
+        )
+        .await
+        .unwrap(),
+    );
+    event.event_context_version = event_record::version(keys);
+}
+
 /// An active channel as `connect` leaves it, without the gateway round trip.
 async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
     let route = key(state, "route").await;
     let agent = key(state, "agent").await;
     let now = Utc::now();
-    let row = NyxbotChannel {
+    let mut row = NyxbotChannel {
         notification_epoch: 0,
         execution_policy_revision: 0,
         org_specialist: None,
@@ -450,13 +505,7 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         route_id: Some(Uuid::new_v4().to_string()),
         agent_api_key_id: Some(agent.id.clone()),
         secret_context_versions: Default::default(),
-        agent_key_ciphertext: Some(
-            state
-                .encryption_keys
-                .encrypt(agent.full_key.as_bytes())
-                .await
-                .unwrap(),
-        ),
+        agent_key_ciphertext: None,
         gateway_channel_id: None,
         gateway_record_id: None,
         gateway_setup_release_id: None,
@@ -497,6 +546,23 @@ async fn channel(state: &AppState, transport: &str) -> (NyxbotChannel, String) {
         created_at: now,
         updated_at: now,
     };
+    use crate::services::{credential_record_service, nyxbot_channel_key as channel_key};
+    row.agent_key_ciphertext = Some(
+        channel_key::seal(
+            &state.encryption_keys,
+            &row.id,
+            &row.user_id,
+            &agent.id,
+            &agent.full_key,
+        )
+        .await
+        .unwrap(),
+    );
+    credential_record_service::mark_version(
+        &mut row.secret_context_versions,
+        &state.encryption_keys,
+        channel_key::FIELD,
+    );
     state
         .db
         .collection::<NyxbotChannel>(CHANNELS)
@@ -8069,21 +8135,19 @@ async fn durable_wake_review_deleted_chat_still_links_bot_and_settles_once() {
 #[path = "nyxbot_mixed_replay_tests.rs"]
 mod mixed_replay_tests;
 
-async fn contextual_event_field(
+async fn seal_thread_reference(
     keys: &crate::crypto::aes::EncryptionKeys,
-    event: &NyxbotEvent,
-    path: &str,
-    legacy: &[u8],
-) -> bson::Binary {
-    let plaintext = keys.decrypt(legacy).await.unwrap();
-    let parts = [path, &event.channel_id];
-    let context =
-        crate::crypto::record_field::RecordContext::new(EVENTS, &event.id, &event.user_id, &parts)
-            .unwrap();
-    bson::Binary {
-        subtype: bson::spec::BinarySubtype::Generic,
-        bytes: keys.encrypt_record(&plaintext, &context).await.unwrap(),
-    }
+    id: &str,
+    owner: &str,
+    channel: &str,
+    bytes: &[u8],
+) -> Vec<u8> {
+    use crate::crypto::record_field::{self, RecordContext};
+    let field = ["event_ref_ciphertext", channel];
+    let context = RecordContext::new(THREADS, id, owner, &field).unwrap();
+    record_field::encrypt_context(keys, &context, bytes)
+        .await
+        .unwrap()
 }
 
 #[path = "nyxbot_gateway_record_tests.rs"]

@@ -28,13 +28,13 @@ async fn gateway_file_failure_or_disabled_sharing_keeps_the_owner_text_turn() {
             )
             .await
             .unwrap();
-        let token = state
-            .encryption_keys
-            .encrypt(b"123:quoted-relay-test-secret")
-            .await
-            .unwrap();
-        state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-            .update_one(doc!{"_id":&row.channel_bot_id},doc!{"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token}}}).await.unwrap();
+        set_bot_secrets(
+            &state,
+            &row,
+            doc! {},
+            &[(BotSecret::Token, b"123:quoted-relay-test-secret")],
+        )
+        .await;
         crate::services::feature_flag_service::set_platform_override(
             &state.db,
             crate::services::feature_flag_service::ASSISTANT_CHANNEL_MEDIA_FLAG_KEY,
@@ -125,22 +125,13 @@ async fn quoted_files_stay_out_of_gateway_payload_but_reach_the_owner_turn() {
         )
         .await
         .unwrap();
-    let token = state
-        .encryption_keys
-        .encrypt(b"123:quoted-relay-test-secret")
-        .await
-        .unwrap();
-    state
-        .db
-        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&row.channel_bot_id},
-            doc! {"$set":{"bot_token_encrypted":bson::Binary {
-                subtype:bson::spec::BinarySubtype::Generic, bytes:token
-            }}},
-        )
-        .await
-        .unwrap();
+    set_bot_secrets(
+        &state,
+        &row,
+        doc! {},
+        &[(BotSecret::Token, b"123:quoted-relay-test-secret")],
+    )
+    .await;
     assert_eq!(
         put_binding(
             State(state.clone()),

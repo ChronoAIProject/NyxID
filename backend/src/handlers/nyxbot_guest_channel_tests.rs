@@ -249,11 +249,7 @@ async fn connection(
     if platform {
         catalog.platform_key =
             Some(serde_json::from_value(json!({"enabled":true,"audience":"public"})).unwrap());
-        catalog.credential_encrypted = state
-            .encryption_keys
-            .encrypt(b"test-platform")
-            .await
-            .unwrap();
+        set_catalog_credential(&state.encryption_keys, &mut catalog, b"test-platform").await;
     }
     state
         .db
@@ -550,17 +546,9 @@ async fn channel_model_turns_for(
     let mut bot = bot_doc(platform, "Helper bot");
     bot.insert("_id", &channel.channel_bot_id);
     bot.insert("user_id", bot_owner(&channel));
-    bot.insert(
-        "bot_token_encrypted",
-        bson::Binary {
-            subtype: bson::spec::BinarySubtype::Generic,
-            bytes: state
-                .encryption_keys
-                .encrypt(b"test-bot-token")
-                .await
-                .unwrap(),
-        },
-    );
+    BotSecret::Token
+        .set_document(&state.encryption_keys, &mut bot, b"test-bot-token")
+        .await;
     state
         .db
         .collection::<bson::Document>("channel_bots")

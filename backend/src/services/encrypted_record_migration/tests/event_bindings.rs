@@ -3,10 +3,41 @@ use crate::{
     crypto::{record_field::RecordContext, token::hash_token},
     models::api_key,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 const PROVIDER: &str = "provider_key_ciphertext";
 const PRODUCER: &str = "producer_secret_ciphertext";
+
+// Unmarked v2 fixtures from the server tests at 846b09d4d.
+const LEGACY_PROVIDER_ONE: &str = concat!(
+    "0202003c43d890a74c66728a70779dc680130c7f03d2176c959b3637945ef578fec0f5916e786289",
+    "5a594e75d590d79cb72f4b6643ac3597b04ffe4c05bacafbae0cb0436582b1c147fb15e05c3451cd",
+    "f359ed6b6581031616e30355dcaac6b27c3e0287d76a8b5947aa06b63217be",
+);
+
+const LEGACY_PROVIDER_SAME_OWNER: &str = concat!(
+    "0202003c0351090c44ea389eabd4e3db937c8ed1cb48e404b551f956029d86bf21419583ec80bc32",
+    "9796fc1349ed99382a681c9fc4713ef51d4b0469f4889e833b1aa33c39a2669c6395ce4d37dd3a9b",
+    "2975b0729a60996b85c20889d2739fdb93ad023d757a9b5ae39c04a6c854a4a6112c1a3ef3c1",
+);
+
+const LEGACY_PROVIDER_OTHER_OWNER: &str = concat!(
+    "0202003cc74ad9d3e86c8c8b63ba185bf2cf67beade3ec830a0d1e6f7c0829876521821c54031a03",
+    "f98efa0af9cab5c3d306bc4124b260000af370e059cae05fcabcc3a7d516dae2223b04454de69de7",
+    "ddd07889dafba08b56ab0d9c3bb30e68fa486b408c144076f70b15cdce1568d54184ff1a42fa45",
+);
+
+const LEGACY_PROVIDER_READY: &str = concat!(
+    "0202003ce0e5c9ba90e688a6cf3477d4c5f209f2cb8055d5796aaf15fe72fb4a68a71a4e0306d628",
+    "27cdf1734f21a0c3cacc1adeb117560181ba6321bb956387438b3584bacd634b8f54917fc87a893c",
+    "997bf69a07e69141247fa8e475aba94e04996b9cdf83229e9729a3df0e36cd8884",
+);
+
+const LEGACY_PRODUCER: &str = concat!(
+    "0202003c6493e85fe6b5524e416aec90b021db3794ed84eae990083f4e16d1812e18a55b2699273a",
+    "4a68aab73e0866a1ace90c9691a748b68094cb129e4cfb7cd53c59f69d385092ddbf5c41caa9e6eb",
+    "2928e72513fde81d88a03bf4121f3343a370408f32e0c72cbc6664d2495f1830bf1a40357a41a216",
+    "30025e2462da52f8e314693613abaaec",
+);
 
 fn binary(bytes: Vec<u8>) -> Bson {
     bson::Binary {
@@ -16,7 +47,7 @@ fn binary(bytes: Vec<u8>) -> Bson {
     .into()
 }
 
-async fn legacy(db: &Database, keys: &EncryptionKeys, id: &str, owner: &str) -> Document {
+async fn legacy(db: &Database, id: &str, owner: &str, provider_ciphertext: &str) -> Document {
     let api_id = format!("managed-{id}");
     let bearer = format!("fixture-api-key-{id}");
     db.collection::<Document>(api_key::COLLECTION_NAME)
@@ -26,8 +57,8 @@ async fn legacy(db: &Database, keys: &EncryptionKeys, id: &str, owner: &str) -> 
     doc! {"_id":id,"user_id":owner,"agent_id":"specialist","agent_owner_id":"organization",
     "destination_channel_id":"chat","destination_partition":"partition",
     "provider_api_key_id":api_id,"producer_key_id":format!("producer-{id}"),
-    PROVIDER:bson::to_bson(&keys.encrypt(bearer.as_bytes()).await.unwrap()).unwrap(),
-    PRODUCER:binary(keys.encrypt(STANDARD.encode([7;32]).as_bytes()).await.unwrap()),
+    PROVIDER:bson::to_bson(&hex::decode(provider_ciphertext).unwrap()).unwrap(),
+    PRODUCER:binary(hex::decode(LEGACY_PRODUCER).unwrap()),
     "status":"ready","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"sibling":"preserved"}
 }
 
@@ -43,7 +74,7 @@ async fn event_binding_rewrap_fences_both_purposes_and_checks_the_installed_prim
         .find(|e| matches!(e.adapter, Adapter::EventBinding))
         .unwrap();
     let rows = db.collection::<Document>(entry.collection);
-    let source = legacy(&db, &old, "one", "person").await;
+    let source = legacy(&db, "one", "person", LEGACY_PROVIDER_ONE).await;
     let id = doc! {"_id":"one"};
     rows.insert_one(&source).await.unwrap();
     for delta in [
@@ -69,7 +100,8 @@ async fn event_binding_rewrap_fences_both_purposes_and_checks_the_installed_prim
         doc! {"user_id":"organization"},
         doc! {"provider_api_key_id":"unknown"},
         doc! {PROVIDER:source.get(PRODUCER).unwrap().clone()},
-        doc! {PRODUCER:binary(old.encrypt(b"incorrect-length").await.unwrap())},
+        // The authenticated bearer is too short for a producer secret.
+        doc! {PRODUCER:binary(hex::decode(LEGACY_PROVIDER_ONE).unwrap())},
         doc! {PRODUCER:Bson::Null},
         doc! {"secret_context_versions":{PRODUCER:4}},
     ] {
@@ -98,8 +130,11 @@ async fn event_binding_rewrap_fences_both_purposes_and_checks_the_installed_prim
     assert!(rebound.get(PROVIDER).unwrap() == winner.get(PROVIDER).unwrap());
     assert_eq!(rebound.get_str("sibling"), Ok("preserved"));
 
-    for (other_id, owner) in [("same-owner", "person"), ("other-owner", "other")] {
-        let other = legacy(&db, &old, other_id, owner).await;
+    for (other_id, owner, provider) in [
+        ("same-owner", "person", LEGACY_PROVIDER_SAME_OWNER),
+        ("other-owner", "other", LEGACY_PROVIDER_OTHER_OWNER),
+    ] {
+        let other = legacy(&db, other_id, owner, provider).await;
         rows.insert_one(&other).await.unwrap();
         assert!(migrate(entry, &db, &current, &other).await.unwrap());
         let other = rows.find_one(doc! {"_id":other_id}).await.unwrap().unwrap();
@@ -159,7 +194,7 @@ async fn event_binding_generation_resumes_with_distinct_field_outcomes_after_ter
         .unwrap();
     let entry = &REGISTRY[index];
     let rows = db.collection::<Document>(entry.collection);
-    let ready = legacy(&db, &keys, "ready", "owner").await;
+    let ready = legacy(&db, "ready", "owner", LEGACY_PROVIDER_READY).await;
     let mut failed = ready.clone();
     failed.extend(doc! {"_id":"failed","status":"failed",PRODUCER:Bson::Null,PROVIDER:Bson::Null});
     let mut revoked = failed.clone();

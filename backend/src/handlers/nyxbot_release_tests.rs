@@ -798,9 +798,26 @@ async fn release_retirement_and_route_key_revocation_roll_back_together() {
 #[tokio::test]
 async fn release_disconnect_org_loss_fallback_and_setup_failure_capture_pending_attempts() {
     for mode in ["disconnect", "org", "fallback", "setup_failure"] {
-        let (state, row, _, _, upstream) = fixture("release_paths").await;
+        let (state, mut row, installed_key, _, upstream) = fixture("release_paths").await;
+        let mut compatible = crate::test_utils::test_encryption_keys();
+        compatible.set_contextual_record_writes(false);
+        row.agent_key_ciphertext = Some(
+            channel_key::seal(
+                &compatible,
+                &row.id,
+                &row.user_id,
+                row.agent_api_key_id.as_deref().unwrap(),
+                &installed_key,
+            )
+            .await
+            .unwrap(),
+        );
+        row.secret_context_versions.remove(channel_key::FIELD);
         let rows = state.db.collection::<Document>(CHANNELS);
-        let source = rows.find_one(doc! {"_id":&row.id}).await.unwrap().unwrap();
+        let source = bson::to_document(&row).unwrap();
+        rows.replace_one(doc! {"_id": &row.id}, &source)
+            .await
+            .unwrap();
         assert!(
             channel_key::migrate(&state.db, &state.encryption_keys, &source)
                 .await
@@ -2517,6 +2534,7 @@ async fn release_stale_gateway_move_keeps_the_working_direct_route() {
     row.transport = "direct".into();
     row.agent_api_key_id = None;
     row.agent_key_ciphertext = None;
+    row.secret_context_versions.remove(channel_key::FIELD);
     row.link_code_hash = Some(sha256_hex(b"working direct owner link"));
     row.link_code_expires_at = Some(
         bson::DateTime::from_chrono(Utc::now() + ChronoDuration::hours(LINK_CODE_TTL_HOURS))

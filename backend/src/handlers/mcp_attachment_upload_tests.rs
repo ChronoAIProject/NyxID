@@ -1,4 +1,5 @@
 //! Real chat dispatch tests for the stored-catalog attachment capability.
+use crate::handlers::credential_record_fixtures::KeySecret;
 #[path = "mcp_raw_attachment_tests.rs"]
 mod raw_file_tests;
 use super::*;
@@ -1514,12 +1515,23 @@ async fn lark_attachment_actual_send_revalidates_after_delayed_credential_prepar
             .mount(&u.server)
             .await;
         let key = Uuid::new_v4().to_string();
-        let encrypted = u.f.state.encryption_keys.encrypt(b"{}").await.unwrap();
-        u.f.state.db.collection::<bson::Document>("user_api_keys").insert_one(doc! {
-            "_id":&key,"user_id":&u.f.owner,"label":"exchange","credential_type":"api_key","status":"active",
-            "credential_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
-            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
-        }).await.unwrap();
+        KeySecret::Credential
+            .insert(
+                &u.f.state.db,
+                &u.f.state.encryption_keys,
+                doc! {
+                    "_id": &key,
+                    "user_id": &u.f.owner,
+                    "label": "exchange",
+                    "credential_type": "api_key",
+                    "status": "active",
+
+                    "created_at": bson::DateTime::now(),
+                    "updated_at": bson::DateTime::now(),
+                },
+                b"{}",
+            )
+            .await;
         u.f.state
             .db
             .collection::<bson::Document>("user_services")

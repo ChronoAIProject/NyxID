@@ -890,7 +890,8 @@ async fn meta_assignment_repair_fences_activation_and_acting_org_admin_at_retire
                 doc! {"_id": &prior.id},
                 doc! {"$set": {"platform": "instagram", "status": "pending", "transport": "direct",
                 "agent_api_key_id": null, "gateway_channel_id": null, "gateway_record_id": null,
-                "gateway_version": null, "binding_id": null, "agent_key_ciphertext": null}},
+                "gateway_version": null, "binding_id": null, "agent_key_ciphertext": null},
+                    "$unset":{crate::services::nyxbot_channel_key::VERSION_PATH:""}},
             )
             .await
             .unwrap();

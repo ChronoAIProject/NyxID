@@ -132,12 +132,7 @@ async fn lark_download_fixture(
         .await
         .expect("MongoDB required");
     fixture.bot.platform = platform.into();
-    fixture.bot.bot_token_encrypted = fixture
-        .state
-        .encryption_keys
-        .encrypt(b"app:secret")
-        .await
-        .unwrap();
+    BotSecret::Token.set(&fixture.state.encryption_keys, &mut fixture.bot, b"app:secret").await;
     fixture.conversation.platform = platform.into();
     fixture
         .state

@@ -13115,6 +13115,9 @@ mod tests {
 
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
+    use crate::handlers::credential_record_fixtures::{
+        KeySecret, proxy_node_signing_secret, set_catalog_credential,
+    };
     mod location_tests {
         use super::*;
         include!("proxy_location_tests.rs");
@@ -13300,10 +13303,7 @@ mod proxy_resolution_integration_tests {
                     ..Default::default()
                 }],
             });
-        service.credential_encrypted = encryption_keys
-            .encrypt(b"test-master-credential")
-            .await
-            .expect("encrypt test credential");
+        set_catalog_credential(&encryption_keys, &mut service, b"test-master-credential").await;
         db.collection::<crate::models::downstream_service::DownstreamService>(
             crate::models::downstream_service::COLLECTION_NAME,
         )
@@ -13518,7 +13518,7 @@ mod proxy_resolution_integration_tests {
         request_count: usize,
     ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
         let (socket, ws_server) = connect_test_node_socket(state, node).await;
-        let signing_secret = "11".repeat(32);
+        let signing_secret = proxy_node_signing_secret();
         let executor = tokio::spawn(async move {
             let (mut ws_sink, mut ws_stream) = socket.split();
             let replay_guard = tokio::sync::Mutex::new(ReplayGuard::new());
@@ -13832,49 +13832,51 @@ mod proxy_resolution_integration_tests {
         owner_user_id: &str,
         access_token: &[u8],
     ) -> String {
-        let credential_key = state
-            .encryption_keys
-            .encrypt(br#"{"type":"service_account","private_key":"redacted"}"#)
-            .await
-            .expect("encrypt service-account JSON");
-        let access_token = state
-            .encryption_keys
-            .encrypt(access_token)
-            .await
-            .expect("encrypt cached GCP access token");
         let api_key_id = Uuid::new_v4().to_string();
         let now = Utc::now();
+        let mut key = UserApiKey {
+            secret_context_versions: Default::default(),
+            oauth_app_observation: None,
+            credential_source: None,
+            id: api_key_id.clone(),
+            user_id: owner_user_id.to_string(),
+            label: "Org GCP SA".to_string(),
+            credential_type: "gcp_service_account".to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: Some("https://www.googleapis.com/auth/cloud-platform".to_string()),
+            expires_at: Some(now + chrono::Duration::hours(1)),
+            provider_config_id: None,
+            connection_id: None,
+            oauth_attempt_nonce: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            last_authorized_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            created_at: now,
+            updated_at: now,
+            credential_epoch: 1,
+        };
+        let keys = &state.encryption_keys;
+        KeySecret::Credential
+            .set(
+                keys,
+                &mut key,
+                br#"{"type":"service_account","private_key":"redacted"}"#,
+            )
+            .await;
+        KeySecret::AccessToken
+            .set(keys, &mut key, access_token)
+            .await;
         state
             .db
             .collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(UserApiKey {
-                secret_context_versions: Default::default(),
-                oauth_app_observation: None,
-                credential_source: None,
-                id: api_key_id.clone(),
-                user_id: owner_user_id.to_string(),
-                label: "Org GCP SA".to_string(),
-                credential_type: "gcp_service_account".to_string(),
-                credential_encrypted: Some(credential_key),
-                access_token_encrypted: Some(access_token),
-                refresh_token_encrypted: None,
-                token_scopes: Some("https://www.googleapis.com/auth/cloud-platform".to_string()),
-                expires_at: Some(now + chrono::Duration::hours(1)),
-                provider_config_id: None,
-                connection_id: None,
-                oauth_attempt_nonce: None,
-                user_oauth_client_id_encrypted: None,
-                user_oauth_client_secret_encrypted: None,
-                status: "active".to_string(),
-                last_used_at: None,
-                last_authorized_at: None,
-                error_message: None,
-                source: Some("user_created".to_string()),
-                source_id: None,
-                created_at: now,
-                updated_at: now,
-                credential_epoch: 1,
-            })
+            .insert_one(&key)
             .await
             .expect("insert org GCP SA key");
         api_key_id
@@ -14192,11 +14194,7 @@ mod proxy_resolution_integration_tests {
         catalog.requires_user_credential = false;
         catalog.visibility = "public".into();
         catalog.auth_method = "bearer".into();
-        catalog.credential_encrypted = state
-            .encryption_keys
-            .encrypt(b"operator-secret")
-            .await
-            .unwrap();
+        set_catalog_credential(&state.encryption_keys, &mut catalog, b"operator-secret").await;
         db.collection::<DownstreamService>(CATALOG)
             .insert_one(&catalog)
             .await
@@ -14241,14 +14239,20 @@ mod proxy_resolution_integration_tests {
     }
 
     async fn insert_online_node(state: &AppState, owner_user_id: &str, name: &str) -> Node {
-        let raw_signing_secret = "11".repeat(32);
-        let signing_secret_encrypted = state
-            .encryption_keys
-            .encrypt(raw_signing_secret.as_bytes())
-            .await
-            .expect("encrypt node signing secret");
-        let now = Utc::now();
+        let raw_signing_secret = proxy_node_signing_secret();
         let node_id = Uuid::new_v4().to_string();
+        let keys = &state.encryption_keys;
+        let signing_secret_encrypted = crate::crypto::record_field::encrypt(
+            keys,
+            NODES,
+            &node_id,
+            owner_user_id,
+            "signing_secret_encrypted",
+            raw_signing_secret.as_bytes(),
+        )
+        .await
+        .expect("encrypt node signing secret");
+        let now = Utc::now();
         let node = Node {
             machine: None,
             machine_confirm: Default::default(),
@@ -14259,7 +14263,7 @@ mod proxy_resolution_integration_tests {
             name: name.to_string(),
             status: NodeStatus::Online,
             signing_secret_encrypted: Some(signing_secret_encrypted),
-            signing_secret_context_version: None,
+            signing_secret_context_version: keys.contextual_record_writes().then_some(3),
             signing_secret_hash: hash_token(&raw_signing_secret),
             last_heartbeat_at: Some(now),
             connected_at: Some(now),
@@ -18578,6 +18582,7 @@ mod nyxagent_admission_tests {
 #[cfg(test)]
 mod nyxbot_readiness_tests {
     use super::*;
+    use crate::handlers::credential_record_fixtures::set_catalog_credential;
     use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
     use crate::services::assistant_nyxagent as engine;
     use axum::http::Method;
@@ -18636,12 +18641,7 @@ mod nyxbot_readiness_tests {
         model.service_category = "internal".into();
         model.visibility = "public".into();
         model.platform_key = None;
-        model.credential_encrypted = f
-            .state
-            .encryption_keys
-            .encrypt(b"operator-secret")
-            .await
-            .unwrap();
+        set_catalog_credential(&f.state.encryption_keys, &mut model, b"operator-secret").await;
         model.inference = Some(
             serde_json::from_value(
                 serde_json::json!({"wire_protocol":"openai_responses","model_list":true}),

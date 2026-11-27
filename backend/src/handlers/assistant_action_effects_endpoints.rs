@@ -1498,15 +1498,13 @@ mod tests {
             .await;
         let mut provider = grant_provider();
         provider.revocation.as_mut().unwrap().url = format!("{}/applications", remote.uri());
-        provider.client_id_encrypted =
-            Some(state.encryption_keys.encrypt(b"test-app").await.unwrap());
-        provider.client_secret_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-app-secret")
-                .await
-                .unwrap(),
-        );
+        crate::handlers::credential_record_fixtures::set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-app",
+            Some("test-app-secret"),
+        )
+        .await;
         crate::test_utils::init_test_audit_chain_hmac_key();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)

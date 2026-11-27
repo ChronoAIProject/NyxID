@@ -167,6 +167,7 @@ pub mod incremental_consent_service;
 pub mod internal_auth;
 pub mod invite_code_service;
 pub(crate) mod job_health;
+pub(crate) mod key_lifecycle;
 pub mod key_service;
 pub mod lark_attachment_tool;
 pub mod lark_im_tool;
