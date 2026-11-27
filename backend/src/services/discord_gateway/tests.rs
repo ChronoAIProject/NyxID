@@ -151,11 +151,8 @@ async fn fixture(name: &str) -> (AppState, Fence) {
     let db = crate::test_utils::connect_transaction_test_database(name).await;
     let state = crate::test_utils::test_app_state(db);
     let mut bot = bot();
-    bot.bot_token_encrypted = state
-        .encryption_keys
-        .encrypt(b"fixture-token")
-        .await
-        .unwrap();
+    bot.bot_token_encrypted =
+        hex::decode(crate::services::channel_registration::historical::DISCORD_BOT_TOKEN).unwrap();
     state
         .db
         .collection(crate::models::user::COLLECTION_NAME)

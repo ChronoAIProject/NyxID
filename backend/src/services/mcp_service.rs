@@ -13390,9 +13390,13 @@ mod tests {
             "https://wrong.example".into(),
         )]));
         provider.token_url = Some(format!("{}/token", token_server.uri()));
-        provider.client_id_encrypted = Some(encryption.encrypt(b"fixture-client").await.unwrap());
-        provider.client_secret_encrypted =
-            Some(encryption.encrypt(b"fixture-secret").await.unwrap());
+        crate::services::credential_test_fixtures::provider_client(
+            &encryption,
+            &mut provider,
+            "fixture-client",
+            Some("fixture-secret"),
+        )
+        .await;
         db.collection::<ProviderConfig>(PROVIDERS)
             .replace_one(doc! {"_id": &provider.id}, &provider)
             .await

@@ -599,18 +599,19 @@ async fn migration_expired_oauth_refreshes_then_executes_without_new_consent() {
         .mount(&f.server)
         .await;
     let provider_id = Uuid::new_v4().to_string();
-    let client = f
-        .state
-        .encryption_keys
-        .encrypt(b"fixture-client")
-        .await
-        .unwrap();
-    let provider: crate::models::provider_config::ProviderConfig = bson::from_document(doc! {
+    let mut provider: crate::models::provider_config::ProviderConfig = bson::from_document(doc! {
         "_id":&provider_id,"slug":"migration-oauth","name":"Fixture","provider_type":"oauth2","is_active":true,
         "created_by":&f.owner,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),
-        "token_url":format!("{}/token", tokens.uri()),"client_id_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:client},
+        "token_url":format!("{}/token", tokens.uri()),
         "token_endpoint_auth_method":"none"
     }).unwrap();
+    crate::services::credential_test_fixtures::provider_client(
+        &f.state.encryption_keys,
+        &mut provider,
+        "fixture-client",
+        None,
+    )
+    .await;
     f.state
         .db
         .collection::<crate::models::provider_config::ProviderConfig>("provider_configs")
