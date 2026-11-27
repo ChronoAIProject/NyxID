@@ -99,16 +99,52 @@ impl JourneyModel {
         &self,
         authorization: &axum::http::HeaderValue,
         image_part: &Value,
-        active: &crate::models::assistant_conversation::ActiveTurn,
+        turn_id: &str,
     ) -> String {
         use tower::ServiceExt;
-        assert_eq!(active.attachments.len(), 1);
-        let image = &active.attachments[0];
+        // Channel uploads bind to the user message; active-turn attachments
+        // describe tool results. Select the exact live input, never prior history.
+        let messages: Vec<AssistantMessage> = self
+            .state
+            .db
+            .collection::<AssistantMessage>(crate::models::assistant_message::COLLECTION_NAME)
+            .find(doc! {"user_id":OWNER,"conversation_id":&self.home_id,"turn_id":turn_id,"role":"user"})
+            .limit(2)
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.text, self.questions[1]);
+        assert!(matches!(message.origin, Some(TurnOrigin::Channel)));
+        assert_eq!(message.attachments.len(), 1);
+        let image = &message.attachments[0];
+        assert_eq!(image.origin, "user_upload");
         assert_eq!(image.content_type, "image/jpeg");
+        let uploads: Vec<AssistantUpload> = self
+            .state
+            .db
+            .collection::<AssistantUpload>(crate::models::assistant_upload::COLLECTION_NAME)
+            .find(doc! {"user_id":OWNER,"conversation_id":&self.home_id,"message_id":&message.id,"origin":"user_upload"})
+            .limit(2)
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        assert_eq!(uploads.len(), 1);
+        let upload = &uploads[0];
+        assert_eq!(upload.id, image.id);
+        assert_eq!(upload.content_type, image.content_type);
+        assert_eq!(upload.size, image.size);
+        assert_eq!(upload.size, self.jpeg.len() as i64);
+        assert!(upload.bound_at.is_some());
         let expected_url = format!(
             "{}/api/v1/assistant-attachments/{}/content",
             self.state.config.base_url.trim_end_matches('/'),
-            image.id
+            upload.id
         );
         let emitted_url = image_part["image_url"]
             .as_str()
@@ -194,7 +230,11 @@ async fn model_response(
     assert!(!input_text(&body).contains(crate::services::assistant_upload_service::IMAGE_FALLBACK));
     assert!(!input_text(&body).contains(crate::services::assistant_channel_media::FAILED_NOTE));
     let image_id = if photo {
-        Some(model.read_photo(authorization, images[0], active).await)
+        Some(
+            model
+                .read_photo(authorization, images[0], &active.turn_id)
+                .await,
+        )
     } else {
         None
     };
@@ -404,6 +444,7 @@ pub(super) async fn text_and_own_photo(f: &mut Fixture, row: &NyxbotChannel) {
             assert_eq!(upload.user_id, OWNER);
             assert_eq!(upload.conversation_id, f.home.id);
             assert_eq!(upload.message_id.as_deref(), Some(rows[0].id.as_str()));
+            assert_eq!(upload.origin, "user_upload");
             assert_eq!(upload.size, jpeg.len() as i64);
         }
     }
