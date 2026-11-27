@@ -70,7 +70,10 @@ impl McpSessionStore {
                 Err(error)
                     if attempt + 1 < SESSION_CREATE_ATTEMPTS
                         && (error.contains_label("TransientTransactionError")
-                            || error.get_custom::<OwnerFenceCreationRace>().is_some())
+                            || error.get_custom::<OwnerFenceCreationRace>().is_some()
+                            || error
+                                .get_custom::<super::mcp_session_storage::ConcurrentMcpClaim>()
+                                .is_some())
                         && !error.contains_label("UnknownTransactionCommitResult") =>
                 {
                     tokio::time::sleep(Duration::from_millis(10 << attempt)).await;
@@ -95,8 +98,12 @@ impl McpSessionStore {
             let expires_at = now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64);
             let session_id = uuid::Uuid::new_v4().to_string();
             let slot_id = format!("{user_id}:{slot}");
+            let mut transaction = db.client().start_session().await?;
+            transaction.start_transaction().await?;
+            let storage_id =
+                super::mcp_session_storage::issuance_key(db, &mut transaction, &session_id).await?;
             let record = McpSessionRecord {
-                id: session_id.clone(),
+                id: storage_id.clone(),
                 user_id: user_id.to_string(),
                 client_info: None,
                 activated_service_ids: Vec::new(),
@@ -105,11 +112,10 @@ impl McpSessionStore {
                 parent_session_id: parent_session_id.map(str::to_owned),
                 notification_sequence: 0,
                 created_at: now,
+                absolute_expires_at: None,
                 last_active_at: now,
                 expires_at,
             };
-            let mut transaction = db.client().start_session().await?;
-            transaction.start_transaction().await?;
             let claim = db
                 .collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
                 .find_one_and_update(
@@ -117,12 +123,12 @@ impl McpSessionStore {
                         "_id": &slot_id,
                         "$or": [
                             { "expires_at": { "$lte": bson::DateTime::from_chrono(now) } },
-                            { "session_id": &session_id },
+                            { "session_id": &storage_id },
                         ],
                     },
                     doc! { "$set": {
                         "user_id": user_id,
-                        "session_id": &session_id,
+                        "session_id": &storage_id,
                         "slot": slot as i32,
                         "expires_at": bson::DateTime::from_chrono(expires_at),
                     }},
@@ -145,6 +151,9 @@ impl McpSessionStore {
                     let _ = transaction.abort_transaction().await;
                     return Err(error);
                 }
+            }
+            if storage_id == session_id {
+                super::mcp_session_storage::fence_activation(db, &mut transaction).await?;
             }
             if let Err(error) =
                 transaction_result(fence_in_session(db, user_id, &mut transaction).await)
@@ -210,13 +219,18 @@ impl McpSessionStore {
             return Ok(None);
         };
         let id = uuid::Uuid::new_v4().to_string();
+        let storage_id =
+            super::mcp_session_storage::issuance_key(db, &mut transaction, &id).await?;
+        if storage_id == id {
+            super::mcp_session_storage::fence_activation(db, &mut transaction).await?;
+        }
         let expires_at = now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64);
         let slot = db
             .collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
             .update_one(
                 doc! { "user_id": user_id, "session_id": &old.id },
                 doc! { "$set": {
-                    "session_id": &id,
+                    "session_id": &storage_id,
                     "expires_at": bson::DateTime::from_chrono(expires_at),
                 }},
             )
@@ -227,7 +241,7 @@ impl McpSessionStore {
             return Ok(None);
         }
         let record = McpSessionRecord {
-            id: id.clone(),
+            id: storage_id,
             user_id: user_id.to_string(),
             client_info: None,
             activated_service_ids: Vec::new(),
@@ -236,6 +250,7 @@ impl McpSessionStore {
             parent_session_id: parent_session_id.map(str::to_owned),
             notification_sequence: 0,
             created_at: now,
+            absolute_expires_at: None,
             last_active_at: now,
             expires_at,
         };

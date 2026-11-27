@@ -295,8 +295,10 @@ OAuth codes and states, raw access or refresh tokens, API-key prefixes and
 hints, push and webhook tokens, private keys, KMS/JWK identifiers, wrapped
 keys, DEKs, nonces, signatures, HMACs, ciphertext, binary payloads, encrypted
 file contents, transient lease/coordination/deduplication records, erasure
-bookkeeping, and retained financial or integrity content. MCP session IDs are
-credentials and are excluded. Decimal128 values are emitted as decimal strings;
+bookkeeping, and retained financial or integrity content. MCP session IDs and their storage hashes are excluded, along with the session's
+`absolute_expires_at` and `slot_recovery_revision`. Notification and slot projections
+use the fields listed above across both formats. The shared `security_rollouts`
+issuance fence revision is excluded as fleet metadata. Decimal128 values are emitted as decimal strings;
 BSON documents and arrays are converted recursively, dates are RFC3339 strings,
 and BSON binary values are omitted. Every URL-valued allowlist field uses one
 sanitizer: every value is reduced to `scheme://host[:port]`, removing userinfo,

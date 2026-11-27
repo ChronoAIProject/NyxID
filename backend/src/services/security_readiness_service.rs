@@ -145,6 +145,7 @@ pub const CAPABILITIES: &[&str] = &[
     TURN_HANDOFF,
     TEAM_HANDOFF,
     CHAT_HANDOFF,
+    super::mcp_session_storage::READINESS,
     super::assistant_platform_model::READINESS,
     super::feature_flag_service::ASSISTANT_CHANNEL_GUEST_MEDIA_FLAG_KEY,
     super::platform_model_service::REGISTRY_READINESS,
@@ -868,6 +869,15 @@ pub(crate) async fn org_guest_grants_activated_in_session(
 }
 
 async fn insert_activation(db: &Database, capability: &str) -> AppResult<bool> {
+    if capability == super::mcp_session_storage::READINESS {
+        return super::transaction_service::run_db_only(db, &db, |tx, db| {
+            Box::pin(async move {
+                super::mcp_session_storage::fence_activation(db, tx).await?;
+                publish_activation(db, super::mcp_session_storage::READINESS, Some(tx)).await
+            })
+        })
+        .await;
+    }
     if capability != super::org_channel_service::GUEST_GRANTS_READINESS {
         return publish_activation(db, capability, None).await;
     }

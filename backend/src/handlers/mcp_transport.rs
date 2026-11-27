@@ -2210,8 +2210,8 @@ pub async fn mcp_get(
                     }
                 }
                 Ok(None) => break,
-                Err(error) => {
-                    tracing::warn!(%error, session_id = %sid, "MCP notification poll failed");
+                Err(_) => {
+                    tracing::warn!(session_ref = %crate::services::mcp_session_storage::hash(&sid), "MCP notification poll failed");
                     tokio::time::sleep(poll_interval).await;
                 }
             }
@@ -2279,11 +2279,12 @@ pub async fn mcp_delete(
     let persisted_created_at = state
         .db
         .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-        .find_one(doc! { "_id": &sid })
+        .find_one(doc! {"_id": {"$in": crate::services::mcp_session_storage::keys_for_wire(&sid)}})
+        .sort(doc! {"_id": -1})
         .await
         .ok()
         .flatten()
-        .map(|rec| rec.created_at);
+        .map(|session| session.created_at);
 
     if let Err(error) = state.mcp_sessions.remove(&sid).await {
         tracing::error!(%error, "Failed to delete MCP session");
@@ -2295,7 +2296,7 @@ pub async fn mcp_delete(
         state.db.clone(),
         Some(auth.user_id.clone()),
         "mcp_session_deleted".to_string(),
-        Some(serde_json::json!({ "session_id": &sid })),
+        Some(serde_json::json!({ "session_id": crate::services::mcp_session_storage::hash(&sid) })),
         auth.ip_address.clone(),
         auth.user_agent.clone(),
         auth.api_key_id.clone(),
@@ -2366,7 +2367,9 @@ async fn handle_initialize(
                     state.db.clone(),
                     Some(user_id.to_string()),
                     "mcp_session_created".to_string(),
-                    Some(serde_json::json!({ "session_id": &id })),
+                    Some(
+                        serde_json::json!({ "session_id": crate::services::mcp_session_storage::hash(&id) }),
+                    ),
                     ip_address.map(String::from),
                     user_agent.map(String::from),
                     api_key_id.map(String::from),
@@ -8245,13 +8248,13 @@ mod tests {
                 assert_eq!(authenticate_mcp(&state, &headers, true).await.is_ok(), allowed);
                 assert_eq!(state.mcp_sessions.get_for_auth(&sid).await.unwrap().is_some(), allowed);
                 let audit_count = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-                    .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": &sid}).await.unwrap();
+                    .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": crate::services::mcp_session_storage::hash(&sid)}).await.unwrap();
                 assert_eq!(audit_count, u64::from(!allowed));
                 if !allowed {
                     // A second replica may already have loaded the deleted row.
                     assert!(crate::services::session_authority::mcp_fallback_assurance(&db, &sid, &snapshot).await.is_err());
                     assert_eq!(db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME)
-                        .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": &sid}).await.unwrap(), 1);
+                        .count_documents(doc! {"event_type": "mfa_unassured_session_rejected", "event_data.session_id": crate::services::mcp_session_storage::hash(&sid)}).await.unwrap(), 1);
                     assert_eq!(db.collection::<bson::Document>(MCP_SESSION_SLOT_COLLECTION).count_documents(doc! {"session_id": &sid}).await.unwrap(), 0);
                     assert_eq!(notifications.count_documents(doc! {"session_id": &sid}).await.unwrap(), 0);
                 }
@@ -10659,6 +10662,83 @@ mod tests {
     #[test]
     fn jsonrpc_version_is_2_0() {
         assert_eq!(JSONRPC_VERSION, "2.0");
+    }
+
+    #[tokio::test]
+    async fn mcp_session_lifecycle_audits_store_only_the_hash() {
+        let db = crate::test_utils::connect_transaction_test_database("mcp_lifecycle_audit").await;
+        let mut state = test_app_state(db.clone());
+        state.mcp_sessions = std::sync::Arc::new(
+            crate::models::mcp_session::McpSessionStore::with_db(db.clone()),
+        );
+        let owner = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&owner, crate::models::user::UserType::Person))
+            .await
+            .unwrap();
+        let request = JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.into(),
+            id: Some(serde_json::json!(1)),
+            method: "initialize".into(),
+            params: None,
+        };
+        let response = handle_initialize(
+            &state,
+            &owner,
+            &request,
+            false,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &TelemetryContext::default(),
+        )
+        .await;
+        let wire = response.headers()["mcp-session-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let app = Router::new()
+            .route("/mcp", axum::routing::delete(mcp_delete))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                Request::delete("/mcp")
+                    .header("mcp-session-id", &wire)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let audits = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+        for event in ["mcp_session_created", "mcp_session_deleted"] {
+            let row = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(row) = audits
+                        .find_one(doc! {"user_id":&owner,"event_type":event})
+                        .await
+                        .unwrap()
+                    {
+                        break row;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                row.get_document("event_data")
+                    .unwrap()
+                    .get_str("session_id")
+                    .unwrap(),
+                crate::services::mcp_session_storage::hash(&wire)
+            );
+            assert!(!row.to_string().contains(&wire));
+        }
+        db.drop().await.unwrap();
     }
 
     #[tokio::test]
