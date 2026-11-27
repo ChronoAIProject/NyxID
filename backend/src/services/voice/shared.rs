@@ -115,6 +115,28 @@ pub async fn admit(
 }
 
 pub async fn revalidate(db: &Database, call: &VoiceSession) -> AppResult<()> {
+    let live = match call.eligibility_owner_id.as_deref() {
+        Some(owner) if owner == call.user_id => 0,
+        Some(org) => {
+            crate::services::org_service::get_active_membership(db, org, &call.user_id)
+                .await?
+                .filter(|m| m.role.can_proxy())
+                .ok_or_else(sharing::missing)?
+                .eligibility_revision
+        }
+        None => {
+            super::super::assistant_voice::thread_with_revision(
+                db,
+                &call.user_id,
+                &call.conversation_id,
+            )
+            .await?
+            .1
+        }
+    };
+    if live != call.eligibility_revision {
+        return Err(AppError::Forbidden("Voice task authority changed".into()));
+    }
     if let Some(binding) = &call.shared_execution {
         if binding.actor != call.user_id
             || binding.conversation != call.conversation_id
@@ -129,8 +151,8 @@ pub async fn revalidate(db: &Database, call: &VoiceSession) -> AppResult<()> {
 
 pub async fn before_start(state: &crate::AppState, call: &VoiceSession) -> AppResult<()> {
     Box::pin(super::client_key::revalidate(&state.db, call)).await?;
+    revalidate(&state.db, call).await?;
     if call.shared_execution.is_some() {
-        revalidate(&state.db, call).await?;
         let current = Box::pin(super::credentials::resolve(
             state,
             &call.user_id,

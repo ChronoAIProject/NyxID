@@ -62,6 +62,8 @@ pub struct LearningCursor {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssistantAgentLearning {
+    #[serde(default)]
+    pub eligibility_revision: i64,
     #[serde(rename = "_id")]
     pub agent_id: String,
     pub owner_id: String,
@@ -107,6 +109,8 @@ fn default_threshold() -> i64 {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssistantAgentLearningMember {
+    #[serde(default)]
+    pub eligibility_revision: i64,
     #[serde(rename = "_id")]
     pub id: String,
     pub agent_id: String,
@@ -125,6 +129,8 @@ pub struct AssistantAgentLearningMember {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LearningEvidence {
+    #[serde(default)]
+    pub eligibility_revision: i64,
     pub label: String,
     pub conversation_id: String,
     pub turn_id: String,
@@ -138,6 +144,8 @@ pub struct LearningEvidence {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssistantAgentLearningRun {
+    #[serde(default)]
+    pub eligibility_revision: i64,
     #[serde(default)]
     pub org_maintain_revision: i64,
     #[serde(rename = "_id")]
@@ -275,6 +283,8 @@ pub struct AssistantAgentLearningSkillRoot {
 /// the encrypted draft. A started write is never issued a second time.
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct LearningPublication {
+    #[serde(default)]
+    pub eligibility_revision: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
     pub operation_id: String,

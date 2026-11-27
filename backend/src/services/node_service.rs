@@ -2720,6 +2720,7 @@ mod tests {
         let access = OwnerAccess::AsOrgAdmin {
             org_user_id: "org-1".to_string(),
             membership_id: "m-1".to_string(),
+            eligibility_revision: 0,
             allowed_service_ids: None,
         };
         assert!(node_access_can_read(&access));
@@ -2730,6 +2731,7 @@ mod tests {
         let access = OwnerAccess::AsOrgMember {
             org_user_id: "org-1".to_string(),
             membership_id: "m-1".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Member,
             allowed_service_ids: None,
         };
@@ -2741,6 +2743,7 @@ mod tests {
         let access = OwnerAccess::AsOrgMember {
             org_user_id: "org-1".to_string(),
             membership_id: "m-1".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Viewer,
             allowed_service_ids: None,
         };

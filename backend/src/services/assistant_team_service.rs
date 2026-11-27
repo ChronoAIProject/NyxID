@@ -157,7 +157,7 @@ pub(crate) fn specialist_settled_event(
             .unwrap_or(&source.user_id)
             .to_owned(),
     );
-    report.source_org_use_revision = source.org_use_revision;
+    report.set_source_member_use(source.member_use);
     report.id.clone_from(&turn.turn_id);
     report.created_at = created_at;
     report.execution_task.clone_from(&turn.execution_task);
@@ -169,7 +169,8 @@ pub fn event(kind: &str, text: String, agent_id: Option<&str>) -> AgentEvent {
     AgentEvent {
         source_owner_id: None,
         source_org_use_revision: 0,
-        org_use_revision: 0,
+        source_eligibility_revision: 0,
+        member_use: Default::default(),
         channel_message: None,
         wake: None,
         automation_work: None,
@@ -952,7 +953,7 @@ async fn create_thread_with_kind(
         automation_thread,
         voice_parent_conversation_id: None,
         guest_model_setup: false,
-        org_use_revision: 0,
+        member_use: Default::default(),
         shared_agent_thread: false,
         agent_owner_id: (actor != agent.user_id).then(|| agent.user_id.clone()),
         learning_epoch,
@@ -981,7 +982,7 @@ async fn create_thread_with_kind(
     ))
     .await?;
     row.shared_agent_thread = authority.is_shared();
-    row.org_use_revision = authority.org_use_revision();
+    row.member_use = authority.member_use();
 
     let credential = credentials::load_or_provision_in_session(
         db,
@@ -999,7 +1000,7 @@ async fn create_thread_with_kind(
     collection
         .update_one(
             doc! {"_id": &row.id},
-            doc! {"$set": {"credential_api_key_id": &row.credential_api_key_id, "shared_agent_thread": row.shared_agent_thread, "org_use_revision":row.org_use_revision}},
+            doc! {"$set": {"credential_api_key_id": &row.credential_api_key_id, "shared_agent_thread": row.shared_agent_thread, "org_use_revision":row.member_use.org_use_revision,"eligibility_revision":row.member_use.eligibility_revision}},
         )
         .session(&mut *session)
         .await?;
@@ -1110,23 +1111,40 @@ pub async fn home_thread_for(
     // creations for this member. Repeat the lookup on each transaction retry.
     super::transaction_service::run_db_only(
         db,
-        &(db, keys, actor, agent, &own),
-        |tx, &(db, keys, actor, agent, own)| {
-            Box::pin(async move {
-                if let Some(row) = db
-                    .collection::<AssistantConversation>(CONVERSATIONS)
-                    .find_one(own.clone())
-                    .sort(doc! {"created_at":1,"_id":1})
-                    .session(&mut *tx)
-                    .await?
-                {
-                    return Ok(row);
-                }
-                create_thread_for(db, keys, actor, agent, &agent.name, tx).await
-            })
+        &(db, keys, actor, agent),
+        |tx, &(db, keys, actor, agent)| {
+            Box::pin(member_home_in_session(db, keys, actor, agent, tx))
         },
     )
     .await
+}
+
+pub(crate) async fn member_home_in_session(
+    db: &Database,
+    keys: &EncryptionKeys,
+    actor: &str,
+    agent: &AssistantAgent,
+    tx: &mut ClientSession,
+) -> AppResult<AssistantConversation> {
+    let mut own = thread_filter_for(actor, agent);
+    own.extend(doc! {"channel":null,"platform_thread":null,"automation_thread":{"$ne":true}});
+    let rows = db.collection::<AssistantConversation>(CONVERSATIONS);
+    if let Some(id) = &agent.home_conversation_id {
+        let mut pinned = own.clone();
+        pinned.insert("_id", id);
+        if let Some(row) = rows.find_one(pinned).session(&mut *tx).await? {
+            return Ok(row);
+        }
+    }
+    if let Some(row) = rows
+        .find_one(own)
+        .sort(doc! {"created_at":1,"_id":1})
+        .session(&mut *tx)
+        .await?
+    {
+        return Ok(row);
+    }
+    create_thread_for(db, keys, actor, agent, &agent.name, tx).await
 }
 
 // ---------------------------------------------------------------------------

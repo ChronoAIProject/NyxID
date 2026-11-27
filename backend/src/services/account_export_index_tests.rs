@@ -517,7 +517,8 @@ mod export_index_coverage {
             [
                 "pub(crate) async fn lane(",
                 "\"actor_id\":actor",
-                "let result=rows.update_one(filter.clone()",
+                "let mut writable = filter.clone();",
+                "rows.update_one(writable,",
                 ").upsert(true).await"
             ]
         ),

@@ -266,6 +266,7 @@ async fn org_membership_requires_active_proxy_role_and_live_owner() {
         .await
         .unwrap();
     let member = OrgMembership {
+        eligibility_revision: 0,
         id: Uuid::new_v4().to_string(),
         org_user_id: org.clone(),
         member_user_id: person.clone(),
@@ -610,6 +611,7 @@ async fn restricted_key_grants_keep_org_resource_and_admin_boundaries() {
         .await
         .unwrap();
     let member = OrgMembership {
+        eligibility_revision: 0,
         id: Uuid::new_v4().to_string(),
         org_user_id: org.clone(),
         member_user_id: person.clone(),

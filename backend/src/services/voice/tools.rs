@@ -420,6 +420,10 @@ impl Executions {
             ),
         )
         .await?;
+        if call.eligibility_revision != hidden.member_use.eligibility_revision {
+            transaction.abort_transaction().await?;
+            return Err(AppError::Forbidden("Voice task authority changed".into()));
+        }
         let mut start = engine::TurnStart::from(&engine::TurnRequest {
             acknowledgement_id: None,
             retry_of: None,

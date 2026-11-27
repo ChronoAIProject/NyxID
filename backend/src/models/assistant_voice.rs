@@ -57,6 +57,8 @@ pub enum RequestState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct VoiceRequest {
+    #[serde(default)]
+    pub eligibility_revision: i64,
     /// Non-authorizing enrollment hint copied from the authenticated person.
     #[serde(default)]
     pub execution_enrolled: bool,

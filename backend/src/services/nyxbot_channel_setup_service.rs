@@ -115,8 +115,14 @@ pub(crate) async fn link(
         &row.channel_bot_id,
     )
     .await?;
-    if row.agent_id.as_deref() == Some(agent.id.as_str())
-        || (row.agent_id.is_none() && agent.is_nyxbot())
+    let renew = owner == row.user_id
+        && binding
+            .as_ref()
+            .zip(row.org_specialist.as_ref())
+            .is_some_and(|(current, old)| current.eligibility_revision != old.eligibility_revision);
+    if !renew
+        && (row.agent_id.as_deref() == Some(agent.id.as_str())
+            || (row.agent_id.is_none() && agent.is_nyxbot()))
     {
         return Ok(json!({"channel_agent_id": row.id, "agent": agent.name, "changed": false}));
     }
@@ -171,7 +177,7 @@ pub(crate) async fn mutate_meta_assignment(
     settings: Option<&crate::services::nyxbot_chat_settings_service::AccessSettings>,
     owner_challenge: Option<(&str, bool)>,
 ) -> AppResult<(NyxbotChannel, u64)> {
-    if let Some(agent) = agent {
+    let renew = if let Some(agent) = agent {
         super::org_channel_service::require_target(&state.db, actor, agent).await?;
         let bot = accessible_bot(state, actor, &expected.channel_bot_id).await?;
         let binding =
@@ -181,7 +187,16 @@ pub(crate) async fn mutate_meta_assignment(
                 "Review this specialist's inbox assignment before continuing".into(),
             ));
         }
-    }
+        actor == expected.user_id
+            && binding
+                .as_ref()
+                .zip(expected.org_specialist.as_ref())
+                .is_some_and(|(current, old)| {
+                    current.eligibility_revision != old.eligibility_revision
+                })
+    } else {
+        false
+    };
     if let Some(settings) = settings {
         settings.validate()?;
     }
@@ -206,7 +221,7 @@ pub(crate) async fn mutate_meta_assignment(
     super::transaction_service::run_db_only(
         &state.db,
         &args,
-        |tx, (db, actor, expected, agent, settings, challenge, callback)| {
+        move |tx, (db, actor, expected, agent, settings, challenge, callback)| {
             Box::pin(async move {
                 let mut row = super::nyxbot_channel_query_service::fence_meta_default(
                     db,
@@ -234,8 +249,9 @@ pub(crate) async fn mutate_meta_assignment(
                         true,
                     )
                     .await?;
-                    if row.agent_id.as_deref() != Some(agent.id.as_str())
-                        && !(row.agent_id.is_none() && agent.is_nyxbot())
+                    if renew
+                        || row.agent_id.as_deref() != Some(agent.id.as_str())
+                            && !(row.agent_id.is_none() && agent.is_nyxbot())
                     {
                         super::channel_thread_follow_service::relink_in_session(
                             db, &row, actor, &agent.id, tx, true,

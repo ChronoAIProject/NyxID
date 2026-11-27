@@ -42,6 +42,7 @@ async fn enqueue(
 ) -> String {
     let id = Uuid::new_v4().to_string();
     let request = GroupRequest {
+        eligibility_revision: 0,
         org_use_revisions: Default::default(),
         execution_task: None,
         collaboration: None,
@@ -2109,6 +2110,7 @@ async fn org_group_concurrent_appends_retry_transaction_conflicts_without_duplic
     let first = TransactionCollisionHook::new(barrier.clone());
     let second = TransactionCollisionHook::new(barrier);
     let request = |id: &str| GroupRequest {
+        eligibility_revision: 0,
         org_use_revisions: Default::default(),
         execution_task: None,
         collaboration: None,
@@ -2396,4 +2398,28 @@ async fn notifications_are_published_by_org_group_settlement_only_for_the_acting
     .unwrap();
     assert_eq!(notifications.count_documents(doc! {}).await.unwrap(), 0);
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn eligibility_revision_drops_queued_org_group_work() {
+    let f = Fixture::new("member_group_queue").await;
+    let db = &f.state.db;
+    let (agent, _) = f.create().await;
+    let group = create(&f, &agent).await.group;
+    let member = access(&f, &f.member, &group.id).await;
+    let stale = enqueue(&f, &member, &agent, &[]).await;
+    f.repromote_member().await;
+    crate::handlers::org_group::advance(&f.state, &group).await;
+    let queued = db
+        .collection::<GroupRequest>(REQUESTS)
+        .find_one(doc! {"_id":stale})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(queued.pending_agent_ids.is_empty());
+    let member = access(&f, &f.member, &group.id).await;
+    let fresh = enqueue(&f, &member, &agent, &[]).await;
+    let thread = start(&f, &member, &agent, &fresh).await;
+    assert_eq!(thread.member_use.eligibility_revision, 1);
+    db.drop().await.unwrap();
 }

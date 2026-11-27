@@ -135,7 +135,8 @@ async fn admit_audio(
     super::super::assistant_voice::require_enabled(db, user)
         .await
         .map_err(|e| crate::errors::voice_start::Stage::Flag.error(e))?;
-    let thread = super::super::assistant_voice::thread(db, user, conversation).await?;
+    let (thread, eligibility_revision) =
+        super::super::assistant_voice::thread_with_revision(db, user, conversation).await?;
     if uuid::Uuid::parse_str(client_request_id).is_err() {
         return Err(AppError::ValidationError(
             "Invalid voice request identity".into(),
@@ -160,6 +161,12 @@ async fn admit_audio(
     let shared_execution =
         super::shared::admit(db, user, &thread, client_request_id, &preferences).await?;
     let row = VoiceSession {
+        eligibility_owner_id: Some(
+            crate::services::org_agent_service::ordinary_member_org(&thread)
+                .unwrap_or(user)
+                .into(),
+        ),
+        eligibility_revision,
         execution_enrolled: false,
         responses: Default::default(),
         client_key,

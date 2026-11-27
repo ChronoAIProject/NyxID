@@ -1120,12 +1120,14 @@ pub enum OwnerAccess {
     AsOrgAdmin {
         org_user_id: String,
         membership_id: String,
+        eligibility_revision: i64,
         allowed_service_ids: Option<Vec<String>>,
     },
     /// The actor is a Member or Viewer of the owning org. Read-only access.
     AsOrgMember {
         org_user_id: String,
         membership_id: String,
+        eligibility_revision: i64,
         role: OrgRole,
         allowed_service_ids: Option<Vec<String>>,
     },
@@ -1134,6 +1136,20 @@ pub enum OwnerAccess {
 }
 
 impl OwnerAccess {
+    pub(crate) fn eligibility_revision(&self) -> i64 {
+        match self {
+            Self::AsOrgAdmin {
+                eligibility_revision,
+                ..
+            }
+            | Self::AsOrgMember {
+                eligibility_revision,
+                ..
+            } => *eligibility_revision,
+            Self::Direct | Self::Forbidden => 0,
+        }
+    }
+
     /// Whether the actor can perform a write/mutate operation on the resource.
     /// Does not account for per-resource scope -- callers must ALSO call
     /// [`Self::allows_resource`] with the target resource id.
@@ -1249,11 +1265,13 @@ pub(crate) fn access_for_membership(
         OrgRole::Admin => OwnerAccess::AsOrgAdmin {
             org_user_id: m.org_user_id,
             membership_id,
+            eligibility_revision: m.eligibility_revision,
             allowed_service_ids: effective_scope,
         },
         OrgRole::Member | OrgRole::Viewer => OwnerAccess::AsOrgMember {
             org_user_id: m.org_user_id,
             membership_id,
+            eligibility_revision: m.eligibility_revision,
             role: m.role,
             allowed_service_ids: effective_scope,
         },
@@ -1437,6 +1455,7 @@ mod tests {
         let admin = OwnerAccess::AsOrgAdmin {
             org_user_id: "org-1".to_string(),
             membership_id: "m-1".to_string(),
+            eligibility_revision: 0,
             allowed_service_ids: None,
         };
         assert!(admin.can_write());
@@ -1445,6 +1464,7 @@ mod tests {
         let member = OwnerAccess::AsOrgMember {
             org_user_id: "org-1".to_string(),
             membership_id: "m-2".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Member,
             allowed_service_ids: None,
         };
@@ -1454,6 +1474,7 @@ mod tests {
         let viewer = OwnerAccess::AsOrgMember {
             org_user_id: "org-1".to_string(),
             membership_id: "m-3".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Viewer,
             allowed_service_ids: None,
         };
@@ -1479,6 +1500,7 @@ mod tests {
         let admin = OwnerAccess::AsOrgAdmin {
             org_user_id: "org".to_string(),
             membership_id: "m".to_string(),
+            eligibility_revision: 0,
             allowed_service_ids: Some(vec!["svc-1".to_string(), "svc-2".to_string()]),
         };
         assert!(admin.allows_resource("svc-1"));
@@ -1491,6 +1513,7 @@ mod tests {
         let member = OwnerAccess::AsOrgMember {
             org_user_id: "org".to_string(),
             membership_id: "m".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Member,
             allowed_service_ids: Some(vec!["svc-1".to_string()]),
         };
@@ -1503,6 +1526,7 @@ mod tests {
         let member = OwnerAccess::AsOrgMember {
             org_user_id: "org".to_string(),
             membership_id: "m".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Member,
             allowed_service_ids: None,
         };
@@ -1514,6 +1538,7 @@ mod tests {
         let member = OwnerAccess::AsOrgMember {
             org_user_id: "org".to_string(),
             membership_id: "m".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Member,
             allowed_service_ids: Some(vec![]),
         };
@@ -1686,6 +1711,7 @@ mod tests {
         let admin = OwnerAccess::AsOrgAdmin {
             org_user_id: "org".to_string(),
             membership_id: "m".to_string(),
+            eligibility_revision: 0,
             allowed_service_ids: None,
         };
         assert!(admin.allows_any_resource(&[]));
@@ -1697,6 +1723,7 @@ mod tests {
         let admin = OwnerAccess::AsOrgAdmin {
             org_user_id: "org".to_string(),
             membership_id: "m".to_string(),
+            eligibility_revision: 0,
             allowed_service_ids: Some(vec!["svc-1".to_string(), "svc-2".to_string()]),
         };
         // One match is enough
@@ -1712,6 +1739,7 @@ mod tests {
         let admin = OwnerAccess::AsOrgAdmin {
             org_user_id: "org".to_string(),
             membership_id: "m".to_string(),
+            eligibility_revision: 0,
             allowed_service_ids: Some(vec!["svc-1".to_string()]),
         };
         assert!(!admin.allows_any_resource(&[]));
@@ -1722,6 +1750,7 @@ mod tests {
         let member = OwnerAccess::AsOrgMember {
             org_user_id: "org".to_string(),
             membership_id: "m".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Member,
             allowed_service_ids: Some(vec!["svc-3".to_string()]),
         };
@@ -1734,6 +1763,7 @@ mod tests {
         let member = OwnerAccess::AsOrgMember {
             org_user_id: "org".to_string(),
             membership_id: "m".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Viewer,
             allowed_service_ids: None,
         };
@@ -1746,6 +1776,7 @@ mod tests {
         let member = OwnerAccess::AsOrgMember {
             org_user_id: "org".to_string(),
             membership_id: "m".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Member,
             allowed_service_ids: Some(vec![]),
         };
@@ -1760,6 +1791,7 @@ mod tests {
         let admin = OwnerAccess::AsOrgAdmin {
             org_user_id: "org-1".to_string(),
             membership_id: "m-1".to_string(),
+            eligibility_revision: 0,
             allowed_service_ids: Some(vec!["svc-1".to_string()]),
         };
         assert!(admin.can_write());
@@ -1771,6 +1803,7 @@ mod tests {
         let viewer = OwnerAccess::AsOrgMember {
             org_user_id: "org-1".to_string(),
             membership_id: "m-1".to_string(),
+            eligibility_revision: 0,
             role: OrgRole::Viewer,
             allowed_service_ids: Some(vec![]),
         };
@@ -1783,6 +1816,7 @@ mod tests {
         let access = OwnerAccess::AsOrgAdmin {
             org_user_id: "org-1".to_string(),
             membership_id: "m-1".to_string(),
+            eligibility_revision: 0,
             allowed_service_ids: None,
         };
         let cloned = access.clone();

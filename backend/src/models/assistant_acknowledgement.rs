@@ -10,6 +10,10 @@ pub struct AssistantAcknowledgement {
     pub meta_contexts: Vec<super::assistant_conversation::ChannelTurnContext>,
     #[serde(default)]
     pub org_maintain_revision: i64,
+    #[serde(default)]
+    pub eligibility_revision: i64,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub target_eligibility_revisions: std::collections::BTreeMap<String, i64>,
     /// A relink can require maintenance on the current and the requested specialist.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub org_maintenance_targets: std::collections::BTreeMap<String, i64>,

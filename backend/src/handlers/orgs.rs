@@ -573,6 +573,7 @@ async fn effective_assignment_scope(
     allowed_service_ids: Option<Vec<String>>,
 ) -> AppResult<Option<Vec<String>>> {
     let candidate = OrgMembership {
+        eligibility_revision: 0,
         id: String::new(),
         org_user_id: org_user_id.to_string(),
         member_user_id: String::new(),
