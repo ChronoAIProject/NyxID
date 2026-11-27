@@ -10,6 +10,9 @@ use crate::services::{
 };
 use serde_json::Value;
 
+#[path = "proposal_owner_continuation_tests.rs"]
+mod owner_continuation_tests;
+
 pub(super) async fn channel_turn(
     name: &str,
     native: bool,

@@ -119,10 +119,13 @@ pub(crate) async fn resume_turn(
     }
     let mut notes = Vec::new();
     let mut receipts = Vec::new();
+    let mut withheld = Vec::new();
     let typed_wake = turn.events.iter().all(|event| {
         event.kind == "permission_decided" && event.id.starts_with("execution-decision:")
     });
     let mut continuation_ready = None;
+    let mut continuation_credential = None;
+    let mut owner_source = None;
     let mut reviews = presentation::ReviewNotes::default();
     let mut seen = std::collections::HashSet::new();
     for id in ids {
@@ -133,7 +136,7 @@ pub(crate) async fn resume_turn(
         let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id})).await?.ok_or_else(missing)?;
         let p = proposal(&request)?;
         let version = AssistantVersion::of(&request)?;
-        let eligible = continuation::eligible(row, p, version);
+        let mut eligible = continuation::eligible(row, p, version);
         if turn.execution_task.as_ref().is_none_or(|t| {
             t.task != p.task.task
                 || t.epoch != p.task.epoch
@@ -146,26 +149,40 @@ pub(crate) async fn resume_turn(
         if p.task.channel_source.is_some() {
             super::super::super::execution_permission_channel::check(&state.db, &p.task).await?;
         }
+        if eligible {
+            let source = match owner_source {
+                Some(source) => source,
+                None => {
+                    let source = continuation::original_owner_source(&state.db, row).await?;
+                    owner_source = Some(source);
+                    source
+                }
+            };
+            eligible = source;
+        }
         if request.status != "approved" {
             reviews.push(&request, p);
             continue;
         }
         if p.state == "completed" {
             notes.push(if matches!(p.contract.context.audience,Audience::Group{..}) {"The operation completed. Its private result is available on your permission card.".into()}else{result_for_human(state,&request).await?.unwrap_or_else(||"The operation completed; its retained result is no longer available.".into())});
-            if eligible
-                && request.activity_outcome.as_deref() == Some("completed")
-                && p.delivered_turn_id.is_none()
-                && p.owner_continuation.as_ref().is_some_and(|release| {
-                    release.version == 1 && !release.blocked && release.released_turn_id.is_none()
-                })
-                && p.result.is_some()
-            {
-                receipts.push(continuation::Receipt {
+            if p.owner_continuation.as_ref().is_some_and(|release| {
+                release.version == 1 && !release.blocked && release.released_turn_id.is_none()
+            }) {
+                let receipt = continuation::Receipt {
                     id: id.into(),
                     version,
                     claim_id: p.claim_id.clone().ok_or_else(conflict)?,
-                });
-            } else {
+                };
+                if eligible
+                    && request.activity_outcome.as_deref() == Some("completed")
+                    && p.delivered_turn_id.is_none()
+                    && p.result.is_some()
+                {
+                    receipts.push(receipt);
+                } else {
+                    withheld.push(receipt);
+                }
             }
             continue;
         }
@@ -243,6 +260,19 @@ pub(crate) async fn resume_turn(
                 .serving_ready,
             );
         }
+        if eligible && continuation_ready == Some(true) && continuation_credential.is_none() {
+            continuation_credential = Some(
+                crate::services::assistant_agent_credential_service::load_for_conversation(
+                    &state.db,
+                    &state.encryption_keys,
+                    &row.user_id,
+                    &row.id,
+                )
+                .await?
+                .filter(|credential| credential.api_key_id == row.credential_api_key_id)
+                .ok_or_else(refused)?,
+            );
+        }
         let raw = Field::Payload
             .open(&state.encryption_keys, &request)
             .await?
@@ -297,6 +327,9 @@ pub(crate) async fn resume_turn(
                             Ok(mut value)=>{redact(&mut value);value.to_string()},
                             Err(_)=>text.into_owned(),
                         };
+                        let text = crate::services::assistant_agent_credential_service::redact_known_secrets(
+                            &text, &[continuation_credential.as_ref().map_or("", |credential| credential.raw_key.as_str())],
+                        );
                         let result=format!("Operation finished (HTTP {}).\n{}",status.as_u16(),text.chars().take(16_384).collect::<String>());
                         private_result=Some(result.clone());
                         activity_outcome = Some(if status.is_success() { "completed" } else { "failed" });
@@ -419,11 +452,12 @@ pub(crate) async fn resume_turn(
     }
     notes.extend(reviews.render());
     let text = notes.join("\n\n");
-    if typed_wake && receipts.len() == seen.len() && !receipts.is_empty() {
+    if typed_wake && withheld.is_empty() && receipts.len() == seen.len() && !receipts.is_empty() {
         return Ok(Some(ResumeOutcome::Continue(
             continuation::prepare(state, row, receipts, text).await?,
         )));
     }
+    receipts.extend(withheld);
     if !receipts.is_empty() {
         continuation::withhold(&state.db, &receipts).await?;
     }

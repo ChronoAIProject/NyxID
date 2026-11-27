@@ -436,23 +436,46 @@ and purge private payloads. Operation permissions receive terminal retention in
 the same terminal update; reusable grants remain subject to their live binding.
 
 For personal owner message-root tasks in private conversations (v1/v3) and
-verified-owner channels (v4), a freshly resumed, durably recorded successful HTTP
-effect continues through the normal model runner on the same admitted task. The
+verified-owner channels (v4), a durably recorded successful HTTP effect with an
+unreleased owner continuation continues through the normal model runner on the same admitted task. The
 runner loads the original human request from that exact live root and supplies
 bounded, redacted operation receipts as quoted, untrusted tool data. It preserves
 the conversation key, selected model, billing lane, task/source audience and
 ordinary model and tool egress checks. The model continues the remaining task;
 the retained effect keeps its original operation identity and cannot be sent
-again from the original or resume turn. A separately gated readback may require
-its own review before continuing.
+again from any automatic continuation of that task, including a later readback
+review. A separately gated readback may require its own review before continuing.
+A new human request has its own root and may execute the same reviewed effect.
 
-Every distinct request in a batched wake must have a fresh successful receipt.
+Every distinct request in a batched wake must have a successful, available receipt
+and a version-1 pending `owner_continuation` marker. The marker commits with the
+known success, after continuation readiness is resolved before provider egress.
+After normal model/context preparation, an atomic batch release fences the live
+worker, task, source, actor and key before the request can be sealed for model
+I/O. Only one release wins. A crash before release leaves the completed effect
+recoverable without another provider send. Preparation failure leaves it pending;
+ordinary failed-turn settlement does not mark that receipt delivered or finish
+the root. Existing bounded maintenance can wake that exact unfinished task again.
+Release is irreversible: an ambiguous launch or lost model/settlement response
+cannot start another model task. Existing recovery of the same sealed model
+request retains its original lookup, idempotency and egress fences.
+
 Denied, expired, waiting, cancelled, failed HTTP, uncertain and operational-error
-outcomes do not start a model continuation. A replayed completed receipt remains
-a receipt only, including after a lost wake or settlement response; it does not
-restart the task. Shared/group/org/platform/delegated/voice/external sources retain
-their existing receipt behavior. No new persisted state or replay permission is
-introduced.
+outcomes do not establish continuation eligibility. A mixed terminal wake durably
+blocks its still-pending success markers before publishing its receipt. Historical
+receipts without the marker, unavailable results and released receipts remain
+receipt-only. Shared/group/org/platform/delegated/voice/external sources retain
+their existing receipt behavior. Metadata contains only version, blocked state
+and the releasing turn ID; the encrypted receipt remains the single result copy.
+
+Marker authoring and release require the optional fleet capability
+`permissions:execution-owner-continuation-v1`. Fresh effects retain receipt-only
+behavior until it is ready; pending marked continuations refuse on readiness
+loss. It adds no cohort prerequisite, feature flag, collection, index or backfill.
+Before binary rollback, disable effective execution cohorts and drain/cancel
+pending owner continuations on upgraded workers. Old workers can read the optional
+fields but cannot preserve the pending-release lifecycle. Keep released/uncertain
+claims intact and recover unfinished work through authenticated web history.
 
 Group receipt publication includes only HTTP outcome, never raw provider account
 data. The original requester can read the bounded encrypted result on their

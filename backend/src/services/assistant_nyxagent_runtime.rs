@@ -2737,11 +2737,21 @@ async fn execute_turn_inner(
         // request can become a recoverable sealed model input. A survivor may
         // send that sealed input, so the release must precede sealing it.
         if let Some(retained) = retained.filter(|_| !continuation_released) {
+            #[cfg(test)]
+            if super::execution_permission_dispatch::proposals::continuation::FAIL_BEFORE_RELEASE
+                .try_with(|fail| *fail)
+                .unwrap_or(false)
+            {
+                return Err(TurnError::internal(
+                    "assistant_unavailable",
+                    "permission_resume",
+                ));
+            }
             if credential.api_key_id != row.credential_api_key_id {
                 return Err(TurnError::internal("cancelled", "permission_resume"));
             }
             if !retained
-                .release(state, row)
+                .release(state, row, credential)
                 .await
                 .map_err(|_| TurnError::internal("assistant_unavailable", "permission_resume"))?
             {
@@ -2755,6 +2765,16 @@ async fn execute_turn_inner(
                 });
             }
             continuation_released = true;
+            #[cfg(test)]
+            if super::execution_permission_dispatch::proposals::continuation::FAIL_AFTER_RELEASE
+                .try_with(|fail| *fail)
+                .unwrap_or(false)
+            {
+                return Err(TurnError::internal(
+                    "assistant_unavailable",
+                    "permission_resume",
+                ));
+            }
         }
         let saved_input = if turn.restart_admission.is_some() {
             request_body["background"] = json!(true);

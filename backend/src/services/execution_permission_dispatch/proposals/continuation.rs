@@ -5,6 +5,12 @@ use crate::services::assistant_nyxagent as engine;
 
 pub(crate) const READINESS: &str = "permissions:execution-owner-continuation-v1";
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static FAIL_BEFORE_RELEASE: bool;
+    pub(crate) static FAIL_AFTER_RELEASE: bool;
+}
+
 pub(crate) enum ResumeOutcome {
     Receipt(String),
     Continue(OwnerContinuation),
@@ -60,6 +66,8 @@ pub(super) fn eligible(
         || p.source_credential_id.is_some()
         || p.task.task.root_kind != TaskRootKind::Message
         || p.contract.subject.lane != ExecutionLane::Owner
+        || p.contract.subject.actor_user_id != row.user_id
+        || !matches!(&p.contract.subject.principal, Principal::Agent(id) if row.agent_id.as_ref() == Some(id))
         || p.contract.binding.owner_user_id != row.user_id
         || p.contract.binding.behavior_digest.is_some()
     {
@@ -81,6 +89,34 @@ pub(super) fn eligible(
     }
 }
 
+fn source_filter(row: &AssistantConversation) -> AppResult<Document> {
+    let task = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.execution_task.as_ref())
+        .ok_or_else(refused)?;
+    let mut filter = tasks::live_filter(task)?;
+    filter.extend(doc! {
+        "conversation_id": &row.id, "user_id": &row.user_id,
+        "role": "user", "author": "owner",
+        "origin": if task.channel_source.is_some() { "channel" } else { "user" },
+    });
+    Ok(filter)
+}
+
+/// A delegated child cannot borrow its parent's human message as its own source.
+pub(super) async fn original_owner_source(
+    db: &Database,
+    row: &AssistantConversation,
+) -> AppResult<bool> {
+    Ok(db
+        .collection::<Document>("assistant_messages")
+        .find_one(source_filter(row)?)
+        .projection(doc! {"_id":1})
+        .await?
+        .is_some())
+}
+
 pub(super) async fn prepare(
     state: &crate::AppState,
     row: &AssistantConversation,
@@ -93,16 +129,10 @@ pub(super) async fn prepare(
         .and_then(|turn| turn.execution_task.as_ref())
         .ok_or_else(refused)?;
     tasks::check(&state.db, task).await?;
-    let mut filter = tasks::live_filter(task)?;
-    filter.extend(doc! {
-        "conversation_id": &row.id, "user_id": &row.user_id,
-        "role": "user", "author": "owner",
-        "origin": if task.channel_source.is_some() { "channel" } else { "user" },
-    });
     let message = state
         .db
         .collection::<AssistantMessage>("assistant_messages")
-        .find_one(filter)
+        .find_one(source_filter(row)?)
         .await?
         .filter(|message| message.author == Some(MessageAuthor::Owner))
         .ok_or_else(refused)?;
@@ -131,20 +161,26 @@ impl OwnerContinuation {
         &self,
         state: &crate::AppState,
         row: &AssistantConversation,
+        credential: &crate::services::assistant_agent_credential_service::AssistantCredential,
     ) -> AppResult<bool> {
         crate::services::security_readiness_service::require_serving(&state.db, READINESS).await?;
         let turn = row.active_turn.as_ref().ok_or_else(refused)?;
         let task = turn.execution_task.as_ref().ok_or_else(refused)?;
+        if credential.api_key_id != row.credential_api_key_id || credential.raw_key.is_empty() {
+            return Err(refused());
+        }
+        let key_hash = crate::crypto::token::hash_token(credential.raw_key.as_str());
         let mut session = state.db.client().start_session().await?;
         let result = session.start_transaction().and_run(
-            (&state.db, row, turn, task, &self.receipts),
-            |session, (db, row, turn, task, receipts)| Box::pin(async move {
+            (&state.db, row, turn, task, &self.receipts, &key_hash),
+            |session, (db, row, turn, task, receipts, key_hash)| Box::pin(async move {
                 let result: AppResult<bool> = async {
                     tasks::fence(db, session, task).await?;
                     let mut filter = engine::WorkerFence::capture(row)?.filter();
                     filter.extend(doc! {
                         "active_turn.stop_requested": false,
                         "active_turn.lease_expires_at": {"$gt": bson::DateTime::now()},
+                        "model": &row.model, "agent_id": &row.agent_id,
                     });
                     if db.collection::<Document>("assistant_conversations")
                         .update_one(filter, doc! {"$inc": {"execution_dispatch_fence": 1_i64}})
@@ -154,7 +190,15 @@ impl OwnerContinuation {
                     }
                     if db.collection::<Document>("api_keys").update_one(doc! {
                         "_id": &row.credential_api_key_id, "user_id": &row.user_id, "is_active": true,
+                        "key_hash": *key_hash,
                         "$or": [{"expires_at": null}, {"expires_at": {"$gt": bson::DateTime::now()}}],
+                    }, doc! {"$inc": {"execution_dispatch_fence": 1_i64}})
+                        .session(&mut *session).await?.matched_count != 1
+                    {
+                        return Err(refused());
+                    }
+                    if db.collection::<Document>("assistant_agents").update_one(doc! {
+                        "_id": &row.agent_id, "user_id": &row.user_id, "destroyed_at": null,
                     }, doc! {"$inc": {"execution_dispatch_fence": 1_i64}})
                         .session(&mut *session).await?.matched_count != 1
                     {
@@ -166,6 +210,12 @@ impl OwnerContinuation {
                             "activity_outcome": "completed",
                             "execution_proposal.v1.state": "completed",
                             "execution_proposal.v1.claim_id": &receipt.claim_id,
+                            "execution_proposal.v1.key_id": &row.credential_api_key_id,
+                            "execution_proposal.v1.conversation_id": &row.id,
+                            "execution_proposal.v1.task.task": bson::to_bson(&task.task).map_err(encoding)?,
+                            "execution_proposal.v1.task.epoch": task.epoch,
+                            "execution_proposal.v1.delivery_abandoned": {"$ne": true},
+                            "execution_proposal.v1.result": {"$ne": null},
                             "execution_proposal.v1.delivered_turn_id": null,
                             "execution_proposal.v1.owner_continuation.version": 1,
                             "execution_proposal.v1.owner_continuation.blocked": {"$ne": true},

@@ -95,7 +95,9 @@ export function ApprovalHistoryPage() {
   const decideMutation = useDecideApproval();
 
   const requests = data?.requests ?? [];
-  const hasActions = requests.some((request) => request.execution_proposal || request.status === "pending");
+  const hasActions = requests.some(
+    (request) => request.execution_proposal || request.status === "pending",
+  );
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
@@ -214,36 +216,38 @@ export function ApprovalHistoryPage() {
                       <Button asChild variant="outline" size="sm" className="flex-1">
                         <a href={request.execution_proposal.review_path}>{translateUi("Review")}</a>
                       </Button>
-                    ) : <>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1 h-8 text-14"
-                      onClick={() =>
-                        setDecideTarget({
-                          id: request.id,
-                          service: request.service_name,
-                          approvalMode: request.approval_mode,
-                          action: "approve",
-                        })
-                      }
-                    >
-                      <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>{translateUi("Approve")}</Button>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="flex-1 h-8 text-14"
-                      onClick={() =>
-                        setDecideTarget({
-                          id: request.id,
-                          service: request.service_name,
-                          approvalMode: request.approval_mode,
-                          action: "reject",
-                        })
-                      }
-                    >
-                      <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Reject")}</Button>
-                    </>}
+                    ) : (
+                      <>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="flex-1 h-8 text-14"
+                          onClick={() =>
+                            setDecideTarget({
+                              id: request.id,
+                              service: request.service_name,
+                              approvalMode: request.approval_mode,
+                              action: "approve",
+                            })
+                          }
+                        >
+                          <ButtonIcon><CheckCircle2 className="h-3 w-3 text-success" /></ButtonIcon>{translateUi("Approve")}</Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="flex-1 h-8 text-14"
+                          onClick={() =>
+                            setDecideTarget({
+                              id: request.id,
+                              service: request.service_name,
+                              approvalMode: request.approval_mode,
+                              action: "reject",
+                            })
+                          }
+                        >
+                          <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Reject")}</Button>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
