@@ -18,6 +18,32 @@ import { semanticMarkdown } from "./public-content.mjs";
 import { writeRouting } from "./public-routing.mjs";
 const root = path.resolve(import.meta.dirname, ".."),
   dist = path.join(root, "dist");
+const assetManifest = JSON.parse(
+  await fs.readFile(path.join(dist, ".vite/manifest.json"), "utf8"),
+);
+function stylesheetHead(meta) {
+  const styles = new Set(), visited = new Set();
+  function collect(key) {
+    if (visited.has(key)) return;
+    visited.add(key);
+    const chunk = assetManifest[key];
+    if (!chunk) throw new Error(`Missing public asset entry: ${key}`);
+    for (const css of chunk.css ?? []) styles.add(css);
+    for (const dependency of chunk.imports ?? []) collect(dependency);
+  }
+  // Follow only static imports: session code and optional animation chunks are
+  // still deferred. These are the same hashed styles Vite loads for hydration.
+  collect("src/features/public-site/bootstrap.tsx");
+  if (meta.route === "/") {
+    collect("src/features/website-a/nyx-home/nyx-home-page.tsx");
+  } else if (!meta.path.startsWith("/docs")) {
+    // Generated page modules use PascalCase route names in each locale folder.
+    const name = meta.route.slice(1).split(/[/-]/)
+      .map((part) => part[0].toUpperCase() + part.slice(1)).join("");
+    collect(`src/features/website-a/generated/${meta.locale}/${name}Page.tsx`);
+  }
+  return [...styles].map((css) => `<link rel="stylesheet" crossorigin href="/${css}">`).join("\n") + "\n";
+}
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const origin = process.env.PUBLIC_SITE_ORIGIN || PUBLIC_ORIGIN;
 if (new URL(origin).origin !== origin)
@@ -83,7 +109,7 @@ for (const route of paths) {
       '<html lang="en"',
       `<html lang="${meta.locale === "zh" ? "zh-CN" : "en"}"`,
     )
-    .replace("</head>", metadataHead(meta, origin) + "</head>")
+    .replace("</head>", stylesheetHead(meta) + metadataHead(meta, origin) + "</head>")
     .replace(
       '<div id="root"></div>',
       `<div id="root" data-public-render="v1" data-website-config="${encodeURIComponent(websiteConfiguration)}">${html}</div>`,
