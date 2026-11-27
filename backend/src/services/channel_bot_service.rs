@@ -3363,6 +3363,7 @@ pub(crate) async fn fence_owner_management(
 #[cfg(test)]
 mod tests {
     mod guest_preferences;
+    mod historical;
     mod mixed_records;
     use super::*;
     use std::sync::{Arc, Mutex};
@@ -3471,7 +3472,7 @@ mod tests {
     }
 
     async fn make_lark_bot(encryption_keys: &EncryptionKeys, bot_token: &str) -> ChannelBot {
-        ChannelBot {
+        let mut bot = ChannelBot {
             meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
@@ -3498,7 +3499,7 @@ mod tests {
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
-            bot_token_encrypted: encryption_keys.encrypt(bot_token.as_bytes()).await.unwrap(),
+            bot_token_encrypted: Vec::new(),
             platform_bot_id: "cli_test".to_string(),
             platform_bot_username: "testbot".to_string(),
             webhook_registered: false,
@@ -3512,7 +3513,18 @@ mod tests {
             is_active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
-        }
+        };
+        bot.bot_token_encrypted = crate::services::channel_bot_record::encrypt(
+            encryption_keys,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            bot_token,
+        )
+        .await
+        .unwrap();
+        crate::services::channel_bot_record::mark_new(&mut bot, encryption_keys).unwrap();
+        bot
     }
 
     #[tokio::test]
@@ -3904,11 +3916,10 @@ mod tests {
     async fn bot_token_decode_error_omits_plaintext() {
         let keys = test_encryption_keys();
         let mut bot = make_lark_bot(&keys, "fixture").await;
-        bot.bot_token_encrypted = keys
-            .encrypt(b"fixture-private-bot-token\xff")
-            .await
-            .unwrap();
+        bot.bot_token_encrypted = hex::decode(historical::INVALID_UTF8_TOKEN).unwrap();
+        bot.secret_context_versions.remove("bot_token_encrypted");
         let error = decrypt_bot_token(&keys, &bot).await.unwrap_err();
+        assert!(matches!(&error, AppError::Internal(message) if message.contains("invalid UTF-8")));
         for output in [
             error.to_string(),
             format!("{error:?}"),
