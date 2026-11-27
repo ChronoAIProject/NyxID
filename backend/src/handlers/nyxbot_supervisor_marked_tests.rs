@@ -69,9 +69,159 @@ async fn marked_assign(j: &Journey, text: &str, id: &str) -> tokio::task::JoinHa
             review_diagnostics(j).await
         );
     }
+    let sent = delegation_review(&card).expect("the actual owner-facing delegation card");
+    let card_id = sent["acknowledgement_id"].as_str().unwrap().to_owned();
+    let conversation = sent["conversation_id"].as_str().unwrap().to_owned();
+    let source = j
+        .state
+        .db
+        .collection::<Document>("assistant_acknowledgements")
+        .find_one(doc! {"_id":&card_id,"user_id":OWNER,"conversation_id":&conversation})
+        .projection(doc! {"_id":1,"status":1,"requested_turn_id":1,"execution_task.task.root_id":1})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(source.get_str("status").unwrap(), "pending");
     let code = delegation_code(&card);
     let response = marked_owner(j, &format!("yes {code}"), &format!("{id}-assign")).await;
-    tokio::spawn(body_text(response))
+    let state = j.state.clone();
+    let observed = j.observed.clone();
+    tokio::spawn(async move {
+        let text = body_text(response).await;
+        let used = state
+            .db
+            .collection::<Document>("assistant_acknowledgements")
+            .find_one(doc! {"_id":&card_id,"user_id":OWNER,"conversation_id":&conversation})
+            .projection(
+                doc! {"_id":1,"status":1,"requested_turn_id":1,"execution_task.task.root_id":1},
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            used.get_str("status").unwrap(),
+            "used",
+            "the reply must consume the exact sent delegation card"
+        );
+        assert_eq!(
+            used.get("requested_turn_id"),
+            source.get("requested_turn_id")
+        );
+        let mut observations = observed.lock().await;
+        let retry = observations
+            .iter()
+            .find(|event| {
+                event["stage"] == "delegation_retry"
+                    && event["acknowledgement_id"] == card_id
+                    && event["conversation_id"] == conversation
+            })
+            .expect("the product input must name the exact reviewed card");
+        let reply_turn = retry["turn_id"].clone();
+        let reply_root = retry["task_root"].clone();
+        observations.push(json!({"stage":"delegation_card_used","acknowledgement_id":card_id,
+            "conversation_id":conversation,"requested_turn_id":source.get_str("requested_turn_id").unwrap(),
+            "original_root":source.get_document("execution_task").unwrap().get_document("task").unwrap().get_str("root_id").unwrap(),
+            "reply_turn":reply_turn,"reply_root":reply_root}));
+        text
+    })
+}
+
+#[tokio::test]
+async fn supervisor_write_marked_fresh_request_uses_its_card_despite_an_older_allowed_card() {
+    let j = Box::pin(marked_journey(false)).await;
+    let request = "Ask accountant for today's pending ledger rows";
+    let old = owner_text(&body_text(marked_owner(&j, request, "ws7-stale-card-first").await).await);
+    let old = delegation_review(&old).unwrap();
+    let old_id = old["acknowledgement_id"].as_str().unwrap();
+    let conversation = old["conversation_id"].as_str().unwrap();
+    // An actual owner decision in the ordinary card service leaves this older
+    // action allowed. A later new request is not a retry of that decision.
+    let allowed = crate::services::assistant_acknowledgement_service::decide(
+        &j.state.db,
+        OWNER,
+        conversation,
+        old_id,
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(allowed.status, "allowed");
+    let fresh =
+        owner_text(&body_text(marked_owner(&j, request, "ws7-stale-card-fresh").await).await);
+    let fresh =
+        delegation_review(&fresh).expect("a fresh owner request must get its own pending card");
+    let fresh_id = fresh["acknowledgement_id"].as_str().unwrap();
+    assert_ne!(fresh_id, old_id);
+    assert_eq!(fresh["conversation_id"], conversation);
+    let cards = j
+        .state
+        .db
+        .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
+            "assistant_acknowledgements",
+        );
+    let pending = cards
+        .find_one(doc! {"_id":fresh_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.status, "pending");
+    assert_eq!(
+        cards
+            .find_one(doc! {"_id":old_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "allowed"
+    );
+    assert!(
+        !j.observed
+            .lock()
+            .await
+            .iter()
+            .any(|e| e["stage"] == "delegation_retry")
+    );
+    assert!(j.ledger.lock().unwrap().reads.is_empty());
+    assert_no_write(&j);
+    let phrase = fresh["confirm_phrase"].as_str().unwrap();
+    let response = marked_owner(&j, phrase, "ws7-stale-card-fresh-yes").await;
+    let report = owner_text(&body_text(response).await);
+    assert_row_report(&report, &j, "Pending", 1);
+    assert_eq!(
+        cards
+            .find_one(doc! {"_id":fresh_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "used"
+    );
+    assert_eq!(
+        cards
+            .find_one(doc! {"_id":old_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "allowed"
+    );
+    let evidence = j.observed.lock().await;
+    let retry = evidence
+        .iter()
+        .find(|e| e["stage"] == "delegation_retry")
+        .unwrap();
+    assert_eq!(retry["acknowledgement_id"], fresh_id);
+    assert_ne!(
+        retry["turn_id"],
+        pending.requested_turn_id.as_deref().unwrap()
+    );
+    assert_ne!(
+        retry["task_root"],
+        pending.execution_task.as_ref().unwrap().task.root_id
+    );
+    drop(evidence);
+    assert_no_write(&j);
+    remove_adapter(&j);
 }
 
 fn assert_no_write(j: &Journey) {

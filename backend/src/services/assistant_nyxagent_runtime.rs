@@ -1739,11 +1739,11 @@ pub(crate) async fn execute_owner_turn(
         .unwrap_or(text);
     let provider_notice = resumed.as_ref().and_then(|r| r.provider_notice);
     if let Some(notice) = provider_notice {
-        *partial = notice.into();
+        prepend_provider_notice_once(partial, notice);
     }
     let preserve_provider_notice = |result: &mut TurnResult, partial: &mut String| {
         if let Some(notice) = provider_notice {
-            result.text = format!("{notice}\n\n{}", result.text);
+            prepend_provider_notice_once(&mut result.text, notice);
             *partial = result.text.clone();
         }
     };
@@ -1771,7 +1771,7 @@ pub(crate) async fn execute_owner_turn(
         .await
         .map_err(|error| {
             if let Some(notice) = provider_notice {
-                *partial = format!("{notice}\n\n{partial}");
+                prepend_provider_notice_once(partial, notice);
             }
             error
         })?
@@ -1811,11 +1811,22 @@ pub(crate) async fn execute_owner_turn(
         }
         Err(error) => {
             if let Some(notice) = provider_notice {
-                *partial = format!("{notice}\n\n{partial}");
+                prepend_provider_notice_once(partial, notice);
             }
             Err(error)
         }
     }
+}
+
+fn prepend_provider_notice_once(text: &mut String, notice: &str) {
+    if text.starts_with(notice) {
+        return;
+    }
+    *text = if text.is_empty() {
+        notice.to_owned()
+    } else {
+        format!("{notice}\n\n{text}")
+    };
 }
 
 fn allows_fallback(error: &TurnError) -> bool {

@@ -331,7 +331,8 @@ when independent readback is not verified, it reports that limitation explicitly
 An observation after uncertainty does not prove that this write caused the state.
 A provider non-2xx remains a rejected write attempt even when the HTTP exchange
 is complete or an independent read observes the requested value. A bounded
-rejection notice survives the specialist report, coalesced receipts and terminal
+rejection notice appears once in the specialist report, including early model
+or fallback errors, and survives coalesced receipts and terminal
 recovery; another occurrence's failed receipt cannot label a later write failed.
 The exact marked wait reads its configured timeout without materializing default
 notification settings after execution authority has been captured.

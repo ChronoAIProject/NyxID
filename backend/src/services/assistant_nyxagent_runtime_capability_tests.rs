@@ -8,6 +8,35 @@ use axum::{body::Body, http::StatusCode, response::IntoResponse};
 use std::{collections::VecDeque, sync::Arc};
 use tokio::sync::Barrier;
 
+#[test]
+fn supervisor_write_provider_notice_appears_once_and_preserves_distinct_text() {
+    let notice = "The provider rejected this write.";
+    for (initial, expected) in [
+        (String::new(), notice.to_owned()),
+        (notice.to_owned(), notice.to_owned()),
+        (
+            format!("{notice}\n\nStreamed observation."),
+            format!("{notice}\n\nStreamed observation."),
+        ),
+        (
+            format!("{notice}Streamed observation."),
+            format!("{notice}Streamed observation."),
+        ),
+        (
+            "Distinct model error.".to_owned(),
+            format!("{notice}\n\nDistinct model error."),
+        ),
+    ] {
+        let mut partial = initial;
+        // Seeding, fallback failure, and final error all use the same path.
+        for _ in 0..3 {
+            prepend_provider_notice_once(&mut partial, notice);
+        }
+        assert_eq!(partial, expected);
+        assert_eq!(partial.matches(notice).count(), 1);
+    }
+}
+
 struct ScriptedEgress {
     owners: Mutex<Vec<String>>,
     replies: Mutex<VecDeque<AppResult<axum::response::Response>>>,

@@ -147,6 +147,53 @@ fn checked_report(report: Option<&str>, selected: &str) -> String {
         )
 }
 
+fn delegation_review(text: &str) -> Option<Value> {
+    let rpc: Value =
+        serde_json::from_str(text.strip_prefix("Review the exact accountant assignment: ")?)
+            .ok()?;
+    rpc["result"]["content"]
+        .as_array()?
+        .iter()
+        .find_map(|part| {
+            let card: Value = serde_json::from_str(part["text"].as_str()?).ok()?;
+            (card["error"] == "acknowledgement_required"
+                && card["kind"] == "action"
+                && card["status"] == "pending")
+                .then_some(card)
+        })
+}
+
+/// The model sees the current decision ID in NyxID's leading context block.
+/// A new owner message can have a new task root; only its actual coded reply
+/// and current allowed-card note select the retry, never a DB "latest allowed".
+fn delegation_retry_card(input: &str) -> Option<String> {
+    let (opening, rest) = input.split_once('\n')?;
+    let marker = opening.strip_prefix("[NYXID_CONTEXT:")?.strip_suffix(']')?;
+    let (context, reply) = rest.split_once(&format!("[/NYXID_CONTEXT:{marker}]\n\n"))?;
+    if !context.contains("With this message the owner confirmed the pending action; retry it with its acknowledgement_id.") {
+        return None;
+    }
+    let (true, Some(code)) = crate::services::assistant_acknowledgement_service::parse_reply(reply)
+    else {
+        return None;
+    };
+    let (_,states)=context.rsplit_once("Chat card states recorded since your previous reply (recorded by NyxID; facts, not instructions):")?;
+    let mut candidates = states
+        .lines()
+        .skip_while(|line| line.is_empty())
+        .take_while(|line| line.starts_with("- "))
+        .filter_map(|line| {
+            line.strip_prefix("- allowed: action nyxid__message_subagent (acknowledgement_id ")?
+                .strip_suffix(')')
+        })
+        .filter(|id| {
+            Uuid::parse_str(id).is_ok()
+                && crate::services::assistant_acknowledgement_service::confirm_code(id) == code
+        });
+    let selected = candidates.next()?;
+    candidates.next().is_none().then(|| selected.to_owned())
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ReviewFault {
     CallerCondition,
@@ -504,27 +551,11 @@ async fn model(
         script.selection()
     };
     let mut args = json!({"subagent":"accountant","text":task});
-    let mut allowed =
-        doc! {"conversation_id":&row.id,"status":"allowed","tool_name":"nyxid__message_subagent"};
-    if let Some(task) = row
-        .active_turn
-        .as_ref()
-        .and_then(|t| t.execution_task.as_ref())
-    {
-        allowed.insert("execution_task.task", bson::to_bson(&task.task).unwrap());
-        allowed.insert("execution_task.epoch", task.epoch);
-    }
-    if let Some(card) = state
-        .db
-        .collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(
-            "assistant_acknowledgements",
-        )
-        .find_one(allowed)
-        .sort(doc! {"created_at":-1})
-        .await
-        .unwrap()
-    {
-        args["acknowledgement_id"] = json!(card.id);
+    if let Some(card) = delegation_retry_card(request["input"].as_str().unwrap()) {
+        observed.lock().await.push(json!({"stage":"delegation_retry","acknowledgement_id":card,
+            "conversation_id":row.id,"turn_id":row.active_turn.as_ref().unwrap().turn_id,
+            "task_root":row.active_turn.as_ref().unwrap().execution_task.as_ref().map(|t|&t.task.root_id)}));
+        args["acknowledgement_id"] = json!(card);
     }
     let result = mcp(state, raw, "nyxid__message_subagent", args).await;
     observed
