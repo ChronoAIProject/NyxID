@@ -2187,6 +2187,7 @@ pub async fn touch_last_used(db: &mongodb::Database, key_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    use crate::services::credential_record_service::fixtures;
     use chrono::Utc;
     use mongodb::bson::doc;
 
@@ -2318,26 +2319,33 @@ mod tests {
             .await
             .unwrap();
 
+        let token_id = uuid::Uuid::new_v4().to_string();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
                 secret_context_versions: Default::default(),
-                id: uuid::Uuid::new_v4().to_string(),
+                id: token_id.clone(),
                 user_id: org_id.clone(),
                 provider_config_id: provider_id.clone(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
                 access_token_encrypted: Some(
-                    test_encryption_keys()
-                        .encrypt(b"fixture-access")
-                        .await
-                        .unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &org_id,
+                        "access_token_encrypted",
+                        b"fixture-access",
+                    )
+                    .await,
                 ),
                 refresh_token_encrypted: Some(
-                    test_encryption_keys()
-                        .encrypt(b"fixture-refresh")
-                        .await
-                        .unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &org_id,
+                        "refresh_token_encrypted",
+                        b"fixture-refresh",
+                    )
+                    .await,
                 ),
                 token_scopes: Some("openid profile".to_string()),
                 expires_at: None,
@@ -2411,26 +2419,33 @@ mod tests {
             .await
             .unwrap();
 
+        let token_id = uuid::Uuid::new_v4().to_string();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
                 secret_context_versions: Default::default(),
-                id: uuid::Uuid::new_v4().to_string(),
+                id: token_id.clone(),
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
                 access_token_encrypted: Some(
-                    test_encryption_keys()
-                        .encrypt(b"fixture-access")
-                        .await
-                        .unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &user_id,
+                        "access_token_encrypted",
+                        b"fixture-access",
+                    )
+                    .await,
                 ),
                 refresh_token_encrypted: Some(
-                    test_encryption_keys()
-                        .encrypt(b"fixture-refresh")
-                        .await
-                        .unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &user_id,
+                        "refresh_token_encrypted",
+                        b"fixture-refresh",
+                    )
+                    .await,
                 ),
                 token_scopes: Some("openid profile".to_string()),
                 expires_at: None,
@@ -3042,25 +3057,32 @@ mod tests {
 
     async fn provider_token(user_id: &str, provider_id: &str) -> UserProviderToken {
         let now = Utc::now();
+        let token_id = uuid::Uuid::new_v4().to_string();
         UserProviderToken {
             secret_context_versions: Default::default(),
-            id: uuid::Uuid::new_v4().to_string(),
+            id: token_id.clone(),
             user_id: user_id.to_string(),
             provider_config_id: provider_id.to_string(),
             connection_id: None,
             credential_user_id: None,
             token_type: "oauth2".to_string(),
             access_token_encrypted: Some(
-                test_encryption_keys()
-                    .encrypt(b"fixture-access")
-                    .await
-                    .unwrap(),
+                fixtures::token(
+                    &token_id,
+                    user_id,
+                    "access_token_encrypted",
+                    b"fixture-access",
+                )
+                .await,
             ),
             refresh_token_encrypted: Some(
-                test_encryption_keys()
-                    .encrypt(b"fixture-refresh")
-                    .await
-                    .unwrap(),
+                fixtures::token(
+                    &token_id,
+                    user_id,
+                    "refresh_token_encrypted",
+                    b"fixture-refresh",
+                )
+                .await,
             ),
             token_scopes: Some("openid profile".to_string()),
             expires_at: None,
@@ -3569,7 +3591,6 @@ mod tests {
         };
 
         crate::test_utils::init_test_audit_chain_hmac_key();
-        let encryption_keys = test_encryption_keys();
         let now = Utc::now();
         let user_id = uuid::Uuid::new_v4().to_string();
         let provider_id = uuid::Uuid::new_v4().to_string();
@@ -3603,20 +3624,33 @@ mod tests {
             .unwrap();
 
         // Insert a legacy provider token to sync from.
+        let token_id = uuid::Uuid::new_v4().to_string();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
                 secret_context_versions: Default::default(),
-                id: uuid::Uuid::new_v4().to_string(),
+                id: token_id.clone(),
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
                 access_token_encrypted: Some(
-                    encryption_keys.encrypt(b"legacy-access").await.unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &user_id,
+                        "access_token_encrypted",
+                        b"legacy-access",
+                    )
+                    .await,
                 ),
                 refresh_token_encrypted: Some(
-                    encryption_keys.encrypt(b"fixture-refresh").await.unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &user_id,
+                        "refresh_token_encrypted",
+                        b"fixture-refresh",
+                    )
+                    .await,
                 ),
                 token_scopes: Some("legacy".to_string()),
                 expires_at: None,
@@ -4111,10 +4145,14 @@ mod tests {
         let now = Utc::now();
         let connection_id = uuid::Uuid::new_v4().to_string();
         let key_id = uuid::Uuid::new_v4().to_string();
-        let existing_refresh = encryption_keys
-            .encrypt(b"existing-refresh-token")
-            .await
-            .unwrap();
+        let owner = uuid::Uuid::new_v4().to_string();
+        let existing_refresh = fixtures::key(
+            &key_id,
+            &owner,
+            "refresh_token_encrypted",
+            b"existing-refresh-token",
+        )
+        .await;
 
         db.collection::<UserApiKey>(super::COLLECTION_NAME)
             .insert_one(UserApiKey {
@@ -4122,15 +4160,18 @@ mod tests {
                 oauth_app_observation: None,
                 credential_source: None,
                 id: key_id.clone(),
-                user_id: uuid::Uuid::new_v4().to_string(),
+                user_id: owner.clone(),
                 label: "preserve-on-reauth".to_string(),
                 credential_type: "oauth2".to_string(),
                 credential_encrypted: None,
                 access_token_encrypted: Some(
-                    encryption_keys
-                        .encrypt(b"previous-access-token")
-                        .await
-                        .unwrap(),
+                    fixtures::key(
+                        &key_id,
+                        &owner,
+                        "access_token_encrypted",
+                        b"previous-access-token",
+                    )
+                    .await,
                 ),
                 refresh_token_encrypted: Some(existing_refresh.clone()),
                 token_scopes: Some("openid profile email".to_string()),
@@ -4245,26 +4286,33 @@ mod tests {
             .await
             .unwrap();
 
+        let token_id = uuid::Uuid::new_v4().to_string();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
                 secret_context_versions: Default::default(),
-                id: uuid::Uuid::new_v4().to_string(),
+                id: token_id.clone(),
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
                 access_token_encrypted: Some(
-                    test_encryption_keys()
-                        .encrypt(b"fixture-access")
-                        .await
-                        .unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &user_id,
+                        "access_token_encrypted",
+                        b"fixture-access",
+                    )
+                    .await,
                 ),
                 refresh_token_encrypted: Some(
-                    test_encryption_keys()
-                        .encrypt(b"fixture-refresh")
-                        .await
-                        .unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &user_id,
+                        "refresh_token_encrypted",
+                        b"fixture-refresh",
+                    )
+                    .await,
                 ),
                 token_scopes: Some("read".to_string()),
                 expires_at: None,
@@ -4317,7 +4365,6 @@ mod tests {
         };
 
         crate::test_utils::init_test_audit_chain_hmac_key();
-        let encryption_keys = test_encryption_keys();
         let now = Utc::now();
         let user_id = uuid::Uuid::new_v4().to_string();
         let provider_id = uuid::Uuid::new_v4().to_string();
@@ -4330,20 +4377,33 @@ mod tests {
             .await
             .unwrap();
 
+        let token_id = uuid::Uuid::new_v4().to_string();
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(UserProviderToken {
                 secret_context_versions: Default::default(),
-                id: uuid::Uuid::new_v4().to_string(),
+                id: token_id.clone(),
                 user_id: user_id.clone(),
                 provider_config_id: provider_id.clone(),
                 connection_id: None,
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
                 access_token_encrypted: Some(
-                    encryption_keys.encrypt(b"refresh-access").await.unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &user_id,
+                        "access_token_encrypted",
+                        b"refresh-access",
+                    )
+                    .await,
                 ),
                 refresh_token_encrypted: Some(
-                    encryption_keys.encrypt(b"fixture-refresh").await.unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &user_id,
+                        "refresh_token_encrypted",
+                        b"fixture-refresh",
+                    )
+                    .await,
                 ),
                 token_scopes: Some("read".to_string()),
                 expires_at: None,
@@ -5284,10 +5344,13 @@ mod tests {
         let mut token = provider_token(&user_id, &provider_id).await;
         token.token_type = "api_key".to_string();
         token.api_key_encrypted = Some(
-            test_encryption_keys()
-                .encrypt(b"fixture-api-key")
-                .await
-                .unwrap(),
+            fixtures::token(
+                &token.id,
+                &token.user_id,
+                "api_key_encrypted",
+                b"fixture-api-key",
+            )
+            .await,
         );
         token.access_token_encrypted = None;
         token.refresh_token_encrypted = None;

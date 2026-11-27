@@ -594,4 +594,6 @@ pub(crate) async fn migrate_snapshot(
 }
 
 #[cfg(test)]
+pub(crate) mod fixtures;
+#[cfg(test)]
 mod tests;

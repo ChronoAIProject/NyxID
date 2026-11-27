@@ -629,6 +629,7 @@ pub async fn resolve_connection_oauth_credentials(
 
 #[cfg(test)]
 mod tests {
+    use crate::services::credential_record_service::fixtures;
     #[test]
     fn resolved_oauth_credentials_debug_redacts_client_material() {
         let credentials = super::ResolvedOAuthCredentials {
@@ -1112,7 +1113,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let encrypted_empty = legacy.encrypt(b"").await.unwrap();
+        let encrypted_empty = fixtures::historical::empty();
         db.collection::<bson::Document>(COLLECTION_NAME).update_one(doc! {"_id":&row.id}, doc! {"$set":{
             "client_secret_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted_empty}
         }}).await.unwrap();
@@ -1374,10 +1375,11 @@ mod tests {
             return;
         };
         let enc = test_encryption_keys();
-        let cid_enc = enc.encrypt(b"admin-client-id").await.unwrap();
-        let sec_enc = enc.encrypt(b"admin-secret").await.unwrap();
-
         let mut provider = make_provider("oauth2", true, true);
+        let cid_enc =
+            fixtures::provider(&provider.id, "client_id_encrypted", b"admin-client-id").await;
+        let sec_enc =
+            fixtures::provider(&provider.id, "client_secret_encrypted", b"admin-secret").await;
         provider.client_id_encrypted = Some(cid_enc);
         provider.client_secret_encrypted = Some(sec_enc);
         provider.credential_mode = "admin".to_string();
@@ -1470,10 +1472,11 @@ mod tests {
             return;
         };
         let enc = test_encryption_keys();
-        let admin_cid_enc = enc.encrypt(b"admin-cid").await.unwrap();
-        let admin_sec_enc = enc.encrypt(b"admin-sec").await.unwrap();
-
         let mut provider = make_provider("oauth2", true, true);
+        let admin_cid_enc =
+            fixtures::provider(&provider.id, "client_id_encrypted", b"admin-cid").await;
+        let admin_sec_enc =
+            fixtures::provider(&provider.id, "client_secret_encrypted", b"admin-sec").await;
         provider.client_id_encrypted = Some(admin_cid_enc);
         provider.client_secret_encrypted = Some(admin_sec_enc);
         provider.credential_mode = "both".to_string();
@@ -1519,10 +1522,15 @@ mod tests {
             return;
         };
         let enc = test_encryption_keys();
-        let admin_cid_enc = enc.encrypt(b"admin-fallback-cid").await.unwrap();
-        let admin_sec_enc = enc.encrypt(b"admin-fallback-sec").await.unwrap();
-
         let mut provider = make_provider("oauth2", true, true);
+        let admin_cid_enc =
+            fixtures::provider(&provider.id, "client_id_encrypted", b"admin-fallback-cid").await;
+        let admin_sec_enc = fixtures::provider(
+            &provider.id,
+            "client_secret_encrypted",
+            b"admin-fallback-sec",
+        )
+        .await;
         provider.client_id_encrypted = Some(admin_cid_enc);
         provider.client_secret_encrypted = Some(admin_sec_enc);
         provider.credential_mode = "both".to_string();
@@ -1576,10 +1584,11 @@ mod tests {
             return;
         };
         let enc = test_encryption_keys();
-        let cid_enc = enc.encrypt(b"tok-admin-cid").await.unwrap();
-        let sec_enc = enc.encrypt(b"tok-admin-sec").await.unwrap();
-
         let mut provider = make_provider("oauth2", true, true);
+        let cid_enc =
+            fixtures::provider(&provider.id, "client_id_encrypted", b"tok-admin-cid").await;
+        let sec_enc =
+            fixtures::provider(&provider.id, "client_secret_encrypted", b"tok-admin-sec").await;
         provider.client_id_encrypted = Some(cid_enc);
         provider.client_secret_encrypted = Some(sec_enc);
 
@@ -1781,8 +1790,24 @@ mod tests {
         let enc = test_encryption_keys();
         let connection_id = uuid::Uuid::new_v4().to_string();
         let mut key = placeholder_key(&connection_id);
-        key.user_oauth_client_id_encrypted = Some(enc.encrypt(b"cli_marketing").await.unwrap());
-        key.user_oauth_client_secret_encrypted = Some(enc.encrypt(b"super-secret").await.unwrap());
+        key.user_oauth_client_id_encrypted = Some(
+            fixtures::key(
+                &key.id,
+                &key.user_id,
+                "user_oauth_client_id_encrypted",
+                b"cli_marketing",
+            )
+            .await,
+        );
+        key.user_oauth_client_secret_encrypted = Some(
+            fixtures::key(
+                &key.id,
+                &key.user_id,
+                "user_oauth_client_secret_encrypted",
+                b"super-secret",
+            )
+            .await,
+        );
 
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(&key)

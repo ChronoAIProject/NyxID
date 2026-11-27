@@ -8367,6 +8367,7 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 
 #[cfg(test)]
 mod tests {
+    use crate::services::credential_record_service::fixtures;
     fn reconcile_seeded_headers(
         stored: Option<&[DefaultRequestHeader]>,
         seeded: &[SeededHeader],
@@ -11983,8 +11984,6 @@ mod tests {
         let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
         let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
         let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
-        let client_id = enc.encrypt(b"configured-cloud-client").await.unwrap();
-        let client_secret = enc.encrypt(b"configured-cloud-secret").await.unwrap();
         let mut identities = Vec::new();
         for (slug, service_slug) in [
             ("cloudflare", "api-cloudflare"),
@@ -12015,7 +12014,26 @@ mod tests {
             assert_eq!(requirement.injection_method, "bearer");
             assert_eq!(requirement.injection_key.as_deref(), Some("Authorization"));
             assert!(crate::services::catalog_spec_registry::spec_for_slug(service_slug).is_some());
-            identities.push((slug, provider.id.clone(), service_slug, service.id));
+            let client_id = fixtures::provider(
+                &provider.id,
+                "client_id_encrypted",
+                b"configured-cloud-client",
+            )
+            .await;
+            let client_secret = fixtures::provider(
+                &provider.id,
+                "client_secret_encrypted",
+                b"configured-cloud-secret",
+            )
+            .await;
+            identities.push((
+                slug,
+                provider.id.clone(),
+                service_slug,
+                service.id,
+                client_id.clone(),
+                client_secret.clone(),
+            ));
             provider.credential_mode = "admin".into();
             provider.client_id_encrypted = Some(client_id.clone());
             provider.client_secret_encrypted = Some(client_secret.clone());
@@ -12029,14 +12047,16 @@ mod tests {
         for _ in 0..2 {
             super::seed_default_providers(&db, &enc).await.unwrap();
             super::seed_default_services(&db, &enc).await.unwrap();
-            for (slug, provider_id, service_slug, service_id) in &identities {
+            for (slug, provider_id, service_slug, service_id, client_id, client_secret) in
+                &identities
+            {
                 let provider = super::get_provider_by_slug(&db, slug).await.unwrap();
                 assert_eq!(&provider.id, provider_id);
                 assert_eq!(provider.credential_mode, "admin");
-                assert_eq!(provider.client_id_encrypted.as_ref(), Some(&client_id));
+                assert_eq!(provider.client_id_encrypted.as_ref(), Some(client_id));
                 assert_eq!(
                     provider.client_secret_encrypted.as_ref(),
-                    Some(&client_secret)
+                    Some(client_secret)
                 );
                 let service = services
                     .find_one(doc! { "slug": *service_slug })
@@ -13190,8 +13210,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let client_id = enc.encrypt(b"shared-google-client").await.unwrap();
-        let secret = enc.encrypt(b"shared-google-secret").await.unwrap();
+        let client_id =
+            fixtures::provider(&provider.id, "client_id_encrypted", b"shared-google-client").await;
+        let secret = fixtures::provider(
+            &provider.id,
+            "client_secret_encrypted",
+            b"shared-google-secret",
+        )
+        .await;
         providers.update_one(doc! { "_id": &provider.id }, doc! { "$set": {
             "client_id_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: client_id.clone() },
             "client_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: secret.clone() },
