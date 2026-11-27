@@ -405,6 +405,7 @@ impl Reader<'_> {
         BoundSkillReader {
             reader: self,
             agent,
+            root: None,
         }
     }
 
@@ -530,6 +531,7 @@ impl OrnnReader for AgentOwnerReader<'_> {
             return BoundSkillReader {
                 reader: self.reader,
                 agent: self.agent,
+                root: None,
             }
             .get(path)
             .await;
@@ -547,6 +549,7 @@ impl OrnnReader for AgentOwnerReader<'_> {
 struct BoundSkillReader<'a> {
     reader: &'a Reader<'a>,
     agent: &'a crate::models::assistant_agent::AssistantAgent,
+    root: Option<&'a crate::models::catalog_skill_revision::SkillReference>,
 }
 
 #[async_trait::async_trait]
@@ -567,7 +570,12 @@ impl skills::OrnnReader for BoundSkillReader<'_> {
         if method != http::Method::GET || !body.is_empty() {
             return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
         }
-        let root = if let Some(root) = system::download_root(self.agent, path) {
+        let root = if let Some(root) = self.root {
+            if !system::allows_download(root, path) {
+                return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
+            }
+            root.clone()
+        } else if let Some(root) = system::download_root(self.agent, path) {
             root.clone()
         } else {
             let system = match system::for_person(
@@ -1470,7 +1478,7 @@ pub(crate) async fn dispatch(
                 system::for_person(db, &chat.user_id, chat.guest).await?
             };
             let view = system::read_view(&agent, system.as_ref());
-            let bound = system::resolve(&agent, system.as_ref(), arg(args, "skill")).is_some();
+            let root = system::resolve(&agent, system.as_ref(), arg(args, "skill"));
             let outline = match args["section"].as_str() {
                 None => false,
                 Some("outline") => {
@@ -1484,17 +1492,21 @@ pub(crate) async fn dispatch(
                     return Err(AppError::ValidationError("section must be outline".into()));
                 }
             };
-            if !bound {
-                audit_skill_read_refusal(state, &chat.user_id, "skill_not_bound");
-                Box::pin(read_attached(&reader, &view, args, outline)).await
-            } else {
+            if let Some(root) = root {
                 Box::pin(read_attached(
-                    &reader.bound_skill(&agent),
+                    &BoundSkillReader {
+                        reader: &reader,
+                        agent: &agent,
+                        root: Some(root),
+                    },
                     &view,
                     args,
                     outline,
                 ))
                 .await
+            } else {
+                audit_skill_read_refusal(state, &chat.user_id, "skill_not_bound");
+                Box::pin(read_attached(&reader, &view, args, outline)).await
             }?
         }
         _ => {
@@ -1537,13 +1549,18 @@ pub(crate) async fn dispatch(
                             .into_iter()
                             .find(|status| status.skill_id == id)
                     });
+                    let effective = agent.destroyed_at.is_none()
+                        && match attached {
+                            Some(pin) => !pin.disabled,
+                            None => status.as_ref().is_some_and(|status| status.effective),
+                        };
                     let value = json!({
                         "agent_id": agent.id, "revision": agent.skills_revision,
                         "skill_id": id, "complete": true, "pin": pin,
                         "provenance": provenance, "system_status": status,
-                        "effective": system::resolve(&agent, context.as_ref(), &id).is_some(),
+                        "effective": effective,
                     });
-                    if skills::wire_len(&value) > 9200 {
+                    if skills::wire_len(&value) > skills::PAGE_BUDGET {
                         return Err(AppError::ValidationError("This pin cannot fit the targeted readback budget; saved-state verification is incomplete.".into()));
                     }
                     return Ok((value, false));

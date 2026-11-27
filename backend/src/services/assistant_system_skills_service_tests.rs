@@ -631,6 +631,50 @@ async fn skill_read_source_effective_builtins_and_explicit_roots_keep_exact_sour
 }
 
 #[tokio::test]
+async fn skill_read_source_exact_guids_precede_root_and_dependency_aliases() {
+    let registry = Registry::new();
+    let mut exact = registry.reference();
+    let mut alias = exact.clone();
+    alias.skill_id = uuid::Uuid::new_v4().to_string();
+    alias.name = exact.skill_id.clone();
+    alias.dependencies.clear();
+    let mut dependency_alias = exact.dependencies[0].clone();
+    dependency_alias.skill_id = uuid::Uuid::new_v4().to_string();
+    dependency_alias.name = DEP.into();
+    exact.dependencies.insert(0, dependency_alias);
+    let mut agent = agent();
+    agent.skills = vec![alias, exact.clone()];
+    assert_eq!(resolve(&agent, None, ID).unwrap().skill_id, ID);
+    let listing = skills::read(&registry, &agent, ID, None, "/", 0, None)
+        .await
+        .unwrap();
+    assert_eq!(listing["skill_id"], ID);
+    let dependency = skills::read(
+        &registry,
+        &agent,
+        ID,
+        Some(DEP),
+        "SKILL.md",
+        0,
+        listing["source_fingerprint"].as_str(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(dependency["skill_id"], DEP);
+    assert!(allows_download(
+        &exact,
+        &format!("/api/v1/skills/{DEP}/versions/1.0/download")
+    ));
+    agent.skills[1].disabled = true;
+    assert!(resolve(&agent, None, ID).is_none());
+    assert!(
+        skills::read(&registry, &agent, ID, None, "/", 0, None)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn guidance_without_an_agent_is_empty_for_configured_flag_on_users() {
     let f = orchestrator_fixture("system_skills_no_agent").await;
     flag(&f.state.db, &f.owner, true).await;

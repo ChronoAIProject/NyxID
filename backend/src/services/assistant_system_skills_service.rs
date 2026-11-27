@@ -210,19 +210,30 @@ pub fn resolve<'a>(
     if agent.destroyed_at.is_some() {
         return None;
     }
+    // An exact attached identity, including a disabled pin, cannot be shadowed
+    // by an earlier UUID-shaped alias or by a built-in.
+    if let Some(pin) = agent.skills.iter().find(|pin| pin.skill_id == skill) {
+        return (!pin.disabled).then_some(pin);
+    }
+    let builtins = system
+        .map(|context| effective(agent, context))
+        .unwrap_or_default();
+    if let Some(entry) = builtins
+        .iter()
+        .copied()
+        .find(|entry| entry.reference.skill_id == skill)
+    {
+        return Some(&entry.reference);
+    }
     agent
         .skills
         .iter()
-        .find(|pin| !pin.disabled && (pin.skill_id == skill || pin.name == skill))
+        .find(|pin| !pin.disabled && pin.name == skill)
         .or_else(|| {
-            system.and_then(|system| {
-                effective(agent, system)
-                    .into_iter()
-                    .find(|entry| {
-                        entry.reference.skill_id == skill || entry.reference.name == skill
-                    })
-                    .map(|entry| &entry.reference)
-            })
+            builtins
+                .into_iter()
+                .find(|entry| entry.reference.name == skill)
+                .map(|entry| &entry.reference)
         })
 }
 
@@ -249,21 +260,24 @@ pub(crate) fn download_root<'a>(
     agent: &'a AssistantAgent,
     path: &str,
 ) -> Option<&'a SkillReference> {
-    // Operation-scoped forwarding supplies the canonical path without its
-    // leading slash; ordinary proxy requests retain it. Treat both forms as
-    // the same internal path before comparing the exact pinned package.
+    agent.skills.iter().find(|pin| allows_download(pin, path))
+}
+
+pub(crate) fn allows_download(pin: &SkillReference, path: &str) -> bool {
+    // Scoped forwarding omits the leading slash; both forms name the same path.
     let path = path.strip_prefix('/').unwrap_or(path);
-    agent.skills.iter().filter(|pin| !pin.disabled).find(|pin| {
-        path == format!(
-            "api/v1/skills/{}/versions/{}/download",
-            pin.skill_id, pin.version
-        ) || pin.dependencies.iter().any(|dep| {
-            path == format!(
+    !pin.disabled
+        && (path
+            == format!(
                 "api/v1/skills/{}/versions/{}/download",
-                dep.skill_id, dep.version
+                pin.skill_id, pin.version
             )
-        })
-    })
+            || pin.dependencies.iter().any(|dep| {
+                path == format!(
+                    "api/v1/skills/{}/versions/{}/download",
+                    dep.skill_id, dep.version
+                )
+            }))
 }
 
 /// Re-evaluate the bound reader's allowed set from live agent/configuration rows.
@@ -285,12 +299,12 @@ pub(crate) async fn validate_download(
         return Err(denied());
     }
     let attached = resolve(&agent, None, &root.skill_id);
-    if attached == Some(root) && download_root(&agent, path) == Some(root) {
+    if attached == Some(root) && allows_download(root, path) {
         return Ok(());
     }
     let context = for_person(db, person, false).await?;
     if resolve(&agent, context.as_ref(), &root.skill_id) != Some(root)
-        || download_root(&read_view(&agent, context.as_ref()), path) != Some(root)
+        || !allows_download(root, path)
     {
         return Err(denied());
     }

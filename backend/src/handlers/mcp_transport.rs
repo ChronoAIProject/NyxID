@@ -2760,7 +2760,7 @@ fn chat_retry_digest(params: &serde_json::Value) -> String {
     chat_activity_digest(params)
 }
 
-/// These closed native readers reconstruct source or verify saved setup after
+/// These closed native readers verify saved setup after
 /// Retry. They dispatch through their normal live ACLs and never write setup.
 /// Do not infer safety from downstream names or HTTP methods.
 fn setup_recovery_read(params: &serde_json::Value) -> bool {

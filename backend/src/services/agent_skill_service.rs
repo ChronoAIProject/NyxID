@@ -1042,18 +1042,15 @@ fn attached_pin<'a>(
     skill: &str,
     dependency: Option<&str>,
 ) -> AppResult<(&'a SkillReference, &'a str, &'a str, &'a str)> {
-    let root = agent
-        .skills
-        .iter()
-        .find(|r| !r.disabled && (r.skill_id == skill || r.name == skill))
-        .ok_or(AppError::SkillRead(
-            crate::errors::skill_read::SkillReadReason::SkillNotBound,
-        ))?;
+    let root = super::assistant_system_skills_service::resolve(agent, None, skill).ok_or(
+        AppError::SkillRead(crate::errors::skill_read::SkillReadReason::SkillNotBound),
+    )?;
     let (id, version, hash) = if let Some(dep) = dependency {
         let d = root
             .dependencies
             .iter()
-            .find(|d| d.skill_id == dep || d.name == dep)
+            .find(|d| d.skill_id == dep)
+            .or_else(|| root.dependencies.iter().find(|d| d.name == dep))
             .ok_or(AppError::SkillRead(
                 crate::errors::skill_read::SkillReadReason::SkillNotBound,
             ))?;
@@ -1286,7 +1283,7 @@ pub(crate) async fn pinned_files(
 
 /// Serialized MCP tool-result budget for one page, leaving room for the
 /// JSON-RPC envelope and NyxAgent's own result decoration.
-const PAGE_BUDGET: usize = 9200;
+pub(crate) const PAGE_BUDGET: usize = 9200;
 /// Smallest outline page budget; always leaves room for some content.
 const MIN_OUTLINE_BUDGET: usize = 2500;
 const CONTINUE_READ: &str = "Continue the same skill/dependency/path with offset=next_offset and source_fingerprint. Carry the fingerprint to other files and dependencies, including offset 0. Join content without separators; verify total_bytes and sha256.";

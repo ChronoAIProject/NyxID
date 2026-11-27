@@ -568,7 +568,7 @@ async fn skill_read_source_mcp_recovers_five_files_and_verifies_saved_setup() {
 #[tokio::test]
 async fn skill_read_recovery_targeted_pins_are_live_bounded_and_retry_reads_only() {
     let (f, service, _) = operation_effect_fixture("source_targeted_readback").await;
-    let (_, pin) = registry(&f).await;
+    let (_server, pin) = registry(&f).await;
     let owner = authenticate_id(&f, &f.nyxbot_thread).await;
     let mut pins = vec![pin.clone()];
     for n in 0..15 {
@@ -586,6 +586,11 @@ async fn skill_read_recovery_targeted_pins_are_live_bounded_and_retry_reads_only
             .collect();
         pins.push(unrelated);
     }
+    // UUID-shaped aliases cannot impersonate an exact pin or an absent GUID.
+    let absent_id = uuid::Uuid::new_v4().to_string();
+    pins.swap(0, 1);
+    pins[0].name = pin.skill_id.clone();
+    pins[2].name = absent_id.clone();
     let agents = f
         .state
         .db
@@ -642,11 +647,26 @@ async fn skill_read_recovery_targeted_pins_are_live_bounded_and_retry_reads_only
         };
         assert_eq!(page["pin"], json!(pin));
         assert_eq!(page["complete"], true);
+        assert_eq!(page["effective"], true);
     }
+    let specialist = authenticate(&f).await;
+    let exact = bounded(
+        call(
+            &f,
+            &specialist,
+            "nyxid__skill_read",
+            json!({"skill":pin.skill_id,"path":"/"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(exact["skill_id"], pin.skill_id);
+    assert_eq!(exact["archive_sha256"], pin.sha256);
     agents
         .update_one(
             doc! {"_id":&f.chat.agent_id},
-            doc! {"$set":{"skills.0.disabled":true}},
+            doc! {"$set":{"skills.1.disabled":true}},
         )
         .await
         .unwrap();
@@ -662,7 +682,7 @@ async fn skill_read_recovery_targeted_pins_are_live_bounded_and_retry_reads_only
             &f,
             &owner,
             "nyxid__get_agent_skills",
-            json!({"agent":f.chat.agent_id,"skill_id":uuid::Uuid::new_v4().to_string()}),
+            json!({"agent":f.chat.agent_id,"skill_id":absent_id}),
         )
         .await,
         false,
@@ -670,6 +690,7 @@ async fn skill_read_recovery_targeted_pins_are_live_bounded_and_retry_reads_only
     .await;
     assert!(absent["pin"].is_null());
     assert_eq!(absent["complete"], true);
+    assert_eq!(absent["effective"], false);
     // Only the two exact native state readers are exempt. Paid/approved bound
     // reads, refs, setup writes, downstream names and unknown outcomes stay fenced.
     for name in [
