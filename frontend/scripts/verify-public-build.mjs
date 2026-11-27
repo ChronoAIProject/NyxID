@@ -89,6 +89,12 @@ for (const page of release.pages) {
     verifyMarkdownContract(page.path, md);
     const doc = new Window().document;
     doc.write(html);
+    if (page.file.startsWith("__public/")) {
+      const styles = [...doc.head.querySelectorAll('link[rel="stylesheet"][href^="/assets/"]')];
+      assert.ok(styles.length > 0, `${page.path}: static body must have styles before JavaScript loads`);
+      for (const style of styles)
+        await fs.access(path.join(dist, style.getAttribute("href").slice(1)));
+    }
     assert.equal(doc.querySelectorAll("h1").length, 1);
     assert.ok(
       (doc.querySelector("main")?.textContent?.trim().length ?? 0) > 40,
@@ -110,6 +116,10 @@ for (const page of release.pages) {
       assert.equal(home.getAttribute("lang"), page.locale === "zh" ? "zh-CN" : "en");
       assert.ok(home.querySelector("[data-mark] canvas"), `${page.path}: missing homepage artwork`);
       assert.ok(home.querySelector("canvas[data-nyx]"), `${page.path}: missing closing artwork`);
+      for (const icon of home.querySelectorAll(".hero-facts img")) {
+        assert.equal(icon.getAttribute("width"), "18");
+        assert.equal(icon.getAttribute("height"), "18");
+      }
       assert.equal(doc.querySelectorAll("#nav").length, 1);
       assert.equal(doc.querySelectorAll("#foot").length, 1);
     }

@@ -15,7 +15,7 @@ export default function NyxHomePage() {
   const t = (english: Parameters<typeof homeText>[0]) => homeText(english, s.language);
   const ref = useRef<HTMLDivElement>(null);
   usePublicThemeElement(ref);
-  // Mark entrance animations before paint; theme is shared with the detailed pages.
+  // Enable the interactive sorting states; the static hero stays visible during hydration.
   useLayoutEffect(() => {
     ref.current?.classList.add("js");
   }, []);
@@ -196,25 +196,17 @@ export default function NyxHomePage() {
             {" "}
             <div className="hero-copy">
               {" "}
-              <h1 data-in="" style={{ "--d": "0" } as CSSProperties}>
+              <h1>
                 <span>{t("The AI assistant")}</span>
                 <span>
                   {t("that gets it ")}
                   <em>{t("done.")}</em>
                 </span>
               </h1>{" "}
-              <p
-                className="lede"
-                data-in=""
-                style={{ "--d": "1" } as CSSProperties}
-              >
+              <p className="lede">
                 {t("Ask NyxBot in plain words on Telegram, X or the NyxID app. It books the table, replies to the customer and sends the morning brief, under rules you set.")}
               </p>{" "}
-              <div
-                className="hero-cta"
-                data-in=""
-                style={{ "--d": "2" } as CSSProperties}
-              >
+              <div className="hero-cta">
                 {" "}
                 <a className="btn" href={s.authHref("register")}>
                   {t("Get started ")}
@@ -232,22 +224,20 @@ export default function NyxHomePage() {
                   </span>
                 </a>{" "}
               </div>{" "}
-              <p
-                className="hero-facts"
-                data-in=""
-                style={{ "--d": "3" } as CSSProperties}
-              >
+              <p className="hero-facts">
                 <span>{t("Open source under Apache-2.0")}</span>
                 <span>
-                  <img src="/landing/nyx/icons/telegram.svg" alt="Telegram" />
-                  <img src="/landing/nyx/icons/x.svg" alt="X" />
+                  <img src="/landing/nyx/icons/telegram.svg" alt="Telegram" width="18" height="18" />
+                  <img src="/landing/nyx/icons/x.svg" alt="X" width="18" height="18" />
                   <img
                     src="/landing/nyx/icons/whatsapp.svg"
                     alt={t("WhatsApp (coming soon)")}
                     title={t("WhatsApp — coming soon")}
+                    width="18"
+                    height="18"
                   />
-                  <img src="/landing/nyx/icons/slack.svg" alt="Slack" />
-                  <img src="/landing/nyx/icons/discord.svg" alt="Discord" />
+                  <img src="/landing/nyx/icons/slack.svg" alt="Slack" width="18" height="18" />
+                  <img src="/landing/nyx/icons/discord.svg" alt="Discord" width="18" height="18" />
                   {t("and the NyxID app")}
                 </span>
               </p>{" "}
@@ -255,8 +245,6 @@ export default function NyxHomePage() {
             <div
               className="nstage"
               data-nstage=""
-              data-in=""
-              style={{ "--d": "1" } as CSSProperties}
               aria-hidden="true"
             >
               {" "}
