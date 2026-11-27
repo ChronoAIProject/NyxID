@@ -384,6 +384,11 @@ fn ensure_proxy_request_id(headers: &mut axum::http::HeaderMap) -> String {
     generated
 }
 
+/// Only the HTTP entry handler can mark a correlation value as server generated.
+/// Caller headers, including caller-supplied UUIDs, cannot construct this marker.
+#[derive(Clone)]
+struct GeneratedProxyRequestId(String);
+
 fn apply_proxy_request_id_header(response: &mut Response, request_id: &str) {
     if !response.headers().contains_key("x-request-id")
         && let Ok(value) = axum::http::HeaderValue::from_str(request_id)
@@ -1027,8 +1032,13 @@ async fn proxy_request_unthrottled(
                 .insert(ProxyExchangeStartedAt(started_at));
             let generated_id = !request.headers().contains_key("x-request-id");
             let request_id = ensure_proxy_request_id(request.headers_mut());
-            if generated_id && let Some(context) = auth_user.execution_permission.as_ref() {
-                context.bind_generated_correlation(&request_id);
+            if generated_id {
+                request
+                    .extensions_mut()
+                    .insert(GeneratedProxyRequestId(request_id.clone()));
+                if let Some(context) = auth_user.execution_permission.as_ref() {
+                    context.bind_generated_correlation(&request_id);
+                }
             }
             if let Some(context) = &auth_user.execution_permission {
                 context.bind_cancellation(request_cancellation(&request));
@@ -1424,8 +1434,13 @@ async fn proxy_request_by_slug_unthrottled(
                 .insert(ProxyExchangeStartedAt(started_at));
             let generated_id = !request.headers().contains_key("x-request-id");
             let request_id = ensure_proxy_request_id(request.headers_mut());
-            if generated_id && let Some(context) = auth_user.execution_permission.as_ref() {
-                context.bind_generated_correlation(&request_id);
+            if generated_id {
+                request
+                    .extensions_mut()
+                    .insert(GeneratedProxyRequestId(request_id.clone()));
+                if let Some(context) = auth_user.execution_permission.as_ref() {
+                    context.bind_generated_correlation(&request_id);
+                }
             }
             if let Some(context) = &auth_user.execution_permission {
                 context.bind_cancellation(request_cancellation(&request));
@@ -4822,6 +4837,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .map(strip_internal_query_params)
         .filter(|q| !q.is_empty());
     let mut all_headers = request.headers().clone();
+    let generated_request_id = request
+        .extensions()
+        .get::<GeneratedProxyRequestId>()
+        .cloned();
     let durable_grant_id = single_system_header(
         &all_headers,
         durable_operation_grant_service::DURABLE_GRANT_HEADER,
@@ -5570,6 +5589,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             target.catalog_headers(),
                             target.user_service_default_headers.as_slice(),
                         ],
+                        generated_request_id.as_ref().map(|id| id.0.as_str()),
                     ),
                 )
             } else {

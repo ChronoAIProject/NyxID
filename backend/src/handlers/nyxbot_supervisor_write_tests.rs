@@ -61,6 +61,13 @@ async fn raw_update(state: &AppState, raw: &str, selected: &str, body: &str) -> 
     json!({"status":response.status().as_u16(),"body":body_text(response).await})
 }
 
+fn update_arguments(record: &str, fields: Value) -> Value {
+    // The published update tool flattens its required JSON object body. The
+    // optional search body below uses the separately published wrapper shape.
+    json!({"app_token":"bascnLedger","table_id":"tblLedger",
+        "record_id":record,"fields":fields})
+}
+
 fn tool_value(result: &Value) -> Option<Value> {
     let result = result.get("result").unwrap_or(result);
     if result["isError"] == true {
@@ -173,6 +180,10 @@ async fn model(
                 .is_some(),
             "delegation must carry original source"
         );
+        assert!(
+            row.active_turn.as_ref().unwrap().execution_task.is_none(),
+            "this journey exercises the legacy connected-approval lane"
+        );
         let args = json!({"app_token":"bascnLedger","table_id":"tblLedger","body":{}});
         let before = mcp(state, raw, "ledger__bitable_records_search", args.clone()).await;
         observed
@@ -200,7 +211,14 @@ async fn model(
                     )
                     .await
                 } else {
-                    mcp(state,raw,"ledger__bitable_record_update",json!({"app_token":"bascnLedger","table_id":"tblLedger","record_id":script.selected,"body":serde_json::from_slice::<Value>(body).unwrap()})).await
+                    let update: Value = serde_json::from_slice(body).unwrap();
+                    mcp(
+                        state,
+                        raw,
+                        "ledger__bitable_record_update",
+                        update_arguments(&script.selected, update["fields"].clone()),
+                    )
+                    .await
                 };
                 replies.push(reply);
             }
@@ -219,15 +237,13 @@ async fn model(
                     state,
                     raw,
                     "ledger__bitable_record_update",
-                    json!({"app_token":"bascnLedger","table_id":"tblLedger",
-                    "record_id":script.selected,"body":{"fields":{"Status":"Approved"}}})
+                    update_arguments(&script.selected, json!({"Status":"Approved"}))
                 ),
                 mcp(
                     state,
                     raw,
                     "ledger__bitable_record_update",
-                    json!({"app_token":"bascnLedger","table_id":"tblLedger",
-                    "record_id":script.control,"body":{"fields":{"Status":"Approved"}}})
+                    update_arguments(&script.control, json!({"Status":"Approved"}))
                 )
             );
             json!({"first":first,"second":second})
@@ -236,8 +252,7 @@ async fn model(
                 state,
                 raw,
                 "ledger__bitable_record_update",
-                json!({"app_token":"bascnLedger","table_id":"tblLedger",
-                "record_id":script.selected,"body":{"fields":{"Status":"Approved"}}}),
+                update_arguments(&script.selected, json!({"Status":"Approved"})),
             )
             .await
         };
@@ -727,8 +742,78 @@ fn assert_row_report(text: &str, j: &Journey, status: &str, read: usize) {
     );
 }
 
+async fn review_diagnostics(j: &Journey) -> Value {
+    // Inclusion projections only: never print a model document, tool arguments,
+    // code/digest, provider values, credential or sent message body on failure.
+    let approvals = j.state.db.collection::<Document>("approval_requests")
+        .find(doc! {"user_id":OWNER})
+        .projection(doc! {"_id":1,"status":1,"approval_mode":1,"created_at":1,"expires_at":1,
+            "supervisor_write.version":1,"supervisor_write.review_confirmed":1,"supervisor_write.dispatching":1,
+            "supervisor_write.specialist_conversation":1,"supervisor_write.specialist_turn":1,
+            "supervisor_write.source.channel.event_id":1,"execution_proposal.version":1})
+        .limit(8).await.unwrap().try_collect::<Vec<_>>().await.unwrap();
+    let conversations = j.state.db.collection::<Document>(CONVERSATIONS)
+        .find(doc! {"user_id":OWNER})
+        .projection(doc! {"_id":1,"role":1,"agent_id":1,"active_turn.turn_id":1,"active_turn.origin":1,
+            "active_turn.supervisor_source.channel.event_id":1,"active_turn.execution_task.version":1,
+            "active_turn.execution_task.task.root_id":1})
+        .limit(8).await.unwrap().try_collect::<Vec<_>>().await.unwrap();
+    let deliveries = j.state.db.collection::<Document>("audit_log")
+        .find(doc! {"user_id":OWNER,"event_type":"nyxbot_channel_supplemental_delivery"})
+        .projection(doc! {"_id":1,"event_data.purpose":1,"event_data.egress":1,"event_data.anchor":1,
+            "event_data.outcome":1,"event_data.reason":1,"event_data.turn_id":1,"event_data.channel_event_id":1})
+        .limit(16).await.unwrap().try_collect::<Vec<_>>().await.unwrap();
+    let grants = j
+        .state
+        .db
+        .collection::<Document>("approval_grants")
+        .count_documents(doc! {"user_id":OWNER})
+        .await
+        .unwrap();
+    let tool_flags: Vec<_> = j.observed.lock().await.iter().map(|observation| {
+        let result = &observation["result"];
+        let payload = result.get("result").unwrap_or(result);
+        json!({"stage":observation["stage"],"http_status":result["status"].as_u64(),
+            "rpc_error_code":result["error"]["code"].as_i64(),"is_error":payload["isError"].as_bool()})
+    }).collect();
+    let sent = j.chat.received_requests().await.unwrap();
+    let sent_reviews = sent
+        .iter()
+        .filter(|request| {
+            serde_json::from_slice::<Value>(&request.body)
+                .ok()
+                .and_then(|body| sent_text(&body))
+                .is_some_and(|text| text.contains("yes write-"))
+        })
+        .count();
+    let (reads, writes) = {
+        let ledger = j.ledger.lock().unwrap();
+        (ledger.reads.len(), ledger.writes.len())
+    };
+    let hint = if approvals.is_empty() {
+        "No connected approval: inspect active source/turn and callback error flags."
+    } else if approvals
+        .iter()
+        .all(|row| !row.contains_key("supervisor_write"))
+    {
+        "Ordinary approval only: inspect published prepared body/path, effective headers and source eligibility."
+    } else if approvals.iter().any(|row| {
+        row.get_document("supervisor_write")
+            .ok()
+            .is_some_and(|binding| binding.get_bool("review_confirmed").ok() == Some(true))
+    }) {
+        "Confirmed binding: inspect sent transport layout and matching review occurrence."
+    } else {
+        "Prepared binding without complete review: inspect supplemental delivery outcome and source anchor."
+    };
+    json!({"hint":hint,"database":j.state.db.name(),"proxy":j.script.proxy,
+        "stage":j.stage.load(Ordering::SeqCst),"approvals":approvals,"conversations":conversations,
+        "supplemental_deliveries":deliveries,"approval_grants":grants,"tool_flags":tool_flags,
+        "channel_requests":sent.len(),"sent_reviews":sent_reviews,"provider_reads":reads,"provider_writes":writes})
+}
+
 async fn wait_review(j: &Journey) -> (ApprovalRequest, String) {
-    tokio::time::timeout(std::time::Duration::from_secs(15),async {
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(15),async {
         loop {
             if let Some(row)=j.state.db.collection::<ApprovalRequest>("approval_requests")
                 .find_one(doc! {"user_id":OWNER,"supervisor_write.review_confirmed":true,"status":"pending"}).await.unwrap() {
@@ -746,7 +831,14 @@ async fn wait_review(j: &Journey) -> (ApprovalRequest, String) {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-    }).await.expect("complete review must reach the originating Telegram chat")
+    }).await;
+    match waited {
+        Ok(review) => review,
+        Err(_) => panic!(
+            "complete review must reach the originating Telegram chat: {}",
+            review_diagnostics(j).await
+        ),
+    }
 }
 
 async fn assign_from_sent_card(
@@ -820,6 +912,16 @@ async fn supervisor_write_two_approvals_real_catalog_and_independent_readback() 
             crate::models::service_approval_config::ApprovalMode::PerRequest
         );
         assert!(review.execution_proposal.is_none());
+        assert_eq!(
+            j.state
+                .db
+                .collection::<Document>("approval_grants")
+                .count_documents(doc! {"user_id":OWNER})
+                .await
+                .unwrap(),
+            0,
+            "the legacy positive journey has no reusable approval or execution grant"
+        );
         assert_eq!(j.ledger.lock().unwrap().writes.len(), 0);
         let decision =
             body_text(owner(&j, &format!("yes write-{code}"), "ws7-write-yes").await).await;
@@ -1021,7 +1123,7 @@ async fn supervisor_write_wrong_chat_sender_expiry_and_revocation_never_send() {
 }
 
 async fn all_reviews(j: &Journey, count: usize) -> Vec<(ApprovalRequest, String)> {
-    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
             let rows = j
                 .state
@@ -1067,8 +1169,14 @@ async fn all_reviews(j: &Journey, count: usize) -> Vec<(ApprovalRequest, String)
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     })
-    .await
-    .expect("all distinct exact-write reviews must reach the original chat")
+    .await;
+    match waited {
+        Ok(reviews) => reviews,
+        Err(_) => panic!(
+            "all {count} distinct exact-write reviews must reach the original chat: {}",
+            review_diagnostics(j).await
+        ),
+    }
 }
 
 #[tokio::test]

@@ -255,14 +255,20 @@ pub(crate) struct Effect {
 pub(crate) fn http_headers_allow_review(
     headers: &http::HeaderMap,
     defaults: &[&[crate::models::default_request_header::ResolvedDefaultRequestHeader]],
+    generated_request_id: Option<&str>,
 ) -> bool {
+    let generated_request_id = generated_request_id.filter(|expected| {
+        let mut values = headers.get_all("x-request-id").iter();
+        values.next().and_then(|value| value.to_str().ok()) == Some(*expected)
+            && values.next().is_none()
+    });
     let forwarded = super::proxy_service::collect_forward_headers_with_defaults(headers, defaults);
-    if forwarded
+    if forwarded.iter().any(|(name, value)| {
+        !matches!(name.as_str(), "content-type" | "accept")
+            && !(name == "x-request-id" && generated_request_id == Some(value.as_str()))
+    }) || ["content-type", "accept"]
         .iter()
-        .any(|(name, _)| !matches!(name.as_str(), "content-type" | "accept"))
-        || ["content-type", "accept"]
-            .iter()
-            .any(|name| headers.get_all(*name).iter().count() > 1)
+        .any(|name| headers.get_all(*name).iter().count() > 1)
     {
         return false;
     }
@@ -276,6 +282,11 @@ pub(crate) fn http_headers_allow_review(
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str())
     };
+    // The exemption applies to the generated value actually sent, including
+    // the same default-header merge as egress. It never admits caller IDs.
+    if generated_request_id.is_some_and(|expected| media("x-request-id") != Some(expected)) {
+        return false;
+    }
     let json = media("content-type")
         .and_then(|value| value.parse::<mime::Mime>().ok())
         .is_some_and(|kind| {
@@ -867,7 +878,7 @@ mod tests {
         );
         headers.insert("accept", "application/json".parse().unwrap());
         headers.insert("x-api-key", "not-forwarded".parse().unwrap());
-        assert!(http_headers_allow_review(&headers, &[]));
+        assert!(http_headers_allow_review(&headers, &[], None));
         let catalog = [ResolvedDefaultRequestHeader {
             name: "X-Instance".into(),
             value: "trusted".to_owned().into(),
@@ -875,9 +886,9 @@ mod tests {
             sensitive: false,
         }];
         headers.insert("x-instance", "caller".parse().unwrap());
-        assert!(http_headers_allow_review(&headers, &[]));
-        assert!(!http_headers_allow_review(&headers, &[&catalog]));
-        assert!(!http_headers_allow_review(&headers, &[&[], &catalog]));
+        assert!(http_headers_allow_review(&headers, &[], None));
+        assert!(!http_headers_allow_review(&headers, &[&catalog], None));
+        assert!(!http_headers_allow_review(&headers, &[&[], &catalog], None));
         headers.remove("x-instance");
         for (name, value) in [
             ("content-type", "text/plain"),
@@ -887,27 +898,60 @@ mod tests {
         ] {
             let mut invalid = headers.clone();
             invalid.insert(http::HeaderName::from_static(name), value.parse().unwrap());
-            assert!(!http_headers_allow_review(&invalid, &[]), "{name}: {value}");
+            assert!(
+                !http_headers_allow_review(&invalid, &[], None),
+                "{name}: {value}"
+            );
         }
         let mut duplicate = headers.clone();
         duplicate.append("content-type", "application/json".parse().unwrap());
-        assert!(!http_headers_allow_review(&duplicate, &[]));
+        assert!(!http_headers_allow_review(&duplicate, &[], None));
         headers.remove("content-type");
-        assert!(!http_headers_allow_review(&headers, &[]));
+        assert!(!http_headers_allow_review(&headers, &[], None));
         let defaults = [ResolvedDefaultRequestHeader {
             name: "Content-Type".into(),
             value: "application/json".to_owned().into(),
             overridable: false,
             sensitive: false,
         }];
-        assert!(http_headers_allow_review(&headers, &[&defaults]));
+        assert!(http_headers_allow_review(&headers, &[&defaults], None));
         headers.insert("content-type", "text/plain".parse().unwrap());
-        assert!(http_headers_allow_review(&headers, &[&defaults]));
+        assert!(http_headers_allow_review(&headers, &[&defaults], None));
         let bad = [ResolvedDefaultRequestHeader {
             value: "text/plain".to_owned().into(),
             ..defaults[0].clone()
         }];
-        assert!(!http_headers_allow_review(&headers, &[&bad]));
+        assert!(!http_headers_allow_review(&headers, &[&bad], None));
+    }
+
+    #[test]
+    fn supervisor_write_http_correlation_requires_exact_internal_provenance() {
+        use crate::models::default_request_header::ResolvedDefaultRequestHeader;
+        let mut headers = http::HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        let generated = uuid::Uuid::new_v4().to_string();
+        headers.insert("x-request-id", generated.parse().unwrap());
+        assert!(http_headers_allow_review(&headers, &[], Some(&generated)));
+        assert!(
+            !http_headers_allow_review(&headers, &[], None),
+            "a caller UUID is not proof of server provenance"
+        );
+        assert!(!http_headers_allow_review(&headers, &[], Some("different")));
+        headers.append("x-request-id", generated.parse().unwrap());
+        assert!(!http_headers_allow_review(&headers, &[], Some(&generated)));
+        headers.insert("x-request-id", generated.parse().unwrap());
+        let defaults = [ResolvedDefaultRequestHeader {
+            name: "X-Request-Id".into(),
+            value: "configured-override".to_owned().into(),
+            overridable: false,
+            sensitive: false,
+        }];
+        assert!(
+            !http_headers_allow_review(&headers, &[&defaults], Some(&generated)),
+            "the effective egress value must match the generated value"
+        );
+        headers.insert("if-match", "provider-version".parse().unwrap());
+        assert!(!http_headers_allow_review(&headers, &[], Some(&generated)));
     }
 
     #[test]
