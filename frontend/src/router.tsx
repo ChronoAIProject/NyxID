@@ -11,6 +11,7 @@ import { PersonalLinkPage } from "@/pages/platform-personal-link";
 import { onboardingSearch } from "@/schemas/platform-onboarding";
 import { ToolsPage } from "@/pages/tools";
 import { AdminToolsPage } from "@/pages/admin-tools";
+import { AdminAssistantSystemSkillsPage } from "@/pages/admin-assistant-system-skills";
 import { parseAutomationSearch } from "@/lib/automation-search";
 import {
   parseMachinesSearch,
@@ -1368,6 +1369,18 @@ const adminPlatformCredentialsRoute = createRoute({
   component: AdminPlatformCredentialsPage,
 });
 
+const adminAssistantSystemSkillsRoute = createRoute({
+  path: "assistant/system-skills",
+  getParentRoute: () => adminLayout,
+  beforeLoad: () => {
+    const { user, isLoading } = useAuthStore.getState();
+    if (!isLoading && !canAdminWrite(user)) {
+      throw redirect({ to: "/dashboard" });
+    }
+  },
+  component: AdminAssistantSystemSkillsPage,
+});
+
 const adminUploadRetentionRoute = createRoute({
   path: "upload-retention",
   getParentRoute: () => adminLayout,
@@ -1518,6 +1531,7 @@ const routeTree = rootRoute.addChildren([
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
       adminUploadRetentionRoute,
+      adminAssistantSystemSkillsRoute,
       adminPlatformBotsRoute,
       adminPlatformCredentialsRoute,
     ]),

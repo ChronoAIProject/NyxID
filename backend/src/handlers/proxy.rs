@@ -34,6 +34,7 @@ use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
 use crate::models::usage_meter::CredentialClass;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
+use crate::services::assistant_service_execution::HttpEgressGuard;
 use crate::services::node_ws_manager::{
     NodeProxyFailure, NodeProxyRequest, ProxyResponseType, StreamChunk,
 };
@@ -4425,7 +4426,7 @@ async fn execute_resolved_proxy_inner<'a>(
     assistant_projection.skill_read = request
         .extensions()
         .get::<super::agent_skills::OrnnSkillRead>()
-        .is_some();
+        .cloned();
     if machine_git {
         let git = machine_ingress
             .as_ref()
@@ -6619,8 +6620,8 @@ async fn execute_resolved_proxy_inner<'a>(
                         )
                         .await?;
                     }
-                    if let Some(guard) =
-                        crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
+                    if let Some(guard) = HttpEgressGuard::with_skill_read(
+                        HttpEgressGuard::for_proxy(
                             assistant_decision.admission.as_ref(),
                             machine_ingress.as_ref(),
                             &state.db,
@@ -6629,14 +6630,22 @@ async fn execute_resolved_proxy_inner<'a>(
                             method.as_str(),
                             path,
                         )
-                        .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
-                        .map(|guard| {
-                            guard
-                                .observed(model_request.as_ref())
-                                .projected(&assistant_projection)
-                                .routed(Some(node_route))
-                        })
-                        && let Err(error) = guard.revalidate().await
+                        .or_else(|| {
+                            HttpEgressGuard::model_observation_only(model_request.as_ref())
+                        }),
+                        &state.db,
+                        auth_user,
+                        &assistant_projection,
+                        resolved_user_service_id.as_deref(),
+                        method.as_str(),
+                        path,
+                    )
+                    .map(|guard| {
+                        guard
+                            .observed(model_request.as_ref())
+                            .projected(&assistant_projection)
+                            .routed(Some(node_route))
+                    }) && let Err(error) = guard.revalidate().await
                     {
                         if let Some(reservation) = durable_reservation.as_ref() {
                             durable_operation_grant_service::mark_send_rejected(
@@ -7632,8 +7641,8 @@ async fn execute_resolved_proxy_inner<'a>(
                     durable_operation_grant_service::mark_dispatched(&state.db, reservation, None)
                         .await?;
                 }
-                let guard =
-                    crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
+                let guard = HttpEgressGuard::with_skill_read(
+                    HttpEgressGuard::for_proxy(
                         assistant_decision.admission.as_ref(),
                         machine_ingress.as_ref(),
                         &state.db,
@@ -7642,16 +7651,22 @@ async fn execute_resolved_proxy_inner<'a>(
                         method.as_str(),
                         path,
                     )
-                    .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
-                        .map(|guard| {
-                        guard
-                            .observed(model_request.as_ref())
-                            .projected(&assistant_projection)
-                            .routed(node_route.as_ref())
-                    });
-                let guard = crate::services::assistant_service_execution::HttpEgressGuard::with_channel_guest(
-                    guard, &state.db, channel_guest_chat, None,
-                );
+                    .or_else(|| HttpEgressGuard::model_observation_only(model_request.as_ref())),
+                    &state.db,
+                    auth_user,
+                    &assistant_projection,
+                    resolved_user_service_id.as_deref(),
+                    method.as_str(),
+                    path,
+                )
+                .map(|guard| {
+                    guard
+                        .observed(model_request.as_ref())
+                        .projected(&assistant_projection)
+                        .routed(node_route.as_ref())
+                });
+                let guard =
+                    HttpEgressGuard::with_channel_guest(guard, &state.db, channel_guest_chat, None);
                 if let Some(guard) = guard
                     && let Err(error) = guard.revalidate().await
                 {
@@ -7877,6 +7892,12 @@ async fn execute_resolved_proxy_inner<'a>(
                     path,
                     query.as_deref(),
                     assistant_decision.admission.is_some()
+                        && (assistant_projection.skill_read.is_none()
+                            || auth_user.assistant_chat.as_ref().is_some_and(|chat| {
+                                !chat.guest
+                                    && chat.is_orchestrator()
+                                    && chat.org_agent_access.is_none()
+                            }))
                         && node_route.is_none()
                         && !is_ws
                         && streaming_body.is_none()
@@ -7919,8 +7940,8 @@ async fn execute_resolved_proxy_inner<'a>(
             destination_audit.dispatch();
             let target_admission_ms = elapsed_ms(exchange_started_at);
             let downstream_started_at = std::time::Instant::now();
-            let egress_guard =
-                crate::services::assistant_service_execution::HttpEgressGuard::for_proxy(
+            let egress_guard = HttpEgressGuard::with_skill_read(
+                HttpEgressGuard::for_proxy(
                     assistant_decision.admission.as_ref(),
                     machine_ingress.as_ref(),
                     &state.db,
@@ -7929,20 +7950,26 @@ async fn execute_resolved_proxy_inner<'a>(
                     method.as_str(),
                     path,
                 )
-                .or_else(|| crate::services::assistant_service_execution::HttpEgressGuard::model_observation_only(model_request.as_ref()))
-                        .map(|guard| {
-                    guard
-                        .observed(model_request.as_ref())
-                        .projected(&assistant_projection)
-                        .routed(node_route.as_ref())
-                });
-            let egress_guard =
-                crate::services::assistant_service_execution::HttpEgressGuard::with_channel_guest(
-                    egress_guard,
-                    &state.db,
-                    channel_guest_chat,
-                    channel_guest_sheets.as_ref(),
-                );
+                .or_else(|| HttpEgressGuard::model_observation_only(model_request.as_ref())),
+                &state.db,
+                auth_user,
+                &assistant_projection,
+                resolved_user_service_id.as_deref(),
+                method.as_str(),
+                path,
+            )
+            .map(|guard| {
+                guard
+                    .observed(model_request.as_ref())
+                    .projected(&assistant_projection)
+                    .routed(node_route.as_ref())
+            });
+            let egress_guard = HttpEgressGuard::with_channel_guest(
+                egress_guard,
+                &state.db,
+                channel_guest_chat,
+                channel_guest_sheets.as_ref(),
+            );
             if shared_connect {
                 require_shared_stream_guard(auth_user, egress_guard.as_ref())?;
             }
@@ -7963,6 +7990,7 @@ async fn execute_resolved_proxy_inner<'a>(
                             || channel_guest_skill.is_some()
                             || is_pool_attempt
                             || operation_scoped
+                            || assistant_projection.skill_read.is_some()
                             || operation_guest
                             || permission_ingress.is_some()
                             || target.service.offering_kind

@@ -855,6 +855,7 @@
   "Review capabilities, file roots, service ceilings, expiry and grant revisions in the existing Agent, Key detail, or granted-app controls. Revoking Machine access affects that grant; revoking an OAuth consent or parent Key affects its authority more broadly. Logging out one child credential is limited to that child.": "Review capabilities, file roots, service ceilings, expiry and grant revisions in the existing Agent, Key detail, or granted-app controls. Revoking Machine access affects that grant; revoking an OAuth consent or parent Key affects its authority more broadly. Logging out one child credential is limited to that child.",
   "Review the existing specialist assignment and its allowed capabilities before use. This Machine has already been created.": "Review the existing specialist assignment and its allowed capabilities before use. This Machine has already been created.",
   "Review {{value}}'s request: {{summary}}": "Review {{value}}'s request: {{summary}}",
+  "Revision": "Revision",
   "Revocation pending on machine. Online revocation is immediate. If delivery is interrupted, v2 leased work stops within 45 seconds.": "Revocation pending on machine. Online revocation is immediate. If delivery is interrupted, v2 leased work stops within 45 seconds.",
   "Revoke consent for third-party service connections": "Revoke consent for third-party service connections",
   "Revoke credit grant": "Revoke credit grant",
