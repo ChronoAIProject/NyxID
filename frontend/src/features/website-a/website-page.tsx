@@ -19,11 +19,7 @@ import {
   injectRedditDefaultCode,
 } from "./auth-links";
 
-import integrations from "./generated/integrations.json";
 import "./website-a.css";
-import "./visuals/visuals.css";
-import { useVisualMotion } from "./visuals/motion";
-import { VisualMotionProvider } from "./visuals/motion-provider";
 
 const English = lazy(() => import("./generated/en"));
 const Chinese = lazy(() => import("./generated/zh"));
@@ -32,14 +28,11 @@ const NyxHomePage = lazy(() => import("./nyx-home/nyx-home-page"));
 
 function Website({
   children,
-  navigationRevision,
   renderedPath,
 }: {
   children?: ReactNode;
-  navigationRevision?: number;
   renderedPath?: string;
 }) {
-  const { mode } = useVisualMotion();
   const publicRef = useRef<HTMLDivElement>(null);
   usePublicThemeElement(publicRef);
   const location = useLocation();
@@ -54,18 +47,10 @@ function Website({
   // Keep the current page's frame while the next route's loader is pending.
   // Navigation links still follow the requested URL and its locale.
   const rendered = parsePublicPath(renderedPath ?? location.pathname);
-  const [menu, setMenu] = useState({ revision: navigationRevision, open: false });
-  const menuOpen = menu.revision === navigationRevision && menu.open;
   const [filters, setFilters] = useState<Record<string, string>>({
     catF: "all",
     chF: "",
-    blogF: "all",
-    intAv: "",
   });
-  const [query, setQuery] = useState("");
-  const [category, setCategory] = useState("");
-  const [demoIndex, setDemoIndex] = useState(0);
-  const [demoStopped, setDemoStopped] = useState(false);
 
   useEffect(() => {
     const previous = document.documentElement.lang;
@@ -76,16 +61,6 @@ function Website({
     };
   }, [language, location.pathname]);
 
-  useEffect(() => {
-    if (demoStopped || route !== "/nyxbot") return;
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const timer = window.setInterval(() => {
-      if (!media.matches && !document.hidden)
-        setDemoIndex((index) => (index + 1) % 4);
-    }, 7000);
-    return () => window.clearInterval(timer);
-  }, [demoStopped, route]);
-
   // Migrate old prototype links without installing any mock auth/start handlers.
   useEffect(() => {
     const destination = legacyDestination(window.location.hash);
@@ -94,17 +69,9 @@ function Website({
 
   const isFilterSelected = (group: string, value: string) =>
     filters[group] === value;
-  const integrationVisible = (name: string, cat: string, available: string) =>
-    (!query.trim() || name.includes(query.trim().toLowerCase())) &&
-    (!category || cat === category) &&
-    (!filters.intAv || available === filters.intAv);
-  const integrationCount = integrations.filter((item) =>
-    integrationVisible(item.name, item.cat, item.available),
-  ).length;
   const state: WebsiteState = {
     language,
     route,
-    menuOpen,
     localeHref: (next) => {
       const params = new URLSearchParams(urlContext.search);
       params.delete("lang");
@@ -115,10 +82,6 @@ function Website({
         urlContext.hash
       );
     },
-    setLanguage: (next) => {
-      window.location.assign(publicationPath(route, next) + urlContext.search);
-    },
-    toggleMenu: () => setMenu({ revision: navigationRevision, open: !menuOpen }),
     authHref: (kind) => authHref(kind, urlContext.search),
     siteHref: (path) => {
       const url = new URL(path, "https://nyx.chrono-ai.fun");
@@ -144,28 +107,6 @@ function Website({
     solutionVisible: (cat, channels) =>
       (filters.catF === "all" || cat === filters.catF) &&
       (!filters.chF || channels.split(",").includes(filters.chF)),
-    postVisible: (cat) => filters.blogF === "all" || cat === filters.blogF,
-    query,
-    category,
-    setQuery,
-    setCategory,
-    integrationVisible,
-    integrationGroupCount: (available) =>
-      integrations.filter(
-        (item) =>
-          item.available === available &&
-          integrationVisible(item.name, item.cat, item.available),
-      ).length,
-    integrationCountLabel:
-      language === "zh"
-        ? `显示 ${integrationCount} / ${integrations.length}`
-        : `Showing ${integrationCount} of ${integrations.length}`,
-    demoIndex,
-    selectDemo: (index) => {
-      setDemoStopped(true);
-      setDemoIndex(index);
-    },
-    stopDemo: () => setDemoStopped(true),
   };
   // The homepage brings its own menu and footer in both locales, so it skips this frame.
   // The public site passes it in as children (its router loads it); the app renders it here.
@@ -184,9 +125,6 @@ function Website({
         className="website-a nyx-public"
         data-website-visibility={JSON.stringify(websiteVisibility)}
         data-website-config={encodeURIComponent(websiteConfiguration)}
-        data-visual-version="4.1"
-        data-visual-route={state.route}
-        data-visual-motion={mode}
         lang={language === "zh" ? "zh-CN" : "en"}
       >
         <a href="#website-main" className="website-skip">
@@ -212,16 +150,10 @@ function Website({
 
 export function WebsitePage({
   children,
-  navigationRevision,
   renderedPath,
 }: {
   children?: ReactNode;
-  navigationRevision?: number;
   renderedPath?: string;
 }) {
-  return (
-    <VisualMotionProvider>
-      <Website navigationRevision={navigationRevision} renderedPath={renderedPath}>{children}</Website>
-    </VisualMotionProvider>
-  );
+  return <Website renderedPath={renderedPath}>{children}</Website>;
 }

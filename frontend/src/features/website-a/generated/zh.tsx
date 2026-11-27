@@ -1,8 +1,6 @@
 // Generated from approved A, SHA-256 5ba81989df18ad10986c1f00cebdcb1e2efd294932853a7671685187a7e34d33.
 import { lazy, Suspense } from "react";
 import { useWebsite } from "../website-context";
-import WebsiteHeader from "./zh/WebsiteHeader";
-import WebsiteFooter from "./zh/WebsiteFooter";
 const HomePage = lazy(() => import("../nyx-home/nyx-home-page"));
 const NyxbotPage = lazy(() => import("./zh/NyxbotPage"));
 const SolutionsPage = lazy(() => import("./zh/SolutionsPage"));
@@ -40,8 +38,6 @@ const SolutionsBackOfficeClerkPage = lazy(
   () => import("./zh/SolutionsBackOfficeClerkPage"),
 );
 const pages = {
-  "/nav": WebsiteHeader,
-  "/footer": WebsiteFooter,
   "/": HomePage,
   "/nyxbot": NyxbotPage,
   "/solutions": SolutionsPage,

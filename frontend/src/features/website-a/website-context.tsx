@@ -5,9 +5,6 @@ export type Language = "en" | "zh";
 export interface WebsiteState {
   language: Language;
   route: string;
-  menuOpen: boolean;
-  setLanguage: (language: Language) => void;
-  toggleMenu: () => void;
   localeHref: (language: Language) => string;
   authHref: (kind: "login" | "register") => string;
   siteHref: (pathname: string) => string;
@@ -16,21 +13,6 @@ export interface WebsiteState {
   setFilter: (group: string, value: string) => void;
   isFilterSelected: (group: string, value: string) => boolean;
   solutionVisible: (category: string, channels: string) => boolean;
-  postVisible: (category: string) => boolean;
-  query: string;
-  category: string;
-  setQuery: (query: string) => void;
-  setCategory: (category: string) => void;
-  integrationVisible: (
-    name: string,
-    category: string,
-    available: string,
-  ) => boolean;
-  integrationGroupCount: (available: string) => number;
-  integrationCountLabel: string;
-  demoIndex: number;
-  selectDemo: (index: number) => void;
-  stopDemo: () => void;
 }
 
 export const WebsiteContext = createContext<WebsiteState | null>(null);

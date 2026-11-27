@@ -108,18 +108,6 @@
     "colour": "one-colour fallback in the brand hex"
   },
   {
-    "file": "n8n.svg",
-    "icon": "logos:n8n-icon",
-    "name": "n8n",
-    "kind": "colour",
-    "source": "gilbarbara/logos@d6960edc1b7309d392c76e40d3a320df7f9ff85c",
-    "author": "Gil Barbara",
-    "licence": "CC0-1.0",
-    "url": "https://github.com/gilbarbara/logos",
-    "trademark": true,
-    "markUrl": "https://n8n.io"
-  },
-  {
     "file": "notion.svg",
     "icon": "logos:notion-icon",
     "name": "Notion",

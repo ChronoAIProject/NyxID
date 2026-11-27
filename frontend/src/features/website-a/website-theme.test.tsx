@@ -7,31 +7,8 @@ import { WebsitePage } from "./website-page";
 
 const location = vi.hoisted(() => ({ pathname: "/" }));
 vi.mock("@tanstack/react-router", () => ({ useLocation: () => location }));
-vi.mock("./generated/en", async () => {
-  const { HeroTitle } = await import("./visuals/hero");
-  return { default: HeroTitle };
-});
-vi.mock("./generated/zh", async () => {
-  const { HeroTitle } = await import("./visuals/hero");
-  return { default: HeroTitle };
-});
-vi.mock("./visuals/motion", async (original) => ({
-  ...(await original<typeof import("./visuals/motion")>()),
-  useMotionTarget: () => ({ active: true, allowed: true, seen: true }),
-}));
-vi.mock("./visuals/react-bits/GradientText", () => ({
-  default: ({
-    colors,
-    children,
-  }: {
-    colors: string[];
-    children: React.ReactNode;
-  }) => (
-    <span data-testid="gradient" data-colors={colors.join(",")}>
-      {children}
-    </span>
-  ),
-}));
+vi.mock("./generated/en", () => ({ default: () => <h1>NyxBot</h1> }));
+vi.mock("./generated/zh", () => ({ default: () => <h1>NyxBot</h1> }));
 
 function ApplicationTheme() {
   useApplyTheme();
@@ -57,7 +34,7 @@ describe("independent public website theme", () => {
       for (const [index, pathname] of ["/nyxbot", "/nyxbot", "/solutions", "/nyxbot"].entries()) {
         location.pathname = pathname;
         const website = render(<WebsitePage />);
-        await screen.findByTestId("gradient");
+        await screen.findByRole("heading", { name: "NyxBot" });
         expect(website.container.querySelector(".website-a")).toHaveAttribute(
           "data-theme",
           index === 0 ? "light" : "dark",

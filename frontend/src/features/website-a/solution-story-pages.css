@@ -104,3 +104,6 @@
   .website-a.nyx-public :is(.st-job,.st-job-go svg,.st-custom-in){transition:none}
   .website-a.nyx-public .st-job:hover{transform:none}
 }
+
+.website-a .solution-activation{display:inline-flex;flex-direction:column;gap:8px;align-items:flex-start}
+.website-a .solution-activation button:disabled{background:var(--muted);color:var(--fg3);border:1px solid var(--border);box-shadow:none;cursor:not-allowed;transform:none}

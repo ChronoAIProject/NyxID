@@ -131,28 +131,12 @@ function PublicLayout() {
     const payload = matches[matches.length - 1]?.loaderData as PublicPayload | undefined;
     return payload?.meta.path;
   } });
-  const router = useRouter();
-  const [navigationRevision, setNavigationRevision] = useState(0);
-  const lastSuccessfulHref = useRef(location.href);
-  useEffect(
-    () =>
-      router.subscribe("onResolved", ({ toLocation }) => {
-        if (
-          router.state.matches.every((match) => match.status === "success") &&
-          toLocation.href !== lastSuccessfulHref.current
-        ) {
-          lastSuccessfulHref.current = toLocation.href;
-          setNavigationRevision((value) => value + 1);
-        }
-      }),
-    [router],
-  );
   return (
     <PublicSearchContext.Provider value={true}>
       {docPaths.has(renderedPath ?? location.pathname) ? (
         <Outlet />
       ) : (
-        <WebsitePage navigationRevision={navigationRevision} renderedPath={renderedPath}>
+        <WebsitePage renderedPath={renderedPath}>
           <Outlet />
         </WebsitePage>
       )}

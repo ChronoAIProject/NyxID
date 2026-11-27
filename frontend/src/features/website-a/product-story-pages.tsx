@@ -1,6 +1,6 @@
 import { FileCheck2, KeyRound } from "lucide-react";
 import { useWebsite } from "./website-context";
-import { CodeExample } from "./interactions";
+import { CodeExample } from "./code-example";
 import { AppPill, PermissionReceipt, StoryDetails, StoryHero, StoryLink, StoryNext, StoryPage, StorySection, StorySplit } from "./story-page";
 import { NyxbotAppShowcase, NyxbotApprovalCapture, NyxbotMemoryCapture } from "./nyxbot-app-media";
 import "./product-story-pages.css";
