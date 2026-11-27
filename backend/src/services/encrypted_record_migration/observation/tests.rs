@@ -225,7 +225,8 @@ async fn registry_matrix_preserves_bson_and_traffic_on_current_historical_absent
     reader.set_allow_legacy_record_reads(false);
     let mut seen = BTreeSet::new();
     for f in families().filter(|f| {
-        super::channels::source_companions(f.entry).is_none()
+        super::protocols::source_companions(f.entry).is_none()
+            && super::channels::source_companions(f.entry).is_none()
             && super::retained::source_companions(f.entry).is_none()
             && super::deliveries::source_companions(f.entry).is_none()
             && super::nested::source_companions(f.entry).is_none()
@@ -528,4 +529,5 @@ async fn content_checks_and_missing_material_keep_distinct_evidence_after_authen
 mod channels;
 mod deliveries;
 mod nested;
+mod protocols;
 mod retained;

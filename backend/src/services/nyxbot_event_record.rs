@@ -112,7 +112,10 @@ fn invalid() -> AppError {
     AppError::Internal("Invalid encrypted channel event".into())
 }
 
-fn stored<'a>(row: &'a Document, path: &str) -> AppResult<Option<&'a Bson>> {
+pub(in crate::services) fn stored<'a>(
+    row: &'a Document,
+    path: &str,
+) -> AppResult<Option<&'a Bson>> {
     let value = match path.split_once('.') {
         None => row.get(path),
         Some((parent, leaf)) => match row.get(parent) {
@@ -124,7 +127,11 @@ fn stored<'a>(row: &'a Document, path: &str) -> AppResult<Option<&'a Bson>> {
     Ok(value.filter(|v| **v != Bson::Null))
 }
 
-fn validate_plain(row: &Document, field: &str, bytes: &[u8]) -> AppResult<()> {
+pub(in crate::services) fn validate_plain(
+    row: &Document,
+    field: &str,
+    bytes: &[u8],
+) -> AppResult<()> {
     match field {
         CONTEXT => {
             let context: serde_json::Value =
@@ -215,6 +222,14 @@ fn validate_plain(row: &Document, field: &str, bytes: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
+pub(in crate::services) const FIELDS: &[(&str, &str)] = &[
+    (TARGET, "delivery.target_context_version"),
+    (CONTEXT, "event_context_version"),
+    (GUEST, GUEST_VERSION),
+    (REPLY, "response_reply.context_version"),
+    (CHANNEL_GUEST, CHANNEL_GUEST_VERSION),
+];
+
 async fn inspect(keys: &EncryptionKeys, row: &Document, rewrap: bool) -> AppResult<Document> {
     if (stored(row, GUEST)?.is_some() || stored(row, GUEST_VERSION)?.is_some())
         && (stored(row, CHANNEL_GUEST)?.is_some() || stored(row, CHANNEL_GUEST_VERSION)?.is_some())
@@ -222,13 +237,7 @@ async fn inspect(keys: &EncryptionKeys, row: &Document, rewrap: bool) -> AppResu
         return Err(invalid());
     }
     let mut set = Document::new();
-    for (field, marker) in [
-        (TARGET, "delivery.target_context_version"),
-        (CONTEXT, "event_context_version"),
-        (GUEST, GUEST_VERSION),
-        (REPLY, "response_reply.context_version"),
-        (CHANNEL_GUEST, CHANNEL_GUEST_VERSION),
-    ] {
+    for &(field, marker) in FIELDS {
         let version = stored(row, marker)?
             .map(|v| bson::from_bson::<u8>(v.clone()))
             .transpose()

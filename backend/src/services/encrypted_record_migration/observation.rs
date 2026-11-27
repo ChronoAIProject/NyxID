@@ -14,6 +14,7 @@ mod companions;
 mod deliveries;
 mod families;
 mod nested;
+mod protocols;
 mod retained;
 #[cfg(test)]
 mod tests;
@@ -82,7 +83,8 @@ pub(crate) fn families() -> impl Iterator<Item = Family> {
             _ => retained::source_companions(entry)
                 .or_else(|| deliveries::source_companions(entry))
                 .or_else(|| nested::source_companions(entry))
-                .or_else(|| channels::source_companions(entry))?,
+                .or_else(|| channels::source_companions(entry))
+                .or_else(|| protocols::source_companions(entry))?,
         };
         Some(Family {
             entry,
@@ -104,6 +106,7 @@ pub(crate) enum Marker {
 pub(crate) enum Contract {
     Unbound,
     HistoricalAad,
+    OracleOuter,
     Contextual,
 }
 
@@ -155,7 +158,8 @@ impl Observation {
         let contract = match binding {
             Binding::Record(None, _) => Contract::Unbound,
             Binding::Record(Some(_), _) => Contract::Contextual,
-            Binding::Historical(_) | Binding::Oracle(_) => Contract::HistoricalAad,
+            Binding::Historical(_) => Contract::HistoricalAad,
+            Binding::Oracle(_) => Contract::OracleOuter,
         };
         match authenticated::observe(keys, bytes, binding).await {
             Err(_) => self.findings.push((label, Finding::Authentication)),
@@ -186,6 +190,7 @@ struct Source<'a> {
     family: &'a Family,
     row: &'a Document,
     id: &'a str,
+    as_of: chrono::DateTime<chrono::Utc>,
 }
 
 fn present<'a>(row: &'a Document, field: &str) -> Option<&'a Bson> {
@@ -222,11 +227,22 @@ impl Family {
             .chain((self.collection() == "auth_device_codes").then_some(deliveries::GRANT))
     }
 
+    #[cfg(test)]
     async fn observe(
         &self,
         keys: &EncryptionKeys,
         row: &Document,
         parents: &companions::Parents,
+    ) -> Observation {
+        self.observe_at_time(keys, row, parents, chrono::Utc::now())
+            .await
+    }
+    async fn observe_at_time(
+        &self,
+        keys: &EncryptionKeys,
+        row: &Document,
+        parents: &companions::Parents,
+        as_of: chrono::DateTime<chrono::Utc>,
     ) -> Observation {
         let mut out = Observation::default();
         let observed = async {
@@ -235,6 +251,7 @@ impl Family {
                 family: self,
                 row,
                 id: text(row, "_id")?,
+                as_of,
             };
             if matches!(
                 self.collection(),
@@ -273,7 +290,23 @@ impl Family {
                 | Adapter::ChannelGuestReplyHandle => {
                     Box::pin(source.channel(&mut out, parents)).await
                 }
-                _ => Box::pin(source.retained(&mut out, parents)).await,
+                Adapter::GatewayResponse
+                | Adapter::NyxbotEvent
+                | Adapter::ThreadReference
+                | Adapter::Setup
+                | Adapter::Trigger
+                | Adapter::GatewayTransport
+                | Adapter::OracleLoginOuter
+                | Adapter::MobileSocialDelivery
+                | Adapter::NativeReplyHandle => Box::pin(source.protocol(&mut out, parents)).await,
+                Adapter::AssistantCredential
+                | Adapter::Attachment
+                | Adapter::GeneratedArtifact
+                | Adapter::ToolResult
+                | Adapter::Public
+                | Adapter::Capability
+                | Adapter::CmaRequest
+                | Adapter::AsyncResult => Box::pin(source.retained(&mut out, parents)).await,
             }
         }
         .await;
@@ -283,6 +316,7 @@ impl Family {
             self.entry.adapter,
             Adapter::Node
                 | Adapter::CatalogCa
+                | Adapter::GatewayTransport
                 | Adapter::NyxbotChannelKey
                 | Adapter::CmaRequest
                 | Adapter::AssistantCredential
@@ -295,6 +329,7 @@ impl Family {
                     (self.entry.adapter, *field),
                     (Adapter::EventBinding, "provider_key_ciphertext")
                         | (Adapter::ChannelBot, "webhook_secret_encrypted")
+                        | (Adapter::Trigger, "verification_secret_encrypted")
                 );
                 if !corroborated
                     && !(self.collection() == "platform_public_sessions"

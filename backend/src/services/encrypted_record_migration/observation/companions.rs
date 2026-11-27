@@ -14,6 +14,7 @@ impl Family {
             Adapter::AssistantCredential => &[("api_keys", "api_key_id")],
             Adapter::NyxbotChannelKey => &[("api_keys", "agent_api_key_id")],
             Adapter::EventBinding => &[("api_keys", "provider_api_key_id")],
+            Adapter::NativeReplyHandle => &[("platform_native_entry_receipts", "receipt_id")],
             Adapter::Attachment => &[("assistant_attachments", "parent_attachment_id")],
             Adapter::Public if self.collection() == "platform_public_sessions" => {
                 &[("api_keys", "credential_api_key_id")]
@@ -71,11 +72,18 @@ impl Family {
                 edges.push(row);
             }
         }
-        let mut out = self.observe(keys, source, &parents).await;
+        // A cut has second precision. A deadline in the same second stays
+        // unresolved until a later cut can prove that it passed.
+        let as_of =
+            chrono::DateTime::from_timestamp(i64::from(at.cut.time.time), 0).ok_or_else(invalid)?;
+        let mut out = self.observe_at_time(keys, source, &parents, as_of).await;
         if let Some(jti) = out.refresh_jti.take() {
+            let &[collection] = self.rescan_parents() else {
+                return Err(invalid());
+            };
             let mut rows = at
                 .find(
-                    "refresh_tokens",
+                    collection,
                     doc! {"jti":jti.as_str()},
                     doc! {"user_id":1,"session_id":1,"jti":1},
                 )
