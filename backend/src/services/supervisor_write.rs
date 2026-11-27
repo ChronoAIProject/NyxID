@@ -343,6 +343,16 @@ pub(crate) fn effect(
 }
 
 fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
+    // Derived struct deserializers also accept positional sequences. The
+    // provider contract requires an object with the named `fields` member.
+    if body
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace())
+        != Some(b'{')
+    {
+        return None;
+    }
     let parts: Vec<_> = path.split('/').collect();
     let [
         "",
@@ -1022,6 +1032,8 @@ mod tests {
         crate::test_utils::init_test_audit_chain_hmac_key();
         let path = "/bitable/v1/apps/bascnLedger/tables/tblLedger/records/recTarget";
         for body in [
+            r#"[{"Status":"Approved"}]"#,
+            " \n [ {\"Status\":\"Approved\"} ]",
             r#"{"fields":{"Status":"first","Status":"second"}}"#,
             r#"{"fields":{"Status":"first"},"fields":{"Status":"second"}}"#,
             r#"{"fields":{"Status":{"text":"Approved"}}}"#,
@@ -1041,6 +1053,17 @@ mod tests {
         ] {
             assert!(effect("api-feishu", "PUT", path, None, body.as_bytes(), false).is_none());
         }
+        assert!(
+            effect(
+                "api-feishu",
+                "PUT",
+                path,
+                None,
+                b" \n {\"fields\":{\"Status\":\"Approved\"}}",
+                false
+            )
+            .is_some()
+        );
         let body = serde_json::json!({"fields":{"Status":"a".repeat(97)}}).to_string();
         assert!(effect("api-feishu", "PUT", path, None, body.as_bytes(), false).is_none());
         let body=serde_json::json!({"fields":(0..9).map(|n|(format!("field{n}"),Value::Bool(true))).collect::<serde_json::Map<_,_>>()}).to_string();
