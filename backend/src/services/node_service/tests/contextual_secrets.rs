@@ -5,6 +5,8 @@ use crate::crypto::{
 };
 use std::sync::Arc;
 
+mod historical;
+
 #[tokio::test]
 async fn node_adapter_authenticates_row_owner_field_and_explicit_format() {
     let mut keys = test_encryption_keys();
@@ -35,7 +37,7 @@ async fn node_adapter_authenticates_row_owner_field_and_explicit_format() {
     // A mutable version flag cannot authorize a downgrade after trusted cutover.
     keys.set_allow_legacy_record_reads(false);
     swapped.signing_secret_context_version = None;
-    swapped.signing_secret_encrypted = Some(keys.encrypt(secret.as_bytes()).await.unwrap());
+    swapped.signing_secret_encrypted = Some(hex::decode(historical::SIGNING_AB).unwrap());
     assert!(signing_secret_from_node(&keys, &swapped).await.is_err());
     assert_eq!(
         *signing_secret_from_node(&keys, &node).await.unwrap(),
@@ -52,11 +54,11 @@ async fn authenticated_malformed_or_hash_mismatched_secrets_never_become_ready()
             .await;
     let keys = test_encryption_keys();
     for contextual in [false, true] {
-        for material in [
-            "".to_owned(),
-            "ab".repeat(16),
-            "not-hex".to_owned(),
-            "cd".repeat(32),
+        for (material, legacy_ciphertext) in [
+            (String::new(), historical::EMPTY),
+            ("ab".repeat(16), historical::SHORT),
+            ("not-hex".to_owned(), historical::NON_HEX),
+            ("cd".repeat(32), historical::MISMATCHED_HASH),
         ] {
             let mut node = make_node("owner", "invalid-material");
             // Last case is a valid length with intentionally mismatched hash.
@@ -67,7 +69,7 @@ async fn authenticated_malformed_or_hash_mismatched_secrets_never_become_ready()
                     .await
                     .unwrap()
             } else {
-                keys.encrypt(material.as_bytes()).await.unwrap()
+                hex::decode(legacy_ciphertext).unwrap()
             });
             db.collection::<Node>(NODES)
                 .insert_one(&node)
@@ -101,24 +103,12 @@ async fn authenticated_malformed_or_hash_mismatched_secrets_never_become_ready()
 
 #[tokio::test]
 async fn legacy_v0_magic_collision_uses_only_explicit_legacy_contract() {
-    use aes_gcm::{
-        Aes256Gcm, Nonce,
-        aead::{Aead, KeyInit},
-    };
     let keys = test_encryption_keys();
     let mut node = make_node("legacy-owner", "legacy-node");
-    // An actual authenticated v0 fixture whose RANDOM nonce could equal v3 magic.
-    let nonce = *b"\x03NYX12345678";
-    let secret = "cd".repeat(32);
-    node.signing_secret_hash = hash_token(&secret);
-    let mut blob = nonce.to_vec();
-    blob.extend(
-        Aes256Gcm::new_from_slice(&[0x11; 32])
-            .unwrap()
-            .encrypt(Nonce::from_slice(&nonce), secret.as_bytes())
-            .unwrap(),
-    );
-    node.signing_secret_encrypted = Some(blob);
+    node.signing_secret_hash = hash_token(&"cd".repeat(32));
+    let ciphertext = hex::decode(historical::V0_MAGIC_COLLISION).unwrap();
+    assert!(ciphertext.starts_with(b"\x03NYX"));
+    node.signing_secret_encrypted = Some(ciphertext);
     assert_eq!(
         *signing_secret_from_node(&keys, &node).await.unwrap(),
         vec![0xcd; 32]
@@ -362,21 +352,17 @@ async fn registration_and_transfer_preserve_secret_across_legacy_and_contextual_
         )
         .await
         .unwrap();
-        let (mut node, auth, signing) = register_node(&db, &keys, &token, None).await.unwrap();
-        assert_eq!(node.signing_secret_context_version, Some(3));
+        let mut registration_keys = test_encryption_keys();
+        registration_keys.set_contextual_record_writes(!legacy);
+        let (node, auth, signing) = register_node(&db, &registration_keys, &token, None)
+            .await
+            .unwrap();
+        assert_eq!(node.signing_secret_context_version, (!legacy).then_some(3));
         assert_eq!(hash_token(&auth), node.auth_token_hash);
         assert_eq!(
             *signing_secret_from_node(&keys, &node).await.unwrap(),
             hex::decode(&signing).unwrap()
         );
-        if legacy {
-            node.signing_secret_encrypted = Some(keys.encrypt(signing.as_bytes()).await.unwrap());
-            node.signing_secret_context_version = None;
-            db.collection::<Node>(NODES)
-                .replace_one(doc! {"_id":&node.id}, &node)
-                .await
-                .unwrap();
-        }
         transfer_node_owner(&db, &keys, &actor, &node.id, &org, 10)
             .await
             .unwrap();
@@ -439,7 +425,7 @@ async fn migration_accepts_exact_legacy_array_storage_and_preserves_stale_source
     let mut node = make_node("legacy-owner", "array-migration");
     let secret = "ab".repeat(32);
     node.signing_secret_hash = hash_token(&secret);
-    let encrypted = keys.encrypt(secret.as_bytes()).await.unwrap();
+    let encrypted = hex::decode(historical::SIGNING_AB).unwrap();
     node.signing_secret_encrypted = Some(encrypted.clone());
     let mut source = bson::to_document(&node).unwrap();
     source.remove("signing_secret_context_version");
@@ -492,7 +478,7 @@ async fn migration_authenticates_current_rows_and_cas_preserves_concurrent_rotat
     let mut node = make_node(&actor, "migration");
     let secret = "ef".repeat(32);
     node.signing_secret_hash = hash_token(&secret);
-    node.signing_secret_encrypted = Some(keys.encrypt(secret.as_bytes()).await.unwrap());
+    node.signing_secret_encrypted = Some(hex::decode(historical::SIGNING_EF).unwrap());
     db.collection::<Node>(NODES)
         .insert_one(&node)
         .await
@@ -753,6 +739,13 @@ async fn transfer_held_during_rebind_uses_live_name_and_rejects_successor_rotati
     }
 }
 
+async fn staged_signing_secret(keys: &EncryptionKeys, node: &Node) -> Zeroizing<Vec<u8>> {
+    assert_eq!(node.signing_secret_context_version, None);
+    // Staged writers emit a v2 envelope for old replicas.
+    assert_eq!(node.signing_secret_encrypted.as_deref().unwrap()[0], 2);
+    decrypt_signing_secret(keys, node).await.unwrap()
+}
+
 #[tokio::test]
 async fn staged_node_writes_preserve_legacy_registration_rotation_transfer_and_managed_activation()
 {
@@ -768,12 +761,8 @@ async fn staged_node_writes_preserve_legacy_registration_rotation_transfer_and_m
     let (node, _, signing) = register_node(&db, &keys, &registration, None)
         .await
         .unwrap();
-    assert_eq!(node.signing_secret_context_version, None);
     assert_eq!(
-        keys.decrypt(node.signing_secret_encrypted.as_deref().unwrap())
-            .await
-            .unwrap()
-            .as_slice(),
+        staged_signing_secret(&keys, &node).await.as_slice(),
         signing.as_bytes()
     );
     let (_, rotated) = rotate_auth_token(&db, &keys, &actor, &node.id)
@@ -785,12 +774,8 @@ async fn staged_node_writes_preserve_legacy_registration_rotation_transfer_and_m
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(node.signing_secret_context_version, None);
     assert_eq!(
-        keys.decrypt(node.signing_secret_encrypted.as_deref().unwrap())
-            .await
-            .unwrap()
-            .as_slice(),
+        staged_signing_secret(&keys, &node).await.as_slice(),
         rotated.as_bytes()
     );
     transfer_node_owner(&db, &keys, &actor, &node.id, &org, 10)
@@ -803,12 +788,8 @@ async fn staged_node_writes_preserve_legacy_registration_rotation_transfer_and_m
         .unwrap()
         .unwrap();
     assert_eq!(moved.user_id, org);
-    assert_eq!(moved.signing_secret_context_version, None);
     assert_eq!(
-        keys.decrypt(moved.signing_secret_encrypted.as_deref().unwrap())
-            .await
-            .unwrap()
-            .as_slice(),
+        staged_signing_secret(&keys, &moved).await.as_slice(),
         rotated.as_bytes()
     );
     let device = create_for_device(
@@ -825,14 +806,7 @@ async fn staged_node_writes_preserve_legacy_registration_rotation_transfer_and_m
     )
     .await
     .unwrap();
-    assert_eq!(device.signing_secret_context_version, None);
-    assert_eq!(
-        keys.decrypt(device.signing_secret_encrypted.as_deref().unwrap())
-            .await
-            .unwrap()
-            .len(),
-        64
-    );
+    assert_eq!(staged_signing_secret(&keys, &device).await.len(), 64);
     db.collection::<Node>(NODES)
         .update_one(
             doc! {"_id":&device.id},
@@ -866,12 +840,8 @@ async fn staged_node_writes_preserve_legacy_registration_rotation_transfer_and_m
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(managed.signing_secret_context_version, None);
     assert_eq!(
-        keys.decrypt(managed.signing_secret_encrypted.as_deref().unwrap())
-            .await
-            .unwrap()
-            .as_slice(),
+        staged_signing_secret(&keys, &managed).await.as_slice(),
         material.signing_secret.as_bytes()
     );
     db.drop().await.unwrap();

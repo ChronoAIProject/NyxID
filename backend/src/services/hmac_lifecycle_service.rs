@@ -25,6 +25,24 @@ pub(crate) async fn is_prepared(db: &mongodb::Database) -> AppResult<bool> {
         .await?
         .is_some())
 }
+/// Observe the configured independent file against all six durable commitments.
+pub(crate) async fn independent_file_matches(
+    db: &mongodb::Database,
+    path: Option<&str>,
+) -> AppResult<bool> {
+    let Some(path) = path else { return Ok(false) };
+    let path = std::path::PathBuf::from(path);
+    let commitments =
+        tokio::task::spawn_blocking(move || HmacKeyset::load(&path).map(|keys| keys.commitments()))
+            .await
+            .map_err(|_| AppError::Internal("Independent HMAC file unavailable".into()))??;
+    Ok(db
+        .collection_with_options::<HmacKeysetPin>(COLLECTION_NAME, options())
+        .find_one(doc! {"_id":"legacy-v1"})
+        .max_time(std::time::Duration::from_secs(2))
+        .await?
+        .is_some_and(|pin| pin.version == 1 && pin.commitments == commitments))
+}
 pub(crate) async fn ensure_consistent(
     db: &mongodb::Database,
     keys: &HmacKeyset,

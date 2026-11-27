@@ -151,8 +151,11 @@ impl EncryptionKeys {
         ciphertext: &[u8],
         context: &RecordContext<'_>,
     ) -> Result<Zeroizing<Vec<u8>>, AppError> {
-        self.decrypt_record_with_policy(ciphertext, context, false)
-            .await
+        Ok(self
+            .decrypt_record_with_policy(ciphertext, context, false, ReadPurpose::Traffic)
+            .await?
+            .into_parts()
+            .0)
     }
 
     /// Authenticate using only the selected primary provider and selector.
@@ -164,17 +167,18 @@ impl EncryptionKeys {
         ciphertext: &[u8],
         context: &RecordContext<'_>,
     ) -> Result<(), AppError> {
-        self.decrypt_record_with_policy(ciphertext, context, true)
+        self.decrypt_record_with_policy(ciphertext, context, true, ReadPurpose::Traffic)
             .await
             .map(drop)
     }
 
-    async fn decrypt_record_with_policy(
+    pub(in crate::crypto) async fn decrypt_record_with_policy(
         &self,
         ciphertext: &[u8],
         context: &RecordContext<'_>,
         primary_current_only: bool,
-    ) -> Result<Zeroizing<Vec<u8>>, AppError> {
+        purpose: ReadPurpose,
+    ) -> Result<Authenticated, AppError> {
         if !is_record_envelope(ciphertext) || ciphertext.len() < RECORD_FIXED_HEADER {
             return Err(invalid_record());
         }
@@ -195,24 +199,27 @@ impl EncryptionKeys {
         };
         // A configured old provider is an unwrap route for this exact format,
         // never permission to retry plaintext using a different AAD contract.
-        let dek_bytes = match self.provider.unwrap_dek(&wrapped).await {
-            Ok(dek) => dek,
+        let (open, fallback) = match purpose.unwrap(self.provider.as_ref(), &wrapped).await {
+            Ok(open) => (open, false),
             Err(_) if !primary_current_only => match &self.fallback_provider {
-                Some(provider) if provider.has_key_id(wrapped.key_id) => provider
-                    .unwrap_dek(&wrapped)
-                    .await
-                    .map_err(|_| invalid_record())?,
+                Some(provider) if provider.has_key_id(wrapped.key_id) => (
+                    purpose
+                        .unwrap(provider.as_ref(), &wrapped)
+                        .await
+                        .map_err(|_| invalid_record())?,
+                    true,
+                ),
                 _ => return Err(invalid_record()),
             },
             Err(_) => return Err(invalid_record()),
         };
-        if dek_bytes.len() != 32 {
+        if open.dek.len() != 32 {
             return Err(invalid_record());
         }
         let aad = context.authenticated_bytes(&ciphertext[..header_len]);
         let payload = &ciphertext[header_len..];
         let cipher =
-            Aes256Gcm::new_from_slice(dek_bytes.as_slice()).map_err(|_| invalid_record())?;
+            Aes256Gcm::new_from_slice(open.dek.as_slice()).map_err(|_| invalid_record())?;
         let plaintext = cipher
             .decrypt(
                 Nonce::from_slice(&payload[..NONCE_SIZE]),
@@ -222,7 +229,13 @@ impl EncryptionKeys {
                 },
             )
             .map_err(|_| invalid_record())?;
-        Ok(Zeroizing::new(plaintext))
+        Ok(Authenticated::envelope(
+            Zeroizing::new(plaintext),
+            Format::V3,
+            wrapped.key_id,
+            open.key,
+            fallback,
+        ))
     }
 }
 

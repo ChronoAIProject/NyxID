@@ -4,7 +4,7 @@ use crate::errors::AppResult;
 use std::borrow::Cow;
 use zeroize::Zeroizing;
 
-pub(crate) struct HistoricalAad<'a>(Cow<'a, [u8]>);
+pub(crate) struct HistoricalAad<'a>(pub(super) Cow<'a, [u8]>);
 
 pub(crate) enum ProposalDomain {
     Assistant,

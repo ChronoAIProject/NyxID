@@ -285,27 +285,36 @@ async fn gateway_local_refusals_keep_local_truth_and_received_403_is_gateway_rej
     ] {
         let f = fixture(&format!("gateway_local_refusal_{reason}")).await;
         settled(&f, false).await;
-        let target = f
-            .state
-            .encryption_keys
-            .encrypt(b"cmaeg1.rt.original")
-            .await
-            .unwrap();
+        let target = event_record::seal(
+            &f.state.encryption_keys,
+            &f.event.id,
+            &f.event.user_id,
+            &[event_record::TARGET, &f.event.channel_id],
+            b"cmaeg1.rt.original",
+        )
+        .await
+        .unwrap();
         patch(&f, doc! {
             "delivery.state":"pending",
             "delivery.target_ciphertext":bson::Binary {subtype:bson::spec::BinarySubtype::Generic, bytes:target},
+            "delivery.target_context_version": event_record::version(&f.state.encryption_keys).map(i32::from),
             "delivery.target_expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::hours(1)),
             "dispatch_identity":bson::to_bson(&dispatch_identity::admission(&f.channel.id,"original-post")).unwrap(),
         }).await;
         match reason {
             "no_agent_key" => {
                 f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&f.channel.id},
-                    doc! {"$set":{"agent_key_ciphertext":bson::Bson::Null}}).await.unwrap();
+                    doc! {
+                        "$set":{"agent_key_ciphertext":bson::Bson::Null},
+                        "$unset":{channel_key::VERSION_PATH:""},
+                    }).await.unwrap();
             }
             "target_expired" => patch(&f, doc! {"delivery.target_expires_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::minutes(1))}).await,
             "target_expiry_missing" => patch(&f, doc! {"delivery.target_expires_at":bson::Bson::Null}).await,
             "legacy_event_expired" => patch(&f, doc! {
-                "delivery.target_ciphertext":bson::Bson::Null,"delivery.target_expires_at":bson::Bson::Null,
+                "delivery.target_ciphertext":bson::Bson::Null,
+                "delivery.target_context_version":bson::Bson::Null,
+                "delivery.target_expires_at":bson::Bson::Null,
                 "created_at":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::minutes(30)),
             }).await,
             "received_403" => {
@@ -901,36 +910,14 @@ async fn gateway_reply_stored_get_events_and_repeated_post_are_empty_completed_c
         answer_delivery: None,
         revision: 1,
         payload_context_version: None,
-        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
+        payload_ciphertext: Vec::new(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
-    let field = [
-        "payload_ciphertext",
-        &stored.channel_id,
-        &stored.binding_id,
-        &stored.response_id,
-    ];
-    let context = crate::crypto::record_field::RecordContext::new(
-        RESPONSES,
-        &stored.id,
-        &stored.user_id,
-        &field,
-    )
-    .unwrap();
-    let bytes = f
-        .state
-        .encryption_keys
-        .decrypt(&stored.payload_ciphertext)
+    recovery::storage::install(&f.state.encryption_keys, &mut stored, &payload)
         .await
         .unwrap();
-    stored.payload_ciphertext = f
-        .state
-        .encryption_keys
-        .encrypt_record(&bytes, &context)
-        .await
-        .unwrap();
-    stored.payload_context_version = Some(3);
+    assert_eq!(stored.payload_context_version, Some(3));
     f.state
         .db
         .collection::<GatewayResponse>(RESPONSES)

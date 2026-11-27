@@ -1,6 +1,7 @@
 //! Server-encrypted record fields. Services validate the row identity and select
 //! the stored format. Historical bindings and the Oracle worker envelope have
 //! purpose-specific operations. Recipient-sealed deliveries use their own protocol.
+pub(crate) mod authenticated;
 pub(crate) mod historical;
 pub(crate) mod oracle;
 

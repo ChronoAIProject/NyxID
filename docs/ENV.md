@@ -11,6 +11,8 @@ For deployment-specific guidance on these variables, see [DEPLOYMENT.md](DEPLOYM
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `DATABASE_URL` | MongoDB connection string | `mongodb://localhost:27017/nyxid?replicaSet=nyxid-rs&directConnection=true` |
+| `NYXID_BOOTSTRAP_DATABASE_URL` | Read-only MongoDB connection used for key-lifecycle admission before application initialization. Configure a principal limited to lifecycle singleton, proof, collection-identity and replica-set identity reads. Set this variable for enrolled databases. Before enrollment, admission uses one indexed read on the existing application connection. | `mongodb://bootstrap@localhost:27017/nyxid?authSource=admin&readPreference=primary` |
+| `NYXID_DEPLOYMENT_REVISION` | Exact release revision admitted by the enrolled key lifecycle. Enrolled startup and one-shot commands refuse when it is absent or differs from the recorded scope. | `release-2026-11-26` |
 | `ENCRYPTION_KEY` | 32-byte hex AES-256 key (64 hex chars); required for `local`, optional legacy/local fallback with KMS | Output of `openssl rand -hex 32` |
 
 ## Encryption
