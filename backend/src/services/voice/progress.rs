@@ -259,15 +259,14 @@ pub async fn refresh(
         });
         let mut update = doc! {};
         let mut set = doc! {};
-        if let Some(snapshot) = &execution_timing {
-            if r.execution_timing.as_ref() != Some(snapshot) {
-                set.insert(
-                    "execution_timing",
-                    bson::to_bson(snapshot).map_err(|_| {
-                        AppError::Internal("Voice timing serialization failed".into())
-                    })?,
-                );
-            }
+        if let Some(snapshot) = &execution_timing
+            && r.execution_timing.as_ref() != Some(snapshot)
+        {
+            set.insert(
+                "execution_timing",
+                bson::to_bson(snapshot)
+                    .map_err(|_| AppError::Internal("Voice timing serialization failed".into()))?,
+            );
         }
         if r.progress.as_ref() != Some(&next) {
             next.updated_at = Utc::now();

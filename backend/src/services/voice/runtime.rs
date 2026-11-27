@@ -557,6 +557,9 @@ fn checkpoint_order(segment: &Segment) -> (i64, bool) {
     (segment.end_ms, segment.speaker == Speaker::Assistant)
 }
 
+/// Request, spoken text, matching output interval, and announcement offset in milliseconds.
+type PendingAnnouncement = (VoiceRequest, String, Option<(i64, i64)>, i64);
+
 struct Coordinator {
     responses: super::responses::Responses,
     transcripts: Transcripts,
@@ -568,7 +571,7 @@ struct Coordinator {
     owner_review_notices: HashSet<String>,
     announced: HashSet<String>,
     progress: super::progress::Coalescer,
-    pending_audio: VecDeque<(VoiceRequest, String, Option<(i64, i64)>, i64)>,
+    pending_audio: VecDeque<PendingAnnouncement>,
     pending_playback: super::timing::PendingPlayback,
     mute_command: Option<(String, bool, i64)>,
     idle_warned: bool,
