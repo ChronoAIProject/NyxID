@@ -20,7 +20,7 @@ use crate::{
     models::{approval_grant::ApprovalGrant, execution_permission::*},
 };
 
-mod authority;
+pub(crate) mod authority;
 pub(crate) mod descendants;
 mod diagnostics;
 pub(crate) mod machine;

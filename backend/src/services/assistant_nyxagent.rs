@@ -774,6 +774,7 @@ pub struct TurnStart {
     pub(crate) automation_parent: Option<super::trigger_schedule::direct::Parent>,
     /// Copied from a verified person's already-loaded enrollment. Not a client field.
     pub(crate) execution_enrollment: bool,
+    pub(crate) supervisor_parent: Option<super::supervisor_write::Parent>,
     pub(crate) execution_parent: Option<super::execution_permission_dispatch::tasks::Parent>,
     pub channel_context: Option<crate::models::assistant_conversation::ChannelTurnContext>,
     pub owner_instruction_source: Option<OwnerInstructionSource>,
@@ -975,6 +976,7 @@ impl From<&TurnRequest> for TurnStart {
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,
+            supervisor_parent: None,
             execution_parent: None,
             media_event_ids: Vec::new(),
             channel_uploads: Vec::new(),
@@ -3816,6 +3818,8 @@ pub(crate) async fn begin_owner_turn_in_session(
         )
     };
     row.active_turn = Some(ActiveTurn {
+        supervisor_source: None,
+        supervisor_sends: Vec::new(),
         restart_offer: None,
         restart_eligibility: None,
         restart_admission: None,
@@ -3935,6 +3939,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         };
         group::admit(db, &row, &work, turn_id, admission, session).await?;
     }
+    Box::pin(super::supervisor_write::assign(db, session, &mut row, start.supervisor_parent.as_ref())).await?;
     Box::pin(super::assistant_delegated_images::assign_in_session(
         db, session, &mut row,
     ))

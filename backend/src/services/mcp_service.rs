@@ -4054,7 +4054,7 @@ impl AutomaticReceipt {
 }
 
 type ServiceApprovalWait =
-    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Result<(), String>> + Send + Sync>;
+    Box<dyn FnOnce(Option<super::supervisor_write::Effect>, String) -> futures::future::BoxFuture<'static, Result<Option<super::supervisor_write::Permit>, String>> + Send + Sync>;
 
 pub struct PreparedProxyCall {
     /// Create the connected approval only after this exact action passes assistant admission.
@@ -4085,7 +4085,7 @@ pub struct PreparedProxyCall {
 impl PreparedProxyCall {
     pub(crate) fn defer_service_approval(
         &mut self,
-        wait: impl FnOnce() -> futures::future::BoxFuture<'static, Result<(), String>>
+        wait: impl FnOnce(Option<super::supervisor_write::Effect>, String) -> futures::future::BoxFuture<'static, Result<Option<super::supervisor_write::Permit>, String>>
         + Send
         + Sync
         + 'static,
@@ -6835,14 +6835,25 @@ async fn execute_tool_resolved_inner(
                 ToolResponse::policy_refusal(refusal),
             ));
         }
-        if let Some(wait) = deferred
-            && let Err(message) = wait().await
-        {
-            return Ok(McpToolExecutionOutcome::Response(
-                ToolResponse::policy_refusal(message),
-            ));
+        let supervisor_permit = if let Some(wait) = deferred {
+            let effect = if node_route.is_none() && prepared.managed_base.is_none()
+                && prepared.attachment_binding.is_none() && prepared.async_submission.is_none()
+                && prepared.async_continuation.is_none() && prepared.server_owned_headers.is_empty()
+            {
+                super::supervisor_write::effect(catalog_service_slug.unwrap_or_default(), prepared.method.as_str(),
+                    &prepared.path, prepared.query(), prepared.body.as_deref().unwrap_or_default(),
+                    !prepared.parameter_headers.is_empty())
+            } else { None };
+            match wait(effect, target.base_url.clone()).await {
+                Ok(permit) => permit,
+                Err(message) => return Ok(McpToolExecutionOutcome::Response(ToolResponse::policy_refusal(message))),
+            }
+        } else { None };
+        if supervisor_permit.is_some() && decision.admission.is_none() {
+            return Err(AppError::Forbidden("Exact write admission is unavailable".into()));
         }
         if let Some(mut admission) = decision.admission {
+            admission.bind_supervisor(supervisor_permit);
             if let Some(watch) = prepared.async_submission.as_deref() {
                 admission.bind_async_submission(db, watch, &target).await?;
             }

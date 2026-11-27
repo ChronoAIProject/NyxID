@@ -881,6 +881,12 @@ remain exact-conversation operation/task/window/persistent permissions. No
 across-private-conversations choice is offered. Review lasts at most ten minutes
 and is capped by the original task and reply-source deadline.
 
+The separate [personal supervisor ledger-write review](chat/09-nyxbot-orchestrator.md#personal-supervisor-ledger-write-review-2605)
+uses `yes write-<code>` only for a legacy connected PerRequest Bitable write.
+It never creates or decides an execution proposal, grants reusable execution
+permission, or depends on execution-permission enrollment/readiness. Existing
+proposal sources, human web decisions and source/result fences remain in force.
+
 Post-review results have a separate `execution_permission_deliveries` occurrence,
 committed with the ordinary stored assistant message. The outbox retains only
 references, not another copy of the answer. Deliveries in versions 5 and 6 keep a plan

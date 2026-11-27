@@ -451,6 +451,17 @@ image rollout and sunset requirements remain in force.
 
 ## Telegram forwarding and secure pairing
 
+Personal NyxBot supervisor ledger-write reviews use the separate
+[originating-owner DM contract](chat/09-nyxbot-orchestrator.md#personal-supervisor-ledger-write-review-2605).
+An original verified owner message in that exact bot/chat may answer the
+request-specific `yes write-<code>` or `no write-<code>`. Forwarded, edited,
+unknown or bot input cannot decide it. This path is independent of the Telegram
+notification/approval bot and of manager setup/creation authority. A complete
+review must be confirmed delivered before its code can authorize a write.
+Gateway-native delivery requires a distinct side-message occurrence; a provider
+without that capability keeps the existing Approvals route when no review was
+sent. Unknown or partial delivery never opens a fallback decision path.
+
 A linked personal manager accepts forwarded text, captions, quotes, hidden links,
 and Telegram file handles, including media attached to an external reply. The
 owner's question stays separate from quoted JSON reference data. Original files

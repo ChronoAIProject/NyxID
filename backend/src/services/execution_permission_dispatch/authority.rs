@@ -2,7 +2,7 @@
 //! Refreshable OAuth material is deliberately excluded; replacement epochs are not.
 use super::*;
 
-pub(super) struct Snapshot(Vec<(&'static str, Document, Vec<Document>)>);
+pub(crate) struct Snapshot(Vec<(&'static str, Document, Vec<Document>)>);
 
 pub(super) fn key_digest(key: &crate::models::api_key::ApiKey) -> String {
     let mut value = serde_json::to_value(key).expect("key serialization");
@@ -91,7 +91,7 @@ impl Snapshot {
         }
         Ok(())
     }
-    pub(super) async fn load(
+    pub(crate) async fn load(
         db: &Database,
         connection: &str,
         key: &str,
@@ -253,7 +253,7 @@ impl Snapshot {
             .unwrap_or_else(|| Ok(Vec::new()))
     }
 
-    pub(super) async fn fence(&self, db: &Database, session: &mut ClientSession) -> AppResult<()> {
+    pub(crate) async fn fence(&self, db: &Database, session: &mut ClientSession) -> AppResult<()> {
         for (collection, filter, expected) in &self.0 {
             let mut cursor = db
                 .collection::<Document>(collection)
@@ -286,7 +286,7 @@ impl Snapshot {
         Ok(())
     }
 
-    pub(super) fn digest(&self) -> String {
+    pub(crate) fn digest(&self) -> String {
         super::super::mcp_service::canonical_sha256(
             serde_json::to_value(&self.0).expect("snapshot encoding"),
         )

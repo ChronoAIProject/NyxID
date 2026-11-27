@@ -1041,7 +1041,7 @@ fn supplemental_part_key(
             .machine_control
             .as_ref()
             .map(|request| side_message_key(&(decision.purpose, request), index)),
-        Purpose::PermissionResult => None,
+        Purpose::PermissionResult | Purpose::SupervisorReview => None,
     }
 }
 

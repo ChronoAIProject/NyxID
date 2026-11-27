@@ -454,6 +454,7 @@ pub(super) async fn create(
     )
     .await?;
     let request = ApprovalRequest {
+        supervisor_write: None,
         org_policy: None,
         activity_outcome: None,
         activity_execution: None,

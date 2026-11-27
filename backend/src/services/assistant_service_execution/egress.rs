@@ -310,6 +310,17 @@ impl Admission {
     }
 }
 impl<'a> HttpEgressGuard<'a> {
+    pub(crate) fn has_supervisor(&self) -> bool {
+        matches!(&self.authority, EgressAuthority::Assistant(g) if g.admission.supervisor_write.is_some())
+    }
+    pub(crate) async fn claim_supervisor(&self, request: &reqwest::Request) -> AppResult<()> {
+        if let EgressAuthority::Assistant(g) = &self.authority
+            && let Some(permit) = &g.admission.supervisor_write {
+            permit.claim(g.db, request).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn shared_stream(
         &self,
     ) -> AppResult<Option<crate::models::assistant_sharing::SharedExecution>> {

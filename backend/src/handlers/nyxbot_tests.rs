@@ -18,6 +18,8 @@ use tokio::sync::Mutex;
 mod fence_tests;
 #[path = "nyxbot_private_handoff_tests.rs"]
 mod private_handoff_tests;
+#[path = "nyxbot_supervisor_write_tests.rs"]
+mod supervisor_write_tests;
 
 #[path = "nyxbot_provider_refusal_tests.rs"]
 mod provider_refusal_tests;
@@ -3049,6 +3051,7 @@ async fn group_chats_share_one_thread_and_members_talk_as_guests() {
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,
+            supervisor_parent: None,
             execution_parent: None,
             channel_context: None,
             capacity: None,
@@ -4171,6 +4174,7 @@ async fn the_owners_private_chats_share_the_agents_own_thread() {
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,
+            supervisor_parent: None,
             execution_parent: None,
             channel_context: None,
             capacity: None,

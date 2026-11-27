@@ -2066,6 +2066,7 @@ mod tests {
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
+            supervisor_write: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),

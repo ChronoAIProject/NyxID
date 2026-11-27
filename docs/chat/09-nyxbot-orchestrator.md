@@ -243,6 +243,66 @@ never tell the owner to click an invisible or terminal Allow/Deny card. Proxy
 approvals link to `/assistant/approvals`, not to a specialist's owner-action
 card. See the engine's Acknowledgements section for history and expiry behavior.
 
+### Personal supervisor ledger-write review (#2605)
+
+The verified originating owner's private chat with their personal NyxBot can
+review one connected `bitable_record_update` during work assigned to their own
+personal specialist. Delegation confirmation and ledger-write approval are two
+separate decisions. The specialist keeps its grants, operation limits and action
+confirmations. Organization, shared, guest, group, automation and unverified or
+forwarded sources cannot acquire this decision path. A private-chat label or
+`report_to` alone never supplies decision authority.
+
+Admission captures the exact authenticated source event, owner, NyxBot thread,
+key and assigning turn. The connected write binds its specialist agent, key,
+turn, request occurrence, exact connection and authority, method, destination
+and prepared body. Only PerRequest approval participates, including the implicit
+default used with Writes only. Grant-mode policies and execution proposals keep
+their existing review route.
+
+The closed adapter accepts the published Feishu/Lark Bitable single-record PUT
+with no query or caller-selected headers and a complete, bounded `fields` map of
+safe scalar values. The review identifies the connection, Base, table and record,
+shows every proposed field value as quoted data, states that current values have
+not been verified, and asks for a fresh read after writing. Nested, oversized,
+credential-shaped or otherwise unsafe inputs keep the existing review route;
+raw arguments and credentials never enter the chat review. The confirmation
+code appears only after the complete review. There is no truncated review.
+
+The bot connectors' published paths include `/open-apis`; OAuth connectors'
+paths start at `/bitable`. The adapter preserves the exact prepared destination.
+It accepts up to eight scalar fields, field names up to 48 characters, string
+values up to 96 characters, at most 4 KiB of JSON and at most 1,200 characters
+of field review. The connected review lasts at most 80 seconds and never beyond
+the captured source or caller deadline. Persisted metadata contains keyed
+effect/code/authority digests and a versioned affirmative DM receipt, without a
+clear code, destination URL or copy of row values. Legacy `approved` status
+without that receipt never authorizes dispatch.
+
+The owner replies `yes write-<code>` or `no write-<code>` in the exact original
+bot/chat. Plain yes/no never decides a write. A confirmed complete review,
+unexpired original waiter and live source, specialist and connection authority
+are required. The decision creates no reusable grant. The final provider-send
+barrier atomically claims that request once; cancellation, expiry, revocation,
+changed authority and uncertain dispatch never authorize resubmission. Replayed
+decision events and parallel requests cannot spend another occurrence's code.
+The specialist receives the real response on its original call, reads the record
+independently, and reports through the existing assignment result path. A write
+receipt alone is not readback evidence. Ordinary notification Telegram settings
+never select this review's destination.
+
+For the merchant workflow, the supervisor first asks the specialist to read the
+test row using the published `bitable_records_search`, then tells the owner the
+identified Base/table/record, observed old values and proposed values. The owner
+confirms the exact assignment with its delegation code and approves the ensuing
+write review separately. After the provider response the specialist searches
+again and reports the actual returned row values, including any mismatch or
+unconfirmed outcome. The seeded catalog does not publish a single-record GET;
+agents do not invent one to verify the write. An uncertain write requires
+observation before any newly requested write. Same-turn retries of the same
+effect cannot acquire a second provider send, while different prepared writes
+retain distinct reviews and codes.
+
 ### Specialist skill permission decisions
 
 Skill permission is advisory: allowing `request_agent_skills` does not attach

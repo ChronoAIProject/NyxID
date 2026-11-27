@@ -3887,6 +3887,19 @@ async fn start_chat_turn(
     } else {
         engine::question_key(text)
     };
+    if crate::services::supervisor_write::parse(text).is_some() {
+        if !exists || !private || guest || had_media || !sender.original_message || !sender.owner_eligible
+            || sender.execution_kind() != crate::models::channel_thread::ThreadSenderKind::Human
+            || execution.is_some() || row.org_specialist.is_some() || row.bot_owner_id.is_some()
+        {
+            return Ok(Inbound::Reply("This ledger-write decision is unavailable in this chat.".into()));
+        }
+        return Ok(Inbound::Reply(match crate::services::supervisor_write::decide(state, &actor, &origin, sender.id, text).await {
+            Ok(Some(true)) => "Write approval saved for the original waiting request. The specialist must read the record before confirming its final value.".into(),
+            Ok(Some(false)) => "Write rejected. This decision authorizes no write.".into(),
+            _ => "This ledger-write decision is expired, already used, or unavailable. No new write is authorized.".into(),
+        }));
+    }
     // A chat app cannot show NyxID's confirmation cards: the verified owner
     // answers one in words (see `decide_reply` for which card it decides).
     // Nobody else can.
@@ -4057,6 +4070,7 @@ async fn start_chat_turn(
             && crate::services::execution_permission_enrollment::snapshot::channel_candidate(
                 &state.db, &actor,
             ),
+        supervisor_parent: None,
         execution_parent: None,
         channel_context: Some(source_context.clone()),
         capacity: None,
@@ -7100,6 +7114,28 @@ pub(super) async fn deliver_to_for_turn(
     let _ = deliver_from_source(state, row, origin, text, images, decision, source).await;
 }
 
+/// Complete reviews use a fixed authenticated event, never a latest-chat fallback.
+pub(crate) async fn supervisor_review(
+    state: &AppState,
+    source: &crate::models::execution_permission_channel::ChannelSource,
+    request_id: &str,
+    text: &str,
+) -> AppResult<()> {
+    let mut session = state.db.client().start_session().await?;
+    let rows = crate::services::execution_permission_channel::validate_supervisor(
+        &state.db, &mut session, source, false,
+    ).await?;
+    let origin = &rows.event.delivery.as_ref().ok_or(AppError::AssistantTurnRequired)?.origin;
+    let row = engine::get(&state.db, &source.actor_user_id, &source.conversation_id).await?;
+    let mut decision = supplemental::Decision::new(supplemental::Purpose::SupervisorReview);
+    decision.saved_result = true;
+    decision.supervisor_occurrence = Some(format!("supervisor-write-review:{request_id}"));
+    deliver_from_source(state, &row, origin, text, None,
+        decision,
+        Some(crate::services::channel_supplemental_delivery::ResultSource::supervisor(source)),
+    ).await
+}
+
 async fn deliver_from_source(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
@@ -7188,6 +7224,10 @@ async fn deliver_from_source(
                         }
                     }
                     Source::Missing => {
+                        decision.skip(supplemental::Reason::MissingAnchor);
+                        return Ok(());
+                    }
+                    Source::Unbound if decision.supervisor_occurrence.is_some() => {
                         decision.skip(supplemental::Reason::MissingAnchor);
                         return Ok(());
                     }
@@ -7309,6 +7349,10 @@ async fn deliver_from_source(
         })
         .await;
         decision.result(&result);
+        let result = if matches!(purpose, supplemental::Purpose::SupervisorReview) && !decision.confirmed() {
+            if decision.not_sent() { Err(AppError::Conflict("supervisor_review_not_sent".into())) }
+            else { Err(AppError::Forbidden("The complete ledger-write review was not confirmed delivered".into())) }
+        } else { result };
         if let Err(error) = &result {
             tracing::debug!(
                 error_code = error.error_code(),

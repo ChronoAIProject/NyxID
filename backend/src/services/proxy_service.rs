@@ -5381,7 +5381,11 @@ async fn forward_request_with_egress_guard_inner(
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
-    let response = if let Some(guard) = egress_guard.filter(|guard| guard.has_guest_data()) {
+    // Finish local preparation before any one-use dispatch barrier. A refused
+    // supervisor occurrence cannot mark another permit or request as dispatched.
+    let mut request = request.build()?;
+    let guest_guard = egress_guard.filter(|guard| guard.has_guest_data());
+    if let Some(guard) = guest_guard {
         if dispatch_guard.is_some() || resource_proof.is_some()
             || target.execution_permission.is_some() || target.execution_request.is_some()
         {
@@ -5389,101 +5393,41 @@ async fn forward_request_with_egress_guard_inner(
                 super::channel_guest_access::policy::denied(),
             ));
         }
-        let request = request.build()?;
-        guard.authorize_guest_request(&request)
-            .await
+        guard.authorize_guest_request(&request).await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
-        client.execute(request).await?
-    } else if let Some(guard) = dispatch_guard {
-        let mut request = request.build()?;
-        if let Some(proof) = resource_proof {
-            proof
-                .attach(&mut request)
-                .await
-                .map_err(ForwardRequestError::PreDispatchRejected)?;
-        }
-        guard
-            .before_send(&request)
-            .await
-            .map_err(ForwardRequestError::PreDispatchRejected)?;
-        if let Some(permit) = &target.execution_permission {
-            permit
-                .before_send(target)
-                .await
-                .map_err(ForwardRequestError::PreDispatchRejected)?;
-        }
-        if let Some(context) = &target.execution_request {
-            context.native_dispatched();
-        }
-        let result = client.execute(request).await;
-        if let Some(permit) = &target.execution_permission {
-            permit
-                .complete(result.is_ok())
-                .await
-                .map_err(ForwardRequestError::Application)?;
-        }
-        let response = result?;
-        guard
-            .observe_response(response)
-            .await
-            .map_err(|_| ForwardRequestError::OutcomeUnknown)?
     } else if let Some(proof) = resource_proof {
-        let mut request = request.build()?;
-        proof
-            .attach(&mut request)
-            .await
-            .map_err(ForwardRequestError::PreDispatchRejected)?;
-        if let Some(permit) = &target.execution_permission {
-            permit
-                .before_send(target)
-                .await
-                .map_err(ForwardRequestError::PreDispatchRejected)?;
-        }
-        if let Some(context) = &target.execution_request {
-            context.native_dispatched();
-        }
-        let result = client.execute(request).await;
-        if let Some(permit) = &target.execution_permission {
-            permit
-                .complete(result.is_ok())
-                .await
-                .map_err(ForwardRequestError::Application)?;
-        }
-        result?
+        proof.attach(&mut request).await.map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
+    if let Some(guard) = egress_guard {
+        guard.claim_supervisor(&request).await.map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
+    if let Some(guard) = dispatch_guard.as_ref() {
+        guard.before_send(&request).await.map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
+    if let Some(permit) = &target.execution_permission {
+        permit.before_send(target).await.map_err(ForwardRequestError::PreDispatchRejected)?;
+    }
+    if let Some(context) = &target.execution_request {
+        context.native_dispatched();
+    }
+    let follow = guest_guard.is_none() && dispatch_guard.is_none() && resource_proof.is_none()
+        && target.execution_permission.is_none()
+        && !egress_guard.is_some_and(|g| g.has_supervisor()) && redirects == Redirects::SameOrigin
+        && target.target_id.is_none() && target.auth_method != "github_git"
+        && target.service.offering_kind != crate::models::downstream_service::OfferingKind::Tool
+        && !super::telegram_new_api::original_bot_api_request(request.url());
+    let result = if follow {
+        return_or_follow_same_origin(target, client, request, path, egress_guard).await
     } else {
-        let result = if let Some(permit) = &target.execution_permission {
-            // A local builder failure is not a provider attempt. Finish all
-            // request preparation before committing the one-use send barrier.
-            let request = request.build()?;
-            permit
-                .before_send(target)
-                .await
-                .map_err(ForwardRequestError::PreDispatchRejected)?;
-            if let Some(context) = &target.execution_request {
-                context.native_dispatched();
-            }
-            client.execute(request).await.map_err(ForwardRequestError::from)
-        } else {
-            let request = request.build()?;
-            if let Some(context) = &target.execution_request {
-                context.native_dispatched();
-            }
-            if redirects == Redirects::SameOrigin
-                && target.target_id.is_none() && target.auth_method != "github_git"
-                && target.service.offering_kind != crate::models::downstream_service::OfferingKind::Tool
-                && !super::telegram_new_api::original_bot_api_request(request.url())
-            {
-                return_or_follow_same_origin(target, client, request, path, egress_guard).await
-            } else { client.execute(request).await.map_err(ForwardRequestError::from) }
-        };
-        if let Some(permit) = &target.execution_permission {
-            permit
-                .complete(result.is_ok())
-                .await
-                .map_err(ForwardRequestError::Application)?;
-        }
-        result?
+        client.execute(request).await.map_err(ForwardRequestError::from)
     };
+    if let Some(permit) = &target.execution_permission {
+        permit.complete(result.is_ok()).await.map_err(ForwardRequestError::Application)?;
+    }
+    let response = result?;
+    let response = if let Some(guard) = dispatch_guard {
+        guard.observe_response(response).await.map_err(|_| ForwardRequestError::OutcomeUnknown)?
+    } else { response };
 
     if super::credential_verification::checking() {
         return super::credential_verification::observe(response).await.map_err(ForwardRequestError::Application);

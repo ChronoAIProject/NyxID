@@ -2357,6 +2357,7 @@ mod tests {
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
+            supervisor_write: None,
             assistant_group: None,
             id: id.to_string(),
             user_id: "user-alpha".to_string(),
@@ -2412,6 +2413,7 @@ mod tests {
             "client-alpha",
             None,
             approval_service::ApprovalRequestOperation {
+                supervisor_write: None,
                 org_policy: None,
                 connected_request_id: None,
                 connected_deadline: None,

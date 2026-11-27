@@ -190,6 +190,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
         automation_work: None,
         automation_parent: None,
         execution_enrollment: false,
+        supervisor_parent: None,
         execution_parent: None,
         channel_context: None,
         capacity: None,
@@ -1089,6 +1090,7 @@ pub(crate) async fn assign(
             automation_parent: execution_parent
                 .and_then(crate::services::trigger_schedule::direct::parent),
             execution_enrollment: false,
+            supervisor_parent: execution_parent.and_then(crate::services::supervisor_write::parent),
             execution_parent: execution_parent
                 .and_then(crate::services::execution_permission_dispatch::tasks::parent),
             channel_context: None,

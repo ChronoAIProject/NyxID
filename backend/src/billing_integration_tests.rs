@@ -958,6 +958,7 @@ async fn run_billing_route_coverage_smoke() {
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
+            supervisor_write: None,
             assistant_group: None,
             id: request_id.clone(),
             user_id: owner_id.clone(),
