@@ -4,6 +4,7 @@ use super::*;
 use crate::models::approval_request::ApprovalRequest;
 use crate::services::assistant_team_service as team;
 use crate::services::billing::route_inventory::BillingRoutePolicy;
+use crate::services::nyxbot_response_recovery as recovery;
 use bson::Document;
 use std::sync::{
     OnceLock,
@@ -1187,6 +1188,17 @@ async fn native_owner(j: &Journey, text: &str, id: &str) -> Response {
     .await
 }
 
+async fn retained_event_context(state: &AppState, event: &NyxbotEvent) -> Value {
+    let context = crate::services::nyxbot_event_record::event_context(
+        &state.encryption_keys,
+        event,
+        event.event_context_ciphertext.as_deref().unwrap(),
+    )
+    .await
+    .unwrap();
+    serde_json::from_slice(&context).unwrap()
+}
+
 #[tokio::test]
 async fn supervisor_write_native_new_reply_event_decides_original_write_and_preserves_result_source()
  {
@@ -1250,14 +1262,25 @@ async fn supervisor_write_native_new_reply_event_decides_original_write_and_pres
         .await
         .unwrap()
         .unwrap();
-    let source = source_event.delivery.unwrap();
-    let current = decided_event.delivery.unwrap();
-    assert_eq!(source.origin.partition, current.origin.partition);
-    assert_eq!(source.sender_id, current.sender_id);
-    assert_eq!(
-        source.origin.nyxbot_channel_id,
-        current.origin.nyxbot_channel_id
-    );
+    assert_eq!(source_event.channel_id, decided_event.channel_id);
+    assert_eq!(source_event.user_id, decided_event.user_id);
+    assert_eq!(source_event.partition, decided_event.partition);
+    assert_ne!(source_event.event_id, decided_event.event_id);
+    // An inline decision finishes the native response without admitting a new
+    // assistant turn or creating turn-delivery state. Its authenticated source
+    // identity is retained in the encrypted ingress context instead.
+    assert!(reply.terminal);
+    assert!(decided_event.turn_id.is_none());
+    assert!(decided_event.delivery.is_none());
+    let source = retained_event_context(&j.state, &source_event).await;
+    let current = retained_event_context(&j.state, &decided_event).await;
+    assert_eq!(current["activity"]["event_id"], "discord:100:805");
+    assert_eq!(current["activity"]["actor"]["kind"], "human");
+    assert_eq!(current["activity"]["actor"]["id"], "7");
+    assert_eq!(current["activity"]["conversation"]["id"], "200");
+    for field in ["source", "actor", "conversation"] {
+        assert_eq!(source["activity"][field], current["activity"][field]);
+    }
     let final_text = owner_text(
         &tokio::time::timeout(std::time::Duration::from_secs(25), result)
             .await
