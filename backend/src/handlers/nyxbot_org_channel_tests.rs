@@ -873,7 +873,16 @@ async fn cold_guest_model_setup(native: bool, addon: bool) {
     state.db.drop().await.unwrap();
 }
 
-async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_retry: bool) {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GuestGroupCase {
+    Followed,
+    Unfollowed,
+    FailedSetup,
+    RouteDrift,
+    SlowAdmission,
+}
+
+async fn org_guest_group_dm_group(case: GuestGroupCase) {
     use crate::models::channel_message::ChannelMessage;
     use crate::models::channel_thread::{
         ChannelThreadFacts, ThreadAddress, ThreadKind, ThreadSenderKind,
@@ -883,10 +892,10 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
     use futures::TryStreamExt;
     use tower::ServiceExt;
 
-    let (mut state, _, old) = setup(&format!(
-        "org_guest_surface_{followed}_{failed_record}_{route_retry}"
-    ))
-    .await;
+    let followed = case != GuestGroupCase::Unfollowed;
+    let failed_record = case == GuestGroupCase::FailedSetup;
+    let route_retry = case == GuestGroupCase::RouteDrift;
+    let (mut state, _, old) = setup(&format!("org_guest_surface_{case:?}")).await;
     old.abort();
     let (mut row, key, agent, org_id) = org_channel(&state, false).await;
     crate::test_utils::set_test_approval_preference(&state.db, &org_id, false).await;
@@ -1037,7 +1046,10 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
     }
     let db = state.db.clone();
     let drifted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let capacity_notice = Arc::new(tokio::sync::Notify::new());
+    let guest_wait = capacity_notice.clone();
     let upstream=Router::new().route("/v1/responses",post(move |headers:HeaderMap,Json(body):Json<Value>| {
+        let guest_wait = guest_wait.clone();
         let callbacks=callbacks.clone();let sink=sink.clone();let db=db.clone();let drifted=drifted.clone();let completed_calls=completed_calls.clone();
         async move {
             let bearer=headers["authorization"].clone();
@@ -1069,6 +1081,11 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
                 "contexts":turn_context_tests::contexts(&body),"input":body["input"],
                 "persisted_context":conversation.active_turn.as_ref().unwrap().channel_context});
             completed_calls.send_modify(|count| *count += 1);
+            if case == GuestGroupCase::SlowAdmission && conversation.guest_turn
+                && conversation.channel.as_ref().is_some_and(|origin| origin.thread.is_some()) {
+                tokio::time::timeout(Duration::from_secs(60), guest_wait.notified())
+                    .await.expect("slow guest admission must send a capacity notice");
+            }
             let session=format!("conv_{}",Uuid::new_v4().simple());
             let event=json!({"type":if status.is_success(){"response.completed"}else{"response.failed"},"sequence_number":0,"response":{"id":format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple()),
                 "conversation":{"id":session},"status":if status.is_success(){"completed"}else{"failed"},"error":if status.is_success(){Value::Null}else{json!({"code":"model_error","message":"Model callback refused"})},"output":if status.is_success(){json!([{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Organization answer"}]}])}else{json!([])}}});
@@ -1322,14 +1339,23 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
         records.update_one(doc! {"_id":"old-failed-setup"},doc! {"$set":{"until":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(1))}}).await.unwrap();
         event_id = next_source(&state, &mut source, &mut body, "First guest after backoff").await;
     }
+    let pending_notice = Notice::Pending.text(route_retry.then_some(NoticeLanguage::Simplified));
     if followed {
+        let pending_content = json!({"text":pending_notice}).to_string();
         wiremock::Mock::given(wiremock::matchers::method("POST"))
             .and(wiremock::matchers::path("/open-apis/im/v1/messages/om_root/reply"))
             .and(wiremock::matchers::body_partial_json(json!({"reply_in_thread":true})))
-            .respond_with(|_: &wiremock::Request| wiremock::ResponseTemplate::new(200).set_body_json(json!({
-                "code":0,"data":{"message_id":format!("om_guest_answer_{}",Uuid::new_v4().simple())}})))
-            .expect(3).mount(&platform).await;
+            .respond_with(move |request: &wiremock::Request| {
+                let body: Value = request.body_json().unwrap();
+                if body["content"].as_str() == Some(pending_content.as_str()) {
+                    capacity_notice.notify_one();
+                }
+                wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                    "code":0,"data":{"message_id":format!("om_guest_answer_{}",Uuid::new_v4().simple())}}))
+            })
+            .mount(&platform).await;
     }
+    let mut checked_requests = 0;
     let mut group_conversation = None;
     let mut private_conversation = None;
     for phase in 0..3 {
@@ -1439,6 +1465,7 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
                             "event_type":"nyxbot_channel_supplemental_delivery",
                             "event_data.conversation_id":&guest.id,
                             "event_data.channel_event_id":&event.id,
+                            "event_data.purpose":"team_result",
                             "event_data.outcome":"confirmed",
                             "event_data.egress":"local_relay",
                         })
@@ -1467,15 +1494,34 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
                 body_text(posted).await
             );
             let requests = platform.received_requests().await.unwrap();
-            let sends: Vec<_> = requests
+            let mut sends = requests[checked_requests..]
                 .iter()
                 .filter(|r| r.url.path() == "/open-apis/im/v1/messages/om_root/reply")
-                .collect();
-            assert_eq!(sends.len(), if phase == 0 { 1 } else { 3 });
-            assert!(
-                sends
-                    .iter()
-                    .all(|r| r.body_json::<Value>().unwrap()["reply_in_thread"] == true)
+                .map(|r| {
+                    let body: Value = r.body_json().unwrap();
+                    assert_eq!(body["reply_in_thread"], true);
+                    assert_eq!(body["msg_type"], "text");
+                    serde_json::from_str::<Value>(body["content"].as_str().unwrap()).unwrap()
+                })
+                .peekable();
+            checked_requests = requests.len();
+            // Slow engine admission can send one capacity notice before the thread answer.
+            let notice = sends.next_if(|content| content == &json!({"text":pending_notice}));
+            if case == GuestGroupCase::SlowAdmission {
+                assert!(
+                    notice.is_some(),
+                    "expected a capacity notice for phase {phase}"
+                );
+            }
+            if phase == 2 {
+                assert_eq!(
+                    sends.next(),
+                    Some(json!({"text":"Guest supplemental result"}))
+                );
+            }
+            assert_eq!(
+                sends.collect::<Vec<_>>(),
+                [json!({"text":"Answer in the original thread"})]
             );
             let listed = thread_controls::list(&state, OWNER, &row.id, None, &Default::default())
                 .await
@@ -1626,9 +1672,6 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
         0,
         "waiting guest sources must be consumed"
     );
-    if followed {
-        platform.verify().await;
-    }
     crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
         .lock()
         .unwrap()
@@ -1643,20 +1686,25 @@ async fn org_guest_group_dm_group(followed: bool, failed_record: bool, route_ret
 
 #[tokio::test]
 async fn qa_cold_org_guest_followed_group_then_dm_then_group_delivers_and_bills_org() {
-    Box::pin(org_guest_group_dm_group(true, false, false)).await;
+    Box::pin(org_guest_group_dm_group(GuestGroupCase::Followed)).await;
 }
 #[tokio::test]
+async fn slow_org_guest_admission_sends_one_thread_answer_after_capacity_notice() {
+    Box::pin(org_guest_group_dm_group(GuestGroupCase::SlowAdmission)).await;
+}
+
+#[tokio::test]
 async fn cold_org_guest_group_without_thread_binding_initializes_and_bills_org() {
-    Box::pin(org_guest_group_dm_group(false, false, false)).await;
+    Box::pin(org_guest_group_dm_group(GuestGroupCase::Unfollowed)).await;
 }
 #[tokio::test]
 async fn failed_org_guest_setup_respects_backoff_then_recovers_on_next_thread_guest() {
-    Box::pin(org_guest_group_dm_group(true, true, false)).await;
+    Box::pin(org_guest_group_dm_group(GuestGroupCase::FailedSetup)).await;
 }
 
 #[tokio::test]
 async fn cold_org_guest_thread_route_drift_forces_setup_and_retries_same_guest() {
-    Box::pin(org_guest_group_dm_group(true, false, true)).await;
+    Box::pin(org_guest_group_dm_group(GuestGroupCase::RouteDrift)).await;
 }
 
 #[tokio::test]
