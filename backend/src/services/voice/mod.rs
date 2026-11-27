@@ -36,6 +36,9 @@ mod startup_tests;
 #[cfg(test)]
 mod tests;
 mod tokens;
+pub mod timing;
+#[cfg(test)]
+mod timing_tests;
 mod tools;
 pub mod transcript;
 mod transport;

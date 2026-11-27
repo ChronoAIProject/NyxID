@@ -2,6 +2,82 @@ import { z } from "zod";
 import { voiceMetadataSchema } from "./platform-keys";
 import { voicePreferencesSchema } from "./assistant-nyxagent";
 
+export const voicePhaseTimingSchema = z.object({
+  unit: z.literal("ms"),
+  offset_origin: z.literal("call_created_at"),
+  measurements: z
+    .array(
+      z.object({
+        phase: z.enum([
+          "input_start",
+          "input_end",
+          "transcript_observed",
+          "delegation",
+          "queued",
+          "first_activity",
+          "tool_start",
+          "tool_end",
+          "first_progress",
+          "approval_wait",
+          "result",
+          "playback_confirmed",
+          "model_start",
+          "model_end",
+          "model",
+          "tool",
+          "total",
+          "output_start",
+          "output_end",
+          "response_start",
+          "response_end",
+          "response_generation",
+          "first_audio",
+          "mcp_round_trip",
+          "transcription_turnaround",
+        ]),
+        source: z.enum([
+          "coordinator",
+          "provider_transcript",
+          "relay_audio",
+          "native_responses",
+          "nyxagent",
+          "mcp_client",
+          "client_playback",
+        ]),
+        kind: z.enum(["offset", "duration"]),
+        value_ms: z.number().int().min(0).max(86_400_000),
+        tool_index: z.number().int().min(0).max(39).optional(),
+      }),
+    )
+    .max(128),
+  unavailable: z
+    .array(
+      z.enum([
+        "asr_processing",
+        "synthesis_processing",
+        "device_playback",
+        "model",
+        "tool",
+        "first_audio",
+        "client_playback",
+      ]),
+    )
+    .max(7),
+});
+export type VoicePhaseTiming = z.infer<typeof voicePhaseTimingSchema>;
+const voiceTurnTimingSchema = z.object({
+  turn_id: z.string().uuid(),
+  related_turn_id: z.string().uuid().optional(),
+  kind: z.enum([
+    "input",
+    "output",
+    "native_response",
+    "direct_tool",
+    "voice_response",
+  ]),
+  phase_timing: voicePhaseTimingSchema,
+});
+
 export const voiceSessionSchema = z.object({
   client_request_id: z.string().optional(),
   created_at: z.string().datetime(),
@@ -63,6 +139,7 @@ const strictVoiceSnapshotSchema = z.object({
       pending_acknowledgement_ids: z.array(z.string()),
       title: z.string().max(120).nullable().optional(),
       result_message_id: z.string().nullable().optional(),
+      phase_timing: voicePhaseTimingSchema.nullable().catch(null).optional(),
       progress: z
         .object({
           stage: z.string(),
@@ -80,6 +157,16 @@ const strictVoiceSnapshotSchema = z.object({
 // Validate the session strictly; omit an incompatible caption/task rather than
 // converting a display-only schema change into a lost audio call.
 export const voiceSnapshotSchema = strictVoiceSnapshotSchema.extend({
+  turn_timings: z
+    .array(z.unknown())
+    .catch([])
+    .transform((rows) =>
+      rows.slice(0, 32).flatMap((row) => {
+        const result = voiceTurnTimingSchema.safeParse(row);
+        return result.success ? [result.data] : [];
+      }),
+    )
+    .optional(),
   captions: z
     .array(z.unknown())
     .catch([])

@@ -179,6 +179,7 @@ mod tests {
             execution_enrolled: false,
             model_task: None,
             progress: None,
+            execution_timing: None,
             timing: Default::default(),
             started_at: None,
             terminal_error_code: None,

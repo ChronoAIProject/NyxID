@@ -13,7 +13,13 @@ use mongodb::{
     Database,
     bson::{self, doc},
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+pub fn belongs_to_call(r: &VoiceRequest, call: &VoiceSession) -> bool {
+    r.user_id == call.user_id
+        && r.conversation_id == call.conversation_id
+        && r.session_id == call.id
+}
 
 pub fn pending(r: &VoiceRequest) -> bool {
     matches!(
@@ -77,10 +83,15 @@ pub(super) async fn task_status(
         .into_iter()
         .map(|m| (m.id, m.text.chars().take(120).collect::<String>()))
         .collect();
+    let observations = super::timing::observations(call);
     Ok(serde_json::json!({
         "type":"task_status","observed_at":Utc::now(),"has_more":has_more,
+        "turn_timings":observations.iter().take(8).collect::<Vec<_>>(),
+        "timings_has_more":observations.len()>8,
+        "timing_note":"Each turn_timings item is one scoped observation. Separate input/output or model/tool entries do not establish a causal pair without explicit related_turn_id evidence. Missing stages are unavailable, never zero. Client playback feedback is not physical hearing.",
         "tasks":requests.iter().map(|r| serde_json::json!({
-            "task_id":r.id,"state":r.state,
+            "task_id":r.id,"turn_id":r.turn_id,"state":r.state,
+            "phase_timing":super::timing::request_report(r),
             "title":titles.get(&r.message_id),
             "outcome":crate::services::assistant_voice::request_outcome(r),
             "progress":r.progress.as_ref().map(|p|serde_json::json!({
@@ -107,6 +118,7 @@ pub fn project(
     turn: Option<&ActiveTurn>,
     now: DateTime<Utc>,
 ) -> VoiceTaskProgress {
+    let turn = turn.filter(|t| t.turn_id == r.turn_id);
     let activities = turn.map(|t| t.activities.as_slice()).unwrap_or_default();
     let completed: Vec<_> = activities
         .iter()
@@ -210,7 +222,7 @@ pub async fn refresh(
     }
     let ids: Vec<_> = requests
         .iter()
-        .filter(|r| pending(r))
+        .filter(|r| belongs_to_call(r, call) && pending(r))
         .map(|r| {
             r.task_conversation_id
                 .as_deref()
@@ -225,39 +237,67 @@ pub async fn refresh(
         .await?;
     let turns: HashMap<_, _> = rows
         .into_iter()
-        .filter_map(|r| r.active_turn.map(|t| (t.turn_id.clone(), t)))
+        .filter_map(|r| r.active_turn.map(|t| ((r.id, t.turn_id.clone()), t)))
         .collect();
     for r in requests {
-        let turn = turns.get(&r.turn_id);
+        if !belongs_to_call(r, call) {
+            continue;
+        }
+        let execution = r
+            .task_conversation_id
+            .as_ref()
+            .unwrap_or(&r.conversation_id);
+        let turn = turns.get(&(execution.clone(), r.turn_id.clone()));
         let mut next = project(r, turn, Utc::now());
         if let Some(old) = &r.progress {
             next.updated_at = old.updated_at;
         }
+        // Aggregates are safe during a live turn. Positional activity intervals
+        // are captured only from the final snapshot because the activity list slides.
+        let execution_timing = turn.map(|t| {
+            super::timing::execution_snapshot(&r.turn_id, call.created_at, Some(&t.timing), &[])
+        });
+        let mut update = doc! {};
+        let mut set = doc! {};
+        if let Some(snapshot) = &execution_timing {
+            if r.execution_timing.as_ref() != Some(snapshot) {
+                set.insert(
+                    "execution_timing",
+                    bson::to_bson(snapshot).map_err(|_| {
+                        AppError::Internal("Voice timing serialization failed".into())
+                    })?,
+                );
+            }
+        }
         if r.progress.as_ref() != Some(&next) {
             next.updated_at = Utc::now();
+            set.insert(
+                "progress",
+                bson::to_bson(&next).map_err(|_| {
+                    AppError::Internal("Voice progress serialization failed".into())
+                })?,
+            );
+        }
+        if !set.is_empty() {
+            update.insert("$set", set);
+        }
+        if !update.is_empty() {
             db.collection::<bson::Document>(REQUESTS)
                 .update_one(
-                    doc! {"_id":&r.id,"state":bson::to_bson(&r.state).map_err(|_|AppError::Internal("Voice progress serialization failed".into()))?},
-                    doc! {"$set":{"progress":bson::to_bson(&next).map_err(|_|AppError::Internal("Voice progress serialization failed".into()))?}},
+                    doc! {"_id":&r.id,"user_id":&call.user_id,"session_id":&call.id,"conversation_id":&call.conversation_id,"turn_id":&r.turn_id,"state":bson::to_bson(&r.state).map_err(|_|AppError::Internal("Voice progress serialization failed".into()))?},
+                    update,
                 )
                 .await?;
             r.progress = Some(next);
+            if execution_timing.is_some() {
+                r.execution_timing = execution_timing;
+            }
         }
         if let Some(first) = turn.and_then(|t| t.activities.iter().min_by_key(|a| a.started_at)) {
             let ms = (first.started_at - call.created_at)
                 .num_milliseconds()
                 .max(0);
             mark(db, r, "first_activity_ms", ms).await?;
-            mark(db, r, "tool_started_ms", ms).await?;
-        }
-        if let Some(at) = turn.and_then(|t| t.activities.iter().filter_map(|a| a.ended_at).min()) {
-            mark(
-                db,
-                r,
-                "first_tool_finished_ms",
-                (at - call.created_at).num_milliseconds().max(0),
-            )
-            .await?;
         }
         if r.state == RequestState::AwaitingConfirmation {
             mark(
@@ -285,7 +325,7 @@ pub async fn mark(
     // under duplicate provider events, retries and a newer lease generation.
     db.collection::<bson::Document>(REQUESTS)
         .update_one(
-            doc! {"_id":&r.id,"user_id":&r.user_id},
+            doc! {"_id":&r.id,"user_id":&r.user_id,"session_id":&r.session_id,"conversation_id":&r.conversation_id,"turn_id":&r.turn_id},
             doc! {"$min":{format!("timing.{name}"):ms.max(0)}},
         )
         .await?;
@@ -295,21 +335,27 @@ pub async fn mark(
 
 #[derive(Default)]
 pub struct Coalescer {
-    sent: HashMap<String, String>,
+    sent: HashSet<(String, String)>,
     last_ms: Option<i64>,
 }
 impl Coalescer {
     pub fn due(&mut self, r: &VoiceRequest, elapsed_ms: i64, age_ms: i64) -> bool {
         let Some(p) = &r.progress else { return false };
-        let key = format!("{}:{}", p.stage, p.detail);
+        let key = p
+            .detail
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
         if p.detail.trim().is_empty()
             || age_ms < 2000
             || self.last_ms.is_some_and(|t| elapsed_ms - t < 8000)
-            || self.sent.get(&r.id) == Some(&key)
+            || self.sent.contains(&(r.id.clone(), key.clone()))
+            || self.sent.len() >= 256
         {
             return false;
         }
-        self.sent.insert(r.id.clone(), key);
+        self.sent.insert((r.id.clone(), key));
         self.last_ms = Some(elapsed_ms);
         true
     }

@@ -377,6 +377,7 @@ async fn admit_task(
         execution_enrolled,
         model_task,
         progress: None,
+        execution_timing: None,
         timing: Default::default(),
         started_at: None,
         terminal_error_code: None,

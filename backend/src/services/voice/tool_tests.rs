@@ -163,6 +163,11 @@ async fn voice_tools_use_selected_bot_grants_and_live_revocation_through_real_mc
             .await
             .unwrap();
         assert_ne!(result["isError"], true, "{result}");
+        let observed_call = super::super::session::refresh(&f.state.db, &call).await.unwrap();
+        let timings = super::super::timing::observations(&observed_call);
+        assert!(timings.iter().any(|t|t.phase_timing.measurements.iter().any(|m|m.phase == super::super::timing::Phase::McpRoundTrip && m.kind == super::super::timing::Kind::Duration)));
+        let evidence = serde_json::to_string(&timings).unwrap();
+        assert!(!evidence.contains("temperature") && !evidence.contains("arguments_json"));
         assert!(result.to_string().contains("22"), "{result}");
         team::set_grants(
             &f.state.db,

@@ -68,6 +68,9 @@ pub struct VoiceRequest {
     /// First observed offsets from the call start, never transcript or tool content.
     #[serde(default)]
     pub timing: std::collections::BTreeMap<String, i64>,
+    /// Atomic snapshot bound to one exact execution turn; never merged across continuations.
+    #[serde(default)]
+    pub execution_timing: Option<VoiceExecutionTiming>,
     /// Already written by claim; legacy requests may not have a start time.
     #[serde(default, with = "crate::models::bson_datetime::optional")]
     pub started_at: Option<DateTime<Utc>>,
@@ -128,6 +131,20 @@ pub struct VoiceTaskProgress {
     pub completed_steps: usize,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceExecutionTiming {
+    pub turn_id: String,
+    pub model_ms: Option<u64>,
+    pub tool_ms: Option<u64>,
+    pub total_ms: Option<u64>,
+    pub tools: Vec<VoiceToolTiming>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VoiceToolTiming {
+    pub start_ms: i64,
+    pub end_ms: Option<i64>,
 }
 impl std::fmt::Debug for VoiceRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -12,8 +12,10 @@ fn grok_contract_disables_builtin_tools_vad_and_resumption() {
     assert_eq!(session["voice"], "catalog-voice");
     assert!(session["turn_detection"]["type"].is_null());
     assert_eq!(session["resumption"]["enabled"], false);
-    assert_eq!(session["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(session["tools"].as_array().unwrap().len(), 2);
     assert_eq!(session["tools"][0]["name"], "delegate_to_agent");
+    assert_eq!(session["tools"][1]["name"], "get_task_status");
+    assert_eq!(session["tools"][1]["parameters"]["additionalProperties"], false);
     assert_eq!(
         session["tools"][0]["parameters"]["additionalProperties"],
         false
@@ -88,7 +90,7 @@ async fn grok_fixture_manual_transcription_during_output_is_cumulative_and_does_
                     socket.send(Message::Text(json!({"type":"session.created"}).to_string().into())).await.unwrap();
                     let Some(Ok(Message::Text(text)))=socket.recv().await else {panic!("configuration required")};
                     let config:serde_json::Value=serde_json::from_str(&text).unwrap();
-                    assert_eq!(config["session"]["tools"].as_array().unwrap().len(),1);
+                    assert_eq!(config["session"]["tools"].as_array().unwrap().len(),2);
                     socket.send(Message::Text(json!({"type":"session.updated","session":config["session"]}).to_string().into())).await.unwrap();
                     while let Some(Ok(Message::Text(text)))=socket.recv().await {
                         sent.send(serde_json::from_str::<serde_json::Value>(&text).unwrap()).await.unwrap();
@@ -122,6 +124,12 @@ async fn grok_fixture_manual_transcription_during_output_is_cumulative_and_does_
         assert_eq!(segments.iter().map(|s|s.text.as_str()).collect::<Vec<_>>(),["Delete the wrong","Delete the draft","Delete the draft file"]);
         assert!(segments[2].sealed && segments[2].complete);
         assert_eq!(segments[0].id,segments[2].id);
+        let timing_call = crate::services::voice::session::refresh(&db,&call).await.unwrap();
+        let timings = crate::services::voice::timing::observations(&timing_call);
+        assert_eq!(timings.len(),1);
+        assert_eq!(timings[0].turn_id,segments[2].id);
+        assert!(timings[0].phase_timing.measurements.iter().any(|m|m.phase==crate::services::voice::timing::Phase::TranscriptionTurnaround));
+        assert!(timings[0].phase_timing.unavailable.contains(&"asr_processing".into()));
         grok.provider(json!({"type":"conversation.item.input_audio_transcription.updated","item_id":"user1","transcript":"late rewrite"})).await.unwrap();
         assert!(grok.events.is_empty());
         grok.provider(json!({"type":"input_audio_buffer.speech_started"})).await.unwrap();
@@ -135,6 +143,12 @@ async fn grok_fixture_manual_transcription_during_output_is_cumulative_and_does_
         grok.arbiter.done("speaking").unwrap();
         grok.send(json!({"type":"nyx.input.accepted","id":segments[2].id})).await.unwrap();
         grok.provider(json!({"type":"response.created","response":{"id":"answer"}})).await.unwrap();
+        let request_count = db.collection::<mongodb::bson::Document>(crate::models::assistant_voice::REQUESTS).count_documents(mongodb::bson::doc!{}).await.unwrap();
+        for (call_id,args) in [("status-ok",json!({})),("status-denied",json!({"session_id":"other"}))] {
+            grok.provider(json!({"type":"response.function_call_arguments.done","response_id":"answer","call_id":call_id,"name":"get_task_status","arguments":args.to_string()})).await.unwrap();
+        }
+        assert_eq!(db.collection::<mongodb::bson::Document>(crate::models::assistant_voice::REQUESTS).count_documents(mongodb::bson::doc!{}).await.unwrap(),request_count);
+        assert!(grok.arbiter.unresolved.is_empty());
         let function=json!({"type":"response.function_call_arguments.done","response_id":"answer","call_id":"tool1",
             "name":"delegate_to_agent","arguments":json!({"utterance_id":segments[2].id,"intent_hint":"delete draft"}).to_string()});
         grok.provider(function.clone()).await.unwrap();
@@ -160,6 +174,10 @@ async fn grok_fixture_manual_transcription_during_output_is_cumulative_and_does_
         assert_eq!(final_event["segment"]["interrupted"],true);
         assert!(uuid::Uuid::parse_str(final_event["segment"]["id"].as_str().unwrap()).is_ok());
         assert_eq!(grok.events.len(),2); // Draft and one final, never a replay.
+        let timing_call = crate::services::voice::session::refresh(&db,&call).await.unwrap();
+        let reports = crate::services::voice::timing::observations(&timing_call);
+        assert!(reports.iter().any(|t|t.phase_timing.measurements.iter().any(|m|m.phase==crate::services::voice::timing::Phase::FirstAudio)));
+        assert!(!serde_json::to_string(&reports).unwrap().contains("provider-item"));
         // Trailing playback still has a truncation target after response.done.
         grok.events.clear();
         for (item, meaningful) in [("backchannel", false), ("correction", true)] {

@@ -160,6 +160,7 @@ async fn admit_audio(
     let shared_execution =
         super::shared::admit(db, user, &thread, client_request_id, &preferences).await?;
     let row = VoiceSession {
+        phase_observations: Vec::new(),
         execution_enrolled: false,
         responses: Default::default(),
         client_key,
