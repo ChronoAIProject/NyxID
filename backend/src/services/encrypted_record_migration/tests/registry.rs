@@ -413,19 +413,19 @@ async fn shared_signing_sources_stay_exact_and_report_a_blocked_finding_until_th
         let db =
             crate::test_utils::connect_transaction_test_database("channel_signing_guard").await;
         let rows = db.collection::<Document>(coll);
-        let secret = bson::Binary {
+        let secret = |ciphertext| bson::Binary {
             subtype: BinarySubtype::Generic,
-            bytes: keys.encrypt(b"channel-test-secret").await.unwrap(),
+            bytes: hex::decode(ciphertext).unwrap(),
         };
         let (source, platform, origin) = if coll == "provider_configs" {
             (
-                doc! {"_id":"fixture-source","slug":"twitter","client_secret_encrypted":secret},
+                doc! {"_id":"fixture-source","slug":"twitter","client_secret_encrypted":secret(super::historical::PROVIDER_SIGNING_SOURCE)},
                 "x",
                 "connection",
             )
         } else {
             (
-                doc! {"_id":"fixture-source","provider":"meta","secrets":{"app_secret":secret},"fields":{},"updated_by":"test","updated_at":bson::DateTime::now()},
+                doc! {"_id":"fixture-source","provider":"meta","secrets":{"app_secret":secret(super::historical::PLATFORM_SIGNING_SOURCE)},"fields":{},"updated_by":"test","updated_at":bson::DateTime::now()},
                 "whatsapp",
                 "platform",
             )
