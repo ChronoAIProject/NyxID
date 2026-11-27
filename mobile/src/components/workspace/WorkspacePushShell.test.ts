@@ -285,7 +285,7 @@ test("the stationary base and full-width translated slab retain the actual navig
   assert.equal(x.find("workspace-sidebar-base").props.style[1].width, 310);
   assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "none");
   assert.ok(x.all().includes(x.child));
-  assert.ok(x.all().includes(x.sidebar));
+  assert.ok(!x.all().includes(x.sidebar));
   assert.equal(x.find("workspace-content-slab").props.style[0].flex, 1);
   assert.equal(
     x.all().filter((node) => /Modal|Overlay|Scrim/.test(String(node.type)))
@@ -293,6 +293,7 @@ test("the stationary base and full-width translated slab retain the actual navig
     0,
   );
   x.set({ visible: true, presented: true });
+  assert.ok(x.all().includes(x.sidebar));
   assert.equal(x.style().transform[0].translateX, 310);
   assert.equal(x.style().borderTopLeftRadius, 16);
   assert.equal(
@@ -329,11 +330,12 @@ test("Android excludes the closed compact drawer from native focus search and sh
   assert.equal(boundary().props.blocked, false);
   assert.ok(elements(boundary()).includes(x.child));
   assert.ok(!elements(boundary()).includes(x.sidebar));
-  assert.ok(x.all().includes(x.sidebar));
+  assert.ok(!x.all().includes(x.sidebar));
   assert.ok(x.all().includes(x.child));
 
   x.handlers().onStart();
   x.render();
+  assert.ok(x.all().includes(x.sidebar));
   assert.equal(sidebarStyle().display, undefined);
   assert.equal(boundary().props.blocked, true);
   x.handlers().onUpdate({ translationX: 240 });
@@ -351,8 +353,13 @@ test("Android excludes the closed compact drawer from native focus search and sh
   x.lastComplete();
   assert.equal(sidebarStyle().display, "none");
   assert.equal(boundary().props.blocked, false);
+  assert.ok(x.all().includes(x.sidebar));
+  x.set({ enabled: false });
+  x.set({ enabled: true });
+  assert.ok(!x.all().includes(x.sidebar));
 
   x.rotate(1194, 834);
+  assert.ok(x.all().includes(x.sidebar));
   assert.equal(sidebarStyle().display, undefined);
   assert.equal(boundary().props.blocked, false);
   assert.equal(x.find("workspace-sidebar-base").props.pointerEvents, "auto");
@@ -502,6 +509,8 @@ test("a nested dirty editor edge swipe requests guarded Back without translating
   x.handlers().onUpdate({ translationX: 160 });
   assert.equal(x.offset(), 0);
   assert.equal(x.counts().reveals, 0);
+  x.render();
+  assert.ok(!x.all().includes(x.sidebar));
   x.handlers().onEnd({ translationX: 160, velocityX: 0 });
   assert.equal(backs, 1);
   assert.deepEqual(x.changes, []);

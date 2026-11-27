@@ -1,24 +1,12 @@
+import { screenModules } from "./screenModules";
 import { translateApp } from "../i18n/appTranslation";
-import { LanguageSettingsScreen } from "../features/account/LanguageSettingsScreen";
-import { QuickAccessSettingsScreen } from "../features/quickAccess/QuickAccessSettingsScreen";
 import { useAppLanguage } from "../i18n/LanguageProvider";
 import { WorkspacePageSurface } from "./WorkspacePageSurface";
 import { workspaceContentAnimation } from "../components/workspace/workspacePushState";
 import {
-  AssistantDetailsScreen,
-  AssistantTitleEditScreen,
-  AssistantWorkingContextScreen,
-} from "../features/assistant/AssistantDetailsScreen";
-import {
   AgentProfileEditScreen,
   agentProfileFieldTitle,
 } from "../features/agents/AgentProfileEditScreen";
-import {
-  WorkspaceRecentsScreen,
-  WorkspaceSearchScreen,
-} from "../components/workspace/WorkspaceBrowseScreen";
-import { WorkspaceRecentChatsSheet } from "../components/workspace/WorkspaceRecentChatsSheet";
-import { UsageCreditsScreen } from "../features/billing/UsageCreditsScreen";
 import { WorkspaceInteractionSurface } from "../lib/accessibility/WorkspaceInteractionSurface";
 import { workspaceFocus } from "../lib/accessibility/workspaceFocus";
 import {
@@ -42,62 +30,29 @@ import { AuthHomeScreen } from "../features/auth/AuthHomeScreen";
 import { DeviceLoginScreen } from "../features/auth/DeviceLoginScreen";
 import { AgentKeyLoginScreen } from "../features/auth/AgentKeyLoginScreen";
 import { useAuthSession } from "../features/auth/AuthSessionContext";
-import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen";
-import { DisplaySettingsScreen } from "../features/account/DisplaySettingsScreen";
-import { VoiceSettingsScreen } from "../features/account/VoiceSettingsScreen";
-import { AppleWatchSettingsScreen } from "../features/account/AppleWatchSettingsScreen";
-import { NotificationSettingsScreen } from "../features/account/NotificationSettingsScreen";
-import { PrivacySettingsScreen } from "../features/account/PrivacySettingsScreen";
 import {
   ProfileFieldEditScreen,
   profileFieldTitle,
 } from "../features/account/ProfileFieldEditScreen";
-import { SessionDetailScreen } from "../features/account/SessionDetailScreen";
 import {
   ChatLayoutEditScreen,
   chatLayoutTitle,
 } from "../features/display/ChatLayoutEditScreen";
-import { AccountSecurityScreen } from "../features/account/AccountSecurityScreen";
-import { MachinePolicyScreen } from "../features/machines/MachinePolicyScreen";
-import {
-  MachineActivityDetailScreen,
-  MachineActivityFilterScreen,
-  MachineActivityScreen,
-} from "../features/machines/MachineActivityScreen";
-import { SavedLoginScreen } from "../features/machines/SavedLogins";
-import { AgentMachinesScreen } from "../features/machines/AgentMachinesScreen";
-import { MachineDesktopRoute } from "../features/machines/MachineDesktopRoute";
-import { MachinesScreen } from "../features/machines/MachinesScreen";
 import { WorkspacePageHeader } from "../components/workspace/WorkspacePageHeader";
 import { WorkspaceDrawerHeader } from "../components/workspace/WorkspaceDrawerHeader";
-import { ActivityScreen } from "../features/activity/ActivityScreen";
-import { NotificationsScreen } from "../features/notifications/NotificationsScreen";
-import { PluginSkillPage } from "../features/plugins/PluginSkills";
-import { AuthoredSkillPage } from "../features/plugins/NativeAuthoredSkillReview";
-import { ConnectionHistoryDetailScreen } from "../features/plugins/PluginConnectionHistory";
-import { ActivityDetailScreen } from "../features/activity/ActivityDetailScreen";
 import { AssistantScreen } from "../features/assistant/AssistantScreen";
 import { AssistantLinkHost } from "../features/assistant/AssistantLinkHost";
-import { SshTerminalScreen } from "../features/ssh/SshTerminalScreen";
 import { ServicesScreen } from "../features/services/ServicesScreen";
 import { AgentsScreen } from "../features/agents/AgentsScreen";
 import { AgentsGroupsScreen } from "../features/agents/AgentsGroupsScreen";
 import { GroupChatScreen } from "../features/groups/GroupChatScreen";
 import { GroupEditorScreen } from "../features/groups/GroupEditorScreen";
 import {
-  AutomationsScreen,
-  AutomationDetailScreen,
-  AutomationRunsScreen,
-  AutomationRunDetailScreen,
-  AutomationAgentFilterScreen,
-} from "../features/automations/AutomationsScreen";
-import {
   PluginsScreen,
   AgentSkillsScreen,
 } from "../features/plugins/PluginsScreen";
 import { TermsOfServiceScreen } from "../features/legal/TermsOfServiceScreen";
 import { PrivacyPolicyScreen } from "../features/legal/PrivacyPolicyScreen";
-import { OpenSourceNoticesScreen } from "../features/account/OpenSourceNoticesScreen";
 import { FullScreenLoading } from "../components/FullScreenLoading";
 import { useReducedMotion } from "../lib/accessibility/useReducedMotion";
 import {
@@ -388,22 +343,22 @@ function WorkspaceNavigator() {
       <ContentStack.Screen name="GroupChat" component={GroupChatRoute} />
       <ContentStack.Screen
         name="AssistantDetails"
-        component={AssistantDetailsScreen}
+        getComponent={() => screenModules.assistantDetails().AssistantDetailsScreen}
         options={{ title: t("Chat details") }}
       />
       <ContentStack.Screen
         name="AssistantTitleEdit"
-        component={AssistantTitleEditScreen}
+        getComponent={() => screenModules.assistantDetails().AssistantTitleEditScreen}
         options={{ title: t("Title") }}
       />
       <ContentStack.Screen
         name="AssistantHistory"
-        component={WorkspaceRecentsScreen}
+        getComponent={() => screenModules.workspaceBrowse().WorkspaceRecentsScreen}
         options={{ title: t("Chat history") }}
       />
       <ContentStack.Screen
         name="AssistantWorkingContext"
-        component={AssistantWorkingContextScreen}
+        getComponent={() => screenModules.assistantDetails().AssistantWorkingContextScreen}
         options={{ title: t("Working context") }}
       />
       <ContentStack.Group
@@ -414,7 +369,7 @@ function WorkspaceNavigator() {
       >
         <ContentStack.Screen
           name="Automations"
-          component={AutomationsScreen}
+          getComponent={() => screenModules.automations().AutomationsScreen}
           options={{ title: t("Automations") }}
         />
         <ContentStack.Screen
@@ -434,27 +389,27 @@ function WorkspaceNavigator() {
         />
         <ContentStack.Screen
           name="Machines"
-          component={MachinesScreen}
+          getComponent={() => screenModules.machines().MachinesScreen}
           options={{ title: t("Machines") }}
         />
         <ContentStack.Screen
           name="Activity"
-          component={ActivityScreen}
+          getComponent={() => screenModules.activity().ActivityScreen}
           options={{ title: t("Activity") }}
         />
         <ContentStack.Screen
           name="Notifications"
-          component={NotificationsScreen}
+          getComponent={() => screenModules.notifications().NotificationsScreen}
           options={{ title: translateApp("Notifications") }}
         />
         <ContentStack.Screen
           name="WorkspaceSearch"
-          component={WorkspaceSearchScreen}
+          getComponent={() => screenModules.workspaceBrowse().WorkspaceSearchScreen}
           options={{ title: t("Search") }}
         />
         <ContentStack.Screen
           name="WorkspaceRecents"
-          component={WorkspaceRecentsScreen}
+          getComponent={() => screenModules.workspaceBrowse().WorkspaceRecentsScreen}
           options={{ title: t("Recents") }}
         />
       </ContentStack.Group>
@@ -482,7 +437,11 @@ function WorkspaceNavigator() {
           title: route.params?.groupId ? t("Crew settings") : t("New crew"),
         })}
       />
-      <ContentStack.Screen name="SshTerminal" component={SshTerminalScreen} options={{ title: t("SSH terminal") }} />
+      <ContentStack.Screen
+        name="SshTerminal"
+        getComponent={() => screenModules.sshTerminal().SshTerminalScreen}
+        options={{ title: t("SSH terminal") }}
+      />
       <ContentStack.Screen
         name="ServiceSetup"
         component={ServiceSetupRoute}
@@ -494,12 +453,12 @@ function WorkspaceNavigator() {
       />
       <ContentStack.Screen
         name="MachineDetail"
-        component={MachinesScreen}
+        getComponent={() => screenModules.machines().MachinesScreen}
         options={{ title: t("Machine") }}
       />
       <ContentStack.Screen
         name="AgentMachineEditor"
-        component={AgentMachinesScreen}
+        getComponent={() => screenModules.agentMachines().AgentMachinesScreen}
         options={{ title: t("Machine access") }}
       />
       <ContentStack.Screen
@@ -509,22 +468,22 @@ function WorkspaceNavigator() {
       />
       <ContentStack.Screen
         name="ConnectionHistoryDetail"
-        component={ConnectionHistoryDetailScreen}
+        getComponent={() => screenModules.pluginConnectionHistory().ConnectionHistoryDetailScreen}
         options={({ route }) => ({ title: route.params.title })}
       />
       <ContentStack.Screen
         name="ActiveGrants"
-        component={ActivityScreen}
+        getComponent={() => screenModules.activity().ActivityScreen}
         options={{ title: t("Active grants") }}
       />
       <ContentStack.Screen
         name="ActivityReview"
-        component={ActivityScreen}
+        getComponent={() => screenModules.activity().ActivityScreen}
         options={{ title: t("Activity") }}
       />
       <ContentStack.Screen
         name="MachinePolicy"
-        component={MachinePolicyScreen}
+        getComponent={() => screenModules.machinePolicy().MachinePolicyScreen}
         options={{
           title: t("Owner policy and updates"),
           header: WorkspacePageHeader,
@@ -532,7 +491,7 @@ function WorkspaceNavigator() {
       />
       <ContentStack.Screen
         name="MachineActivity"
-        component={MachineActivityScreen}
+        getComponent={() => screenModules.machineActivity().MachineActivityScreen}
         options={{
           title: t("Machine activity"),
           header: WorkspacePageHeader,
@@ -540,22 +499,22 @@ function WorkspaceNavigator() {
       />
       <ContentStack.Screen
         name="MachineActivityFilter"
-        component={MachineActivityFilterScreen}
+        getComponent={() => screenModules.machineActivity().MachineActivityFilterScreen}
         options={{ title: t("Agent"), header: WorkspacePageHeader }}
       />
       <ContentStack.Screen
         name="MachineActivityDetail"
-        component={MachineActivityDetailScreen}
+        getComponent={() => screenModules.machineActivity().MachineActivityDetailScreen}
         options={{ title: t("Activity"), header: WorkspacePageHeader }}
       />
       <ContentStack.Screen
         name="MachineSavedLogin"
-        component={SavedLoginScreen}
+        getComponent={() => screenModules.savedLogins().SavedLoginScreen}
         options={{ title: t("Saved login"), header: WorkspacePageHeader }}
       />
       <ContentStack.Screen
         name="AgentMachines"
-        component={AgentMachinesScreen}
+        getComponent={() => screenModules.agentMachines().AgentMachinesScreen}
         options={{
           title: t("Agent machine access"),
           header: WorkspacePageHeader,
@@ -568,47 +527,47 @@ function WorkspaceNavigator() {
       />
       <ContentStack.Screen
         name="SkillDetail"
-        component={PluginSkillPage}
+        getComponent={() => screenModules.pluginSkills().PluginSkillPage}
         options={({ route }) => ({ title: route.params.name })}
       />
       <ContentStack.Screen
         name="SkillVersions"
-        component={PluginSkillPage}
+        getComponent={() => screenModules.pluginSkills().PluginSkillPage}
         options={{ title: t("Skill versions") }}
       />
       <ContentStack.Screen
         name="SkillHistory"
-        component={PluginSkillPage}
+        getComponent={() => screenModules.pluginSkills().PluginSkillPage}
         options={{ title: t("Skill history") }}
       />
       <ContentStack.Screen
         name="AuthoredSkillReview"
-        component={AuthoredSkillPage}
+        getComponent={() => screenModules.nativeAuthoredSkillReview().AuthoredSkillPage}
         options={{ title: t("Review skill draft") }}
       />
       <ContentStack.Screen
         name="AutomationDetail"
-        component={AutomationDetailScreen}
+        getComponent={() => screenModules.automations().AutomationDetailScreen}
         options={{ title: t("Automation") }}
       />
       <ContentStack.Screen
         name="AutomationRuns"
-        component={AutomationRunsScreen}
+        getComponent={() => screenModules.automations().AutomationRunsScreen}
         options={{ title: t("Run history") }}
       />
       <ContentStack.Screen
         name="AutomationRunDetail"
-        component={AutomationRunDetailScreen}
+        getComponent={() => screenModules.automations().AutomationRunDetailScreen}
         options={{ title: t("Run") }}
       />
       <ContentStack.Screen
         name="AutomationAgentFilter"
-        component={AutomationAgentFilterScreen}
+        getComponent={() => screenModules.automations().AutomationAgentFilterScreen}
         options={{ title: t("Agent") }}
       />
       <ContentStack.Screen
         name="ActivityDetail"
-        component={ActivityDetailScreen}
+        getComponent={() => screenModules.activityDetail().ActivityDetailScreen}
         options={{ title: t("Approval detail") }}
       />
     </ContentStack.Navigator>
@@ -747,12 +706,12 @@ function SettingsSheetRoute({
         >
           <SheetStack.Screen
             name="AccountSettings"
-            component={AccountSettingsScreen}
+            getComponent={() => screenModules.accountSettings().AccountSettingsScreen}
             options={{ title: t("Settings") }}
           />
           <SheetStack.Screen
             name="UsageCredits"
-            component={UsageCreditsScreen}
+            getComponent={() => screenModules.usageCredits().UsageCreditsScreen}
             options={{
               title: t("Usage & credits"),
               header: WorkspaceDrawerHeader,
@@ -760,42 +719,42 @@ function SettingsSheetRoute({
           />
           <SheetStack.Screen
             name="AccountSecurity"
-            component={AccountSecurityScreen}
+            getComponent={() => screenModules.accountSecurity().AccountSecurityScreen}
             options={{ title: t("Account & security") }}
           />
           <SheetStack.Screen
             name="NotificationSettings"
-            component={NotificationSettingsScreen}
+            getComponent={() => screenModules.notificationSettings().NotificationSettingsScreen}
             options={{ title: t("Notifications") }}
           />
           <SheetStack.Screen
             name="DisplaySettings"
-            component={DisplaySettingsScreen}
+            getComponent={() => screenModules.displaySettings().DisplaySettingsScreen}
             options={{ title: t("Display") }}
           />
           <SheetStack.Screen
             name="LanguageSettings"
-            component={LanguageSettingsScreen}
+            getComponent={() => screenModules.languageSettings().LanguageSettingsScreen}
             options={{ title: t("Language") }}
           />
           <SheetStack.Screen
             name="QuickAccessSettings"
-            component={QuickAccessSettingsScreen}
+            getComponent={() => screenModules.quickAccessSettings().QuickAccessSettingsScreen}
             options={{ title: t("Quick access") }}
           />
           <SheetStack.Screen
             name="VoiceSettings"
-            component={VoiceSettingsScreen}
+            getComponent={() => screenModules.voiceSettings().VoiceSettingsScreen}
             options={{ title: t("Voice") }}
           />
           <SheetStack.Screen
             name="AppleWatchSettings"
-            component={AppleWatchSettingsScreen}
+            getComponent={() => screenModules.appleWatchSettings().AppleWatchSettingsScreen}
             options={{ title: t("Apple Watch") }}
           />
           <SheetStack.Screen
             name="PrivacySettings"
-            component={PrivacySettingsScreen}
+            getComponent={() => screenModules.privacySettings().PrivacySettingsScreen}
             options={{ title: t("Privacy") }}
           />
           <SheetStack.Screen
@@ -807,7 +766,7 @@ function SettingsSheetRoute({
           />
           <SheetStack.Screen
             name="SessionDetail"
-            component={SessionDetailScreen}
+            getComponent={() => screenModules.sessionDetail().SessionDetailScreen}
             options={{ title: t("Session") }}
           />
           <SheetStack.Screen
@@ -819,7 +778,7 @@ function SettingsSheetRoute({
           />
           <SheetStack.Screen
             name="RecentChats"
-            component={WorkspaceRecentChatsSheet}
+            getComponent={() => screenModules.workspaceRecentChatsSheet().WorkspaceRecentChatsSheet}
             options={{ title: t("Recent chats") }}
           />
           <SheetStack.Screen
@@ -834,7 +793,7 @@ function SettingsSheetRoute({
           />
           <SheetStack.Screen
             name="OpenSourceNotices"
-            component={OpenSourceNoticesScreen}
+            getComponent={() => screenModules.openSourceNotices().OpenSourceNoticesScreen}
             options={{ title: t("Open-source notices") }}
           />
           <SheetStack.Screen
@@ -963,7 +922,7 @@ export function AppNavigator({
                         />
                         <Stack.Screen
                           name="MachineDesktop"
-                          component={MachineDesktopRoute}
+                          getComponent={() => screenModules.machineDesktopRoute().MachineDesktopRoute}
                           options={{
                             presentation: "fullScreenModal",
                             animation: reducedMotion ? "none" : "fade",
