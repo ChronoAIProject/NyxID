@@ -1253,7 +1253,7 @@ async fn deliver_webhook_body(
         "trigger.event",
         event_id,
         body,
-        SignatureContract::Timestamped,
+        SignatureContract::TriggerDelivery,
         Some(key_id),
     )
     .await
@@ -1837,6 +1837,26 @@ mod tests {
             wire_headers["X-NyxID-Signature"],
             format!("sha256={expected}")
         );
+        let delivery_id = wire_headers["X-NyxID-Delivery-Id"].as_bytes();
+        assert_eq!(delivery_id, b"before-cutover");
+        let sign = |id: &[u8]| {
+            let material = [
+                b"nyxid-trigger-v2\0".as_slice(),
+                wire_headers["X-NyxID-Timestamp"].as_bytes(),
+                b"\0",
+                id,
+                b"\0",
+                &wire_body,
+            ]
+            .concat();
+            let digest = webhook_delivery_service::compute_body_signature(
+                created.delivery_signing_secret.as_ref().unwrap().as_bytes(),
+                &material,
+            );
+            format!("sha256={digest}")
+        };
+        assert_eq!(wire_headers["X-NyxID-Signature-V2"], sign(delivery_id));
+        assert_ne!(wire_headers["X-NyxID-Signature-V2"], sign(b"other-event"));
         let (rotated, secret) = rotate_secret(&db, &strict, &live).await.unwrap();
         assert_eq!(
             rotated
