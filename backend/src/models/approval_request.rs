@@ -580,6 +580,7 @@ impl std::fmt::Debug for SupervisorWrite {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("SupervisorWrite { [REDACTED] }")
     }
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SupervisorSource {

@@ -5555,20 +5555,45 @@ async fn execute_resolved_proxy_inner<'a>(
             )
             .await?;
             let forwarded = proxy_service::collect_forward_headers_with_defaults(&all_headers, &[]);
-            let supervisor_effect = if node_route.is_none() && streaming_body.is_none() && !pending.resolution.from_org_policy {
-                crate::services::supervisor_write::effect(target.catalog_slug.as_deref().unwrap_or_default(),
-                    &method_str, path, query.as_deref(), &body_bytes,
-                    forwarded.iter().any(|(name,_)| !matches!(name.as_str(), "content-type" | "accept")))
-            } else { None };
-            let supervisor = crate::services::supervisor_write::prepare(&state.db,
-                auth_user.assistant_chat.as_deref(), resolved_user_service_id.as_deref(),
-                &pending.primary_owner_user_id, &pending.resolution.mode, supervisor_effect,
-                &target.base_url, service_id).await?;
+            let supervisor_effect = if node_route.is_none()
+                && streaming_body.is_none()
+                && !pending.resolution.from_org_policy
+            {
+                crate::services::supervisor_write::effect(
+                    target.catalog_slug.as_deref().unwrap_or_default(),
+                    &method_str,
+                    path,
+                    query.as_deref(),
+                    &body_bytes,
+                    forwarded
+                        .iter()
+                        .any(|(name, _)| !matches!(name.as_str(), "content-type" | "accept")),
+                )
+            } else {
+                None
+            };
+            let supervisor = crate::services::supervisor_write::prepare(
+                &state.db,
+                auth_user.assistant_chat.as_deref(),
+                resolved_user_service_id.as_deref(),
+                &pending.primary_owner_user_id,
+                &pending.resolution.mode,
+                supervisor_effect,
+                &target.base_url,
+                service_id,
+            )
+            .await?;
             if let Some(review) = &supervisor {
                 request_operation.supervisor_write = Some(review.binding.clone());
-                request_operation.connected_deadline = Some((chrono::Utc::now()+chrono::Duration::seconds(80))
-                    .min(review.binding.source.channel.expires_at)
-                    .min(request_operation.connected_deadline.unwrap_or(review.binding.source.channel.expires_at)));
+                request_operation.connected_deadline = Some(
+                    (chrono::Utc::now() + chrono::Duration::seconds(80))
+                        .min(review.binding.source.channel.expires_at)
+                        .min(
+                            request_operation
+                                .connected_deadline
+                                .unwrap_or(review.binding.source.channel.expires_at),
+                        ),
+                );
             }
             let mut approval_request = box_proxy_future(|| {
                 approval_service::create_approval_request(
@@ -5594,8 +5619,12 @@ async fn execute_resolved_proxy_inner<'a>(
             .await?;
 
             if let Some(review) = &supervisor {
-                if !crate::services::supervisor_write::deliver(state, &approval_request, review).await? {
-                    approval_request=approval_service::fallback_supervisor_review(state,&approval_request).await?;
+                if !crate::services::supervisor_write::deliver(state, &approval_request, review)
+                    .await?
+                {
+                    approval_request =
+                        approval_service::fallback_supervisor_review(state, &approval_request)
+                            .await?;
                 }
             }
             if let Some(chat) = auth_user.assistant_chat.as_deref() {
@@ -5619,8 +5648,15 @@ async fn execute_resolved_proxy_inner<'a>(
                         &state.config.frontend_url,
                     )
                 })?;
-            if let Some(permit) = crate::services::supervisor_write::Permit::from_request(&approval_request) {
-                assistant_decision.admission.as_mut().ok_or_else(|| AppError::Forbidden("Exact write admission is unavailable".into()))?
+            if let Some(permit) =
+                crate::services::supervisor_write::Permit::from_request(&approval_request)
+            {
+                assistant_decision
+                    .admission
+                    .as_mut()
+                    .ok_or_else(|| {
+                        AppError::Forbidden("Exact write admission is unavailable".into())
+                    })?
                     .bind_supervisor(Some(permit));
             }
             if let Some(chat) = auth_user.assistant_chat.as_deref() {

@@ -4596,7 +4596,8 @@ async fn authorize_mcp_operation(
         let operation = operation.clone();
         prepared.defer_service_approval(move |effect, base| {
             Box::pin(async move {
-                wait_for_mcp_approval(&state, &auth, &target, &operation, &pending, effect, &base).await
+                wait_for_mcp_approval(&state, &auth, &target, &operation, &pending, effect, &base)
+                    .await
             })
         });
     } else {
@@ -4654,16 +4655,35 @@ async fn wait_for_mcp_approval(
     )
     .await
     .map_err(|e| format!("Approval check failed: {e}"))?;
-    let supervisor = if pending.resolution.from_org_policy { None } else {
-        crate::services::supervisor_write::prepare(&state.db, auth.chat.as_ref(), target.connection_id.as_deref(),
-            &pending.primary_owner_user_id, &pending.resolution.mode, effect, base, &target.service_id)
-            .await.map_err(|_| "The exact owner-chat write review is unavailable".to_owned())?
+    let supervisor = if pending.resolution.from_org_policy {
+        None
+    } else {
+        crate::services::supervisor_write::prepare(
+            &state.db,
+            auth.chat.as_ref(),
+            target.connection_id.as_deref(),
+            &pending.primary_owner_user_id,
+            &pending.resolution.mode,
+            effect,
+            base,
+            &target.service_id,
+        )
+        .await
+        .map_err(|_| "The exact owner-chat write review is unavailable".to_owned())?
     };
     if let Some(review) = &supervisor {
         request_operation.supervisor_write = Some(review.binding.clone());
-        request_operation.connected_deadline = Some(chrono::Utc::now().checked_add_signed(chrono::Duration::seconds(80))
-            .ok_or_else(|| "Invalid review expiry".to_owned())?.min(review.binding.source.channel.expires_at)
-            .min(request_operation.connected_deadline.unwrap_or(review.binding.source.channel.expires_at)));
+        request_operation.connected_deadline = Some(
+            chrono::Utc::now()
+                .checked_add_signed(chrono::Duration::seconds(80))
+                .ok_or_else(|| "Invalid review expiry".to_owned())?
+                .min(review.binding.source.channel.expires_at)
+                .min(
+                    request_operation
+                        .connected_deadline
+                        .unwrap_or(review.binding.source.channel.expires_at),
+                ),
+        );
     }
     let mut approval_request = approval_service::create_approval_request(
         &state.db,
@@ -4690,10 +4710,17 @@ async fn wait_for_mcp_approval(
     })?;
 
     if let Some(review) = &supervisor {
-        if !crate::services::supervisor_write::deliver(state, &approval_request, review).await
-            .map_err(|_| "The complete owner-chat write review was not delivered; no write is authorized".to_owned())? {
-            approval_request=approval_service::fallback_supervisor_review(state,&approval_request).await
-                .map_err(|_| "Review the pending request in Approvals".to_owned())?;
+        if !crate::services::supervisor_write::deliver(state, &approval_request, review)
+            .await
+            .map_err(|_| {
+                "The complete owner-chat write review was not delivered; no write is authorized"
+                    .to_owned()
+            })?
+        {
+            approval_request =
+                approval_service::fallback_supervisor_review(state, &approval_request)
+                    .await
+                    .map_err(|_| "Review the pending request in Approvals".to_owned())?;
         }
     }
     if let Some(chat) = auth.chat.as_ref() {
@@ -4732,7 +4759,9 @@ async fn wait_for_mcp_approval(
             .await
             .map_err(|_| "The originating invocation turn was stopped or replaced".to_owned())?;
     }
-    Ok(crate::services::supervisor_write::Permit::from_request(&approval_request))
+    Ok(crate::services::supervisor_write::Permit::from_request(
+        &approval_request,
+    ))
 }
 
 // ---------------------------------------------------------------------------

@@ -330,7 +330,8 @@ impl<'a> HttpEgressGuard<'a> {
     }
     pub(crate) async fn claim_supervisor(&self, request: &reqwest::Request) -> AppResult<()> {
         if let EgressAuthority::Assistant(g) = &self.authority
-            && let Some(permit) = &g.admission.supervisor_write {
+            && let Some(permit) = &g.admission.supervisor_write
+        {
             permit.claim(g.db, request).await?;
         }
         Ok(())

@@ -3888,11 +3888,20 @@ async fn start_chat_turn(
         engine::question_key(text)
     };
     if crate::services::supervisor_write::parse(text).is_some() {
-        if !exists || !private || guest || had_media || !sender.original_message || !sender.owner_eligible
+        if !exists
+            || !private
+            || guest
+            || had_media
+            || !sender.original_message
+            || !sender.owner_eligible
             || sender.execution_kind() != crate::models::channel_thread::ThreadSenderKind::Human
-            || execution.is_some() || row.org_specialist.is_some() || row.bot_owner_id.is_some()
+            || execution.is_some()
+            || row.org_specialist.is_some()
+            || row.bot_owner_id.is_some()
         {
-            return Ok(Inbound::Reply("This ledger-write decision is unavailable in this chat.".into()));
+            return Ok(Inbound::Reply(
+                "This ledger-write decision is unavailable in this chat.".into(),
+            ));
         }
         return Ok(Inbound::Reply(match crate::services::supervisor_write::decide(state, &actor, &origin, sender.id, text).await {
             Ok(Some(true)) => "Write approval saved for the original waiting request. The specialist must read the record before confirming its final value.".into(),
@@ -7123,17 +7132,32 @@ pub(crate) async fn supervisor_review(
 ) -> AppResult<()> {
     let mut session = state.db.client().start_session().await?;
     let rows = crate::services::execution_permission_channel::validate_supervisor(
-        &state.db, &mut session, source, false,
-    ).await?;
-    let origin = &rows.event.delivery.as_ref().ok_or(AppError::AssistantTurnRequired)?.origin;
+        &state.db,
+        &mut session,
+        source,
+        false,
+    )
+    .await?;
+    let origin = &rows
+        .event
+        .delivery
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?
+        .origin;
     let row = engine::get(&state.db, &source.actor_user_id, &source.conversation_id).await?;
     let mut decision = supplemental::Decision::new(supplemental::Purpose::SupervisorReview);
     decision.saved_result = true;
     decision.supervisor_occurrence = Some(format!("supervisor-write-review:{request_id}"));
-    deliver_from_source(state, &row, origin, text, None,
+    deliver_from_source(
+        state,
+        &row,
+        origin,
+        text,
+        None,
         decision,
         Some(crate::services::channel_supplemental_delivery::ResultSource::supervisor(source)),
-    ).await
+    )
+    .await
 }
 
 async fn deliver_from_source(
@@ -7349,10 +7373,19 @@ async fn deliver_from_source(
         })
         .await;
         decision.result(&result);
-        let result = if matches!(purpose, supplemental::Purpose::SupervisorReview) && !decision.confirmed() {
-            if decision.not_sent() { Err(AppError::Conflict("supervisor_review_not_sent".into())) }
-            else { Err(AppError::Forbidden("The complete ledger-write review was not confirmed delivered".into())) }
-        } else { result };
+        let result = if matches!(purpose, supplemental::Purpose::SupervisorReview)
+            && !decision.confirmed()
+        {
+            if decision.not_sent() {
+                Err(AppError::Conflict("supervisor_review_not_sent".into()))
+            } else {
+                Err(AppError::Forbidden(
+                    "The complete ledger-write review was not confirmed delivered".into(),
+                ))
+            }
+        } else {
+            result
+        };
         if let Err(error) = &result {
             tracing::debug!(
                 error_code = error.error_code(),

@@ -20,7 +20,6 @@ pub mod api_key_scope_service;
 pub mod api_key_validation;
 pub mod approval_policy;
 pub mod approval_service;
-pub(crate) mod supervisor_write;
 pub mod approved_sign_in_policy;
 pub mod assistant_action_execution_service;
 pub mod assistant_action_receipts;
@@ -305,6 +304,7 @@ pub mod staging_qr;
 mod startup_seed_service;
 #[cfg(test)]
 mod startup_seed_tests;
+pub(crate) mod supervisor_write;
 pub mod telegram_formatting;
 pub mod telegram_new_admin;
 pub mod telegram_new_api;

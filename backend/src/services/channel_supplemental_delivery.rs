@@ -252,8 +252,15 @@ pub(crate) fn saved_destinations(
 }
 
 impl ResultSource {
-    pub(crate) fn supervisor(source: &crate::models::execution_permission_channel::ChannelSource) -> Self {
-        Self { turn_id: source.original_turn_id.clone(), event_id: Some(source.event_id.clone()), ids: vec![source.event_id.clone()], expected: true }
+    pub(crate) fn supervisor(
+        source: &crate::models::execution_permission_channel::ChannelSource,
+    ) -> Self {
+        Self {
+            turn_id: source.original_turn_id.clone(),
+            event_id: Some(source.event_id.clone()),
+            ids: vec![source.event_id.clone()],
+            expected: true,
+        }
     }
     pub(crate) fn capture(
         turn: &crate::models::assistant_conversation::ActiveTurn,

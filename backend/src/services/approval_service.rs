@@ -1127,7 +1127,8 @@ pub async fn create_approval_request(
 /// Only a positively unsent review can return to the preexisting inbox path.
 /// Unknown or partially dispatched reviews keep their dedicated fences.
 pub(crate) async fn fallback_supervisor_review(
-    state: &crate::AppState, request: &ApprovalRequest,
+    state: &crate::AppState,
+    request: &ApprovalRequest,
 ) -> AppResult<ApprovalRequest> {
     let updated=state.db.collection::<ApprovalRequest>(REQUESTS).find_one_and_update(doc! {
         "_id":&request.id,"user_id":&request.user_id,"status":"pending",
@@ -1136,8 +1137,16 @@ pub(crate) async fn fallback_supervisor_review(
     },doc! {"$unset":{"supervisor_write":""}})
         .return_document(ReturnDocument::After).await?
         .ok_or_else(|| AppError::Conflict("Review source changed".into()))?;
-    let notified=notify_service_approval(&state.db,&state.config,&state.http_client,
-        state.fcm_auth.as_deref(),state.apns_auth.as_deref(),&updated.notify_user_ids,&updated).await?;
+    let notified = notify_service_approval(
+        &state.db,
+        &state.config,
+        &state.http_client,
+        state.fcm_auth.as_deref(),
+        state.apns_auth.as_deref(),
+        &updated.notify_user_ids,
+        &updated,
+    )
+    .await?;
     Ok(notified.unwrap_or(updated))
 }
 
@@ -1338,7 +1347,7 @@ pub async fn create_tool_approval_request(
         activity_outcome: None,
         activity_execution: None,
         execution_proposal: None,
-            supervisor_write: None,
+        supervisor_write: None,
         assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
@@ -1541,7 +1550,9 @@ pub(crate) async fn process_decision_with_access(
     } = decision_request;
     super::execution_permission_dispatch::proposals::legacy_refusal(&current)?;
     if current.supervisor_write.is_some() {
-        return Err(AppError::Forbidden("Review this exact write in its originating owner chat".into()));
+        return Err(AppError::Forbidden(
+            "Review this exact write in its originating owner chat".into(),
+        ));
     }
     if let Some(binding) = &current.assistant_group {
         super::org_group_service::authorize_approval(
@@ -1656,27 +1667,41 @@ pub(crate) async fn process_decision_with_access(
 /// The supervisor's source transaction supplies the verified owner and exact
 /// occurrence; the normal mutation retains atomic approval audit intents.
 pub(crate) async fn decide_supervisor_in_session(
-    db: &Database, session: &mut ClientSession, request: &ApprovalRequest,
-    approved: bool, receipt: &str,
+    db: &Database,
+    session: &mut ClientSession,
+    request: &ApprovalRequest,
+    approved: bool,
+    receipt: &str,
 ) -> AppResult<()> {
-    let b = request.supervisor_write.as_deref().ok_or_else(|| AppError::Forbidden("Supervisor review required".into()))?;
+    let b = request
+        .supervisor_write
+        .as_deref()
+        .ok_or_else(|| AppError::Forbidden("Supervisor review required".into()))?;
     let source = DecisionSource::SupervisorOwnerDm(AuditActor {
-        user_id: request.user_id.clone(), ip_address: None, user_agent: None, api_key_id: None, api_key_name: None,
+        user_id: request.user_id.clone(),
+        ip_address: None,
+        user_agent: None,
+        api_key_id: None,
+        api_key_name: None,
     });
     let mutation = DecisionMutation {
-        authority: None, collaboration: None, approved, duration_sec: None,
-        now: approval_now(), grant_id: uuid::Uuid::new_v4().to_string(),
+        authority: None,
+        collaboration: None,
+        approved,
+        duration_sec: None,
+        now: approval_now(),
+        grant_id: uuid::Uuid::new_v4().to_string(),
         intent: source.intent(&request.id, &request.service_id, &request.user_id, approved)?,
         filter: doc! {"_id":&request.id,"user_id":&request.user_id,"status":"pending",
-            "approval_mode":"per_request","execution_proposal":null,"exact_service":null,
-            "assistant_group":null,"from_org_policy":false,"supervisor_write.version":1,
-            "supervisor_write.code_digest":&b.code_digest,"supervisor_write.review_confirmed":true,
-            "supervisor_write.dispatching":false,"supervisor_write.dm_decision_receipt":null},
+        "approval_mode":"per_request","execution_proposal":null,"exact_service":null,
+        "assistant_group":null,"from_org_policy":false,"supervisor_write.version":1,
+        "supervisor_write.code_digest":&b.code_digest,"supervisor_write.review_confirmed":true,
+        "supervisor_write.dispatching":false,"supervisor_write.dm_decision_receipt":null},
         update: doc! {"status":if approved {"approved"} else {"rejected"},
-            "decided_at":bson::DateTime::from_chrono(approval_now()),"decision_channel":source.channel(),
-            "supervisor_write.dm_decision_receipt":receipt},
+        "decided_at":bson::DateTime::from_chrono(approval_now()),"decision_channel":source.channel(),
+        "supervisor_write.dm_decision_receipt":receipt},
     };
-    match mutation.apply(db,session).await? {
+    match mutation.apply(db, session).await? {
         DecisionOutcome::Applied(_) => Ok(()),
         _ => Err(AppError::Conflict("already_decided".into())),
     }

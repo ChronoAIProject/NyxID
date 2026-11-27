@@ -27,7 +27,12 @@ pub struct Admission {
     pub(super) chat: acks::ChatAuthority,
 }
 impl Admission {
-    pub(crate) fn bind_supervisor(&mut self, permit: Option<crate::services::supervisor_write::Permit>) { self.supervisor_write = permit; }
+    pub(crate) fn bind_supervisor(
+        &mut self,
+        permit: Option<crate::services::supervisor_write::Permit>,
+    ) {
+        self.supervisor_write = permit;
+    }
     pub(crate) fn shared_execution(
         &self,
     ) -> AppResult<Option<crate::models::assistant_sharing::SharedExecution>> {

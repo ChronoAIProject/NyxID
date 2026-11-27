@@ -3939,7 +3939,13 @@ pub(crate) async fn begin_owner_turn_in_session(
         };
         group::admit(db, &row, &work, turn_id, admission, session).await?;
     }
-    Box::pin(super::supervisor_write::assign(db, session, &mut row, start.supervisor_parent.as_ref())).await?;
+    Box::pin(super::supervisor_write::assign(
+        db,
+        session,
+        &mut row,
+        start.supervisor_parent.as_ref(),
+    ))
+    .await?;
     Box::pin(super::assistant_delegated_images::assign_in_session(
         db, session, &mut row,
     ))

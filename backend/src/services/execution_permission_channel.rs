@@ -243,13 +243,20 @@ pub(crate) async fn admit(
 
 /// Source provenance is shared; the supervisor path has no execution-permission enrollment.
 pub(crate) async fn admit_supervisor(
-    db: &Database, tx: &mut ClientSession, row: &AssistantConversation, event: &str,
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &AssistantConversation,
+    event: &str,
 ) -> AppResult<ChannelSource> {
     capture(db, tx, row, event, false).await
 }
 
 async fn capture(
-    db: &Database, tx: &mut ClientSession, row: &AssistantConversation, event: &str, permission: bool,
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &AssistantConversation,
+    event: &str,
+    permission: bool,
 ) -> AppResult<ChannelSource> {
     let r = rows(db, tx, &row.user_id, &row.id, event, true).await?;
     let agent = row.agent_id.as_deref().ok_or_else(refused)?;
@@ -334,7 +341,10 @@ pub(crate) async fn validate(
 }
 
 pub(crate) async fn validate_supervisor(
-    db: &Database, tx: &mut ClientSession, s: &ChannelSource, fence: bool,
+    db: &Database,
+    tx: &mut ClientSession,
+    s: &ChannelSource,
+    fence: bool,
 ) -> AppResult<SourceRows> {
     validate_inner(db, tx, s, fence, true, false).await
 }
@@ -366,7 +376,8 @@ async fn validate_inner(
         fence,
     )
     .await?;
-    if (permission && conversation_exists
+    if (permission
+        && conversation_exists
         && r.event
             .delivery
             .as_ref()
