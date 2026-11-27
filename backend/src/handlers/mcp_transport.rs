@@ -2517,6 +2517,9 @@ async fn handle_tools_list(
         }
         None => mcp_service::generate_tool_definitions(&services, None),
     };
+    if add_on.is_some() {
+        guest_tools::project_sheets_schemas(&services, &mut tool_defs);
+    }
 
     // Scoped API keys do not get SSH meta-tools. SSH invocations would
     // otherwise escape the service/node allow-list entirely.
@@ -6461,11 +6464,21 @@ async fn handle_meta_search(
             }
         }
     }
-    let ranked_candidates = if exact_service_id_query {
+    let mut ranked_candidates = if exact_service_id_query {
         candidates
     } else {
         mcp_service::rank_search_candidates(candidates, query)
     };
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.channel_guest.is_some())
+    {
+        crate::services::channel_guest_access::guest_tools::project_sheets_schemas(
+            &services,
+            &mut ranked_candidates,
+        );
+    }
     // Facts only for the services this search returns.
     let mut returned_ids = std::collections::HashSet::new();
     let returned: Vec<&mcp_service::McpToolService> = ranked_candidates

@@ -189,6 +189,90 @@ pub(crate) fn sheets_endpoint_action(endpoint: &McpToolEndpoint) -> Option<&'sta
     }
 }
 
+/// Project only the enrolled guest's discovery copy. Keep the essential request
+/// guidance first: compact chat search can omit the schema and shorten prose.
+fn describe_sheets_endpoint(endpoint: &mut McpToolEndpoint, action: &str) {
+    let columns = google_sheets::MAX_COLUMNS;
+    endpoint.description = Some(if action == "read" {
+        format!(
+            "Channel guest read: use a bounded A1 cell or rectangle on a named tab, e.g. Sheet1!A1:H24 (up to {columns} columns and {} cells). Use FORMATTED_VALUE or UNFORMATTED_VALUE rendering. Live grants, Google access and the effective approval policy still apply; discovery is not approval.",
+            google_sheets::MAX_READ_CELLS
+        )
+    } else {
+        format!(
+            "Channel guest append: supply valueInputOption=RAW and insertDataOption=INSERT_ROWS once each in a shared room. Use a named tab with a column range, e.g. Sheet1!A:H (up to {columns} columns). Send exactly one nonempty row of strings, numbers or booleans in body.values. Google chooses placement within the tab. Live grants, Google access and the effective approval policy must allow the write; discovery is not approval."
+        )
+    });
+}
+
+/// Narrow only rendered schemas, after MCP has selected its argument wrapper.
+/// Endpoint inputs stay intact for preparation and live execution checks.
+/// Call only for enrolled guest discovery, with the already filtered catalog.
+pub(crate) fn project_sheets_schemas(
+    services: &[McpToolService],
+    definitions: &mut [McpToolDefinition],
+) {
+    use serde_json::json;
+
+    for tool in definitions {
+        let Some((_, endpoint)) =
+            crate::services::mcp_service::resolve_tool_call(&tool.name, services)
+        else {
+            continue;
+        };
+        let Some(action) = sheets_endpoint_action(endpoint) else {
+            continue;
+        };
+        let columns = google_sheets::MAX_COLUMNS;
+        let properties = &mut tool.input_schema["properties"];
+        if action == "read" {
+            properties["range"]["description"] = json!(format!(
+                "Bounded A1 cell or rectangle on a named tab, e.g. Sheet1!A1:H24 or 'Sheet 1'!A1. Use the exact authorized range, up to {columns} columns and {} cells.",
+                google_sheets::MAX_READ_CELLS
+            ));
+            properties["valueRenderOption"]["enum"] =
+                json!(["FORMATTED_VALUE", "UNFORMATTED_VALUE"]);
+            continue;
+        }
+        properties["range"]["description"] = json!(format!(
+            "Named tab and column range, e.g. Sheet1!A:H or 'Sheet 1'!A:H, up to {columns} columns. Google locates a table and chooses placement within the tab. Supply the range without the :append suffix."
+        ));
+        properties["valueInputOption"]["enum"] = json!(["RAW"]);
+        properties["insertDataOption"]["enum"] = json!(["INSERT_ROWS"]);
+        properties["includeValuesInResponse"]["enum"] = json!([false]);
+        if let Some(properties) = properties.as_object_mut() {
+            properties.remove("responseValueRenderOption");
+            properties.remove("responseDateTimeRenderOption");
+        }
+        let body_name = crate::services::mcp_service::request_body_field_name(endpoint);
+        let Some(body) = properties.get_mut(&body_name) else {
+            continue;
+        };
+        *body = json!({
+            "type":"object", "additionalProperties":false,
+            "properties":{
+                "majorDimension":{"type":"string","enum":["ROWS"]},
+                "values":{
+                    "type":"array", "minItems":1, "maxItems":1,
+                    "description":format!("Exactly one nonempty row, with no more cells than the selected column range. The entire JSON body is at most {} bytes. Supply values and optionally majorDimension=ROWS.", google_sheets::MAX_APPEND_BYTES),
+                    "items":{
+                        "type":"array", "minItems":1, "maxItems":google_sheets::MAX_COLUMNS,
+                        "items":{"anyOf":[{"type":"string"},{"type":"number"},{"type":"boolean"}]}
+                    }
+                }
+            },
+            "required":["values"]
+        });
+        if let Some(required) = tool.input_schema["required"].as_array_mut() {
+            for name in ["valueInputOption", "insertDataOption", &body_name] {
+                if !required.contains(&json!(name)) {
+                    required.push(json!(name));
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn filter_catalog(
     db: &Database,
     turn: &GuestTurn,
@@ -207,13 +291,19 @@ pub(crate) async fn filter_catalog(
             return false;
         };
         let metadata = &service.durable_endpoint_metadata;
-        service.endpoints.retain(|endpoint| {
-            metadata
+        service.endpoints.retain_mut(|endpoint| {
+            let Some(action) = sheets_endpoint_action(endpoint) else {
+                return false;
+            };
+            if !metadata
                 .get(&endpoint.endpoint_id)
                 .is_some_and(|m| m.catalog_contract)
-                && sheets_endpoint_action(endpoint).is_some_and(|action| {
-                    policy::has_sheets_grant(policy, turn, user_service_id, action)
-                })
+                || !policy::has_sheets_grant(policy, turn, user_service_id, action)
+            {
+                return false;
+            }
+            describe_sheets_endpoint(endpoint, action);
+            true
         });
         !service.endpoints.is_empty()
     });

@@ -7,9 +7,9 @@ use serde::Deserialize;
 pub(crate) const SOURCE_ID: &str = "google_sheets";
 pub(crate) const COLLECTION_ID: &str = "values";
 pub(crate) const ACTIONS: [&str; 2] = ["read", "create"];
-const MAX_APPEND_BYTES: usize = 16 * 1024;
-const MAX_COLUMNS: u32 = 32;
-const MAX_READ_CELLS: u32 = 2000;
+pub(super) const MAX_APPEND_BYTES: usize = 16 * 1024;
+pub(super) const MAX_COLUMNS: u32 = 32;
+pub(super) const MAX_READ_CELLS: u32 = 2000;
 
 pub(crate) struct SheetsOperation {
     pub(crate) action: &'static str,

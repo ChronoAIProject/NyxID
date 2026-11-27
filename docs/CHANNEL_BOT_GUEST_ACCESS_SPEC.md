@@ -104,6 +104,23 @@ owner's applicable approvals and check the resolved Google destination at send.
 Existing grants alone leave both operations unavailable on enrollment.
 [Reported Discord event workflow](https://github.com/ChronoAIProject/NyxID/issues/2704)
 
+Hosted guest discovery describes this restricted Sheets contract on both Google
+catalogs. Direct MCP `tools/list` and `nyx__search_tools` publish a bounded,
+tab-qualified read range (at most 32 columns and 2,000 cells), without `FORMULA`
+rendering. Append guidance requires a shared room, a named tab with a column
+range of at most 32 columns, exactly one nonempty row, and exactly one each of
+`valueInputOption=RAW` and `insertDataOption=INSERT_ROWS`. The JSON body is at
+most 16 KiB, contains `values` and optionally `majorDimension=ROWS`, and accepts
+only strings, numbers and booleans as cells, with no more cells than the selected
+columns. `includeValuesInResponse` is omitted or false; response-render options
+and `body.range` are unavailable. The discovery schema narrows these choices
+while preserving the existing `body` argument wrapper. Compact search retains
+the essential request guidance and approval caveat when it omits the schema.
+Discovery publishes no workbook, tab or range from the guest data grants, and
+does not establish approval or access to any example resource. Execution checks
+the exact request, live policy, Google destination and applicable approvals.
+Owner, verified-member and non-enrolled discovery keep their ordinary contracts.
+
 ## Code and storage boundaries
 
 Register the built-in flag as global-only. Use the authoritative global reader

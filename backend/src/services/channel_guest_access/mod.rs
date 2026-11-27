@@ -9,6 +9,11 @@ pub(crate) mod setup;
 pub(crate) mod skills;
 pub(crate) mod transport;
 
+#[cfg(test)]
+mod discovery_tests;
+#[cfg(test)]
+mod test_support;
+
 use mongodb::{
     ClientSession, Database,
     bson::{self, Document, doc},
