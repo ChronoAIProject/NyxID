@@ -7,7 +7,6 @@ use serde_json::Value;
 
 use super::{assistant_acknowledgement_service::ChatAuthority, assistant_nyxagent as engine};
 use crate::{
-    AppState,
     errors::{AppError, AppResult},
     models::{
         approval_request::{ApprovalRequest, SupervisorSource, SupervisorWrite},
@@ -518,39 +517,31 @@ async fn fence_in_session(
     Ok(())
 }
 
-pub(crate) async fn deliver(
-    state: &AppState,
-    request: &ApprovalRequest,
-    review: &PreparedReview,
-) -> AppResult<bool> {
+pub(crate) async fn before_review(db: &Database, request: &ApprovalRequest) -> AppResult<()> {
     let b = request.supervisor_write.as_deref().ok_or_else(refused)?;
     if request.expires_at <= Utc::now() {
         return Err(refused());
     }
-    fence(&state.db, b).await?;
-    // Delivery uses the exact original event and requires a confirmed complete send.
-    let text = format!(
+    fence(db, b).await
+}
+
+pub(crate) fn review_text(request: &ApprovalRequest, review: &PreparedReview) -> String {
+    format!(
         "{}\nExpires: {}\nApprove: yes write-{}\nReject: no write-{}",
         review.text,
         request.expires_at.to_rfc3339(),
         review.code,
         review.code
-    );
-    match crate::handlers::nyxbot::supervisor_review(state, &b.source.channel, &request.id, &text)
-        .await
-    {
-        Ok(()) => {}
-        Err(AppError::Conflict(reason)) if reason == "supervisor_review_not_sent" => {
-            fence(&state.db, b).await?;
-            return Ok(false);
-        }
-        Err(error) => return Err(error),
-    }
-    if state.db.collection::<Document>("approval_requests").update_one(doc! {
+    )
+}
+
+pub(crate) async fn confirm_review(db: &Database, request: &ApprovalRequest) -> AppResult<()> {
+    let b = request.supervisor_write.as_deref().ok_or_else(refused)?;
+    if db.collection::<Document>("approval_requests").update_one(doc! {
         "_id":&request.id,"status":"pending","expires_at":{"$gt":bson::DateTime::now()},
         "supervisor_write.code_digest":&b.code_digest,"supervisor_write.review_confirmed":false
-    },doc! {"$set":{"supervisor_write.review_confirmed":true}}).await?.modified_count != 1 { return Err(refused()); }
-    Ok(true)
+    },doc! {"$set":{"supervisor_write.review_confirmed":true}}).await?.modified_count != 1 {return Err(refused());}
+    Ok(())
 }
 
 pub(crate) fn parse(text: &str) -> Option<(bool, &str)> {
@@ -569,7 +560,7 @@ pub(crate) fn parse(text: &str) -> Option<(bool, &str)> {
 
 /// Called only after transport authentication and verified original owner DM classification.
 pub(crate) async fn decide(
-    state: &AppState,
+    db: &Database,
     owner: &str,
     origin: &ChannelOrigin,
     sender: &str,
@@ -579,16 +570,16 @@ pub(crate) async fn decide(
         return Ok(None);
     };
     let digest = fingerprint(b"supervisor-code-v1", code.as_bytes())?;
-    let Some(request) = state.db.collection::<ApprovalRequest>("approval_requests").find_one(doc! {
+    let Some(request) = db.collection::<ApprovalRequest>("approval_requests").find_one(doc! {
         "user_id":owner,"status":"pending","expires_at":{"$gt":bson::DateTime::now()},
         "approval_mode":"per_request","execution_proposal":null,"exact_service":null,"from_org_policy":false,
         "supervisor_write.version":1,"supervisor_write.code_digest":digest,"supervisor_write.review_confirmed":true,
         "supervisor_write.source.channel.channel_id":&origin.nyxbot_channel_id
     }).await? else { return Err(refused()) };
     let b = request.supervisor_write.as_deref().ok_or_else(refused)?;
-    let mut tx = state.db.client().start_session().await?;
+    let mut tx = db.client().start_session().await?;
     let r = super::execution_permission_channel::validate_supervisor(
-        &state.db,
+        db,
         &mut tx,
         &b.source.channel,
         false,
@@ -602,7 +593,7 @@ pub(crate) async fn decide(
         || origin.org_execution.is_some()
         || d.sender_id != sender
         || authority(
-            &state.db,
+            db,
             owner,
             &b.connection,
             &b.specialist_key,
@@ -613,8 +604,8 @@ pub(crate) async fn decide(
     {
         return Err(refused());
     }
-    let context = (state.db.clone(), request.clone(), allowed);
-    super::transaction_service::run_db_only(&state.db, &context, |tx, (db, request, allowed)| {
+    let context = (db.clone(), request.clone(), allowed);
+    super::transaction_service::run_db_only(db, &context, |tx, (db, request, allowed)| {
         Box::pin(async move {
             let b = request.supervisor_write.as_deref().ok_or_else(refused)?;
             fence_in_session(db, tx, b).await?;

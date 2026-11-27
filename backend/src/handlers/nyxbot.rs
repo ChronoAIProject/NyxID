@@ -3903,7 +3903,7 @@ async fn start_chat_turn(
                 "This ledger-write decision is unavailable in this chat.".into(),
             ));
         }
-        return Ok(Inbound::Reply(match crate::services::supervisor_write::decide(state, &actor, &origin, sender.id, text).await {
+        return Ok(Inbound::Reply(match crate::services::supervisor_write::decide(&state.db, &actor, &origin, sender.id, text).await {
             Ok(Some(true)) => "Write approval saved for the original waiting request. The specialist must read the record before confirming its final value.".into(),
             Ok(Some(false)) => "Write rejected. This decision authorizes no write.".into(),
             _ => "This ledger-write decision is expired, already used, or unavailable. No new write is authorized.".into(),
@@ -7121,6 +7121,30 @@ pub(super) async fn deliver_to_for_turn(
     });
     let decision = supplemental::Decision::new(purpose);
     let _ = deliver_from_source(state, row, origin, text, images, decision, source).await;
+}
+
+pub(crate) async fn deliver_supervisor_review(
+    state: &AppState,
+    request: &crate::models::approval_request::ApprovalRequest,
+    review: &crate::services::supervisor_write::PreparedReview,
+) -> AppResult<bool> {
+    use crate::services::supervisor_write;
+    supervisor_write::before_review(&state.db, request).await?;
+    let binding = request
+        .supervisor_write
+        .as_deref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let text = supervisor_write::review_text(request, review);
+    match supervisor_review(state, &binding.source.channel, &request.id, &text).await {
+        Ok(()) => {}
+        Err(AppError::Conflict(reason)) if reason == "supervisor_review_not_sent" => {
+            supervisor_write::before_review(&state.db, request).await?;
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    }
+    supervisor_write::confirm_review(&state.db, request).await?;
+    Ok(true)
 }
 
 /// Complete reviews use a fixed authenticated event, never a latest-chat fallback.

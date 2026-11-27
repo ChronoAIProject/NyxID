@@ -4699,7 +4699,7 @@ async fn wait_for_mcp_approval(
     })?;
 
     if let Some(review) = &supervisor {
-        if !crate::services::supervisor_write::deliver(state, &approval_request, review)
+        if !crate::handlers::nyxbot::deliver_supervisor_review(state, &approval_request, review)
             .await
             .map_err(|_| {
                 "The complete owner-chat write review was not delivered; no write is authorized"

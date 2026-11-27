@@ -5610,8 +5610,12 @@ async fn execute_resolved_proxy_inner<'a>(
             .await?;
 
             if let Some(review) = &supervisor {
-                if !crate::services::supervisor_write::deliver(state, &approval_request, review)
-                    .await?
+                if !crate::handlers::nyxbot::deliver_supervisor_review(
+                    state,
+                    &approval_request,
+                    review,
+                )
+                .await?
                 {
                     approval_request =
                         approval_service::fallback_supervisor_review(state, &approval_request)
