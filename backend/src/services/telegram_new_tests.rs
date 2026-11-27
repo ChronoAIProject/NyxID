@@ -570,7 +570,15 @@ async fn telegram_new_start_sends_readable_instructions_before_the_creation_keyb
     );
     assert_eq!(bound.label, request.label);
     assert!(bound.telegram_bot_id.is_none());
-    assert!(bound.channel_bot_id.is_none());
+    assert!(
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .find_one(doc! {"_id": &request.id})
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
