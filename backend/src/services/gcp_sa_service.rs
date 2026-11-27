@@ -470,6 +470,7 @@ async fn mint_and_store_inner(
 
 #[cfg(test)]
 mod tests {
+    use crate::services::credential_record_service::fixtures;
     #[test]
     fn service_account_debug_redacts_key_identifiers_and_unvalidated_url() {
         let key=super::GcpServiceAccountKey {
@@ -721,17 +722,20 @@ mod tests {
         assert!(matches!(err, MintError::Terminal(_)), "got {err:?}");
     }
 
-    fn make_gcp_key(sa_json_enc: Vec<u8>) -> UserApiKey {
+    async fn make_gcp_key(owner: String, sa_json: String) -> UserApiKey {
+        let id = Uuid::new_v4().to_string();
+        let credential =
+            fixtures::key(&id, &owner, "credential_encrypted", sa_json.as_bytes()).await;
         let now = Utc::now();
         UserApiKey {
             secret_context_versions: Default::default(),
             oauth_app_observation: None,
             credential_source: None,
-            id: Uuid::new_v4().to_string(),
-            user_id: Uuid::new_v4().to_string(),
+            id,
+            user_id: owner,
             label: "GCP Service Account".to_string(),
             credential_type: "gcp_service_account".to_string(),
-            credential_encrypted: Some(sa_json_enc),
+            credential_encrypted: Some(credential),
             access_token_encrypted: None,
             refresh_token_encrypted: None,
             token_scopes: Some(DEFAULT_GCP_SA_SCOPE.to_string()),
@@ -789,8 +793,7 @@ mod tests {
             } else {
                 canonical.clone()
             };
-            let mut key = make_gcp_key(keys.encrypt(sa_json(&uri).as_bytes()).await.unwrap());
-            key.user_id = subject.clone();
+            let key = make_gcp_key(subject.clone(), sa_json(&uri)).await;
             db.collection::<UserApiKey>(USER_API_KEYS)
                 .insert_one(&key)
                 .await
@@ -853,7 +856,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let uri = format!("http://{}/token", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let key = make_gcp_key(keys.encrypt(sa_json(&uri).as_bytes()).await.unwrap());
+        let key = make_gcp_key(Uuid::new_v4().to_string(), sa_json(&uri)).await;
         db.collection::<crate::models::user::User>("users")
             .insert_one(crate::test_utils::test_user(
                 &key.user_id,
@@ -973,11 +976,7 @@ mod tests {
         )
         .await;
 
-        let sa_enc = encryption_keys
-            .encrypt(sa_json(&token_uri).as_bytes())
-            .await
-            .unwrap();
-        let key = make_gcp_key(sa_enc);
+        let key = make_gcp_key(Uuid::new_v4().to_string(), sa_json(&token_uri)).await;
         crate::test_utils::init_test_audit_chain_hmac_key();
         db.collection::<crate::models::user::User>("users")
             .insert_one(crate::test_utils::test_user(
@@ -1042,11 +1041,7 @@ mod tests {
         )
         .await;
 
-        let sa_enc = encryption_keys
-            .encrypt(sa_json(&token_uri).as_bytes())
-            .await
-            .unwrap();
-        let key = make_gcp_key(sa_enc);
+        let key = make_gcp_key(Uuid::new_v4().to_string(), sa_json(&token_uri)).await;
         crate::test_utils::init_test_audit_chain_hmac_key();
         db.collection::<crate::models::user::User>("users")
             .insert_one(crate::test_utils::test_user(

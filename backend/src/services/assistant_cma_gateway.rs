@@ -481,6 +481,75 @@ impl CatalogCmaGateway {
         }
     }
 
+    pub(super) async fn sandbox_inventory_page(
+        &self,
+        owner: &str,
+        cursor: Option<&str>,
+    ) -> CmaResult<CmaPage<(String, SandboxObservationState)>> {
+        let (status, body) = self
+            .request(
+                owner,
+                reqwest::Method::GET,
+                &["api", "v1", "sandboxes"],
+                cursor,
+                None,
+            )
+            .await?;
+        // This page authorizes a release. Accept only the CMA inventory contract.
+        #[derive(Deserialize)]
+        struct Item {
+            #[serde(alias = "sandbox_id")]
+            id: String,
+            #[serde(alias = "owner_id", alias = "user_id")]
+            owner: String,
+            #[serde(alias = "state")]
+            status: String,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Page {
+            items: Vec<Item>,
+            next: Option<String>,
+        }
+        let items = body
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or(CmaGatewayError::InvalidResponse)?;
+        if status != 200 || items.len() > MAX_PAGE_SIZE || !items.iter().all(Value::is_object) {
+            return Err(CmaGatewayError::InventoryIncomplete);
+        }
+        let page: Page =
+            serde_json::from_value(body).map_err(|_| CmaGatewayError::InvalidResponse)?;
+        if page.next.as_deref().is_some_and(|cursor| {
+            cursor.is_empty()
+                || cursor.len() > MAX_CURSOR_BYTES
+                || cursor.chars().any(char::is_control)
+        }) {
+            return Err(CmaGatewayError::InvalidResponse);
+        }
+        let items = page
+            .items
+            .into_iter()
+            .map(|item| {
+                if item.owner != owner {
+                    return Err(CmaGatewayError::Forbidden);
+                }
+                validate_remote_id(&item.id)?;
+                if item.status.trim().is_empty()
+                    || item.status.len() > 120
+                    || item.status.chars().any(char::is_control)
+                {
+                    return Err(CmaGatewayError::InvalidResponse);
+                }
+                Ok((item.id, observation_state(&item.status)))
+            })
+            .collect::<CmaResult<_>>()?;
+        Ok(CmaPage {
+            items,
+            next_cursor: page.next,
+        })
+    }
+
     pub(super) async fn get_sandbox_provenance(
         &self,
         owner: &str,

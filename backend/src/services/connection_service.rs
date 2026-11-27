@@ -593,12 +593,11 @@ mod tests {
         let staged: UserServiceConnection = bson::from_document(source.clone()).unwrap();
         assert!(staged.secret_context_versions.is_empty());
         assert_eq!(
-            stage
-                .decrypt(staged.credential_encrypted.as_deref().unwrap())
+            super::super::connection_record_service::text(&stage, &staged)
                 .await
                 .unwrap()
-                .as_slice(),
-            b"staged-secret"
+                .as_str(),
+            "staged-secret"
         );
         let mut migration = test_encryption_keys();
         migration.set_contextual_record_writes(true);
