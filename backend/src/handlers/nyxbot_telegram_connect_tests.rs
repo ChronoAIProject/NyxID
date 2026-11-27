@@ -386,17 +386,49 @@ async fn provider_event(f: &Fixture, row: &NyxbotChannel, update: Value) -> (Val
         &f.state.config.base_url,
     );
     assert_eq!(payload.raw_platform_data.as_ref(), Some(&update));
+    assert_eq!(payload.message_id, source.id);
+    assert_eq!(payload.platform, f.bot.platform);
+    assert_eq!(canonical_platform(&payload.platform), row.platform);
+    assert_eq!(payload.agent.api_key_id, row.route_api_key_id);
+    assert_eq!(
+        Some(payload.conversation.id.as_str()),
+        row.route_id.as_deref()
+    );
+    assert_eq!(payload.conversation.id, route.id);
+    assert_eq!(payload.conversation.conversation_type, "private");
+    assert_eq!(
+        payload.conversation.platform_id,
+        update["message"]["chat"]["id"]
+            .as_i64()
+            .unwrap()
+            .to_string()
+    );
+    assert_eq!(
+        payload.sender.platform_id,
+        update["message"]["from"]["id"]
+            .as_i64()
+            .unwrap()
+            .to_string()
+    );
+    let expected_text = update["message"]["text"]
+        .as_str()
+        .or_else(|| update["message"]["caption"].as_str());
+    assert_eq!(payload.content.text.as_deref(), expected_text);
     let mut body = event(
-        inbound.text.as_deref().unwrap_or_default(),
-        &inbound.sender_platform_id,
-        &id,
+        payload.content.text.as_deref().unwrap(),
+        &payload.sender.platform_id,
+        &payload.message_id,
     );
     body["event_context"]["channel_id"] = json!(row.gateway_channel_id);
     let activity = &mut body["event_context"]["activity"];
     activity.as_object_mut().unwrap().remove("telegram_input");
-    activity["source"]["route_id"] = json!(route.id);
-    activity["conversation"]["id"] = json!(inbound.conversation_id);
-    if inbound.content_type == "image" {
+    activity["source"]["platform"] = json!(canonical_platform(&payload.platform));
+    activity["source"]["route_id"] = json!(payload.conversation.id);
+    activity["conversation"]["id"] = json!(payload.conversation.platform_id);
+    activity["conversation"]["kind"] = json!(payload.conversation.conversation_type);
+    activity["actor"]["display_name"] = json!(payload.sender.display_name);
+    activity["occurred_at"] = json!(payload.timestamp);
+    if update["message"].get("photo").is_some() {
         assert_eq!(payload.content.content_type, "image");
         assert_eq!(payload.content.attachments.len(), 1);
         let own = update["message"]["photo"]
@@ -413,16 +445,28 @@ async fn provider_event(f: &Fixture, row: &NyxbotChannel, update: Value) -> (Val
             payload.content.attachments[0].url,
             source.attachments[0].provider_ref
         );
+        assert_eq!(payload.content.attachments[0].content_type, "image");
+        assert_eq!(
+            payload.content.attachments[0].size_bytes,
+            own["file_size"].as_u64()
+        );
+        assert_eq!(
+            payload.content.attachments[0].download_url,
+            format!(
+                "{}/api/v1/channel-relay/messages/{id}/attachments/0",
+                f.state.config.base_url.trim_end_matches('/')
+            )
+        );
         // CMAEG 9fd3537cb0a1: a relayed Telegram PhotoSize remains an image/photo,
         // with a canonical activity platform and a relay attachment index.
         activity["kind"]["attachments"] = json!([{
-            "kind":"image", "variant":"photo", "mime":"image/jpeg",
+            "kind":"image", "variant":"photo", "mime_type":"image/jpeg",
             "reference":format!("telegram:{}", own["file_unique_id"].as_str().unwrap()),
             "source":{"type":"nyxid_relay","index":0},
-            "width":own["width"], "height":own["height"], "size":own["file_size"],
+            "width":own["width"], "height":own["height"], "size_bytes":payload.content.attachments[0].size_bytes,
         }]);
     } else {
-        assert_eq!(inbound.content_type, "text");
+        assert_eq!(payload.content.content_type, "text");
         assert!(payload.content.attachments.is_empty());
     }
     (body, id)

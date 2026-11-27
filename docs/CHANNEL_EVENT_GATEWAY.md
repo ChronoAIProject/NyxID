@@ -1973,9 +1973,11 @@ a uniquely marked text turn followed by an own top-level Telegram photo for both
 saved home. The real adapter authenticates and parses each update; stored relay
 metadata supplies the file handle, and the photo activity uses CMAEG's
 `image`/`photo` shape with a canonical `telegram` source. With owner channel media
-enabled, the local model fixture reads the exact JPEG through its authenticated
-live thread key. Assertions bind both answers to the saved owner, specialist,
-event, turn and reply destination, and exact command replay starts no new turn.
+enabled, the local model fixture verifies the complete emitted image URL against
+the configured base and reads the exact JPEG through the production private
+router with the received live thread bearer. Assertions bind both answers to the
+saved owner, specialist, event, turn and reply destination, and exact command
+replay starts no new turn.
 These local fixtures do not verify CMAEG media admission or Telegram delivery;
 own top-level media additionally requires the gateway's media setting described
 in [Telegram forwarding](TELEGRAM_NEW.md#telegram-forwarding-and-secure-pairing).
