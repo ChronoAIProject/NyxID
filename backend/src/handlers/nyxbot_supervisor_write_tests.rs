@@ -934,6 +934,11 @@ async fn supervisor_write_two_approvals_real_catalog_and_independent_readback() 
             let ledger = j.ledger.lock().unwrap();
             assert_eq!(ledger.writes.len(), 1);
             assert_eq!(ledger.writes[0].0, j.script.selected);
+            assert_eq!(
+                ledger.writes[0].1,
+                json!({"fields":{"Status":"Approved"}}),
+                "the selected record must receive exactly the published provider body"
+            );
             assert_eq!(ledger.target, "Approved");
             assert_eq!(ledger.control, "Untouched");
             assert_eq!(

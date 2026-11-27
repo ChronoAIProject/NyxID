@@ -1080,6 +1080,7 @@ mod tests {
             " \n [ {\"Status\":\"Approved\"} ]",
             r#"{"fields":{"Status":"first","Status":"second"}}"#,
             r#"{"fields":{"Status":"first"},"fields":{"Status":"second"}}"#,
+            r#"{"body":{"fields":{"Status":"Approved"}}}"#,
             r#"{"fields":{"Status":{"text":"Approved"}}}"#,
             r#"{"fields":{"Status":["Approved"]}}"#,
             r#"{"fields":{"Status":{"nested":{"text":"Approved"}}}}"#,
