@@ -21,6 +21,7 @@ use crate::crypto::jwt;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
+use crate::mw::rate_limit::AuditIp;
 use crate::services::{
     approval_service, audit_service, connect_link_service, mcp_service, notification_service,
     operation_descriptor, proxy_service, ssh_service, user_service_service,
@@ -985,22 +986,6 @@ impl McpAuthContext {
     }
 }
 
-fn mcp_extract_ip(headers: &HeaderMap) -> Option<String> {
-    if let Some(forwarded) = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        return Some(forwarded);
-    }
-    headers
-        .get("x-real-ip")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
 fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
     headers
         .get(axum::http::header::USER_AGENT)
@@ -1035,18 +1020,34 @@ async fn authenticate_mcp(
     headers: &HeaderMap,
     session_fallback: bool,
 ) -> Result<McpAuthContext, Box<Response>> {
-    authenticate_mcp_for_method(state, headers, session_fallback, axum::http::Method::POST).await
+    authenticate_mcp_for_method(
+        state,
+        headers,
+        None,
+        session_fallback,
+        axum::http::Method::POST,
+    )
+    .await
 }
 
 async fn authenticate_mcp_for_method(
     state: &AppState,
     headers: &HeaderMap,
+    request_ip: Option<String>,
     session_fallback: bool,
     method: axum::http::Method,
 ) -> Result<McpAuthContext, Box<Response>> {
-    match authenticate_mcp_or_public(state, headers, session_fallback, false, method, None)
-        .await
-        .map_err(Box::new)?
+    match authenticate_mcp_or_public(
+        state,
+        headers,
+        request_ip,
+        session_fallback,
+        false,
+        method,
+        None,
+    )
+    .await
+    .map_err(Box::new)?
     {
         McpAuthentication::Ordinary(auth) => Ok(*auth),
         McpAuthentication::Public(_) | McpAuthentication::ThreadInitialize => {
@@ -1059,12 +1060,12 @@ async fn authenticate_mcp_for_method(
 async fn authenticate_mcp_or_public(
     state: &AppState,
     headers: &HeaderMap,
+    request_ip: Option<String>,
     session_fallback: bool,
     allow_public: bool,
     method: axum::http::Method,
     thread_initialize: Option<&JsonRpcRequest>,
 ) -> Result<McpAuthentication, Response> {
-    let request_ip = mcp_extract_ip(headers);
     let request_ua = mcp_extract_user_agent(headers);
 
     // --- Try API key first (stateless auth for headless clients) ---
@@ -1809,6 +1810,8 @@ pub async fn mcp_post(
     request: Request<Body>,
 ) -> Response {
     let cancellation = crate::downstream_disconnect::request_cancellation(&request);
+    let AuditIp(request_ip) =
+        AuditIp::from_transport(request.headers(), request.extensions(), &state);
     let headers = request.headers().clone();
     let body = match super::body_limit::read_request_body(
         request,
@@ -1851,6 +1854,7 @@ pub async fn mcp_post(
     let mut auth = match authenticate_mcp_or_public(
         &state,
         &headers,
+        request_ip,
         !is_initialize,
         true,
         axum::http::Method::POST,
@@ -2127,12 +2131,23 @@ async fn resolve_session(
 // GET /mcp -- SSE notification stream
 // ---------------------------------------------------------------------------
 
-pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let auth =
-        match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::GET).await {
-            Ok(a) => a,
-            Err(resp) => return *resp,
-        };
+pub async fn mcp_get(
+    State(state): State<AppState>,
+    AuditIp(ip): AuditIp,
+    headers: HeaderMap,
+) -> Response {
+    let auth = match authenticate_mcp_for_method(
+        &state,
+        &headers,
+        ip,
+        true,
+        axum::http::Method::GET,
+    )
+    .await
+    {
+        Ok(a) => a,
+        Err(resp) => return *resp,
+    };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
@@ -2220,13 +2235,18 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
 // DELETE /mcp -- session termination
 // ---------------------------------------------------------------------------
 
-pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let auth = match authenticate_mcp_for_method(&state, &headers, true, axum::http::Method::DELETE)
-        .await
-    {
-        Ok(a) => a,
-        Err(resp) => return *resp,
-    };
+pub async fn mcp_delete(
+    State(state): State<AppState>,
+    AuditIp(ip): AuditIp,
+    headers: HeaderMap,
+) -> Response {
+    let auth =
+        match authenticate_mcp_for_method(&state, &headers, ip, true, axum::http::Method::DELETE)
+            .await
+        {
+            Ok(a) => a,
+            Err(resp) => return *resp,
+        };
 
     if let Err(e) = crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
@@ -8384,6 +8404,7 @@ mod tests {
             let failure = authenticate_mcp_or_public(
                 &state,
                 &headers,
+                None,
                 true,
                 true,
                 axum::http::Method::POST,
@@ -10035,27 +10056,6 @@ mod tests {
         assert!(!record.session_fallback_allowed);
     }
 
-    #[test]
-    fn mcp_extract_ip_prefers_forwarded_for() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
-        headers.insert("x-real-ip", "9.9.9.9".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("1.2.3.4"));
-    }
-
-    #[test]
-    fn mcp_extract_ip_falls_back_to_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", "9.9.9.9".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("9.9.9.9"));
-    }
-
-    #[test]
-    fn mcp_extract_ip_returns_none_when_absent() {
-        let headers = HeaderMap::new();
-        assert!(mcp_extract_ip(&headers).is_none());
-    }
-
     #[tokio::test]
     async fn resolve_ssh_service_id_scopes_uuid_lookup_to_user() {
         let Some(db) = connect_test_database("mcp_ssh_resolve").await else {
@@ -10213,32 +10213,6 @@ mod tests {
     fn mcp_extract_user_agent_returns_none_when_absent() {
         let headers = HeaderMap::new();
         assert!(mcp_extract_user_agent(&headers).is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // mcp_extract_ip edge cases
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn mcp_extract_ip_ignores_empty_forwarded_for() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "".parse().unwrap());
-        headers.insert("x-real-ip", "10.0.0.1".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("10.0.0.1"));
-    }
-
-    #[test]
-    fn mcp_extract_ip_trims_whitespace_in_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", "  8.8.8.8  ".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("8.8.8.8"));
-    }
-
-    #[test]
-    fn mcp_extract_ip_single_forwarded_for() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "203.0.113.50".parse().unwrap());
-        assert_eq!(mcp_extract_ip(&headers).as_deref(), Some("203.0.113.50"));
     }
 
     // -----------------------------------------------------------------------

@@ -1522,30 +1522,43 @@ pub fn resolve_client_ip(
     })
 }
 
-/// Resolve rate-limit and audit IPs with a compatibility fallback for the
-/// two legacy surfaces that historically trusted forwarded headers.
-///
-/// When no proxy ranges are configured this preserves the old XFF-first
-/// behavior. As soon as the allowlist is non-empty it uses the strict trusted
-/// resolver above, so forwarded headers from an untrusted peer are ignored.
-pub fn resolve_client_ip_with_legacy_fallback(
-    headers: &HeaderMap,
-    peer: Option<SocketAddr>,
-    trusted_proxies: &[TrustedProxyRange],
-) -> Option<ResolvedClientIp> {
-    if trusted_proxies.is_empty() {
-        let peer_ip = peer.map(|address| normalize_ip_address(address.ip()));
-        warn_if_proxy_attribution_is_collapsed(peer_ip, trusted_proxies);
-        let ip = leftmost_xff(headers)
-            .or_else(|| header_ip(headers, "x-real-ip"))
-            .or(peer_ip)?;
-        return Some(ResolvedClientIp {
-            ip,
-            attribution: classify_unverified_ip(ip),
-        });
+/// Client address recorded for request attribution.
+pub struct AuditIp(pub Option<String>);
+
+impl AuditIp {
+    pub fn resolve(
+        headers: &HeaderMap,
+        peer: Option<SocketAddr>,
+        trusted: &[TrustedProxyRange],
+    ) -> Self {
+        Self(resolve_client_ip(headers, peer, trusted).map(|resolved| resolved.ip.to_string()))
     }
 
-    resolve_client_ip(headers, peer, trusted_proxies)
+    pub fn from_transport(
+        headers: &HeaderMap,
+        extensions: &axum::http::Extensions,
+        state: &crate::AppState,
+    ) -> Self {
+        let peer = extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|info| info.0);
+        Self::resolve(headers, peer, &state.config.trusted_proxy_ips)
+    }
+}
+
+impl axum::extract::FromRequestParts<crate::AppState> for AuditIp {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &crate::AppState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self::from_transport(
+            &parts.headers,
+            &parts.extensions,
+            state,
+        ))
+    }
 }
 
 pub fn is_trusted_proxy(ip: IpAddr, trusted_proxies: &[TrustedProxyRange]) -> bool {
@@ -1627,19 +1640,16 @@ fn rightmost_untrusted_xff(
     headers: &HeaderMap,
     trusted_proxies: &[TrustedProxyRange],
 ) -> Option<IpAddr> {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())?
-        .split(',')
-        .rev()
-        .filter_map(|value| {
-            value
-                .trim()
-                .parse::<IpAddr>()
-                .ok()
-                .map(normalize_ip_address)
-        })
-        .find(|ip| !is_trusted_proxy(*ip, trusted_proxies))
+    // Repeated fields are one ordered chain. Stop at an unreadable hop.
+    for field in headers.get_all("x-forwarded-for").iter().rev() {
+        for hop in field.to_str().ok()?.rsplit(',') {
+            let ip = normalize_ip_address(hop.trim().parse().ok()?);
+            if !is_trusted_proxy(ip, trusted_proxies) {
+                return Some(ip);
+            }
+        }
+    }
+    None
 }
 
 pub(crate) fn warn_if_proxy_attribution_is_collapsed(
@@ -1709,7 +1719,7 @@ fn is_client_ip_exempt(
         // A trusted proxy with no usable client headers cannot exempt all its
         // traffic by falling back to the proxy's own allowlisted address.
         header_ip(request.headers(), "cf-connecting-ip")
-            .or_else(|| strict_rightmost_untrusted_xff(request.headers(), trusted_proxies))
+            .or_else(|| rightmost_untrusted_xff(request.headers(), trusted_proxies))
             .or_else(|| header_ip(request.headers(), "x-real-ip"))
     } else {
         // Includes empty TRUSTED_PROXY_IPS: never use the legacy header fallback
@@ -1717,27 +1727,6 @@ fn is_client_ip_exempt(
         Some(peer_ip)
     };
     client_ip.is_some_and(|ip| exempt_ips.iter().any(|range| range.contains(ip)))
-}
-
-fn strict_rightmost_untrusted_xff(
-    headers: &HeaderMap,
-    trusted_proxies: &[TrustedProxyRange],
-) -> Option<IpAddr> {
-    // A malformed intervening hop is a trust boundary. Never skip it and
-    // continue into a potentially forged prefix when granting an exemption.
-    for value in headers
-        .get("x-forwarded-for")?
-        .to_str()
-        .ok()?
-        .split(',')
-        .rev()
-    {
-        let ip = normalize_ip_address(value.trim().parse::<IpAddr>().ok()?);
-        if !is_trusted_proxy(ip, trusted_proxies) {
-            return Some(ip);
-        }
-    }
-    None
 }
 
 /// Enforce general per-IP and global budgets, with independently configured
@@ -2665,19 +2654,48 @@ mod tests {
     }
 
     #[test]
-    fn legacy_fallback_preserves_leftmost_xff_until_proxy_trust_is_configured() {
-        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 2, 10, 22));
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "1.2.3.4, 8.8.8.8".parse().unwrap());
+    fn audit_ip_requires_a_trusted_peer_for_forwarded_hops() {
+        for (peer, range, forwarded, expected) in [
+            ("10.0.0.1:80", None, "192.0.2.1", "10.0.0.1"),
+            ("10.0.0.1:80", Some("10.0.0.0/8"), "192.0.2.1", "192.0.2.1"),
+            (
+                "10.0.0.1:80",
+                Some("10.0.0.0/8"),
+                "192.0.2.2, 192.0.2.1, 10.0.0.2",
+                "192.0.2.1",
+            ),
+            ("192.0.2.1:80", Some("10.0.0.0/8"), "192.0.2.2", "192.0.2.1"),
+            (
+                "[2001:db8:1::1]:80",
+                Some("2001:db8:1::/64"),
+                "2001:db8::2, 2001:db8:1::2",
+                "2001:db8::2",
+            ),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert("x-forwarded-for", forwarded.parse().unwrap());
+            let ranges = range.into_iter().map(trusted).collect::<Vec<_>>();
+            let ip = AuditIp::resolve(&headers, Some(peer.parse().unwrap()), &ranges);
+            assert_eq!(ip.0.as_deref(), Some(expected));
+            assert_eq!(AuditIp::resolve(&headers, None, &ranges).0, None);
+        }
+    }
 
-        let resolved = resolve_client_ip_with_legacy_fallback(&headers, Some(socket(peer_ip)), &[]);
+    #[test]
+    fn audit_ip_uses_the_rightmost_forwarded_field() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-forwarded-for", "192.0.2.2".parse().unwrap());
+        headers.append("x-forwarded-for", "192.0.2.1, 10.0.0.2".parse().unwrap());
+        let peer = Some("10.0.0.1:80".parse().unwrap());
+        let ranges = [trusted("10.0.0.0/8")];
         assert_eq!(
-            resolved.map(|value| value.ip),
-            Some("1.2.3.4".parse().unwrap())
+            AuditIp::resolve(&headers, peer, &ranges).0.as_deref(),
+            Some("192.0.2.1")
         );
+        headers.append("x-forwarded-for", "unknown, 10.0.0.3".parse().unwrap());
         assert_eq!(
-            resolved.map(|value| value.attribution),
-            Some(ClientIpAttribution::Unverified)
+            AuditIp::resolve(&headers, peer, &ranges).0.as_deref(),
+            Some("10.0.0.1")
         );
     }
 
