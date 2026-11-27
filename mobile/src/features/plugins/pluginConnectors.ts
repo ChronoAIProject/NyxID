@@ -61,12 +61,10 @@ function connectionState(
   if (connections.every((connection) => !connection.is_active))
     return { status: translateApp("Disabled"), statusTone: "neutral" };
   const enabled = connections.filter((connection) => connection.is_active);
-  const saved = enabled
-    .filter((connection) =>
-      isSavedCredential(connection) &&
-      (connection.credential_source?.type !== "org" || connection.credential_source.allowed),
-    )
-    .map(describeConnection);
+  if (enabled.every((connection) =>
+    connection.credential_source?.type === "org" && !connection.credential_source.allowed,
+  )) return { status: translateApp("Restricted"), statusTone: "neutral" };
+  const saved = enabled.filter(isSavedCredential).map(describeConnection);
   if (saved.length) {
     const result = saved.find((item) => item.tone === "error")
       ?? saved.find((item) => item.tone !== "success")

@@ -245,6 +245,13 @@ test("grouped cards surface failed and unverified active saved credentials befor
   } };
   const failed = { ...saved, status: "failed" };
   const status = (...rows: ServiceConnection[]) => deriveConnectorItems(rows, []).added[0]?.status;
+  const restricted: ServiceConnection = {
+    ...saved,
+    credential_source: { type: "org", org_id: "org", org_name: "Work", role: "viewer", allowed: false },
+    credential_verification: { state: "rejected", reason_code: "provider_forbidden", can_check: false },
+  };
+  assert.equal(status(verified, restricted), "Rejected by provider");
+  assert.equal(status(restricted), "Restricted");
   assert.equal(status(verified, saved), "Saved, not verified");
   assert.equal(status(verified, failed), "Authorization failed");
   assert.equal(status(verified, { ...failed, is_active: false }), "Verified");
