@@ -114,8 +114,10 @@ most 16 KiB, contains `values` and optionally `majorDimension=ROWS`, and accepts
 only strings, numbers and booleans as cells, with no more cells than the selected
 columns. `includeValuesInResponse` is omitted or false; response-render options
 and `body.range` are unavailable. The discovery schema narrows these choices
-while preserving the existing `body` argument wrapper. Compact search retains
-the essential request guidance and approval caveat when it omits the schema.
+while preserving the existing `body` argument wrapper. Rendered instructions
+precede the connection label. Compact search retains the exact authorized read
+range guidance, append requirements and effective approval requirement when it
+omits the schema, including with a 200-character connection label.
 Discovery publishes no workbook, tab or range from the guest data grants, and
 does not establish approval or access to any example resource. Execution checks
 the exact request, live policy, Google destination and applicable approvals.

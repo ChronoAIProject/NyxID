@@ -2518,7 +2518,7 @@ async fn handle_tools_list(
         None => mcp_service::generate_tool_definitions(&services, None),
     };
     if add_on.is_some() {
-        guest_tools::project_sheets_schemas(&services, &mut tool_defs);
+        guest_tools::project_sheets_discovery(&services, &mut tool_defs);
     }
 
     // Scoped API keys do not get SSH meta-tools. SSH invocations would
@@ -6474,7 +6474,7 @@ async fn handle_meta_search(
         .as_ref()
         .is_some_and(|chat| chat.channel_guest.is_some())
     {
-        crate::services::channel_guest_access::guest_tools::project_sheets_schemas(
+        crate::services::channel_guest_access::guest_tools::project_sheets_discovery(
             &services,
             &mut ranked_candidates,
         );

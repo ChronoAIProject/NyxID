@@ -189,33 +189,32 @@ pub(crate) fn sheets_endpoint_action(endpoint: &McpToolEndpoint) -> Option<&'sta
     }
 }
 
-/// Project only the enrolled guest's discovery copy. Keep the essential request
-/// guidance first: compact chat search can omit the schema and shorten prose.
-fn describe_sheets_endpoint(endpoint: &mut McpToolEndpoint, action: &str) {
+fn sheets_guidance(action: &str) -> String {
     let columns = google_sheets::MAX_COLUMNS;
-    endpoint.description = Some(if action == "read" {
+    if action == "read" {
         format!(
-            "Channel guest read: use a bounded A1 cell or rectangle on a named tab, e.g. Sheet1!A1:H24 (up to {columns} columns and {} cells). Use FORMATTED_VALUE or UNFORMATTED_VALUE rendering. Live grants, Google access and the effective approval policy still apply; discovery is not approval.",
+            "Read the exact authorized A1 cell or rectangle on a named tab, such as Sheet1!A1:H24, with up to {columns} columns and {} cells. Live grants, Google access and the effective approval policy must permit the read. Use FORMATTED_VALUE or UNFORMATTED_VALUE rendering.",
             google_sheets::MAX_READ_CELLS
         )
     } else {
         format!(
-            "Channel guest append: supply valueInputOption=RAW and insertDataOption=INSERT_ROWS once each in a shared room. Use a named tab with a column range, e.g. Sheet1!A:H (up to {columns} columns). Send exactly one nonempty row of strings, numbers or booleans in body.values. Google chooses placement within the tab. Live grants, Google access and the effective approval policy must allow the write; discovery is not approval."
+            "Append exactly one nonempty row in body.values with valueInputOption=RAW and insertDataOption=INSERT_ROWS once each. In a shared room, use the authorized named tab and column range, such as Sheet1!A:H, with up to {columns} columns. The write needs an effective approval policy that permits it, live grants and Google access. Google chooses placement within the tab."
         )
-    });
+    }
 }
 
-/// Narrow only rendered schemas, after MCP has selected its argument wrapper.
+/// Project rendered guidance and schemas after MCP selects its argument wrapper.
+/// Put all guidance before the connection label so compact search retains it.
 /// Endpoint inputs stay intact for preparation and live execution checks.
 /// Call only for enrolled guest discovery, with the already filtered catalog.
-pub(crate) fn project_sheets_schemas(
+pub(crate) fn project_sheets_discovery(
     services: &[McpToolService],
     definitions: &mut [McpToolDefinition],
 ) {
     use serde_json::json;
 
     for tool in definitions {
-        let Some((_, endpoint)) =
+        let Some((service, endpoint)) =
             crate::services::mcp_service::resolve_tool_call(&tool.name, services)
         else {
             continue;
@@ -223,6 +222,7 @@ pub(crate) fn project_sheets_schemas(
         let Some(action) = sheets_endpoint_action(endpoint) else {
             continue;
         };
+        tool.description = format!("{} [{}]", sheets_guidance(action), service.service_name);
         let columns = google_sheets::MAX_COLUMNS;
         let properties = &mut tool.input_schema["properties"];
         if action == "read" {
@@ -291,19 +291,13 @@ pub(crate) async fn filter_catalog(
             return false;
         };
         let metadata = &service.durable_endpoint_metadata;
-        service.endpoints.retain_mut(|endpoint| {
-            let Some(action) = sheets_endpoint_action(endpoint) else {
-                return false;
-            };
-            if !metadata
+        service.endpoints.retain(|endpoint| {
+            metadata
                 .get(&endpoint.endpoint_id)
                 .is_some_and(|m| m.catalog_contract)
-                || !policy::has_sheets_grant(policy, turn, user_service_id, action)
-            {
-                return false;
-            }
-            describe_sheets_endpoint(endpoint, action);
-            true
+                && sheets_endpoint_action(endpoint).is_some_and(|action| {
+                    policy::has_sheets_grant(policy, turn, user_service_id, action)
+                })
         });
         !service.endpoints.is_empty()
     });
