@@ -25,11 +25,13 @@ describe("window-free public renderer", () => {
           throw new Error("Unexpected documentation access");
         });
         expect(html).toContain("<h1");
-        if (route === "/" && locale === "en") {
-          // The English home page ("light night" design) has its own menu and footer.
+        if (route === "/") {
+          // Both homepage locales use the same design and their own chrome.
           expect(html).toContain('class="nyx-home nyx-public"');
           expect(html).toContain("data-nav");
           expect(html).toContain('id="end"');
+          expect(html).toContain(locale === "zh" ? "能办事的 AI 助手" : "The AI assistant");
+          expect(html).not.toContain("unicorn.studio");
         } else {
           expect(html).toContain('id="nav"');
           expect(html).toContain('id="foot"');

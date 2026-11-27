@@ -585,6 +585,8 @@ html.lenis,html.lenis body{height:auto}
 .nyx-home .hero-copy{position:relative;z-index:2;will-change:transform}
 .nyx-home .hero h1{font-size:clamp(38px,3.7vw,62px);line-height:.95;letter-spacing:-.05em}
 .nyx-home .hero h1 span{display:block}
+.nyx-home[lang="zh-CN"] :is(h1,h2,h3,.big),.nyx-home[lang="zh-CN"] :is(h1,h2,.big) em{letter-spacing:0;line-height:1.16}
+.nyx-home[lang="zh-CN"] .hero-facts{gap:12px 20px}
 .nyx-home .hero h1 em{color:var(--violet-deep);transition:color .5s var(--ease)}
 .nyx-home .hero.is-done h1 em{color:var(--done)}
 .nyx-home .hero .lede{margin-top:26px;max-width:40ch}

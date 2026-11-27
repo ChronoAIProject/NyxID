@@ -1,4 +1,4 @@
-import { ArrowUpRight, ChevronDown, Moon, Sun } from "lucide-react";
+import { ArrowUpRight, Check, ChevronDown, Globe2, Moon, Sun } from "lucide-react";
 import footerDirectory from "../public-site/public-footer-links.json";
 import { usePublicTheme } from "../public-site/public-theme";
 import { useBrowserContext } from "../public-site/browser-context";
@@ -36,6 +36,30 @@ export function PublicThemeToggle({ language = "en" }: { language?: Language }) 
   );
 }
 
+function PublicLanguageSelector({ language, localeHref }: { language: Language; localeHref: NonNullable<ChromeProps["localeHref"]> }) {
+  const zh = language === "zh";
+  return (
+    <details className="public-language" name="public-header-menu" key={language}
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) e.currentTarget.open = false; }}
+      onKeyDown={(e) => { if (e.key === "Escape") { e.currentTarget.open = false; e.currentTarget.querySelector("summary")?.focus(); } }}>
+      <summary className="list-none" aria-label={zh ? "选择语言" : "Choose language"}>
+        <Globe2 className="public-language-globe" size={16} aria-hidden="true" />
+        <span>{zh ? "中文" : "EN"}</span><ChevronDown size={12} aria-hidden="true" />
+      </summary>
+      <nav className="public-language-menu" aria-label={zh ? "语言" : "Language"} onClick={(e) => {
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        if ((e.target as Element).closest("a")) e.currentTarget.closest("details")?.removeAttribute("open");
+      }}>
+        {([ ["en", "English", "en"], ["zh", "中文", "zh-CN"] ] as const).map(([locale, label, lang]) => (
+          <SiteLink key={locale} href={localeHref(locale)} lang={lang} hrefLang={lang} aria-current={language === locale ? "true" : undefined}>
+            {label}{language === locale && <Check size={15} aria-hidden="true" />}
+          </SiteLink>
+        ))}
+      </nav>
+    </details>
+  );
+}
+
 const primaryPages = [
   ["/nyxbot", "NyxBot", "NyxBot", "The app, channels and specialists.", "应用、聊天渠道与专属助手。"],
   ["/solutions", "Solutions", "解决方案", "Bookings, research, calls and office work.", "预订、研究、通话与后台工作。"],
@@ -66,10 +90,10 @@ export function PublicHeader({ home = false, route = "", language = "en", siteHr
           <nav className="public-nav-links" aria-label={zh ? "主导航" : "Main"}>
             {links.map(([href, label, path]) => <SiteLink key={path} href={href} aria-current={route === path ? "page" : route.startsWith(`${path}/`) ? "location" : undefined}>{label}</SiteLink>)}
           </nav>
-          <details key={`${route}:${language}`} className="public-more"
+          <details key={`${route}:${language}`} className="public-more" name="public-header-menu"
             onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) e.currentTarget.open = false; }}
             onKeyDown={(e) => { if (e.key === "Escape") { e.currentTarget.open = false; e.currentTarget.querySelector("summary")?.focus(); } }}>
-            <summary className="list-none">{zh ? "了解更多" : "Show more"}<ChevronDown size={14} aria-hidden="true" /></summary>
+            <summary className="list-none"><span className="public-label-full">{zh ? "了解更多" : "Show more"}</span><span className="public-label-short">{zh ? "更多" : "More"}</span><ChevronDown size={14} aria-hidden="true" /></summary>
             <nav className="public-more-menu" aria-label={zh ? "探索 NyxID" : "Explore NyxID"} onClick={(e) => {
               if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
               if ((e.target as Element).closest("a")) e.currentTarget.closest("details")?.removeAttribute("open");
@@ -85,14 +109,14 @@ export function PublicHeader({ home = false, route = "", language = "en", siteHr
               <div className="public-more-bottom">
                 <a href={auth("login")}>{zh ? "登录" : "Log in"}</a>
                 <SiteLink href={site("/contact")}>{zh ? "联系" : "Contact"}</SiteLink>
-                {localeHref && <SiteLink href={localeHref(zh ? "en" : "zh")} lang={zh ? "en" : "zh-CN"}>{zh ? "EN" : "中文"}</SiteLink>}
               </div>
             </nav>
           </details>
           <span className="public-nav-divider" aria-hidden="true" />
           <a className="public-login" href={auth("login")}>{zh ? "登录" : "Log in"}</a>
           <PublicThemeToggle language={language} />
-          <a className="public-cta" href={auth("register")}>{zh ? "开始使用" : "Get started"}</a>
+          {localeHref && <PublicLanguageSelector language={language} localeHref={localeHref} />}
+          <a className="public-cta" href={auth("register")} aria-label={zh ? "开始使用" : "Get started"}><span className="public-label-full">{zh ? "开始使用" : "Get started"}</span><span className="public-label-short">{zh ? "开始" : "Start"}</span></a>
         </div>
       </div>
     </header>

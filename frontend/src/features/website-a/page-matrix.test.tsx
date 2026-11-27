@@ -22,6 +22,8 @@ import { WebsitePage } from "./website-page";
 import { parsePublicPath } from "../public-site/publication";
 
 const location = vi.hoisted(() => ({ pathname: "/", searchStr: "" }));
+// The browser checks motion and hit testing; happy-dom only checks page content.
+vi.mock("./nyx-home/nyx-home-motion", () => ({ startNyxHome: () => () => {} }));
 vi.mock("@tanstack/react-router", () => ({
   useLocation: () => location,
   Link: forwardRef<HTMLAnchorElement, Record<string, unknown>>(

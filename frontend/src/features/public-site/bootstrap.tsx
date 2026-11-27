@@ -14,6 +14,12 @@ export async function bootPublicSite() {
   // are resolved explicitly here, so no serialized private application state is needed.
   if (root.dataset.publicRender === "v1") router.ssr = { manifest: undefined };
   await router.load();
+  if (root.dataset.publicRender === "v1") {
+    // This public-only hydration resolves loaders itself. Seed the initial
+    // location as TanStack's SSR hydrator does, so the first navigation can
+    // save its scroll position and Back can restore that document correctly.
+    router.stores.resolvedLocation.setState(() => router.stores.location.state);
+  }
   const tree = <RouterProvider router={router} />;
   if (root.dataset.publicRender === "v1")
     hydrateRoot(root, tree, {

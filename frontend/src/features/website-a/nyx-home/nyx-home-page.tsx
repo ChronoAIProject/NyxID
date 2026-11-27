@@ -7,10 +7,12 @@ import { HomeJobs } from "./nyx-home-jobs";
 import { ToolCatalog } from "./nyx-home-tools";
 import { PublicHeader, PublicFooter } from "../../public-site/public-chrome";
 import { usePublicThemeElement } from "../../public-site/public-theme";
+import { homeText } from "./home-copy";
 import "./nyx-home.css";
 
 export default function NyxHomePage() {
   const s = useWebsite();
+  const t = (english: Parameters<typeof homeText>[0]) => homeText(english, s.language);
   const ref = useRef<HTMLDivElement>(null);
   usePublicThemeElement(ref);
   // Mark entrance animations before paint; theme is shared with the detailed pages.
@@ -37,11 +39,11 @@ export default function NyxHomePage() {
     };
   }, []);
   return (
-    <div ref={ref} className="nyx-home nyx-public">
+    <div ref={ref} className="nyx-home nyx-public" lang={s.language === "zh" ? "zh-CN" : "en"}>
       {" "}
       <div className="page-sky" aria-hidden="true" />{" "}
       <a className="skip" href="#main">
-        Skip to content
+        {t("Skip to content")}
       </a>{" "}
       <svg
         width="0"
@@ -93,15 +95,15 @@ export default function NyxHomePage() {
         <span data-k="call">
           <span className="shape s-call">
             <span className="o-l">Telegram</span>
-            <span className="o-m">Table for 4 at 7:30</span>
-            <span className="o-s">Sarah, one vegan</span>
+            <span className="o-m">{t("Table for 4 at 7:30")}</span>
+            <span className="o-s">{t("Sarah, one vegan")}</span>
           </span>
         </span>{" "}
         <span data-k="cal">
           <span className="shape s-cal">
-            <span className="cal-top">Every weekday</span>
+            <span className="cal-top">{t("Every weekday")}</span>
             <span className="cal-big">08:00</span>
-            <span className="o-s">Morning brief</span>
+            <span className="o-s">{t("Morning brief")}</span>
           </span>
         </span>{" "}
         <span data-k="letter">
@@ -110,27 +112,27 @@ export default function NyxHomePage() {
               <path d="M0 0 L50 34 L100 0" />
             </svg>
             <span className="o-l">X</span>
-            <span className="o-m">Open on Monday?</span>
-            <span className="o-s">A DM to answer</span>
+            <span className="o-m">{t("Open on Monday?")}</span>
+            <span className="o-s">{t("A DM to answer")}</span>
           </span>
         </span>{" "}
         <span data-k="sticky">
           <span className="shape s-sticky">
-            <span className="o-m">Call Mr Tan back</span>
-            <span className="o-s">Missed call, 6:10 PM</span>
+            <span className="o-m">{t("Call Mr Tan back")}</span>
+            <span className="o-s">{t("Missed call, 6:10 PM")}</span>
           </span>
         </span>{" "}
         <span data-k="invoice">
           <span className="shape s-invoice">
             <span className="o-l">Stripe</span>
-            <span className="o-m">Refund $40</span>
-            <span className="o-s">Ask first</span>
+            <span className="o-m">{t("Refund $40")}</span>
+            <span className="o-s">{t("Ask first")}</span>
           </span>
         </span>{" "}
         <span data-k="slip">
           <span className="shape s-slip">
             <span className="o-l">Claude Code</span>
-            <span className="o-m">Open a pull request</span>
+            <span className="o-m">{t("Open a pull request")}</span>
             <span className="o-s">GitHub</span>
           </span>
         </span>{" "}
@@ -138,46 +140,46 @@ export default function NyxHomePage() {
           <span className="shape s-receipt">
             <span className="o-l">Google Sheets</span>
             <span className="row">
-              <span>Takings</span>
-              <b>Sat</b>
+              <span>{t("Takings")}</span>
+              <b>{t("Sat")}</b>
             </span>
             <span className="row">
-              <span>Row</span>
+              <span>{t("Row")}</span>
               <b>212</b>
             </span>
             <span className="row">
-              <span>Rule</span>
-              <b>Allow</b>
+              <span>{t("Rule")}</span>
+              <b>{t("Allow")}</b>
             </span>
           </span>
         </span>{" "}
       </div>{" "}
-      <PublicHeader home siteHref={s.siteHref} authHref={s.authHref} localeHref={s.localeHref} />
-      <nav className="hud" aria-label="Page position" data-hud="">
+      <PublicHeader home language={s.language} siteHref={s.siteHref} authHref={s.authHref} localeHref={s.localeHref} />
+      <nav className="hud" aria-label={t("Page position")} data-hud="">
         {" "}
         <a href="#top">
           <i />
-          <span>01 Ask</span>
+          <span>{t("01 Ask")}</span>
         </a>{" "}
         <a href="#pile">
           <i />
-          <span>02 NyxBot</span>
+          <span>{t("02 NyxBot")}</span>
         </a>{" "}
         <a href="#agent">
           <i />
-          <span>03 Your agent</span>
+          <span>{t("03 Your agent")}</span>
         </a>{" "}
         <a href="#apps">
           <i />
-          <span>04 Tools</span>
+          <span>{t("04 Tools")}</span>
         </a>{" "}
         <a href="#jobs">
           <i />
-          <span>05 Solutions</span>
+          <span>{t("05 Solutions")}</span>
         </a>{" "}
         <a href="#end">
           <i />
-          <span>06 Start</span>
+          <span>{t("06 Start")}</span>
         </a>{" "}
         <output className="hud-y" data-hud-y="" aria-hidden="true">
           000
@@ -195,10 +197,10 @@ export default function NyxHomePage() {
             <div className="hero-copy">
               {" "}
               <h1 data-in="" style={{ "--d": "0" } as CSSProperties}>
-                <span>The AI assistant</span>
+                <span>{t("The AI assistant")}</span>
                 <span>
-                  {"that gets it "}
-                  <em>done.</em>
+                  {t("that gets it ")}
+                  <em>{t("done.")}</em>
                 </span>
               </h1>{" "}
               <p
@@ -206,9 +208,7 @@ export default function NyxHomePage() {
                 data-in=""
                 style={{ "--d": "1" } as CSSProperties}
               >
-                Ask NyxBot in plain words on Telegram, X or the NyxID app. It
-                books the table, replies to the customer and sends the morning
-                brief, under rules you set.
+                {t("Ask NyxBot in plain words on Telegram, X or the NyxID app. It books the table, replies to the customer and sends the morning brief, under rules you set.")}
               </p>{" "}
               <div
                 className="hero-cta"
@@ -217,7 +217,7 @@ export default function NyxHomePage() {
               >
                 {" "}
                 <a className="btn" href={s.authHref("register")}>
-                  {"Get started "}
+                  {t("Get started ")}
                   <span className="arr" aria-hidden="true">
                     →
                   </span>
@@ -226,7 +226,7 @@ export default function NyxHomePage() {
                   className="link"
                   href="https://github.com/ChronoAIProject/NyxID"
                 >
-                  {"Self-host with Docker "}
+                  {t("Self-host with Docker ")}
                   <span className="arr" aria-hidden="true">
                     →
                   </span>
@@ -237,18 +237,18 @@ export default function NyxHomePage() {
                 data-in=""
                 style={{ "--d": "3" } as CSSProperties}
               >
-                <span>Open source under Apache-2.0</span>
+                <span>{t("Open source under Apache-2.0")}</span>
                 <span>
                   <img src="/landing/nyx/icons/telegram.svg" alt="Telegram" />
                   <img src="/landing/nyx/icons/x.svg" alt="X" />
                   <img
                     src="/landing/nyx/icons/whatsapp.svg"
-                    alt="WhatsApp (coming soon)"
-                    title="WhatsApp — coming soon"
+                    alt={t("WhatsApp (coming soon)")}
+                    title={t("WhatsApp — coming soon")}
                   />
                   <img src="/landing/nyx/icons/slack.svg" alt="Slack" />
                   <img src="/landing/nyx/icons/discord.svg" alt="Discord" />
-                  and the NyxID app
+                  {t("and the NyxID app")}
                 </span>
               </p>{" "}
             </div>{" "}
@@ -280,9 +280,9 @@ export default function NyxHomePage() {
               </div>{" "}
               <p className="n-count">
                 <b data-count="">0</b>
-                {" of "}
+                {t(" of ")}
                 <span data-total="">10</span>
-                {" requests handled"}
+                {t(" requests handled")}
               </p>{" "}
               <div className="done-chat" data-done-chat="">
                 <p className="done-bubble">
@@ -297,7 +297,7 @@ export default function NyxHomePage() {
                         <use href="#ck" />
                       </svg>
                     </i>
-                    Done!
+                    {t("Done!")}
                   </span>
                 </p>
               </div>{" "}
@@ -308,28 +308,27 @@ export default function NyxHomePage() {
         <section
           className="pile-sec"
           id="pile"
-          aria-label="How NyxBot works through the night's pile"
+          aria-label={t("How NyxBot works through the night's pile")}
         >
           {" "}
           <div className="wrap pile-grid">
             {" "}
             <div className="pile-copy">
               {" "}
-              <p className="section-label">NyxBot at work</p>
-              <h2>The pile on your counter, sorted before you wake.</h2>{" "}
+              <p className="section-label">{t("NyxBot at work")}</p>
+              <h2>{t("The pile on your counter, sorted before you wake.")}</h2>{" "}
               <p className="lede">
-                Your agent works in the apps and chats you connect. You set the
-                limits and review actions that need approval.
+                {t("Your agent works in the apps and chats you connect. You set the limits and review actions that need approval.")}
               </p>{" "}
               <div className="pile-detail-links">
                 <a className="link" href={s.siteHref("/how-it-works")}>
-                  How it works{" "}
+                  {t("How it works")}{" "}
                   <span className="arr" aria-hidden="true">
                     →
                   </span>
                 </a>
                 <a className="link" href={s.siteHref("/security")}>
-                  Security{" "}
+                  {t("Security")}{" "}
                   <span className="arr" aria-hidden="true">
                     →
                   </span>
@@ -338,20 +337,20 @@ export default function NyxHomePage() {
               <p className="count" aria-live="polite">
                 <span>
                   <b data-n-done="">0</b>
-                  done
+                  {t("done")}
                 </span>
                 <span>
                   <b data-n-wait="">0</b>
-                  waiting for approval
+                  {t("waiting for approval")}
                 </span>
               </p>{" "}
               <div
                 className="pile"
                 data-pile=""
-                aria-label="Things on the counter"
+                aria-label={t("Things on the counter")}
               >
                 {" "}
-                <p className="pile-empty">The counter is clear.</p>{" "}
+                <p className="pile-empty">{t("The counter is clear.")}</p>{" "}
                 <button
                   className="obj"
                   type="button"
@@ -365,14 +364,14 @@ export default function NyxHomePage() {
                       "--z": "2",
                     } as CSSProperties
                   }
-                  aria-label="Reservation from Sarah. Hand to NyxBot."
+                  aria-label={t("Reservation from Sarah. Hand to NyxBot.")}
                 >
                   {" "}
                   <span className="obj-in">
                     <span className="shape s-slip">
-                      <span className="o-l">Reservation</span>
-                      <span className="o-m">Table for 4</span>
-                      <span className="o-s">Sun 7:30 PM, Sarah</span>
+                      <span className="o-l">{t("Reservation")}</span>
+                      <span className="o-m">{t("Table for 4")}</span>
+                      <span className="o-s">{t("Sun 7:30 PM, Sarah")}</span>
                     </span>
                     <svg
                       className="stamp"
@@ -397,7 +396,7 @@ export default function NyxHomePage() {
                       "--z": "1",
                     } as CSSProperties
                   }
-                  aria-label="Question on X from maya_eats. Hand to NyxBot."
+                  aria-label={t("Question on X from maya_eats. Hand to NyxBot.")}
                 >
                   {" "}
                   <span className="obj-in">
@@ -413,8 +412,8 @@ export default function NyxHomePage() {
                         <img src="/landing/nyx/icons/x.svg" alt="" />
                         @maya_eats
                       </span>
-                      <span className="o-m">Gluten-free dishes?</span>
-                      <span className="o-s">Open on Monday?</span>
+                      <span className="o-m">{t("Gluten-free dishes?")}</span>
+                      <span className="o-s">{t("Open on Monday?")}</span>
                     </span>
                     <svg
                       className="stamp"
@@ -439,7 +438,7 @@ export default function NyxHomePage() {
                       "--z": "3",
                     } as CSSProperties
                   }
-                  aria-label="Invoice from Harbour Fish Co. Hand to NyxBot."
+                  aria-label={t("Invoice from Harbour Fish Co. Hand to NyxBot.")}
                 >
                   {" "}
                   <span className="obj-in">
@@ -452,8 +451,8 @@ export default function NyxHomePage() {
                     </svg>
                     <span className="shape s-invoice">
                       <span className="o-l">Harbour Fish Co.</span>
-                      <span className="o-m">Friday order</span>
-                      <span className="o-s">Price up 8%. Confirm?</span>
+                      <span className="o-m">{t("Friday order")}</span>
+                      <span className="o-s">{t("Price up 8%. Confirm?")}</span>
                     </span>
                     <svg
                       className="stamp"
@@ -478,22 +477,22 @@ export default function NyxHomePage() {
                       "--z": "2",
                     } as CSSProperties
                   }
-                  aria-label="Till receipt for Saturday. Hand to NyxBot."
+                  aria-label={t("Till receipt for Saturday. Hand to NyxBot.")}
                 >
                   {" "}
                   <span className="obj-in">
                     <span className="shape s-receipt">
-                      <span className="o-l">Saturday till</span>
+                      <span className="o-l">{t("Saturday till")}</span>
                       <span className="row">
-                        <span>Tables</span>
+                        <span>{t("Tables")}</span>
                         <b>38</b>
                       </span>
                       <span className="row">
-                        <span>Card</span>
+                        <span>{t("Card")}</span>
                         <b>31</b>
                       </span>
                       <span className="row">
-                        <span>Cash</span>
+                        <span>{t("Cash")}</span>
                         <b>7</b>
                       </span>
                     </span>
@@ -520,13 +519,13 @@ export default function NyxHomePage() {
                       "--z": "4",
                     } as CSSProperties
                   }
-                  aria-label="Note: Jo is sick, can't do lunch. Hand to NyxBot."
+                  aria-label={t("Note: Jo is sick, can't do lunch. Hand to NyxBot.")}
                 >
                   {" "}
                   <span className="obj-in">
                     <span className="shape s-sticky">
-                      <span className="o-m">Jo is sick, can't do lunch</span>
-                      <span className="o-s">7:15 AM</span>
+                      <span className="o-m">{t("Jo is sick, can't do lunch")}</span>
+                      <span className="o-s">{t("7:15 AM")}</span>
                     </span>
                     <svg
                       className="stamp"
@@ -551,14 +550,14 @@ export default function NyxHomePage() {
                       "--z": "3",
                     } as CSSProperties
                   }
-                  aria-label="Missed call from Mr Tan. Hand to NyxBot."
+                  aria-label={t("Missed call from Mr Tan. Hand to NyxBot.")}
                 >
                   {" "}
                   <span className="obj-in">
                     <span className="shape s-call">
-                      <span className="o-l">Missed call</span>
-                      <span className="o-m">Mr Tan</span>
-                      <span className="o-s">6:05 PM, about Friday</span>
+                      <span className="o-l">{t("Missed call")}</span>
+                      <span className="o-m">{t("Mr Tan")}</span>
+                      <span className="o-s">{t("6:05 PM, about Friday")}</span>
                     </span>
                     <svg
                       className="stamp"
@@ -583,14 +582,14 @@ export default function NyxHomePage() {
                       "--z": "5",
                     } as CSSProperties
                   }
-                  aria-label="Morning brief, weekdays at 8. Hand to NyxBot."
+                  aria-label={t("Morning brief, weekdays at 8. Hand to NyxBot.")}
                 >
                   {" "}
                   <span className="obj-in">
                     <span className="shape s-cal">
-                      <span className="cal-top">Weekdays</span>
+                      <span className="cal-top">{t("Weekdays")}</span>
                       <span className="cal-big">8:00</span>
-                      <span className="o-s">Morning brief</span>
+                      <span className="o-s">{t("Morning brief")}</span>
                     </span>
                     <svg
                       className="stamp"
@@ -604,7 +603,7 @@ export default function NyxHomePage() {
                 </button>{" "}
               </div>{" "}
               <p className="hint">
-                Drag a slip into a tray, or press Enter on it.
+                {t("Drag a slip into a tray, or press Enter on it.")}
               </p>{" "}
             </div>{" "}
             <div className="trays" data-trays="">
@@ -612,17 +611,17 @@ export default function NyxHomePage() {
               <div className="tray" data-tray="done">
                 {" "}
                 <p className="tray-h">
-                  {"Done by NyxBot "}
-                  <span data-h-done="">nothing yet</span>
+                  {t("Done by NyxBot ")}
+                  <span data-h-done="">{t("nothing yet")}</span>
                 </p>{" "}
                 <ol>
                   {" "}
                   <li className="slot" data-slot="slip">
                     <span className="slot-hole" />
                     <p className="slot-text">
-                      <b>Sarah's table.</b>
+                      <b>{t("Sarah's table.")}</b>
                       {
-                        " Booked for Sunday 7:30 PM, one vegan noted. Reply sent."
+                        t(" Booked for Sunday 7:30 PM, one vegan noted. Reply sent.")
                       }
                     </p>
                     <img src="/landing/nyx/icons/telegram.svg" alt="Telegram" />
@@ -630,16 +629,16 @@ export default function NyxHomePage() {
                   <li className="slot" data-slot="letter">
                     <span className="slot-hole" />
                     <p className="slot-text">
-                      <b>A question on X.</b>
-                      {" Answered from your menu notes."}
+                      <b>{t("A question on X.")}</b>
+                      {t(" Answered from your menu notes.")}
                     </p>
                     <img src="/landing/nyx/icons/x.svg" alt="X" />
                   </li>{" "}
                   <li className="slot" data-slot="receipt">
                     <span className="slot-hole" />
                     <p className="slot-text">
-                      <b>Saturday's takings.</b>
-                      {" Added to your sheet, row 212."}
+                      <b>{t("Saturday's takings.")}</b>
+                      {t(" Added to your sheet, row 212.")}
                     </p>
                     <img
                       src="/landing/nyx/icons/google-sheets.svg"
@@ -649,8 +648,8 @@ export default function NyxHomePage() {
                   <li className="slot" data-slot="sticky">
                     <span className="slot-hole" />
                     <p className="slot-text">
-                      <b>Jo is sick.</b>
-                      {" Sam said yes to lunch. Rota updated."}
+                      <b>{t("Jo is sick.")}</b>
+                      {t(" Sam said yes to lunch. Rota updated.")}
                     </p>
                     <img
                       src="/landing/nyx/icons/google-calendar.svg"
@@ -660,16 +659,16 @@ export default function NyxHomePage() {
                   <li className="slot" data-slot="call">
                     <span className="slot-hole" />
                     <p className="slot-text">
-                      <b>Mr Tan's missed call.</b>
-                      {" Called back. Friday delivery confirmed."}
+                      <b>{t("Mr Tan's missed call.")}</b>
+                      {t(" Called back. Friday delivery confirmed.")}
                     </p>
                     <img src="/landing/nyx/icons/twilio.svg" alt="Twilio" />
                   </li>{" "}
                   <li className="slot" data-slot="cal">
                     <span className="slot-hole" />
                     <p className="slot-text">
-                      <b>Your morning brief.</b>
-                      {" Sent to your phone at 8:00."}
+                      <b>{t("Your morning brief.")}</b>
+                      {t(" Sent to your phone at 8:00.")}
                     </p>
                     <img src="/landing/nyx/icons/telegram.svg" alt="Telegram" />
                   </li>{" "}
@@ -677,7 +676,7 @@ export default function NyxHomePage() {
                     <span className="slot-hole" />
                     <p className="slot-text">
                       <b>Harbour Fish Co.</b>
-                      {" You approved. Confirmation sent at 8:01."}
+                      {t(" You approved. Confirmation sent at 8:01.")}
                     </p>
                     <img src="/landing/nyx/icons/gmail.svg" alt="Gmail" />
                   </li>{" "}
@@ -686,8 +685,8 @@ export default function NyxHomePage() {
               <div className="tray tray--wait" data-tray="wait">
                 {" "}
                 <p className="tray-h">
-                  {"Waiting for approval "}
-                  <span data-h-wait="">nothing yet</span>
+                  {t("Waiting for approval ")}
+                  <span data-h-wait="">{t("nothing yet")}</span>
                 </p>{" "}
                 <ol>
                   {" "}
@@ -695,16 +694,16 @@ export default function NyxHomePage() {
                     {" "}
                     <span className="slot-hole" />{" "}
                     <p className="slot-text" data-wait-text="">
-                      <b>Harbour Fish Co. raised Friday's order by 8%.</b>
-                      {" A reply is drafted. Money decisions wait for you."}
+                      <b>{t("Harbour Fish Co. raised Friday's order by 8%.")}</b>
+                      {t(" A reply is drafted. Money decisions wait for you.")}
                     </p>{" "}
                     <div className="slot-act">
                       {" "}
                       <button className="b-ok" type="button" data-approve="">
-                        Approve the reply
+                        {t("Approve the reply")}
                       </button>{" "}
                       <button className="b-no" type="button" data-deny="">
-                        Deny
+                        {t("Deny")}
                       </button>{" "}
                       <button
                         className="b-undo"
@@ -712,13 +711,13 @@ export default function NyxHomePage() {
                         data-undo=""
                         hidden
                       >
-                        Undo
+                        {t("Undo")}
                       </button>{" "}
                     </div>{" "}
                   </li>{" "}
                 </ol>{" "}
                 <p className="tray-none" data-wait-none="" hidden>
-                  Nothing is waiting for you.
+                  {t("Nothing is waiting for you.")}
                 </p>{" "}
               </div>{" "}
             </div>{" "}
@@ -732,12 +731,11 @@ export default function NyxHomePage() {
             <div>
               {" "}
               <h2>
-                {"Already use Claude Code or Cursor? "}
-                <em>Connect it.</em>
+                {t("Already use Claude Code or Cursor? ")}
+                <em>{t("Connect it.")}</em>
               </h2>{" "}
               <p className="lede">
-                Point any MCP client at NyxID and it can use the same apps. Use a separate Agent Key for each agent and choose its service scope. NyxID adds the real login at the
-                proxy, so the agent never holds it.
+                {t("Point any MCP client at NyxID and it can use the same apps. Use a separate Agent Key for each agent and choose its service scope. NyxID adds the real login at the proxy, so the agent never holds it.")}
               </p>{" "}
               <div className="agent-who">
                 {" "}
@@ -767,7 +765,7 @@ export default function NyxHomePage() {
                 <div
                   className="term-tabs"
                   role="tablist"
-                  aria-label="Setup command"
+                  aria-label={t("Setup command")}
                 >
                   {" "}
                   <button
@@ -787,7 +785,7 @@ export default function NyxHomePage() {
                     Cursor
                   </button>{" "}
                   <button className="term-copy" type="button" data-copy="">
-                    Copy
+                    {t("Copy")}
                   </button>{" "}
                 </div>{" "}
                 <pre data-term-out="">
@@ -797,7 +795,7 @@ export default function NyxHomePage() {
                   {" https://nyx-api.chrono-ai.fun/mcp"}
                 </pre>{" "}
               </div>{" "}
-              <a className="link" href={s.siteHref("/agents")}>Your agent <span aria-hidden="true">→</span></a>
+              <a className="link" href={s.siteHref("/agents")}>{t("Your agent")}<span aria-hidden="true">→</span></a>
             </div>{" "}
             <div className="swap">
               {" "}
@@ -806,7 +804,7 @@ export default function NyxHomePage() {
                 data-flow=""
                 data-step="4"
                 role="img"
-                aria-label="Claude Code sends its own NyxID key. NyxID checks it, swaps in the real Stripe key from its vault, and Stripe creates the refund. The agent never holds the real key."
+                aria-label={t("Claude Code sends its own NyxID key. NyxID checks it, swaps in the real Stripe key from its vault, and Stripe creates the refund. The agent never holds the real key.")}
               >
                 {" "}
                 <div className="flow-card" data-flow-at="0">
@@ -816,18 +814,18 @@ export default function NyxHomePage() {
                       <img src="/landing/nyx/icons/claude.svg" alt="" />
                     </span>
                     <b>Claude Code</b>
-                    <span className="fc-tag">your agent</span>
+                    <span className="fc-tag">{t("your agent")}</span>
                   </p>{" "}
-                  <p className="fc-line">Asks Stripe to refund $40</p>{" "}
+                  <p className="fc-line">{t("Asks Stripe to refund $40")}</p>{" "}
                   <p className="fc-key">
-                    {"Sends "}
+                    {t("Sends ")}
                     <span className="k-agent">
                       <svg aria-hidden="true">
                         <use href="#lock" />
                       </svg>
                       nyxid_ag_7f3c
                     </span>
-                    its own NyxID key
+                    {t("its own NyxID key")}
                   </p>{" "}
                 </div>{" "}
                 <div className="flow-wire" data-w="1">
@@ -840,7 +838,7 @@ export default function NyxHomePage() {
                       <img src="/nyxid-icon-white.svg" alt="" />
                     </span>
                     <b>NyxID</b>
-                    <span className="fc-tag">checks, then swaps the key</span>
+                    <span className="fc-tag">{t("checks, then swaps the key")}</span>
                   </p>{" "}
                   <ul className="fc-checks">
                     {" "}
@@ -850,7 +848,7 @@ export default function NyxHomePage() {
                           <use href="#ck" />
                         </svg>
                       </i>
-                      The key belongs to this agent
+                      {t("The key belongs to this agent")}
                     </li>{" "}
                     <li>
                       <i>
@@ -858,7 +856,7 @@ export default function NyxHomePage() {
                           <use href="#ck" />
                         </svg>
                       </i>
-                      Stripe is in its scope
+                      {t("Stripe is in its scope")}
                     </li>{" "}
                     <li>
                       <i>
@@ -866,11 +864,11 @@ export default function NyxHomePage() {
                           <use href="#ck" />
                         </svg>
                       </i>
-                      Your rule for refunds is Allow
+                      {t("Your rule for refunds is Allow")}
                     </li>{" "}
                   </ul>{" "}
                   <p className="fc-swap">
-                    {"Swaps "}
+                    {t("Swaps ")}
                     <span className="k-agent">nyxid_ag_7f3c</span>
                     <svg viewBox="0 0 16 16">
                       <path d="M3 8h10M9 4l4 4-4 4" />
@@ -879,9 +877,9 @@ export default function NyxHomePage() {
                       <svg aria-hidden="true">
                         <use href="#lock" />
                       </svg>
-                      real Stripe key
+                      {t("real Stripe key")}
                     </span>
-                    from its vault
+                    {t("from its vault")}
                   </p>{" "}
                 </div>{" "}
                 <div className="flow-wire" data-w="3">
@@ -894,17 +892,17 @@ export default function NyxHomePage() {
                       <img src="/landing/nyx/icons/stripe.svg" alt="" />
                     </span>
                     <b>Stripe</b>
-                    <span className="fc-tag">the app</span>
+                    <span className="fc-tag">{t("the app")}</span>
                   </p>{" "}
                   <p className="fc-key">
-                    {"Receives "}
+                    {t("Receives ")}
                     <span className="k-real">
                       <svg aria-hidden="true">
                         <use href="#lock" />
                       </svg>
                       sk_live_••••4242
                     </span>
-                    the real key, never seen by the agent
+                    {t("the real key, never seen by the agent")}
                   </p>{" "}
                   <p className="fc-done">
                     <i>
@@ -912,20 +910,19 @@ export default function NyxHomePage() {
                         <use href="#ck" />
                       </svg>
                     </i>
-                    Refund of $40 created
+                    {t("Refund of $40 created")}
                   </p>{" "}
                 </div>{" "}
               </div>{" "}
               <div className="swap-facts">
                 {" "}
                 <div>
-                  <b>One scoped key per agent</b>
-                  Agent A reaches Slack and Gmail. Agent B reaches only your
-                  internal API.
+                  <b>{t("One scoped key per agent")}</b>
+                  {t("Agent A reaches Slack and Gmail. Agent B reaches only your internal API.")}
                 </div>{" "}
                 <div>
-                  <b>Revoke one, keep the rest</b>
-                  End any agent's access without touching the login behind it.
+                  <b>{t("Revoke one, keep the rest")}</b>
+                  {t("End any agent's access without touching the login behind it.")}
                 </div>{" "}
               </div>{" "}
             </div>{" "}
@@ -939,12 +936,11 @@ export default function NyxHomePage() {
             <div className="apps-head">
               {" "}
               <h2>
-                {"Ask in a chat and the work lands "}
-                <em>in your apps.</em>
+                {t("Ask in a chat and the work lands ")}
+                <em>{t("in your apps.")}</em>
               </h2>{" "}
               <p className="lede">
-                Connect the apps your business runs on. Give NyxBot or your own
-                agent access through a connected account or API key.
+                {t("Connect the apps your business runs on. Give NyxBot or your own agent access through a connected account or API key.")}
               </p>{" "}
             </div>{" "}
             <div className="hub" data-hub="">
@@ -952,7 +948,7 @@ export default function NyxHomePage() {
               <svg className="hub-lines" aria-hidden="true" />{" "}
               <div className="hub-col hub-in">
                 {" "}
-                <p className="hub-col-l">Ask from</p>{" "}
+                <p className="hub-col-l">{t("Ask from")}</p>{" "}
                 <span className="tile" data-node="in">
                   <img src="/landing/nyx/icons/telegram.svg" alt="" />
                   Telegram
@@ -962,7 +958,7 @@ export default function NyxHomePage() {
                 </span>{" "}
                 <span className="tile" data-node="in">
                   <img src="/landing/nyx/icons/whatsapp.svg" alt="" />
-                  WhatsApp <span className="tile-status">Coming soon</span>
+                  WhatsApp <span className="tile-status">{t("Coming soon")}</span>
                 </span>{" "}
                 <span className="tile" data-node="in">
                   <img src="/landing/nyx/icons/slack.svg" alt="" />
@@ -978,7 +974,7 @@ export default function NyxHomePage() {
               </div>{" "}
               <div className="hub-col hub-out">
                 {" "}
-                <p className="hub-col-l">It works in</p>{" "}
+                <p className="hub-col-l">{t("It works in")}</p>{" "}
                 <span className="tile" data-node="out">
                   <img src="/landing/nyx/icons/google-calendar.svg" alt="" />
                   Google Calendar
@@ -1017,13 +1013,13 @@ export default function NyxHomePage() {
             <div className="apps-note">
               {" "}
               <p>
-                <b>Your app is missing?</b>
+                <b>{t("Your app is missing?")}</b>
                 {
-                  " Any REST API with an OpenAPI file becomes a tool NyxBot can use."
+                  t(" Any REST API with an OpenAPI file becomes a tool NyxBot can use.")
                 }
               </p>{" "}
               <a className="link" href={s.siteHref("/docs/ai/guides/wrap-rest-api-as-mcp")}>
-                {"API connection guide "}
+                {t("API connection guide ")}
                 <span className="arr" aria-hidden="true">
                   →
                 </span>
@@ -1039,10 +1035,10 @@ export default function NyxHomePage() {
             <div className="jobs-head">
               {" "}
               <h2>
-                {"Start with a job."}
+                {t("Start with a job.")}
               </h2>{" "}
               <a className="link" href={s.siteHref("/solutions")}>
-                {"Solutions "}
+                {t("Solutions ")}
                 <span className="arr" aria-hidden="true">
                   →
                 </span>
@@ -1063,21 +1059,21 @@ export default function NyxHomePage() {
         <div className="wrap close-in" data-close="">
           {" "}
           <p className="big" id="closing-title" data-split="">
-            {"Give NyxBot "}
-            <em>one task</em>
-            {" today."}
+            {t("Give NyxBot ")}
+            <em>{t("one task")}</em>
+            {t(" today.")}
           </p>{" "}
           <div className="close-cta">
             {" "}
             <a className="btn btn-lilac" href={s.authHref("register")}>
-              {"Get started "}
+              {t("Get started ")}
               <span className="arr" aria-hidden="true">
                 →
               </span>
             </a>{" "}
-            <a className="link" href={s.siteHref("/pricing")}>Pricing <span className="arr" aria-hidden="true">→</span></a>
+            <a className="link" href={s.siteHref("/pricing")}>{t("Pricing")}<span className="arr" aria-hidden="true">→</span></a>
             <a className="link" href="https://github.com/ChronoAIProject/NyxID">
-              {"Self-host with Docker "}
+              {t("Self-host with Docker ")}
               <span className="arr" aria-hidden="true">
                 →
               </span>
@@ -1086,7 +1082,7 @@ export default function NyxHomePage() {
         </div>{" "}
       </section>
       </main>{" "}
-      <PublicFooter siteHref={s.siteHref} localeHref={s.localeHref} />{" "}
+      <PublicFooter language={s.language} siteHref={s.siteHref} localeHref={s.localeHref} />{" "}
     </div>
   );
 }

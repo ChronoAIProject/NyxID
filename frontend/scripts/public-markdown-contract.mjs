@@ -35,30 +35,6 @@ export function verifyMarkdownContract(path, markdown, origin = getPublicOrigin(
       `${path}: code examples must remain separate`,
     );
   }
-  if (path === "/zh") {
-    assert.notEqual(
-      code.findIndex((value) => value.includes('"mcpServers"')),
-      code.findIndex((value) => value.includes("curl -X POST")),
-      `${path}: MCP and curl examples must remain separate`,
-    );
-    const bodies =
-      path === "/zh"
-        ? [
-            "在 Telegram 和 X 上全天候回复客户",
-            "一句话连接 Gmail、日历、X 等服务",
-            "通过 MCP 和 REST 接入 Claude、Cursor、Codex 或你自己的代码",
-          ]
-        : [
-            "Answers customers on Telegram and X, day and night",
-            "Connect Gmail, Calendar, X and more in one message",
-            "MCP and REST for Claude, Cursor, Codex or your own code",
-          ];
-    for (const body of bodies)
-      assert.ok(
-        markdown.includes(body),
-        `${path}: missing audience body ${body}`,
-      );
-  }
   const links = nodes
     .filter((node) => node.type === "link")
     .map((node) => node.url);
@@ -73,42 +49,29 @@ export function verifyMarkdownContract(path, markdown, origin = getPublicOrigin(
           "nyxid api-key create",
           "--allow-all-services false",
         ]
-      : path === "/zh"
-        ? [
-            '"mcpServers"',
-            "https://nyx-api.chrono-ai.fun/mcp",
-            "curl -X POST",
-            "delete_event",
-          ]
-        : [];
+      : [];
   for (const marker of markers)
     assert.ok(
       code.some((value) => value.includes(marker)),
       `${path}: missing code ${marker}`,
     );
-  if (path === "/zh")
-    for (const title of prefix
-      ? [
-          "一个开箱即用的助手",
-          "看看你的 AI 能做到什么",
-          "给智能体钥匙，而不是密码",
-        ]
-      : [
-          "An assistant that just works",
-          "See what your AI can really do",
-          "Keys for your agents, not passwords",
-        ])
-      assert.ok(markdown.includes(title), `${path}: missing audience ${title}`);
-  if (path === "/") {
+  if (route === "/") {
     assert.ok(code.some(value => value.trim().split(/\s+/).at(-1) === "https://nyx-api.chrono-ai.fun/mcp" && value.includes("claude mcp add --transport http --scope user")), "Home: retain the visible MCP setup example");
-    for (const body of [
+    const bodies = prefix ? [
+      "台面上积下的事，醒来前就办妥。",
+      "智能体在你连接的应用和聊天渠道里办事。",
+      "为每个智能体分配独立 Agent Key",
+      "先交给它一件事。",
+    ] : [
       "The pile on your counter, sorted before you wake.",
       "Your agent works in the apps and chats you connect.",
       "Use a separate Agent Key for each agent",
       "Start with a job.",
-    ]) assert.ok(markdown.includes(body), `Home: missing story or progressive detail ${body}`);
+    ];
+    for (const body of bodies)
+      assert.ok(markdown.includes(body), `${path}: missing story or progressive detail ${body}`);
     for (const target of ["/agents", "/integrations", "/pricing"])
-      assert.ok(links.includes(`${origin}${target}`), `Home: missing detail destination ${target}`);
+      assert.ok(links.includes(`${origin}${prefix}${target}`), `${path}: missing detail destination ${target}`);
   }
   const targets =
     route === "/agents"

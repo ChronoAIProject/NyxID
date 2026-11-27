@@ -16,6 +16,7 @@ import { Draggable } from 'gsap/Draggable';
 import { InertiaPlugin } from 'gsap/InertiaPlugin';
 import { DrawSVGPlugin } from 'gsap/DrawSVGPlugin';
 import Lenis from 'lenis';
+import { homeText } from './home-copy';
 
 gsap.registerPlugin(ScrollTrigger, SplitText, ScrambleTextPlugin, Flip, Draggable, InertiaPlugin, DrawSVGPlugin);
 
@@ -64,6 +65,8 @@ function createEnv(page) {
 
 export function startNyxHome(page) {
   const env = createEnv(page);
+  const language = page.lang === 'zh-CN' ? 'zh' : 'en';
+  const t = english => homeText(english, language);
 
   /* window-level hooks the design used, now tied to this page's lifetime */
   const addEventListener = (type, fn, opts) =>
@@ -176,8 +179,8 @@ export function startNyxHome(page) {
       const wait = inv && !S.decision ? 1 : 0;
       setText($('[data-n-done]', section), done);
       setText($('[data-n-wait]', section), wait);
-      setText($('[data-h-done]', section), done ? `${done} of 7` : 'nothing yet');
-      setText($('[data-h-wait]', section), wait ? '1 thing' : inv ? 'nothing now' : 'nothing yet');
+      setText($('[data-h-done]', section), done ? (language === 'zh' ? `${done} / 7` : `${done} of 7`) : t('nothing yet'));
+      setText($('[data-h-wait]', section), wait ? t('1 thing') : inv ? t('nothing now') : t('nothing yet'));
       pile.classList.toggle('is-empty', sorted.length === objs.length);
       if (hooks.onChange) hooks.onChange({ done, wait, sorted: sorted.length, total: objs.length });
     }
@@ -213,7 +216,7 @@ export function startNyxHome(page) {
     });
     bNo.addEventListener('click', () => {
       S.decision = 'denied';
-      waitText.replaceChildren(make('b', null, 'Denied.'), ' NyxBot sent nothing to Harbour Fish Co. The draft is still there if you change your mind.');
+      waitText.replaceChildren(make('b', null, t('Denied.')), t(' NyxBot sent nothing to Harbour Fish Co. The draft is still there if you change your mind.'));
       bOk.hidden = bNo.hidden = true; bUndo.hidden = false;
       counts();
     });
@@ -625,7 +628,9 @@ void main(){
       pace: (v) => Math.ceil((v - 0.02) / 0.7 * 7),
       onChange: ({ done, wait }) => {
         const msg = $('#pile .pile-empty');
-        if (msg) msg.replaceChildren(make('i', null, checkIcon()), make('span', null, `Morning. ${done} ${done === 1 ? 'thing is' : 'things are'} done`, ...(wait ? [', and ', make('em', null, '1 is waiting for approval'), '.'] : ['.'])));
+        if (msg) msg.replaceChildren(make('i', null, checkIcon()), make('span', null,
+          language === 'zh' ? `早上好，${done} 件事已完成` : `Morning. ${done} ${done === 1 ? 'thing is' : 'things are'} done`,
+          ...(wait ? [language === 'zh' ? '，' : ', and ', make('em', null, language === 'zh' ? '1 件等待审批' : '1 is waiting for approval'), language === 'zh' ? '。' : '.'] : [language === 'zh' ? '。' : '.'])));
       },
     };
     {
@@ -661,7 +666,7 @@ void main(){
     mm.add('(max-width: 959px), (prefers-reduced-motion: reduce)', () => staticMode());
   } else {
     staticMode();
-    initSort($('#pile'), { onChange: ({ done, wait }) => { const m = $('#pile .pile-empty'); if (m) m.textContent = `Morning. ${done} done${wait ? ', 1 waiting for approval' : ''}.`; } });
+    initSort($('#pile'), { onChange: ({ done, wait }) => { const m = $('#pile .pile-empty'); if (m) m.textContent = language === 'zh' ? `早上好，${done} 件事已完成${wait ? '，1 件等待审批' : ''}。` : `Morning. ${done} done${wait ? ', 1 waiting for approval' : ''}.`; } });
   }
 
   /* React owns the public theme. Motion responds to it without a second toggle handler. */
@@ -756,7 +761,7 @@ void main(){
   $('[data-copy]').addEventListener('click', (e) => {
     const text = termOut.textContent.replace(/^\$\s*/, '');
     const btn = e.currentTarget;
-    const ok = () => { btn.textContent = 'Copied'; setTimeout(() => { btn.textContent = 'Copy'; }, 1600); };
+    const ok = () => { btn.textContent = t('Copied'); setTimeout(() => { btn.textContent = t('Copy'); }, 1600); };
     if (navigator.clipboard) navigator.clipboard.writeText(text).then(ok, ok); else ok();
   });
 

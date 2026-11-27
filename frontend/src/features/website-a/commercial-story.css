@@ -143,6 +143,45 @@
   pointer-events: none;
 }
 .website-a.nyx-public .st-commercial.stc-catalog .st-hero { padding-bottom: 28px; }
+.website-a.nyx-public .stc-catalog .st-hero-grid { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 48px; }
+.website-a.nyx-public .stc-catalog .st-hero h1 { font-size: clamp(42px, 4.5vw, 64px); }
+.website-a.nyx-public .stc-catalog .st-hero-visual { padding: 32px 0 12px; }
+.website-a.nyx-public .stc-map { display: grid; grid-template-columns: minmax(0, 1fr) 24px 48px 24px minmax(0, 1.8fr); align-items: center; width: 100%; }
+.website-a.nyx-public .stc-map-col { position: relative; display: grid; gap: 6px; min-width: 0; }
+.website-a.nyx-public .stc-map-label { position: absolute; left: 0; bottom: calc(100% + 12px); margin: 0; font-size: 12px; line-height: 1.3; color: var(--site-faint); white-space: nowrap; }
+.website-a.nyx-public .stc-map-out { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.website-a.nyx-public .stc-map-tile { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 40px; padding: 6px 8px; border: 1px solid var(--site-rule); border-radius: 9px; background: var(--site-surface); font-size: 12px; font-weight: 500; line-height: 1.2; color: var(--site-ink); }
+.website-a.nyx-public .stc-map-out .stc-map-tile { min-height: 48px; }
+.website-a.nyx-public .stc-map-tile img { display: block; flex: none; width: 16px; height: 16px; object-fit: contain; }
+.website-a.nyx-public .stc-map-tile small { display: block; margin-top: 2px; color: var(--site-faint); font-size: 9px; font-weight: 400; }
+.website-a.nyx-public .stc-map-core { display: grid; place-items: center; width: 48px; height: 48px; border: 1px solid var(--site-rule-strong); border-radius: 13px; background: #17171A; outline: 1px solid var(--site-soft); outline-offset: 4px; }
+.website-a.nyx-public .stc-map-core img { display: block; width: 30px; height: 30px; }
+.website-a.nyx-public .stc-map-wires { width: 100%; height: 224px; overflow: visible; }
+.website-a.nyx-public .stc-map-wires path { fill: none; stroke: var(--site-rule-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.website-a.nyx-public[data-theme="dark"] .stc-map-tile img:is([src$="/x.svg"],[src$="/notion.svg"],[src$="/github.svg"]) { filter: invert(1); }
+@media(max-width:1100px) and (min-width:801px) {
+  .website-a.nyx-public .stc-catalog .st-hero-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 32px; }
+  .website-a.nyx-public .stc-catalog .st-hero h1 { font-size: 48px; }
+}
+@media(max-width:800px) {
+  .website-a.nyx-public .stc-catalog .st-hero-grid { grid-template-columns: minmax(0, 1fr); gap: 32px; }
+  .website-a.nyx-public .stc-catalog .st-hero h1 { font-size: clamp(42px, 7vw, 60px); }
+  .website-a.nyx-public .stc-catalog .st-hero-visual { width: 100%; max-width: 560px; padding-top: 24px; }
+}
+@media(max-width:560px) {
+  .website-a.nyx-public .stc-map { grid-template-columns: minmax(0, 1fr) 16px 40px 16px minmax(0, 1.75fr); }
+  .website-a.nyx-public .stc-map-core { width: 40px; height: 40px; border-radius: 11px; outline-offset: 3px; }
+  .website-a.nyx-public .stc-map-core img { width: 26px; height: 26px; }
+  .website-a.nyx-public .stc-map-tile { gap: 5px; padding-inline: 6px; font-size: 11px; }
+  .website-a.nyx-public .stc-map-tile img { width: 14px; height: 14px; }
+}
+@media(max-width:360px) {
+  .website-a.nyx-public .stc-map { grid-template-columns: minmax(0, 1fr) 10px 32px 10px minmax(0, 1.65fr); }
+  .website-a.nyx-public .stc-map-core { width: 32px; height: 32px; border-radius: 9px; outline-offset: 2px; }
+  .website-a.nyx-public .stc-map-core img { width: 22px; height: 22px; }
+  .website-a.nyx-public .stc-map-tile { gap: 4px; padding-inline: 4px; font-size: 10px; }
+  .website-a.nyx-public .stc-map-tile img { width: 12px; height: 12px; }
+}
 .website-a.nyx-public .st-commercial.stc-catalog .st-hero-actions { display: block; max-width: 60ch; margin-top: 20px; }
 .website-a.nyx-public .st-commercial.stc-catalog .st-hero-actions .st-details { border-top: 0; }
 .website-a.nyx-public .st-commercial.stc-catalog .st-hero-actions .st-details > summary { min-height: 44px; padding: 10px 0; font-size: 15px; }

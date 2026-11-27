@@ -61,18 +61,13 @@ it.each(["en", "zh"])(
     );
     verifyMarkdownContract(home.meta.path, homeMd);
     const homeCodes = nodes(parse(homeMd), "code").map((n) => String(n.value));
-    for (const marker of locale === "zh" ? [
-      '"mcpServers"',
-      "https://nyx-api.chrono-ai.fun/mcp",
-      "curl -X POST",
-      "delete_event",
-    ] : ["claude mcp add --transport http --scope user", "https://nyx-api.chrono-ai.fun/mcp"])
+    for (const marker of ["claude mcp add --transport http --scope user", "https://nyx-api.chrono-ai.fun/mcp"])
       expect(
         homeCodes.some((code) => code.includes(marker)),
         marker,
       ).toBe(true);
     for (const label of locale === "zh"
-      ? ["给企业", "给 AI 爱好者", "给开发者"]
+      ? ["台面上积下的事，醒来前就办妥。", "先交给它一件事。", "为每个智能体分配独立 Agent Key"]
       : ["The pile on your counter, sorted before you wake.", "Start with a job.", "Use a separate Agent Key for each agent"])
       expect(homeMd).toContain(label);
   },

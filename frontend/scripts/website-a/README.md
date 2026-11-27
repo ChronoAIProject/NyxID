@@ -94,12 +94,35 @@ bilingual workflow content in `solution-story-copy.json` for the job details, wi
 `solution-workflow-icons.tsx` for explicit, locale-independent workflow marks. The generator preserves these native adapters. Keep the
 solution release gate in `SolutionActivation` when changing workflow layouts.
 
-The English home page is the design reference for public pages. Shared chrome is in
+The home page is the design reference for public pages. English and Chinese use
+the same `nyx-home-page.tsx` component, artwork, sections and motion. Chinese
+homepage copy lives in `nyx-home/home-copy.json`; dynamic motion labels and catalog
+controls use the same locale. Switching homepage locale remounts the motion scene
+so its transformed nodes and listeners belong to one page lifetime. Shared chrome is in
 `src/features/website-a/public-chrome.tsx`, with its bilingual footer directory in
 `src/features/public-site/public-footer-links.json`. `public-design.css` holds the
 public palette, type and controls; `public-reading.css` adapts docs, auth and legal
 surfaces. Their `nyxid-theme` choice stays separate from the application's
 `nyxid.theme` preference.
+
+Marketing headers place an English/中文 selector beside the public theme toggle.
+Switching language keeps the current published route, visitor query parameters
+and explicit section fragment. The selector is omitted on pages without a
+published translation. Both header menus use native disclosures and support
+keyboard dismissal; the standalone HTML preview uses the same markup.
+
+The Tools introduction includes a compact version of the homepage's channel →
+NyxID → apps diagram beside the text. It uses the same brand assets and visible
+WhatsApp availability label, and stacks below the introduction on narrow screens.
+The searchable directory stays below both columns.
+
+The standard `npm run build` renders these same components into the public HTML
+artifacts listed in `dist/public-release.json`. The generated Nginx configuration
+serves each route's HTML directly; JavaScript hydrates its controls and motion.
+`verify-public-build.mjs` checks both homepage layouts, static language links and
+the Tools diagram before packaging. The browser acceptance suite also reads these
+pages with JavaScript disabled. The standalone export below is a separate artifact
+with a DOM runtime and no React or TanStack in its browser graph.
 
 Standalone legal HTML uses the same public CSS and footer directory during
 `scripts/prerender-legal.mjs`, so its first load matches the SPA presentation.
@@ -107,6 +130,34 @@ Standalone legal HTML uses the same public CSS and footer directory during
 Sign-in uses stills of the landing page's existing halftone artwork. To regenerate
 them, start the local preview on port 2972 and follow the capture and `cwebp`
 commands at the top of `capture-auth-art.mjs`.
+
+## Standalone HTML homepage preview
+
+`npm run build:landing` exports the approved homepage in English and Chinese to
+`dist-landing/index.html` and `dist-landing/zh/index.html`, with its CSS, local
+artwork/icons and browser scripts. The header language selector switches between
+these two static documents.
+The export uses the same approved page source at build time. Its browser entry
+contains no React or application router: native HTML links/disclosures and DOM
+handlers provide the menu, public theme, catalog search and query handoff, while
+the existing GSAP/Lenis module provides the motion. The build rejects React or
+TanStack modules in the exported browser graph.
+
+`LANDING_LINK_ORIGIN` sets the origin for detail and sign-in links;
+it defaults to the configured public origin. Use the local app origin for local
+review:
+
+```sh
+LANDING_LINK_ORIGIN=http://127.0.0.1:2972 npm run build:landing
+python3 -m http.server 2973 --bind 127.0.0.1 --directory dist-landing
+```
+
+The homepage reads the public `nyxid-theme` choice without changing app settings.
+A bounded session read redirects a confirmed signed-in visitor to Assistant;
+failed or signed-out reads leave the static page available. The export sends no
+analytics or diagnostics. Those remain owned by the application reached through
+its links. Production routing and the normal public build retain their existing
+rendering path; this export is an independent preview artifact.
 
 ## Surge preview
 
