@@ -1928,27 +1928,27 @@ async fn schedule_result_delivers_to_telegram_and_push_with_live_acl() {
     let channel_id = Uuid::new_v4().to_string();
     let chat_id = Uuid::new_v4().to_string();
     let now = mongodb::bson::DateTime::now();
-    let encrypted = state.encryption_keys.encrypt(b"test-token").await.unwrap();
-    state
-        .db
-        .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .insert_one(doc! {
-            "_id": &bot_id,
-            "user_id": OWNER,
-            "platform": "telegram",
-            "label": "My Telegram bot",
-            "bot_token_encrypted": mongodb::bson::Binary{subtype:mongodb::bson::spec::BinarySubtype::Generic,bytes:encrypted},
-            "platform_bot_id": "123",
-            "platform_bot_username": "test_bot",
-            "webhook_registered": true,
-            "webhook_secret_hash": "fixture",
-            "status": "active",
-            "is_active": true,
-            "created_at": now,
-            "updated_at": now,
-        })
-        .await
-        .unwrap();
+    crate::handlers::credential_record_fixtures::BotSecret::Token
+        .insert(
+            &state.db,
+            &state.encryption_keys,
+            doc! {
+                "_id": &bot_id,
+                "user_id": OWNER,
+                "platform": "telegram",
+                "label": "My Telegram bot",
+                "platform_bot_id": "123",
+                "platform_bot_username": "test_bot",
+                "webhook_registered": true,
+                "webhook_secret_hash": "fixture",
+                "status": "active",
+                "is_active": true,
+                "created_at": now,
+                "updated_at": now,
+            },
+            b"test-token",
+        )
+        .await;
     state
         .db
         .collection::<Document>(crate::models::nyxbot_channel::COLLECTION_NAME)

@@ -6,6 +6,13 @@ use crate::{
 };
 const SECRET: &str = "managed-channel-fixture-key";
 
+// Unmarked v2 fixtures from the server tests at 846b09d4d.
+const LEGACY_CHANNEL_KEY: &str = concat!(
+    "0202003c970328ef44ef1c4967bba9b3c53e0df81371da3bc135ee1b72132673d3ea00640565942f",
+    "0ed1cc507ba1ee15ab4ad3aaf608d982e0053c0bca841adb7ddb7da49d3d9ed46a8d6d4f926f4567",
+    "bf6d70a14c34a7b8d3ce8b457d70b939cbd191b493735cddaf3f9d3fec6c8481578b0ee0f213ee",
+);
+
 fn channel(id: &str) -> Document {
     doc! {"_id":id,"user_id":"person","bot_owner_id":"org","channel_bot_id":"bot",
     "platform":"lark","bot_label":"fixture","route_api_key_id":"org-route",
@@ -44,7 +51,7 @@ async fn channel_key_rewrap_authenticates_the_installed_personal_key_and_exact_r
     settings.encryption_key_previous = settings.encryption_key.replace("22".repeat(32));
     let current_keys = EncryptionKeys::from_config(&settings);
     let mut source = channel("channel");
-    let legacy = old.encrypt(SECRET.as_bytes()).await.unwrap();
+    let legacy = hex::decode(LEGACY_CHANNEL_KEY).unwrap();
     source.insert(FIELD, bson::to_bson(&legacy).unwrap());
     source.insert("unknown_sibling", 7);
     rows.insert_one(&source).await.unwrap();
@@ -68,10 +75,21 @@ async fn channel_key_rewrap_authenticates_the_installed_personal_key_and_exact_r
         assert!(rows.find_one(id.clone()).await.unwrap().unwrap() == winner);
         rows.replace_one(id.clone(), &source).await.unwrap();
     }
+    let mut staged = crate::test_utils::test_encryption_keys();
+    staged.set_contextual_record_writes(false);
+    let wrong_key = crate::services::nyxbot_channel_key::seal(
+        &staged,
+        "channel",
+        "person",
+        "installed",
+        "different-fixture-key",
+    )
+    .await
+    .unwrap();
     for delta in [
         doc! {"agent_api_key_id":"absent","pending_agent_api_key_id":"installed"},
         doc! {"user_id":"org"},
-        doc! {FIELD:binary(old.encrypt(b"different-fixture-key").await.unwrap())},
+        doc! {FIELD:binary(wrong_key)},
     ] {
         let mut wrong = source.clone();
         wrong.extend(delta);
@@ -137,10 +155,7 @@ async fn channel_key_generation_counts_adopted_staged_retired_and_missing_keys_a
     let entry = &REGISTRY[index];
     let rows = db.collection::<Document>(entry.collection);
     let mut adopted = channel("adopted");
-    adopted.insert(
-        FIELD,
-        binary(keys.encrypt(SECRET.as_bytes()).await.unwrap()),
-    );
+    adopted.insert(FIELD, binary(hex::decode(LEGACY_CHANNEL_KEY).unwrap()));
     let mut staged = channel("staged");
     staged.remove("agent_api_key_id");
     staged.extend(doc! {"transport":"direct","pending_agent_api_key_id":"next"});

@@ -4,7 +4,7 @@ use crate::errors::AppResult;
 use crate::models::oracle_login_profile::OracleLoginProfile;
 use zeroize::Zeroizing;
 
-pub(crate) struct OracleOuter(String);
+pub(crate) struct OracleOuter(pub(super) String);
 
 impl OracleOuter {
     pub(crate) fn profile(row: &OracleLoginProfile) -> Self {

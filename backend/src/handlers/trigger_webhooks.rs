@@ -235,19 +235,7 @@ mod tests {
         status: TriggerStatus,
     ) -> Trigger {
         let now = Utc::now();
-        let verification_secret_encrypted =
-            if matches!(verification, TriggerVerification::HmacSha256 { .. }) {
-                Some(
-                    state
-                        .encryption_keys
-                        .encrypt(raw_secret.as_bytes())
-                        .await
-                        .expect("encrypt verification secret"),
-                )
-            } else {
-                None
-            };
-        let trigger = Trigger {
+        let mut trigger = Trigger {
             assistant_target_owner: None,
             secret_context_versions: Default::default(),
             source: Default::default(),
@@ -262,19 +250,47 @@ mod tests {
             status,
             secret_hash: hash_token(raw_secret),
             verification,
-            verification_secret_encrypted,
+            verification_secret_encrypted: None,
             delivery: TriggerDelivery::Webhook { url },
-            delivery_secret_encrypted: Some(
-                state
-                    .encryption_keys
-                    .encrypt(b"delivery-secret")
-                    .await
-                    .expect("encrypt delivery secret"),
-            ),
+            delivery_secret_encrypted: None,
             delivery_key_id: Some("key_fixture".to_string()),
             created_at: now,
             updated_at: now,
         };
+        let keys = &state.encryption_keys;
+        let verification = matches!(trigger.verification, TriggerVerification::HmacSha256 { .. })
+            .then_some(raw_secret.as_bytes());
+        for (field, slot, plaintext) in [
+            (
+                "verification_secret_encrypted",
+                &mut trigger.verification_secret_encrypted,
+                verification,
+            ),
+            (
+                "delivery_secret_encrypted",
+                &mut trigger.delivery_secret_encrypted,
+                Some(b"delivery-secret".as_slice()),
+            ),
+        ] {
+            if let Some(plaintext) = plaintext {
+                *slot = Some(
+                    crate::services::trigger_record_service::encrypt_secret(
+                        keys,
+                        &trigger.id,
+                        &trigger.user_id,
+                        field,
+                        plaintext,
+                    )
+                    .await
+                    .unwrap(),
+                );
+                crate::services::credential_record_service::mark_version(
+                    &mut trigger.secret_context_versions,
+                    keys,
+                    field,
+                );
+            }
+        }
         state
             .db
             .collection::<Trigger>(TRIGGERS)

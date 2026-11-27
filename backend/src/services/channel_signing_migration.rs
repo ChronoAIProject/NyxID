@@ -218,6 +218,17 @@ pub(super) async fn update_in_session(
     let mut prepared = filter.clone();
     prepared.insert(SIGNING_PREPARATION_FIELD, doc! {"$exists":true});
     let source = rows.find_one(prepared).session(&mut *session).await?;
+    if source.is_none() && upsert {
+        // An upsert can introduce an exceptional source outside the survivor
+        // copy protocol. Invalidate retirement evidence in this transaction
+        // before the replacement is published.
+        super::key_lifecycle::invalidate_in_transaction(
+            db,
+            session,
+            "channel_signing_migration_upsert",
+        )
+        .await?;
+    }
     let Some(mut target) = rows
         .find_one_and_update(filter, update)
         .upsert(upsert)

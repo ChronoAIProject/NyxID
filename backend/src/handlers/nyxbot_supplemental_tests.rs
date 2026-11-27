@@ -9,6 +9,12 @@ use std::sync::{
 };
 
 async fn notice_fixture() -> (Fixture, MockServer, AssistantConversation) {
+    Box::pin(notice_fixture_with_reference_keys(None)).await
+}
+
+async fn notice_fixture_with_reference_keys(
+    reference_keys: Option<&crate::crypto::aes::EncryptionKeys>,
+) -> (Fixture, MockServer, AssistantConversation) {
     let (f, platform) = Box::pin(image_fixture("telegram", "gateway")).await;
     let origin = f.event.delivery.as_ref().unwrap().origin.clone();
     f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&f.event.conversation_id},doc! {"$set":{"message_count":1,"active_turn":{
@@ -17,17 +23,16 @@ async fn notice_fixture() -> (Fixture, MockServer, AssistantConversation) {
         "lease_expires_at":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::minutes(5)),
         "external_check_started":true,"stop_requested":false,
     }}}).await.unwrap();
-    let encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"cmaeg1.ev.original")
-        .await
-        .unwrap();
+    let keys = reference_keys.unwrap_or(&f.state.encryption_keys);
+    let encrypted = f.seal_reference(keys, b"cmaeg1.ev.original").await;
     let mut fields = sources::reference_fields(
         encrypted,
         Utc::now() + ChronoDuration::minutes(29),
         f.event.relay_message_id.as_deref(),
     );
+    if keys.contextual_record_writes() {
+        fields.insert("event_ref_context_version", 3);
+    }
     fields.insert("platform_thread_id", "77");
     f.state
         .db
@@ -413,7 +418,7 @@ async fn supplemental_chat_reference_anchor_missing_deleted_mismatched_stale_and
                         "event_ref_ciphertext",
                         bson::Binary {
                             subtype: bson::spec::BinarySubtype::Generic,
-                            bytes: f.state.encryption_keys.encrypt(b"newer").await.unwrap(),
+                            bytes: f.seal_reference(&f.state.encryption_keys, b"newer").await,
                         },
                     );
                 }
@@ -515,11 +520,8 @@ async fn supplemental_progress_does_not_use_reference_fallback_or_newer_pointer(
             .await
             .unwrap();
         let mut fields = sources::reference_fields(
-            f.state
-                .encryption_keys
-                .encrypt(b"newer-event")
-                .await
-                .unwrap(),
+            f.seal_reference(&f.state.encryption_keys, b"newer-event")
+                .await,
             Utc::now() + ChronoDuration::minutes(29),
             Some("newer-inbound"),
         );
@@ -878,7 +880,8 @@ async fn supplemental_guest_and_org_route_authority_are_revalidated() {
                 f.state.db.collection(USERS).insert_one(test_user(&org,UserType::Org)).await.unwrap();
                 f.state.db.collection::<bson::Document>("org_memberships").insert_one(doc!{"_id":Uuid::new_v4().to_string(),"org_user_id":&org,"member_user_id":OWNER,"role":"admin","allowed_service_ids":bson::Bson::Null,"created_at":bson::DateTime::now(),"revoked_at":bson::Bson::Null}).await.unwrap();
                 f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":&f.channel.id},doc!{"$set":{"bot_owner_id":&org}}).await.unwrap();
-                for (collection,filter) in [("channel_bots",doc!{"_id":&f.channel.channel_bot_id}),("channel_conversations",doc!{"_id":&f.channel.route_id}),("api_keys",doc!{"_id":&f.channel.route_api_key_id}),("channel_messages",doc!{"_id":&f.event.relay_message_id})] {
+                set_bot_secrets(&f.state, &f.channel, doc! {"user_id":&org}, &[(BotSecret::Token, b"token")]).await;
+                for (collection,filter) in [("channel_conversations",doc!{"_id":&f.channel.route_id}),("api_keys",doc!{"_id":&f.channel.route_api_key_id}),("channel_messages",doc!{"_id":&f.event.relay_message_id})] {
                     f.state.db.collection::<bson::Document>(collection).update_one(filter,doc!{"$set":{"user_id":&org}}).await.unwrap();
                 }
                 if mode=="org_revoked" {f.state.db.collection::<bson::Document>("org_memberships").delete_many(doc!{"org_user_id":&org}).await.unwrap();}
@@ -1061,11 +1064,8 @@ async fn age_result_anchor(f: &Fixture, age: ChronoDuration) {
         .await
         .unwrap();
     let fields = sources::reference_fields(
-        f.state
-            .encryption_keys
-            .encrypt(b"cmaeg1.ev.original")
-            .await
-            .unwrap(),
+        f.seal_reference(&f.state.encryption_keys, b"cmaeg1.ev.original")
+            .await,
         at + ChronoDuration::minutes(29),
         f.event.relay_message_id.as_deref(),
     );
@@ -2475,14 +2475,18 @@ async fn supplemental_result_window_late_authority_guest_org_key_and_relink() {
                 f.state.db.collection(USERS).insert_one(test_user(&org,UserType::Org)).await.unwrap();
                 f.state.db.collection::<bson::Document>("org_memberships").insert_one(doc!{"_id":Uuid::new_v4().to_string(),"org_user_id":&org,"member_user_id":OWNER,"role":"admin","allowed_service_ids":bson::Bson::Null,"created_at":bson::DateTime::now(),"revoked_at":bson::Bson::Null}).await.unwrap();
                 f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc!{"_id":&f.channel.id},doc!{"$set":{"bot_owner_id":&org}}).await.unwrap();
-                for (collection,filter) in [("channel_bots",doc!{"_id":&f.channel.channel_bot_id}),("channel_conversations",doc!{"_id":&f.channel.route_id}),("api_keys",doc!{"_id":&f.channel.route_api_key_id}),("channel_messages",doc!{"_id":&f.event.relay_message_id})] {
+                set_bot_secrets(&f.state, &f.channel, doc! {"user_id":&org}, &[(BotSecret::Token, b"token")]).await;
+                for (collection,filter) in [("channel_conversations",doc!{"_id":&f.channel.route_id}),("api_keys",doc!{"_id":&f.channel.route_api_key_id}),("channel_messages",doc!{"_id":&f.event.relay_message_id})] {
                     f.state.db.collection::<bson::Document>(collection).update_one(filter,doc!{"$set":{"user_id":&org}}).await.unwrap();
                 }
                 if mode=="org_revoked" {f.state.db.collection::<bson::Document>("org_memberships").delete_many(doc!{"org_user_id":&org}).await.unwrap();}
             }
             if mode=="route_revoked" {f.state.db.collection::<bson::Document>("api_keys").update_one(doc!{"_id":&f.channel.route_api_key_id},doc!{"$set":{"is_active":false}}).await.unwrap();}
             if mode=="platform_manager" {f.state.db.collection::<bson::Document>("channel_bots").update_one(doc!{"_id":&f.channel.channel_bot_id},doc!{"$set":{"platform_profile_id":"managed"}}).await.unwrap();}
-            if mode=="gateway_key_missing" { f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&f.channel.id},doc! {"$set":{"agent_key_ciphertext":bson::Bson::Null}}).await.unwrap(); }
+            if mode=="gateway_key_missing" { f.state.db.collection::<bson::Document>(CHANNELS).update_one(doc! {"_id":&f.channel.id},doc! {
+                        "$set":{"agent_key_ciphertext":bson::Bson::Null},
+                        "$unset":{channel_key::VERSION_PATH:""},
+                    }).await.unwrap(); }
             if mode=="relinked" { f.state.db.collection::<bson::Document>(THREADS).update_one(doc! {"channel_id":&f.channel.id},doc! {"$set":{"conversation_id":"different-conversation"}}).await.unwrap(); }
             deliver_to_for(&f.state,&row,&f.event.delivery.as_ref().unwrap().origin,"Useful answer",None,Purpose::TeamResult).await;
             assert_eq!(platform.received_requests().await.unwrap().len(),usize::from(matches!(mode,"guest"|"org")),"{mode}");

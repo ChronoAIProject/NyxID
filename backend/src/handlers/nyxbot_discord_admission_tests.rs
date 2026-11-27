@@ -50,15 +50,13 @@ async fn direct_admission() {
         doc! {"_id":&row.route_api_key_id},
         doc! {"$set":{"callback_url":format!("https://example.test/api/v1/nyxbot/relay/{}", row.id)}},
     ).await.unwrap();
-    let token = state
-        .encryption_keys
-        .encrypt(b"test-discord-token")
-        .await
-        .unwrap();
-    state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(
-        doc! {"_id":&row.channel_bot_id},
-        doc! {"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token}}},
-    ).await.unwrap();
+    set_bot_secrets(
+        &state,
+        &row,
+        doc! {},
+        &[(BotSecret::Token, b"test-discord-token")],
+    )
+    .await;
     state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc! {
         "_id":Uuid::new_v4().to_string(),"org_user_id":null,"flag_key":feature_flag_service::NYXBOT_THREAD_FOLLOW_FLAG_KEY,
         "target_kind":"user","target_key":OWNER,"enabled":true,"updated_by":"test","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()

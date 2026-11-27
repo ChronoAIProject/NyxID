@@ -864,6 +864,13 @@ const ALLOWLIST: &[(&str, &str, &str, usize, &str)] = &[
         "Awaited CPU/parsing/hash work under its request or worker; no independent durable ownership or external effect. Hard deadline bounds runtime teardown.",
     ),
     (
+        "services/hmac_lifecycle_service.rs",
+        "independent_file_matches",
+        "tokio::task::spawn_blocking",
+        1,
+        "Status awaits a bounded local HMAC keyset read and commitment calculation. The blocking task owns no database writes or provider requests.",
+    ),
+    (
         "services/machine_gateway_service.rs",
         "stream_upload",
         "body_stream",

@@ -90,7 +90,13 @@ async fn media_fixture(
         .replace_one(doc! {"_id":&row.id}, &row)
         .await
         .unwrap();
-    state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc!{"_id":&row.channel_bot_id},doc!{"$set":{"platform":"lark","bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:state.encryption_keys.encrypt(b"app:secret").await.unwrap()}}}).await.unwrap();
+    set_bot_secrets(
+        &state,
+        &row,
+        doc! {"platform":"lark"},
+        &[(BotSecret::Token, b"app:secret")],
+    )
+    .await;
     state
         .db
         .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
@@ -416,8 +422,14 @@ async fn channel_media_revoked_org_admin_never_downloads() {
         .replace_one(doc! {"_id":&row.id}, &row)
         .await
         .unwrap();
+    set_bot_secrets(
+        &state,
+        &row,
+        doc! {"user_id":&org},
+        &[(BotSecret::Token, b"app:secret")],
+    )
+    .await;
     for (collection, filter) in [
-        ("channel_bots", doc! {"_id":&row.channel_bot_id}),
         ("channel_conversations", doc! {"_id":&row.route_id}),
         ("api_keys", doc! {"_id":&row.route_api_key_id}),
     ] {
@@ -2522,8 +2534,14 @@ async fn channel_media_first_photo_org_bot_and_specialist_thread_bind_to_correct
                 .unwrap();
             state.db.collection::<bson::Document>("org_memberships").insert_one(doc! {"_id":Uuid::new_v4().to_string(),"org_user_id":&org,"member_user_id":OWNER,"role":"admin","allowed_service_ids":bson::Bson::Null,"created_at":bson::DateTime::now(),"revoked_at":bson::Bson::Null}).await.unwrap();
             row.bot_owner_id = Some(org.clone());
+            set_bot_secrets(
+                &state,
+                &row,
+                doc! {"user_id":&org},
+                &[(BotSecret::Token, b"app:secret")],
+            )
+            .await;
             for (collection, filter) in [
-                ("channel_bots", doc! {"_id":&row.channel_bot_id}),
                 ("channel_conversations", doc! {"_id":&row.route_id}),
                 ("api_keys", doc! {"_id":&row.route_api_key_id}),
             ] {
@@ -2904,18 +2922,21 @@ async fn signed_feishu_direct_pdf_webhook_delivers_pages_and_replies() {
         .mount(&provider)
         .await;
 
-    let binary = |bytes| bson::Binary {
-        subtype: bson::spec::BinarySubtype::Generic,
-        bytes,
-    };
     let encrypt_key = "fixture-event-key";
     let verification_token = "fixture-verification-token";
-    state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .update_one(doc! {"_id":&channel.channel_bot_id}, doc! {"$set":{
-            "platform":"feishu","webhook_registered":true,
-            "lark_verification_token_encrypted":binary(state.encryption_keys.encrypt(verification_token.as_bytes()).await.unwrap()),
-            "lark_encrypt_key_encrypted":binary(state.encryption_keys.encrypt(encrypt_key.as_bytes()).await.unwrap()),
-        }}).await.unwrap();
+    set_bot_secrets(
+        &state,
+        &channel,
+        doc! {"platform":"feishu","webhook_registered":true},
+        &[
+            (
+                BotSecret::LarkVerificationToken,
+                verification_token.as_bytes(),
+            ),
+            (BotSecret::LarkEncryptKey, encrypt_key.as_bytes()),
+        ],
+    )
+    .await;
     state
         .db
         .collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)

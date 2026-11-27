@@ -64,13 +64,13 @@ async fn native_channel_impl(state: &AppState) -> (NyxbotChannel, String) {
         )
         .await
         .unwrap();
-    let token = state
-        .encryption_keys
-        .encrypt(b"test-discord-token")
-        .await
-        .unwrap();
-    state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&row.channel_bot_id},
-        doc! {"$set":{"platform":"discord","platform_bot_id":"100","bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token}}}).await.unwrap();
+    set_bot_secrets(
+        state,
+        &row,
+        doc! {"platform":"discord","platform_bot_id":"100"},
+        &[(BotSecret::Token, b"test-discord-token")],
+    )
+    .await;
     // Retained thread evidence must resolve the real route, including its
     // callback. Production native enrollment installs this refusing receiver.
     state.db.collection::<bson::Document>(crate::models::api_key::COLLECTION_NAME).update_one(
@@ -1379,12 +1379,22 @@ async fn native_media_is_explicit_and_async_updates_keep_original_event() {
         )
         .mount(&http)
         .await;
-    let newer = state
-        .encryption_keys
-        .encrypt(b"newer-reference-must-not-be-used")
-        .await
-        .unwrap();
-    state.db.collection::<NyxbotThread>(THREADS).update_many(doc! {"channel_id":&row.id},doc! {"$set":{"event_ref_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:newer}}}).await.unwrap();
+    let threads = state.db.collection::<NyxbotThread>(THREADS);
+    let mut selected = threads.find(doc! {"channel_id":&row.id}).await.unwrap();
+    while let Some(thread) = selected.try_next().await.unwrap() {
+        let newer = seal_thread_reference(
+            &state.encryption_keys,
+            &thread.id,
+            &thread.user_id,
+            &thread.channel_id,
+            b"newer-reference-must-not-be-used",
+        )
+        .await;
+        threads.update_one(doc! {"_id": &thread.id}, doc! {"$set":{
+            "event_ref_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:newer},
+            "event_ref_context_version": event_record::version(&state.encryption_keys).map(i32::from),
+        }}).await.unwrap();
+    }
     let mut invalid = deletion(&row, "704", "7");
     invalid["metadata"]["cmaeg.event"] = json!("mismatch");
     assert_eq!(
