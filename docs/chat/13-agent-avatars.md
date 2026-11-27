@@ -8,9 +8,12 @@ backgrounds, framing, rendering styles, and per-state reactions. Randomise
 includes every head permitted for the agent, including the original NyxID logo
 for NyxBot. Specialists retain the pinned 6/4/6 identity split described below.
 
-The source is the byte-preserved
-[`mockups/nyxid-bot-faces-reference.html`](../../mockups/nyxid-bot-faces-reference.html),
-SHA256 `9d91953d4e8a97a190ae75ce32f3b9acec1cb94e4024914b8d618a95ef30ea2e`.
+The face kit design is by Chloe (@Chloechew-chronoai). Its original shape,
+colour and ripple declarations are preserved in
+[`shared/agent-avatars/reference-source.json`](../../shared/agent-avatars/reference-source.json),
+without a runnable gallery. The pinned source retains the original design
+SHA256 `9d91953d4e8a97a190ae75ce32f3b9acec1cb94e4024914b8d618a95ef30ea2e`
+as generated provenance.
 The kit replaces the superseded orb art. Web Natural motion uses a locally
 authored, script-free Rive state machine to control the shared vector eye
 apertures; materials remain in the portable painter. Native retains its
@@ -144,8 +147,8 @@ NyxBot's saved head is honoured.
 ## Composition and size policy
 
 Run `node shared/agent-avatars/generate-face-kit.mjs --check` to verify the
-catalogue and geometry against the original fixture. The generator supports the
-frontend's documented Node 20 minimum. `geometry.json` carries paths, bounded
+catalogue and geometry against the pinned design declarations. The generator
+supports the frontend's documented Node 20 minimum. `geometry.json` carries paths, bounded
 contours, palette roles, and effect constants; the backend does not embed it.
 Original SVG strings are preserved. Generated contours round to five decimals,
 below 0.00022 export pixels in the 24-unit space. Optional logo emote eyes stay
@@ -299,12 +302,10 @@ and preview sizes; positions snap to the same grid. Static path parsing and
 colour classification reuse bounded/weak caches. SVG artwork remains the
 complete rendering fallback, with the accessible name exposed only once.
 
-The local comparison page is `/avatar-emotes.html`. It renders all 12 emotes
-on randomized configurable avatars in one Pixel art style, with same-avatar
-comparison, pause/replay, themes, actual 56px/112px size comparisons and all
-twelve voice colourways. The mixed texture selector has been removed. It uses
-the actual app renderer and does not access a microphone or save preferences.
-It is a development entry and is excluded from the production app bundle.
+The actual assistant drawer's Motion step previews all process expressions
+through the app renderer. Its voice field previews all twelve colourways.
+Expression selection does not access the microphone or persist a preference;
+appearance and reaction changes persist only after Save avatar is confirmed.
 
 One-shots identify both the state and the observed event. Pausing preserves
 progress; completed events do not replay on refocus or configuration updates.
@@ -358,9 +359,8 @@ profile upload/synchronization remains a
 separate integration; export does not claim to update channel profile photos.
 The web editor deliberately has no download action.
 
-The implementation/evidence ledger is
-[`docs/plans/2026-11-25-nyxbot-face-kit-evidence.md`](../plans/2026-11-25-nyxbot-face-kit-evidence.md).
-It distinguishes executable results from outstanding device/visual checks.
-The isolated `mobile/review/face-kit-entry.tsx` entry uses the actual native
-renderer and Hermes to verify contracts, output hashes, exports and cache cost;
-it is not imported by the normal app entry and contacts no backend.
+Browser checks exercise the real `/assistant` editor, save/reset propagation,
+process emotes and all voice colourways. Canvas/portable PNG parity uses a
+measurement helper with no page entry or UI. Shared and native contract tests
+cover geometry, authority, raster topology, export and lifecycle behavior.
+Standalone galleries and device review entries are not part of the repository.

@@ -40,16 +40,14 @@ breathe subtly rather than bouncing. Eye glances look toward the active prop.
 The current Natural web display composites the face, moving apertures and
 props into one small Canvas2D image, then quantizes it to at most eight palette
 colours with hard alpha. Nearest-neighbour scaling gives every element the
-same pixel edges. The 192/112/56px review sizes use 64/56/56 grid cells,
+same pixel edges. Scenes at 192/112/56px use 64/56/56 grid cells,
 respectively. Positions snap to that grid; no smooth prop layer is visible over
 a pixel face. The shared SVG remains the complete load/render-failure fallback.
 Rive still authors motion; its poses paint directly without React frame state.
 Parsed static paths and colour lookups are cached to avoid repeated glyph parsing.
 
-The comparison page uses this one Pixel art style for all twelve scenes and
-one tile framing rule. It randomises shape/eyes/colour without mixing Flat,
-Dither and ASCII across the cards. Existing stored appearance preferences
-remain the source of identity and material on actual app surfaces.
+The actual assistant drawer previews these expressions in its Motion step.
+Stored appearance preferences supply identity and material on app surfaces.
 
 Full props are used at 96px and above; 44–95px omit small tap details. Below
 44px, icons keep the existing face/badge treatment. Quiet mode holds props
@@ -119,7 +117,7 @@ policy remains unchanged. After a production build, run:
 ```sh
 node scripts/verify-rive-worker.mjs
 python3 scripts/test-nginx-policy.py
-npx playwright test e2e/avatar-emotes.spec.ts e2e/agent-avatar-editor.spec.ts e2e/agent-activity-states.spec.ts
+npx playwright test e2e/agent-avatar-emotes.spec.ts e2e/face-kit.spec.ts e2e/agent-avatar-editor.spec.ts e2e/agent-activity-states.spec.ts
 ```
 
 The first check serves the actual built worker, rig and WASM under the generated
@@ -129,7 +127,5 @@ live states, static Home cards, sticky details, voice colourways, motion
 preferences, themes and narrow widths. Unit tests cover material preservation,
 exact resting geometry, fallback and lifecycle behavior.
 
-The local comparison entry is `/avatar-emotes.html`; it is excluded from the
-production app entry. The normal app uses the same renderer. Native retains
-the portable face renderer and voice ripple implementation; this web asset is
-not evidence of a tested native Rive integration.
+Native retains the portable face renderer and voice ripple implementation;
+this web asset is not evidence of a tested native Rive integration.
