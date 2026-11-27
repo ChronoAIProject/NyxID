@@ -13,6 +13,7 @@ mod channels;
 mod companions;
 mod deliveries;
 mod families;
+pub(crate) mod manifest;
 mod nested;
 mod protocols;
 mod retained;
