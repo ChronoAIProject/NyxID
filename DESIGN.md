@@ -26,8 +26,10 @@ request, Your agent explains client setup, Security explains permissions, Pricin
 explains billing, and Tools provides the directory. Solutions uses job tickets.
 Use real app captures with fictional data; retain reduced-motion stills and visible
 availability labels. Shared navigation, locale/theme controls and the complete
-footer keep the pages connected. Production HTML contains the readable content
-before controls and motion load.
+footer keep the pages connected. Production HTML links its page styles and contains
+the readable content before controls and motion load. The homepage hero remains
+visible through hydration and delayed motion loading; channel icons reserve their
+18-by-18-pixel space in the HTML to keep the initial layout stable.
 
 ## Color
 
