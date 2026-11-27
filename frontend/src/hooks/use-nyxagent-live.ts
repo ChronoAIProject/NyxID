@@ -8,6 +8,7 @@ import { useAuthStore } from "@/stores/auth-store";
 
 /** The open thread or group refreshes this quickly after a change. */
 const FAST_FLUSH_MS = 150;
+const ACTIVITY_FLUSH_MS = 1000;
 /** Lists (threads, agents, groups, channels) refresh at most this often. */
 const LIST_FLUSH_MS = 2000;
 
@@ -16,12 +17,13 @@ export interface NyxAgentLiveRefresh {
   readonly now: QueryKey[];
   /** Lists whose rows changed; refreshed at most every two seconds. */
   readonly lists: QueryKey[];
+  readonly activity?: true;
 }
 
 /**
  * The queries a live event makes stale. `seen` remembers each thread's
- * running turn and message count, so a tool-activity write refreshes only
- * the open transcript, not the thread and agent lists.
+ * running turn and message count, so a tool-activity write refreshes
+ * the transcript and activity projection without reloading the rosters.
  */
 export function nyxAgentLiveRefresh(
   userId: string,
@@ -38,18 +40,24 @@ export function nyxAgentLiveRefresh(
         // A hidden group member thread: only its group shows it.
         return {
           now: [nyxBotGroupKeys.messages(userId, event.group_id)],
+          activity: true,
           lists: listsChanged ? [groupList, nyxBotQueryKeys.agents(userId)] : [],
         };
       }
       return {
         now: [nyxBotQueryKeys.history(userId, event.id)],
+        activity: true,
         lists: listsChanged
           ? [nyxBotQueryKeys.threads(userId), nyxBotQueryKeys.agents(userId)]
           : [],
       };
     }
     case "group":
-      return { now: [nyxBotGroupKeys.messages(userId, event.id)], lists: [groupList] };
+      return {
+        now: [nyxBotGroupKeys.messages(userId, event.id)],
+        lists: [groupList],
+        activity: true,
+      };
     case "channel_thread":
       return { now: [], lists: [nyxBotQueryKeys.channelChats(userId, event.channel_id), nyxBotQueryKeys.threads(userId)] };
     case "channels":
@@ -59,12 +67,16 @@ export function nyxAgentLiveRefresh(
       };
     case "notification":
       // The bell and an open feed follow at once; identifiers only.
-      return { now: [notificationQueryKeys.root(userId)], lists: [] };
+      return {
+        now: [notificationQueryKeys.root(userId)],
+        lists: [],
+        activity: true,
+      };
     case "ready":
     case "resync":
       // (Re)connected or events were missed: re-read everything.
       seen.clear();
-      return { now: [nyxBotQueryKeys.root(userId)], lists: [] };
+      return { now: [nyxBotQueryKeys.root(userId)], lists: [], activity: true };
   }
 }
 
@@ -75,28 +87,81 @@ let active:
 
 function start(client: QueryClient, userId: string) {
   const seen = new Map<string, string>();
+  const activityKey = nyxBotQueryKeys.activity(userId);
+  let activityTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryUnavailable = false;
+  let deferredActivity: Promise<unknown> | undefined;
+  let stopped = false;
   const pending = { now: new Map<string, QueryKey>(), lists: new Map<string, QueryKey>() };
   const timers: { now?: ReturnType<typeof setTimeout>; lists?: ReturnType<typeof setTimeout> } =
     {};
+  const scheduleActivity = () => {
+    if (stopped) return;
+    activityTimer ??= setTimeout(flushActivity, ACTIVITY_FLUSH_MS);
+  };
+  function flushActivity() {
+    activityTimer = undefined;
+    const activity = client
+      .getQueryCache()
+      .find({ queryKey: activityKey, exact: true });
+    const inFlight =
+      activity?.state.fetchStatus === "fetching" ? activity.promise : undefined;
+    if (inFlight) {
+      if (deferredActivity !== inFlight) {
+        deferredActivity = inFlight;
+        const refresh = () => {
+          if (stopped || deferredActivity !== inFlight) return;
+          deferredActivity = undefined;
+          scheduleActivity();
+        };
+        void inFlight.then(refresh, refresh);
+      }
+      return;
+    }
+    const shouldRetry = retryUnavailable;
+    retryUnavailable = false;
+    if (activity?.state.data === null) {
+      if (shouldRetry)
+        void client.resetQueries({ queryKey: activityKey, exact: true });
+      return;
+    }
+    void client.invalidateQueries(
+      { queryKey: activityKey, exact: true },
+      { cancelRefetch: false },
+    );
+  }
   const flush = (which: "now" | "lists") => {
     timers[which] = undefined;
     for (const key of pending[which].values()) {
       // Never cancel a refresh already on its way: bursts would starve it.
-      void client.invalidateQueries({ queryKey: key }, { cancelRefetch: false });
+      void client.invalidateQueries(
+        {
+          queryKey: key,
+          ...(key.length === 3
+            ? { predicate: (query) => query.queryKey[3] !== activityKey[3] }
+            : {}),
+        },
+        { cancelRefetch: false },
+      );
     }
     pending[which].clear();
   };
   const stop = listenNyxAgentLive((event) => {
     const refresh = nyxAgentLiveRefresh(userId, event, seen);
+    if (event.type === "ready" || event.type === "resync")
+      retryUnavailable = true;
+    if (refresh.activity) scheduleActivity();
     for (const key of refresh.now) pending.now.set(JSON.stringify(key), key);
     for (const key of refresh.lists) pending.lists.set(JSON.stringify(key), key);
     if (pending.now.size) timers.now ??= setTimeout(() => flush("now"), FAST_FLUSH_MS);
     if (pending.lists.size) timers.lists ??= setTimeout(() => flush("lists"), LIST_FLUSH_MS);
   });
   return () => {
+    stopped = true;
     stop();
     if (timers.now) clearTimeout(timers.now);
     if (timers.lists) clearTimeout(timers.lists);
+    if (activityTimer) clearTimeout(activityTimer);
   };
 }
 

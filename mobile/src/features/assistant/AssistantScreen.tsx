@@ -30,7 +30,13 @@ import {
   AssistantApprovalCard,
   AssistantWaitingNote,
 } from "./AssistantPendingState";
+import {
+  moodInputFor,
+  settledReplyOf,
+  useAgentMood,
+} from "./agentMood";
 import { AssistantSystemMessage } from "./AssistantSystemMessage";
+import { useOwnNyxBotIdentity } from "../../lib/avatars/useOwnNyxBot";
 import { AssistantLinkContext } from "./AssistantLinkContext";
 import { AssistantComposerSettings } from "./AssistantComposerSettings";
 import { useComposerConnection } from "./useComposerConnection";
@@ -436,6 +442,18 @@ export function AssistantScreen({
         message.turn_id === assistant.live?.turnId && message.role === "user",
     );
   const historyMessages = assistant.history?.messages;
+  const nyxbot = useOwnNyxBotIdentity();
+  // Decorative: the header's status text stays the source of truth.
+  const mood = useAgentMood(
+    assistant.conversationId,
+    moodInputFor({
+      activeTurn: conversation?.active_turn,
+      sending: assistant.sending,
+      liveText,
+      pendingOwnerAction: pendingCount > 0,
+    }),
+    settledReplyOf(historyMessages),
+  );
   const voiceEpoch = getAuthEpoch();
   const voiceSurfaceToken = useMemo(() => ({}), [voiceThread, voiceEpoch]);
   const currentVoiceSurface = useRef(voiceSurfaceToken);
@@ -1004,6 +1022,7 @@ export function AssistantScreen({
             name={agentName}
             detail={headerDetail}
             status={headerStatus}
+            mood={mood}
             agent={
               currentAgent ?? {
                 id: assistant.agentId ?? "nyxbot",
@@ -1025,6 +1044,7 @@ export function AssistantScreen({
     agentName,
     headerDetail,
     headerStatus,
+    mood,
     assistant.agentId,
     isNyxBotChat,
     currentAgent,
@@ -1158,6 +1178,7 @@ export function AssistantScreen({
       return (
         <AssistantSystemMessage
           message={item}
+          nyxbot={nyxbot}
           conversationId={assistant.conversationId}
           onOpenAutomations={() =>
             navigation.dispatch(workspaceNavigateAction("Automations"))
@@ -1985,6 +2006,7 @@ export function AssistantScreen({
             key={`voice:${voiceThread}`}
             thread={voiceThread}
             agentName={agentName}
+            agent={currentAgent??undefined}
             onClose={() => {
               if (
                 getAuthEpoch() !== voiceEpoch ||

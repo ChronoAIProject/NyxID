@@ -343,6 +343,9 @@ pub(crate) async fn response(
                         .map(|a| a.name.clone())
                         .unwrap_or_else(|| "Unavailable agent".into()),
                     display_name: agent.and_then(|a| a.display_name.clone()),
+                    avatar: agent.and_then(|a| {
+                        crate::services::assistant_avatar_service::view(a.avatar.as_ref())
+                    }),
                     kind: crate::models::assistant_agent::AgentKind::Specialist,
                     destroyed: agent.is_none_or(|a| a.destroyed_at.is_some()),
                     unavailable: !available.contains(id),

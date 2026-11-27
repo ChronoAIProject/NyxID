@@ -17,6 +17,7 @@ import type { NativeStackHeaderProps } from "@react-navigation/native-stack";
 import { ChevronDown } from "lucide-react-native";
 import { AgentAvatar, AgentAvatarStack } from "../../components/AgentAvatar";
 import type { AgentIdentity } from "../../components/agentAvatarModel";
+import type { AvatarMood } from "../../lib/avatars/agentAvatars";
 import { useTheme } from "../../theme/ThemeContext";
 import { fonts } from "../../theme/designTokens";
 import { formatRelativeTimeFromMs } from "../../lib/time";
@@ -145,6 +146,7 @@ export function ChatIdentity({
   agent,
   members,
   status,
+  mood,
   disabled,
   onPress,
   compact = false,
@@ -160,6 +162,8 @@ export function ChatIdentity({
   name: string;
   detail: string;
   agent?: AgentIdentity;
+  /** The agent's live mood (decorative; `status` carries the state). */
+  mood?: AvatarMood;
   members?: readonly AgentIdentity[];
   status?: "Needs you" | "Running";
   disabled?: boolean;
@@ -192,7 +196,7 @@ export function ChatIdentity({
           surface={colors.bg}
         />
       ) : agent ? (
-        <AgentAvatar agent={agent} size={avatarSize} />
+        <AgentAvatar agent={agent} size={avatarSize} mood={mood} animated={!compact && !floating} />
       ) : null}
       <View style={styles.labels}>
         <View style={styles.nameLine}>

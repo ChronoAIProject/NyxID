@@ -11,6 +11,9 @@ const fixture = vi.hoisted(() => ({
   actor: "actor",
   status: undefined as undefined | ((value: VoiceConnectionStatus) => void),
   snapshot: undefined as undefined | ((value: VoiceSnapshot) => void),
+  input: undefined as undefined | ((value: boolean) => void),
+  closed: undefined as undefined | (() => void),
+  conflict: undefined as undefined | ((value: unknown) => void),
   start: vi.fn(async () => {}),
   end: vi.fn(),
 }));
@@ -24,6 +27,7 @@ vi.mock("@/lib/assistant-voice-client", () => ({
     start = fixture.start; // POST resolves before the upstream relay is ready.
     end = fixture.end;
     hold = vi.fn();
+    rejoin = vi.fn();
     constructor(
       _thread: string,
       snapshot: (value: VoiceSnapshot) => void,
@@ -32,9 +36,13 @@ vi.mock("@/lib/assistant-voice-client", () => ({
       _conflict: unknown,
       _activity: unknown,
       status: (value: VoiceConnectionStatus) => void,
+      input: (enabled: boolean) => void,
     ) {
       fixture.snapshot = snapshot;
       fixture.status = status;
+      fixture.input = input;
+      fixture.closed = _closed as () => void;
+      fixture.conflict = _conflict as (value: unknown) => void;
     }
   },
 }));
@@ -133,4 +141,86 @@ it("disables talk and clears the held state while reconnecting", async () => {
   expect(result.current.connected).toBe(false);
   expect(result.current.starting).toBe(true);
   expect(result.current.connectionStatus).toBe("reconnecting");
+});
+
+it("clears actual capture on end and fences callbacks from old threads and actors", async () => {
+  const { result, rerender } = renderHook(
+    ({ thread }) => useAssistantVoice(thread),
+    { initialProps: { thread: "one" } },
+  );
+  await act(() => result.current.start({} as VoicePreferences));
+  act(() => {
+    fixture.status?.("ready");
+    fixture.input?.(true);
+  });
+  expect(result.current.inputAccepting).toBe(true);
+  const old = fixture.input!;
+  await act(() => result.current.end());
+  expect(result.current.inputAccepting).toBe(false);
+  act(() => old(true));
+  expect(result.current.inputAccepting).toBe(false);
+  await act(() => result.current.start({} as VoicePreferences));
+  act(() => {
+    fixture.status?.("ready");
+    fixture.input?.(true);
+  });
+  const previous = fixture.input!;
+  rerender({ thread: "two" });
+  expect(result.current.inputAccepting).toBe(false);
+  act(() => previous(true));
+  expect(result.current.inputAccepting).toBe(false);
+  await act(() => result.current.start({} as VoicePreferences));
+  act(() => {
+    fixture.status?.("ready");
+    fixture.input?.(true);
+  });
+  fixture.actor = "other";
+  rerender({ thread: "two" });
+  expect(result.current.inputAccepting).toBe(false);
+});
+it("clears capture during reconnect, closure, failed start and rejoin", async () => {
+  const { result } = renderHook(() => useAssistantVoice("thread"));
+  await act(() => result.current.start({} as VoicePreferences));
+  act(() => {
+    fixture.status?.("ready");
+    fixture.input?.(true);
+  });
+  act(() => fixture.status?.("reconnecting"));
+  expect(result.current.inputAccepting).toBe(false);
+  act(() => {
+    fixture.status?.("ready");
+    fixture.input?.(true);
+  });
+  act(() => fixture.closed?.());
+  expect(result.current.inputAccepting).toBe(false);
+  act(() => fixture.conflict?.({ resumable: true }));
+  act(() => result.current.rejoin());
+  expect(result.current.inputAccepting).toBe(false);
+  act(() => fixture.closed?.());
+  expect(result.current.inputAccepting).toBe(false);
+});
+it("emits a restored connection only for a watched reconnect in the same session", async () => {
+  vi.useFakeTimers();
+  const { result } = renderHook(() => useAssistantVoice("thread"));
+  await act(() => result.current.start({} as VoicePreferences));
+  act(() => {
+    fixture.snapshot?.({
+      session: { id: "session", state: "active" },
+    } as VoiceSnapshot);
+    fixture.status?.("ready");
+  });
+  expect(result.current.restoredEvent).toBeNull();
+  act(() => {
+    fixture.status?.("reconnecting");
+    fixture.status?.("ready");
+    fixture.input?.(true);
+  });
+  expect(result.current.restoredEvent?.sessionId).toBe("session");
+  expect(result.current.inputAccepting).toBe(true);
+  const id = result.current.restoredEvent?.id;
+  act(() => fixture.status?.("ready"));
+  expect(result.current.restoredEvent?.id).toBe(id);
+  act(() => vi.advanceTimersByTime(1300));
+  expect(result.current.restoredEvent).toBeNull();
+  vi.useRealTimers();
 });

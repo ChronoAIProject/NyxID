@@ -2803,7 +2803,7 @@ async fn org_specialist_independent_rights_governance_memory_and_old_keys() {
             .iter()
             .any(|note| note.text == "Organization playbook")
     );
-    let summaries = team::summaries_for_agents(db, &f.member, vec![current.clone()], 0)
+    let summaries = team::summaries_for_agents(db, &f.member, vec![current.clone()], 0, None)
         .await
         .unwrap();
     assert!(summaries[0].can_use);
@@ -2977,7 +2977,7 @@ async fn org_agent_page_batches_memberships_and_stale_maintenance_cannot_commit(
     let agents = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME);
     agents.insert_one(&b).await.unwrap();
     members.store(0, Ordering::SeqCst);
-    let both = team::summaries_for_agents(db, &f.member, vec![a.clone(), b.clone()], 0)
+    let both = team::summaries_for_agents(db, &f.member, vec![a.clone(), b.clone()], 0, None)
         .await
         .unwrap();
     assert_eq!(members.load(Ordering::SeqCst), 1);

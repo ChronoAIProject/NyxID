@@ -622,6 +622,97 @@ describe("NyxBot agents in the sidebar", () => {
     return { ...handlers, onSelect, queryClient };
   }
 
+  it.each([false, true])(
+    "shows translated activity in the sidebar and rail (rail=%s)",
+    async (rail) => {
+      useAuthStore.setState({
+        user: {
+          ...USER,
+          capabilities: {
+            billing_available: true,
+            enabled_features: ["assistant:avatars"],
+          },
+        },
+      });
+      const researcher = {
+        ...agents[1]!,
+        pending_acknowledgements: 0,
+        activity: [
+          { conversation_id: "queued", state: "waiting" as const },
+          { conversation_id: "live", state: "drafting" as const },
+        ],
+      };
+      const { queryClient } = renderAgents(
+        { agents: [agents[0]!, researcher], selectedAgentId: researcher.id },
+        { rail },
+      );
+      const button = screen.getByRole("button", {
+        name: /researcher, specialist, Writing/,
+      });
+      const badge = button.querySelector('[data-avatar-activity="drafting"]');
+      expect(badge).toHaveAttribute("width", "12");
+      expect(badge).toHaveAttribute("aria-hidden", "true");
+      expect(button.querySelector(".bg-success")).toBeNull();
+      if (rail) {
+        await userEvent.click(button);
+        expect(
+          await screen.findByRole("button", { name: "New chat" }),
+        ).toBeVisible();
+        expect(
+          document.body.querySelectorAll('[data-avatar-activity="drafting"]'),
+        ).toHaveLength(2);
+      }
+      queryClient.clear();
+    },
+  );
+
+  it.each([false, true])(
+    "uses the resolved idle state for stale running dots (rail=%s)",
+    (rail) => {
+      useAuthStore.setState({
+        user: {
+          ...USER,
+          capabilities: {
+            billing_available: true,
+            enabled_features: ["assistant:avatars"],
+          },
+        },
+      });
+      renderAgents({ activityMood: () => "idle" }, { rail });
+      const button = screen.getByRole("button", {
+        name: "researcher, specialist, Idle, 2 pending requests",
+      });
+      expect(button.querySelector(".bg-success")).toBeNull();
+      expect(button.querySelector("[data-avatar-activity]")).toBeNull();
+      expect(Boolean(button.querySelector(".bg-muted-foreground"))).toBe(!rail);
+    },
+  );
+
+  it.each([
+    [1, "1 pending request"],
+    [2, "2 pending requests"],
+  ])(
+    "announces Waiting for approval with a plural-safe request count (%s)",
+    (count, phrase) => {
+      useAuthStore.setState({
+        user: {
+          ...USER,
+          capabilities: {
+            billing_available: true,
+            enabled_features: ["assistant:avatars"],
+          },
+        },
+      });
+      const researcher = { ...agents[1]!, pending_acknowledgements: count };
+      renderAgents({ agents: [researcher], activityMood: () => "approval" });
+      expect(
+        screen.getByRole("button", {
+          name: `researcher, specialist, Waiting for approval, ${phrase}`,
+        }),
+      ).toBeVisible();
+    },
+  );
+
   it.each(["pointer", "keyboard"])("keeps the channel Rename input focused after closing its menu with %s", async (interaction) => {
     const user = userEvent.setup();
     const row: Conversation = {

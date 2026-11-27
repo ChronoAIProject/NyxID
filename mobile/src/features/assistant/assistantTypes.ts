@@ -1,5 +1,6 @@
 import { historyEnum, isolateHistoryItems } from "./assistantHistoryCompat";
 import { z } from "zod";
+import { agentAvatarFieldSchema } from "../../lib/avatars/avatarSchema";
 
 export const conversationIdSchema = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 export const activitySchema = z.object({
@@ -104,6 +105,7 @@ export const conversationSchema = z.object({
       name: z.string(),
       display_name: z.string().nullish(),
       kind: historyEnum(["nyxbot", "specialist"]),
+      avatar: agentAvatarFieldSchema,
       destroyed: z.boolean().default(false),
     })
     .nullish(),

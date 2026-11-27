@@ -442,15 +442,20 @@ test("crew header shows member identity and narrows recipients through its picke
   assert.equal(working.props.accessibilityLiveRegion, "polite");
   assert.ok(
     nodes(working).some(
-      (n) => n.type === "AgentAvatar" && n.props.agent.id === "research",
+      (n) => n.type === "AgentAvatar" &&
+        n.props.agent.id === "research" && n.props.mood === "thinking",
     ),
   );
   assert.ok(nodes(working).some((n) => n.type === "ActivityIndicator"));
   chat.data.pending_actions = [
-    { summary: "Needs confirmation", conversation_id: "chat" },
+    { summary: "Needs confirmation", conversation_id: "chat", agent_id: "research" },
   ];
   h.render();
   assert.equal(identity().props.status, "Needs you");
+  assert.ok(nodes(h.value()).some(
+    (n) => n.type === "AgentAvatar" &&
+      n.props.agent.id === "research" && n.props.mood === "approval",
+  ));
   chat.data.pending_actions = [];
   chat.data.collaboration_decisions = [{ can_decide: true }];
   h.render();

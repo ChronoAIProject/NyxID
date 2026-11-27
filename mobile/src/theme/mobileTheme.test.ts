@@ -35,6 +35,13 @@ function composite(rgba: string, base: string): Rgb {
       value * (1 - parts[3]!) + (parts[index]! / 255) * parts[3]!,
   ) as Rgb;
 }
+test("every activity badge tone meets 4.5:1 on its disc in each theme", () => {
+  for (const colors of [darkColors, lightColors, darkSheetColors, lightSheetColors]) {
+    for (const ink of [colors.primaryTone.text, colors.warningTone.text, colors.successTone.text, colors.textPrimary]) {
+      assert.ok(ratio(rgb(ink), rgb(colors.bg)) >= 4.5, `${ink} on ${colors.bg}`);
+    }
+  }
+});
 test("auth-only light fills, labels and control/focus edges retain contrast without changing global cards", () => {
   const c = authSurfaceColors(lightColors, "light");
   for (const fill of [c.bg, authLightColors.fill, authLightColors.pressed]) {

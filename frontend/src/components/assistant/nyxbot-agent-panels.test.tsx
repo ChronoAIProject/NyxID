@@ -2,8 +2,13 @@ import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { PendingEventsNote, ThreadHeader, WaitingNote } from "./nyxbot-agent-panels";
+import { ChatHeaderCompactContext } from "./chat-header-context";
+import { useAuthStore } from "@/stores/auth-store";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  useAuthStore.setState({ user: null });
+});
 
 const at = "2026-09-28T00:00:00Z";
 it("names the thread's agent with its kind and opens its details", async () => {
@@ -24,6 +29,22 @@ it("marks a destroyed agent's thread read-only", () => {
 it("shows NyxBot's kind badge", () => {
   render(<ThreadHeader name="NyxBot" kind="nyxbot" destroyed={false} />);
   expect(screen.getAllByText("NyxBot")).toHaveLength(2);
+});
+
+it("shows the same live badge in the expanded and compact thread header", () => {
+  useAuthStore.setState({ user: { capabilities: { enabled_features: ["assistant:avatars"] } } as never });
+  const view = (compact: boolean) => (
+    <ChatHeaderCompactContext value={compact}>
+      <ThreadHeader name="researcher" kind="specialist" destroyed={false} mood="retry" />
+    </ChatHeaderCompactContext>
+  );
+  const { container, rerender } = render(view(false));
+  const badge = () => container.querySelector('[data-avatar-activity="retry"]');
+  expect(badge()).toHaveAttribute("width", "18");
+  const face = container.querySelector('[data-avatar-state="retry"]');
+  rerender(view(true));
+  expect(badge()).toHaveAttribute("width", "12");
+  expect(container.querySelector('[data-avatar-state="retry"]')).toBe(face);
 });
 
 it("reserves the loading agent's space without showing a NyxBot identity", () => {

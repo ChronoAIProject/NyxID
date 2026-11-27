@@ -34,6 +34,7 @@ pub struct GroupMemberResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mention_handle: Option<String>,
     pub(crate) display_name: Option<String>,
+    pub(crate) avatar: Option<crate::services::assistant_avatar_service::AvatarView>,
     pub(crate) kind: AgentKind,
     pub(crate) destroyed: bool,
     pub(crate) unavailable: bool,
@@ -70,6 +71,7 @@ pub struct GroupAgentRef {
     id: String,
     name: String,
     display_name: Option<String>,
+    avatar: Option<crate::services::assistant_avatar_service::AvatarView>,
     kind: AgentKind,
 }
 
@@ -107,6 +109,9 @@ pub(crate) fn message_response(
                 .or_else(|| row.agent_name.clone())
                 .unwrap_or_default(),
             display_name: known.and_then(|agent| agent.display_name.clone()),
+            avatar: known.and_then(|agent| {
+                crate::services::assistant_avatar_service::view(agent.avatar.as_ref())
+            }),
             kind: known.map_or(AgentKind::Specialist, |agent| agent.kind),
         }
     });
@@ -159,6 +164,7 @@ async fn group_response(state: &AppState, group: AssistantGroup) -> AppResult<Gr
                 id: agent.id.clone(),
                 name: agent.name.clone(),
                 display_name: agent.display_name.clone(),
+                avatar: crate::services::assistant_avatar_service::view(agent.avatar.as_ref()),
                 kind: agent.kind,
                 destroyed: agent.destroyed_at.is_some(),
                 unavailable: !agent.available,

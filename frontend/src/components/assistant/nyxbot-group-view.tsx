@@ -1,4 +1,5 @@
 import { useUiTranslation } from "@/i18n/use-ui-translation";
+import { groupMemberMood } from "@/lib/assistant/use-agent-mood";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
 import { GroupAgentAccessRequest } from "./group-agent-access";
@@ -279,6 +280,7 @@ export function GroupMessageRow({
 function GroupTranscript({
   group,
   messages,
+  pendingActions,
   hasOlder,
   onLoadOlder,
   onOpenAgent,
@@ -286,6 +288,8 @@ function GroupTranscript({
 }: {
   readonly group: AssistantGroup;
   readonly messages: readonly AssistantGroupMessage[];
+  /** Members' cards waiting for a decision (already loaded with the transcript). */
+  readonly pendingActions: readonly AssistantGroupPendingAction[];
   readonly hasOlder: boolean;
   readonly onLoadOlder: () => Promise<void>;
   readonly onOpenAgent: (agentId: string) => void;
@@ -413,7 +417,8 @@ function GroupTranscript({
               className="grid grid-cols-[30px_minmax(0,1fr)] items-center"
             >
               <span className="flex w-6 justify-center">
-                <AgentAvatar agent={working[0]!} size="md" />
+                {/* The agent producing the reply: decorative; the label below carries the state. */}
+                <AgentAvatar agent={working[0]!} size="md" mood={groupMemberMood(working[0]!.id, pendingActions)} animated />
               </span>
               <span className="flex items-center gap-2 text-13 text-muted-foreground">
                 <WorkingDots />
@@ -814,6 +819,7 @@ export function NyxAgentGroupPage({
       name: member.mention_handle ?? (people.some((p) => personAlias(p) === member.name.toLowerCase() || p.handle === member.name.toLowerCase()) ? member.id : memberMention(member, group?.members ?? [])),
       kind: member.kind,
       display_name: withDisplayName(member, agents.data?.agents).display_name || member.name,
+      avatar: member.avatar,
       shared: member.shared,
       owner_name: member.owner_name,
     })), ...people.map((person) => ({ id: person.id, name: person.handle!, display_name: person.display_name, kind: "person" as const }))];
@@ -849,6 +855,7 @@ export function NyxAgentGroupPage({
               <GroupTranscript
                 group={group}
                 messages={messages}
+                pendingActions={transcript.error ? [] : (transcript.data?.pending_actions ?? [])}
                 hasOlder={Boolean(transcript.data?.before_seq)}
                 onLoadOlder={transcript.loadOlder}
                 onOpenAgent={setDetailsAgentId}

@@ -63,7 +63,8 @@ def render(env: dict[str, str], template: str, output: Path, root: Path,
         connect.add(item.replace("https:", "wss:", 1).replace("http:", "ws:", 1))
     csp = "; ".join([
         "default-src 'none'", "base-uri 'self'", "object-src 'none'", "frame-ancestors 'none'",
-        "form-action 'self'", "script-src 'self' https://connect.facebook.net https://telegram.org/js/telegram-widget.js https://cdn.jsdelivr.net/gh/hiunicornstudio/unicornstudio.js@v2.1.4/dist/",
+        "form-action 'self'",
+        "script-src 'self' https://connect.facebook.net https://telegram.org/js/telegram-widget.js https://cdn.jsdelivr.net/gh/hiunicornstudio/unicornstudio.js@v2.1.4/dist/",
         "script-src-attr 'none'", "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
         "font-src 'self' https://fonts.gstatic.com", "img-src 'self' https: data: blob:",
         "media-src 'self' blob:", "worker-src 'self'", "manifest-src 'self'",
@@ -92,10 +93,17 @@ def render(env: dict[str, str], template: str, output: Path, root: Path,
         'add_header Permissions-Policy $nyxid_proxy_permissions always;',
         'add_header Content-Security-Policy $nyxid_proxy_csp always;',
     ]
+    # Rive computes eye poses in a dedicated worker. Keep WASM permission out
+    # of the SPA and every proxied document; only this emitted worker needs it.
+    rive_worker = common + [
+        'add_header Referrer-Policy "no-referrer" always;',
+        'add_header Content-Security-Policy "default-src \'none\'; script-src \'self\' \'wasm-unsafe-eval\'; connect-src \'self\'; worker-src \'none\'; object-src \'none\'; base-uri \'none\'; frame-ancestors \'none\'" always;',
+    ]
     values = {
         "@@BACKEND_URL@@": backend,
         "@@STATIC_HEADERS@@": path_literal(output / "spa-headers.conf"),
         "@@PROXY_HEADERS@@": path_literal(output / "proxy-headers.conf"),
+        "@@RIVE_WORKER_HEADERS@@": path_literal(output / "rive-worker-headers.conf"),
         "@@ROOT@@": path_literal(root), "@@LEGAL_CACHE@@": path_literal(legal_cache),
         "@@PORT@@": str(port),
     }
@@ -104,7 +112,8 @@ def render(env: dict[str, str], template: str, output: Path, root: Path,
     if "@@" in template or not 1024 <= port <= 65535:
         raise ValueError("invalid template marker or listen port")
     return {"default.conf": template, "spa-headers.conf": "\n".join(static) + "\n",
-            "proxy-headers.conf": "\n".join(proxy) + "\n"}
+            "proxy-headers.conf": "\n".join(proxy) + "\n",
+            "rive-worker-headers.conf": "\n".join(rive_worker) + "\n"}
 
 
 def main() -> None:

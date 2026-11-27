@@ -1063,7 +1063,8 @@ Paths below are relative to `/api/v1/assistant/nyxagent`.
 | `POST /conversations/{id}/steer` | closed `{text,turn_id,clientRequestId}` | `{client_request_id,outcome,code}` on acceptance; safe error code on refusal/uncertainty |
 | `PATCH /conversations/{id}/access-mode` | ignored | `410 Gone` (`access_mode_retired`) |
 | `GET` / `POST /agents` | `POST`: closed `{name,description,services?,account_read?}` | `{agents,limits}` / `201 {id,name,home_conversation_id}` |
-| `GET` / `PATCH` / `DELETE /agents/{id}` | `PATCH`: closed `{name?,description?,display_name?,persona?,voice_instructions?,model?,access_mode_override?,channel_checking_notice?}` (`name`, `model`, `access_mode_override` and `channel_checking_notice` require an agent maintainer); `DELETE` only after destroy | `{agent,memory,threads}` / agent / 204 |
+| `GET /agents/activity` | First-party human only; engine enabled; viewer-scoped active turns and pending acknowledgements ([activity contract](13-agent-avatars.md#roster-aggregation-and-visibility)) | `{agents:[{agent_id,threads:[{conversation_id,state}]}]}` |
+| `GET` / `PATCH` / `DELETE /agents/{id}` | `PATCH`: closed `{name?,description?,avatar?,display_name?,persona?,voice_instructions?,model?,access_mode_override?,channel_checking_notice?}` (`avatar` object sets, null clears; [avatar contract](13-agent-avatars.md); `name`, `model`, `access_mode_override` and `channel_checking_notice` require an agent maintainer); `DELETE` only after destroy | `{agent,memory,threads}` / agent / 204 |
 | `PUT /agents/{id}/grants` | closed `{services,account_read,guest_access?,machines?,logins?}` (specialists; `guest_access` maps a granted service to `read`, `use` or `all`) | `{id,services,account_read}` |
 | `POST /agents/{id}/destroy` | no body; specialists only | `{id,destroyed_at}` |
 | `DELETE /agents/{id}/memory/{note_id}` | no body | 204 |

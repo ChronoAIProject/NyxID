@@ -1,0 +1,12 @@
+[
+  {"name":"empty defaults","kind":"nyxbot","avatar":{"template":"face-v1","choices":{}},"valid":true},
+  {"name":"NyxBot chosen head","kind":"nyxbot","avatar":{"template":"face-v1","choices":{"head":"round","eyes":"happy"}},"valid":true},
+  {"name":"logo belongs to NyxBot","kind":"specialist","avatar":{"template":"face-v1","choices":{"head":"logo"}},"valid":false},
+  {"name":"Nyx palette kind","kind":"specialist","avatar":{"template":"face-v1","choices":{"palette":"core-nyx"}},"valid":false},
+  {"name":"retained character reaction on flat","kind":"specialist","avatar":{"template":"face-v1","choices":{"surface":"flat","react_thinking":"character-churn"}},"valid":true},
+  {"name":"wrong state reaction","kind":"nyxbot","avatar":{"template":"face-v1","choices":{"react_listening":"rain"}},"valid":false},
+  {"name":"stroke incompatibility","kind":"nyxbot","avatar":{"template":"face-v1","choices":{"treatment":"neon-line","surface":"ascii-shaded"}},"valid":false},
+  {"name":"future field read only","kind":"nyxbot","avatar":{"template":"face-v1","choices":{"future_field":"future-id"}},"valid":false},
+  {"name":"future template read only","kind":"nyxbot","avatar":{"template":"face-v9","choices":{"eyes":"dots"}},"valid":false},
+  {"name":"mongo path rejected","kind":"nyxbot","avatar":{"template":"face-v1","choices":{"x.y":"dots"}},"valid":false}
+]

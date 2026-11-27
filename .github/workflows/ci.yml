@@ -138,6 +138,9 @@ jobs:
               - 'scripts/test-docker-dependency-recipe.py'
               - 'backend/Dockerfile'
               - 'shared/native-app-links.json'
+              - 'shared/agent-avatars/catalog.json'
+              - 'shared/agent-avatars/activity-fixture.json'
+              - 'shared/agent-avatars/validation-fixture.json'
               - '.dockerignore'
               - '.github/scripts/prepare-backend-runner.sh'
               - '.github/workflows/ci.yml'
@@ -186,6 +189,10 @@ jobs:
               - 'machine/**'
               - 'machine-updater/**'
               - 'integrations/oracle/cdp-worker/worker.mjs'
+              # Embedded by the backend (include_str!) for avatar id validation.
+              - 'shared/agent-avatars/catalog.json'
+              - 'shared/agent-avatars/activity-fixture.json'
+              - 'shared/agent-avatars/validation-fixture.json'
               - 'cloud-auth/**'
               - 'service-adapters/**'
               - 'nyxid-crypto/**'
@@ -221,6 +228,9 @@ jobs:
               # needs to trigger workspace-wide checks.
               - 'backend/**'
               - 'integrations/oracle/cdp-worker/worker.mjs'
+              - 'shared/agent-avatars/catalog.json'
+              - 'shared/agent-avatars/activity-fixture.json'
+              - 'shared/agent-avatars/validation-fixture.json'
               - 'cli/**'
               - 'machine/**'
               - 'machine-updater/**'
@@ -240,12 +250,14 @@ jobs:
               - '.cargo/**'
               - '.config/nextest.toml'
             frontend:
+              - 'mockups/nyxid-bot-faces-reference.html'
               - 'frontend/**'
               # Frontend cross-app tests load real mobile screens and controls.
               - 'mobile/src/**'
               - 'shared/**'
               - '.node-version'
             mobile:
+              - 'mockups/nyxid-bot-faces-reference.html'
               - 'mobile/**'
               - 'shared/**'
               - '.node-version'
@@ -887,6 +899,17 @@ jobs:
       - if: matrix.lane == 'lint-and-build'
         run: npm run lint && npm run build
       - if: matrix.lane == 'lint-and-build'
+        name: Check avatar catalogue and authenticated export validation
+        run: |
+          node ../shared/agent-avatars/generate-face-kit.mjs --check
+          node --test scripts/rive-export.test.mjs
+      - if: matrix.lane == 'lint-and-build'
+        name: Install Chromium for the production avatar worker check
+        run: npx --no-install playwright install --with-deps chromium
+      - if: matrix.lane == 'lint-and-build'
+        name: Verify the production Rive worker and its isolated CSP
+        run: node scripts/verify-rive-worker.mjs
+      - if: matrix.lane == 'lint-and-build'
         name: Validate readiness inventory against real build
         run: python3 scripts/frontend-readiness.py --inventory --root dist --manifest "$RUNNER_TEMP/frontend-static-readiness.json"
       - if: matrix.lane != 'lint-and-build'
@@ -912,6 +935,9 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      - name: Check the avatar catalogue matches its generator
+        working-directory: .
+        run: node shared/agent-avatars/generate-face-kit.mjs --check
       - run: npm ci
       - run: npm run lint
       - run: npm run test
@@ -921,6 +947,12 @@ jobs:
           python3 scripts/test-nginx-policy.py
           python3 scripts/test-nginx-readiness.py
       - run: npm run build
+      - name: Install Chromium for the production avatar worker check
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Test authenticated Rive export validation
+        run: node --test scripts/rive-export.test.mjs
+      - name: Verify the production Rive worker and its isolated CSP
+        run: node scripts/verify-rive-worker.mjs
       - name: Validate readiness inventory against real build
         run: python3 scripts/frontend-readiness.py --inventory --root dist --manifest "$RUNNER_TEMP/frontend-static-readiness.json"
       - name: Build frontend Docker inputs

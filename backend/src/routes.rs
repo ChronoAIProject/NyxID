@@ -2978,6 +2978,10 @@ fn build_router_internal(router_state: Option<AppState>) -> (Router<AppState>, R
             get(handlers::assistant_team::list_agents).post(handlers::assistant_team::create_agent),
         )
         .route(
+            "/nyxagent/agents/activity",
+            get(handlers::assistant_team::list_agent_activity),
+        )
+        .route(
             "/nyxagent/agents/{id}",
             get(handlers::assistant_team::get_agent)
                 .patch(handlers::assistant_team::update_agent)

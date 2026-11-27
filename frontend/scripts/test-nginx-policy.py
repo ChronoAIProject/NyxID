@@ -41,7 +41,15 @@ class PolicyInputs(unittest.TestCase):
         self.assertIn("https://api.example:8443", spa)
         self.assertIn("microphone=(self)", spa)
         self.assertNotIn("'unsafe-inline'", spa.split("script-src ", 1)[1].split(";", 1)[0])
-        self.assertNotIn("unsafe-eval", spa)
+        script_src = spa.split("script-src ", 1)[1].split(";", 1)[0]
+        self.assertNotIn("'wasm-unsafe-eval'", script_src.split())
+        worker = files["rive-worker-headers.conf"]
+        self.assertIn("script-src 'self' 'wasm-unsafe-eval'", worker)
+        self.assertIn("worker-src 'none'", worker)
+        self.assertNotIn("'unsafe-eval'", worker)
+        self.assertIn("rive-motion\\.worker-", files["default.conf"])
+        self.assertNotIn("'unsafe-eval'", spa.split())
+        self.assertNotIn("'unsafe-eval'", spa)
         self.assertIn("$nyxid_proxy_csp", proxy)
         self.assertNotIn("script-src", proxy)
         self.assertIn('Strict-Transport-Security "max-age=31536000"', spa)

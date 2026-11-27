@@ -215,6 +215,13 @@ const SKILL_RUNS_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+pub const ASSISTANT_AVATARS_FLAG_KEY: &str = "assistant:avatars";
+const ASSISTANT_AVATARS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_AVATARS_FLAG_KEY,
+    description: "Personalised agent avatars and the avatar editor. Stored configurations are retained while disabled.",
+    default_enabled: false,
+};
+
 pub const ASSISTANT_MODEL_CONTROLS_FLAG_KEY: &str = "assistant:model-controls";
 const ASSISTANT_MODEL_CONTROLS_FLAG: FeatureFlagDef = FeatureFlagDef {
     key: ASSISTANT_MODEL_CONTROLS_FLAG_KEY,
@@ -565,6 +572,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MOBILE_MFA_FLAG,
     STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
+    ASSISTANT_AVATARS_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     ASSISTANT_CMA_SANDBOXES_FLAG,
@@ -648,6 +656,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     MOBILE_MFA_FLAG,
     STAGING_QR_LOGIN,
     NYXAGENT_ENGINE_FLAG,
+    ASSISTANT_AVATARS_FLAG,
     ASSISTANT_MODEL_CONTROLS_FLAG,
     ASSISTANT_WORKSPACE_PREVIEW_FLAG,
     ASSISTANT_CMA_SANDBOXES_FLAG,
@@ -3607,6 +3616,7 @@ mod tests {
                 "auth:mobile-mfa",
                 "auth:staging-qr-login",
                 "assistant:nyxagent-engine",
+                "assistant:avatars",
                 "assistant:model-controls",
                 "assistant:workspace-preview",
                 "assistant:cma-sandboxes",

@@ -6,6 +6,7 @@ import { workspaceCornerSensor } from "../components/workspace/workspaceLayout";
 import { useAppLanguage } from "../i18n/LanguageProvider";
 import { translateApp } from "../i18n/appTranslation";
 import { LanguageProvider } from "../i18n/LanguageProvider";
+import { AgentAvatarsProvider } from "../lib/avatars/AgentAvatarsProvider";
 import "react-native-gesture-handler";
 import { useForegroundNotificationToast } from "./useForegroundNotificationToast";
 import { useNotificationNavigation } from "./useNotificationNavigation";
@@ -441,6 +442,7 @@ function AppContent() {
               <ChatLayoutProvider>
                 <MobileConsentProvider>
                   <AuthSessionProvider>
+                    <AgentAvatarsProvider>
                     <ThemedAppShell
                       navigationRef={navigationRef}
                       currentRouteName={currentRouteName}
@@ -454,6 +456,7 @@ function AppContent() {
                       pushToast={pushToast}
                       pushToastKey={pushToastKey}
                     />
+                    </AgentAvatarsProvider>
                   </AuthSessionProvider>
                 </MobileConsentProvider>
               </ChatLayoutProvider>
