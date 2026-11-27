@@ -21,6 +21,8 @@ use super::lago_client::{
 // Six client timeouts allow delayed responses/read replicas to settle; the
 // provider's unique active customer/code index also fences a late first POST.
 const WALLET_CREATE_QUIET_SECS: u64 = HTTP_TIMEOUT_SECS * 6;
+const MIN_TOPUP_CREDITS: i64 = 10;
+const MAX_TOPUP_CREDITS: i64 = 10_000_000;
 use crate::services::coordination_service::{LeaseStore, LeaseToken, cluster_lease_runtime};
 
 #[derive(Clone, Copy)]
@@ -385,16 +387,6 @@ pub async fn create_topup_checkout(
     amount_credits: i64,
     idempotency_key: &str,
 ) -> AppResult<TopUpCheckout> {
-    if amount_credits <= 0 {
-        return Err(AppError::BadRequest(
-            "amount_credits must be greater than 0".to_string(),
-        ));
-    }
-    if amount_credits > 10_000_000 {
-        return Err(AppError::BadRequest(
-            "amount_credits must be at most 10000000".to_string(),
-        ));
-    }
     let idempotency_key = normalize_idempotency_key(idempotency_key)?;
     if let Some(existing) = find_topup_session(db, owner_id, &idempotency_key).await? {
         if existing.amount_credits != amount_credits {
@@ -411,6 +403,7 @@ pub async fn create_topup_checkout(
             });
         }
     }
+    validate_new_topup_amount(amount_credits)?;
 
     let provisioned = ensure_owner_wallet(db, lago, owner_id, options).await?;
     let Some(lago_wallet_id) = provisioned.wallet.lago_wallet_id.clone() else {
@@ -637,6 +630,20 @@ async fn find_topup_session_by_id(
         .map_err(Into::into)
 }
 
+fn validate_new_topup_amount(amount: i64) -> AppResult<()> {
+    if amount < MIN_TOPUP_CREDITS {
+        return Err(AppError::BadRequest(format!(
+            "Minimum credit purchase is {MIN_TOPUP_CREDITS} credits"
+        )));
+    }
+    if amount > MAX_TOPUP_CREDITS {
+        return Err(AppError::BadRequest(format!(
+            "amount_credits must be at most {MAX_TOPUP_CREDITS}"
+        )));
+    }
+    Ok(())
+}
+
 fn normalize_idempotency_key(idempotency_key: &str) -> AppResult<String> {
     let value = idempotency_key.trim();
     if value.is_empty() {
@@ -698,7 +705,7 @@ mod tests {
 
     use super::{
         WalletProvisioningOptions, create_topup_checkout, deterministic_topup_session_id,
-        ensure_owner_wallet, normalize_idempotency_key,
+        ensure_owner_wallet, normalize_idempotency_key, validate_new_topup_amount,
     };
 
     #[test]
@@ -715,6 +722,16 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(first.starts_with("btu_"));
+    }
+
+    #[test]
+    fn topup_amount_boundaries_match_the_whole_usd_wallet() {
+        for amount in [i64::MIN, -100, 0, 1, 9, 10_000_001, i64::MAX] {
+            assert!(validate_new_topup_amount(amount).is_err(), "{amount}");
+        }
+        for amount in [10, 11, 20, 50, 100, 500, 10_000_000] {
+            assert!(validate_new_topup_amount(amount).is_ok(), "{amount}");
+        }
     }
 
     fn wallet_options(cap: i64) -> WalletProvisioningOptions<'static> {
@@ -1358,31 +1375,132 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn topup_rejects_non_positive_amount() {
+    async fn topup_rejects_new_orders_outside_the_purchase_limits() {
         let Some(db) = connect_test_database("billing_topup_nonpositive").await else {
             return;
         };
         let owner_id = insert_owner(&db, "nonpositive@example.com").await;
         let lago = FakeLago::default();
 
-        for amount in [0_i64, -100] {
+        for amount in [i64::MIN, -100, 0, 1, 9, 10_000_001, i64::MAX] {
             let error =
                 create_topup_checkout(&db, &lago, &owner_id, wallet_options(0), amount, "topup-np")
                     .await
-                    .expect_err("non-positive amount must be rejected");
+                    .expect_err("out-of-range amount must be rejected");
             assert!(
                 matches!(error, crate::errors::AppError::BadRequest(_)),
                 "amount_credits = {amount} should be rejected with BadRequest, got {error:?}"
             );
+            if amount == 9 {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("Minimum credit purchase is 10 credits")
+                );
+            }
         }
         // Guard rejects before any Lago call or top-up session write.
         assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(lago.customer_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(lago.subscription_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(lago.wallet_creates.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            db.collection::<BillingWallet>(BILLING_WALLET)
+                .count_documents(doc! { "owner_id": &owner_id })
+                .await
+                .unwrap(),
+            0
+        );
         let session_count = db
             .collection::<BillingTopUpSession>(BILLING_TOPUP_SESSIONS)
             .count_documents(doc! { "owner_id": &owner_id })
             .await
             .expect("count top-up sessions");
         assert_eq!(session_count, 0);
+    }
+
+    #[tokio::test]
+    async fn topup_accepts_minimum_default_presets_and_maximum() {
+        let db = connect_test_database("billing_topup_limits").await.unwrap();
+        let owner_id = insert_owner(&db, "purchase-limits@example.com").await;
+        let lago = FakeLago::default();
+        for amount in [10, 11, 20, 50, 100, 500, 10_000_000] {
+            let key = format!("purchase-{amount}");
+            let checkout =
+                create_topup_checkout(&db, &lago, &owner_id, wallet_options(0), amount, &key)
+                    .await
+                    .unwrap();
+            assert_eq!(checkout.session.amount_credits, amount);
+            assert!(!checkout.reused);
+        }
+        assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 7);
+        let inputs = lago.topup_inputs.lock().unwrap();
+        for ((external_id, quantity), amount) in
+            inputs.iter().zip([10, 11, 20, 50, 100, 500, 10_000_000])
+        {
+            assert_eq!(*quantity, amount);
+            assert_eq!(
+                external_id,
+                &format!(
+                    "nyxid-topup:{}",
+                    deterministic_topup_session_id(&owner_id, &format!("purchase-{amount}"))
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn topup_replays_existing_orders_below_the_new_minimum() {
+        let db = connect_test_database("billing_topup_legacy_minimum")
+            .await
+            .unwrap();
+        let owner = insert_owner(&db, "legacy-purchase@example.com").await;
+        let lago = FakeLago::default();
+        let key = "legacy-purchase";
+        let first = create_topup_checkout(&db, &lago, &owner, wallet_options(0), 10, key)
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(BILLING_TOPUP_SESSIONS)
+            .update_one(
+                doc! { "_id": &first.session.id },
+                doc! { "$set": { "amount_credits": 9_i64 } },
+            )
+            .await
+            .unwrap();
+        let replay = create_topup_checkout(&db, &lago, &owner, wallet_options(0), 9, key)
+            .await
+            .unwrap();
+        assert!(replay.reused);
+        assert_eq!(replay.session.payment_url, first.session.payment_url);
+        assert_eq!(replay.session.amount_credits, 9);
+        assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 1);
+
+        let sessions = db.collection::<BillingTopUpSession>(BILLING_TOPUP_SESSIONS);
+        for status in ["pending", "failed"] {
+            sessions
+                .update_one(
+                    doc! { "_id": &first.session.id },
+                    doc! { "$set": { "status": status }, "$unset": { "payment_url": "" } },
+                )
+                .await
+                .unwrap();
+            let before = sessions
+                .find_one(doc! { "_id": &first.session.id })
+                .await
+                .unwrap();
+            let error = create_topup_checkout(&db, &lago, &owner, wallet_options(0), 9, key)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, crate::errors::AppError::BadRequest(_)));
+            assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                sessions
+                    .find_one(doc! { "_id": &first.session.id })
+                    .await
+                    .unwrap(),
+                before
+            );
+        }
     }
 
     #[tokio::test]
@@ -1442,6 +1560,7 @@ mod tests {
         enforce_code_uniqueness: bool,
         accepted_wallets: Arc<AtomicUsize>,
         topup_creates: Arc<AtomicUsize>,
+        topup_inputs: Arc<std::sync::Mutex<Vec<(String, i64)>>>,
         wallet_barrier: Option<Arc<Barrier>>,
         wallet_entered: Arc<tokio::sync::Notify>,
         wallet_failures_remaining: Arc<AtomicUsize>,
@@ -1564,8 +1683,12 @@ mod tests {
         async fn create_wallet_topup(
             &self,
             _wallet_id: &str,
-            _request: &WalletTopUpInput,
+            request: &WalletTopUpInput,
         ) -> crate::errors::AppResult<WalletTopUpCheckout> {
+            self.topup_inputs
+                .lock()
+                .unwrap()
+                .push((request.external_id.clone(), request.amount_credits));
             self.topup_creates.fetch_add(1, Ordering::SeqCst);
             if take_failure(&self.topup_failures_remaining) {
                 return Err(crate::errors::AppError::BillingProviderUnavailable(

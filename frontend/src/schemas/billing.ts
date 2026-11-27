@@ -198,8 +198,21 @@ export const provisionBillingWalletRequestSchema = z.object({
   owner_id: z.string().min(1).optional(),
 });
 
+export const MIN_TOP_UP_CREDITS = 10;
+export const MAX_TOP_UP_CREDITS = 10_000_000;
+export const TOP_UP_PRESETS_USD = [20, 50, 100, 500] as const;
+export const DEFAULT_TOP_UP_CREDITS = TOP_UP_PRESETS_USD[0];
+
+export const topUpAmountSchema = z
+  .number()
+  .int()
+  .min(MIN_TOP_UP_CREDITS)
+  .max(MAX_TOP_UP_CREDITS);
+
 export const topUpBillingRequestSchema = z.object({
-  amount_credits: z.number().int().positive().max(10_000_000),
+  // The transport also supports retries of purchases below today's minimum.
+  // New-purchase UI validation uses topUpAmountSchema; the server owns replay.
+  amount_credits: z.number().int().positive().max(MAX_TOP_UP_CREDITS),
   idempotency_key: z.string().trim().min(8).max(128),
   owner_id: z.string().min(1).optional(),
 });

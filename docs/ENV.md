@@ -372,10 +372,10 @@ Configure Lago to send webhooks to `<BASE_URL>/api/v1/webhooks/lago` with the sa
 Before enabling paid top-ups for users, run a deployed sandbox verification:
 
 ```bash
-nyxid billing verify-topup-flow --amount-credits 1 --open
+nyxid billing verify-topup-flow --amount-credits 20 --open
 ```
 
-Complete the Stripe sandbox checkout opened by the command. The verifier passes only when the reconciled wallet balance increases by exactly the paid amount and the checkout response is Stripe-backed.
+The verifier defaults to 20 whole credits. See the [Add credits contract](BILLING_UI_GLOSSARY.md#4-add-credits-dialog) for purchase limits and replay behavior. Complete the Stripe sandbox checkout opened by the command. The verifier passes only when the reconciled wallet balance increases by exactly the paid amount and the checkout response is Stripe-backed.
 
 Human operators can inspect defaults with `nyxid admin billing config show`,
 prices with `nyxid admin billing service show <slug>` and
