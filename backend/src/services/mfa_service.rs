@@ -68,12 +68,17 @@ async fn decrypt_factor_secret(
         || AppError::Internal("MFA secret format is unavailable".into()),
     )
     .await?;
+    validate_factor_seed(&plaintext, &factor.user_id)?;
+    Ok(plaintext)
+}
+
+pub(super) fn validate_factor_seed(plaintext: &[u8], owner: &str) -> AppResult<()> {
     // Readiness requires a usable TOTP seed, including the library's key-size
     // validation. Authentication of an empty or malformed secret is insufficient.
     if plaintext.len() > 1024 {
         return Err(AppError::Internal("Invalid MFA secret".into()));
     }
-    let text = std::str::from_utf8(&plaintext)
+    let text = std::str::from_utf8(plaintext)
         .map_err(|_| AppError::Internal("Invalid MFA secret".into()))?;
     let secret = Secret::Encoded(text.to_owned());
     let _totp = create_totp(
@@ -81,9 +86,9 @@ async fn decrypt_factor_secret(
             .to_bytes()
             .map_err(|_| AppError::Internal("Invalid MFA secret".into()))?,
         "NyxID",
-        &factor.user_id,
+        owner,
     )?;
-    Ok(plaintext)
+    Ok(())
 }
 
 pub(crate) async fn verify_current_secret(

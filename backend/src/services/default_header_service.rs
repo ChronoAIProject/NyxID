@@ -21,6 +21,41 @@ fn invalid() -> AppError {
     AppError::Internal("Default header storage is invalid or unavailable".into())
 }
 
+pub(super) fn value_path(name: &str, sensitive: bool) -> [&str; 5] {
+    [
+        "default_request_headers",
+        name,
+        "value",
+        "visibility",
+        if sensitive { "masked" } else { "public" },
+    ]
+}
+
+/// Return the single admissible stored binding. Unmarked plaintext has no context.
+pub(super) fn value_context<'a>(
+    collection: &'a str,
+    record: &'a str,
+    owner: &'a str,
+    row: &StoredDefaultRequestHeader,
+    path: &'a [&'a str; 5],
+) -> AppResult<Option<RecordContext<'a>>> {
+    let path = match (&row.value_encrypted, row.value_context_version) {
+        (Some(_), Some(3)) if row.value.is_empty() && row.sensitive => &path[..3],
+        (Some(_), Some(VERSION)) if row.value.is_empty() => &path[..],
+        (None, None) => return Ok(None),
+        _ => return Err(invalid()),
+    };
+    RecordContext::new(collection, record, owner, path).map(Some)
+}
+
+pub(super) fn validate_stored_value(name: &str, value: &str) -> AppResult<()> {
+    headers::validate_header_parts(name, value)?;
+    if name.trim() != name || value.trim() != value {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 /// Context is selected by the caller from the authoritative containing record.
 /// Header identity uses the canonical HTTP name, never array position or blob metadata.
 pub(crate) async fn decode(
@@ -37,45 +72,28 @@ pub(crate) async fn decode(
     let mut result = Vec::with_capacity(stored.len());
     for row in stored {
         let name = row.name.to_ascii_lowercase();
-        let value = match (
-            &row.value_encrypted,
-            row.value_context_version,
-            row.sensitive,
-        ) {
-            (Some(encrypted), Some(version @ (3 | VERSION)), sensitive)
-                if row.value.is_empty() && (version == VERSION || sensitive) =>
-            {
+        let path = value_path(&name, row.sensitive);
+        let value = match value_context(collection, record, owner, row, &path)? {
+            Some(context) => {
                 let keys = keys.ok_or_else(invalid)?;
-                let visibility = if sensitive { "masked" } else { "public" };
-                let fields = [
-                    "default_request_headers",
-                    name.as_str(),
-                    "value",
-                    "visibility",
-                    visibility,
-                ];
-                let context = RecordContext::new(
-                    collection,
-                    record,
-                    owner,
-                    if version == 3 { &fields[..3] } else { &fields },
-                )?;
-                let bytes = keys.decrypt_record(encrypted, &context).await?;
+                let bytes = keys
+                    .decrypt_record(
+                        row.value_encrypted.as_deref().ok_or_else(invalid)?,
+                        &context,
+                    )
+                    .await?;
                 let text = std::str::from_utf8(&bytes).map_err(|_| invalid())?;
                 if text.len() > headers::MAX_HEADER_VALUE_LEN {
                     return Err(invalid());
                 }
                 Zeroizing::new(text.to_owned())
             }
-            (None, None, _) if keys.is_some_and(EncryptionKeys::allow_legacy_record_reads) => {
+            None if keys.is_some_and(EncryptionKeys::allow_legacy_record_reads) => {
                 row.value.clone()
             }
-            _ => return Err(invalid()),
+            None => return Err(invalid()),
         };
-        headers::validate_header_parts(&row.name, value.as_str())?;
-        if row.name.trim() != row.name || value.trim() != value.as_str() {
-            return Err(invalid());
-        }
+        validate_stored_value(&row.name, &value)?;
         result.push(ResolvedDefaultRequestHeader {
             name: row.name.clone(),
             value,

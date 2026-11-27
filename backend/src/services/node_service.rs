@@ -1516,12 +1516,20 @@ fn decode_node_signing_secret(
 }
 
 fn validate_node_signing_secret(bytes: &[u8], node: &Node) -> AppResult<Zeroizing<Vec<u8>>> {
-    let decoded = decode_node_signing_secret(bytes, &node.id)?;
+    validate_signing_secret_hash(bytes, &node.id, &node.signing_secret_hash)
+}
+
+pub(super) fn validate_signing_secret_hash(
+    bytes: &[u8],
+    id: &str,
+    hash: &str,
+) -> AppResult<Zeroizing<Vec<u8>>> {
+    let decoded = decode_node_signing_secret(bytes, id)?;
     let encoded = std::str::from_utf8(bytes)
         .map_err(|_| AppError::Internal("Invalid node signing secret encoding".into()))?;
     // The legacy hash authenticates the EXACT hex text, not the decoded bytes.
     // Storage-only migration preserves that historical contract.
-    if hash_token(encoded) != node.signing_secret_hash {
+    if hash_token(encoded) != hash {
         return Err(AppError::Internal(
             "Node signing secret hash mismatch".into(),
         ));
