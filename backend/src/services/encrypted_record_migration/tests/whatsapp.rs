@@ -1,6 +1,19 @@
 use super::*;
 use crate::services::whatsapp_native::token_record::FIELD;
 
+// Unmarked v2 fixtures from the server tests at 846b09d4d.
+const LEGACY_RETAINED_TOKEN: &str = concat!(
+    "0202003cd244504493555dd17af7cf9146522af16e2a9c140ec9be7ba4345b02aa2b389d809442e6",
+    "d1e5877d060a354bad547529d1775e42c1b7a257619722fcc80e5607714ca352d568a15d9ab6a004",
+    "c4ce2b83805a1806ab5c98e4ab4532192d8ecdd0b42a343a890391072c6b83c4a21ef9",
+);
+
+const LEGACY_PRESENT_TOKEN: &str = concat!(
+    "0202003ced5fa5ebe4c3701f8fe567f18fc6d353ba153e107e706b253b5f469b9e6e3aa102d1a5f2",
+    "a6ac400ef3b820f8a004c4b829624daee5fe323eba65f3f81263ab8cbfc66fbab9689a43cc8a4000",
+    "d7c50e3dc83be9de31c9c2a30354fb20e684f34ba730efe5b1ba16f4bd052cd9bcac6428",
+);
+
 fn retained(id: &str) -> Document {
     doc! {"_id":id,"owner_id":"owner","ownership_version":2_i64,
     "meta_app_id":"111","waba_id":"222","phone_number_id":"333","dedicated_app":true,
@@ -21,7 +34,7 @@ async fn retained_whatsapp_rewrap_fences_raw_source_and_checks_primary_and_scope
     let new = EncryptionKeys::from_config(&settings);
     let mut source = retained("retained");
     let token = b"fixture-wa-verify-token";
-    let legacy = old.encrypt(token).await.unwrap();
+    let legacy = hex::decode(LEGACY_RETAINED_TOKEN).unwrap();
     source.insert(FIELD, bson::to_bson(&legacy).unwrap());
     let id = doc! {"_id":"retained"};
     rows.insert_one(&source).await.unwrap();
@@ -102,7 +115,7 @@ async fn whatsapp_generation_reports_retained_absent_null_and_damaged_tokens_aft
     let mut present = retained("present");
     present.insert(
         FIELD,
-        bson::to_bson(&keys.encrypt(b"test-native-verify-token").await.unwrap()).unwrap(),
+        bson::to_bson(&hex::decode(LEGACY_PRESENT_TOKEN).unwrap()).unwrap(),
     );
     let mut null = retained("null");
     null.insert(FIELD, Bson::Null);

@@ -3,6 +3,14 @@ use crate::services::platform_entry_gateway_service::tests::setup::SetupFixture;
 
 const FIELD: &str = "request_ciphertext";
 
+// Unmarked v2 fixtures from the server tests at 846b09d4d.
+const LEGACY_REQUEST: &str = concat!(
+    "0202003c9ec4598db980c435d7ae52a59bb44a6d20e5cf2dd57d922a37fb4e4818873cbc41433296",
+    "0cad4f50ef08ffad8a16c00345b602815b771afdde6d9aeede89789342851cd49e72b870a1501b46",
+    "e6633796ea9654b35c99818b858b66dc2ceb374126c41d48f67848bcf1a9ad95bd3e29ff0899a617",
+    "a103c046a20b3a991c9c55916fda1365a91980",
+);
+
 #[test]
 fn gateway_transport_authenticates_exact_bytes_scope_and_the_rewrap_winner() {
     crate::test_utils::run_native_journey_test("gateway_transport_storage", || async {
@@ -28,7 +36,7 @@ fn gateway_transport_authenticates_exact_bytes_scope_and_the_rewrap_winner() {
         let bytes = "{ \"name\":\"α\", \"name\":\"β\", \"credentials\":{} }\n".as_bytes();
         use sha2::{Digest, Sha256};
         let hash = format!("sha256:{:x}", Sha256::digest(bytes));
-        let legacy = old.encrypt(bytes).await.unwrap();
+        let legacy = hex::decode(LEGACY_REQUEST).unwrap();
         let mut source = prepared.clone();
         source.remove("secret_context_versions");
         source.insert(FIELD, bson::to_bson(&legacy).unwrap());

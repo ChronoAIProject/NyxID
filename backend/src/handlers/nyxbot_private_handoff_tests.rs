@@ -39,8 +39,13 @@ async fn mock_chat(
             .mount(&server)
             .await;
     } else {
-        let encrypted = state.encryption_keys.encrypt(b"app:secret").await.unwrap();
-        state.db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc! {"_id":&channel.channel_bot_id},doc! {"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+        set_bot_secrets(
+            state,
+            channel,
+            doc! {},
+            &[(BotSecret::Token, b"app:secret")],
+        )
+        .await;
         Mock::given(path("/open-apis/auth/v3/tenant_access_token/internal"))
             .respond_with(
                 ResponseTemplate::new(200).set_body_json(

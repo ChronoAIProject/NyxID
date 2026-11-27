@@ -986,6 +986,7 @@ impl std::fmt::Debug for RotateAssistantServiceCredentialRequest {
 
 #[cfg(test)]
 mod tests {
+    use crate::handlers::credential_record_fixtures::KeySecret;
     mod route_sync;
     use axum::{
         Router,
@@ -1308,7 +1309,9 @@ mod tests {
         key.provider_config_id = Some(provider_id.to_string());
         key.connection_id = Some(Uuid::new_v4().to_string());
         key.credential_source = Some("platform".to_string());
-        key.access_token_encrypted = Some(encryption_keys.encrypt(b"access-token").await.unwrap());
+        KeySecret::AccessToken
+            .set(encryption_keys, &mut key, b"access-token")
+            .await;
         key.label = slug.to_string();
         let mut service = test_user_service(
             &Uuid::new_v4().to_string(),
@@ -1877,8 +1880,9 @@ mod tests {
             key.provider_config_id = Some(provider_id.to_string());
             key.connection_id = Some(Uuid::new_v4().to_string());
             key.credential_source = Some("platform".to_string());
-            key.access_token_encrypted =
-                Some(encryption_keys.encrypt(b"access-token").await.unwrap());
+            KeySecret::AccessToken
+                .set(encryption_keys, &mut key, b"access-token")
+                .await;
             key.label = slug.to_string();
             let mut service = test_user_service(
                 &Uuid::new_v4().to_string(),

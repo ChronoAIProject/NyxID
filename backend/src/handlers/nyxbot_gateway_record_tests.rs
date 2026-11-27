@@ -9,6 +9,26 @@ use crate::{
 };
 use bson::Document;
 
+async fn compatible_payload_bytes(row: &Document, bytes: &[u8]) -> Vec<u8> {
+    let mut keys = crate::test_utils::test_encryption_keys();
+    keys.set_contextual_record_writes(false);
+    let field = [
+        "payload_ciphertext",
+        row.get_str("channel_id").unwrap(),
+        row.get_str("binding_id").unwrap(),
+        row.get_str("response_id").unwrap(),
+    ];
+    let context = RecordContext::new(
+        RESPONSES,
+        row.get_str("_id").unwrap(),
+        row.get_str("user_id").unwrap(),
+        &field,
+    )
+    .unwrap();
+    record_field::encrypt_context(&keys, &context, bytes)
+        .await
+        .unwrap()
+}
 async fn plain(keys: &EncryptionKeys, row: &GatewayResponse) -> Vec<u8> {
     let field = [
         "payload_ciphertext",
@@ -217,7 +237,7 @@ async fn gateway_record_rewrap_preserves_expired_bytes_and_loses_to_changed_sour
     let mut bytes = vec![b' '];
     bytes.extend(fixture.get_binary_generic("bytes").unwrap());
     let keys = crate::test_utils::test_encryption_keys();
-    let encrypted = keys.encrypt(&bytes).await.unwrap();
+    let encrypted = compatible_payload_bytes(&source, &bytes).await;
     source.insert(
         "payload_ciphertext",
         encrypted.into_iter().map(i32::from).collect::<Vec<_>>(),
@@ -375,12 +395,19 @@ async fn gateway_record_migrates_a_retained_payload_larger_than_half_a_bson_docu
     let bytes = body.encoded().unwrap();
     assert!(bytes.len() > 8 * 1024 * 1024);
     let now = bson::DateTime::now();
-    let source = doc! {
+    let mut source = doc! {
         "_id":"large","response_id":"response","channel_id":"channel","binding_id":"binding",
         "user_id":"owner","partition":"partition","event_key":"event","request_hash":"hash",
         "revision":1_i64,"terminal":true,"created_at":now,"expires_at":now,
-        "payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:keys.encrypt(&bytes).await.unwrap()},
     };
+    let ciphertext = compatible_payload_bytes(&source, &bytes).await;
+    source.insert(
+        "payload_ciphertext",
+        bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes: ciphertext,
+        },
+    );
     let rows = db.collection::<Document>(RESPONSES);
     rows.insert_one(&source).await.unwrap();
     assert!(storage::migrate(&db, &keys, &source).await.unwrap());

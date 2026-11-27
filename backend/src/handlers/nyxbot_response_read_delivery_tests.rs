@@ -316,17 +316,12 @@ async fn response_read_2588_unaccepted_busy_retry_keeps_admission_and_acceptance
     source.retry_request_sha256 = Some(sha256_hex(request.to_string()));
     source.dispatch_identity = Some(dispatch_identity::admission(&live.id, key));
     source.relay_message_id = Some("retry-source".into());
-    source.event_context_ciphertext = Some(
-        f.state
-            .encryption_keys
-            .encrypt(
-                serde_json::to_string(&request["event_context"])
-                    .unwrap()
-                    .as_bytes(),
-            )
-            .await
-            .unwrap(),
-    );
+    set_event_context(
+        &f.state.encryption_keys,
+        &mut source,
+        &serde_json::to_vec(&request["event_context"]).unwrap(),
+    )
+    .await;
     let id = dispatch_identity::relay_response(&live.id, key);
     let mapping = read::identity(&live, &source, read::command(&id, &request));
     let mut raw = bson::to_document(&source).unwrap();
