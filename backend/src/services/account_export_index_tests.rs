@@ -495,7 +495,9 @@ mod export_index_coverage {
                 "pub async fn upsert_mapping(",
                 "\"channel\": channel,",
                 "\"channel_user_id\": channel_user_id,",
-                "if let Some(existing) = existing"
+                "\"prepareUnique\": true",
+                "\"nyxid_user_id\": nyxid_user_id",
+                ".upsert(true)"
             ]
         ),
         resource!(
