@@ -2416,6 +2416,25 @@ test("the folded Duo's agent picker is the workspace bottom sheet ending before 
   phone.harness.unmount();
 });
 
+test("the ordinary Android agent picker applies the native modal top inset around its title and Close target", () => {
+  const x = setup(A, true, "android");
+  x.chooseAgent();
+  const modal = x.all().find(
+    (n) => n.type === "Modal" && n.props.visible && n.props.presentationStyle === "pageSheet",
+  )!;
+  const [surface] = modal.props.children;
+  assert.equal(surface.type, "SafeAreaView");
+  assert.deepEqual(Array.from(surface.props.edges), ["top"]);
+  const contents = elements(surface);
+  assert.ok(contents.some(
+    (n) => n.props.accessibilityRole === "header" && n.props.children.includes("Choose agent"),
+  ));
+  assert.ok(contents.some(
+    (n) => n.props.accessibilityLabel?.startsWith("Close ") && typeof n.props.onPress === "function",
+  ));
+  x.harness.unmount();
+});
+
 test("Choose agent preserves its hierarchy and dismisses before pushing History or Details into main content", () => {
   for (const [label, route] of [
     ["History", "AssistantHistory"],

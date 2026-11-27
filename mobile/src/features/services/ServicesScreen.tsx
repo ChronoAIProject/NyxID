@@ -57,7 +57,6 @@ import { useServiceOAuth } from "./useServiceOAuth";
 import { oauthOutcomeCopy } from "./serviceOAuthModel";
 
 const ROOT = ["workspace", "services"] as const;
-const MANAGEMENT_TABS = ["overview", "advanced", "history"] as const;
 const messageOf = (cause: unknown) =>
   cause instanceof Error
     ? cause.message
@@ -451,6 +450,11 @@ export function ServicesScreen({
                   "Ask your agent to use {{providerName}}. For a specialist, first select this connection in Agents & Crews → choose the agent → Service permissions, then save.",
                   { providerName: providerName },
                 );
+    const managementTabs = [
+      { id: "overview", label: t("Overview") },
+      { id: "advanced", label: t("Advanced") },
+      { id: "history", label: t("History") },
+    ] satisfies { id: typeof managementTab; label: string }[];
     return (
       <WorkspacePage
         title={translateApp("Manage connection")}
@@ -475,13 +479,11 @@ export function ServicesScreen({
           </SettingsGroup>
         )}
         <SegmentControl
-          segments={MANAGEMENT_TABS.map((value) => ({
-            label: value.charAt(0).toUpperCase() + value.slice(1),
-          }))}
-          activeIndex={MANAGEMENT_TABS.indexOf(managementTab)}
+          segments={managementTabs}
+          activeIndex={managementTabs.findIndex((tab) => tab.id === managementTab)}
           disabled={busy}
           onPress={(index) => {
-            const value = MANAGEMENT_TABS[index];
+            const value = managementTabs[index]?.id;
             if (!value) return;
             setManagementTab(value);
             setReplacement("");
@@ -1485,13 +1487,14 @@ const sentence = (value: string) =>
   value.charAt(0).toUpperCase() + value.slice(1);
 
 function credentialKind(connection: ServiceConnection) {
-  return connection.credential_binding === "platform"
-    ? translateApp("Platform key")
-    : connection.credential_type === "none"
-      ? translateApp("No authentication")
-      : connection.credential_type === "oauth2"
-        ? "OAuth"
-        : connection.credential_type.replaceAll("_", " ");
+  if (connection.credential_binding === "platform") return translateApp("Platform key");
+  switch (connection.credential_type) {
+    case "none": return translateApp("No authentication");
+    case "oauth2": return "OAuth";
+    case "api_key": return translateApp("API key");
+    case "node_managed": return translateApp("Managed on your node");
+    default: return connection.credential_type.replaceAll("_", " ");
+  }
 }
 
 const styles = StyleSheet.create({

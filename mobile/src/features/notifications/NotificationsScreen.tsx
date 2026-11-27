@@ -428,20 +428,21 @@ export function NotificationsScreen({
     Promise.all([feed.refetch(), summary.refetch()]),
   );
   const canMarkAll = enabled && runtime.active && runtime.online && unread > 0 && !!asOf && !markRead.isPending;
-  const actions = useRef({ canMarkAll, active: enabled && runtime.active, asOf, mutate: markRead.mutate });
-  actions.current = { canMarkAll, active: enabled && runtime.active, asOf, mutate: markRead.mutate };
+  const canOpenOptions = Platform.OS === "ios" ? enabled && runtime.active : canMarkAll;
+  const actions = useRef({ canOpenOptions, canMarkAll, asOf, mutate: markRead.mutate });
+  actions.current = { canOpenOptions, canMarkAll, asOf, mutate: markRead.mutate };
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
   const openOptions = useCallback(() => {
-    if (!actions.current.active) return;
+    if (!mounted.current || !actions.current.canOpenOptions) return;
     Keyboard.dismiss();
     const epoch = getAuthEpoch();
     const markAll = () => {
       const current = actions.current;
-      if (mounted.current && getAuthEpoch() === epoch && current.active && current.canMarkAll && current.asOf)
+      if (mounted.current && getAuthEpoch() === epoch && current.canMarkAll && current.asOf)
         current.mutate({ all: true, before: current.asOf });
     };
     if (Platform.OS === "ios") {
@@ -453,7 +454,7 @@ export function NotificationsScreen({
       }, index => { if (index === 0) markAll(); });
     } else {
       Alert.alert(translateApp("Notifications"), undefined, [
-        ...(actions.current.canMarkAll ? [{ text: translateApp("Mark all as read"), onPress: markAll }] : []),
+        { text: translateApp("Mark all as read"), onPress: markAll },
         { text: translateApp("Cancel"), style: "cancel" },
       ]);
     }
@@ -463,7 +464,7 @@ export function NotificationsScreen({
       <WorkspaceHeaderVisibility>
         <FloatingButton
           accessibilityLabel={t("Notification options")}
-          disabled={!enabled || !runtime.active}
+          disabled={!canOpenOptions}
           onPress={openOptions}
           testID="notifications-options"
         >
@@ -475,7 +476,7 @@ export function NotificationsScreen({
       headerRight: button,
       unstable_headerRightItems: () => [{ type: "custom", element: button(), hidesSharedBackground: true }],
     };
-  }, [enabled, runtime.active, openOptions, colors.textPrimary, t]);
+  }, [canOpenOptions, openOptions, colors.textPrimary, t]);
   useWorkspaceBack({
     active: false,
     defaultRole: Platform.OS === "ios" ? "back" : "menu",

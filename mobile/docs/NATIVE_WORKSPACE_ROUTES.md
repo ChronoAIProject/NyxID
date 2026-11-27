@@ -50,7 +50,8 @@ transient interactions, rather than workspace destinations.
 Chat Details, History and Working context are nested content pages. History
 reuses the thread browser, initially filtered to the viewed agent; its New chat
 keeps that agent. Choosing Details/History from the agent picker first dismisses
-the native picker, then pushes the content page. Agent/permissions/options and
+the native picker, then pushes the content page. On Android the picker title
+and its Close control sit below the system status bar. Agent/permissions/options and
 recipients/connections pickers remain transient choices. Attachment preview
 retains its media presentation.
 
@@ -66,6 +67,7 @@ New chat and More in the top bar. More grows that measured capsule into an
 anchored options bubble over the existing chat, with Chat details, Notifications
 when enabled, Settings, and Voice preferences during a call. Crew options grow
 from their single-button capsule and retain the existing Settings destination.
+On Android the open menu keeps the entire first row below the status bar.
 Both shrink back to their source on outside tap, Android Back or accessibility
 escape; reduced motion changes size immediately. Accessibility focus enters the
 options and returns to the trigger on dismissal. Selected destinations wait for

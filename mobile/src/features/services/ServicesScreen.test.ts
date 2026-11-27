@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
+import { appLocale, setAppTranslationLanguage, translateApp } from "../../i18n/appTranslation";
 import { renderSegmentControl } from "../../components/SegmentControl.testHarness";
 import { deferred, hookHarness } from "../assistant/assistantHookTestHarness";
 import * as connectionPresentation from "./connectionPresentation";
@@ -127,6 +128,9 @@ function setup({
       return result;
     };
   const harness = hookHarness<Element>({
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => ({ language: appLocale(), t: translateApp }),
+    },
     "react/jsx-runtime": {
       jsx: renderElement,
       jsxs: renderElement,
@@ -315,6 +319,39 @@ function setup({
       ).props.onPress(),
   };
 }
+
+test("Simplified Chinese connector tabs, credential and removal guidance follow the selected view", () => {
+  const before = appLocale();
+  setAppTranslationLanguage("zh-CN");
+  try {
+    for (const revokesGrant of [false, true]) {
+      const env = setup({
+        row: { ...connection, credential_type: "api_key", revocation: { revokes_grant: revokesGrant } },
+      });
+      env.tab("概览");
+      assert.match(env.text(), /个人 · API 密钥/);
+      assert.match(env.text(), /连接已启用/);
+      env.tab("高级");
+      const footer = env.find(item =>
+        typeof item.props.footer === "string" && item.props.footer.includes("智能体将失去访问权限")
+      ).props.footer;
+      assert.match(footer, /在“概览”中关闭“连接已启用”开关/);
+      assert.match(footer, revokesGrant ? /保留授权，仅移除此连接/ : /撤销为此连接保存的令牌/);
+      assert.doesNotMatch(footer.replaceAll("NyxID", ""), /[a-z]/i);
+      env.button("移除连接").props.onPress();
+      const alert = env.alerts.at(-1)!;
+      assert.equal(alert.title, "移除“Cloudflare Personal”？");
+      assert.equal(alert.buttons[0]?.text, "取消");
+      alert.buttons[0]?.onPress?.();
+      env.tab("历史记录");
+      assert.equal(env.find(item => item.type === "PluginConnectionHistory").props.serviceId, connection.id);
+      assert.deepEqual(env.calls, []);
+      env.harness.unmount();
+    }
+  } finally {
+    setAppTranslationLanguage(before);
+  }
+});
 
 test("a healthy OAuth connection explains provider access without asking to reauthorize", () => {
   const env = setup();

@@ -93,6 +93,7 @@ function setup(platform = "ios", reducedMotion = false, sourceWidth = 88) {
       },
     },
     "react-native-safe-area-context": {
+      SafeAreaView: "SafeAreaView",
       useSafeAreaInsets: () => ({ top: 0, right: 0, left: 0, bottom: 0 }),
     },
     "../../components/FloatingControl": { FloatingCapsule: "Capsule" },
@@ -168,6 +169,17 @@ function setup(platform = "ios", reducedMotion = false, sourceWidth = 88) {
     },
   };
 }
+
+test("the Android menu positions its measured anchor inside the modal's native top safe area", () => {
+  const x = setup("android");
+  x.open();
+  const surface = x.modal().props.children;
+  assert.equal(surface.type, "SafeAreaView");
+  assert.deepEqual(Array.from(surface.props.edges), ["top"]);
+  assert.equal(surface.props.children.props.accessibilityViewIsModal, true);
+  assert.equal(flat(x.menu().props.style).top, 52);
+  x.h.unmount();
+});
 
 test("the source capsule stays until native presentation, then grows and shrinks at its exact anchor before dispatching", () => {
   const x = setup();

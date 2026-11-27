@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
+import { appLocale, setAppTranslationLanguage } from "../../i18n/appTranslation";
 import { hookHarness } from "../assistant/assistantHookTestHarness";
 import * as designTokens from "../../theme/designTokens";
 import * as historyTypes from "./pluginConnectionHistoryTypes";
@@ -176,6 +177,20 @@ function setup({ groups = [] as unknown[] } = {}) {
     unmount: () => harness.unmount(),
   };
 }
+
+test("the Simplified Chinese history view localizes the filter, disclosure and empty state", () => {
+  const before = appLocale();
+  setAppTranslationLanguage("zh-CN");
+  try {
+    const env = setup();
+    assert.equal(env.control("筛选历史操作").props.value, "所有操作");
+    assert.ok(env.all().some(item => item.props.footer === "仅显示元数据。保留配置更改与作者信息，永不显示凭据。"));
+    assert.ok(env.all().some(item => item.props.children === "尚未记录更改。"));
+    env.unmount();
+  } finally {
+    setAppTranslationLanguage(before);
+  }
+});
 
 test("history filters load on demand and only Apply changes the paged history request", async () => {
   const env = setup();
