@@ -41,32 +41,93 @@ async fn mcp(state: &AppState, raw: &str, name: &str, args: Value) -> Value {
     serde_json::from_str(&text).unwrap_or_else(|_| panic!("MCP returned invalid JSON: {text}"))
 }
 
-fn find_value(value: &Value, key: &str) -> Option<Value> {
-    match value {
-        Value::String(text) => serde_json::from_str::<Value>(text)
-            .ok()
-            .and_then(|v| find_value(&v, key)),
-        Value::Object(fields) => fields
-            .get(key)
-            .cloned()
-            .or_else(|| fields.values().find_map(|v| find_value(v, key))),
-        Value::Array(values) => values.iter().find_map(|v| find_value(v, key)),
-        _ => None,
-    }
+async fn raw_update(state: &AppState, raw: &str, selected: &str, body: &str) -> Value {
+    use tower::ServiceExt;
+    let (_, private) = crate::routes::build_router_with_state(state.clone());
+    let request = axum::http::Request::builder()
+        .method("PUT")
+        .uri(format!(
+            "/api/v1/proxy/s/ledger/bitable/v1/apps/bascnLedger/tables/tblLedger/records/{selected}"
+        ))
+        .header("x-api-key", raw)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .unwrap();
+    let response = private
+        .with_state(state.clone())
+        .oneshot(request)
+        .await
+        .unwrap();
+    json!({"status":response.status().as_u16(),"body":body_text(response).await})
 }
-fn read_sentence(result: &Value) -> String {
-    let Some(marker) =
-        find_value(result, "read_marker").and_then(|v| v.as_str().map(str::to_owned))
-    else {
-        return "Independent observation is unavailable; no final value is confirmed.".into();
-    };
-    let Some(status) = find_value(result, "Status").and_then(|v| v.as_str().map(str::to_owned))
-    else {
-        return "Independent observation has no target value; no final value is confirmed.".into();
-    };
-    format!(
-        "Base bascnLedger, table tblLedger, record recTarget: Status = {status}. Independent observation {marker}."
-    )
+
+fn tool_value(result: &Value) -> Option<Value> {
+    let result = result.get("result").unwrap_or(result);
+    if result["isError"] == true {
+        return None;
+    }
+    result["content"]
+        .as_array()?
+        .iter()
+        .filter(|part| part["type"] == "text")
+        .find_map(|part| serde_json::from_str(part["text"].as_str()?).ok())
+}
+
+fn row_observation(result: &Value, selected: &str) -> Option<String> {
+    let response = tool_value(result)?;
+    if response["code"] != 0 {
+        return None;
+    }
+    let record = response["data"]["items"]
+        .as_array()?
+        .iter()
+        .find(|record| record["record_id"] == selected)?;
+    let id = record["record_id"].as_str()?;
+    let status = record["fields"]["Status"].as_str()?;
+    let marker = record["fields"]["Observation"].as_str()?;
+    Some(format!(
+        "Base bascnLedger, table tblLedger, record {id}: Status = {status}; independent observation {marker}."
+    ))
+}
+
+const NO_CONFIRMATION: &str =
+    "The selected row has no matching specialist observation; no final value is confirmed.";
+fn checked_report(report: Option<&str>, selected: &str) -> String {
+    report
+        .filter(|report| {
+            let observation = report
+                .rsplit_once(" After: ")
+                .map_or(*report, |(_, after)| after);
+            observation.contains(&format!("record {selected}: Status = "))
+                && observation.contains(&format!(":{selected}."))
+        })
+        .map_or_else(
+            || NO_CONFIRMATION.into(),
+            |report| format!("Accountant report. {report}"),
+        )
+}
+
+struct Script {
+    proxy: bool,
+    stage: Arc<AtomicUsize>,
+    selected: String,
+    control: String,
+    delayed: std::sync::atomic::AtomicBool,
+    release: tokio::sync::Semaphore,
+    result_fault: AtomicUsize,
+}
+impl Script {
+    async fn delay_settlement(&self) {
+        if self.delayed.load(Ordering::SeqCst) {
+            self.release.acquire().await.unwrap().forget();
+        }
+    }
+    fn selection(&self) -> String {
+        format!(
+            "Choose Base bascnLedger table tblLedger record {}: Status Pending -> Approved",
+            self.selected
+        )
+    }
 }
 fn owner_text(stream: &str) -> String {
     stream
@@ -90,10 +151,11 @@ fn owner_text(stream: &str) -> String {
 async fn model(
     state: &AppState,
     raw: &str,
-    proxy: bool,
-    stage: usize,
+    request: &Value,
+    script: &Script,
     observed: &Arc<Mutex<Vec<Value>>>,
 ) -> String {
+    let stage = script.stage.load(Ordering::SeqCst);
     let (_, key, _) = key_service::validate_api_key(&state.db, raw).await.unwrap();
     let row = state
         .db
@@ -118,21 +180,39 @@ async fn model(
             .await
             .push(json!({"stage":"before","result":before.clone()}));
         if stage == 0 {
-            return format!("Pending ledger entries. {}", read_sentence(&before));
+            script.delay_settlement().await;
+            let selected =
+                row_observation(&before, &script.selected).expect("selected provider row");
+            let control = row_observation(&before, &script.control).expect("control provider row");
+            return format!("Pending ledger entries. {selected} Control entry. {control}");
         }
-        let written = if proxy {
-            use tower::ServiceExt;
-            let (_, private) = crate::routes::build_router_with_state(state.clone());
-            let request=axum::http::Request::builder().method("PUT")
-                .uri("/api/v1/proxy/s/ledger/bitable/v1/apps/bascnLedger/tables/tblLedger/records/recTarget")
-                .header("x-api-key",raw).header("content-type","application/json")
-                .body(Body::from(json!({"fields":{"Status":"Approved"}}).to_string())).unwrap();
-            let response = private
-                .with_state(state.clone())
-                .oneshot(request)
-                .await
-                .unwrap();
-            json!({"status":response.status().as_u16(),"body":body_text(response).await})
+        let written = if stage == 3 {
+            let first = br#"{"fields":{"Amount":12,"Status":"Approved"}}"#;
+            let second = br#"{ "fields": { "Status": "Approved", "Amount": 12.0 } }"#;
+            let mut replies = Vec::new();
+            for body in [first.as_slice(), second.as_slice()] {
+                let reply = if script.proxy {
+                    raw_update(
+                        state,
+                        raw,
+                        &script.selected,
+                        std::str::from_utf8(body).unwrap(),
+                    )
+                    .await
+                } else {
+                    mcp(state,raw,"ledger__bitable_record_update",json!({"app_token":"bascnLedger","table_id":"tblLedger","record_id":script.selected,"body":serde_json::from_slice::<Value>(body).unwrap()})).await
+                };
+                replies.push(reply);
+            }
+            json!(replies)
+        } else if script.proxy {
+            raw_update(
+                state,
+                raw,
+                &script.selected,
+                r#"{"fields":{"Status":"Approved"}}"#,
+            )
+            .await
         } else if stage == 2 {
             let (first, second) = tokio::join!(
                 mcp(
@@ -140,14 +220,14 @@ async fn model(
                     raw,
                     "ledger__bitable_record_update",
                     json!({"app_token":"bascnLedger","table_id":"tblLedger",
-                    "record_id":"recTarget","body":{"fields":{"Status":"Approved"}}})
+                    "record_id":script.selected,"body":{"fields":{"Status":"Approved"}}})
                 ),
                 mcp(
                     state,
                     raw,
                     "ledger__bitable_record_update",
                     json!({"app_token":"bascnLedger","table_id":"tblLedger",
-                    "record_id":"recControl","body":{"fields":{"Status":"Approved"}}})
+                    "record_id":script.control,"body":{"fields":{"Status":"Approved"}}})
                 )
             );
             json!({"first":first,"second":second})
@@ -157,7 +237,7 @@ async fn model(
                 raw,
                 "ledger__bitable_record_update",
                 json!({"app_token":"bascnLedger","table_id":"tblLedger",
-                "record_id":"recTarget","body":{"fields":{"Status":"Approved"}}}),
+                "record_id":script.selected,"body":{"fields":{"Status":"Approved"}}}),
             )
             .await
         };
@@ -165,32 +245,53 @@ async fn model(
             .lock()
             .await
             .push(json!({"stage":"write","result":written}));
+        script.delay_settlement().await;
         let after = mcp(state, raw, "ledger__bitable_records_search", args).await;
         observed
             .lock()
             .await
             .push(json!({"stage":"independent_readback","result":after.clone()}));
-        return read_sentence(&after);
+        let selected = if script.result_fault.load(Ordering::SeqCst) == 2 {
+            &script.control
+        } else {
+            &script.selected
+        };
+        if script.result_fault.load(Ordering::SeqCst) == 1 {
+            return format!(
+                "Before: {} After: Independent observation unavailable; no final value is confirmed.",
+                row_observation(&before, selected).unwrap()
+            );
+        }
+        return format!(
+            "Before: {} After: {}",
+            row_observation(&before, selected).unwrap_or_else(|| NO_CONFIRMATION.into()),
+            row_observation(&after, selected).unwrap_or_else(|| NO_CONFIRMATION.into())
+        );
     }
     // Event reports consume results; they never reassign completed work.
     if row.active_turn.as_ref().unwrap().origin
         == crate::models::assistant_conversation::TurnOrigin::Event
     {
-        return serde_json::to_string(
-            &row.active_turn
-                .as_ref()
-                .unwrap()
-                .events
-                .iter()
-                .map(|e| &e.text)
-                .collect::<Vec<_>>(),
+        observed.lock().await.push(json!({"stage":"supervisor_event","conversation_id":row.id,
+            "turn_id":row.active_turn.as_ref().unwrap().turn_id,"input":request["input"],
+            "sources":row.active_turn.as_ref().unwrap().events.iter().map(|event|json!({"id":event.id,"kind":event.kind,"agent_id":event.agent_id})).collect::<Vec<_>>()}));
+        let input = request["input"].as_str().expect("rendered model input");
+        let pattern = regex::Regex::new(
+            r#"Specialist accountant replied\. Reply excerpt: "([^"]*)" Read more"#,
         )
         .unwrap();
+        let report = pattern.captures_iter(input).last();
+        return checked_report(report.as_ref().map(|capture| &capture[1]), &script.selected);
+    }
+    if row.active_turn.as_ref().unwrap().origin
+        == crate::models::assistant_conversation::TurnOrigin::User
+    {
+        return "I will continue this thread in the app.".into();
     }
     let task = if stage == 0 {
-        "List pending ledger rows and return the real observed values."
+        "List pending ledger rows and return the real observed values.".to_owned()
     } else {
-        "Update recTarget Status from Pending to Approved; read back independently."
+        script.selection()
     };
     let mut args = json!({"subagent":"accountant","text":task});
     if let Some(card)=state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>("assistant_acknowledgements")
@@ -215,20 +316,27 @@ async fn model(
     {
         return format!("Review the exact accountant assignment: {result}");
     }
-    let _finished = mcp(
+    if script.delayed.load(Ordering::SeqCst) {
+        return "The accountant is still working; the result will follow.".into();
+    }
+    let finished = mcp(
         state,
         raw,
         "nyxid__wait_for_subagents",
         json!({"subagents":["accountant"],"timeout_secs":20}),
     )
     .await;
-    let evidence = observed.lock().await;
-    let latest = evidence
-        .iter()
-        .rev()
-        .find(|r| r["stage"] == "independent_readback" || r["stage"] == "before")
-        .expect("specialist must observe ledger");
-    format!("Accountant report. {}", read_sentence(&latest["result"]))
+    observed
+        .lock()
+        .await
+        .push(json!({"stage":"supervisor_wait","result":finished.clone()}));
+    let payload = tool_value(&finished);
+    let report = payload
+        .as_ref()
+        .and_then(|value| value["settled"].as_array())
+        .and_then(|rows| rows.iter().find(|result| result["name"] == "accountant"))
+        .and_then(|result| result["reply"]["text"].as_str());
+    checked_report(report, &script.selected)
 }
 
 struct Journey {
@@ -240,6 +348,8 @@ struct Journey {
     ledger: Arc<std::sync::Mutex<Ledger>>,
     observed: Arc<Mutex<Vec<Value>>>,
     stage: Arc<AtomicUsize>,
+    script: Arc<Script>,
+    settlements: Mutex<crate::handlers::assistant_team::settlement_test_observer::Observer>,
     _engine: tokio_util::task::AbortOnDropHandle<()>,
 }
 
@@ -254,12 +364,21 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
     let stage = Arc::new(AtomicUsize::new(0));
     let active = runtime.clone();
     let evidence = observed.clone();
-    let active_stage = stage.clone();
-    let router=Router::new().route("/v1/responses",post(move |headers:HeaderMap| {
-        let state=active.get().unwrap().clone(); let evidence=evidence.clone(); let stage=active_stage.load(Ordering::SeqCst);
+    let script = Arc::new(Script {
+        proxy,
+        stage: stage.clone(),
+        selected: format!("recA{}", &Uuid::new_v4().simple().to_string()[..8]),
+        control: format!("recZ{}", &Uuid::new_v4().simple().to_string()[..8]),
+        delayed: std::sync::atomic::AtomicBool::new(false),
+        release: tokio::sync::Semaphore::new(0),
+        result_fault: AtomicUsize::new(0),
+    });
+    let active_script = script.clone();
+    let router=Router::new().route("/v1/responses",post(move |headers:HeaderMap, Json(request):Json<Value>| {
+        let state=active.get().unwrap().clone(); let evidence=evidence.clone(); let script=active_script.clone();
         async move {
             let raw=headers["authorization"].to_str().unwrap().strip_prefix("Bearer ").unwrap();
-            let answer=Box::pin(model(&state,raw,proxy,stage,&evidence)).await;
+            let answer=Box::pin(model(&state,raw,&request,&script,&evidence)).await;
             let session=format!("conv_{}",Uuid::new_v4().simple());
             let response=format!("resp_{}_{}",&session[5..],Uuid::new_v4().simple());
             let stream=async_stream::stream! {
@@ -271,6 +390,8 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
     }));
     let db = connect_transaction_test_database("ws7_supervisor_write").await;
     let (state, _, engine) = Box::pin(setup_with_engine(db, Value::Null, Some(router))).await;
+    let settlements =
+        Mutex::new(crate::handlers::assistant_team::settlement_test_observer::observe(&state.db));
     assert!(runtime.set(state.clone()).is_ok());
     crate::services::assistant_settings_service::update(
         &state.db,
@@ -289,15 +410,17 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
     }));
     let ledger_server = MockServer::start().await;
     let read = ledger.clone();
+    let read_script = script.clone();
     Mock::given(method("POST")).and(path_regex(".*/bitable/v1/apps/bascnLedger/tables/tblLedger/records/search$"))
         .respond_with(move |_:&wiremock::Request| {
             let mut r=read.lock().unwrap(); let value=r.target.clone();r.reads.push(value);
-            ResponseTemplate::new(200).set_body_json(json!({"code":0,"read_marker":format!("provider-search-{}",r.reads.len()),"data":{"items":[
-                {"record_id":"recTarget","fields":{"Status":r.target}},
-                {"record_id":"recControl","fields":{"Status":r.control}}
+            ResponseTemplate::new(200).set_body_json(json!({"code":0,"data":{"items":[
+                {"record_id":read_script.control,"fields":{"Status":r.control,"Observation":format!("provider-search-{}:{}",r.reads.len(),read_script.control)}},
+                {"record_id":read_script.selected,"fields":{"Status":r.target,"Observation":format!("provider-search-{}:{}",r.reads.len(),read_script.selected)}}
             ],"has_more":false}}))
         }).mount(&ledger_server).await;
     let written = ledger.clone();
+    let write_script = script.clone();
     Mock::given(method("PUT"))
         .and(path_regex(
             ".*/bitable/v1/apps/bascnLedger/tables/tblLedger/records/[^/]+$",
@@ -307,9 +430,10 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
             let body: Value = serde_json::from_slice(&request.body).unwrap();
             let mut r = written.lock().unwrap();
             r.writes.push((record.clone(), body.clone()));
-            if record == "recTarget" {
+            if record == write_script.selected {
                 r.target = body["fields"]["Status"].as_str().unwrap().into();
             } else {
+                assert_eq!(record, write_script.control);
                 r.control = body["fields"]["Status"].as_str().unwrap().into();
             }
             // The write response deliberately omits values. Only a separate
@@ -322,7 +446,9 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
     let catalog = Uuid::new_v4().to_string();
     let endpoint = Uuid::new_v4().to_string();
     let connection = Uuid::new_v4().to_string();
-    let base = if slug.ends_with("-bot") {
+    let base = if proxy {
+        format!("{}/tenant/test/open-apis", ledger_server.uri())
+    } else if slug.ends_with("-bot") {
         ledger_server.uri()
     } else {
         format!("{}/open-apis", ledger_server.uri())
@@ -567,6 +693,8 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
         ledger,
         observed,
         stage,
+        script,
+        settlements,
         _engine: tokio_util::task::AbortOnDropHandle::new(engine),
     }
 }
@@ -582,6 +710,7 @@ async fn owner(j: &Journey, text: &str, id: &str) -> Response {
     }}).upsert(true).await.unwrap();
     let mut input = event(text, "7", id);
     input["event_context"]["activity"]["conversation"]["id"] = json!("123");
+    input["event_context"]["activity"]["source"]["route_id"] = json!(j.channel.route_id);
     respond(&j.state, &j.key, &input, id).await
 }
 
@@ -594,6 +723,16 @@ fn sent_text(body: &Value) -> Option<String> {
     })
 }
 
+fn assert_row_report(text: &str, j: &Journey, status: &str, read: usize) {
+    assert!(
+        text.contains(&format!(
+            "record {}: Status = {status}; independent observation provider-search-{read}:{}.",
+            j.script.selected, j.script.selected
+        )),
+        "owner row observation: {text}"
+    );
+}
+
 async fn wait_review(j: &Journey) -> (ApprovalRequest, String) {
     tokio::time::timeout(std::time::Duration::from_secs(15),async {
         loop {
@@ -604,7 +743,9 @@ async fn wait_review(j: &Journey) -> (ApprovalRequest, String) {
                         && let Some(text)=sent_text(&body)
                         && let Some((_,tail))=text.split_once("yes write-") {
                         let code=tail.split_whitespace().next().unwrap().to_owned();
-                        assert!(text.contains("recTarget") && text.contains("Approved") && text.contains("Merchant ledger"),"{text}");
+                        let digest=crate::services::audit_service::keyed_fingerprint(crate::services::audit_service::audit_chain_hmac_key(),b"supervisor-code-v1",code.as_bytes()).unwrap();
+                        if row.supervisor_write.as_ref().unwrap().code_digest != digest { continue; }
+                        assert!(text.contains(&j.script.selected) && text.contains("Approved") && text.contains("Merchant ledger"),"{text}");
                         return (row,code);
                     }
                 }
@@ -642,19 +783,16 @@ async fn start(j: &Journey, write_stage: usize) -> tokio::task::JoinHandle<Strin
             .unwrap(),
     );
     assert!(
-        listed.contains("recTarget")
+        listed.contains(&j.script.selected)
             && listed.contains("Pending")
             && listed.contains("provider-search-1"),
         "actual owner list message: {listed}"
     );
+    assert_row_report(&listed, j, "Pending", 1);
+    assert!(listed.contains(&format!("record {}: Status = Untouched", j.script.control)));
     assert_eq!(j.ledger.lock().unwrap().writes.len(), 0);
     j.stage.store(write_stage, Ordering::SeqCst);
-    assign_from_sent_card(
-        j,
-        "Choose Base bascnLedger table tblLedger record recTarget: Status Pending -> Approved",
-        "ws7-write",
-    )
-    .await
+    assign_from_sent_card(j, &j.script.selection(), "ws7-write").await
 }
 
 #[tokio::test]
@@ -699,7 +837,7 @@ async fn supervisor_write_two_approvals_real_catalog_and_independent_readback() 
         {
             let ledger = j.ledger.lock().unwrap();
             assert_eq!(ledger.writes.len(), 1);
-            assert_eq!(ledger.writes[0].0, "recTarget");
+            assert_eq!(ledger.writes[0].0, j.script.selected);
             assert_eq!(ledger.target, "Approved");
             assert_eq!(ledger.control, "Untouched");
             assert_eq!(
@@ -717,6 +855,8 @@ async fn supervisor_write_two_approvals_real_catalog_and_independent_readback() 
                     && r["result"].to_string().contains("Approved"))
         );
         let final_message = owner_text(&final_text);
+        assert_row_report(&final_message, &j, "Pending", 2);
+        assert_row_report(&final_message, &j, "Approved", 3);
         assert!(
             final_message.contains("Approved") && final_message.contains("provider-search-3"),
             "actual owner final message: {final_message}"
@@ -945,11 +1085,11 @@ async fn supervisor_write_parallel_occurrences_cannot_borrow_a_decision() {
     reviews.sort_by_key(|(r, _)| r.resource.clone());
     let (control, control_code) = reviews
         .iter()
-        .find(|(r, _)| r.resource.as_ref().unwrap().contains("recControl"))
+        .find(|(r, _)| r.resource.as_ref().unwrap().contains(&j.script.control))
         .unwrap();
     let (target, target_code) = reviews
         .iter()
-        .find(|(r, _)| r.resource.as_ref().unwrap().contains("recTarget"))
+        .find(|(r, _)| r.resource.as_ref().unwrap().contains(&j.script.selected))
         .unwrap();
     assert_ne!(control.id, target.id);
     assert_ne!(control_code, target_code);
@@ -989,7 +1129,8 @@ async fn supervisor_write_parallel_occurrences_cannot_borrow_a_decision() {
         .await
         .unwrap()
         .unwrap();
-    assert!(owner_text(&final_text).contains("provider-search-3"));
+    assert_row_report(&owner_text(&final_text), &j, "Pending", 2);
+    assert_row_report(&owner_text(&final_text), &j, "Approved", 3);
     {
         let ledger = j.ledger.lock().unwrap();
         assert_eq!(ledger.writes.len(), 1);
@@ -1063,20 +1204,20 @@ async fn supervisor_write_signed_feishu_relay_returns_list_review_and_verified_r
         .unwrap();
     let messages = direct_texts(&j).await;
     assert!(
-        messages.iter().any(|text| text.contains("recTarget")
+        messages.iter().any(|text| text.contains(&j.script.selected)
             && text.contains("Pending")
             && text.contains("provider-search-1")),
         "actual DM list: {messages:?}"
     );
+    assert!(messages.iter().any(|text| text.contains(&format!(
+        "record {}: Status = Pending; independent observation provider-search-1:{}.",
+        j.script.selected, j.script.selected
+    ))));
     assert!(j.ledger.lock().unwrap().writes.is_empty());
     j.stage.store(1, Ordering::SeqCst);
-    direct_message(
-        &j,
-        "Choose Base bascnLedger table tblLedger record recTarget: Status Pending -> Approved",
-        "ws7-direct-write",
-    )
-    .await
-    .unwrap();
+    direct_message(&j, &j.script.selection(), "ws7-direct-write")
+        .await
+        .unwrap();
     let code = delegation_code(direct_texts(&j).await.last().unwrap());
     let completed = direct_message(
         &j,
@@ -1109,11 +1250,17 @@ async fn supervisor_write_signed_feishu_relay_returns_list_review_and_verified_r
     completed.await.unwrap();
     let messages = direct_texts(&j).await;
     assert!(
-        messages.iter().any(|text| text.contains("recTarget")
+        messages.iter().any(|text| text.contains(&j.script.selected)
             && text.contains("Approved")
             && text.contains("provider-search-3")),
         "actual DM result: {messages:?}"
     );
+    let report = messages
+        .iter()
+        .find(|text| text.contains("provider-search-3"))
+        .unwrap();
+    assert_row_report(report, &j, "Pending", 2);
+    assert_row_report(report, &j, "Approved", 3);
     direct_message(
         &j,
         &format!("yes write-{write_code}"),
@@ -1178,6 +1325,501 @@ async fn supervisor_write_review_respects_a_configured_timeout_below_eighty_seco
         .remove(&j.channel.channel_bot_id);
 }
 
+#[tokio::test]
+async fn supervisor_write_equivalent_http_and_mcp_updates_share_one_send_fence() {
+    for proxy in [true, false] {
+        let j = Box::pin(setup_journey("api-feishu", proxy)).await;
+        let result = start(&j, 3).await;
+        let (first, code) = wait_review(&j).await;
+        assert!(
+            body_text(owner(&j, &format!("yes write-{code}"), "ws7-equivalent-first").await)
+                .await
+                .contains("Write approval saved")
+        );
+        let (second, code) = wait_review(&j).await;
+        assert_ne!(first.id, second.id);
+        let first_binding = first.supervisor_write.as_ref().unwrap();
+        let second_binding = second.supervisor_write.as_ref().unwrap();
+        assert_eq!(
+            first_binding.specialist_turn,
+            second_binding.specialist_turn
+        );
+        assert_ne!(first_binding.body_digest, second_binding.body_digest);
+        assert_eq!(first_binding.effect_digest, second_binding.effect_digest);
+        assert!(
+            body_text(owner(&j, &format!("yes write-{code}"), "ws7-equivalent-second").await)
+                .await
+                .contains("Write approval saved")
+        );
+        let report = owner_text(
+            &tokio::time::timeout(Duration::from_secs(25), result)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert_row_report(&report, &j, "Pending", 2);
+        assert_row_report(&report, &j, "Approved", 3);
+        let evidence = j.observed.lock().await;
+        let written = &evidence.iter().find(|row| row["stage"] == "write").unwrap()["result"];
+        if proxy {
+            assert_eq!(written[1]["status"], 403);
+        } else {
+            assert_eq!(written[1]["result"]["isError"], true);
+        }
+        drop(evidence);
+        let ledger = j.ledger.lock().unwrap();
+        assert_eq!(ledger.writes.len(), 1);
+        assert_eq!(ledger.writes[0].0, j.script.selected);
+        assert_eq!(ledger.target, "Approved");
+        assert_eq!(ledger.control, "Untouched");
+        assert_eq!(ledger.reads, ["Pending", "Pending", "Approved"]);
+        drop(ledger);
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&j.channel.channel_bot_id);
+    }
+}
+
+async fn owner_history(j: &Journey, conversation: &str) -> Value {
+    let Json(history) = crate::handlers::assistant_nyxagent::history(
+        State(j.state.clone()),
+        crate::test_utils::test_auth_user(OWNER),
+        Path(conversation.into()),
+        axum::extract::Query(Default::default()),
+    )
+    .await
+    .unwrap();
+    serde_json::to_value(history).unwrap()
+}
+
+async fn wait_idle(j: &Journey, conversation: &str) {
+    tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            if engine::get(&j.state.db, OWNER, conversation)
+                .await
+                .unwrap()
+                .active_turn
+                .is_none()
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("supervisor must settle before specialist release");
+    let history = owner_history(j, conversation).await;
+    let turn = history["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "assistant")
+        .unwrap()["turn_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    j.settlements.lock().await.wait(&turn).await;
+}
+
+async fn wait_owner_report(j: &Journey, conversation: &str, marker: &str) -> String {
+    tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            let history = owner_history(j, conversation).await;
+            if let Some(message) = history["messages"].as_array().unwrap().iter().find(|m| {
+                m["role"] == "assistant"
+                    && m["text"].as_str().is_some_and(|text| text.contains(marker))
+            }) {
+                return message["text"].as_str().unwrap().to_owned();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("normal team event must produce an owner-visible report")
+}
+
+async fn telegram_texts(j: &Journey) -> Vec<String> {
+    j.chat
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path().ends_with("/sendMessage"))
+        .map(|request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(
+                body["chat_id"], "123",
+                "owner delivery must stay in its verified DM"
+            );
+            body["text"].as_str().unwrap().to_owned()
+        })
+        .collect()
+}
+
+async fn wait_dm_report(j: &Journey, marker: &str) -> String {
+    tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            if let Some(text) = telegram_texts(j)
+                .await
+                .into_iter()
+                .find(|text| text.contains(marker))
+            {
+                return text;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("normal team event must deliver its result to the owner DM")
+}
+
+async fn web_turn(
+    j: &Journey,
+    actor: &str,
+    conversation: Option<&str>,
+    agent: Option<&str>,
+) -> AppResult<Response> {
+    let mut request=axum::http::Request::builder().method("POST").uri("/api/v1/assistant/nyxagent/turns")
+        .body(Body::from(json!({"text":"Continue this conversation in the app.","conversation_id":conversation,"agent_id":agent}).to_string())).unwrap();
+    request.extensions_mut().insert(BillingRoutePolicy::Metered(
+        crate::services::billing::BillingIngress::Proxy,
+    ));
+    Box::pin(crate::handlers::assistant_nyxagent::turns(
+        State(j.state.clone()),
+        crate::test_utils::test_auth_user(actor),
+        request,
+    ))
+    .await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DelayedRoute {
+    OriginalDm,
+    SameMainWeb,
+    OtherThread,
+    DifferentActor,
+    UntrustedActivity,
+    MissingResult,
+    MismatchedResult,
+}
+
+#[tokio::test]
+async fn supervisor_write_delayed_settlement_respects_owner_destination_and_frozen_review() {
+    for route in [
+        DelayedRoute::OriginalDm,
+        DelayedRoute::SameMainWeb,
+        DelayedRoute::OtherThread,
+        DelayedRoute::DifferentActor,
+        DelayedRoute::UntrustedActivity,
+        DelayedRoute::MissingResult,
+        DelayedRoute::MismatchedResult,
+    ] {
+        let j = Box::pin(setup_journey("api-feishu-bot", false)).await;
+        j.script.delayed.store(true, Ordering::SeqCst);
+        let listing = assign_from_sent_card(
+            &j,
+            "Ask accountant for today's pending ledger rows",
+            "ws7-delayed-list",
+        )
+        .await;
+        let waiting = owner_text(
+            &tokio::time::timeout(Duration::from_secs(25), listing)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(waiting.contains("still working") && !waiting.contains("provider-search"));
+        let thread = j
+            .state
+            .db
+            .collection::<NyxbotThread>(THREADS)
+            .find_one(doc! {"channel_id":&j.channel.id,"partition":PARTITION})
+            .await
+            .unwrap()
+            .unwrap();
+        let conversation = thread.conversation_id.unwrap();
+        wait_idle(&j, &conversation).await;
+        assert!(
+            !j.observed
+                .lock()
+                .await
+                .iter()
+                .any(|row| row["stage"] == "supervisor_wait")
+        );
+        j.script.release.add_permits(1);
+        let list = wait_dm_report(&j, "provider-search-1").await;
+        assert_row_report(&list, &j, "Pending", 1);
+        assert!(list.contains(&format!("record {}: Status = Untouched", j.script.control)));
+        wait_idle(&j, &conversation).await;
+        j.stage.store(1, Ordering::SeqCst);
+        let writing = assign_from_sent_card(&j, &j.script.selection(), "ws7-delayed-write").await;
+        let waiting = owner_text(
+            &tokio::time::timeout(Duration::from_secs(25), writing)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert!(waiting.contains("still working") && !waiting.contains("provider-search-3"));
+        wait_idle(&j, &conversation).await;
+        let (review, code) = wait_review(&j).await;
+        let source =
+            serde_json::to_value(&review.supervisor_write.as_ref().unwrap().source).unwrap();
+        assert_eq!(
+            review
+                .supervisor_write
+                .as_ref()
+                .unwrap()
+                .source
+                .channel
+                .conversation_id,
+            conversation
+        );
+        let home = engine::get(&j.state.db, OWNER, &conversation)
+            .await
+            .unwrap();
+        match route {
+            DelayedRoute::OriginalDm => {}
+            DelayedRoute::MissingResult => {
+                j.script.result_fault.store(1, Ordering::SeqCst);
+            }
+            DelayedRoute::MismatchedResult => {
+                j.script.result_fault.store(2, Ordering::SeqCst);
+            }
+            DelayedRoute::SameMainWeb => {
+                let response = web_turn(&j, OWNER, Some(&conversation), None)
+                    .await
+                    .unwrap();
+                assert!(
+                    body_text(response)
+                        .await
+                        .contains("I will continue this thread in the app")
+                );
+                wait_idle(&j, &conversation).await;
+            }
+            DelayedRoute::OtherThread => {
+                let response = web_turn(&j, OWNER, None, home.agent_id.as_deref())
+                    .await
+                    .unwrap();
+                assert_ne!(
+                    response.headers()["x-nyxid-conversation-id"]
+                        .to_str()
+                        .unwrap(),
+                    conversation
+                );
+                assert!(
+                    body_text(response)
+                        .await
+                        .contains("I will continue this thread in the app")
+                );
+            }
+            DelayedRoute::DifferentActor => {
+                let other = "87654321-4321-4321-8321-1234567890ab";
+                let result = web_turn(&j, other, Some(&conversation), None).await;
+                assert!(matches!(
+                    result,
+                    Err(AppError::NotFound(_)) | Err(AppError::Forbidden(_))
+                ));
+                let mut input = event(&format!("yes write-{code}"), "8", "ws7-delayed-other-actor");
+                input["event_context"]["activity"]["conversation"]["id"] = json!("123");
+                let _ =
+                    body_text(respond(&j.state, &j.key, &input, "ws7-delayed-other-actor").await)
+                        .await;
+            }
+            DelayedRoute::UntrustedActivity => {
+                let mut input = event(&format!("yes write-{code}"), "7", "ws7-delayed-forwarded");
+                input["event_context"]["activity"]["telegram_input"]["original"] = json!(false);
+                input["event_context"]["activity"]["conversation"]["id"] = json!("123");
+                let _ = body_text(respond(&j.state, &j.key, &input, "ws7-delayed-forwarded").await)
+                    .await;
+            }
+        }
+        let current = engine::get(&j.state.db, OWNER, &conversation)
+            .await
+            .unwrap();
+        assert_eq!(
+            current.reply_channel.is_none(),
+            route == DelayedRoute::SameMainWeb
+        );
+        assert!(j.ledger.lock().unwrap().writes.is_empty());
+        let decision = owner_text(
+            &body_text(owner(&j, &format!("yes write-{code}"), "ws7-delayed-decision").await).await,
+        );
+        assert!(decision.contains("Write approval saved"), "{decision}");
+        let replay =
+            body_text(owner(&j, &format!("yes write-{code}"), "ws7-delayed-decision").await).await;
+        assert!(!replay.is_empty());
+        let stored = j
+            .state
+            .db
+            .collection::<ApprovalRequest>("approval_requests")
+            .find_one(doc! {"_id":&review.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&stored.supervisor_write.as_ref().unwrap().source).unwrap(),
+            source
+        );
+        assert!(
+            stored
+                .supervisor_write
+                .as_ref()
+                .unwrap()
+                .dm_decision_receipt
+                .is_some()
+        );
+        assert_eq!(
+            engine::get(&j.state.db, OWNER, &conversation)
+                .await
+                .unwrap()
+                .reply_channel
+                .is_none(),
+            route == DelayedRoute::SameMainWeb,
+            "deciding the frozen DM review must not change the generic result destination"
+        );
+        j.script.release.add_permits(1);
+        let fault = matches!(
+            route,
+            DelayedRoute::MissingResult | DelayedRoute::MismatchedResult
+        );
+        let marker = if fault {
+            NO_CONFIRMATION.into()
+        } else {
+            format!("provider-search-3:{}", j.script.selected)
+        };
+        let report = wait_owner_report(&j, &conversation, &marker).await;
+        if fault {
+            assert_eq!(report, NO_CONFIRMATION);
+        } else {
+            assert_row_report(&report, &j, "Pending", 2);
+            assert_row_report(&report, &j, "Approved", 3);
+        }
+        wait_idle(&j, &conversation).await;
+        let evidence = j.observed.lock().await;
+        let input_marker = match route {
+            DelayedRoute::MissingResult => "After: Independent observation unavailable".into(),
+            DelayedRoute::MismatchedResult => format!("provider-search-3:{}", j.script.control),
+            _ => marker.clone(),
+        };
+        let events = evidence
+            .iter()
+            .filter(|row| {
+                row["stage"] == "supervisor_event"
+                    && row["input"]
+                        .as_str()
+                        .is_some_and(|input| input.contains(&input_marker))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events.len(),
+            1,
+            "one normal wake consumes the specialist result"
+        );
+        assert_eq!(events[0]["conversation_id"], conversation);
+        assert!(
+            events[0]["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|event| event["kind"] == "subagent_settled"
+                    && event["id"] == review.supervisor_write.as_ref().unwrap().specialist_turn
+                    && event["agent_id"]
+                        == review.supervisor_write.as_ref().unwrap().specialist_agent)
+        );
+        let event_turn = events[0]["turn_id"].as_str().unwrap().to_owned();
+        drop(evidence);
+        j.settlements.lock().await.wait(&event_turn).await;
+        if route == DelayedRoute::SameMainWeb {
+            assert!(
+                !telegram_texts(&j)
+                    .await
+                    .iter()
+                    .any(|text| text.contains(&marker)),
+                "generic delayed report follows the explicit same-thread web switch"
+            );
+        } else {
+            let text = wait_dm_report(&j, &marker).await;
+            if fault {
+                assert_eq!(text, NO_CONFIRMATION);
+            } else {
+                assert_row_report(&text, &j, "Approved", 3);
+            }
+        }
+
+        let history = owner_history(&j, &conversation).await;
+        assert!(
+            history["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["turn_id"] == event_turn
+                    && message["role"] == "assistant"
+                    && message["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains(&marker)))
+        );
+        {
+            let ledger = j.ledger.lock().unwrap();
+            assert_eq!(ledger.writes.len(), 1);
+            assert_eq!(ledger.writes[0].0, j.script.selected);
+            assert_eq!(ledger.target, "Approved");
+            assert_eq!(ledger.control, "Untouched");
+            assert_eq!(ledger.reads, ["Pending", "Pending", "Approved"]);
+        }
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&j.channel.channel_bot_id);
+    }
+}
+
+#[tokio::test]
+async fn supervisor_write_missing_or_mismatched_product_result_never_confirms_final_value() {
+    for fault in [1, 2] {
+        let j = Box::pin(setup_journey("api-feishu", false)).await;
+        // The initial list must really arrive before the owner selects a row.
+        let result = start(&j, 1).await;
+        let (review, code) = wait_review(&j).await;
+        j.script.result_fault.store(fault, Ordering::SeqCst);
+        let _ =
+            body_text(owner(&j, &format!("yes write-{code}"), "ws7-fault-decision").await).await;
+        let response = tokio::time::timeout(Duration::from_secs(25), result)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner_text(&response), NO_CONFIRMATION);
+        let evidence = j.observed.lock().await;
+        let waited = evidence
+            .iter()
+            .rev()
+            .find(|row| row["stage"] == "supervisor_wait")
+            .unwrap();
+        let result = tool_value(&waited["result"]).unwrap();
+        let reply = result["settled"][0]["reply"]["text"].as_str().unwrap();
+        assert_eq!(
+            checked_report(Some(reply), &j.script.selected),
+            NO_CONFIRMATION
+        );
+        assert_eq!(
+            result["settled"][0]["id"],
+            review.supervisor_write.as_ref().unwrap().specialist_agent
+        );
+        drop(evidence);
+        let ledger = j.ledger.lock().unwrap();
+        assert_eq!(ledger.writes.len(), 1);
+        assert_eq!(ledger.target, "Approved");
+        assert_eq!(ledger.control, "Untouched");
+        assert_eq!(ledger.reads, ["Pending", "Pending", "Approved"]);
+        drop(ledger);
+        crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+            .lock()
+            .unwrap()
+            .remove(&j.channel.channel_bot_id);
+    }
+}
+
 async fn native_owner(j: &Journey, text: &str, id: &str) -> Response {
     respond(
         &j.state,
@@ -1211,13 +1853,15 @@ async fn supervisor_write_native_new_reply_event_decides_original_write_and_pres
     let list =
         owner_text(&body_text(native_owner(&j, &format!("yes {first_code}"), "802").await).await);
     assert!(
-        list.contains("recTarget")
+        list.contains(&j.script.selected)
             && list.contains("Pending")
             && list.contains("provider-search-1"),
         "native owner list: {list}"
     );
+    assert_row_report(&list, &j, "Pending", 1);
     j.stage.store(1, Ordering::SeqCst);
-    let assignment=owner_text(&body_text(native_owner(&j,"Choose Base bascnLedger table tblLedger record recTarget: Status Pending -> Approved","803").await).await);
+    let assignment =
+        owner_text(&body_text(native_owner(&j, &j.script.selection(), "803").await).await);
     let code = delegation_code(&assignment);
     let response = native_owner(&j, &format!("yes {code}"), "804").await;
     let result = tokio::spawn(body_text(response));
@@ -1291,6 +1935,8 @@ async fn supervisor_write_native_new_reply_event_decides_original_write_and_pres
         final_text.contains("Approved") && final_text.contains("provider-search-3"),
         "native owner result: {final_text}"
     );
+    assert_row_report(&final_text, &j, "Pending", 2);
+    assert_row_report(&final_text, &j, "Approved", 3);
     {
         let ledger = j.ledger.lock().unwrap();
         assert_eq!(ledger.writes.len(), 1);

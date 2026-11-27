@@ -212,7 +212,18 @@ impl<'de> serde::Deserialize<'de> for Unique {
                     if values.contains_key(&key) {
                         return Err(serde::de::Error::custom("duplicate field"));
                     }
-                    values.insert(key, map.next_value::<Unique>()?.0);
+                    let raw = map.next_value::<Box<serde_json::value::RawValue>>()?;
+                    let parsed = serde_json::from_str::<Unique>(raw.get())
+                        .map_err(serde::de::Error::custom)?
+                        .0;
+                    if let Value::Number(number) = &parsed
+                        && canonical_decimal(raw.get()) != canonical_decimal(&number.to_string())
+                    {
+                        return Err(serde::de::Error::custom(
+                            "number cannot be reviewed exactly",
+                        ));
+                    }
+                    values.insert(key, parsed);
                 }
                 Ok(Unique(Value::Object(values)))
             }
@@ -243,8 +254,72 @@ impl<'de> serde::Deserialize<'de> for Unique {
 
 pub(crate) struct Effect {
     body_digest: String,
+    fields_digest: String,
     review: String,
     path: String,
+}
+
+/// Apply the same caller admission and default layers as HTTP egress. Only
+/// unambiguous JSON media headers may accompany this bounded review adapter.
+pub(crate) fn http_headers_allow_review(
+    headers: &http::HeaderMap,
+    defaults: &[&[crate::models::default_request_header::ResolvedDefaultRequestHeader]],
+) -> bool {
+    let forwarded = super::proxy_service::collect_forward_headers_with_defaults(headers, defaults);
+    if forwarded
+        .iter()
+        .any(|(name, _)| !matches!(name.as_str(), "content-type" | "accept"))
+        || ["content-type", "accept"]
+            .iter()
+            .any(|name| headers.get_all(*name).iter().count() > 1)
+    {
+        return false;
+    }
+    let effective = crate::models::default_request_header::merge_into_header_list(
+        crate::models::default_request_header::SecretHeaders::from(forwarded),
+        defaults,
+    );
+    let media = |name: &str| {
+        effective
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    };
+    let json = media("content-type")
+        .and_then(|value| value.parse::<mime::Mime>().ok())
+        .is_some_and(|kind| {
+            kind.type_() == mime::APPLICATION
+                && kind.subtype() == mime::JSON
+                && kind.params().count() <= 1
+                && kind.params().all(|(name, value)| {
+                    name == mime::CHARSET && value.as_str().eq_ignore_ascii_case("utf-8")
+                })
+        });
+    json && media("accept").is_none_or(|value| value.eq_ignore_ascii_case("application/json"))
+}
+
+fn canonical_decimal(text: &str) -> Option<String> {
+    let text = text.trim();
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((n, e)) => (n, e.parse::<i32>().ok()?),
+        None => (text, 0_i32),
+    };
+    let negative = mantissa.starts_with('-');
+    let mantissa = mantissa.trim_start_matches('-');
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return Some("0".into());
+    }
+    let significant = digits.trim_end_matches('0');
+    let exponent = exponent
+        .checked_sub(fraction.len() as i32)?
+        .checked_add((digits.len() - significant.len()) as i32)?;
+    Some(format!(
+        "{}{significant}e{exponent}",
+        if negative { "-" } else { "" }
+    ))
 }
 /// Both proxy and catalog MCP supply final prepared bytes here, never raw tool arguments.
 pub(crate) fn effect(
@@ -282,6 +357,9 @@ pub(crate) fn effect(
 
 fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
     let parts: Vec<_> = path.split('/').collect();
+    let ["", "bitable", "v1", "apps", _, "tables", _, "records", _] = parts.as_slice() else {
+        return None;
+    };
     let ids = [parts[4], parts[6], parts[8]];
     if ids.iter().any(|id| {
         id.len() > 64
@@ -325,6 +403,29 @@ fn effect_fields(path: &str, body: &[u8]) -> Option<Effect> {
     }
     Some(Effect {
         body_digest: fingerprint(b"supervisor-body-v1", body).ok()?,
+        fields_digest: fingerprint(
+            b"supervisor-fields-v1",
+            &serde_json::to_vec(&(
+                path,
+                fields
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name,
+                            match value {
+                                Value::Number(number) => serde_json::json!([
+                                    "number",
+                                    canonical_decimal(&number.to_string())
+                                ]),
+                                value => serde_json::json!(["value", value]),
+                            },
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            ))
+            .ok()?,
+        )
+        .ok()?,
         review,
         path: path.into(),
     })
@@ -397,6 +498,7 @@ pub(crate) async fn prepare(
         authority: authority(db, owner, connection, &chat.api_key_id, catalog).await?,
         url_digest: fingerprint(b"supervisor-url-v1", url.as_bytes())?,
         body_digest: effect.body_digest,
+        effect_digest: Some(effect.fields_digest),
         code_digest: fingerprint(b"supervisor-code-v1", code.as_bytes())?,
         review_confirmed: false,
         dispatching: false,
@@ -701,17 +803,25 @@ impl Permit {
         {
             return Err(refused());
         }
-        let context = (db.clone(), self.request.clone());
-        super::transaction_service::run_db_only(db,&context,|tx,(db,request)| {
+        let effect = fingerprint(
+            b"supervisor-sent-effect-v2",
+            &serde_json::to_vec(&(
+                &b.connection,
+                &b.url_digest,
+                b.effect_digest.as_ref().ok_or_else(refused)?,
+            ))
+            .map_err(|_| refused())?,
+        )?;
+        let context = (db.clone(), self.request.clone(), effect);
+        super::transaction_service::run_db_only(db,&context,|tx,(db,request,effect)| {
             Box::pin(async move {
                 let b=request.supervisor_write.as_deref().ok_or_else(refused)?;
                 fence_in_session(db,tx,b).await?;
-                let effect=fingerprint(b"supervisor-sent-effect-v1",format!("{}:{}:{}",b.connection,b.url_digest,b.body_digest).as_bytes())?;
                 if db.collection::<Document>("assistant_conversations").update_one(doc! {
                     "_id":&b.specialist_conversation,"user_id":&request.user_id,
                     "active_turn.turn_id":&b.specialist_turn,"active_turn.stop_requested":false,
-                    "active_turn.supervisor_sends":{"$ne":&effect}
-                },doc! {"$push":{"active_turn.supervisor_sends":effect}}).session(&mut *tx).await?.modified_count != 1 { return Err(refused()); }
+                    "active_turn.supervisor_sends":{"$ne":effect.as_str()}
+                },doc! {"$push":{"active_turn.supervisor_sends":effect.as_str()}}).session(&mut *tx).await?.modified_count != 1 { return Err(refused()); }
                 if db.collection::<Document>("approval_requests").update_one(doc! {
                     "_id":&request.id,"status":"approved","expires_at":{"$gt":bson::DateTime::now()},
                     "decision_channel":"supervisor_owner_dm",
@@ -742,6 +852,115 @@ impl Permit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supervisor_write_http_headers_use_egress_admission_and_json_media() {
+        use crate::models::default_request_header::ResolvedDefaultRequestHeader;
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "content-type",
+            "application/json; charset=utf-8".parse().unwrap(),
+        );
+        headers.insert("accept", "application/json".parse().unwrap());
+        headers.insert("x-api-key", "not-forwarded".parse().unwrap());
+        assert!(http_headers_allow_review(&headers, &[]));
+        let catalog = [ResolvedDefaultRequestHeader {
+            name: "X-Instance".into(),
+            value: "trusted".to_owned().into(),
+            overridable: true,
+            sensitive: false,
+        }];
+        headers.insert("x-instance", "caller".parse().unwrap());
+        assert!(http_headers_allow_review(&headers, &[]));
+        assert!(!http_headers_allow_review(&headers, &[&catalog]));
+        assert!(!http_headers_allow_review(&headers, &[&[], &catalog]));
+        headers.remove("x-instance");
+        for (name, value) in [
+            ("content-type", "text/plain"),
+            ("content-type", "application/json; profile=other"),
+            ("accept", "text/html"),
+            ("accept", "application/json, text/html"),
+        ] {
+            let mut invalid = headers.clone();
+            invalid.insert(http::HeaderName::from_static(name), value.parse().unwrap());
+            assert!(!http_headers_allow_review(&invalid, &[]), "{name}: {value}");
+        }
+        let mut duplicate = headers.clone();
+        duplicate.append("content-type", "application/json".parse().unwrap());
+        assert!(!http_headers_allow_review(&duplicate, &[]));
+        headers.remove("content-type");
+        assert!(!http_headers_allow_review(&headers, &[]));
+        let defaults = [ResolvedDefaultRequestHeader {
+            name: "Content-Type".into(),
+            value: "application/json".to_owned().into(),
+            overridable: false,
+            sensitive: false,
+        }];
+        assert!(http_headers_allow_review(&headers, &[&defaults]));
+        headers.insert("content-type", "text/plain".parse().unwrap());
+        assert!(http_headers_allow_review(&headers, &[&defaults]));
+        let bad = [ResolvedDefaultRequestHeader {
+            value: "text/plain".to_owned().into(),
+            ..defaults[0].clone()
+        }];
+        assert!(!http_headers_allow_review(&headers, &[&bad]));
+    }
+
+    #[test]
+    fn supervisor_write_logical_effect_is_independent_of_json_encoding() {
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let path = "/bitable/v1/apps/base/tables/table/records/record";
+        let first =
+            effect_fields(path, br#"{"fields":{"Status":"Approved","Amount":12}}"#).unwrap();
+        for body in [
+            br#"{ "fields": { "Amount": 12.0, "Status": "Approved" } }"#.as_slice(),
+            br#"{"fields":{"Amount":1.2e1,"Status":"\u0041pproved"}}"#,
+        ] {
+            let next = effect_fields(path, body).unwrap();
+            assert_ne!(
+                first.body_digest, next.body_digest,
+                "an occurrence still binds exact bytes"
+            );
+            assert_eq!(first.fields_digest, next.fields_digest);
+        }
+        for (other, body) in [
+            (
+                path,
+                br#"{"fields":{"Status":"Approved","Amount":13}}"#.as_slice(),
+            ),
+            (
+                "/bitable/v1/apps/base/tables/table/records/other",
+                br#"{"fields":{"Status":"Approved","Amount":12}}"#,
+            ),
+        ] {
+            assert_ne!(
+                first.fields_digest,
+                effect_fields(other, body).unwrap().fields_digest
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_write_numeric_review_preserves_decimal_value_or_falls_back() {
+        crate::test_utils::init_test_audit_chain_hmac_key();
+        let path = "/bitable/v1/apps/base/tables/table/records/record";
+        for number in ["0.1", "12.50", "1.25e2", "9007199254740993", "-0.01"] {
+            let body = format!(r#"{{"fields":{{"Amount":{number}}}}}"#);
+            assert!(effect_fields(path, body.as_bytes()).is_some(), "{number}");
+        }
+        for number in [
+            "9007199254740993.0",
+            "0.10000000000000000001",
+            "12345678901234567890123456789",
+            "1e-9999",
+        ] {
+            let body = format!(r#"{{"fields":{{"Amount":{number}}}}}"#);
+            assert!(
+                effect_fields(path, body.as_bytes()).is_none(),
+                "{number} must not display a rounded value"
+            );
+        }
+    }
 
     #[test]
     fn supervisor_write_accepts_the_real_oauth_and_bot_catalog_operations() {

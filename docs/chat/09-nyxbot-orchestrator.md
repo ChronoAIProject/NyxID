@@ -268,6 +268,12 @@ not been verified, and asks for a fresh read after writing. Nested, oversized,
 credential-shaped or otherwise unsafe inputs keep the existing review route;
 raw arguments and credentials never enter the chat review. The confirmation
 code appears only after the complete review. There is no truncated review.
+HTTP eligibility uses the same catalog and connection default-header layers as
+egress. Admitted custom caller headers, duplicate media headers, and effective
+media types other than JSON keep the ordinary approval route. JSON content type
+accepts only an optional UTF-8 charset; an explicit Accept header must request
+JSON. Numeric tokens whose decimal value would change during parsing also keep
+the ordinary route, so the review never displays a rounded ledger amount.
 
 The bot connectors' published paths include `/open-apis`; OAuth connectors'
 paths start at `/bitable`. The adapter preserves the exact prepared destination.
@@ -302,6 +308,18 @@ agents do not invent one to verify the write. An uncertain write requires
 observation before any newly requested write. Same-turn retries of the same
 effect cannot acquire a second provider send, while different prepared writes
 retain distinct reviews and codes.
+Each occurrence binds the exact URL and body bytes. The same-turn send fence
+also binds a canonical catalog-relative row and scalar-field effect, independent
+of JSON whitespace, field order, and equivalent decimal spelling. This fence
+uses the prepared catalog path without reparsing connection base prefixes.
+
+The supervisor reads specialist results through its team tools or the normal
+settlement event delivered to its model. A delayed generic result returns to the
+original private chat while it remains the main thread's destination. An owner
+message in that same NyxBot main thread in the web app switches subsequent generic
+results to the app. Activity in another thread, another actor's activity, and
+untrusted messages cannot make that switch. The exact write review and decision
+code remain bound to their original verified DM across an owner switch to web.
 
 ### Specialist skill permission decisions
 

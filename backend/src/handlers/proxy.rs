@@ -5554,7 +5554,6 @@ async fn execute_resolved_proxy_inner<'a>(
                 timeout_secs,
             )
             .await?;
-            let forwarded = proxy_service::collect_forward_headers_with_defaults(&all_headers, &[]);
             let supervisor_effect = if node_route.is_none()
                 && streaming_body.is_none()
                 && !pending.resolution.from_org_policy
@@ -5565,9 +5564,13 @@ async fn execute_resolved_proxy_inner<'a>(
                     path,
                     query.as_deref(),
                     &body_bytes,
-                    forwarded
-                        .iter()
-                        .any(|(name, _)| !matches!(name.as_str(), "content-type" | "accept")),
+                    !crate::services::supervisor_write::http_headers_allow_review(
+                        &all_headers,
+                        &[
+                            target.catalog_headers(),
+                            target.user_service_default_headers.as_slice(),
+                        ],
+                    ),
                 )
             } else {
                 None

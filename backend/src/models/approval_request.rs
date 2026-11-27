@@ -570,6 +570,8 @@ pub struct SupervisorWrite {
     pub authority: String,
     pub url_digest: String,
     pub body_digest: String,
+    #[serde(default)]
+    pub effect_digest: Option<String>,
     pub code_digest: String,
     pub review_confirmed: bool,
     pub dispatching: bool,

@@ -41,6 +41,10 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+#[path = "assistant_team_settlement_test_observer.rs"]
+pub(crate) mod settlement_test_observer;
+
 /// The owner identity NyxID uses for turns it starts itself (specialist
 /// work, wake-ups, channel messages): the same person a browser turn acts for.
 pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
@@ -572,6 +576,8 @@ pub(crate) async fn after_turn(
     }
     Box::pin(deliver_settled_channel_result(state, row, turn)).await;
     let _ = crate::services::assistant_invocation_service::hooks_done(&state.db, row).await;
+    #[cfg(test)]
+    settlement_test_observer::completed(&state.db, &turn.turn_id);
 }
 
 async fn deliver_settled_channel_result(
