@@ -1,3 +1,4 @@
+use super::record_field::authenticated::{LogicalKey, Slot};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -35,6 +36,31 @@ pub enum KeyVersionRetirementEvidence {
     OperatorUnverifiedInternalVersions,
 }
 
+/// A successful provider unwrap may identify the exact logical key it used.
+pub struct Unwrapped {
+    pub(super) dek: Zeroizing<Vec<u8>>,
+    pub(super) key: Option<(Slot, LogicalKey)>,
+}
+
+impl Unwrapped {
+    #[cfg(any(test, feature = "aws-kms"))]
+    pub(super) fn aws(dek: Zeroizing<Vec<u8>>, slot: Slot, arn: Option<String>) -> Self {
+        let key = arn.filter(|arn| matches!(arn.split(':').collect::<Vec<_>>().as_slice(),
+            ["arn", partition, "kms", region, account, key] if !partition.is_empty() && !region.is_empty() && !account.is_empty() && key.strip_prefix("key/").is_some_and(|id| !id.is_empty() && !id.contains('/'))))
+            .map(|arn| (slot, LogicalKey::Aws(arn)));
+        Self { dek, key }
+    }
+
+    #[cfg(any(test, feature = "gcp-kms"))]
+    pub(super) fn gcp(dek: Zeroizing<Vec<u8>>, slot: Slot, name: &str) -> Self {
+        let key = matches!(name.split('/').collect::<Vec<_>>().as_slice(),
+            ["projects", project, "locations", location, "keyRings", ring, "cryptoKeys", key]
+            if [project, location, ring, key].iter().all(|part| !part.is_empty()))
+        .then(|| (slot, LogicalKey::Gcp(name.to_owned())));
+        Self { dek, key }
+    }
+}
+
 /// Abstraction over KEK wrap/unwrap operations.
 ///
 /// Implementations provide the mechanism for protecting DEKs at rest.
@@ -56,6 +82,15 @@ pub trait KeyProvider: Send + Sync + std::fmt::Debug {
     /// Returns the plaintext DEK wrapped in [`Zeroizing`] so it is automatically
     /// scrubbed from memory when the caller drops it.
     async fn unwrap_dek(&self, wrapped: &WrappedKey) -> Result<Zeroizing<Vec<u8>>, AppError>;
+
+    /// Providers opt in to logical attribution. An ordinary successful unwrap
+    /// by an unrecognized provider still reads the data but supplies no key.
+    async fn unwrap_for_observation(&self, wrapped: &WrappedKey) -> Result<Unwrapped, AppError> {
+        Ok(Unwrapped {
+            dek: self.unwrap_dek(wrapped).await?,
+            key: None,
+        })
+    }
 
     /// Stable identifier stored in the header for the current (active) KEK.
     fn current_key_id(&self) -> u8;
