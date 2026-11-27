@@ -986,6 +986,7 @@ mod tests {
         telegram_new_tests as telegram,
     };
     use super::*;
+    use crate::services::platform_entry_native::tests::credentials::BotSecret;
 
     async fn renewal_then_revocation(replace: bool) {
         let f = support::distinct_fixture().await;
@@ -1644,12 +1645,13 @@ mod tests {
         manual.platform = "telegram".into();
         manual.platform_bot_id = "900".into();
         manual.credential_source = "user".into();
-        manual.bot_token_encrypted = f
-            .state
-            .encryption_keys
-            .encrypt(b"900:manual-test-token")
-            .await
-            .unwrap();
+        BotSecret::Token
+            .set(
+                &f.state.encryption_keys,
+                &mut manual,
+                "900:manual-test-token",
+            )
+            .await;
         let mut held = f.state.db.client().start_session().await.unwrap();
         held.start_transaction().await.unwrap();
         f.state

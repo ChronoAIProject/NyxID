@@ -876,19 +876,18 @@ async fn telegram_manager_channel_get_me_failure_persists_safe_status_and_verify
     credentials::delete(&state.db, &credential_descriptor())
         .await
         .unwrap();
+    let update = crate::services::platform_entry_native::tests::credentials::token_update(
+        &state.encryption_keys,
+        &channel.id,
+        &channel.user_id,
+        MANAGER,
+        doc! {"credential_source": "user"},
+    )
+    .await;
     state
         .db
         .collection::<ChannelBot>(BOTS)
-        .update_one(
-            doc! {"_id": &channel.id},
-            doc! {"$set": {
-                "credential_source": "user",
-                "bot_token_encrypted": bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: state.encryption_keys.encrypt(MANAGER.as_bytes()).await.unwrap(),
-                },
-            }},
-        )
+        .update_one(doc! {"_id": &channel.id}, update)
         .await
         .unwrap();
     let ordinary = bots::get_bot(&state.db, &channel.id).await.unwrap();
