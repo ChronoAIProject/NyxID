@@ -429,7 +429,7 @@ fn optional_client_secret(collection: &str, field: &str) -> bool {
             && field == "user_oauth_client_secret_encrypted"
 }
 
-fn validate_field_value(
+pub(super) fn validate_field_value(
     collection: &str,
     row: &bson::Document,
     field: &str,
