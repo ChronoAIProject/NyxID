@@ -11,6 +11,9 @@ overrides:
   '@expo/metro-config>postcss': ^8.5.18
 
 patchedDependencies:
+  expo-modules-core@55.0.21:
+    hash: 561d9a3637b11982aef3b97715080c9f4b8405b8f28ce8bc83263820f75b3126
+    path: patches/expo-modules-core@55.0.21.patch
   expo-secure-store@55.0.12:
     hash: 9a824651f128f49505c2a14504b5e336f2e4cd25f410e7e9b14a35b9b2e5040f
     path: patches/expo-secure-store@55.0.12.patch
@@ -6950,7 +6953,7 @@ snapshots:
       - supports-color
       - typescript
 
-  expo-modules-core@55.0.21(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0):
+  expo-modules-core@55.0.21(patch_hash=561d9a3637b11982aef3b97715080c9f4b8405b8f28ce8bc83263820f75b3126)(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0):
     dependencies:
       invariant: 2.2.4
       react: 19.2.0
@@ -7057,7 +7060,7 @@ snapshots:
       expo-font: 55.0.6(expo@55.0.12)(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
       expo-keep-awake: 55.0.6(expo@55.0.12)(react@19.2.0)
       expo-modules-autolinking: 55.0.15(typescript@5.9.3)
-      expo-modules-core: 55.0.21(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
+      expo-modules-core: 55.0.21(patch_hash=561d9a3637b11982aef3b97715080c9f4b8405b8f28ce8bc83263820f75b3126)(react-native@0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0))(react@19.2.0)
       pretty-format: 29.7.0
       react: 19.2.0
       react-native: 0.83.4(@babel/core@7.29.0)(@react-native/metro-config@0.85.0(@babel/core@7.29.0))(@types/react@19.2.14)(react@19.2.0)

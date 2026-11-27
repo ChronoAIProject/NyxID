@@ -37,6 +37,11 @@
   },
   "expo": {
     "autolinking": {
+      "apple": {
+        "buildFromSource": [
+          ".*"
+        ]
+      },
       "android": {
         "exclude": [
           "expo-dev-client",
@@ -132,6 +137,7 @@
       "@expo/metro-config>postcss": "^8.5.18"
     },
     "patchedDependencies": {
+      "expo-modules-core@55.0.21": "patches/expo-modules-core@55.0.21.patch",
       "expo-secure-store@55.0.12": "patches/expo-secure-store@55.0.12.patch",
       "query-string@7.1.3": "patches/query-string@7.1.3.patch"
     }
