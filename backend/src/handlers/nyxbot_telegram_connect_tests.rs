@@ -8,6 +8,11 @@ use std::sync::atomic::AtomicBool;
 type CreateRefusal = (u16, Value, Option<i64>);
 
 const CLIENT_SECRET: &str = "local-telegram-gateway-client";
+const BOT_TOKEN: &str = "123:local-telegram-connect";
+const WEBHOOK_SECRET: &str = "local-telegram-connect-webhook";
+
+#[path = "nyxbot_telegram_photo_tests.rs"]
+mod photo;
 
 #[derive(Clone)]
 pub(super) struct CreatorAuth {
@@ -237,7 +242,22 @@ async fn fixture(platform: &str) -> Fixture {
     if platform == "telegram-new" {
         bot.insert("credential_source", "platform");
     }
-    let bot: ChannelBot = bson::from_document(bot).unwrap();
+    bot.insert("webhook_secret_hash", sha256_hex(WEBHOOK_SECRET));
+    let mut bot: ChannelBot = bson::from_document(bot).unwrap();
+    bot.bot_token_encrypted = crate::crypto::record_field::encrypt(
+        &state.encryption_keys,
+        crate::models::channel_bot::COLLECTION_NAME,
+        &bot.id,
+        OWNER,
+        "bot_token_encrypted",
+        BOT_TOKEN.as_bytes(),
+    )
+    .await
+    .unwrap();
+    if state.encryption_keys.contextual_record_writes() {
+        bot.secret_context_versions
+            .insert("bot_token_encrypted".into(), 3);
+    }
     state
         .db
         .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
@@ -298,6 +318,22 @@ async fn provider_message(
     sender: i64,
     number: i64,
 ) -> String {
+    let (body, id) = provider_event(
+        f,
+        row,
+        json!({
+            "update_id":number,"message":{"message_id":number,"chat":{"id":sender,"type":"private"},
+            "from":{"id":sender,"is_bot":false},"text":text},
+        }),
+    )
+    .await;
+    let raw = decrypt_agent_key(&f.state, row).await.unwrap().unwrap();
+    let response = respond(&f.state, &raw, &body, &id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    body_text(response).await
+}
+
+async fn provider_event(f: &Fixture, row: &NyxbotChannel, update: Value) -> (Value, String) {
     let route = f
         .state
         .db
@@ -313,10 +349,18 @@ async fn provider_message(
         &f.state.token_exchange_cache,
     )
     .unwrap();
-    let inbound = adapter.parse_inbound(&serde_json::to_vec(&json!({
-        "update_id":number,"message":{"message_id":number,"chat":{"id":sender,"type":"private"},
-        "from":{"id":sender,"is_bot":false},"text":text},
-    })).unwrap()).await.unwrap().remove(0);
+    let raw = serde_json::to_vec(&update).unwrap();
+    let headers = HeaderMap::from_iter([(
+        "x-telegram-bot-api-secret-token".parse().unwrap(),
+        WEBHOOK_SECRET.parse().unwrap(),
+    )]);
+    adapter
+        .verify_webhook(&f.bot, None, &headers, &raw)
+        .await
+        .unwrap();
+    let mut inbound = adapter.parse_inbound(&raw).await.unwrap();
+    assert_eq!(inbound.len(), 1);
+    let inbound = inbound.remove(0);
     let id = Uuid::new_v4().to_string();
     let source = crate::services::channel_relay_service::store_inbound_message_with_id(
         &f.state.db,
@@ -331,16 +375,57 @@ async fn provider_message(
     .await
     .unwrap();
     assert_eq!(source.platform, f.bot.platform);
-    let raw = decrypt_agent_key(&f.state, row).await.unwrap().unwrap();
-    let mut body = event(text, &sender.to_string(), &id);
+    assert_eq!(source.original_message, Some(true));
+    let payload = crate::services::channel_relay_service::build_callback_payload(
+        &source,
+        &route,
+        &row.route_api_key_id,
+        "gateway",
+        &inbound,
+        None,
+        &f.state.config.base_url,
+    );
+    assert_eq!(payload.raw_platform_data.as_ref(), Some(&update));
+    let mut body = event(
+        inbound.text.as_deref().unwrap_or_default(),
+        &inbound.sender_platform_id,
+        &id,
+    );
     body["event_context"]["channel_id"] = json!(row.gateway_channel_id);
     let activity = &mut body["event_context"]["activity"];
     activity.as_object_mut().unwrap().remove("telegram_input");
     activity["source"]["route_id"] = json!(route.id);
-    activity["conversation"]["id"] = json!(sender.to_string());
-    let response = respond(&f.state, &raw, &body, &id).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    body_text(response).await
+    activity["conversation"]["id"] = json!(inbound.conversation_id);
+    if inbound.content_type == "image" {
+        assert_eq!(payload.content.content_type, "image");
+        assert_eq!(payload.content.attachments.len(), 1);
+        let own = update["message"]["photo"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert_eq!(source.attachments.len(), 1);
+        assert_eq!(
+            source.attachments[0].provider_ref,
+            own["file_id"].as_str().unwrap()
+        );
+        assert_eq!(
+            payload.content.attachments[0].url,
+            source.attachments[0].provider_ref
+        );
+        // CMAEG 9fd3537cb0a1: a relayed Telegram PhotoSize remains an image/photo,
+        // with a canonical activity platform and a relay attachment index.
+        activity["kind"]["attachments"] = json!([{
+            "kind":"image", "variant":"photo", "mime":"image/jpeg",
+            "reference":format!("telegram:{}", own["file_unique_id"].as_str().unwrap()),
+            "source":{"type":"nyxid_relay","index":0},
+            "width":own["width"], "height":own["height"], "size":own["file_size"],
+        }]);
+    } else {
+        assert_eq!(inbound.content_type, "text");
+        assert!(payload.content.attachments.is_empty());
+    }
+    (body, id)
 }
 
 #[test]
@@ -349,7 +434,7 @@ fn telegram_personal_specialist_connect_introspection_owner_link_and_turn() {
         "telegram_personal_specialist_connect_introspection_owner_link_and_turn",
         || async {
             for platform in ["telegram-new", "telegram"] {
-                let f = fixture(platform).await;
+                let mut f = fixture(platform).await;
                 let (row, link) = connect(&f.state, OWNER, None, &f.bot.id, &f.specialist)
                     .await
                     .unwrap();
@@ -436,10 +521,7 @@ fn telegram_personal_specialist_connect_introspection_owner_link_and_turn() {
                 let row = load_channel(&f.state, OWNER, &row.id).await.unwrap();
                 assert_eq!(row.owner_sender_ids, ["77"]);
                 assert!(row.link_code_hash.is_none());
-                let answer =
-                    provider_message(&f, &row, "who are you, local specialist check", 77, 3).await;
-                assert!(answer.contains("Here is your answer"), "{answer}");
-                assert_eq!(f.model_calls.lock().await.len(), 1);
+                photo::text_and_own_photo(&mut f, &row).await;
                 let saved = engine::get(&f.state.db, OWNER, &f.home.id).await.unwrap();
                 assert_eq!(saved.agent_id.as_deref(), Some(f.specialist.id.as_str()));
                 assert!(!saved.guest_turn);

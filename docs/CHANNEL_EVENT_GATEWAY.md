@@ -1968,7 +1968,17 @@ both request names at a UTF-8 boundary before create and full attachment update.
 Telegram relay issuers must be HTTPS origins. The local connect regression checks
 these nested constraints in addition to the management request schema, uses the
 registered gateway client's real introspection path, pairs the owner and executes
-a personal specialist turn for both `telegram-new` and `telegram`.
+a uniquely marked text turn followed by an own top-level Telegram photo for both
+`telegram-new` and `telegram`. Both turns use the selected personal specialist's
+saved home. The real adapter authenticates and parses each update; stored relay
+metadata supplies the file handle, and the photo activity uses CMAEG's
+`image`/`photo` shape with a canonical `telegram` source. With owner channel media
+enabled, the local model fixture reads the exact JPEG through its authenticated
+live thread key. Assertions bind both answers to the saved owner, specialist,
+event, turn and reply destination, and exact command replay starts no new turn.
+These local fixtures do not verify CMAEG media admission or Telegram delivery;
+own top-level media additionally requires the gateway's media setting described
+in [Telegram forwarding](TELEGRAM_NEW.md#telegram-forwarding-and-secure-pairing).
 
 HTTP 400 alone does not prove that a channel was never saved. An
 `invalid_request` with trimmed exact detail `nyxbot`, `unknown provider: nyxbot`
