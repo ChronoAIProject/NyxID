@@ -9,7 +9,13 @@ import {
   resolveAvatar,
   resolveProcess,
 } from "../../../lib/avatars/agentAvatars";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
 import { useAppLanguage } from "../../../i18n/LanguageProvider";
 import {
   ActivityIndicator,
@@ -44,7 +50,9 @@ import { fonts } from "../../../theme/designTokens";
 import { ChatComposerFrame } from "../ChatComposer";
 import { useNativeVoice } from "./useNativeVoice";
 import { useVoiceLevels } from "./useVoiceLevels";
+import { VoiceComposerAura } from "./VoiceComposerAura";
 import { VoiceMediaBridge } from "./VoiceMediaBridge";
+import type { VoiceAuraPhase } from "./voiceAuraState";
 import { withVoiceRequestDeadline } from "./voiceRequestDeadline";
 import {
   chooseVoiceOption,
@@ -907,6 +915,23 @@ function VoiceConversation({
   const showRecovery =
     !ending && (confirmingEnd || !!conflict || uncertain || checking);
   const showPreCall = !active && !showRecovery && !ending && !confirmingEnd;
+  // Use live audio gates and task state; retained captions cannot imply speech.
+  const auraPhase: VoiceAuraPhase =
+    !focused || !isConnected || terminal || ending || showRecovery || restarting
+      ? "resting"
+      : voice.starting
+        ? "connecting"
+        : !voice.connected
+          ? "resting"
+          : outputActive
+            ? "speaking"
+            : muted || session?.input_muted
+              ? "muted"
+              : running
+                ? "thinking"
+                : listening
+                  ? "listening"
+                  : "resting";
   return (
     <>
       {voice.media ? (
@@ -917,7 +942,12 @@ function VoiceConversation({
           origin={environment.origin}
         />
       ) : null}
-      <ChatComposerFrame style={styles.frame} bounce={false}>
+      <VoiceConversationFrame
+        phase={auraPhase}
+        input={levels.input}
+        output={levels.output}
+        reducedMotion={reducedMotion}
+      >
         {avatarsEnabled && agent ? (
           <VoiceRippleBanner
             config={resolveAvatar(agent)}
@@ -1500,7 +1530,7 @@ function VoiceConversation({
             </ScrollView>
           </View>
         ) : null}
-      </ChatComposerFrame>
+      </VoiceConversationFrame>
       {preferencesVisible && focused && voicePickerScope === selectionScope ? (
         <WorkspaceSelectionSheet
           key={selectionScope}
@@ -1601,6 +1631,20 @@ function Choice({
     </Pressable>
   );
 }
+/** Restore the original halo around the current controls and notices. */
+function VoiceConversationFrame({
+  children,
+  ...aura
+}: ComponentProps<typeof VoiceComposerAura>) {
+  return (
+    <VoiceComposerAura {...aura}>
+      <ChatComposerFrame style={styles.frame} bounce={false}>
+        {children}
+      </ChatComposerFrame>
+    </VoiceComposerAura>
+  );
+}
+
 function VoiceWave({
   input,
   output,
