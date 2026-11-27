@@ -21,6 +21,9 @@ pub struct AssistantCmaCreation {
     #[serde(default)]
     pub expected_workspace_id: Option<String>,
     pub submission_state: String,
+    /// This generation was settled from owner inventory without proof of non-creation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub released_by_inventory: bool,
     pub operation_id: Option<String>,
     pub cma_agent_id: Option<String>,
     #[serde(default)]
@@ -71,6 +74,7 @@ mod tests {
             sandbox_generation: 1,
             creates_sandbox: false,
             expected_workspace_id: None,
+            released_by_inventory: false,
             submission_state: "pending".into(),
             operation_id: None,
             cma_agent_id: None,
