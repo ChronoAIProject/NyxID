@@ -80,6 +80,19 @@ fn inference_defaults_and_legacy_binding_are_additive() {
     assert!(old.platform_key_pricing.is_none());
 }
 
+async fn set_catalog_credential(
+    keys: &crate::crypto::aes::EncryptionKeys,
+    service: &mut DownstreamService,
+    value: &[u8],
+) {
+    use crate::services::catalog_credential_record_service as catalog;
+    service.credential_encrypted =
+        catalog::encrypt(keys, &service.id, catalog::owner(service).unwrap(), value)
+            .await
+            .unwrap();
+    service.secret_context_versions = catalog::initial_versions(keys, true);
+}
+
 #[tokio::test]
 async fn platform_acl_checks_people_org_roles_activity_and_revocation() {
     let db = connect_transaction_test_database("platform_acl").await;
@@ -227,7 +240,7 @@ async fn seeded_provider_platform_binding_resolves_proxy_gateway_and_realtime() 
             .unwrap();
         assert_eq!(provider.provider_type, "api_key");
         service.platform_key = platform_service().platform_key;
-        service.credential_encrypted = enc.encrypt(b"test-platform-secret").await.unwrap();
+        set_catalog_credential(&enc, &mut service, b"test-platform-secret").await;
         db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
             .replace_one(doc! {"_id": &service.id}, &service)
             .await
@@ -434,7 +447,7 @@ async fn platform_auto_connections_reconcile_and_hosted_links_complete_once() {
     let other = owner(&db, UserType::Person).await;
     let enc = test_encryption_keys();
     let mut catalog = platform_service();
-    catalog.credential_encrypted = enc.encrypt(b"platform-secret").await.unwrap();
+    set_catalog_credential(&enc, &mut catalog, b"platform-secret").await;
     catalog.platform_key.as_mut().unwrap().audience = PlatformKeyAudience::Restricted;
     catalog.platform_key.as_mut().unwrap().allowed_owner_ids = vec![user.clone()];
     db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
@@ -600,11 +613,7 @@ async fn platform_key_http_llm_gateway_and_mcp_use_server_credential_and_live_ac
         .unwrap();
     catalog.base_url = format!("{}/v1", upstream.uri());
     catalog.platform_key = platform_service().platform_key;
-    catalog.credential_encrypted = state
-        .encryption_keys
-        .encrypt(b"platform-secret")
-        .await
-        .unwrap();
+    set_catalog_credential(&state.encryption_keys, &mut catalog, b"platform-secret").await;
     db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
         .replace_one(doc! {"_id":&catalog.id}, &catalog)
         .await
@@ -792,7 +801,7 @@ async fn org_auto_platform_rows_inherit_acl_and_agent_union_tracks_binding() {
         .await
         .unwrap();
     let mut service = platform_service();
-    service.credential_encrypted = enc.encrypt(b"platform-secret").await.unwrap();
+    set_catalog_credential(&enc, &mut service, b"platform-secret").await;
     service.platform_key.as_mut().unwrap().audience = PlatformKeyAudience::Restricted;
     service.platform_key.as_mut().unwrap().allowed_owner_ids = vec![org.clone()];
     db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
@@ -902,7 +911,7 @@ async fn public_platform_auto_connection_is_personal_only_and_reconciles_org_row
         .unwrap();
 
     let mut catalog = platform_service();
-    catalog.credential_encrypted = enc.encrypt(b"platform-secret").await.unwrap();
+    set_catalog_credential(&enc, &mut catalog, b"platform-secret").await;
     catalog.platform_key.as_mut().unwrap().audience = PlatformKeyAudience::Public;
     db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
         .insert_one(&catalog)
@@ -1263,7 +1272,7 @@ async fn public_platform_explicit_org_binding_keeps_execution_and_agent_access()
         .await
         .unwrap();
     let mut catalog = platform_service();
-    catalog.credential_encrypted = enc.encrypt(b"platform-secret").await.unwrap();
+    set_catalog_credential(&enc, &mut catalog, b"platform-secret").await;
     db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
         .insert_one(&catalog)
         .await
@@ -1334,7 +1343,7 @@ async fn platform_audience_switch_reconciles_org_auto_rows_in_both_directions() 
         .unwrap();
 
     let mut catalog = platform_service();
-    catalog.credential_encrypted = enc.encrypt(b"platform-secret").await.unwrap();
+    set_catalog_credential(&enc, &mut catalog, b"platform-secret").await;
     catalog.platform_key.as_mut().unwrap().audience = PlatformKeyAudience::Restricted;
     catalog.platform_key.as_mut().unwrap().allowed_owner_ids = vec![org.clone()];
     db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
@@ -1451,7 +1460,7 @@ async fn platform_to_oauth_uses_existing_unified_placeholder_flow() {
         .unwrap();
     let mut service = platform_service();
     service.provider_config_id = Some(provider.id);
-    service.credential_encrypted = enc.encrypt(b"platform-secret").await.unwrap();
+    set_catalog_credential(&enc, &mut service, b"platform-secret").await;
     db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
         .insert_one(&service)
         .await
@@ -1681,11 +1690,7 @@ async fn explicit_platform_connections_allow_cosmetics_and_name_locked_fields() 
     let user = owner(&db, UserType::Person).await;
     let state = crate::test_utils::test_app_state(db.clone());
     let mut catalog = platform_service();
-    catalog.credential_encrypted = state
-        .encryption_keys
-        .encrypt(b"platform-secret")
-        .await
-        .unwrap();
+    set_catalog_credential(&state.encryption_keys, &mut catalog, b"platform-secret").await;
     db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
         .insert_one(&catalog)
         .await
@@ -1813,11 +1818,7 @@ async fn byok_create_response_reports_available_platform_key_for_both_create_pat
     let user = owner(&db, UserType::Person).await;
     let state = crate::test_utils::test_app_state(db.clone());
     let mut catalog = platform_service();
-    catalog.credential_encrypted = state
-        .encryption_keys
-        .encrypt(b"platform-secret")
-        .await
-        .unwrap();
+    set_catalog_credential(&state.encryption_keys, &mut catalog, b"platform-secret").await;
     db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
         .insert_one(&catalog)
         .await
@@ -1911,11 +1912,7 @@ async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
     let mut catalog = platform_service();
     catalog.slug = "chrono-llm-public".into();
     catalog.base_url = url;
-    catalog.credential_encrypted = state
-        .encryption_keys
-        .encrypt(b"platform-secret")
-        .await
-        .unwrap();
+    set_catalog_credential(&state.encryption_keys, &mut catalog, b"platform-secret").await;
     catalog.billing = Some(ServiceBilling {
         platform_key_pricing: Some(LanePricing {
             model_prices: Vec::new(),
@@ -2076,10 +2073,21 @@ async fn llm_status_fetches_memberships_once_for_many_providers_and_owners() {
     provider_service::seed_default_services(&db, &enc)
         .await
         .unwrap();
-    db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME).update_many(doc! {"slug":{"$in":["llm-openai","llm-xai","llm-deepseek"]}}, doc! {"$set": {
-        "platform_key": {"enabled":true,"audience":"restricted","allowed_owner_ids": &orgs},
-        "credential_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: enc.encrypt(b"secret").await.unwrap() },
-    }}).await.unwrap();
+    let catalogs =
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME);
+    for slug in ["llm-openai", "llm-xai", "llm-deepseek"] {
+        let mut row = catalogs
+            .find_one(doc! {"slug":slug})
+            .await
+            .unwrap()
+            .unwrap();
+        set_catalog_credential(&enc, &mut row, b"secret").await;
+        catalogs.clone_with_type::<bson::Document>().update_one(doc! {"_id":&row.id}, doc! {"$set":{
+            "platform_key":{"enabled":true,"audience":"restricted","allowed_owner_ids": &orgs},
+            "secret_context_versions":bson::to_bson(&row.secret_context_versions).unwrap(),
+            "credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:row.credential_encrypted},
+        }}).await.unwrap();
+    }
     let statuses = assert_listing_queries(
         &counts,
         llm_gateway_service::get_llm_status(&db, &person, "https://nyx.example"),

@@ -773,6 +773,7 @@ fn resolve_client_ip(headers: &HeaderMap, addr: SocketAddr, state: &AppState) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::handlers::credential_record_fixtures::set_catalog_credential;
     use crate::models::connect_link::{COLLECTION_NAME as CONNECT_LINKS, ConnectLink};
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, test_helpers::dummy_service,
@@ -850,12 +851,12 @@ mod tests {
             audience: crate::models::downstream_service::PlatformKeyAudience::Public,
             ..Default::default()
         });
-        catalog.credential_encrypted = f
-            .state
-            .encryption_keys
-            .encrypt(b"fixture-platform-key")
-            .await
-            .unwrap();
+        set_catalog_credential(
+            &f.state.encryption_keys,
+            &mut catalog,
+            b"fixture-platform-key",
+        )
+        .await;
         f.state
             .db
             .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
