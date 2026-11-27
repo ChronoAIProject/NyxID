@@ -123,6 +123,22 @@ pub async fn resolve(
     ))
 }
 
+pub async fn release_empty_inventory(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<reservations::InventoryReleaseRequest>,
+) -> AppResult<Json<ResolveResponse>> {
+    super::login_client_context::require_first_party_human(&auth)?;
+    require_admin(&state, &auth).await?;
+    let actor = crate::services::audit_service::AuditActor::from_auth_user(&auth);
+    let parent = reservations::get(&state.db, &id).await?;
+    let gateway = CatalogCmaGateway::for_service(&state, &parent.cma_service_id);
+    let reservation =
+        reservations::release_empty_inventory(&state.db, &gateway, &parent, &body, &actor).await?;
+    Ok(Json(ResolveResponse { reservation }))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -265,43 +281,87 @@ mod authorization_tests {
             active_key.scopes,
             "read write admin openid profile email services:read services:write proxy"
         );
+        let delegated = crate::crypto::jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor,
+            "account:read",
+            "private-client-id",
+            300,
+            None,
+        )
+        .unwrap();
+        let (sa, _) = crate::crypto::jwt::generate_service_account_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor.to_string(),
+            "account:read",
+            300,
+            0,
+        )
+        .unwrap();
+        let relay = format!(
+            "header.{}.signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(json!({"relay":true}).to_string())
+        );
         let (_, router) = crate::routes::build_router();
         let app = router.with_state(state);
+        let resolve_body =
+            json!({"generation":1,"revision":0,"creation_revision":0,"action":"release"})
+                .to_string();
+        let inventory_body =
+            json!({"generation":1,"revision":0,"creation_revision":0,"reason":"reviewed"})
+                .to_string();
         let paths = [
-            ("GET", "/api/v1/admin/cma-sandbox-reservations"),
+            ("GET", "/api/v1/admin/cma-sandbox-reservations", ""),
             (
                 "POST",
                 "/api/v1/admin/cma-sandbox-reservations/missing/inspect",
+                "",
             ),
             (
                 "POST",
                 "/api/v1/admin/cma-sandbox-reservations/missing/resolve",
+                resolve_body.as_str(),
+            ),
+            (
+                "POST",
+                "/api/v1/admin/cma-sandbox-reservations/missing/release-empty-inventory",
+                inventory_body.as_str(),
             ),
         ];
-        let body = json!({"generation":1,"revision":0,"creation_revision":0,"action":"release"})
-            .to_string();
-        for (method, path) in paths {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::builder()
-                        .method(method)
-                        .uri(path)
-                        .header("authorization", format!("Bearer {human}"))
-                        .header("content-type", "application/json")
-                        .body(Body::from(body.clone()))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN, "non-admin {path}");
+        for role in [None, Some(roles.operator.as_str())] {
+            if let Some(role_id) = role {
+                user.role_ids.push(role_id.to_owned());
+                db.collection::<User>(USERS)
+                    .replace_one(doc! {"_id":&user.id}, &user)
+                    .await
+                    .unwrap();
+            }
+            for (method, path, body) in paths {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .header("authorization", format!("Bearer {human}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_owned()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{role:?} {path}");
+            }
         }
         user.role_ids.push(roles.admin);
         db.collection::<User>(USERS)
             .replace_one(doc! {"_id":&user.id}, user)
             .await
             .unwrap();
-        for (method, path) in paths {
+        for (method, path, body) in paths {
             let response = app
                 .clone()
                 .oneshot(
@@ -310,7 +370,7 @@ mod authorization_tests {
                         .uri(path)
                         .header("authorization", format!("Bearer {human}"))
                         .header("content-type", "application/json")
-                        .body(Body::from(body.clone()))
+                        .body(Body::from(body.to_owned()))
                         .unwrap(),
                 )
                 .await
@@ -326,15 +386,11 @@ mod authorization_tests {
             );
             // The real router's deny-only middleware rejects these credential
             // classes before permitting a delegated admin's account:read GET.
-            for claims in [
-                json!({"relay":true}),
-                json!({"sa":true}),
-                json!({"delegated":true,"scope":"account:read"}),
+            for (kind, token) in [
+                ("relay", &relay),
+                ("service account", &sa),
+                ("delegated", &delegated),
             ] {
-                let token = format!(
-                    "header.{}.signature",
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
-                );
                 let response = app
                     .clone()
                     .oneshot(
@@ -343,12 +399,12 @@ mod authorization_tests {
                             .uri(path)
                             .header("authorization", format!("Bearer {token}"))
                             .header("content-type", "application/json")
-                            .body(Body::from(body.clone()))
+                            .body(Body::from(body.to_owned()))
                             .unwrap(),
                     )
                     .await
                     .unwrap();
-                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{claims} {path}");
+                assert_eq!(response.status(), StatusCode::FORBIDDEN, "{kind} {path}");
             }
             let response = app
                 .clone()
@@ -358,7 +414,7 @@ mod authorization_tests {
                         .uri(path)
                         .header("authorization", format!("Bearer {oauth}"))
                         .header("content-type", "application/json")
-                        .body(Body::from(body.clone()))
+                        .body(Body::from(body.to_owned()))
                         .unwrap(),
                 )
                 .await
@@ -376,7 +432,7 @@ mod authorization_tests {
                         .uri(path)
                         .header("x-api-key", &api_key.full_key)
                         .header("content-type", "application/json")
-                        .body(Body::from(body.clone()))
+                        .body(Body::from(body.to_owned()))
                         .unwrap(),
                 )
                 .await
