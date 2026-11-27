@@ -267,7 +267,7 @@ const RECOVERY_BUDGET: Duration = Duration::from_secs(3);
 const RECOVERY_COOLDOWN_SECONDS: i64 = 5;
 // CMA's generic command cache expires at 24 hours. Lifecycle creation has a
 // separate permanent ledger; generic allocations need a conservative bound.
-const GENERIC_CREATION_REPLAY_HOURS: i64 = 23;
+pub(super) const GENERIC_CREATION_REPLAY_HOURS: i64 = 23;
 
 // Admission-only selector from the human recovery gateway; never forwarded.
 // It narrows ordinary admission to an existing submission and grants no authority.
@@ -424,6 +424,7 @@ async fn store_creation(
                     next.sandbox_generation = candidate.sandbox_generation;
                     next.submission_generation = previous.submission_generation.checked_add(1).ok_or_else(drift)?;
                     next.submission_state = "pending".into();
+                    next.released_by_inventory = false;
                     next.request_ciphertext = candidate.request_ciphertext.clone();
                     next.request_context_version = candidate.request_context_version;
                     next.recovery_checked_at = None;
@@ -941,6 +942,7 @@ pub async fn admit(
             sandbox_generation: sandbox.generation,
             creates_sandbox,
             expected_workspace_id,
+            released_by_inventory: false,
             submission_state: "pending".into(),
             operation_id: None,
             cma_agent_id: None,
@@ -1814,6 +1816,11 @@ mod tests {
         mod admin_reservations {
             use super::*;
             include!("assistant_cma_reservation_tests.rs");
+
+            mod inventory_release {
+                use super::*;
+                include!("assistant_cma_inventory_release_tests.rs");
+            }
         }
 
         mod mixed_requests {
@@ -2000,6 +2007,7 @@ mod tests {
             sandbox_generation: 1,
             creates_sandbox: true,
             expected_workspace_id: None,
+            released_by_inventory: false,
             submission_state: "pending".into(),
             operation_id: None,
             cma_agent_id: None,
