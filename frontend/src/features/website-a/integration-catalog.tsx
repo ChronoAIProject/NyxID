@@ -8,6 +8,7 @@ import {
   StoryPage,
 } from "./story-page";
 import { SiteLink } from "./site-link";
+import { ToolConnectionMap } from "./tool-connection-map";
 import { useWebsite } from "./website-context";
 import {
   catalogEntries,
@@ -42,6 +43,7 @@ export function IntegrationCatalog() {
     <StoryPage className="st-commercial stc-catalog">
       <StoryHero
         title={chinese ? "查找你的智能体可以使用的工具" : "Find the tools your agent can use"}
+        visual={<ToolConnectionMap />}
         description={
           chinese
             ? "连接应用、AI 提供商与语音服务。使用自己的账号或凭据，决定智能体可以执行哪些操作。"

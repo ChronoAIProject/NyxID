@@ -1,6 +1,6 @@
 import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { websiteRelease } from "../website-a/release-config";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useLayoutEffect, useState, useRef } from "react";
 import type { ComponentType } from "react";
 import {
   createRootRoute,
@@ -66,8 +66,8 @@ export async function loadPublicPage(
     locale === "zh"
       ? await import("../website-a/generated/zh")
       : await import("../website-a/generated/en");
-  // The English home page uses the "light night" design (website-a/nyx-home).
-  const lightNightHome = locale === "en" && route === "/" && Boolean(page);
+  // Both home locales share the "light night" design and its interactions.
+  const lightNightHome = route === "/" && Boolean(page);
   const Page = lightNightHome
     ? (await import("../website-a/nyx-home/nyx-home-page")).default
     : await module.loadPage(page ? route : "/404");
@@ -78,10 +78,12 @@ export async function loadPublicPage(
       route,
       locale,
       title: lightNightHome
-        ? "The AI assistant that gets it done"
+        ? locale === "zh" ? "能办事的 AI 助手" : "The AI assistant that gets it done"
         : (module.titles[route] ?? "Page not found"),
       description: lightNightHome
-        ? "NyxBot is the AI assistant from NyxID. Ask it on Telegram, X or the NyxID app. It books the table, replies to the customer and sends the morning brief, under rules you set."
+        ? locale === "zh"
+          ? "NyxBot 是 NyxID 的 AI 助手。在 Telegram、X 或 NyxID 应用里提出请求，按你设定的规则订桌、回复客户、发送晨间简报。"
+          : "NyxBot is the AI assistant from NyxID. Ask it on Telegram, X or the NyxID app. It books the table, replies to the customer and sends the morning brief, under rules you set."
         : route.startsWith("/solutions/") &&
             !websiteRelease.solutions[
               route.slice(11) as keyof typeof websiteRelease.solutions
@@ -100,25 +102,28 @@ export async function loadPublicPage(
 function Content() {
   const { Page, meta } = useLoaderData({ strict: false }) as PublicPayload;
   const location = useLocation();
+  const router = useRouter();
+  const navigation = useRef<{ path: string; fresh: boolean } | null>(null);
+  useEffect(() => router.history.subscribe(({ location: next, action }) => {
+    navigation.current = { path: next.pathname, fresh: action.type === "PUSH" || action.type === "REPLACE" };
+  }), [router]);
   useEffect(() => {
     applyMetadata(meta);
     document.documentElement.dataset.publicReady = "v1";
   }, [meta]);
-  useEffect(() => {
+  useLayoutEffect(() => {
+    // Wait for the destination body, rather than scrolling the old page while
+    // its replacement loads. History restoration remains the router's job.
+    if (meta.path !== location.pathname) return;
     const main = document.querySelector<HTMLElement>("main");
-    if (location.hash) {
-      try {
-        document
-          .getElementById(decodeURIComponent(location.hash))
-          ?.scrollIntoView();
-      } catch {
-        /* Malformed anchors leave the readable body in place. */
-      }
-    } else {
+    if (!location.hash) {
+      if (navigation.current?.fresh && navigation.current.path === meta.path)
+        window.scrollTo({ top: 0, left: 0, behavior: "instant" });
       main?.focus({ preventScroll: true });
     }
-  }, [location.pathname, location.hash]);
-  return <Page />;
+    navigation.current = null;
+  }, [meta.path, location.pathname, location.hash]);
+  return <Page key={meta.path} />;
 }
 function PublicLayout() {
   const location = useLocation();
@@ -222,5 +227,6 @@ export function publicRouter(
     // SSG must not emit TanStack's self-removing inline restoration script.
     // The browser router still restores client-side history after hydration.
     scrollRestoration: !path,
+    scrollRestorationBehavior: "instant",
   });
 }

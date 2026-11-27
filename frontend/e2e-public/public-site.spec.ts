@@ -13,12 +13,25 @@ test("initial body remains readable with JavaScript disabled", async ({
     "/",
     "/zh",
     "/security",
+    "/integrations",
+    "/zh/integrations",
     "/zh/solutions/help-desk",
     "/docs/ai/guides/agent-isolation",
   ]) {
     await page.goto(`${testOrigin}${path}`);
     await expect(page.locator("h1")).toBeVisible();
     await expect(page.locator("main")).not.toBeEmpty();
+    if (path === "/" || path === "/zh") {
+      await expect(page.locator(".nyx-home #top h1")).toBeVisible();
+      for (const id of ["pile", "agent", "apps", "jobs", "end"])
+        await expect(page.locator(`.nyx-home section#${id}`)).toHaveCount(1);
+      await expect(page.locator("#nav .public-language")).toHaveCount(1);
+    }
+    if (path.endsWith("/integrations")) {
+      await expect(page.locator(".stc-map")).toBeVisible();
+      await expect(page.locator(".stc-map-tile")).toHaveCount(13);
+      await expect(page.locator(".stc-map-tile small")).toHaveText(path.startsWith("/zh") ? "即将上线" : "Coming soon");
+    }
   }
   await context.close();
 });
@@ -45,6 +58,7 @@ test("hydrates, keeps shell during a delayed route chunk and supports history an
     "href",
     /code=INV/,
   );
+  await page.evaluate(() => window.scrollTo(0, 1200));
   const nav = await page.locator("#nav").elementHandle();
   let release!: () => void;
   const held = new Promise<void>((resolve) => {
@@ -65,6 +79,7 @@ test("hydrates, keeps shell during a delayed route chunk and supports history an
   release();
   await expect(page).toHaveURL(/\/security\?/);
   await expect(page.locator("h1")).toContainText("credentials");
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   expect(delayed).toBe(true);
   await page.locator("#foot").getByRole("link", { name: "中文", exact: true }).click();
   await expect(page).toHaveURL(/\/zh\/security\?/);
@@ -77,6 +92,65 @@ test("hydrates, keeps shell during a delayed route chunk and supports history an
   expect(errors.filter((e) => !/401|Failed to load resource/.test(e))).toEqual(
     [],
   );
+});
+test("header language switching keeps the route and queries, and new pages start at the top", async ({ page }) => {
+  await page.goto("/integrations?code=INV&tag=one&tag=two&return_to=%2Fkeys");
+  await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
+  await page.evaluate(() => window.scrollTo(0, 1100));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(1100);
+  await page.locator('#nav .public-nav-links a[href^="/solutions"]').click();
+  await expect(page.locator("h1")).toHaveText("Jobs you can hand to an assistant");
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  await page.goBack();
+  await expect(page.locator("h1")).toHaveText("Find the tools your agent can use");
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(1100);
+
+  const language = page.locator("#nav .public-language");
+  await language.locator("summary").click();
+  await page.keyboard.press("Escape");
+  await expect(language).not.toHaveAttribute("open", "");
+  await expect(language.locator("summary")).toBeFocused();
+  await language.locator("summary").click();
+  await language.getByRole("link", { name: "中文", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+  expect(new URL(page.url()).pathname).toBe("/zh/integrations");
+  expect(new URL(page.url()).searchParams.getAll("tag")).toEqual(["one", "two"]);
+  expect(new URL(page.url()).searchParams.get("code")).toBe("INV");
+  expect(new URL(page.url()).searchParams.get("return_to")).toBe("/keys");
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  await expect(language).not.toHaveAttribute("open", "");
+
+  // A real section link still lands at its target on the homepage.
+  await page.goto("/#apps");
+  await expect(page.locator("#apps")).toBeInViewport();
+});
+test("Chinese home keeps the approved homepage design and localized interactions", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.goto("/?code=INV&tag=one&tag=two");
+  await expect(page.locator("html")).toHaveAttribute("data-public-ready", "v1");
+  const sections = await page.locator(".nyx-home main > section").evaluateAll(nodes => nodes.map(node => node.id));
+  await page.locator(".public-language summary").click();
+  await page.locator(".public-language").getByRole("link", { name: "中文", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh-CN");
+  await expect(page.locator(".nyx-home h1")).toContainText("能办事的 AI 助手");
+  expect(await page.locator(".nyx-home main > section").evaluateAll(nodes => nodes.map(node => node.id))).toEqual(sections);
+  await expect(page.locator("#nav")).toHaveCount(1);
+  await expect(page.locator("#foot")).toHaveCount(1);
+  await expect(page.locator(".nyx-home canvas[data-nyx]")).toHaveCount(1);
+  await expect(page.locator(".unicorn-embed")).toHaveCount(0);
+  await expect(page.locator(".public-cta")).toHaveAttribute("href", /code=INV/);
+  await page.locator(".tool-catalog summary").click();
+  await page.getByRole("searchbox", { name: "搜索工具", exact: true }).fill("WhatsApp");
+  await expect(page.locator(".catalog-tile:visible")).toHaveCount(1);
+  await expect(page.locator(".catalog-tile:visible")).toContainText("即将上线");
+  await expect(page.locator(".tool-catalog [role=status]")).toHaveText("找到 1 个工具");
+  await page.locator(".public-language summary").click();
+  await page.locator(".public-language").getByRole("link", { name: "English", exact: true }).click();
+  await expect(page.locator(".nyx-home h1")).toContainText("The AI assistant");
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  expect(new URL(page.url()).searchParams.getAll("tag")).toEqual(["one", "two"]);
+  expect(errors).toEqual([]);
 });
 test("contact preselection and configured solution gate survive hydration", async ({
   page,
@@ -321,17 +395,19 @@ test("F02 and F04 preserve ordered query strings, document identity and mobile m
     (window as unknown as { identity: string }).identity = "same-document";
   });
   const menu = page.locator("#nav .public-more");
-  for (const selector of [
-    '#nav .public-more a[href^="/security"]',
-    '#nav .public-more a[href^="/solutions"]',
-    '#nav .public-more a[lang="zh-CN"]',
+  for (const [disclosure, selector] of [
+    [".public-more", 'a[href^="/security"]'],
+    [".public-more", 'a[href^="/solutions"]'],
+    [".public-language", 'a[lang="zh-CN"]'],
   ]) {
-    await menu.locator("summary").click();
-    await expect(menu).toHaveAttribute("open", "");
-    const link = page.locator(selector);
+    const activeMenu = page.locator(`#nav ${disclosure}`);
+    await activeMenu.locator("summary").click();
+    await expect(activeMenu).toHaveAttribute("open", "");
+    const link = activeMenu.locator(selector);
     expect(Array.from(new URL((await link.getAttribute("href"))!, page.url()).searchParams)).toEqual(entries);
     await link.click();
     await expect(menu).not.toHaveAttribute("open", "");
+    await expect(page.locator("#nav .public-language")).not.toHaveAttribute("open", "");
     expect(Array.from(new URL(page.url()).searchParams)).toEqual(entries);
     expect(await page.evaluate(() => (window as unknown as { identity: string }).identity)).toBe("same-document");
   }

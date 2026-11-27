@@ -93,6 +93,32 @@ for (const page of release.pages) {
     assert.ok(
       (doc.querySelector("main")?.textContent?.trim().length ?? 0) > 40,
     );
+    if (page.translated) {
+      assert.equal(doc.querySelectorAll("#nav .public-language").length, 1,
+        `${page.path}: static header must include the language selector`);
+      for (const [locale, lang] of [["en", "en"], ["zh", "zh-CN"]]) {
+        const href = doc.querySelector(`#nav .public-language a[lang="${lang}"]`)?.getAttribute("href");
+        const target = locale === "zh" ? `/zh${page.route === "/" ? "" : page.route}` : page.route;
+        assert.equal(href, target, `${page.path}: static language link must preserve the route`);
+      }
+    }
+    if (page.route === "/") {
+      const home = doc.querySelector(".nyx-home");
+      assert.ok(home, `${page.path}: static homepage must use the approved design`);
+      for (const id of ["top", "pile", "agent", "apps", "jobs", "end"])
+        assert.ok(home.querySelector(`section#${id}`), `${page.path}: missing homepage section ${id}`);
+      assert.equal(home.getAttribute("lang"), page.locale === "zh" ? "zh-CN" : "en");
+      assert.ok(home.querySelector("[data-mark] canvas"), `${page.path}: missing homepage artwork`);
+      assert.ok(home.querySelector("canvas[data-nyx]"), `${page.path}: missing closing artwork`);
+      assert.equal(doc.querySelectorAll("#nav").length, 1);
+      assert.equal(doc.querySelectorAll("#foot").length, 1);
+    }
+    if (page.route === "/integrations") {
+      assert.equal(doc.querySelectorAll(".stc-map-tile").length, 13,
+        `${page.path}: static Tools introduction must include the channel and app tiles`);
+      assert.equal(doc.querySelector(".stc-map-tile small")?.textContent,
+        page.locale === "zh" ? "即将上线" : "Coming soon");
+    }
     assert.equal(doc.querySelectorAll("title").length, 1);
     assert.equal(doc.title, `${page.title} · NyxID`);
     assert.ok(!titles.has(doc.title), "Duplicate title");

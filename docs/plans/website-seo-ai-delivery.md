@@ -91,6 +91,14 @@ All nine solution activation controls are native disabled buttons with visible a
 
 English keeps existing paths; Chinese uses `/zh`. Only known marketing paths normalize valid locale queries and trailing slashes, with one-hop 301s preserving other parameters. Repeated locale parameters, including case variants, return 400. Invalid values create no language variant. Docs/legal retain English; authentication/protocol parameters are untouched. Duplicate business parameters retain native navigation to preserve semantics.
 
+Marketing headers expose the published English and Chinese versions beside the
+theme control, preserving the current route, query values and explicit fragment.
+Both homepage locales render the same light/night component, artwork and sections
+with localized copy and interaction labels.
+New page links without a fragment start at the top after the destination body
+loads. Explicit section links scroll to their target; Back and Forward restore
+the saved history position. Navigation resets and history restoration are instant.
+
 HTML/Markdown 使用 no-cache + ETag 再验证；hash assets immutable；app shell no-store + noindex。Markdown 镜像 noindex，不进 sitemap。未知公开、预览和未审批文章返回真实 404。已知 app 动态路径来自 router 声明，不能用任意 `/admin/*` 或 `/settings/*` 兜底。预览构建设置 `PUBLIC_SITE_ORIGIN` 后 head noindex；非正式 Host 的 HTML 也带 noindex 响应头。预览访问控制仍由部署 owner 配置。
 
 HTML/Markdown revalidate; hashed assets are immutable; private app shells are no-store/noindex. Markdown mirrors are excluded from the sitemap. Unknown, preview and unpublished article routes return real 404s. Valid app patterns come from router declarations rather than broad namespace fallbacks. Preview builds use `PUBLIC_SITE_ORIGIN` for noindex heads, and nonproduction HTML hosts receive a noindex header. Deployment owners remain responsible for preview access control.

@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "build:landing": "vite build --config vite.public-render.config.ts && node scripts/export-static-landing.mjs",
     "build": "node scripts/check-avatar-emotes.mjs && node scripts/sync-i18n.mjs --overrides-only && tsc -b && vite build && node scripts/prerender-legal.mjs && vite build --config vite.public-render.config.ts && node scripts/prerender-public.mjs && vite build --config vite.credential-accept.config.ts && node scripts/assert-mock-footprint.mjs && node scripts/verify-public-build.mjs && node scripts/collect-crash-artifacts.mjs",
     "build:avatar-emotes": "node scripts/build-avatar-emotes.mjs",
     "check:avatar-emotes": "node scripts/check-avatar-emotes.mjs",

@@ -82,11 +82,20 @@
 .nyx-public .public-more-menu svg{flex:none}
 .nyx-public .public-more-bottom{display:flex;justify-content:space-between;gap:16px;margin-top:8px;padding:12px;border-top:1px solid var(--site-rule)}
 .nyx-public .public-more-bottom a{font-size:13px;color:var(--site-body)}
+.nyx-public .public-label-short{display:none}
+.nyx-public .public-language{position:relative;flex:none;margin:0;padding:0;border:0}
+.nyx-public .public-language>summary{display:flex;align-items:center;justify-content:center;gap:6px;min-height:38px;padding:8px;border:0;border-radius:9px;color:var(--site-body);font-size:13px;font-weight:500;line-height:1;list-style:none;cursor:pointer}
+.nyx-public .public-language>summary::-webkit-details-marker{display:none}
+.nyx-public .public-language>summary::before,.nyx-public .public-language>summary::after{display:none}
+.nyx-public .public-language>summary:hover,.nyx-public .public-language[open]>summary{background:var(--site-hover);color:var(--site-ink)}
+.nyx-public .public-language-menu{position:absolute;top:calc(100% + 18px);right:0;min-width:160px;padding:6px;border:1px solid var(--site-rule-strong);border-radius:14px;background:var(--site-surface);color:var(--site-ink);box-shadow:0 16px 40px -24px rgba(0,0,0,.3)}
+.nyx-public .public-language-menu a{display:flex;align-items:center;justify-content:space-between;gap:20px;min-height:44px;padding:10px 12px;border-radius:8px;font-size:14px;white-space:nowrap}
+.nyx-public .public-language-menu a:hover,.nyx-public .public-language-menu a[aria-current]{background:var(--site-hover)}
 .nyx-public .public-header.is-dark .public-nav-box{--site-glass:rgba(23,23,26,.78);--site-glass-rule:rgba(255,255,255,.1);--site-ink:#F3F3F0;--site-body:#C1BEC8;--site-bg:#17171A;--site-rule:rgba(255,255,255,.14);--site-rule-strong:rgba(255,255,255,.28);--site-hover:rgba(255,255,255,.06)}
 .nyx-public .public-header.is-dark .public-brand-day{display:none}
 .nyx-public .public-header.is-dark .public-brand-night{display:block}
 /* The open menu always uses the page's own surface, even over a dark illustration. */
-.nyx-public .public-header.is-dark .public-more-menu{background:var(--site-bg);color:var(--site-ink)}
+.nyx-public .public-header.is-dark :is(.public-more-menu,.public-language-menu){background:var(--site-bg);color:var(--site-ink)}
 
 /* A quiet, complete directory beneath the closing painting. */
 .nyx-public .public-footer{position:relative;padding:0 0 28px;margin:0;border:0;background:var(--site-footer);color:var(--site-ink)}
@@ -109,10 +118,17 @@
   .nyx-public .public-login,.nyx-public .public-nav-divider{display:none}
   .nyx-public .public-more>summary{padding-inline:10px;font-size:12.5px}
   .nyx-public .public-theme-toggle{width:30px;margin:0}
+  .nyx-public .public-language>summary{gap:4px;padding-inline:5px;font-size:12px}
+  .nyx-public .public-language-globe{display:none}
   .nyx-public .public-cta{font-size:12.5px;padding-inline:12px;margin-left:0}
   .nyx-public .public-more-menu{position:fixed;top:80px;left:20px;right:20px;width:auto}
   .nyx-public .public-footer-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:24px;padding:36px 0 28px}
   .nyx-public .public-footer-legal{align-items:flex-start;flex-direction:column;gap:4px}
+}
+@media(max-width:380px){
+  .nyx-public .public-header .public-label-full{display:none}
+  .nyx-public .public-header .public-label-short{display:inline}
+  .nyx-public .public-more>summary{padding-inline:8px}
 }
 @media(prefers-reduced-motion:reduce){.nyx-public :is(.public-header,.public-footer) *{transition:none;scroll-behavior:auto}}
 

@@ -1,0 +1,4 @@
+/* typography-exempt: the public homepage retains its own approved design. */
+html, body { margin: 0; padding: 0; }
+body { min-width: 320px; }
+[hidden] { display: none !important; }
