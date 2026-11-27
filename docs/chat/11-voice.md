@@ -1375,6 +1375,14 @@ controls. The full transcript/cards remain available without ending the call.
 End voice and Stop task are distinct labelled controls. Results interrupt only
 at a natural pause; an important card also remains visually discoverable.
 
+Native private calls keep compact controls and use the main chat as their only
+transcript. The original mint-and-blush composer halo surrounds those controls
+and any enabled avatar banner. Its listening and speaking phases follow actual
+input acceptance and playback; queued/running tasks drive its thinking phase.
+Retained captions never imply audio activity. End, recovery and inactive calls
+return the halo to rest; Reduce Motion keeps a still glow. This decoration does
+not own or remount media, change next-call preferences, or alter bounded cleanup.
+
 The full panel has separate **You** and **Assistant** caption regions and a live
 elapsed timer. Speaker mute controls local playback only; microphone mute is a
 separate control and neither ends billing. Minimize keeps the same media session
