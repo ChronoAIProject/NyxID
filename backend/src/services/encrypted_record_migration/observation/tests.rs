@@ -224,7 +224,10 @@ async fn registry_matrix_preserves_bson_and_traffic_on_current_historical_absent
     let mut reader = test_encryption_keys();
     reader.set_allow_legacy_record_reads(false);
     let mut seen = BTreeSet::new();
-    for f in families().filter(|f| super::retained::source_companions(f.entry).is_none()) {
+    for f in families().filter(|f| {
+        super::retained::source_companions(f.entry).is_none()
+            && super::deliveries::source_companions(f.entry).is_none()
+    }) {
         assert!(seen.insert((f.collection(), f.entry.fields[0])));
         assert!(!f.source_companions.is_empty());
         for current in [true, false] {
@@ -520,4 +523,5 @@ async fn content_checks_and_missing_material_keep_distinct_evidence_after_authen
         Storage::Encrypted { empty: true, .. }
     ));
 }
+mod deliveries;
 mod retained;

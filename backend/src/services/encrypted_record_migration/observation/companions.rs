@@ -2,6 +2,8 @@
 //! path. Keep the requested parent identity even when the snapshot has no row.
 use super::*;
 use crate::services::encrypted_record_census::{Row, replay::Snapshot};
+use bson::doc;
+use futures::TryStreamExt;
 use std::collections::BTreeMap;
 
 pub(super) type Parents = BTreeMap<&'static str, Document>;
@@ -15,7 +17,22 @@ impl Family {
                 &[("api_keys", "credential_api_key_id")]
             }
             Adapter::Public => &[("platform_public_sessions", "public_session_id")],
+            Adapter::NodeDevice => &[
+                ("api_keys", "issued_api_key_id"),
+                ("nodes", "issued_node_id"),
+            ],
+            Adapter::AuthDevice => &[("api_key_credentials", "agent_key_grant.credential_id")],
             _ => &[],
+        }
+    }
+
+    /// Historical refresh JWTs name a jti rather than the Mongo _id. On a
+    /// refresh-token change the reverse join must rescan, including prior misses.
+    pub(crate) fn rescan_parents(&self) -> &'static [&'static str] {
+        if matches!(self.entry.adapter, Adapter::AuthDevice) {
+            &["refresh_tokens"]
+        } else {
+            &[]
         }
     }
 
@@ -28,7 +45,20 @@ impl Family {
         let mut parents = Parents::new();
         let mut edges = Vec::new();
         for &(collection, path) in self.parent_joins() {
-            if let Ok(id) = source.get_str(path) {
+            if matches!(
+                self.entry.adapter,
+                Adapter::AuthDevice | Adapter::NodeDevice
+            ) && present(source, "delivery_context_version").is_some()
+            {
+                continue;
+            }
+            let id = match path.split_once('.') {
+                Some((outer, inner)) => source
+                    .get_document(outer)
+                    .and_then(|doc| doc.get_str(inner)),
+                None => source.get_str(path),
+            };
+            if let Ok(id) = id {
                 let row = Row {
                     collection: collection.into(),
                     id: id.into(),
@@ -40,6 +70,29 @@ impl Family {
             }
         }
         let mut out = self.observe(keys, source, &parents).await;
+        if let Some(jti) = out.refresh_jti.take() {
+            let mut rows = at
+                .find(
+                    "refresh_tokens",
+                    doc! {"jti":jti.as_str()},
+                    doc! {"user_id":1,"session_id":1,"jti":1},
+                )
+                .await?;
+            let field = "delivery_refresh_token_encrypted";
+            match rows.try_next().await? {
+                None => out.findings.push((field, Finding::MissingParent)),
+                Some(row) => {
+                    let valid = row.get_str("jti") == Ok(jti.as_str())
+                        && row.get_str("user_id").ok() == source.get_str("approved_user_id").ok()
+                        && row.get_str("session_id").ok()
+                            == source.get_str("approved_session_id").ok()
+                        && rows.try_next().await?.is_none();
+                    if !valid {
+                        out.findings.push((field, Finding::InvalidValue));
+                    }
+                }
+            }
+        }
         out.parents = edges;
         Ok(out)
     }

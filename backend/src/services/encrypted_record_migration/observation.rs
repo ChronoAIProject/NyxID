@@ -10,6 +10,7 @@ use crate::services::{channel_signing_migration, credential_record_service as cr
 use bson::{Bson, Document};
 
 mod companions;
+mod deliveries;
 mod families;
 mod retained;
 #[cfg(test)]
@@ -76,7 +77,8 @@ pub(crate) fn families() -> impl Iterator<Item = Family> {
             ],
             Adapter::Broker => &["user_id", "client_id", "secret_context_versions", "revoked"],
             Adapter::OAuthWebhook => &["created_by", "secret_context_versions"],
-            _ => retained::source_companions(entry)?,
+            _ => retained::source_companions(entry)
+                .or_else(|| deliveries::source_companions(entry))?,
         };
         Some(Family {
             entry,
@@ -124,6 +126,7 @@ pub(crate) enum Finding {
 #[derive(Default)]
 pub(crate) struct Observation {
     pub(crate) instances: Vec<(&'static str, Storage)>,
+    refresh_jti: Option<zeroize::Zeroizing<String>>,
     pub(crate) parents: Vec<crate::services::encrypted_record_census::Row>,
     pub(crate) findings: Vec<(&'static str, Finding)>,
 }
@@ -211,6 +214,7 @@ impl Family {
             .iter()
             .copied()
             .chain(matches!(self.entry.adapter, Adapter::OAuthState).then_some(CALLBACK))
+            .chain((self.collection() == "auth_device_codes").then_some(deliveries::GRANT))
     }
 
     async fn observe(
@@ -249,6 +253,9 @@ impl Family {
                 }
                 Adapter::CatalogCa => source.ssh(&mut out).await,
                 Adapter::OAuthState => source.oauth(&mut out).await,
+                Adapter::AgentLogin | Adapter::AuthDevice | Adapter::NodeDevice => {
+                    Box::pin(source.delivery(&mut out, parents)).await
+                }
                 _ => Box::pin(source.retained(&mut out, parents)).await,
             }
         }
@@ -262,6 +269,8 @@ impl Family {
                 | Adapter::CmaRequest
                 | Adapter::AssistantCredential
                 | Adapter::GeneratedArtifact
+                | Adapter::NodeDevice
+                | Adapter::AuthDevice
         ) {
             for (field, storage) in &out.instances {
                 if !(self.collection() == "platform_public_sessions"
