@@ -1,7 +1,9 @@
 use crate::{
-    crypto::{aes::EncryptionKeys, local_key_provider::LocalKeyProvider},
+    crypto::{aes::EncryptionKeys, local_key_provider::LocalKeyProvider, record_field},
     models::{
+        channel_bot::{COLLECTION_NAME as CHANNEL_BOTS, ChannelBot},
         downstream_service::DownstreamService,
+        mfa_factor::{COLLECTION_NAME as MFA_FACTORS, MfaFactor},
         provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig},
         user_api_key::{COLLECTION_NAME, UserApiKey},
         user_service_connection::{COLLECTION_NAME as CONNECTIONS, UserServiceConnection},
@@ -23,6 +25,117 @@ pub(super) fn unrelated_encryption_keys() -> EncryptionKeys {
 
 pub(super) fn proxy_node_signing_secret() -> String {
     "11".repeat(32)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum BotSecret {
+    Token,
+    AppSecret,
+    LarkVerificationToken,
+}
+
+impl BotSecret {
+    fn field(self) -> &'static str {
+        match self {
+            Self::Token => "bot_token_encrypted",
+            Self::AppSecret => "app_secret_encrypted",
+            Self::LarkVerificationToken => "lark_verification_token_encrypted",
+        }
+    }
+
+    async fn encrypt_for_bot(
+        self,
+        keys: &EncryptionKeys,
+        id: &str,
+        owner: &str,
+        plaintext: &[u8],
+    ) -> Vec<u8> {
+        record_field::encrypt(keys, CHANNEL_BOTS, id, owner, self.field(), plaintext)
+            .await
+            .unwrap()
+    }
+
+    pub(super) async fn set(self, keys: &EncryptionKeys, bot: &mut ChannelBot, plaintext: &[u8]) {
+        let bytes = self
+            .encrypt_for_bot(keys, &bot.id, &bot.user_id, plaintext)
+            .await;
+        match self {
+            Self::Token => bot.bot_token_encrypted = bytes,
+            Self::AppSecret => bot.app_secret_encrypted = Some(bytes),
+            Self::LarkVerificationToken => bot.lark_verification_token_encrypted = Some(bytes),
+        }
+        credential_record_service::mark_version(
+            &mut bot.secret_context_versions,
+            keys,
+            self.field(),
+        );
+    }
+
+    pub(super) async fn insert(
+        self,
+        db: &mongodb::Database,
+        keys: &EncryptionKeys,
+        mut bot: bson::Document,
+        plaintext: &[u8],
+    ) {
+        let bytes = self
+            .encrypt_for_bot(
+                keys,
+                bot.get_str("_id").unwrap(),
+                bot.get_str("user_id").unwrap(),
+                plaintext,
+            )
+            .await;
+        bot.insert(
+            self.field(),
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes,
+            },
+        );
+        if keys.contextual_record_writes() {
+            bot.insert("secret_context_versions", bson::doc! { self.field(): 3 });
+        }
+        db.collection::<bson::Document>(CHANNEL_BOTS)
+            .insert_one(bot)
+            .await
+            .unwrap();
+    }
+}
+
+pub(super) async fn insert_recovery_factor(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    owner: &str,
+    recovery_hash: &str,
+) {
+    let id = uuid::Uuid::new_v4().to_string();
+    let secret = record_field::encrypt(
+        keys,
+        MFA_FACTORS,
+        &id,
+        owner,
+        "secret_encrypted",
+        b"JBSWY3DPEHPK3PXP",
+    )
+    .await
+    .unwrap();
+    db.collection::<MfaFactor>(MFA_FACTORS)
+        .insert_one(MfaFactor {
+            id,
+            user_id: owner.to_owned(),
+            factor_type: "totp".into(),
+            secret_encrypted: Some(secret),
+            secret_context_version: keys.contextual_record_writes().then_some(3),
+            recovery_codes: Some(serde_json::json!([recovery_hash])),
+            last_totp_counter: None,
+            is_verified: true,
+            is_active: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
+        .await
+        .unwrap();
 }
 
 #[derive(Clone, Copy)]

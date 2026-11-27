@@ -1100,6 +1100,7 @@ async fn handle_webhook_inner_impl(
 
 #[cfg(test)]
 mod tests {
+    use crate::handlers::credential_record_fixtures::{BotSecret, KeySecret};
     use std::{sync::Arc, time::Duration};
 
     use super::*;
@@ -1141,15 +1142,25 @@ mod tests {
                 "credential_mode": "user", "supports_pkce": true, "created_by": &owner,
                 "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
             }).await.unwrap();
-        let token = state.encryption_keys.encrypt(b"user-token").await.unwrap();
-        db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
-            .insert_one(doc! {
-                "_id": &connection, "user_id": &owner, "label": "X", "credential_type": "oauth2",
-                "credential_source": "platform", "provider_config_id": &provider, "status": "active",
-                "token_scopes": REQUIRED_SCOPES.join(" "),
-                "access_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: token },
-                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
-            }).await.unwrap();
+        KeySecret::AccessToken
+            .insert(
+                &db,
+                &state.encryption_keys,
+                doc! {
+                    "_id": &connection,
+                    "user_id": &owner,
+                    "label": "X",
+                    "credential_type": "oauth2",
+                    "credential_source": "platform",
+                    "provider_config_id": &provider,
+                    "status": "active",
+                    "token_scopes": REQUIRED_SCOPES.join(" "),
+                    "created_at": bson::DateTime::now(),
+                    "updated_at": bson::DateTime::now(),
+                },
+                b"user-token",
+            )
+            .await;
         let adapter = resolve_adapter("x", &state.token_exchange_cache).unwrap();
         platform_credential_service::update(
             &db,
@@ -1371,17 +1382,26 @@ mod tests {
         let api_key_id = uuid::Uuid::new_v4().to_string();
         let (callback_url, received, shutdown_tx) =
             spawn_callback_server_with_outcome(callback_status).await;
-        let encrypted_secret = state.encryption_keys.encrypt(b"app-secret").await.unwrap();
-        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-            .insert_one(doc! {
-                "_id": &bot_id, "user_id": &owner_id, "platform": platform, "label": "Retry test",
-                "platform_bot_id": "123456", "platform_bot_username": "support",
+        BotSecret::AppSecret.insert(
+            &db,
+            &state.encryption_keys,
+            doc! {
+                "_id": &bot_id,
+                "user_id": &owner_id,
+                "platform": platform,
+                "label": "Retry test",
+                "platform_bot_id": "123456",
+                "platform_bot_username": "support",
                 "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
-                "app_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted_secret },
                 "webhook_secret_hash": hex::encode(Sha256::digest(b"verify-token")),
-                "webhook_registered": !concurrent_first, "status": if concurrent_first { "pending_webhook" } else { "active" }, "is_active": true,
-                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
-            }).await.unwrap();
+                "webhook_registered": !concurrent_first,
+                "status": if concurrent_first { "pending_webhook" } else { "active" },
+                "is_active": true,
+                "created_at": bson::DateTime::now(),
+                "updated_at": bson::DateTime::now(),
+            },
+            b"app-secret",
+        ).await;
         db.collection::<bson::Document>(API_KEYS)
             .insert_one(doc! {
                 "_id": &api_key_id, "user_id": &owner_id, "name": "agent", "key_prefix": "nyxid_ag",
@@ -2176,9 +2196,7 @@ mod tests {
         let conversation_id = uuid::Uuid::new_v4().to_string();
         let (callback_url, received_requests, shutdown_tx) = spawn_mock_callback_server().await;
 
-        let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
-
-        let bot = crate::models::channel_bot::ChannelBot {
+        let mut bot = crate::models::channel_bot::ChannelBot {
             meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
@@ -2222,8 +2240,7 @@ mod tests {
             webhook_secret_hash: hex::encode(Sha256::digest(b"telegram-secret")),
             app_id: (platform != "telegram").then(|| "cli_test".into()),
             app_secret_encrypted: None,
-            lark_verification_token_encrypted: (platform != "telegram")
-                .then_some(verification_token_encrypted),
+            lark_verification_token_encrypted: None,
             lark_encrypt_key_encrypted: None,
             public_key: None,
             status: "pending_webhook".to_string(),
@@ -2231,6 +2248,12 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
+
+        if platform != "telegram" {
+            BotSecret::LarkVerificationToken
+                .set(&encryption_keys, &mut bot, b"verify_token")
+                .await;
+        }
 
         let api_key = crate::models::api_key::ApiKey {
             permission_policy_id: None,
@@ -2794,6 +2817,7 @@ mod tests {
 #[cfg(test)]
 mod whatsapp_activation_tests {
     use super::*;
+    use crate::handlers::credential_record_fixtures::BotSecret;
     use hmac::{Hmac, Mac};
     use serde_json::json;
     use sha2::Sha256;
@@ -2801,20 +2825,28 @@ mod whatsapp_activation_tests {
     async fn whatsapp_phone() -> (AppState, String, serde_json::Value) {
         let db = crate::test_utils::connect_transaction_test_database("wa_activation_shapes").await;
         let state = crate::test_utils::test_app_state(db.clone());
-        let secret = state
-            .encryption_keys
-            .encrypt(b"test-app-secret")
-            .await
-            .unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME).insert_one(doc! {
-            "_id":&id,"user_id":uuid::Uuid::new_v4().to_string(),"platform":"whatsapp","label":"test",
-            "platform_bot_id":"123","platform_bot_username":"+123","app_id":"456",
-            "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1]},
-            "app_secret_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:secret},
-            "webhook_secret_hash":"unused","webhook_registered":false,"status":"pending_webhook","is_active":true,
-            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
-        }).await.unwrap();
+        BotSecret::AppSecret.insert(
+            &db,
+            &state.encryption_keys,
+            doc! {
+                "_id": &id,
+                "user_id": uuid::Uuid::new_v4().to_string(),
+                "platform": "whatsapp",
+                "label": "test",
+                "platform_bot_id": "123",
+                "platform_bot_username": "+123",
+                "app_id": "456",
+                "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+                "webhook_secret_hash": "unused",
+                "webhook_registered": false,
+                "status": "pending_webhook",
+                "is_active": true,
+                "created_at": bson::DateTime::now(),
+                "updated_at": bson::DateTime::now(),
+            },
+            b"test-app-secret",
+        ).await;
         let valid = json!({"object":"whatsapp_business_account","entry":[{"id":"456","changes":[{"field":"messages","value":{
             "messaging_product":"whatsapp","metadata":{"phone_number_id":"123"},
             "messages":[{"id":"wamid.1","from":"789","type":"text","text":{"body":"hello"}}]

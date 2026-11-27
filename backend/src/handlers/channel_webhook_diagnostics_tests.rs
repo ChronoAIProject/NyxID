@@ -183,6 +183,7 @@ async fn only_authenticated_deliveries_write_bot_diagnostics() {
 
 #[tokio::test]
 async fn lark_challenge_is_not_inbound_and_first_webhook_without_route_is_observed() {
+    use crate::handlers::credential_record_fixtures::BotSecret;
     use crate::models::{channel_bot::ChannelBot, user::UserType};
     let db = crate::test_utils::connect_transaction_test_database("lark_setup_evidence").await;
     let state = crate::test_utils::test_app_state(db.clone());
@@ -191,19 +192,16 @@ async fn lark_challenge_is_not_inbound_and_first_webhook_without_route_is_observ
         .insert_one(crate::test_utils::test_user(&owner, UserType::Person))
         .await
         .unwrap();
-    let encrypted = state
-        .encryption_keys
-        .encrypt(b"verification-token")
-        .await
-        .unwrap();
-    let bot: ChannelBot = bson::from_document(doc! {
+    let mut bot: ChannelBot = bson::from_document(doc! {
         "_id": uuid::Uuid::new_v4().to_string(), "user_id":owner,"platform":"lark","label":"Lark",
         "platform_bot_id":"cli_app", "platform_bot_username":"bot", "bot_token_encrypted":bson::Binary {
             subtype:bson::spec::BinarySubtype::Generic, bytes: vec![] },
-        "lark_verification_token_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
         "webhook_secret_hash":"hash","webhook_registered":false,"status":"pending_webhook","is_active":true,
         "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
     }).unwrap();
+    BotSecret::LarkVerificationToken
+        .set(&state.encryption_keys, &mut bot, b"verification-token")
+        .await;
     db.collection::<ChannelBot>("channel_bots")
         .insert_one(&bot)
         .await
