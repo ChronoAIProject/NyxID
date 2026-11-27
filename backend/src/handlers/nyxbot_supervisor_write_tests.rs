@@ -243,9 +243,11 @@ struct Journey {
 }
 
 async fn setup_journey(slug: &str, proxy: bool) -> Journey {
-    setup_transport_journey(slug, proxy, false).await
+    setup_transport_journey(slug, proxy, "relay").await
 }
-async fn setup_transport_journey(slug: &str, proxy: bool, direct: bool) -> Journey {
+async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Journey {
+    let direct = transport == "direct";
+    let native = transport == "native";
     let runtime = Arc::new(OnceLock::<AppState>::new());
     let observed = Arc::new(Mutex::new(Vec::new()));
     let stage = Arc::new(AtomicUsize::new(0));
@@ -414,7 +416,11 @@ async fn setup_transport_journey(slug: &str, proxy: bool, direct: bool) -> Journ
     )
     .await
     .unwrap();
-    let (channel, key) = channel(&state, if direct { "direct" } else { "gateway" }).await;
+    let (channel, key) = if native {
+        native_tests::native_channel(&state).await
+    } else {
+        channel(&state, if direct { "direct" } else { "gateway" }).await
+    };
     let sender = if direct { "ou_owner" } else { "7" };
     state
         .db
@@ -425,7 +431,7 @@ async fn setup_transport_journey(slug: &str, proxy: bool, direct: bool) -> Journ
         )
         .await
         .unwrap();
-    if !direct {
+    if !direct && !native {
         assert_eq!(
             put_binding(
                 State(state.clone()),
@@ -532,6 +538,25 @@ async fn setup_transport_journey(slug: &str, proxy: bool, direct: bool) -> Journ
         )
         .mount(&chat)
         .await;
+    if native {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(
+                "/events/opaque-native-ref/side-messages",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"available":true})))
+            .mount(&chat)
+            .await;
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path(
+                "/events/opaque-native-ref/side-messages",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"delivery":{"outcome":"confirmed"}})),
+            )
+            .mount(&chat)
+            .await;
+    }
     Journey {
         state,
         channel,
@@ -1023,7 +1048,7 @@ fn delegation_code(text: &str) -> String {
 
 #[tokio::test]
 async fn supervisor_write_signed_feishu_relay_returns_list_review_and_verified_result_to_same_dm() {
-    let j = Box::pin(setup_transport_journey("api-feishu-bot", false, true)).await;
+    let j = Box::pin(setup_transport_journey("api-feishu-bot", false, "direct")).await;
     direct_message(
         &j,
         "Ask accountant for today's pending ledger rows",
@@ -1146,6 +1171,105 @@ async fn supervisor_write_review_respects_a_configured_timeout_below_eighty_seco
         .unwrap()
         .unwrap();
     assert!(j.ledger.lock().unwrap().writes.is_empty());
+    crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
+        .lock()
+        .unwrap()
+        .remove(&j.channel.channel_bot_id);
+}
+
+async fn native_owner(j: &Journey, text: &str, id: &str) -> Response {
+    respond(
+        &j.state,
+        &j.key,
+        &native_tests::native_event(&j.channel, id, text),
+        &format!("ws7-native-{id}"),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn supervisor_write_native_new_reply_event_decides_original_write_and_preserves_result_source()
+ {
+    let j = Box::pin(setup_transport_journey("api-feishu-bot", false, "native")).await;
+    let initial = owner_text(
+        &body_text(native_owner(&j, "Ask accountant for today's pending ledger rows", "801").await)
+            .await,
+    );
+    let first_code = delegation_code(&initial);
+    let list =
+        owner_text(&body_text(native_owner(&j, &format!("yes {first_code}"), "802").await).await);
+    assert!(
+        list.contains("recTarget")
+            && list.contains("Pending")
+            && list.contains("provider-search-1"),
+        "native owner list: {list}"
+    );
+    j.stage.store(1, Ordering::SeqCst);
+    let assignment=owner_text(&body_text(native_owner(&j,"Choose Base bascnLedger table tblLedger record recTarget: Status Pending -> Approved","803").await).await);
+    let code = delegation_code(&assignment);
+    let response = native_owner(&j, &format!("yes {code}"), "804").await;
+    let result = tokio::spawn(body_text(response));
+    let (review, write_code) = wait_review(&j).await;
+    let original = &review.supervisor_write.as_ref().unwrap().source.channel;
+    let decision = native_owner(&j, &format!("yes write-{write_code}"), "805").await;
+    let response_id = decision.headers()["x-cma-response-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let decision_text = owner_text(&body_text(decision).await);
+    assert!(
+        decision_text.contains("Write approval saved"),
+        "{decision_text}"
+    );
+    let reply = recovery::load(&j.state.db, &j.channel, &response_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        reply.event_key, original.event_id,
+        "the owner reply has a new provider event identity"
+    );
+    let decided_event = j
+        .state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&reply.event_key})
+        .await
+        .unwrap()
+        .unwrap();
+    let source_event = j
+        .state
+        .db
+        .collection::<NyxbotEvent>(EVENTS)
+        .find_one(doc! {"_id":&original.event_id})
+        .await
+        .unwrap()
+        .unwrap();
+    let source = source_event.delivery.unwrap();
+    let current = decided_event.delivery.unwrap();
+    assert_eq!(source.origin.partition, current.origin.partition);
+    assert_eq!(source.sender_id, current.sender_id);
+    assert_eq!(
+        source.origin.nyxbot_channel_id,
+        current.origin.nyxbot_channel_id
+    );
+    let final_text = owner_text(
+        &tokio::time::timeout(std::time::Duration::from_secs(25), result)
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    assert!(
+        final_text.contains("Approved") && final_text.contains("provider-search-3"),
+        "native owner result: {final_text}"
+    );
+    {
+        let ledger = j.ledger.lock().unwrap();
+        assert_eq!(ledger.writes.len(), 1);
+        assert_eq!(ledger.target, "Approved");
+        assert_eq!(ledger.control, "Untouched");
+        assert_eq!(ledger.reads, ["Pending", "Pending", "Approved"]);
+    }
     crate::handlers::channel_relay::TEST_REPLY_ADAPTERS
         .lock()
         .unwrap()
