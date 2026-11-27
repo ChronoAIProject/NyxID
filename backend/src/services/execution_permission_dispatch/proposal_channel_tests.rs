@@ -1,11 +1,13 @@
 use super::*;
+use crate::handlers::credential_record_fixtures::BotSecret;
 use crate::models::{
     assistant_conversation::ChannelOrigin,
     execution_permission_channel::{COLLECTION_NAME as DELIVERIES, Delivery},
     nyxbot_channel::{ChannelTurnDelivery, NyxbotEvent},
 };
 use crate::services::{
-    execution_permission_channel as channel,
+    execution_permission_channel as channel, nyxbot_channel_key as channel_key,
+    nyxbot_event_record as event_record,
     security_readiness_service::refresh_test_replica_heartbeat,
 };
 use serde_json::Value;
@@ -51,6 +53,18 @@ async fn channel_turn_transport(
     let now = bson::DateTime::now();
     let db = &f.state.db;
     db.collection::<Document>("channel_bots").insert_one(doc!{"_id":&bot,"user_id":&f.owner,"platform":platform,"platform_bot_id":if whatsapp {"333"} else {"100"},"label":"Owner bot","platform_bot_username":"owner_bot","webhook_registered":true,"webhook_secret_hash":"hash","bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![1]},"is_active":true,"status":"active","created_at":now,"updated_at":now}).await.unwrap();
+    let bot_update = BotSecret::update(
+        &f.state.encryption_keys,
+        &bot,
+        &f.owner,
+        doc! {},
+        &[(BotSecret::Token, b"test-token")],
+    )
+    .await;
+    db.collection::<Document>("channel_bots")
+        .update_one(doc! {"_id": &bot}, bot_update)
+        .await
+        .unwrap();
     db.collection::<Document>("channel_conversations").insert_one(doc!{"_id":&route,"user_id":&f.owner,"channel_bot_id":&bot,"platform":platform,"platform_conversation_id":if whatsapp {"7"} else {"200"},"platform_conversation_type":"private","agent_api_key_id":&f.key,"is_active":true,"created_at":now,"updated_at":now}).await.unwrap();
     let mut c = doc! {"_id":&id,"user_id":&f.owner,"channel_bot_id":&bot,"platform":platform,"bot_label":"Owner bot","status":"active","transport":transport,"route_api_key_id":&f.key,"route_id":&route,"owner_sender_ids":["7"],"agent_id":&previous.agent_id,"created_at":now,"updated_at":now};
     c.insert("agent_api_key_id", &f.key);
@@ -58,14 +72,14 @@ async fn channel_turn_transport(
         "agent_key_ciphertext",
         bson::Binary {
             subtype: bson::spec::BinarySubtype::Generic,
-            bytes: f
-                .state
-                .encryption_keys
-                .encrypt(f.raw.as_bytes())
+            bytes: channel_key::seal(&f.state.encryption_keys, &id, &f.owner, &f.key, &f.raw)
                 .await
                 .unwrap(),
         },
     );
+    if f.state.encryption_keys.contextual_record_writes() {
+        c.insert("secret_context_versions", doc! {channel_key::FIELD: 3});
+    }
     c.insert("binding_id", "bound");
     if native {
         c.insert(
@@ -117,17 +131,20 @@ async fn channel_turn_transport(
     };
     db.collection::<Document>("nyxbot_events").insert_one(doc!{"_id":&event,"channel_id":&id,"user_id":&f.owner,"partition":"original-chat","event_id":"original-provider-event","delivery":bson::to_bson(&delivery).unwrap(),"status":"running","created_at":now,"expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(24))}).await.unwrap();
     if sealed {
-        let target = f
-            .state
-            .encryption_keys
-            .encrypt(b"original-target")
-            .await
-            .unwrap();
-        db.collection::<Document>("nyxbot_events").update_one(doc!{"_id":&event},doc!{"$set":{
+        let target = event_record::seal(
+            &f.state.encryption_keys,
+            &event,
+            &f.owner,
+            &[event_record::TARGET, &id],
+            b"original-target",
+        )
+        .await
+        .unwrap();
+        db.collection::<Document>("nyxbot_events").update_one(doc!{"_id":&event},event_record::set_material(doc! {
             "created_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::hours(1)),
             "delivery.target_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:target},
             "delivery.target_expires_at":bson::DateTime::from_chrono(Utc::now()+chrono::Duration::hours(22))
-        }}).await.unwrap();
+        }, "delivery.target_context_version", event_record::version(&f.state.encryption_keys))).await.unwrap();
     }
     let context = if whatsapp {
         // Exercise multipart receipt recovery with explicitly seeded retained
@@ -142,24 +159,23 @@ async fn channel_turn_transport(
     } else {
         json!({"event_ref":"original-relay-ref"})
     };
-    let cipher = f
-        .state
-        .encryption_keys
-        .encrypt(&serde_json::to_vec(&context).unwrap())
-        .await
-        .unwrap();
-    db.collection::<Document>("nyxbot_events").update_one(doc!{"_id":&event},doc!{"$set":{"event_context_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
+    let cipher = event_record::seal(
+        &f.state.encryption_keys,
+        &event,
+        &f.owner,
+        &[event_record::CONTEXT, &id],
+        &serde_json::to_vec(&context).unwrap(),
+    )
+    .await
+    .unwrap();
+    db.collection::<Document>("nyxbot_events").update_one(doc!{"_id":&event},event_record::set_material(
+        doc! {"event_context_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}},
+        "event_context_version", event_record::version(&f.state.encryption_keys),
+    )).await.unwrap();
     if native {
         native_response(&f, &id, &event, "original-response", &previous.id).await;
     }
     if !native {
-        let token = f
-            .state
-            .encryption_keys
-            .encrypt(b"test-token")
-            .await
-            .unwrap();
-        db.collection::<Document>("channel_bots").update_one(doc!{"_id":&bot},doc!{"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token}}}).await.unwrap();
         db.collection::<Document>("channel_messages").insert_one(doc!{"_id":"original-provider-event","conversation_id":&route,"channel_bot_id":&bot,"user_id":&f.owner,"direction":"inbound","platform":"telegram","platform_conversation_id":"200","platform_message_id":"500","sender_platform_id":"7","agent_api_key_id":&f.key,"content_type":"text","thread_id":"77","created_at":now}).await.unwrap();
     }
     if !native {
@@ -1601,7 +1617,10 @@ async fn migration_channel_gateway_sealed_target_outlives_event_window_without_r
     f.state
         .db
         .collection::<Document>("nyxbot_events")
-        .update_many(doc! {}, doc! {"$unset":{"event_context_ciphertext":""}})
+        .update_many(
+            doc! {},
+            doc! {"$unset":{"event_context_ciphertext":"","event_context_version":""}},
+        )
         .await
         .unwrap();
     crate::handlers::nyxbot::execution_delivery::process(&f.state, &d.id)
