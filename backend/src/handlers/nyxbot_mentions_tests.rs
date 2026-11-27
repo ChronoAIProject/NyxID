@@ -2387,8 +2387,7 @@ async fn supplemental_bot_reference_writer_supplies_fallback_without_human_point
         let chat=state.db.collection::<NyxbotThread>(THREADS).find_one(doc!{"_id":&chat.id}).await.unwrap().unwrap();
         assert!(chat.last_relay_message_id.is_none());
         assert_eq!(crate::services::channel_supplemental_delivery::reference_anchor(&chat).ok(),Some(id));
-        let cipher=state.encryption_keys.encrypt(b"test-token").await.unwrap();
-        state.db.collection::<bson::Document>("channel_bots").update_one(doc!{"_id":&row.channel_bot_id},doc!{"$set":{"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
+        set_bot_secrets(&state, &row, doc! {}, &[(BotSecret::Token, b"test-token")]).await;
         let platform=MockServer::start().await;
         Mock::given(path_regex("/bot.*/sendMessage")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok":true,"result":{"message_id":43}}))).mount(&platform).await;
         crate::handlers::channel_relay::TEST_REPLY_ADAPTERS.lock().unwrap().insert(row.channel_bot_id.clone(),Arc::new(crate::services::channel_adapters::telegram::TelegramAdapter::media_test_adapter(&platform.uri())));

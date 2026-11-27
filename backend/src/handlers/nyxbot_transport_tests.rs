@@ -120,22 +120,13 @@ pub(super) async fn native_discord_identity(
         matchers::{header, path},
     };
     crate::services::security_readiness_service::ready_test_replica(&state.db).await;
-    let token = state
-        .encryption_keys
-        .encrypt(b"test-discord-token")
-        .await
-        .unwrap();
-    state
-        .db
-        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
-        .update_one(
-            doc! {"_id":&row.channel_bot_id},
-            doc! {"$set":{"platform_bot_id":"100","bot_token_encrypted":bson::Binary {
-                subtype:bson::spec::BinarySubtype::Generic,bytes:token,
-            }}},
-        )
-        .await
-        .unwrap();
+    set_bot_secrets(
+        state,
+        row,
+        doc! {"platform_bot_id":"100"},
+        &[(BotSecret::Token, b"test-discord-token")],
+    )
+    .await;
     let http = MockServer::start().await;
     crate::services::nyxbot_gateway_source::TEST_DISCORD_BASES
         .lock()

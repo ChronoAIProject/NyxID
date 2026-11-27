@@ -114,13 +114,19 @@ async fn platform(state: &AppState, row: &mut NyxbotChannel, name: &str) {
             "credential_mode":"user","supports_pkce":true,"created_by":OWNER,
             "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
         }).await.unwrap();
-        state.db.collection::<bson::Document>("user_api_keys").insert_one(doc!{
-            "_id":&connection,"user_id":OWNER,"label":"X","credential_type":"oauth2",
-            "credential_source":"platform","provider_config_id":provider,"status":"active",
-            "token_scopes":adapters::x::REQUIRED_SCOPES.join(" "),
-            "access_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:state.encryption_keys.encrypt(b"app:secret").await.unwrap()},
-            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
-        }).await.unwrap();
+        KeySecret::AccessToken
+            .insert(
+                &state.db,
+                &state.encryption_keys,
+                doc! {
+                "_id":&connection,"user_id":OWNER,"label":"X","credential_type":"oauth2",
+                "credential_source":"platform","provider_config_id":provider,"status":"active",
+                "token_scopes":adapters::x::REQUIRED_SCOPES.join(" "),
+                "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+                },
+                b"app:secret",
+            )
+            .await;
         state
             .db
             .collection::<bson::Document>("channel_bots")
@@ -1114,20 +1120,16 @@ async fn whatsapp_relay_turns() {
     let callback = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     state.db.collection::<bson::Document>("api_keys")
         .update_one(doc!{"_id":&row.route_api_key_id},doc!{"$set":{"callback_url":format!("{}/api/v1/nyxbot/relay/{}",state.config.base_url,row.id)}}).await.unwrap();
-    let secret = state
-        .encryption_keys
-        .encrypt(b"test-app-secret")
-        .await
-        .unwrap();
-    let token = state
-        .encryption_keys
-        .encrypt(b"test-bot-token")
-        .await
-        .unwrap();
-    state.db.collection::<bson::Document>("channel_bots").update_one(doc! {"_id":&row.channel_bot_id},doc! {"$set":{
-        "app_secret_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:secret},
-        "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token}
-    }}).await.unwrap();
+    set_bot_secrets(
+        &state,
+        &row,
+        doc! {},
+        &[
+            (BotSecret::AppSecret, b"test-app-secret"),
+            (BotSecret::Token, b"test-bot-token"),
+        ],
+    )
+    .await;
     let graph = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/123/messages"))

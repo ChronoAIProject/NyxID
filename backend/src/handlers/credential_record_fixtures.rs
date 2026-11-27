@@ -32,6 +32,7 @@ pub(super) enum BotSecret {
     Token,
     AppSecret,
     LarkVerificationToken,
+    LarkEncryptKey,
 }
 
 impl BotSecret {
@@ -40,6 +41,7 @@ impl BotSecret {
             Self::Token => "bot_token_encrypted",
             Self::AppSecret => "app_secret_encrypted",
             Self::LarkVerificationToken => "lark_verification_token_encrypted",
+            Self::LarkEncryptKey => "lark_encrypt_key_encrypted",
         }
     }
 
@@ -63,6 +65,7 @@ impl BotSecret {
             Self::Token => bot.bot_token_encrypted = bytes,
             Self::AppSecret => bot.app_secret_encrypted = Some(bytes),
             Self::LarkVerificationToken => bot.lark_verification_token_encrypted = Some(bytes),
+            Self::LarkEncryptKey => bot.lark_encrypt_key_encrypted = Some(bytes),
         }
         credential_record_service::mark_version(
             &mut bot.secret_context_versions,
@@ -71,11 +74,10 @@ impl BotSecret {
         );
     }
 
-    pub(super) async fn insert(
+    pub(super) async fn set_document(
         self,
-        db: &mongodb::Database,
         keys: &EncryptionKeys,
-        mut bot: bson::Document,
+        bot: &mut bson::Document,
         plaintext: &[u8],
     ) {
         let bytes = self
@@ -94,8 +96,59 @@ impl BotSecret {
             },
         );
         if keys.contextual_record_writes() {
-            bot.insert("secret_context_versions", bson::doc! { self.field(): 3 });
+            if !bot.contains_key(credential_record_service::VERSIONS) {
+                bot.insert(credential_record_service::VERSIONS, bson::Document::new());
+            }
+            bot.get_document_mut(credential_record_service::VERSIONS)
+                .unwrap()
+                .insert(self.field(), 3);
+        } else if let Ok(versions) = bot.get_document_mut(credential_record_service::VERSIONS) {
+            versions.remove(self.field());
         }
+    }
+
+    pub(super) async fn update(
+        keys: &EncryptionKeys,
+        id: &str,
+        owner: &str,
+        mut set: bson::Document,
+        secrets: &[(Self, &[u8])],
+    ) -> bson::Document {
+        let mut unset = bson::Document::new();
+        for &(secret, plaintext) in secrets {
+            let destination = set.get_str("user_id").unwrap_or(owner);
+            let bytes = secret
+                .encrypt_for_bot(keys, id, destination, plaintext)
+                .await;
+            set.insert(
+                secret.field(),
+                bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic,
+                    bytes,
+                },
+            );
+            credential_record_service::mark_classic_update(
+                &mut set,
+                &mut unset,
+                keys,
+                secret.field(),
+            );
+        }
+        let mut update = bson::doc! {"$set":set};
+        if !unset.is_empty() {
+            update.insert("$unset", unset);
+        }
+        update
+    }
+
+    pub(super) async fn insert(
+        self,
+        db: &mongodb::Database,
+        keys: &EncryptionKeys,
+        mut bot: bson::Document,
+        plaintext: &[u8],
+    ) {
+        self.set_document(keys, &mut bot, plaintext).await;
         db.collection::<bson::Document>(CHANNEL_BOTS)
             .insert_one(bot)
             .await
