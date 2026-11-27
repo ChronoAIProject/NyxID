@@ -64,7 +64,9 @@ pub async fn set(db: &Database, config: Option<UtilityInference>) -> AppResult<(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::assistant_oneshot_inference::tests::utility_fixture;
+    use crate::services::assistant_oneshot_inference::tests::{
+        set_platform_credential, utility_fixture,
+    };
     use mongodb::bson::Document;
 
     #[tokio::test]
@@ -78,6 +80,7 @@ mod tests {
         let mut alternate = service.clone();
         alternate.id = uuid::Uuid::new_v4().to_string();
         alternate.slug = "custom-utility".into();
+        set_platform_credential(&state, &mut alternate).await;
         state
             .db
             .collection::<DownstreamService>(SERVICES)
