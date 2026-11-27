@@ -1,7 +1,9 @@
 //! Metadata-only administration of held CMA account-slot reservations.
 use super::{
     assistant_cma_admission::reservation_admin as admission,
-    assistant_cma_gateway::{CmaGateway, CmaGatewayError, CmaSandbox, validate_remote_id},
+    assistant_cma_gateway::{
+        CatalogCmaGateway, CmaGateway, CmaGatewayError, CmaSandbox, validate_remote_id,
+    },
     assistant_cma_sandbox_service as sandboxes,
     audit_service::AuditActor,
 };
@@ -265,7 +267,8 @@ pub(super) async fn exact_sandbox(
 }
 
 fn has_non_creation_proof(creation: &AssistantCmaCreation) -> bool {
-    creation.submission_state == "confirmed_not_created"
+    !creation.released_by_inventory
+        && creation.submission_state == "confirmed_not_created"
         && creation.operation_id.is_none()
         && creation.cma_agent_id.is_none()
         && creation.cma_sandbox_id.is_none()
@@ -279,6 +282,9 @@ async fn observe(
 ) -> (InspectionOutcome, Option<CmaSandbox>) {
     if let Err(error) = verify(gateway, parent, creation).await {
         return (unknown_reason(error), None);
+    }
+    if creation.is_some_and(|c| c.released_by_inventory) {
+        return (unknown("released_after_inventory_check"), None);
     }
     if parent.cma_sandbox_id.is_none() && creation.is_some_and(has_non_creation_proof) {
         return (
@@ -452,6 +458,137 @@ pub async fn inspect(
     })
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InventoryReleaseRequest {
+    pub generation: i64,
+    pub revision: i64,
+    pub creation_revision: i64,
+    pub reason: String,
+}
+
+pub(super) fn require_inventory_release_candidate(
+    parent: &AssistantCmaSandbox,
+    creation: &AssistantCmaCreation,
+) -> AppResult<()> {
+    if parent.source != sandboxes::NYXID_CREATED_SOURCE
+        || !matches!(
+            holding(parent, Some(creation)),
+            "creation_unknown" | "creation_in_progress"
+        )
+        || !matches!(
+            parent.admission_state,
+            SandboxAdmissionState::Unknown
+                | SandboxAdmissionState::Creating
+                | SandboxAdmissionState::Reserved
+        )
+        || parent.operation_id.is_some()
+        || creation.operation_id.is_some()
+        || creation.cma_agent_id.is_some()
+        || !matches!(
+            creation.submission_state.as_str(),
+            "unknown" | "submitted" | "pending"
+        )
+        || creation.method != "POST"
+        || creation.path != "/api/v1/sandboxes"
+    {
+        return Err(AppError::Conflict(
+            "cma_inventory_release_ineligible".into(),
+        ));
+    }
+    if !creation.first_dispatched_at.is_some_and(|first| {
+        Utc::now().signed_duration_since(first)
+            >= chrono::Duration::hours(
+                super::assistant_cma_admission::GENERIC_CREATION_REPLAY_HOURS,
+            )
+    }) {
+        return Err(AppError::Conflict("cma_replay_window_not_expired".into()));
+    }
+    Ok(())
+}
+
+async fn owner_inventory(
+    gateway: &CatalogCmaGateway,
+    owner: &str,
+) -> Result<(usize, Vec<String>), CmaGatewayError> {
+    let mut cursors = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut live = Vec::new();
+    let mut cursor = None;
+    for _ in 0..100 {
+        let page = gateway
+            .sandbox_inventory_page(owner, cursor.as_deref())
+            .await?;
+        for (id, state) in page.items {
+            if !seen.insert(id.clone()) {
+                return Err(CmaGatewayError::InventoryIncomplete);
+            }
+            if state != SandboxObservationState::Retired {
+                live.push(id);
+            }
+        }
+        let Some(next) = page.next_cursor else {
+            return Ok((seen.len(), live));
+        };
+        if !cursors.insert(next.clone()) {
+            return Err(CmaGatewayError::InventoryIncomplete);
+        }
+        cursor = Some(next);
+    }
+    Err(CmaGatewayError::InventoryIncomplete)
+}
+
+pub async fn release_empty_inventory(
+    db: &Database,
+    gateway: &CatalogCmaGateway,
+    parent: &AssistantCmaSandbox,
+    request: &InventoryReleaseRequest,
+    actor: &AuditActor,
+) -> AppResult<ReservationRow> {
+    let reason = request.reason.trim();
+    if reason.is_empty() || request.reason.len() > 512 || reason.chars().any(char::is_control) {
+        return Err(AppError::ValidationError(
+            "An audit reason of 1 to 512 bytes is required".into(),
+        ));
+    }
+    sandboxes::require_generation(parent, request.generation)?;
+    if parent.agent_reference_version != request.revision {
+        return Err(drift());
+    }
+    let db = super::transaction_service::durable_database(db);
+    let creation = admission::creation_for_sandbox(&db, parent)
+        .await?
+        .ok_or_else(drift)?;
+    if creation.revision != request.creation_revision {
+        return Err(drift());
+    }
+    require_inventory_release_candidate(parent, &creation)?;
+    verify(gateway, parent, Some(&creation)).await?;
+    let (checked, live) = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        owner_inventory(gateway, &parent.user_id),
+    )
+    .await
+    .map_err(|_| CmaGatewayError::InventoryIncomplete)?
+    .map_err(|_| CmaGatewayError::InventoryIncomplete)?;
+    let data = json!({
+        "reservation_id": parent.id, "owner_id": parent.user_id, "cma_service_id": parent.cma_service_id,
+        "generation": request.generation, "revision": request.revision, "creation_revision": request.creation_revision,
+        "action": "release_empty_inventory", "result": "resolved", "reason": reason,
+        "inventory_checked": checked, "inventory_live": live.len(), "unknown_live": 0
+    });
+    let (saved, creation) = admission::commit(
+        &db,
+        parent,
+        Some(&creation),
+        admission::Change::ReleaseEmptyInventory(live),
+        actor,
+        data,
+    )
+    .await?;
+    Ok(project(&saved, creation.as_ref()))
+}
+
 pub async fn resolve(
     db: &Database,
     gateway: &dyn CmaGateway,
@@ -621,6 +758,7 @@ mod tests {
             sandbox_generation: 1,
             creates_sandbox: true,
             expected_workspace_id: None,
+            released_by_inventory: false,
             submission_state: submission_state.into(),
             operation_id: Some("operation".into()),
             cma_agent_id: None,

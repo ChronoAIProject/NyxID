@@ -26,6 +26,7 @@ pub(crate) async fn creation_for_sandbox(
 pub(crate) enum Change {
     Associate(CmaSandbox),
     Release,
+    ReleaseEmptyInventory(Vec<String>),
     ConfirmRetirement(CmaSandbox),
 }
 
@@ -110,9 +111,19 @@ async fn commit_with_actor(
                     }
                     sandboxes::apply_observation(&mut next, remote, current.generation, Utc::now())?;
                 },
+                Change::ReleaseEmptyInventory(live_ids) => {
+                    let row = creation.as_mut().ok_or_else(drift)?;
+                    super::super::assistant_cma_reservation_service::require_inventory_release_candidate(&current, row)?;
+                    if crate::services::audit_service::audit_chain_hmac_key().is_none() {
+                        return Err(AppError::Internal("Audit chain unavailable".into()));
+                    }
+                    require_linked_inventory(db, tx, &current, live_ids).await?;
+                    apply_creation_change(row, &mut next, &CreationChange::NoResource)?;
+                    row.released_by_inventory = true;
+                }
                 Change::Release => {
                     let row = creation.as_mut().ok_or_else(drift)?;
-                    if row.submission_state != "confirmed_not_created" || current.cma_sandbox_id.is_some() {
+                    if row.submission_state != "confirmed_not_created" || row.released_by_inventory || current.cma_sandbox_id.is_some() {
                         return Err(AppError::Conflict("cma_creation_absence_proof_required: CMA has not provided authoritative proof that this creation was never made".into()));
                     }
                     apply_creation_change(row, &mut next, &CreationChange::NoResource)?;
@@ -139,6 +150,38 @@ async fn commit_with_actor(
             Ok((saved, creation))
         })
     }).await
+}
+
+async fn require_linked_inventory(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    parent: &AssistantCmaSandbox,
+    live_ids: &[String],
+) -> AppResult<()> {
+    let links =
+        db.collection::<bson::Document>(crate::models::assistant_cma_sandbox::COLLECTION_NAME);
+    for batch in live_ids.chunks(100) {
+        let mut missing: std::collections::HashSet<&str> =
+            batch.iter().map(String::as_str).collect();
+        let mut cursor = links
+            .find(doc! {
+                "user_id": &parent.user_id, "cma_service_id": &parent.cma_service_id,
+                "cma_sandbox_id": {"$in": batch}, "admission_state": {"$ne":"retired"},
+            })
+            .projection(doc! {"_id":0, "cma_sandbox_id":1})
+            .session(&mut *tx)
+            .await?;
+        let mut stream = cursor.stream(&mut *tx);
+        while let Some(link) = stream.try_next().await? {
+            if let Ok(id) = link.get_str("cma_sandbox_id") {
+                missing.remove(id);
+            }
+        }
+        if !missing.is_empty() {
+            return Err(AppError::Conflict("cma_inventory_unlinked_sandbox".into()));
+        }
+    }
+    Ok(())
 }
 
 /// Background receipt reconciliation uses the existing exact identity helpers;

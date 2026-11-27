@@ -457,11 +457,27 @@ or edit MongoDB to investigate a held reservation.
    recovery material atomically. Stale state requires another inspection; the
    personal-owner erasure fence applies to every resolution state change.
 
+6. For a receipt-less direct Sandbox creation still holding a slot at least 23
+   hours after its recorded first dispatch, use
+   `POST .../{id}/release-empty-inventory`. Send the three inspected fences and
+   a short audit reason, such as a support case reference. CMA must return the
+   owner's complete sandbox inventory at the original catalog deployment. Every
+   sandbox in any state other than `retired` must have a current NyxID link for
+   that owner and service. An unknown live sandbox, incomplete page sequence or
+   failed read keeps the slot held. Agent lifecycle creates use a permanent
+   ledger and stay on the receipt-recovery path.
+
+   The release relies on present capacity. If the uncertain create succeeded,
+   its sandbox is already linked or has retired. The inventory cannot establish
+   whether the original create succeeded. The release transaction checks both
+   revisions and the generation, clears both recovery envelopes, releases the
+   slot, and records the admin's reason and inventory counts in the audit chain.
+
 Inspection writes only `admin_cma_sandbox_reservation_inspected` under the admin
 actor; resolution couples `admin_cma_sandbox_reservation_resolved` to its state
 change transaction. The direct GET boundary uses owner authorization but bypasses
 proxy metering, billing, service-request activity and owner proxy rate limiting.
-Refused resolution attempts also produce a best-effort metadata-only audit.
+Refused `/resolve` attempts also produce a best-effort metadata-only audit.
 These operations do not change owner admission/replay/recovery behavior.
 
 An unknown creation with no remote receipt may remain unresolvable through GETs.
@@ -472,8 +488,8 @@ the exact creation identity (owner, deployment, operation, original idempotency
 identity and request fingerprint) returning either the durable operation/resource
 receipt or authoritative never-created/no-pending-work evidence. Such negative
 evidence must fence late or concurrent admission under the same identity; an
-expired cache lookup alone is insufficient. Until that contract exists, record
-an explicit CMA protocol blocker and keep the slot occupied. See [API](../API.md#admin-cma-sandbox-reservations).
+expired cache lookup alone is insufficient. For rows outside the inventory-release
+criteria, the slot stays occupied pending a receipt or authoritative absence evidence. See [API](../API.md#admin-cma-sandbox-reservations).
 
 The read contract was checked against CMA commit
 `259c26cf5be0837f0f8ee4d400380e7608fb0301`: `api/crates/layer1-public/src/rest/idempotency.rs`
@@ -537,8 +553,8 @@ lookup or replay failures after finding the occupied slot instead return
 `cma_sandbox_account_slot_occupied`, explaining that the earlier creation is not
 confirmed absent and can be rechecked later. The new request is not dispatched.
 The initial slot lookup's database errors and the incoming request's own validation
-and authorization errors retain their usual responses. Such older uncertain requests require
-authoritative CMA investigation, not a new identity or a local force-unlock.
+and authorization errors retain their usual responses. For older uncertain direct
+Sandbox requests, see [Admin inspection of held account slots](#admin-inspection-of-held-account-slots).
 A rolling old replica may still leave a refusal unknown; an upgraded replica can
 recover it within that window. No schema or writer-cutover change is required.
 
@@ -568,9 +584,8 @@ with retirement; best effort after the existing multistep receipt recovery).
 `cma_sandbox_reservation_recovery_deferred` reports fixed reason codes at most
 once per reservation/generation/reason per hour via an existing coordination
 claim. Neither event retains provider bodies, request material or credentials.
-Old replicas can continue reading and writing all rows: no new persisted enum
-value or sandbox/creation field is introduced. Repeated observation and races
-with owner recovery are safe under the existing fences.
+The worker uses the existing persisted states across replica versions. Repeated
+observation and races with owner recovery are safe under the existing fences.
 
 `operation_without_resource` is not a terminal non-creation result. CMA may
 have a sandbox internally while exposing no Agent in the public operation.
