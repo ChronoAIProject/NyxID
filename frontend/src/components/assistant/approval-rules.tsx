@@ -1,13 +1,12 @@
 import { StoredApprovalPolicyDialog } from "./stored-approval-policy-dialog";
-import { useId, useMemo, useState, type KeyboardEvent } from "react";
-import { Link } from "@tanstack/react-router";
+import { ApprovalTelegramSetup } from "./approval-telegram-setup";
+import { useEffect, useId, useMemo, useState, type KeyboardEvent } from "react";
 import { ChevronRight, Search, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { translateUi, useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateErrorMessage } from "@/lib/error-messages";
 import { getFormattingLocale } from "@/lib/formatting-locale";
 import { ApiError } from "@/lib/api-client";
-import { MOBILE_APP_LINK } from "@/lib/mobile-app-link";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -355,10 +354,17 @@ function WhereControls({
 }: {
   readonly settings: NotificationSettings;
   readonly value: WhereChoice;
-  readonly onChange: (value: WhereChoice) => void;
+  readonly onChange: (changes: Partial<WhereChoice>) => void;
   readonly disabled?: boolean;
 }) {
   const hasPhone = settings.push_device_count > 0;
+  const [waitingForPhone, setWaitingForPhone] = useState(false);
+  useNotificationSettings({ enabled: waitingForPhone && !hasPhone, refetchInterval: 5000 });
+  useEffect(() => {
+    if (!waitingForPhone || hasPhone) return;
+    const timer = window.setTimeout(() => setWaitingForPhone(false), 5 * 60_000);
+    return () => window.clearTimeout(timer);
+  }, [waitingForPhone, hasPhone]);
   return (
     <GroupedList>
       <GroupedRow
@@ -391,12 +397,13 @@ function WhereControls({
               aria-label={translateUi("Mobile app")}
               checked={value.push}
               disabled={disabled}
-              onCheckedChange={(push) => onChange({ ...value, push })}
+              onCheckedChange={(push) => onChange({ push })}
             />
           ) : (
             <Button asChild variant="outline" size="sm">
               <a
-                href={MOBILE_APP_LINK}
+                href="https://apps.apple.com/app/nyxid/id6759768423"
+                onClick={() => setWaitingForPhone(true)}
                 target="_blank"
                 rel="noopener noreferrer"
               >
@@ -406,30 +413,20 @@ function WhereControls({
           )
         }
       />
-      <GroupedRow
-        title={translateUi("Telegram")}
-        description={
-          settings.telegram_connected
-            ? translateUi(
-                "Approve and Reject buttons in your linked Telegram chat.",
-              )
-            : translateUi("Telegram is not linked to your account.")
-        }
-        accessory={
-          settings.telegram_connected ? (
+      {settings.telegram_connected ? (
+        <GroupedRow
+          title={translateUi("Telegram")}
+          description={translateUi("Approve and Reject buttons in your linked Telegram chat.")}
+          accessory={
             <Switch
               aria-label={translateUi("Telegram")}
               checked={value.telegram}
               disabled={disabled}
-              onCheckedChange={(telegram) => onChange({ ...value, telegram })}
+              onCheckedChange={(telegram) => onChange({ telegram })}
             />
-          ) : (
-            <Button asChild variant="outline" size="sm">
-              <Link to="/approvals/settings">{translateUi("Connect")}</Link>
-            </Button>
-          )
-        }
-      />
+          }
+        />
+      ) : <ApprovalTelegramSetup disabled={disabled} />}
     </GroupedList>
   );
 }
@@ -479,10 +476,12 @@ function ProtectionSetupDialog({
     all?: ProtectionDraft;
     specific?: ProtectionDraft;
   }>({});
-  const [where, setWhere] = useState<WhereChoice>({
-    push: settings.push_enabled,
-    telegram: settings.telegram_enabled,
-  });
+  // Linking a channel can enable delivery while this draft is open.
+  const [deliveryEdits, setDeliveryEdits] = useState<Partial<WhereChoice>>({});
+  const where = {
+    push: deliveryEdits.push ?? settings.push_enabled,
+    telegram: deliveryEdits.telegram ?? settings.telegram_enabled,
+  };
   const endpoints = useEndpoints(service?.catalogServiceId ?? "");
   const save = useSetServiceApprovalConfig();
   const remove = useDeleteServiceApprovalConfig();
@@ -623,8 +622,8 @@ function ProtectionSetupDialog({
         where.telegram !== settings.telegram_enabled
       ) {
         await updateSettings.mutateAsync({
-          push_enabled: where.push,
-          telegram_enabled: where.telegram,
+          ...(deliveryEdits.push !== undefined && { push_enabled: where.push }),
+          ...(deliveryEdits.telegram !== undefined && { telegram_enabled: where.telegram }),
         });
       }
       toast.success(
@@ -1303,7 +1302,7 @@ function ProtectionSetupDialog({
               <WhereControls
                 settings={settings}
                 value={where}
-                onChange={setWhere}
+                onChange={(changes) => setDeliveryEdits((previous) => ({ ...previous, ...changes }))}
                 disabled={busy}
               />
               <p className="type-secondary text-text-tertiary">

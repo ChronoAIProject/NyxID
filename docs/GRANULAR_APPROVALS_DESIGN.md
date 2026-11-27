@@ -26,6 +26,12 @@ precede overlapping parameter paths; an explicit Ask is retained even when the
 method heuristic agrees with the base, because trusted server metadata may
 classify a POST as read-only.
 
+In the guided form, **Where you are asked** opens the NyxID iOS App Store
+listing in a separate tab. Telegram setup expands in place with a bot link
+and a copyable command. The owner can continue with web approvals while
+delivery setup is pending. The review reflects newly connected channels and
+the wizard saves only delivery preferences the owner explicitly changed.
+
 Policy PUT accepts `expected_revision`, returned by list/get responses. An empty
 revision means the editor observed absence. Stale saves and deletes return 409;
 an edit never upserts a deleted record. Rules and days validate before side

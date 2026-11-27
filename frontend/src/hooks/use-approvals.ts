@@ -21,8 +21,12 @@ import type {
 
 // --- Notification Settings ---
 
-export function useNotificationSettings() {
+export function useNotificationSettings(options: {
+  enabled?: boolean;
+  refetchInterval?: number;
+} = {}) {
   return useQuery({
+    ...options,
     queryKey: ["notifications", "settings"],
     queryFn: async (): Promise<NotificationSettings> => {
       return api.get<NotificationSettings>("/notifications/settings");
