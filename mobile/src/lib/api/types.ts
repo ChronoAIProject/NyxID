@@ -3,6 +3,7 @@ export type ApprovalMode = "per_request" | "grant";
 export type ApprovalDecisionChannel = "web" | "telegram" | "mobile";
 
 export type ChallengeItem = {
+  decision_destination?: "originating_owner_chat" | null;
   id: string;
   title: string;
   action: string;

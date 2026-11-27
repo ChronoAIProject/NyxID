@@ -301,9 +301,10 @@ export const nyxAgentAcknowledgementSchema = z.object({
 });
 export type NyxAgentAcknowledgement = z.infer<typeof nyxAgentAcknowledgementSchema>;
 
-/// A pending proxy approval raised by the chat's key; decided through the
-/// ordinary approvals API.
+/// A proxy approval raised by the chat's key. A decision destination can bind
+/// it to the original owner chat instead of the ordinary approvals API.
 export const nyxAgentApprovalSchema = z.object({
+  decision_destination: z.literal("originating_owner_chat").nullish(),
   execution_proposal: executionProposalSchema.nullish(),
   status: z.enum(["pending", "approved", "rejected", "expired"]).optional(),
   review_path: z.string().optional(),

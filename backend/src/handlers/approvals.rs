@@ -23,6 +23,8 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 #[derive(Debug, Serialize)]
 pub struct ApprovalRequestItem {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision_destination: Option<approval_service::DecisionDestination>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_proposal:
         Option<crate::services::execution_permission_dispatch::proposals::ProposalView>,
     pub id: String,
@@ -258,6 +260,7 @@ fn to_approval_request_item(
     };
     let resolved_org_name = if from_org_policy { org_name } else { None };
     ApprovalRequestItem {
+        decision_destination: approval_service::decision_destination(&request),
         execution_proposal: crate::services::execution_permission_dispatch::proposals::view(
             &request,
         ),

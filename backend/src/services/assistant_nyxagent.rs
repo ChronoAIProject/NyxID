@@ -6213,9 +6213,10 @@ pub async fn sweep_orphaned_turn_rows(db: &Database) -> AppResult<Vec<AssistantC
     Ok(settled)
 }
 
-/// A pending proxy approval request raised by this chat's key. The chat renders
-/// it as a card; the decision itself goes through the ordinary approvals API.
+/// A proxy approval raised by this chat's key. Cards retain their public decision
+/// destination; the original-owner-chat boundary also applies in thread history.
 pub struct ChatApproval {
+    pub decision_destination: Option<super::approval_service::DecisionDestination>,
     pub execution_proposal: Option<super::execution_permission_dispatch::proposals::ProposalView>,
     pub status: String,
     pub review_path: String,
@@ -6232,7 +6233,8 @@ pub struct ChatApproval {
 /// Pending approval requests the conversation's key is waiting on. Requests
 /// carry the key's name as `requester_label` (proxy approvals record the API
 /// key name), and the owner is either the request owner or a notified
-/// approver for org-policy requests.
+/// approver for org-policy requests. Public decision destinations distinguish
+/// original-owner-chat reviews; presence in history never grants web authority.
 #[cfg(test)]
 pub async fn pending_approvals(
     db: &Database,
@@ -6348,6 +6350,7 @@ fn chat_approval(
 ) -> ChatApproval {
     let proposal = super::execution_permission_dispatch::proposals::view(&row);
     ChatApproval {
+        decision_destination: super::approval_service::decision_destination(&row),
         review_path: proposal.as_ref().map_or_else(
             || super::assistant_links::AssistantPage::Approvals.path(),
             |p| p.review_path.clone(),

@@ -248,3 +248,20 @@ it.each([
   await act(async () => { await appI18n.changeLanguage("zh-CN"); });
   expect(screen.getByText(chinese)).toBeVisible();
 });
+
+
+it.each([
+  [null, NOW + 60_000, "Pending", true],
+  [null, NOW - 1, "Request expired", false],
+  ["expired", NOW + 60_000, "Request expired", false],
+  ["approved", NOW - 1, "Approved", false],
+  ["denied", NOW - 1, "Request denied", false],
+] as const)("keeps owner-chat thread card %s factual and has no web decision or pending review link", (decision, deadline, label, live) => {
+  const decide = vi.fn();
+  render(<ApprovalCard block={{...approval(decision), decision_destination: "originating_owner_chat", expires_at: new Date(deadline).toISOString()}} onDecide={decide} reviewPath="/assistant/approvals" />);
+  expect(screen.getByText(label)).toBeInTheDocument();
+  expect(screen.queryByRole("button", {name: /Approve|Deny/})).not.toBeInTheDocument();
+  expect(screen.queryByText("Review this request in your original private chat with NyxBot.") !== null).toBe(live);
+  if (live) expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  expect(decide).not.toHaveBeenCalled();
+});

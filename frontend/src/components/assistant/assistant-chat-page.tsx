@@ -1156,6 +1156,7 @@ function NyxAgentThreadPage() {
         block={{
           type: "approval_card", block_id: `nyxagent-approval:${approval.id}`,
           approval_request_id: approval.id, execution_proposal: approval.execution_proposal,
+          decision_destination: approval.decision_destination,
           body: `${approval.service_name}: ${approval.summary}`, service_slug: approval.service_slug,
           agent_key_prefix: approval.agent_key_prefix, approval_mode: approval.approval_mode,
           grant_duration_sec: null, expires_at: approval.expires_at,

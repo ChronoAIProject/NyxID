@@ -149,3 +149,21 @@ test("unknown execution proposal versions also refuse mobile decisions while leg
   assert.equal(getChallengeActionState(detail).canDecide, false);
   assert.match(getChallengeActionState(detail).reason ?? "", /web app/);
 });
+
+
+test("owner-chat destination survives the mobile adapter and only live pending reviews get that cue", () => {
+  for (const [status, expires_at, expected] of [
+    ["pending", "2099-01-01", "Review this request in your original private chat with NyxBot."],
+    ["pending", "2000-01-01", "This challenge has expired. Decision actions are disabled."],
+    ["approved", "2000-01-01", "This challenge has already been approved."],
+    ["rejected", "2000-01-01", "This challenge has already been denied."],
+    ["expired", "2099-01-01", "This challenge has expired. Decision actions are disabled."],
+  ] as const) {
+    const row = mapBackendRequestToChallenge({...fixture, status, expires_at, decision_destination: "originating_owner_chat"});
+    assert.equal(row.decision_destination, "originating_owner_chat");
+    const state = getChallengeActionState(row);
+    assert.equal(state.canDecide, false);
+    assert.equal(state.reason, expected);
+  }
+  assert.equal(getChallengeActionState(mapBackendRequestToChallenge({...fixture, expires_at: "2099-01-01"})).canDecide, true);
+});

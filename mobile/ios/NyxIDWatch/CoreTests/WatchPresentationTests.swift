@@ -54,6 +54,25 @@ final class ApprovalPresentationTests: XCTestCase {
     try WatchJSON.decoder.decode(ApprovalRequest.self, from: Data(json.utf8))
   }
 
+  func testOwnerChatCuePreservesExpirationAndTerminalState() throws {
+    for (status, expiry, cue) in [
+      ("pending", "2099-01-01T00:00:00+00:00", "Review in original NyxBot chat"),
+      ("pending", "2000-01-01T00:00:00+00:00", "Expired"),
+      ("expired", "2099-01-01T00:00:00+00:00", "Expired"),
+      ("approved", "2000-01-01T00:00:00+00:00", "Approved"),
+      ("rejected", "2000-01-01T00:00:00+00:00", "Denied"),
+    ] {
+      let request = try approval(Fixtures.approval(status: status)
+        .replacingOccurrences(of: #""decision_channel":null"#,
+          with: #""decision_channel":null,"decision_destination":"originating_owner_chat""#)
+        .replacingOccurrences(of: "2026-11-16T10:05:00+00:00", with: expiry))
+      XCTAssertFalse(request.canDecideOnWatch)
+      XCTAssertEqual(request.reviewCue, cue)
+    }
+    XCTAssertTrue(try approval(Fixtures.approval()).canDecideOnWatch)
+    XCTAssertEqual(try approval(Fixtures.approval(proposal: true)).reviewCue, "Review on iPhone")
+  }
+
   func testCardWording() throws {
     let write = try approval(Fixtures.approval(mode: "grant"))
     XCTAssertEqual(write.headline, "Make changes in Gmail")

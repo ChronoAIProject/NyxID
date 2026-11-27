@@ -30,6 +30,20 @@ use crate::services::operation_descriptor::OperationDescriptor;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
 use crate::telemetry::{TelemetryClient, TelemetryContext, TelemetryEvent, emit_event};
 
+/// Public decision boundary only; never includes source identity or review material.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionDestination {
+    OriginatingOwnerChat,
+}
+
+pub(crate) fn decision_destination(request: &ApprovalRequest) -> Option<DecisionDestination> {
+    request
+        .supervisor_write
+        .as_ref()
+        .map(|_| DecisionDestination::OriginatingOwnerChat)
+}
+
 /// Caller interaction capability, independent of authorization and transport.
 /// Disabling requests never bypasses policy or invalidates an existing grant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

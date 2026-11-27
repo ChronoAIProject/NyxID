@@ -10,11 +10,11 @@ import type { ChallengeDetail } from "../../lib/api/types";
 type Element = { type: unknown; props: Record<string, any> };
 const nodes = (e: Element): Element[] => [
   e,
-  ...[e.props.children]
+  ...[e.props.children, e.props.footer]
     .flat(Infinity)
     .flatMap((c) => (c?.props ? nodes(c) : [])),
 ];
-function setup(execution_proposal?: ChallengeDetail["execution_proposal"], approvalMode = "grant") {
+function setup(execution_proposal?: ChallengeDetail["execution_proposal"], approvalMode = "grant", boundary?: Partial<ChallengeDetail>) {
   const calls: unknown[][] = [];
   const openedUrls: string[] = [];
   let frontendUrl = "https://app.example.test";
@@ -34,6 +34,7 @@ function setup(execution_proposal?: ChallengeDetail["execution_proposal"], appro
     created_at: "2026-10-28T00:00:00Z",
     expires_at: "2099-10-28T00:00:00Z",
     request_context: { client: "agent", requester: "reviewer" },
+    ...boundary,
   };
   const h = hookHarness<Element>({
     "react/jsx-runtime": {
@@ -128,6 +129,7 @@ function setup(execution_proposal?: ChallengeDetail["execution_proposal"], appro
     },
     gate,
     guard: () => guard,
+    text: () => nodes(h.flush()).map(n => [n.props.label,n.props.value,n.props.children,n.props.footer].flat(Infinity).filter(x => typeof x === "string").join(" ")).join(" "),
     pair: () =>
       nodes(h.flush()).find((n) => n.type === "ApprovalDecisionPair")!,
     row: (label: string) =>
@@ -208,4 +210,16 @@ test("per-request approval uses the selected language and keeps request evidence
   t.after(e.h.unmount);
   assert.equal(e.row("批准").props.value, "每次请求");
   assert.equal(e.row("资源").props.value, "repo");
+});
+
+
+test("owner-chat mobile detail is read-only with its source-specific live cue", () => {
+  for (const [status, expires_at, live] of [["PENDING", "2099-01-01", true], ["PENDING", "2000-01-01", false], ["APPROVED", "2099-01-01", false], ["DENIED", "2099-01-01", false], ["EXPIRED", "2099-01-01", false]] as const) {
+    const e = setup(undefined, "per_request", {decision_destination: "originating_owner_chat", status, expires_at});
+    assert.equal(e.pair(), undefined);
+    assert.equal(e.row("Review in the web app"), undefined);
+    assert.equal(e.text().includes("Review this request in your original private chat with NyxBot."), live);
+    assert.deepEqual(e.calls, []);
+    e.h.unmount();
+  }
 });

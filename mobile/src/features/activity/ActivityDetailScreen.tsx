@@ -200,7 +200,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   const viewedEmittedRef = useRef<string | null>(null);
   const decided = useRef(false);
   const decidable = useRef(false);
-  decidable.current = data?.status === "PENDING" && !data.execution_proposal;
+  decidable.current = data ? getChallengeActionState(data).canDecide : false;
   useEffect(
     () => () => {
       if (viewedAtRef.current != null && decidable.current && !decided.current)
@@ -244,6 +244,8 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
 
   const decideMutation = useMutation({
     mutationFn: async (decision: "APPROVE" | "DENY") => {
+      if (data?.decision_destination === "originating_owner_chat")
+        throw new Error(translateApp("Review this request in your original private chat with NyxBot."));
       const durationSec =
         decision === "APPROVE"
           ? (settingsQuery.data?.grant_expiry_days ?? 30) * 86400
@@ -430,7 +432,7 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
             value={approvalExpiryLabel(data)} />
         </SettingsGroup>
         <ApprovalEvidence challenge={data} />
-        {data.execution_proposal && (
+        {data.execution_proposal && data.decision_destination !== "originating_owner_chat" && (
           <SettingsGroup inset={false}>
             <SettingsRow
               tone="action"

@@ -6,6 +6,7 @@ import { useApprovalRequests, useDecideApproval } from "@/hooks/use-approvals";
 import { ApiError } from "@/lib/api-client";
 import {
   isToolApproval,
+  approvalStatus,
   operationIdentityLabel,
   primaryActionLabel,
   shouldShowRawIdentityLine,
@@ -188,7 +189,7 @@ export function ApprovalHistoryPage() {
                       {request.requester_label ?? request.requester_type}
                     </p>
                   </div>
-                  {getStatusBadge(request.status)}
+                  {getStatusBadge(approvalStatus(request))}
                 </div>
                 <ApprovalAction className="mt-1.5 line-clamp-2">
                   {isToolApproval(request)
@@ -207,7 +208,9 @@ export function ApprovalHistoryPage() {
                   <span>{formatDate(request.created_at)}</span>
                   {request.decided_at && <span>{translateUi("Decided ")}{formatDate(request.decided_at)}</span>}
                 </div>
-                {request.status === "pending" && (
+                {approvalStatus(request) === "pending" && (request.decision_destination === "originating_owner_chat" ? (
+                  <p className="mt-3 border-t border-border/40 pt-3 type-secondary text-muted-foreground">{translateUi(Date.parse(request.expires_at) > Date.now() ? "Review this request in your original private chat with NyxBot." : "Waiting for the server")}</p>
+                ) : (
                   <div className="mt-3 flex gap-2 border-t border-border/40 pt-3">
                     <Button
                       variant="outline"
@@ -238,7 +241,7 @@ export function ApprovalHistoryPage() {
                     >
                       <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Reject")}</Button>
                   </div>
-                )}
+                ))}
               </div>
             ))}
           </div>
@@ -254,7 +257,7 @@ export function ApprovalHistoryPage() {
                   <TableHead>{translateUi("Status")}</TableHead>
                   <TableHead>{translateUi("Requested")}</TableHead>
                   <TableHead>{translateUi("Decided")}</TableHead>
-                  {requests.some((r) => r.status === "pending") && (
+                  {requests.some((r) => approvalStatus(r) === "pending") && (
                     <TableHead className="w-[100px]">{translateUi("Actions")}</TableHead>
                   )}
                 </TableRow>
@@ -327,7 +330,7 @@ export function ApprovalHistoryPage() {
                         )}
                       </div>
                     </TableCell>
-                    <TableCell>{getStatusBadge(request.status)}</TableCell>
+                    <TableCell>{getStatusBadge(approvalStatus(request))}</TableCell>
                     <TableCell className="text-muted-foreground">
                       {formatDate(request.created_at)}
                     </TableCell>
@@ -336,9 +339,11 @@ export function ApprovalHistoryPage() {
                         ? formatDate(request.decided_at)
                         : "-"}
                     </TableCell>
-                    {requests.some((r) => r.status === "pending") && (
+                    {requests.some((r) => approvalStatus(r) === "pending") && (
                       <TableCell>
-                        {request.status === "pending" && (
+                        {approvalStatus(request) === "pending" && (request.decision_destination === "originating_owner_chat" ? (
+                          <p className="type-secondary text-muted-foreground">{translateUi(Date.parse(request.expires_at) > Date.now() ? "Review this request in your original private chat with NyxBot." : "Waiting for the server")}</p>
+                        ) : (
                           <div className="flex justify-end gap-1">
                             <Button
                               variant="ghost"
@@ -367,7 +372,7 @@ export function ApprovalHistoryPage() {
                             >
                               <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Reject")}</Button>
                           </div>
-                        )}
+                        ))}
                       </TableCell>
                     )}
                   </TableRow>

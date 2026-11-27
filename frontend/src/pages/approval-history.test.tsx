@@ -490,3 +490,39 @@ describe("ApprovalHistoryPage", () => {
     });
   });
 });
+
+
+describe("owner-chat decision destination", () => {
+  it.each([
+    ["pending", "2099-01-01T00:00:00Z", "Pending", true],
+    ["pending", "2000-01-01T00:00:00Z", "Expired", false],
+    ["expired", "2099-01-01T00:00:00Z", "Expired", false],
+    ["approved", "2000-01-01T00:00:00Z", "Approved", false],
+    ["rejected", "2000-01-01T00:00:00Z", "Rejected", false],
+  ] as const)("keeps %s history factual in both layouts with no owner-chat decisions", (status, expires_at, label, live) => {
+    fixtures.requests = [
+      makeRequest({id: "dm", service_name: "Owner ledger", status, expires_at, decision_destination: "originating_owner_chat"}),
+      makeRequest({id: "ordinary", service_name: "Ordinary write"}),
+      makeRequest({id: "proposal", service_name: "Execution scope", execution_proposal: {
+        version: 5, supported: true, revision: 1, state: "pending", can_decide: true,
+        review_path: "/assistant/approvals", review: null, choices: [], grant_id: null, failure_code: null,
+      }}),
+    ];
+    fixtures.total = 3;
+    const view = render(<ApprovalHistoryPage />);
+    const mobile = view.container.querySelector(".md\\:hidden")!;
+    for (const [layout, selector] of [[mobile, "div.relative"], [screen.getByRole("table"), "tr"]] as const) {
+      const row = within(layout as HTMLElement).getByText("Owner ledger").closest(selector) as HTMLElement;
+      expect(within(row).getByText(label)).toBeInTheDocument();
+      expect(within(row).queryByRole("button")).not.toBeInTheDocument();
+      expect(within(row).queryByRole("link")).not.toBeInTheDocument();
+      expect(within(row).queryByText("Review this request in your original private chat with NyxBot.") !== null).toBe(live);
+      const ordinary = within(layout as HTMLElement).getByText("Ordinary write").closest(selector) as HTMLElement;
+      expect(within(ordinary).getByRole("button", {name: "Approve"})).toBeInTheDocument();
+      expect(within(ordinary).getByRole("button", {name: "Reject"})).toBeInTheDocument();
+      const proposal = within(layout as HTMLElement).getByText("Execution scope").closest(selector) as HTMLElement;
+      expect(within(proposal).queryByText("Review this request in your original private chat with NyxBot.")).not.toBeInTheDocument();
+    }
+    expect(mockDecideMutateAsync).not.toHaveBeenCalled();
+  });
+});

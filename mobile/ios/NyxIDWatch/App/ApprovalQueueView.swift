@@ -114,7 +114,7 @@ struct ApprovalQueueView: View {
         }
         .disabled(deciding)
       } else {
-        Label("Review on iPhone", systemImage: "iphone")
+        Label(approval.reviewCue, systemImage: approval.requiresOwnerChatReview ? "message" : "iphone")
           .font(.footnote)
           .foregroundStyle(.secondary)
       }
@@ -150,7 +150,7 @@ struct ApprovalQueueView: View {
   }
 
   private func decide(_ approval: ApprovalRequest, allow: Bool) async {
-    guard !deciding else { return }
+    guard approval.canDecideOnWatch, !deciding else { return }
     deciding = true
     defer { deciding = false }
     let key = decisionKeys[approval.id] ?? WatchService.decisionKey(for: approval.id)
@@ -215,6 +215,10 @@ private struct ApprovalCard: View {
         .kerning(0.6)
         .padding(.top, 2)
         .accessibilityHidden(true)
+      } else if approval.requiresOwnerChatReview {
+        Text(approval.reviewCue)
+          .font(.footnote)
+          .foregroundStyle(.secondary)
       }
     }
     .padding(10)

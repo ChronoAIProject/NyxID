@@ -601,6 +601,7 @@ async fn model(
 struct Journey {
     _readiness_heartbeat: Option<tokio_util::task::AbortOnDropHandle<()>>,
     _enrollment_snapshot_worker: Option<tokio_util::task::AbortOnDropHandle<()>>,
+    telegram_provider_ids: std::sync::Mutex<std::collections::HashMap<String, i32>>,
     state: AppState,
     channel: NyxbotChannel,
     key: String,
@@ -956,6 +957,7 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
     Journey {
         _readiness_heartbeat: None,
         _enrollment_snapshot_worker: None,
+        telegram_provider_ids: Default::default(),
         state,
         channel,
         key,
@@ -970,16 +972,32 @@ async fn setup_transport_journey(slug: &str, proxy: bool, transport: &str) -> Jo
     }
 }
 
+fn telegram_provider_id(j: &Journey, event: &str) -> i32 {
+    let mut ids = j.telegram_provider_ids.lock().unwrap();
+    let next = i32::try_from(ids.len()).unwrap().checked_add(1).unwrap();
+    *ids.entry(event.to_owned()).or_insert(next)
+}
+
 async fn owner(j: &Journey, text: &str, id: &str) -> Response {
+    // Local event/relay anchors stay stable. Marked Telegram sources separately
+    // use positive provider message IDs, unique in this fixture's owner chat and
+    // reused for a redelivery of the same event.
+    let provider_id = (j.script.marked.load(Ordering::SeqCst) && j.channel.platform == "telegram")
+        .then(|| telegram_provider_id(j, id));
+    let stored_provider_id = provider_id.map_or_else(|| id.to_owned(), |id| id.to_string());
     // The authenticated relay persists full inbound identity before invoking
     // NyxBot. This is the original-message anchor used by real supplemental sends.
     j.state.db.collection::<Document>("channel_messages").update_one(doc! {"_id":id},doc! {"$setOnInsert":{
         "conversation_id":&j.channel.route_id,"user_id":OWNER,"channel_bot_id":&j.channel.channel_bot_id,
-        "platform":"telegram","platform_conversation_id":"123","direction":"inbound","platform_message_id":id,
+        "platform":"telegram","platform_conversation_id":"123","direction":"inbound","platform_message_id":&stored_provider_id,
         "sender_platform_id":"7","original_message":true,"content_type":"text",
         "agent_api_key_id":&j.channel.route_api_key_id,"created_at":bson::DateTime::now()
     }}).upsert(true).await.unwrap();
     let mut input = event(text, "7", id);
+    if let Some(provider_id) = provider_id {
+        input["event_context"]["activity"]["telegram_input"]["message"]["message_id"] =
+            json!(provider_id);
+    }
     input["event_context"]["activity"]["conversation"]["id"] = json!("123");
     input["event_context"]["activity"]["source"]["route_id"] = json!(j.channel.route_id);
     respond(&j.state, &j.key, &input, id).await

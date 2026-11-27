@@ -273,6 +273,18 @@ not been verified, and asks for a fresh read after writing. Nested, oversized,
 credential-shaped or otherwise unsafe inputs keep the existing review route;
 raw arguments and credentials never enter the chat review. The confirmation
 code appears only after the complete review. There is no truncated review.
+
+Owner-visible approval lists, details and linked thread history retain these
+requests with the optional public `decision_destination: originating_owner_chat`
+marker. The marker contains no code, chat identity or private binding data.
+For live pending requests, web, mobile and Watch surfaces show an instruction to
+review in the original private NyxBot chat in place of decision controls.
+Expired and terminal requests retain their factual status. Generic review paths remain
+history navigation for older readers; they do not authorize a web decision.
+The ordinary web/mobile decision endpoint refuses both Allow and Deny for a
+bound request. Standard approvals and execution-proposal review paths keep
+their existing decision semantics.
+
 HTTP eligibility uses the same catalog and connection default-header layers as
 egress. Admitted custom caller headers, duplicate media headers, and effective
 media types other than JSON keep the ordinary approval route. JSON content type

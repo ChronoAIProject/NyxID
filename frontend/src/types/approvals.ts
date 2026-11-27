@@ -57,6 +57,7 @@ export interface TelegramDisconnectResponse {
 }
 
 export interface ApprovalRequestItem {
+  readonly decision_destination?: "originating_owner_chat" | null;
   readonly execution_proposal?: ExecutionProposal | null;
   readonly id: string;
   readonly service_name: string;

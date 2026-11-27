@@ -454,7 +454,17 @@ async fn confirmed_dm_report(
         .get_str("platform_message_id")
         .unwrap()
         .parse::<i64>()
-        .ok();
+        .expect("a marked Telegram source must have a valid numeric provider message ID");
+    assert!(reply_to > 0 && reply_to <= i64::from(i32::MAX));
+    assert_eq!(
+        Some(reply_to),
+        j.telegram_provider_ids
+            .lock()
+            .unwrap()
+            .get(anchor)
+            .map(|id| i64::from(*id)),
+        "the wire reply must name the provider message for this exact local source"
+    );
     for receipt in &prepared.receipts {
         let outbound = receipt.outbound_message_id.as_deref().unwrap();
         assert_eq!(receipt.platform_message_ids.len(), 1);
@@ -494,7 +504,7 @@ async fn confirmed_dm_report(
     }
 
     // Telegram receives the complete rendered plan, including entities and the
-    // source reply anchor when numeric. Compare whole bodies for every part;
+    // exact numeric source reply anchor. Compare whole bodies for every part;
     // marker-only matching could hide a missing denial or rejection notice.
     let expected: Vec<Value> = parts
         .iter()
@@ -505,9 +515,7 @@ async fn confirmed_dm_report(
             } else {
                 body["parse_mode"] = json!("Markdown");
             }
-            if let Some(id) = reply_to {
-                body["reply_to_message_id"] = json!(id);
-            }
+            body["reply_to_message_id"] = json!(reply_to);
             body
         })
         .collect();
@@ -522,16 +530,32 @@ async fn confirmed_dm_report(
         .map(|request| serde_json::from_slice(&request.body).unwrap())
         .collect();
     progress["later_sends"] = json!(received.len());
-    received
+    let occurrences: Vec<_> = received
         .windows(expected.len())
-        .find(|window| *window == expected.as_slice())
-        .map(|bodies| {
-            bodies
-                .iter()
-                .map(|body| body["text"].as_str().unwrap())
-                .collect::<Vec<_>>()
-                .join("")
-        })
+        .filter(|window| *window == expected.as_slice())
+        .collect();
+    progress["matching_occurrences"] = json!(occurrences.len());
+    let bodies = occurrences.first()?;
+    assert_eq!(
+        occurrences.len(),
+        1,
+        "the final result occurrence must be sent exactly once"
+    );
+    assert_eq!(
+        received
+            .iter()
+            .filter(|body| expected.contains(body))
+            .count(),
+        expected.len(),
+        "no final result part may be duplicated"
+    );
+    Some(
+        bodies
+            .iter()
+            .map(|body| body["text"].as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join(""),
+    )
 }
 
 async fn later_dm_report(
@@ -572,11 +596,13 @@ async fn later_dm_report(
                     .iter()
                     .find(|m| m["role"] == "assistant" && m["turn_id"] == turn)
                     .filter(|m| m["text"].as_str().is_some_and(|text| text.contains(marker)))
-                    && let Some(report) =
-                        confirmed_dm_report(j, cursor, &turn, message, task, &mut progress).await
                 {
                     j.settlements.lock().await.wait(&turn).await;
-                    return report;
+                    if let Some(report) =
+                        confirmed_dm_report(j, cursor, &turn, message, task, &mut progress).await
+                    {
+                        return report;
+                    }
                 }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -708,6 +734,172 @@ fn remove_adapter(j: &Journey) {
         .lock()
         .unwrap()
         .remove(&j.channel.channel_bot_id);
+}
+
+#[tokio::test]
+async fn supervisor_write_public_destination_keeps_owner_history_and_refuses_web_decisions() {
+    use crate::handlers::approvals::{self, ApprovalRequestsQuery};
+    for marked in [false, true] {
+        let j = if marked {
+            Box::pin(marked_journey(false)).await
+        } else {
+            Box::pin(setup_journey("api-feishu", false)).await
+        };
+        let auth = || crate::test_utils::test_auth_user(OWNER);
+        let query = || {
+            axum::extract::Query(ApprovalRequestsQuery {
+                status: None,
+                page: Some(1),
+                per_page: Some(50),
+                org_id: None,
+                include_admin_orgs: None,
+            })
+        };
+        let mut connected = None;
+        if marked {
+            let proposal = initial_gap(&j).await;
+            let Json(public) = approvals::get_request_by_id(
+                State(j.state.clone()),
+                auth(),
+                Path(proposal.id.clone()),
+            )
+            .await
+            .unwrap();
+            let public = serde_json::to_value(public).unwrap();
+            assert!(public.get("decision_destination").is_none());
+            assert_eq!(public["status"], "pending");
+            assert_eq!(
+                public["execution_proposal"]["review_path"],
+                crate::services::assistant_links::AssistantPage::ReviewCard {
+                    conversation: &proposals::proposal(&proposal).unwrap().conversation_id,
+                    card: &proposal.id,
+                }
+                .path()
+            );
+            web_allow(&j, &proposal, "operation", &Uuid::new_v4().to_string()).await;
+        } else {
+            connected = Some(start(&j, 1).await);
+        }
+        let (review, code) = wait_review(&j).await;
+        let binding = review.supervisor_write.as_ref().unwrap();
+        assert_eq!(binding.version, if marked { 2 } else { 1 });
+        let Json(public) =
+            approvals::get_request_by_id(State(j.state.clone()), auth(), Path(review.id.clone()))
+                .await
+                .unwrap();
+        let public = serde_json::to_value(public).unwrap();
+        assert_eq!(public["decision_destination"], "originating_owner_chat");
+        assert_eq!(public["status"], "pending");
+        assert!(public.get("execution_proposal").is_none());
+        assert!(public.get("supervisor_write").is_none());
+        for private in [
+            &binding.code_digest,
+            &binding.body_digest,
+            &binding.url_digest,
+            &binding.authority,
+            &binding.source.channel.event_id,
+        ] {
+            assert!(!public.to_string().contains(private));
+        }
+        let Json(list) = approvals::list_requests(State(j.state.clone()), auth(), query())
+            .await
+            .unwrap();
+        let listed = list
+            .requests
+            .into_iter()
+            .find(|r| r.id == review.id)
+            .expect("owner history retains its bound request");
+        assert_eq!(serde_json::to_value(listed).unwrap(), public);
+
+        let thread =
+            engine::approval_history(&j.state.db, OWNER, &binding.specialist_key, &[&review.id])
+                .await
+                .unwrap();
+        let card = thread
+            .into_iter()
+            .find(|r| r.id == review.id)
+            .expect("the linked specialist activity retains its request");
+        let card = serde_json::to_value(
+            crate::handlers::assistant_nyxagent::ChatApprovalResponse::from(card),
+        )
+        .unwrap();
+        assert_eq!(card["decision_destination"], "originating_owner_chat");
+        assert_eq!(card["review_path"], "/assistant/approvals");
+        assert!(card.get("supervisor_write").is_none());
+
+        let other = "99999999-9999-4999-8999-999999999999";
+        let denied = approvals::get_request_by_id(
+            State(j.state.clone()),
+            crate::test_utils::test_auth_user(other),
+            Path(review.id.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert!(denied.is_forbidden());
+        assert_eq!(denied.into_response().status(), StatusCode::FORBIDDEN);
+        let Json(other_list) = approvals::list_requests(
+            State(j.state.clone()),
+            crate::test_utils::test_auth_user(other),
+            query(),
+        )
+        .await
+        .unwrap();
+        assert!(!other_list.requests.iter().any(|r| r.id == review.id));
+        for approved in [false, true] {
+            let denied = approvals::decide_request(
+                State(j.state.clone()),
+                auth(),
+                Path(review.id.clone()),
+                crate::telemetry::TelemetryContext::default(),
+                HeaderMap::new(),
+                Json(approvals::DecideRequest {
+                    approved,
+                    duration_sec: None,
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert!(denied.is_forbidden());
+            assert_eq!(denied.into_response().status(), StatusCode::FORBIDDEN);
+            assert_eq!(load(&j, &review.id).await.status, "pending");
+            assert_no_write(&j);
+        }
+        let mut ordinary = review.clone();
+        ordinary.id = Uuid::new_v4().to_string();
+        ordinary.idempotency_key = Uuid::new_v4().to_string();
+        ordinary.supervisor_write = None;
+        j.state
+            .db
+            .collection::<ApprovalRequest>("approval_requests")
+            .insert_one(&ordinary)
+            .await
+            .unwrap();
+        let Json(control) =
+            approvals::get_request_by_id(State(j.state.clone()), auth(), Path(ordinary.id))
+                .await
+                .unwrap();
+        assert!(
+            serde_json::to_value(control)
+                .unwrap()
+                .get("decision_destination")
+                .is_none()
+        );
+
+        let delivery = cursor(&j).await;
+        let _ = body_text(owner(&j, &format!("no write-{code}"), "ws7-public-boundary-deny").await)
+            .await;
+        if let Some(connected) = connected {
+            let report = tokio::time::timeout(Duration::from_secs(25), connected)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(owner_text(&report).contains(NO_CONFIRMATION));
+        } else {
+            later_dm_report(&j, &delivery, &review, NO_CONFIRMATION).await;
+        }
+        assert_no_write(&j);
+        remove_adapter(&j);
+    }
 }
 
 #[tokio::test]
@@ -1045,9 +1237,17 @@ async fn supervisor_write_marked_retained_http_and_mcp_need_web_and_dm_then_spec
         // normal entry points. Neither can submit this occurrence again.
         let _ = body_text(owner(&j, &format!("yes write-{code}"), "ws7-marked-dm").await).await;
         web_allow(&j, &proposal, "operation", &key).await;
+        crate::handlers::assistant_team::wake(&j.state, OWNER, &binding.specialist_conversation)
+            .await;
+        wait_idle(&j, &binding.specialist_conversation).await;
         let parent = &binding.source.channel.conversation_id;
         wait_idle(&j, parent).await;
-        assert_eq!(j.ledger.lock().unwrap().writes.len(), 1);
+        let replayed_final = later_dm_report(&j, &delivery, &review, &marker).await;
+        assert_eq!(replayed_final, final_text);
+        let ledger = j.ledger.lock().unwrap();
+        assert_eq!(ledger.writes.len(), 1);
+        assert_eq!(ledger.control, "Untouched");
+        drop(ledger);
         remove_adapter(&j);
     }
 }

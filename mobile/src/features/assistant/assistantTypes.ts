@@ -273,6 +273,8 @@ export const cmaOperationSchema = z.object({
 });
 export type CmaOperation = z.infer<typeof cmaOperationSchema>;
 const historyApprovalSchema = z.object({
+  status: z.enum(["pending", "approved", "rejected", "expired"]).optional(),
+  decision_destination: z.literal("originating_owner_chat").nullish(),
   id: z.string(),
   service_name: z.string(),
   summary: z.string(),

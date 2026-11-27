@@ -476,3 +476,16 @@ test("retained-operation history renders one notice with the distinct request co
   assert.equal(notices[0]?.summary, "Retained operation updates for 6 distinct permission requests");
   assert.ok(!notices[0]?.detail?.includes("Do not reconstruct"));
 });
+
+
+test("owner-chat thread card retains live, expired and terminal state without a mobile decision", () => {
+  for (const [status, expires_at, label, live] of [["pending", "2099-01-01", "Approval required", true], ["pending", "2000-01-01", "Request expired", false], ["approved", "2000-01-01", "Approved", false], ["rejected", "2000-01-01", "Request denied", false], ["expired", "2099-01-01", "Request expired", false]] as const) {
+    const x = render("./AssistantPendingState.tsx", "AssistantApprovalCard", {approval: {...approval, status, expires_at, decision_destination: "originating_owner_chat"}, disabled: false, onDecide: () => assert.fail("owner-chat thread decision")});
+    assert.ok(x.text().includes(label));
+    assert.equal(x.text().includes("Review this request in your original private chat with NyxBot."), live);
+    assert.equal(x.button("Approve and send"), undefined);
+    assert.equal(x.button("Deny"), undefined);
+    assert.ok(x.text().includes(approval.summary));
+    x.h.unmount();
+  }
+});

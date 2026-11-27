@@ -33,6 +33,7 @@ struct ApprovalRequest: Decodable, Equatable, Identifiable, Sendable {
   /// Present only for execution-permission proposals, which need the full
   /// review page and can't be decided with a plain approve/deny.
   let executionProposal: ExecutionProposalSummary?
+  let decisionDestination: String?
 
   var title: String {
     let name = serviceName.trimmingCharacters(in: .whitespaces)
@@ -65,8 +66,23 @@ struct ApprovalRequest: Decodable, Equatable, Identifiable, Sendable {
     }
   }
 
-  /// Decidable from the watch: pending and not a review-only proposal.
-  var canDecideOnWatch: Bool { status == "pending" && executionProposal == nil }
+  var requiresOwnerChatReview: Bool { decisionDestination == "originating_owner_chat" }
+  var reviewCue: String {
+    guard requiresOwnerChatReview else { return "Review on iPhone" }
+    switch status {
+    case "approved": return "Approved"
+    case "rejected": return "Denied"
+    case "expired": return "Expired"
+    default: break
+    }
+    guard let expiresAt else { return "Waiting for the server" }
+    return expiresAt <= Date() ? "Expired" : "Review in original NyxBot chat"
+  }
+
+  /// Absence preserves older servers; a dedicated decision destination is review-only.
+  var canDecideOnWatch: Bool {
+    status == "pending" && executionProposal == nil && decisionDestination == nil
+  }
 
   var isGrant: Bool { approvalMode == "grant" }
 }
