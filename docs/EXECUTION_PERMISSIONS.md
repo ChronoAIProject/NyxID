@@ -3,8 +3,10 @@
 **Status: default-off contract, dispatch, and assistant permission authoring.**
 The #2195 Part A flow below adds human permission updates and exact-effect resume
 for enrolled private owner, shared-recipient and collaboration chat turns using
-MCP or HTTP proxy. Other callers retain #2194 Gap → legacy prompts. #2196 legacy
-mapping is not included. Unmarked traffic gains no preparation or database reads.
+MCP or HTTP proxy. Other callers retain #2194 Gap → legacy prompts. The
+[#2196 legacy mapping](#legacy-mapping-and-admission-diagnostics-2196a) preserves
+existing authority without backfilling consent. Unmarked traffic gains no
+preparation or database reads.
 
 Flag enables and clear-that-enables require the same durable activation and live
 observed support as proposal creation/decisions, version selection, channel-source
@@ -410,6 +412,9 @@ scope, audience, source and recent dispatch, and uses existing revocation. It
 never displays the persistent TTL sentinel as a permission expiry. Mobile and
 Telegram remain link-only, with generic notifications through existing configured
 channels and no input preview or legacy Allow/Deny action.
+Dashboard Approval History opens execution proposals through their server-issued
+review destination on desktop and mobile. Its legacy Approve/Reject actions
+remain available only for legacy requests.
 
 ### Exact resume and recovery
 
@@ -429,6 +434,25 @@ pause the retained effect; their decisions retain their existing semantics.
 Cancellation, departure, source deletion and sharing narrowing fence queued work
 and purge private payloads. Operation permissions receive terminal retention in
 the same terminal update; reusable grants remain subject to their live binding.
+
+For personal owner message-root tasks in private conversations (v1/v3) and
+verified-owner channels (v4), a freshly resumed, durably recorded successful HTTP
+effect continues through the normal model runner on the same admitted task. The
+runner loads the original human request from that exact live root and supplies
+bounded, redacted operation receipts as quoted, untrusted tool data. It preserves
+the conversation key, selected model, billing lane, task/source audience and
+ordinary model and tool egress checks. The model continues the remaining task;
+the retained effect keeps its original operation identity and cannot be sent
+again from the original or resume turn. A separately gated readback may require
+its own review before continuing.
+
+Every distinct request in a batched wake must have a fresh successful receipt.
+Denied, expired, waiting, cancelled, failed HTTP, uncertain and operational-error
+outcomes do not start a model continuation. A replayed completed receipt remains
+a receipt only, including after a lost wake or settlement response; it does not
+restart the task. Shared/group/org/platform/delegated/voice/external sources retain
+their existing receipt behavior. No new persisted state or replay permission is
+introduced.
 
 Group receipt publication includes only HTTP outcome, never raw provider account
 data. The original requester can read the bounded encrypted result on their

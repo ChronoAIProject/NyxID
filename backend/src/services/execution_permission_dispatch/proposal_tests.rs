@@ -143,6 +143,7 @@ async fn resume(f: &Fixture, row: &AssistantConversation) -> String {
         .await
         .unwrap()
         .unwrap()
+        .into_text()
 }
 async fn count(f: &Fixture, collection: &str) -> u64 {
     f.state

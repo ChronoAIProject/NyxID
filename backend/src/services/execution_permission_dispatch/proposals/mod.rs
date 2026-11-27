@@ -9,6 +9,7 @@ use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+pub(crate) mod continuation;
 mod lifecycle;
 mod presentation;
 pub(crate) mod record;
@@ -16,6 +17,7 @@ mod resume;
 use record::{Arm, Field, Slot};
 pub(crate) mod v2;
 pub(crate) mod v3;
+pub(crate) use continuation::ResumeOutcome;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
 pub(crate) use presentation::delivery_notice;
 pub(crate) use resume::{Resume, result_for_human, resume_turn};
@@ -402,6 +404,7 @@ pub(super) async fn create(
         choices.push(v3::choice(&contract)?);
     }
     let p = Proposal {
+        owner_continuation: None,
         revision: 1,
         gap_key: gap_key.clone(),
         effect_id: context.operation_id.clone(),
@@ -840,7 +843,7 @@ pub(crate) fn legacy_refusal(row: &ApprovalRequest) -> AppResult<()> {
 }
 
 fn secret_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
+    let key = key.to_ascii_lowercase().replace('-', "_");
     [
         "password",
         "secret",
@@ -975,6 +978,7 @@ pub(super) async fn existing_effect(
         "execution_proposal.v1.task.epoch":task.epoch,"execution_proposal.v1.contract.binding.connection_id":connection,
         "execution_proposal.v1.prepared_digest":digest,
         "$or":[{"execution_proposal.v1.state":{"$ne":"completed"}},
+            {"execution_proposal.v1.owner_continuation.version":1},
             {"execution_proposal.v1.delivered_turn_id":null},
             {"execution_proposal.v1.source_turn_id":&chat.turn_id},
             {"execution_proposal.v1.resume_turn_id":&chat.turn_id}]

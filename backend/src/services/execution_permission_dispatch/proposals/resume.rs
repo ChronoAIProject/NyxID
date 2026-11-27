@@ -102,9 +102,9 @@ pub(crate) async fn resume_turn(
     state: &crate::AppState,
     egress: &dyn super::super::super::platform_manager_contract::NyxAgentEgress,
     row: &AssistantConversation,
-) -> AppResult<Option<String>> {
+) -> AppResult<Option<ResumeOutcome>> {
     if let Some(note) = Box::pin(super::v2::resume_voice(state, row)).await? {
-        return Ok(Some(note));
+        return Ok(Some(ResumeOutcome::Receipt(note)));
     }
     let Some(turn) = row.active_turn.as_ref() else {
         return Ok(None);
@@ -118,6 +118,11 @@ pub(crate) async fn resume_turn(
         return Ok(None);
     }
     let mut notes = Vec::new();
+    let mut receipts = Vec::new();
+    let typed_wake = turn.events.iter().all(|event| {
+        event.kind == "permission_decided" && event.id.starts_with("execution-decision:")
+    });
+    let mut continuation_ready = None;
     let mut reviews = presentation::ReviewNotes::default();
     let mut seen = std::collections::HashSet::new();
     for id in ids {
@@ -128,6 +133,7 @@ pub(crate) async fn resume_turn(
         let request=state.db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{"_id":id,"user_id":&row.user_id,"execution_proposal.v1.conversation_id":&row.id,"execution_proposal.v1.key_id":&row.credential_api_key_id})).await?.ok_or_else(missing)?;
         let p = proposal(&request)?;
         let version = AssistantVersion::of(&request)?;
+        let eligible = continuation::eligible(row, p, version);
         if turn.execution_task.as_ref().is_none_or(|t| {
             t.task != p.task.task
                 || t.epoch != p.task.epoch
@@ -146,6 +152,21 @@ pub(crate) async fn resume_turn(
         }
         if p.state == "completed" {
             notes.push(if matches!(p.contract.context.audience,Audience::Group{..}) {"The operation completed. Its private result is available on your permission card.".into()}else{result_for_human(state,&request).await?.unwrap_or_else(||"The operation completed; its retained result is no longer available.".into())});
+            if eligible
+                && request.activity_outcome.as_deref() == Some("completed")
+                && p.delivered_turn_id.is_none()
+                && p.owner_continuation.as_ref().is_some_and(|release| {
+                    release.version == 1 && !release.blocked && release.released_turn_id.is_none()
+                })
+                && p.result.is_some()
+            {
+                receipts.push(continuation::Receipt {
+                    id: id.into(),
+                    version,
+                    claim_id: p.claim_id.clone().ok_or_else(conflict)?,
+                });
+            } else {
+            }
             continue;
         }
         if p.state == "dispatched"
@@ -209,6 +230,18 @@ pub(crate) async fn resume_turn(
                     .into(),
             );
             continue;
+        }
+        // This optional readiness read precedes the provider attempt. A failure
+        // cannot discard a known provider success or strand its durable receipt.
+        if eligible && continuation_ready.is_none() {
+            continuation_ready = Some(
+                crate::services::security_readiness_service::serving_report(
+                    &state.db,
+                    continuation::READINESS,
+                )
+                .await?
+                .serving_ready,
+            );
         }
         let raw = Field::Payload
             .open(&state.encryption_keys, &request)
@@ -347,6 +380,16 @@ pub(crate) async fn resume_turn(
             "execution_proposal.v1.independent_request_id": independent_request,
             "execution_proposal.v1.independent_card_id": independent_card,
         };
+        let successful = state_name == "completed" && activity_outcome == Some("completed");
+        let release_pending = eligible && successful && continuation_ready == Some(true);
+        if release_pending {
+            set.insert(
+                "execution_proposal.v1.owner_continuation",
+                doc! {
+                    "version": 1, "released_turn_id": bson::Bson::Null,
+                },
+            );
+        }
         if let Some(version) = marker {
             set.insert(
                 "execution_proposal.v1.result_context_version",
@@ -365,10 +408,26 @@ pub(crate) async fn resume_turn(
             }.await;
             super::super::super::api_key_mutation_service::transaction_result(result)
         })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
+        if release_pending {
+            receipts.push(continuation::Receipt {
+                id: id.into(),
+                version,
+                claim_id,
+            });
+        }
         notes.push(text);
     }
     notes.extend(reviews.render());
-    Ok(Some(notes.join("\n\n")))
+    let text = notes.join("\n\n");
+    if typed_wake && receipts.len() == seen.len() && !receipts.is_empty() {
+        return Ok(Some(ResumeOutcome::Continue(
+            continuation::prepare(state, row, receipts, text).await?,
+        )));
+    }
+    if !receipts.is_empty() {
+        continuation::withhold(&state.db, &receipts).await?;
+    }
+    Ok(Some(ResumeOutcome::Receipt(text)))
 }
 /// Called only after first-party-human ownership checks. Public projections
 /// never decrypt the provider receipt.

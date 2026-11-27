@@ -4107,7 +4107,8 @@ async fn execution_proposal_shared_private_and_group_resume_keep_requester_and_p
         let text = proposals::resume_turn(&f.state, egress.as_ref(), &resumed)
             .await
             .unwrap()
-            .expect("resume receipt");
+            .expect("resume receipt")
+            .into_text();
         assert!(text.contains("HTTP 200"), "{text}");
         assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
         if collaboration {

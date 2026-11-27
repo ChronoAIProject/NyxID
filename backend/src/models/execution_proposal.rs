@@ -25,6 +25,9 @@ impl std::fmt::Debug for ExecutionProposal {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Proposal {
+    /// Durable success-to-model handoff. Absent historical receipts never launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_continuation: Option<OwnerContinuation>,
     pub revision: i64,
     pub gap_key: String,
     pub effect_id: String,
@@ -74,6 +77,15 @@ pub struct Proposal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_context_version: Option<u8>,
     pub failure_code: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OwnerContinuation {
+    pub version: u32,
+    #[serde(default)]
+    pub blocked: bool,
+    /// None is proven unreleased. A release is irreversible, even after a crash.
+    pub released_turn_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

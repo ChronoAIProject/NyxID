@@ -95,6 +95,7 @@ export function ApprovalHistoryPage() {
   const decideMutation = useDecideApproval();
 
   const requests = data?.requests ?? [];
+  const hasActions = requests.some((request) => request.execution_proposal || request.status === "pending");
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
@@ -207,8 +208,13 @@ export function ApprovalHistoryPage() {
                   <span>{formatDate(request.created_at)}</span>
                   {request.decided_at && <span>{translateUi("Decided ")}{formatDate(request.decided_at)}</span>}
                 </div>
-                {request.status === "pending" && (
+                {(request.execution_proposal || request.status === "pending") && (
                   <div className="mt-3 flex gap-2 border-t border-border/40 pt-3">
+                    {request.execution_proposal ? (
+                      <Button asChild variant="outline" size="sm" className="flex-1">
+                        <a href={request.execution_proposal.review_path}>{translateUi("Review")}</a>
+                      </Button>
+                    ) : <>
                     <Button
                       variant="outline"
                       size="sm"
@@ -237,6 +243,7 @@ export function ApprovalHistoryPage() {
                       }
                     >
                       <ButtonIcon><XCircle className="h-3 w-3 text-destructive" /></ButtonIcon>{translateUi("Reject")}</Button>
+                    </>}
                   </div>
                 )}
               </div>
@@ -254,7 +261,7 @@ export function ApprovalHistoryPage() {
                   <TableHead>{translateUi("Status")}</TableHead>
                   <TableHead>{translateUi("Requested")}</TableHead>
                   <TableHead>{translateUi("Decided")}</TableHead>
-                  {requests.some((r) => r.status === "pending") && (
+                  {hasActions && (
                     <TableHead className="w-[100px]">{translateUi("Actions")}</TableHead>
                   )}
                 </TableRow>
@@ -336,9 +343,13 @@ export function ApprovalHistoryPage() {
                         ? formatDate(request.decided_at)
                         : "-"}
                     </TableCell>
-                    {requests.some((r) => r.status === "pending") && (
+                    {hasActions && (
                       <TableCell>
-                        {request.status === "pending" && (
+                        {request.execution_proposal ? (
+                          <Button asChild variant="outline" size="sm">
+                            <a href={request.execution_proposal.review_path}>{translateUi("Review")}</a>
+                          </Button>
+                        ) : request.status === "pending" && (
                           <div className="flex justify-end gap-1">
                             <Button
                               variant="ghost"
