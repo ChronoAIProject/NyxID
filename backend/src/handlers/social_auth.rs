@@ -1799,6 +1799,7 @@ mod tests {
         use crate::services::billing::schedules::eligibility::tests::{
             assert_login_credits, login_test_schedule,
         };
+        use crate::services::oauth_flow::{generate_code_challenge, generate_code_verifier};
         let db =
             crate::test_utils::connect_transaction_test_database("social_credit_loading").await;
         let state = crate::test_utils::test_app_state(db.clone());
@@ -1811,7 +1812,8 @@ mod tests {
             },
             SocialRedirectTarget::Mobile {
                 redirect_uri: "nyxid://auth/social/callback".into(),
-                code_challenge: None,
+                // #3017 requires an S256 challenge for mobile social code delivery.
+                code_challenge: Some(generate_code_challenge(&generate_code_verifier())),
             },
         ] {
             let id = uuid::Uuid::new_v4().to_string();
