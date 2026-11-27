@@ -46,20 +46,13 @@ pub(crate) async fn fixture() -> (AppState, XAdapter, MockServer, String, String
         "supports_pkce": true, "credential_mode": "user", "default_scopes": REQUIRED_SCOPES,
         "created_by": &owner, "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
     }).unwrap();
-    provider.client_id_encrypted = Some(
-        state
-            .encryption_keys
-            .encrypt(b"platform-client")
-            .await
-            .unwrap(),
-    );
-    provider.client_secret_encrypted = Some(
-        state
-            .encryption_keys
-            .encrypt(b"platform-secret")
-            .await
-            .unwrap(),
-    );
+    crate::services::credential_test_fixtures::provider_client(
+        &state.encryption_keys,
+        &mut provider,
+        "platform-client",
+        Some("platform-secret"),
+    )
+    .await;
     state
         .db
         .collection(PROVIDERS)
@@ -73,20 +66,36 @@ pub(crate) async fn fixture() -> (AppState, XAdapter, MockServer, String, String
         "status": "active", "token_scopes": REQUIRED_SCOPES.join(" "),
         "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
     }).unwrap();
-    key.access_token_encrypted = Some(
-        state
-            .encryption_keys
-            .encrypt(b"live-access-token")
+    for (field, slot, value) in [
+        (
+            "access_token_encrypted",
+            &mut key.access_token_encrypted,
+            "live-access-token",
+        ),
+        (
+            "refresh_token_encrypted",
+            &mut key.refresh_token_encrypted,
+            "refresh-token",
+        ),
+    ] {
+        *slot = Some(
+            crate::services::credential_record_service::encrypt(
+                &state.encryption_keys,
+                KEYS,
+                &key.id,
+                &key.user_id,
+                field,
+                value.as_bytes(),
+            )
             .await
             .unwrap(),
-    );
-    key.refresh_token_encrypted = Some(
-        state
-            .encryption_keys
-            .encrypt(b"refresh-token")
-            .await
-            .unwrap(),
-    );
+        );
+        crate::services::credential_record_service::mark_version(
+            &mut key.secret_context_versions,
+            &state.encryption_keys,
+            field,
+        );
+    }
     state.db.collection(KEYS).insert_one(key).await.unwrap();
     let adapter = XAdapter {
         api_base: Some(server.uri()),
@@ -510,10 +519,18 @@ async fn organization_connections_require_matching_owner_and_admin_acl() {
         .await
         .is_err()
     );
-    state
-        .db
-        .collection::<bson::Document>(KEYS)
-        .update_one(doc! {"_id": &key}, doc! {"$set": {"user_id": &org}})
+    let rows = state.db.collection::<UserApiKey>(KEYS);
+    let source = rows
+        .find_one(doc! {"_id": &key, "user_id": &actor})
+        .await
+        .unwrap()
+        .unwrap();
+    let mut fields =
+        super::credential_record_service::rebind_key_owner(&state.encryption_keys, &source, &org)
+            .await
+            .unwrap();
+    fields.insert("user_id", &org);
+    rows.update_one(doc! {"_id": &key, "user_id": &actor}, doc! {"$set": fields})
         .await
         .unwrap();
     assert!(

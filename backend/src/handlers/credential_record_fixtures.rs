@@ -312,7 +312,7 @@ pub(super) async fn insert_bearer_connection(
     id
 }
 
-pub(crate) async fn set_provider_client(
+pub(super) async fn set_provider_client(
     keys: &EncryptionKeys,
     provider: &mut ProviderConfig,
     client: &str,

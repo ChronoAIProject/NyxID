@@ -339,6 +339,9 @@ pub(crate) async fn bind_fixture_fields(
 }
 
 #[cfg(test)]
+pub(super) mod historical;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::channel_adapters::resolve_adapter;
@@ -624,10 +627,8 @@ mod tests {
     #[tokio::test]
     async fn channel_secrets_decrypt_only_descriptor_fields_and_configuration_never_exposes_secrets()
      {
-        let keys = EncryptionKeys::with_provider(Arc::new(
-            crate::crypto::local_key_provider::LocalKeyProvider::new([0x11; 32], None),
-        ));
-        let encrypted = keys.encrypt(b"meta-secret").await.unwrap();
+        let keys = crate::test_utils::test_encryption_keys();
+        let encrypted = hex::decode(historical::WHATSAPP_APP_SECRET).unwrap();
         let mut bot: ChannelBot = bson::from_document(bson::doc! {
             "_id": "bot", "user_id": "user", "platform": "whatsapp", "label": "Support",
             "platform_bot_id": "123456", "platform_bot_username": "+123456", "app_id": "654321",
@@ -640,9 +641,9 @@ mod tests {
         let cache = Arc::new(TokenExchangeCache::new());
         let adapter = resolve_adapter("whatsapp", &cache).unwrap();
         let secrets = adapter.build_verify_secrets(&keys, &bot).await.unwrap();
-        assert_eq!(secrets.get("app_secret"), Some("meta-secret"));
+        assert_eq!(secrets.get("app_secret"), Some("test-app-secret"));
         assert!(secrets.get("encrypt_key").is_none());
-        assert!(!format!("{secrets:?}").contains("meta-secret"));
+        assert!(!format!("{secrets:?}").contains("test-app-secret"));
         let configuration = adapter.registration().configuration(&bot).unwrap();
         assert_eq!(
             configuration,

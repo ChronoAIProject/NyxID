@@ -605,7 +605,7 @@ async fn migration_expired_oauth_refreshes_then_executes_without_new_consent() {
         "token_url":format!("{}/token", tokens.uri()),
         "token_endpoint_auth_method":"none"
     }).unwrap();
-    crate::handlers::credential_record_fixtures::set_provider_client(
+    crate::services::credential_test_fixtures::provider_client(
         &f.state.encryption_keys,
         &mut provider,
         "fixture-client",
