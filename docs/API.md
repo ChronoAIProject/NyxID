@@ -8384,6 +8384,9 @@ Service account tokens do **not** include `sid`, `roles`, `groups`, `permissions
 
 ## Security Rollout Readiness
 
+For the admin endpoints that start and advance an encrypted-record census and
+read its dated report, see [Running a dated census](security/KEY_LIFECYCLE.md#running-a-dated-census).
+
 ```
 GET /api/v1/admin/security-readiness
 Authorization: Bearer <admin_or_operator_access_token>

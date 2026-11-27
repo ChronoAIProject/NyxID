@@ -52,7 +52,11 @@ async fn call(
 ) -> (StatusCode, Value) {
     let req = Request::builder()
         .method(method)
-        .uri(format!("/api/v1/admin/key-lifecycle{path}"))
+        .uri(if path.starts_with("/encrypted-records/") {
+            format!("/api/v1/admin{path}")
+        } else {
+            format!("/api/v1/admin/key-lifecycle{path}")
+        })
         .header(header, credential)
         .header("content-type", "application/json")
         .body(if method == "GET" {
@@ -296,4 +300,64 @@ async fn real_admin_router_fences_credentials_and_commits_metadata_only_audit() 
         serde_json::to_value(data.get_i64("revision").unwrap()).unwrap(),
         json!(2)
     );
+}
+
+#[tokio::test]
+async fn census_router_authorizes_admin_and_operator_reads_and_audits_the_actions() {
+    let db = connect_transaction_test_database("census_roles").await;
+    role_service::seed_system_roles(&db).await.unwrap();
+    let roles = role_service::get_platform_role_ids(&db).await.unwrap();
+    let state = test_utils::test_app_state(db.clone());
+    let (admin, token) = human(&state, roles.admin.clone()).await;
+    let (operator, op) = human(&state, roles.operator.clone()).await;
+    let (_, other) = human(&state, Uuid::new_v4().to_string()).await;
+    let delegated = jwt::generate_delegated_access_token(
+        &state.jwt_keys,
+        &state.config,
+        &Uuid::parse_str(&admin).unwrap(),
+        "account:read",
+        "fixture",
+        60,
+        None,
+    )
+    .unwrap();
+    let (public, private) = crate::routes::build_router_with_state(state.clone());
+    let app = public.merge(private).with_state(state.clone());
+    let token = format!("Bearer {token}");
+    let op = format!("Bearer {op}");
+    let denied = [format!("Bearer {other}"), format!("Bearer {delegated}")];
+    let base = "/encrypted-records/censuses";
+    crate::services::encrypted_record_census::tests::with_history(&db,120,async{
+        for credential in [&op,&denied[0],&denied[1]] {
+            assert_eq!(call(&app,"POST",base,"authorization",credential,&Value::Null).await.0,StatusCode::FORBIDDEN);
+        }
+        let (code,body)=call(&app,"POST",base,"authorization",&token,&Value::Null).await;
+        assert_eq!(code,StatusCode::OK,"{body}");
+        let id=body["generation"].as_str().unwrap();
+        let advance=format!("{base}/{id}/advance");
+        assert_eq!(call(&app,"POST",&advance,"authorization",&op,&Value::Null).await.0,StatusCode::FORBIDDEN);
+        assert_eq!(call(&app,"POST",&advance,"authorization",&token,&Value::Null).await.0,StatusCode::OK);
+        let report=crate::services::encrypted_record_census::report::advance;
+        for _ in 0..128 {
+            if report(&db,&state.encryption_keys,&state.config,id).await.unwrap().complete {break;}
+        }
+        for suffix in ["","/families","/findings"]{
+            let path=format!("{base}/{id}{suffix}");
+            for auth in [&token,&op]{
+                assert_eq!(call(&app,"GET",&path,"authorization",auth,&Value::Null).await.0,StatusCode::OK);
+            }
+            for auth in &denied{
+                assert_eq!(call(&app,"GET",&path,"authorization",auth,&Value::Null).await.0,StatusCode::FORBIDDEN);
+            }
+        }
+        let logs=db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME);
+        assert_eq!(logs.count_documents(doc!{"event_type":{"$in":["encrypted_records.census_requested","encrypted_records.census_advance_requested"]},"user_id":&admin}).await.unwrap(),2);
+        tokio::time::timeout(std::time::Duration::from_secs(8),async{
+            loop {
+                if logs.count_documents(doc!{"event_type":"admin.read.by_operator","user_id":&operator,"event_data.endpoint":{"$in":["admin.census.status","admin.census.families","admin.census.findings"]}}).await.unwrap()==3 {break;}
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.unwrap();
+    }).await;
+    db.drop().await.unwrap();
 }
