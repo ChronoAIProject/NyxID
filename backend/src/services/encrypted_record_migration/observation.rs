@@ -12,6 +12,7 @@ use bson::{Bson, Document};
 mod companions;
 mod deliveries;
 mod families;
+mod nested;
 mod retained;
 #[cfg(test)]
 mod tests;
@@ -78,7 +79,8 @@ pub(crate) fn families() -> impl Iterator<Item = Family> {
             Adapter::Broker => &["user_id", "client_id", "secret_context_versions", "revoked"],
             Adapter::OAuthWebhook => &["created_by", "secret_context_versions"],
             _ => retained::source_companions(entry)
-                .or_else(|| deliveries::source_companions(entry))?,
+                .or_else(|| deliveries::source_companions(entry))
+                .or_else(|| nested::source_companions(entry))?,
         };
         Some(Family {
             entry,
@@ -253,6 +255,9 @@ impl Family {
                 }
                 Adapter::CatalogCa => source.ssh(&mut out).await,
                 Adapter::OAuthState => source.oauth(&mut out).await,
+                Adapter::LearningProposal => Box::pin(source.learning(&mut out)).await,
+                Adapter::ReattachWindow => source.window(&mut out).await,
+                Adapter::ApprovalProposal => source.approval(&mut out).await,
                 Adapter::AgentLogin | Adapter::AuthDevice | Adapter::NodeDevice => {
                     Box::pin(source.delivery(&mut out, parents)).await
                 }
