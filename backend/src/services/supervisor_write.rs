@@ -144,6 +144,20 @@ fn personal(row: &AssistantConversation) -> bool {
         && row.voice_parent_conversation_id.is_none()
 }
 
+pub(crate) fn turn_guidance(row: &AssistantConversation) -> &'static str {
+    if personal(row)
+        && row.is_subagent()
+        && row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.supervisor_source.is_some())
+    {
+        "\n\nPersonal supervisor ledger work: keep your own grants and action confirmations. NyxID may send a separate exact connected Bitable write review to the verified originating owner DM; neither you nor NyxBot may decide it. Approval resumes only the original waiting call. Read the identified row independently with the published bitable_records_search before and after an update. Report the actual returned values and observation failures to NyxBot; a write acknowledgement or the requested value is not readback evidence. After a timeout or uncertain write, observe first and never automatically repeat the write."
+    } else {
+        ""
+    }
+}
+
 /// Complete, bounded display from a closed schema. Nested values, URLs,
 /// credential names/shapes and control text are never sent to the owner chat.
 fn safe_text(text: &str, limit: usize) -> bool {

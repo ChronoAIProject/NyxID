@@ -559,6 +559,7 @@ pub(crate) async fn turn_notes(
 ) -> String {
     let mut notes = engine::channel_note(row);
     notes.push_str(engine::specialist_handoff_capability(row));
+    notes.push_str(super::supervisor_write::turn_guidance(row));
     notes.push_str(
         &engine::additional_channel_length_note(&state.db, row)
             .await

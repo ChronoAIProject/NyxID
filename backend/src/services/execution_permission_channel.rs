@@ -300,20 +300,24 @@ async fn capture(
                 r.settings.id.as_str(),
             ),
         )?,
-        audience_label: format!(
-            "{} · {} · {}",
-            r.channel.platform,
-            r.channel.bot_label,
-            r.thread
-                .title
-                .as_deref()
-                .or(r.settings.title.as_deref())
-                .unwrap_or("original chat/thread")
-        )
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(240)
-        .collect(),
+        audience_label: if permission {
+            format!(
+                "{} · {} · {}",
+                r.channel.platform,
+                r.channel.bot_label,
+                r.thread
+                    .title
+                    .as_deref()
+                    .or(r.settings.title.as_deref())
+                    .unwrap_or("original chat/thread")
+            )
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(240)
+            .collect()
+        } else {
+            String::new()
+        },
         policy_digest: policy_digest(&r)?,
         expires_at: expires,
     };
