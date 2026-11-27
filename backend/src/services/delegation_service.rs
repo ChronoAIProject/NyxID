@@ -512,6 +512,7 @@ async fn materialize_provider_requirements(
 
 #[cfg(test)]
 mod tests {
+    use crate::services::credential_record_service::fixtures;
     use chrono::Utc;
 
     use super::{normalize_delegated_injection, resolve_delegated_credentials};
@@ -679,16 +680,23 @@ mod tests {
             .await
             .unwrap();
 
+        let token_id = uuid::Uuid::new_v4().to_string();
         let token = UserProviderToken {
             secret_context_versions: Default::default(),
-            id: uuid::Uuid::new_v4().to_string(),
+            id: token_id.clone(),
             user_id: org_user_id.clone(),
             provider_config_id: provider_id,
             connection_id: None,
             credential_user_id: None,
             token_type: "oauth2".to_string(),
             access_token_encrypted: Some(
-                encryption_keys.encrypt(b"org-access-token").await.unwrap(),
+                fixtures::token(
+                    &token_id,
+                    &org_user_id,
+                    "access_token_encrypted",
+                    b"org-access-token",
+                )
+                .await,
             ),
             refresh_token_encrypted: None,
             token_scopes: Some("repo".to_string()),

@@ -1923,13 +1923,22 @@ mod tests {
             .unwrap();
         assert!(skills::search(&reader, "private", 1).await.is_err());
         assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
-        let encrypted = f
-            .state
-            .encryption_keys
-            .encrypt(b"test-only-ornn-fixture")
-            .await
-            .unwrap();
-        collection.update_one(doc!{"_id":&service.id},doc!{"$set":{"identity_propagation_mode":"jwt","auth_method":"bearer","service_category":"internal","credential_encrypted":mongodb::bson::Binary{subtype:mongodb::bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+        crate::handlers::credential_record_fixtures::set_catalog_credential(
+            &f.state.encryption_keys,
+            &mut service,
+            b"test-only-ornn-fixture",
+        )
+        .await;
+        collection.update_one(doc! {"_id": &service.id}, doc! {"$set": {
+            "identity_propagation_mode": "jwt",
+            "auth_method": "bearer",
+            "service_category": "internal",
+            "credential_encrypted": mongodb::bson::Binary {
+                subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                bytes: service.credential_encrypted,
+            },
+            "secret_context_versions": bson::to_bson(&service.secret_context_versions).unwrap(),
+        }}).await.unwrap();
         assert!(skills::search(&reader, "private", 1).await.is_err());
         assert!(matches!(
             reader

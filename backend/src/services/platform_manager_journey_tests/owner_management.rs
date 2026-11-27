@@ -1,6 +1,7 @@
 //! Signed private ingress and browser proof reach the real authenticated MCP
 //! handlers. NyxAgent's tool choices and Discord delivery use local fixtures.
 use super::*;
+use crate::services::platform_entry_native::tests::credentials::BotSecret;
 use crate::{
     models::{
         assistant_agent::COLLECTION_NAME as AGENTS,
@@ -449,11 +450,13 @@ async fn management_fixture(
     ordinary.user_id = owner.to_owned();
     ordinary.platform = "discord".into();
     ordinary.credential_source = "user".into();
-    ordinary.bot_token_encrypted = state
-        .encryption_keys
-        .encrypt(b"synthetic-owned-discord-token")
-        .await
-        .unwrap();
+    BotSecret::Token
+        .set(
+            &state.encryption_keys,
+            &mut ordinary,
+            "synthetic-owned-discord-token",
+        )
+        .await;
     ordinary.app_id = Some("901".into());
     ordinary.public_key = Some(hex::encode(
         ed25519_dalek::SigningKey::from_bytes(&[38; 32])
@@ -467,11 +470,13 @@ async fn management_fixture(
     foreign.user_id = base_bot.user_id.clone();
     foreign.platform_bot_id = "902".into();
     foreign.app_id = Some("902".into());
-    foreign.bot_token_encrypted = state
-        .encryption_keys
-        .encrypt(b"synthetic-foreign-discord-token")
-        .await
-        .unwrap();
+    BotSecret::Token
+        .set(
+            &state.encryption_keys,
+            &mut foreign,
+            "synthetic-foreign-discord-token",
+        )
+        .await;
     foreign.label = "Foreign ordinary Discord bot".into();
     state
         .db

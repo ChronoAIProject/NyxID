@@ -1,3 +1,5 @@
+#[path = "platform_entry_credential_fixtures.rs"]
+pub(crate) mod credentials;
 use super::*;
 use crate::models::platform_entry_identity::{EntryTransport, NativeEntryIdentity};
 use serde_json::json;
@@ -567,6 +569,17 @@ pub(crate) async fn stored_x_fixture() -> (
     NativeEntryConfiguration,
     String,
 ) {
+    stored_x_fixture_with_access_keys(&crate::test_utils::test_encryption_keys()).await
+}
+
+async fn stored_x_fixture_with_access_keys(
+    access_keys: &crate::crypto::aes::EncryptionKeys,
+) -> (
+    crate::AppState,
+    ChannelBot,
+    NativeEntryConfiguration,
+    String,
+) {
     crate::test_utils::init_test_audit_chain_hmac_key();
     use super::super::platform_entry_credentials::EntryCredentialSnapshot;
     use bson::doc;
@@ -595,18 +608,17 @@ pub(crate) async fn stored_x_fixture() -> (
         "credential_mode":"user","supports_pkce":true,"created_by":&bot.user_id,
         "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
     }).await.unwrap();
-    let token = state
-        .encryption_keys
-        .encrypt(b"synthetic-user-token")
-        .await
-        .unwrap();
-    db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME).insert_one(doc! {
+    let mut connection = doc! {
         "_id":bot.connection_id.as_ref().unwrap(),"user_id":&bot.user_id,"label":"X","credential_type":"oauth2",
         "credential_source":"platform","provider_config_id":&provider_id,"status":"active","credential_epoch":1_i64,
         "token_scopes":crate::services::channel_adapters::x::REQUIRED_SCOPES.join(" "),
-        "access_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:token},
         "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
-    }).await.unwrap();
+    };
+    credentials::seed_x_access_token(access_keys, &mut connection).await;
+    db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
+        .insert_one(connection)
+        .await
+        .unwrap();
     let adapter = crate::services::channel_adapters::x::XAdapter::default();
     crate::services::platform_credential_service::update(
         &db,
@@ -1371,7 +1383,9 @@ fn faq_alias_uses_the_same_trimmed_unicode_boundary() {
 async fn strict_native_snapshot_and_live_channel_use_context_and_preserve_captured_generation() {
     use crate::services::platform_entry_credentials::EntryCredentialSnapshot;
     use bson::doc;
-    let (state, bot, config, _profile) = stored_x_fixture().await;
+    let mut compatible = crate::test_utils::test_encryption_keys();
+    compatible.set_contextual_record_writes(false);
+    let (state, bot, config, _profile) = stored_x_fixture_with_access_keys(&compatible).await;
     let collection = crate::models::user_api_key::COLLECTION_NAME;
     let source = state
         .db
@@ -1474,7 +1488,9 @@ async fn composed_signing_sources_keep_native_admission_in_either_migration_orde
             .unwrap();
         // A connection-backed bot keeps its local token empty.
         bot.bot_token_encrypted.clear();
-        bot.app_secret_encrypted = Some(legacy.encrypt(b"local").await.unwrap());
+        credentials::BotSecret::AppSecret
+            .set(&legacy, &mut bot, "local")
+            .await;
         db.collection::<ChannelBot>("channel_bots")
             .replace_one(doc! {"_id":&bot.id}, &bot)
             .await

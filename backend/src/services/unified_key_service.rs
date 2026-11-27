@@ -5197,6 +5197,7 @@ async fn enrich_view_with_oauth_client_id(
 
 #[cfg(test)]
 mod tests {
+    use crate::services::credential_record_service::fixtures;
     mod catalog_placeholders;
     mod optional_provider_tests {
         include!("unified_key_service_optional_provider_tests.rs");
@@ -5536,16 +5537,22 @@ mod tests {
                 credential_user_id: None,
                 token_type: "oauth2".to_string(),
                 access_token_encrypted: Some(
-                    test_encryption_keys()
-                        .encrypt(b"fixture-access-token")
-                        .await
-                        .unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        user_id,
+                        "access_token_encrypted",
+                        b"fixture-access-token",
+                    )
+                    .await,
                 ),
                 refresh_token_encrypted: Some(
-                    test_encryption_keys()
-                        .encrypt(b"fixture-refresh-token")
-                        .await
-                        .unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        user_id,
+                        "refresh_token_encrypted",
+                        b"fixture-refresh-token",
+                    )
+                    .await,
                 ),
                 token_scopes: None,
                 expires_at: None,
@@ -7667,7 +7674,6 @@ mod tests {
 
     async fn insert_modern_oauth_service(
         db: &mongodb::Database,
-        encryption_keys: &crate::crypto::aes::EncryptionKeys,
         user_id: &str,
         provider_id: &str,
         service_id: &str,
@@ -7682,13 +7688,35 @@ mod tests {
             .unwrap()
             .unwrap();
         key.connection_id = Some(uuid::Uuid::new_v4().to_string());
-        key.access_token_encrypted = Some(encryption_keys.encrypt(b"access-token").await.unwrap());
+        key.access_token_encrypted = Some(
+            fixtures::key(
+                &key.id,
+                &key.user_id,
+                "access_token_encrypted",
+                b"access-token",
+            )
+            .await,
+        );
         if let Some(client_id) = oauth_client_id {
             key.credential_source = Some("byo".to_string());
-            key.user_oauth_client_id_encrypted =
-                Some(encryption_keys.encrypt(client_id.as_bytes()).await.unwrap());
-            key.user_oauth_client_secret_encrypted =
-                Some(encryption_keys.encrypt(b"client-secret").await.unwrap());
+            key.user_oauth_client_id_encrypted = Some(
+                fixtures::key(
+                    &key.id,
+                    &key.user_id,
+                    "user_oauth_client_id_encrypted",
+                    client_id.as_bytes(),
+                )
+                .await,
+            );
+            key.user_oauth_client_secret_encrypted = Some(
+                fixtures::key(
+                    &key.id,
+                    &key.user_id,
+                    "user_oauth_client_secret_encrypted",
+                    b"client-secret",
+                )
+                .await,
+            );
         } else {
             key.credential_source = Some("platform".to_string());
         }
@@ -7755,15 +7783,7 @@ mod tests {
             .insert_one(&provider)
             .await
             .unwrap();
-        insert_modern_oauth_service(
-            &db,
-            &encryption_keys,
-            &user_id,
-            &provider.id,
-            "disabled-github",
-            None,
-        )
-        .await;
+        insert_modern_oauth_service(&db, &user_id, &provider.id, "disabled-github", None).await;
         db.collection::<UserService>(USER_SERVICES)
             .update_one(
                 doc! { "_id": "disabled-github" },
@@ -7820,15 +7840,7 @@ mod tests {
             .await
             .unwrap();
         for service_id in ["active-github", "disabled-github", "deleted-github"] {
-            insert_modern_oauth_service(
-                &db,
-                &encryption_keys,
-                &user_id,
-                &provider.id,
-                service_id,
-                None,
-            )
-            .await;
+            insert_modern_oauth_service(&db, &user_id, &provider.id, service_id, None).await;
         }
         db.collection::<UserService>(USER_SERVICES)
             .update_many(
@@ -7904,24 +7916,8 @@ mod tests {
             .insert_one(&provider)
             .await
             .unwrap();
-        insert_modern_oauth_service(
-            &db,
-            &encryption_keys,
-            &user_id,
-            &provider.id,
-            "svc-primary",
-            None,
-        )
-        .await;
-        insert_modern_oauth_service(
-            &db,
-            &encryption_keys,
-            &user_id,
-            &provider.id,
-            "svc-sibling",
-            None,
-        )
-        .await;
+        insert_modern_oauth_service(&db, &user_id, &provider.id, "svc-primary", None).await;
+        insert_modern_oauth_service(&db, &user_id, &provider.id, "svc-sibling", None).await;
         let mut orphan_key = sample_api_key("oauth2");
         orphan_key.id = "orphan-key".to_string();
         orphan_key.user_id = user_id.clone();
@@ -7993,15 +7989,7 @@ mod tests {
             .await
             .unwrap();
         for service_id in ["svc-primary", "svc-sibling"] {
-            insert_modern_oauth_service(
-                &db,
-                &encryption_keys,
-                &user_id,
-                &provider.id,
-                service_id,
-                None,
-            )
-            .await;
+            insert_modern_oauth_service(&db, &user_id, &provider.id, service_id, None).await;
         }
 
         let result = super::disconnect_credentials(
@@ -8148,7 +8136,7 @@ mod tests {
             .insert_one(&provider)
             .await
             .unwrap();
-        insert_modern_oauth_service(&db, &keys, &owner, &provider.id, "crash-source", None).await;
+        insert_modern_oauth_service(&db, &owner, &provider.id, "crash-source", None).await;
         let pause = Arc::new(super::DisconnectClaimPause::default());
         let stopped = pause.clone();
         let task_db = db.clone();
@@ -8305,8 +8293,7 @@ mod tests {
                 .insert_one(&other_provider)
                 .await
                 .unwrap();
-            insert_modern_oauth_service(&db, &keys, &owner, &provider.id, "held-disconnect", None)
-                .await;
+            insert_modern_oauth_service(&db, &owner, &provider.id, "held-disconnect", None).await;
             let pause = Arc::new(super::DisconnectClaimPause::default());
             let task_db = db.clone();
             let task_owner = owner.clone();
@@ -8453,10 +8440,7 @@ mod tests {
             .insert_one(&provider)
             .await
             .unwrap();
-        let shared_ciphertext = encryption_keys
-            .encrypt(b"shared-access-token")
-            .await
-            .unwrap();
+        let shared_ciphertext = fixtures::historical::shared_access();
         let token_id = insert_provider_token(&db, &user_id, &provider.id).await;
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .update_one(
@@ -8559,15 +8543,7 @@ mod tests {
             .insert_one(&provider)
             .await
             .unwrap();
-        insert_modern_oauth_service(
-            &db,
-            &encryption_keys,
-            &user_id,
-            &provider.id,
-            "facebook-service",
-            None,
-        )
-        .await;
+        insert_modern_oauth_service(&db, &user_id, &provider.id, "facebook-service", None).await;
 
         let result = super::disconnect_credentials(
             &db,
@@ -8604,15 +8580,8 @@ mod tests {
             ("svc-sibling", "client-a"),
             ("svc-other-app", "client-b"),
         ] {
-            insert_modern_oauth_service(
-                &db,
-                &encryption_keys,
-                &user_id,
-                &provider.id,
-                service_id,
-                Some(client_id),
-            )
-            .await;
+            insert_modern_oauth_service(&db, &user_id, &provider.id, service_id, Some(client_id))
+                .await;
         }
         let mut orphan_other_app = sample_api_key("oauth2");
         orphan_other_app.id = "orphan-other-app".to_string();
@@ -8622,10 +8591,13 @@ mod tests {
         orphan_other_app.connection_id = Some(uuid::Uuid::new_v4().to_string());
         orphan_other_app.credential_source = Some("byo".to_string());
         orphan_other_app.user_oauth_client_id_encrypted = Some(
-            encryption_keys
-                .encrypt(b"client-b")
-                .await
-                .expect("encrypt orphan client id"),
+            fixtures::key(
+                &orphan_other_app.id,
+                &orphan_other_app.user_id,
+                "user_oauth_client_id_encrypted",
+                b"client-b",
+            )
+            .await,
         );
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(orphan_other_app)
@@ -8708,23 +8680,17 @@ mod tests {
 
         let mut provider = grant_provider();
         provider.revocation.as_mut().unwrap().url = format!("http://{address}/applications");
-        provider.client_id_encrypted = Some(encryption_keys.encrypt(b"client-id").await.unwrap());
-        provider.client_secret_encrypted =
-            Some(encryption_keys.encrypt(b"client-secret").await.unwrap());
+        provider.client_id_encrypted =
+            Some(fixtures::provider(&provider.id, "client_id_encrypted", b"client-id").await);
+        provider.client_secret_encrypted = Some(
+            fixtures::provider(&provider.id, "client_secret_encrypted", b"client-secret").await,
+        );
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(&provider)
             .await
             .unwrap();
         for service_id in ["svc-primary", "svc-sibling"] {
-            insert_modern_oauth_service(
-                &db,
-                &encryption_keys,
-                &user_id,
-                &provider.id,
-                service_id,
-                None,
-            )
-            .await;
+            insert_modern_oauth_service(&db, &user_id, &provider.id, service_id, None).await;
         }
 
         crate::test_utils::init_test_audit_chain_hmac_key();
@@ -9047,10 +9013,13 @@ mod tests {
                 token_scopes: None,
                 expires_at: None,
                 api_key_encrypted: Some(
-                    encryption_keys
-                        .encrypt(b"reusable-provider-api-key")
-                        .await
-                        .unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &user_id,
+                        "api_key_encrypted",
+                        b"reusable-provider-api-key",
+                    )
+                    .await,
                 ),
                 status: "active".to_string(),
                 state_version: 1,
@@ -9142,10 +9111,13 @@ mod tests {
                 token_scopes: None,
                 expires_at: None,
                 api_key_encrypted: Some(
-                    encryption_keys
-                        .encrypt(b"reusable-provider-api-key")
-                        .await
-                        .unwrap(),
+                    fixtures::token(
+                        &token_id,
+                        &user_id,
+                        "api_key_encrypted",
+                        b"reusable-provider-api-key",
+                    )
+                    .await,
                 ),
                 status: "active".to_string(),
                 state_version: 1,

@@ -5,14 +5,10 @@ async fn optional_authority_exact_redemption_forwards_frozen_header_once() {
     let f = optional_fixture().await;
     let mut token = f.token(false).await;
     // A pending approval created before storage migration keeps its lineage.
+    // Unmarked v2 bytes captured from this approval fixture on 437f0ec66.
+    const LEGACY_OWNER_TOKEN: &str = "0202003cf557a07ea980569d236400c3b7a23b40eb93f06514930cec47ff4fc35f81ccdbde294ab2e7643244c1c62075581ce70a53e5021c397303868bff159583a7df80e733168d9741a27806b2e9fdab71e739d55d69303a5a7e233eefb3fb4344ad61631b1b";
     token.secret_context_versions.clear();
-    token.access_token_encrypted = Some(
-        f.state
-            .encryption_keys
-            .encrypt(b"owner-token")
-            .await
-            .unwrap(),
-    );
+    token.access_token_encrypted = Some(hex::decode(LEGACY_OWNER_TOKEN).unwrap());
     f.state
         .db
         .collection::<UserProviderToken>(TOKENS)

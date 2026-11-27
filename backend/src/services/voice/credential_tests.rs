@@ -1,5 +1,7 @@
 //! Real replica-set regressions for specialist audio authority and billing.
 use super::credentials;
+use crate::services::catalog_credential_record_service as catalog_record;
+use crate::services::credential_record_service as key_record;
 use crate::{
     billing_integration_tests::{FakeLago, billing_service, create_usage_index, rate},
     models::{
@@ -71,11 +73,16 @@ async fn configure(state: &mut crate::AppState, owner: &str) -> DownstreamServic
         audience: PlatformKeyAudience::Public,
         allowed_owner_ids: vec![],
     });
-    service.credential_encrypted = state
-        .encryption_keys
-        .encrypt(b"fixture-platform-key")
-        .await
-        .unwrap();
+    service.credential_encrypted = catalog_record::encrypt(
+        &state.encryption_keys,
+        &service.id,
+        catalog_record::owner(&service).unwrap(),
+        b"fixture-platform-key",
+    )
+    .await
+    .unwrap();
+    service.secret_context_versions =
+        catalog_record::initial_versions(&state.encryption_keys, true);
     service.inference = crate::services::inference_service::default_inference("llm-openai");
     service.billing = Some(
         serde_json::from_value(json!({
@@ -169,13 +176,30 @@ pub(super) async fn connection(f: &Fixture, service: &DownstreamService, slug: &
     let key_id = Uuid::new_v4().to_string();
     let owner = f.row.agent_owner_id.as_deref().unwrap_or(&f.owner);
     let now = bson::DateTime::now();
+    let encrypted = key_record::encrypt(
+        &f.state.encryption_keys,
+        crate::models::user_api_key::COLLECTION_NAME,
+        &key_id,
+        owner,
+        "credential_encrypted",
+        b"fixture-own-key",
+    )
+    .await
+    .unwrap();
+    let mut versions = Default::default();
+    key_record::mark_version(
+        &mut versions,
+        &f.state.encryption_keys,
+        "credential_encrypted",
+    );
     f.state
         .db
         .collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME)
         .insert_one(doc! {
-            "_id":&key_id, "user_id":owner, "label":slug, "credential_type":"bearer",
+            "_id":&key_id, "user_id":owner, "label":slug,
+            "secret_context_versions": bson::to_bson(&versions).unwrap(), "credential_type":"bearer",
             "credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,
-                bytes:f.state.encryption_keys.encrypt(b"fixture-own-key").await.unwrap()},
+                bytes:encrypted},
             "status":"active", "created_at":now, "updated_at":now
         })
         .await
@@ -729,29 +753,100 @@ async fn specialist_own_voice_discovery_checks_effective_origin_and_usable_crede
         let (f, service) = fixture("specialist_voice_own_eligibility").await;
         let id = connection(&f, &service, "openai-own").await;
         grant(&f, vec![id.clone()]).await;
-        let row = f.state.db.collection::<crate::models::user_service::UserService>(crate::models::user_service::COLLECTION_NAME)
-            .find_one(doc! {"_id":&id}).await.unwrap().unwrap();
-        let endpoints = f.state.db.collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME);
-        let keys = f.state.db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME);
-        let own_available = |o:&Value|o.as_array().unwrap().iter().any(|v|v["connection_id"]==id && v["available"]==true);
+        let row = f
+            .state
+            .db
+            .collection::<crate::models::user_service::UserService>(
+                crate::models::user_service::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id":&id})
+            .await
+            .unwrap()
+            .unwrap();
+        let endpoints = f
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::user_endpoint::COLLECTION_NAME);
+        let keys = f
+            .state
+            .db
+            .collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME);
+        let own_available = |o: &Value| {
+            o.as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["connection_id"] == id && v["available"] == true)
+        };
         assert!(own_available(&options(&f).await));
-        let mut p = platform(&service); p.key_source=VoiceKeySource::Own; p.connection_id=Some(id.clone());
-        endpoints.update_one(doc! {"_id":&row.endpoint_id}, doc! {"$set":{"url":"https://attacker.invalid/v1"}}).await.unwrap();
+        let mut p = platform(&service);
+        p.key_source = VoiceKeySource::Own;
+        p.connection_id = Some(id.clone());
+        endpoints
+            .update_one(
+                doc! {"_id":&row.endpoint_id},
+                doc! {"$set":{"url":"https://attacker.invalid/v1"}},
+            )
+            .await
+            .unwrap();
         assert!(!own_available(&options(&f).await));
-        assert!(credentials::resolve(&f.state,&f.owner,&f.row.id,&p).await.is_err());
-        endpoints.update_one(doc! {"_id":&row.endpoint_id}, doc! {"$set":{"url":&service.base_url}}).await.unwrap();
-        keys.update_one(doc! {"_id":&row.api_key_id}, doc! {"$set":{"status":"revoked"}}).await.unwrap();
+        assert!(
+            credentials::resolve(&f.state, &f.owner, &f.row.id, &p)
+                .await
+                .is_err()
+        );
+        endpoints
+            .update_one(
+                doc! {"_id":&row.endpoint_id},
+                doc! {"$set":{"url":&service.base_url}},
+            )
+            .await
+            .unwrap();
+        keys.update_one(
+            doc! {"_id":&row.api_key_id},
+            doc! {"$set":{"status":"revoked"}},
+        )
+        .await
+        .unwrap();
         assert!(!own_available(&options(&f).await));
-        assert!(credentials::resolve(&f.state,&f.owner,&f.row.id,&p).await.is_err());
-        keys.update_one(doc! {"_id":&row.api_key_id}, doc! {"$set":{"status":"active","credential_encrypted":bson::Bson::Null}}).await.unwrap();
+        assert!(
+            credentials::resolve(&f.state, &f.owner, &f.row.id, &p)
+                .await
+                .is_err()
+        );
+        let saved = keys
+            .find_one_and_update(
+                doc! {"_id":&row.api_key_id},
+                doc! {"$set":{"status":"active","credential_encrypted":bson::Bson::Null}},
+            )
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!own_available(&options(&f).await));
-        assert!(credentials::resolve(&f.state,&f.owner,&f.row.id,&p).await.is_err());
-        keys.update_one(doc! {"_id":&row.api_key_id}, doc! {"$set":{"credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic, bytes:f.state.encryption_keys.encrypt(b"fixture-own-key").await.unwrap()}}}).await.unwrap();
+        assert!(
+            credentials::resolve(&f.state, &f.owner, &f.row.id, &p)
+                .await
+                .is_err()
+        );
+        keys.update_one(
+            doc! {"_id":&row.api_key_id},
+            doc! {"$set":{"credential_encrypted":saved.get("credential_encrypted").unwrap()}},
+        )
+        .await
+        .unwrap();
         assert!(own_available(&options(&f).await));
-        endpoints.delete_one(doc! {"_id":&row.endpoint_id}).await.unwrap();
-        assert!(matches!(assistant_voice::options(&f.state.db,&f.state.encryption_keys,&f.row).await, Err(crate::errors::AppError::Internal(_))),
-            "read-only snapshot infrastructure/data-integrity errors must propagate");
-    }).await;
+        endpoints
+            .delete_one(doc! {"_id":&row.endpoint_id})
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                assistant_voice::options(&f.state.db, &f.state.encryption_keys, &f.row).await,
+                Err(crate::errors::AppError::Internal(_))
+            ),
+            "read-only snapshot infrastructure/data-integrity errors must propagate"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]

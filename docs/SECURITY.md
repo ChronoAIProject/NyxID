@@ -167,6 +167,8 @@ Prepare the [independent HMAC keyset](security/KEY_LIFECYCLE.md) before changing
 
 Readiness is observation evidence about the registered fields, not proof that every retained backup is independent of an old key. There is no automatic key-destruction action or universal lazy rewrap. See [ENV.md](ENV.md#contextual-encryption-writer-cutover) for the mode matrix and [the field inventory](security/ENCRYPTED_FIELD_INVENTORY.md) for coverage. Remaining field-family conversion and restriction of raw crypto entry points are tracked in #1933 and #1934.
 
+The online census journal is dormant until the census runner and its family observers are installed. Its snapshot and change stream describe the live database. NyxID cannot independently prove that an unannounced restore or import did not occur. A restore can roll back both the database and its evidence. Record announced restores under a new restore epoch and start a fresh census. Retirement will require current full-admin evidence recorded after the baseline for old writer withdrawal, obsolete credentials and sessions, restore continuity, and backup, PITR and rollback dependencies.
+
 ### Key Rotation Rollback
 
 If a key rotation causes issues, you can roll back:

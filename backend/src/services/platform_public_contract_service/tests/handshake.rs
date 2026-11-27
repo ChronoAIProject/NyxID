@@ -9,6 +9,7 @@ use crate::models::{
     platform_public_session::{COLLECTION_NAME as SESSIONS, PlatformPublicSession},
     usage_meter::{COLLECTION_NAME as METERS, UsageMeterRow},
 };
+use crate::services::catalog_credential_record_service as catalog_record;
 use crate::services::{
     audit_service::AuditActor, platform_bot_runtime_control_service as controls,
     platform_public_credential_service as credentials,
@@ -401,11 +402,16 @@ impl Handshake {
         outer.base_url = runtime_base;
         let mut service = model();
         service.base_url = format!("{}/v1", provider.uri());
-        service.credential_encrypted = state
-            .encryption_keys
-            .encrypt(b"local-test-provider-key")
-            .await
-            .unwrap();
+        service.credential_encrypted = catalog_record::encrypt(
+            &state.encryption_keys,
+            &service.id,
+            catalog_record::owner(&service).unwrap(),
+            b"local-test-provider-key",
+        )
+        .await
+        .unwrap();
+        service.secret_context_versions =
+            catalog_record::initial_versions(&state.encryption_keys, true);
         service.billing = Some(serde_json::from_value(json!({"platform_billable":true,"platform_key_pricing":{
             "metric":"input_tokens","credits_per_unit":"0.000005","lago_metric_code":"public_input","sync_status":"synced","components":[
             {"metric":"output_tokens","credits_per_unit":"0.00002","lago_metric_code":"public_output","sync_status":"synced"},
