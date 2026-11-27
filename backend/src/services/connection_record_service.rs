@@ -1,7 +1,10 @@
 //! Per-user legacy service credentials bind the service relationship as well as
 //! the captured record/owner. The envelope never supplies trusted identities.
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::user_service_connection::{COLLECTION_NAME, UserServiceConnection},
 };
@@ -34,7 +37,7 @@ pub(crate) async fn encrypt(
     if plaintext.is_empty() || plaintext.len() > 8192 {
         return Err(invalid());
     }
-    let ciphertext = super::record_field_service::encrypt_context(
+    let ciphertext = record_field::encrypt_context(
         keys,
         &RecordContext::new(
             COLLECTION_NAME,
@@ -54,7 +57,7 @@ pub(crate) async fn text(
     row: &UserServiceConnection,
 ) -> AppResult<Zeroizing<String>> {
     validate(row)?;
-    let raw = super::record_field_service::decrypt_context(
+    let raw = record_field::decrypt_context(
         keys,
         &RecordContext::new(
             COLLECTION_NAME,

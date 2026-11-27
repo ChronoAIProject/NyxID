@@ -1523,6 +1523,7 @@ async fn specialist_guest_turns_never_use_owner_tools_or_ssh() {
     // to the usual checks (what guests may do with a service is decided
     // before, from the owner's guest access).
     let target = crate::services::mcp_approval::McpApprovalTarget {
+        connection_id: None,
         service_id: uuid::Uuid::new_v4().to_string(),
         service_name: "Example".into(),
         service_slug: "example".into(),
@@ -1724,6 +1725,7 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.clone(),
@@ -1782,6 +1784,7 @@ async fn specialist_guests_use_a_granted_service_as_far_as_the_owner_lets_them()
             crate::models::approval_grant::COLLECTION_NAME,
         )
         .insert_one(crate::models::approval_grant::ApprovalGrant {
+            org_policy: None,
             execution_review: None,
             execution_last_used_at: None,
             execution_use: None,
@@ -3088,6 +3091,7 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: catalog.id.clone(),
@@ -3112,6 +3116,7 @@ async fn assistant_operation_scopes_hide_typed_tools_and_preserve_guest_and_webh
                     crate::models::approval_grant::COLLECTION_NAME,
                 )
                 .insert_one(crate::models::approval_grant::ApprovalGrant {
+                    org_policy: None,
                     execution_review: None,
                     execution_last_used_at: None,
                     execution_use: None,
@@ -5235,6 +5240,7 @@ async fn full_access_service_approval_executes_with_receipt_while_auto_waits() {
             .db
             .collection::<ServiceApprovalConfig>(CONFIGS)
             .insert_one(ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.owner.clone(),
                 service_id: service.clone(),
@@ -5509,6 +5515,7 @@ async fn invocation_cancel_during_approval_wait_denies_direct_meta_and_http_disp
                 .db
                 .collection(configs::COLLECTION_NAME)
                 .insert_one(configs::ServiceApprovalConfig {
+                    approvers: Default::default(),
                     id: uuid::Uuid::new_v4().to_string(),
                     user_id: f.owner.clone(),
                     service_id: service_id.clone(),
@@ -8285,7 +8292,10 @@ async fn assistant_connect_accepts_catalog_slug_or_id_locks_personal_intent_and_
 
 // #2271: drive both direct native and nyx__call_tool discovery through the
 // real authenticated handler. Only synthetic lengths/IDs enter these fixtures.
-async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Vec<String>) {
+async fn operation_discovery_fixture(
+    name: &'static str,
+    count: usize,
+) -> (Fixture, String, Vec<String>) {
     use crate::models::assistant_agent::AgentGrants;
     use crate::services::assistant_team_service as team;
     let f = boxed_chat_fixture(name).await;
@@ -8309,7 +8319,7 @@ async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Ve
     .unwrap();
     let mut ids = Vec::new();
     let now = bson::DateTime::now();
-    let rows:Vec<_>=(0..120).map(|i| {
+    let rows:Vec<_>=(0..count).map(|i| {
         let id=uuid::Uuid::new_v4().to_string(); ids.push(id.clone());
         doc!{"_id":id,"service_id":&service,"name":format!("operation_{i}"),
             "description":"中文 JSON \"value\"\n# Markdown\\path".repeat(8),
@@ -8327,7 +8337,7 @@ async fn operation_discovery_fixture(name: &'static str) -> (Fixture, String, Ve
 
 #[tokio::test]
 async fn assistant_team_operation_discovery_mcp_pages_are_complete_bounded_and_filtered() {
-    let (f, service, expected) = operation_discovery_fixture("discovery_pages").await;
+    let (f, service, expected) = operation_discovery_fixture("discovery_pages", 120).await;
     let auth = authenticate_id(&f, &f.nyxbot_thread).await;
     let hidden = connected(
         &f.state.db,
@@ -8411,7 +8421,7 @@ async fn assistant_team_operation_discovery_mcp_pages_are_complete_bounded_and_f
 async fn assistant_team_operation_discovery_live_revocation_and_cursor_binding() {
     use crate::models::assistant_agent::AgentGrants;
     use crate::services::assistant_team_service as team;
-    let (f, service, ids) = operation_discovery_fixture("discovery_fences").await;
+    let (f, service, ids) = operation_discovery_fixture("discovery_fences", 120).await;
     let auth = authenticate_id(&f, &f.nyxbot_thread).await;
     let initial = json!({"subagent":"worker","limit":1});
     let first = result(
@@ -9017,4 +9027,468 @@ async fn voice_rpc_error_envelopes_redact_links_in_json_and_sse_without_changing
         1
     );
     f.state.db.drop().await.unwrap();
+}
+
+async fn operation_effect_fixture(name: &'static str) -> (Fixture, String, Vec<String>) {
+    let (f, service, ids) = operation_discovery_fixture(name, 5).await;
+    crate::test_utils::set_agent_operation_scopes_enabled(&f.state.db, &f.owner, true).await;
+    let endpoints = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME);
+    endpoints
+        .update_one(doc! {"_id":&ids[4]}, doc! {"$set":{"publication":"draft"}})
+        .await
+        .unwrap();
+    for (id, method, risk) in [
+        (&ids[1], "POST", None),
+        (&ids[2], "POST", Some("read")),
+        (&ids[3], "DELETE", None),
+    ] {
+        endpoints
+            .update_one(
+                doc! {"_id":id},
+                doc! {"$set":{"method":method,"risk":risk,"name":format!("read_{id}")}},
+            )
+            .await
+            .unwrap();
+    }
+    (f, service, ids)
+}
+
+#[tokio::test]
+async fn agent_operation_effect_filter_uses_closed_classes() {
+    let (f, service, ids) = operation_effect_fixture("closed_effect_filter").await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    for (class, expected) in [
+        ("read", vec![&ids[0], &ids[2]]),
+        ("change", vec![&ids[1]]),
+        ("destructive", vec![&ids[3]]),
+        ("sensitive", vec![]),
+    ] {
+        let page = result(
+            call(
+                &f,
+                &auth,
+                "nyxid__get_agent_operations",
+                json!({"subagent":"worker","service_id":service,"effect_class":class}),
+            )
+            .await,
+            false,
+        )
+        .await;
+        let actual: Vec<_> = page["services"][0]["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|op| op["endpoint_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(actual, expected);
+    }
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn agent_operation_effect_read_only_snapshot_never_grows() {
+    let (f, service, ids) = operation_effect_fixture("closed_effect_snapshot").await;
+    let auth = authenticate_id(&f, &f.nyxbot_thread).await;
+    let selection = json!({"subagent":"worker","service_id":service,"selection":{"expected_revision":0,"read_only":true}});
+    let saved = result(
+        call(&f, &auth, "nyxid__set_agent_operations", selection.clone()).await,
+        false,
+    )
+    .await;
+    assert_eq!(saved["revision"], 1);
+    let endpoints = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::service_endpoint::COLLECTION_NAME);
+    endpoints
+        .update_one(
+            doc! {"_id":&ids[4]},
+            doc! {"$set":{"publication":"published"}},
+        )
+        .await
+        .unwrap();
+    let _ = result(
+        call(&f, &auth, "nyxid__set_agent_operations", selection).await,
+        true,
+    )
+    .await;
+    let page = result(
+        call(
+            &f,
+            &auth,
+            "nyxid__get_agent_operations",
+            json!({"subagent":"worker","service_id":service}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(page["services"][0]["revision"], 1);
+    assert_eq!(page["services"][0]["all_operations"], false);
+    assert_eq!(
+        page["services"][0]["endpoint_ids"],
+        json!([&ids[0], &ids[2]])
+    );
+    assert_eq!(
+        page["services"][0]["operations"].as_array().unwrap().len(),
+        5
+    );
+    // Existing selected reads keep their value limits, and a read omitted by
+    // the owner's explicit selection stays omitted on a later snapshot.
+    let limits = json!({"query":{"lang":{"required":true,"rule":{"type":"exact","value":"en"}}}});
+    let restricted = json!({"subagent":"worker","service_id":service,"selection":{
+        "expected_revision":1,"endpoint_ids":[ids[0]],"inputs":{(&ids[0]):limits}}});
+    result(
+        call(&f, &auth, "nyxid__set_agent_operations", restricted).await,
+        false,
+    )
+    .await;
+    result(
+        call(
+            &f,
+            &auth,
+            "nyxid__set_agent_operations",
+            json!({"subagent":"worker","service_id":service,
+        "selection":{"expected_revision":2,"read_only":true}}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    let filtered = result(
+        call(
+            &f,
+            &auth,
+            "nyxid__get_agent_operations",
+            json!({"subagent":"worker","service_id":service,"effect_class":"read"}),
+        )
+        .await,
+        false,
+    )
+    .await;
+    assert_eq!(filtered["services"][0]["endpoint_ids"], json!([ids[0]]));
+    assert_eq!(filtered["services"][0]["inputs"][&ids[0]], limits);
+    f.state.db.drop().await.unwrap();
+}
+
+async fn unconfirmed_skill_save(mode: crate::models::assistant_settings::AccessMode) {
+    use crate::models::assistant_settings::AccessMode;
+    use crate::services::{
+        assistant_activity_decision, assistant_nyxagent, assistant_settings_service,
+        assistant_skill_authoring::tests::{fixture, input, setup_ornn},
+    };
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let f = fixture("mcp_unconfirmed_skill_save").await;
+    assistant_settings_service::update(
+        &f.state.db,
+        &f.owner,
+        assistant_settings_service::Update {
+            access_mode: Some(mode),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let server = setup_ornn(&f).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skill-format/validate"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":{"valid":true}})))
+        .mount(&server)
+        .await;
+    const PRIVATE: &str = "private-storage-host/bucket/operation";
+    Mock::given(method("POST"))
+        .and(path("/api/v1/skills"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"detail":PRIVATE})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/skill-search"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":{"items":[],"totalPages":0}})),
+        )
+        .mount(&server)
+        .await;
+    let auth = authenticate(&f).await;
+    let draft = || {
+        call(
+            &f,
+            &auth,
+            "nyxid__draft_agent_skill",
+            input(&f.chat.agent_id),
+        )
+    };
+    let result_value = result(draft().await, true).await;
+    let reviewed = mode != AccessMode::Autopilot;
+    let card = if reviewed {
+        assert_eq!(result_value["error"], "acknowledgement_required");
+        Some(result_value["acknowledgement_id"].as_str().unwrap())
+    } else {
+        None
+    };
+    let decide = |id: &str| {
+        crate::handlers::assistant_nyxagent::decide_acknowledgement(
+            axum::extract::State(f.state.clone()),
+            crate::test_utils::test_auth_user(&f.owner),
+            axum::extract::Path((f.row.id.clone(), id.to_owned())),
+            Json(serde_json::from_value(json!({"decision":"allow"})).unwrap()),
+        )
+    };
+    let failure = if let Some(id) = card {
+        let error = decide(id).await.err().unwrap();
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        serde_json::to_value(error.response_body()).unwrap()
+    } else {
+        result_value.clone()
+    };
+    assert_eq!(
+        failure["details"]["reason"], "publication_ambiguous",
+        "{failure}"
+    );
+    assert_eq!(failure["details"]["recovery"], "check");
+    assert_eq!(failure["details"]["upstream_status"], 500);
+    assert!(!failure.to_string().contains(PRIVATE));
+    assert!(
+        failure["message"]
+            .as_str()
+            .unwrap()
+            .contains("was not confirmed")
+    );
+    let mut activities = assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+        .await
+        .unwrap()
+        .active_turn
+        .unwrap()
+        .activities;
+    assistant_activity_decision::refresh(
+        &f.state.db,
+        &f.owner,
+        &f.row.id,
+        activities.iter_mut().collect(),
+    )
+    .await
+    .unwrap();
+    let activity = activities.last().unwrap();
+    let diagnostic = activity.failure.as_ref().unwrap();
+    assert_eq!(diagnostic.reason.as_deref(), Some("publication_ambiguous"));
+    assert_eq!(diagnostic.status, Some(500));
+    assert!(!serde_json::to_string(activity).unwrap().contains(PRIVATE));
+    if let Some(id) = card {
+        assert_eq!(activity.decision.as_ref().unwrap().state, "failed");
+        let error = decide(id).await.err().unwrap();
+        assert_eq!(error.response_body().details.unwrap()["recovery"], "check");
+    } else {
+        assert_eq!(activity.status, "error");
+        assert!(activity.decision.is_none());
+        assert!(
+            failure["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("setup is incomplete")
+        );
+        assert!(
+            failure["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("guess a cause")
+        );
+        let proposal = f
+            .state
+            .db
+            .collection::<crate::models::assistant_agent_learning::AssistantAgentLearningProposal>(
+                crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME,
+            )
+            .find_one(doc! {"agent_id":&f.chat.agent_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(proposal.failure_code.as_deref(), Some("publish_uncertain"));
+        assert!(proposal.publication.unwrap().uncertain_dispatch);
+    }
+    server.verify().await;
+    f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn unconfirmed_skill_save_full_access() {
+    Box::pin(unconfirmed_skill_save(
+        crate::models::assistant_settings::AccessMode::Autopilot,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn unconfirmed_skill_save_review_card() {
+    Box::pin(unconfirmed_skill_save(
+        crate::models::assistant_settings::AccessMode::Nyxmode,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn authored_skill_registry_5xx_reports_the_failed_step() {
+    Box::pin(async {
+        use crate::models::{
+            assistant_agent::{AssistantAgent, COLLECTION_NAME as AGENTS},
+            assistant_settings::AccessMode,
+            catalog_skill_revision::SkillReference,
+        };
+        use crate::services::{
+            assistant_nyxagent, assistant_settings_service,
+            assistant_skill_authoring::tests::{fixture, input, setup_ornn},
+        };
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+
+        const PRIVATE: &str = "private-storage-host/bucket/verification";
+        for (reason, recovery, write_count) in [
+            ("source_skill_unavailable", "retry_later", 0),
+            ("ornn_unavailable", "retry_later", 0),
+            ("verify_failed", "check", 1),
+        ] {
+            let f = fixture("mcp_authored_skill_registry_5xx").await;
+            assistant_settings_service::update(
+                &f.state.db,
+                &f.owner,
+                assistant_settings_service::Update {
+                    access_mode: Some(AccessMode::Autopilot),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            let server = setup_ornn(&f).await;
+            let registry_failure =
+                ResponseTemplate::new(503).set_body_json(json!({"detail":PRIVATE}));
+            let skill_id = uuid::Uuid::new_v4().to_string();
+            let mut args = input(&f.chat.agent_id);
+            if reason == "source_skill_unavailable" {
+                let pin = SkillReference {
+                    source: "ornn".into(),
+                    skill_id: skill_id.clone(),
+                    name: "weekly-review".into(),
+                    version: "1.0".into(),
+                    sha256: "a".repeat(64),
+                    dependencies: vec![],
+                    disabled: false,
+                };
+                f.state
+                    .db
+                    .collection::<bson::Document>(AGENTS)
+                    .update_one(
+                        doc! {"_id":&f.chat.agent_id},
+                        doc! {"$set":{"skills":bson::to_bson(&[pin]).unwrap()}},
+                    )
+                    .await
+                    .unwrap();
+                args["base_skill"] = json!({"skill_id":skill_id,"version":"1.0"});
+            }
+            Mock::given(method("POST"))
+                .and(path("/api/v1/skill-format/validate"))
+                .respond_with(if reason == "ornn_unavailable" {
+                    registry_failure.clone()
+                } else {
+                    ResponseTemplate::new(200).set_body_json(json!({"data":{"valid":true}}))
+                })
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path("/api/v1/skills"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(json!({"data":{"guid":skill_id}})),
+                )
+                .expect(write_count)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path(format!("/api/v1/skills/{skill_id}")))
+                .respond_with(registry_failure)
+                .expect(u64::from(reason != "ornn_unavailable"))
+                .mount(&server)
+                .await;
+            let auth = authenticate(&f).await;
+            let error = result(
+                call(&f, &auth, "nyxid__draft_agent_skill", args.clone()).await,
+                true,
+            )
+            .await;
+            assert_eq!(error["error"], "conflict", "{error}");
+            assert_eq!(error["error_code"], 1004);
+            assert_eq!(
+                error["details"],
+                json!({
+                    "reason":reason, "recovery":recovery, "upstream_status":503
+                })
+            );
+            assert!(
+                error["instructions"]
+                    .as_str()
+                    .unwrap()
+                    .contains("setup is incomplete")
+            );
+            let activity = assistant_nyxagent::get(&f.state.db, &f.owner, &f.row.id)
+                .await
+                .unwrap()
+                .active_turn
+                .unwrap()
+                .activities
+                .pop()
+                .unwrap();
+            assert_eq!(activity.status, "error");
+            assert!(activity.decision.is_none());
+            let serialized_activity = serde_json::to_string(&activity).unwrap();
+            let failure = activity.failure.unwrap();
+            assert_eq!(failure.reason.as_deref(), Some(reason));
+            assert_eq!(failure.status, Some(503));
+            for forbidden in [
+                PRIVATE,
+                args["skill_md"].as_str().unwrap(),
+                args["files"][0]["content"].as_str().unwrap(),
+            ] {
+                assert!(!error.to_string().contains(forbidden));
+                assert!(!serialized_activity.contains(forbidden));
+            }
+            let agent = f
+                .state
+                .db
+                .collection::<AssistantAgent>(AGENTS)
+                .find_one(doc! {"_id":&f.chat.agent_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                agent.skills.len(),
+                usize::from(reason == "source_skill_unavailable")
+            );
+            let proposal = f
+                .state
+                .db
+                .collection::<bson::Document>(
+                    crate::models::assistant_agent_learning::PROPOSALS_COLLECTION_NAME,
+                )
+                .find_one(doc! {"agent_id":&f.chat.agent_id})
+                .await
+                .unwrap()
+                .unwrap();
+            if reason == "source_skill_unavailable" {
+                assert!(proposal.get_document("publication").is_err());
+            } else {
+                assert_eq!(proposal.get_str("failure_code").unwrap(), reason);
+                let publication = proposal.get_document("publication").unwrap();
+                assert_eq!(publication.get_bool("started").unwrap(), write_count == 1);
+            }
+            server.verify().await;
+            f.state.db.drop().await.unwrap();
+        }
+    })
+    .await;
 }

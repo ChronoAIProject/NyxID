@@ -1,3 +1,4 @@
+import { onboardingText } from "../../../../shared/onboardingCopy";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
@@ -581,7 +582,7 @@ function Chips({
   multi?: boolean;
   disabled?: boolean;
 }) {
-  useAppLanguage();
+  const { language } = useAppLanguage();
   const { colors } = useTheme();
   return (
     <View
@@ -622,7 +623,7 @@ function Chips({
               />
             </View>
             <Label style={[styles.small, { flexShrink: 1 }]}>
-              {choice.label}
+              {onboardingText(language, choice.label)}
               {active ? "  ✓" : ""}
             </Label>
           </Pressable>

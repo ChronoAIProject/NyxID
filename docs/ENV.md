@@ -136,6 +136,29 @@ its target permissions, API connectivity and CA in the deployment environment. S
 local-fixture limits and pending environment acceptance. No IAM/RBAC changes
 are supplied or authorized by this configuration support.
 
+### Remote Machine runtime, funding and bootstrap verification
+
+Missing or invalid required values do not stop the server; they keep managed
+Machine admission closed and appear as platform readiness blockers. The
+signed-ticket verification settings below are not part of that readiness report:
+an invalid or incomplete key makes bootstrap verification unavailable (an error is
+logged) without appearing as a readiness blocker.
+
+| Variable | Requirement | Default | Description |
+|---|---|---|---|
+| `NYXID_REMOTE_MACHINE_IMAGE_DIGEST` | Required | *(none)* | Runtime image pinned by digest, `<image>@sha256:<64 hex>`. Absent or invalid values report `runtime_image_reference_missing_or_invalid`. |
+| `NYXID_REMOTE_MACHINE_BOOTSTRAP_BASE_URL` | Defaulted | `BASE_URL` | HTTPS origin that managed Machines use to bootstrap; credentials, query and fragment are rejected (`bootstrap_origin_invalid`). |
+| `NYXID_REMOTE_MACHINE_FUNDING_WINDOW_SECONDS` | Defaulted | `120` | Funded runtime window length, clamped to 60–300 seconds; unparseable values use the default. |
+| `NYXID_REMOTE_MACHINE_FUNDING_RENEWAL_MARGIN_SECONDS` | Defaulted | `45` | Renewal margin before a window ends, clamped to 20 seconds through half the window; unparseable values use the default. |
+| `NYXID_REMOTE_MACHINE_STORAGE_CLASS` | Optional | Cluster default | Unset or blank omits the PVC `storageClassName`; a configured name must be a valid, existing StorageClass. |
+| `NYXID_REMOTE_MACHINE_RUNTIME_CLASS` | Optional | Node default | Unset or blank omits `runtimeClassName`. |
+| `NYXID_REMOTE_MACHINE_PROVIDER_PUBLIC_KEY_FILE`, `NYXID_REMOTE_MACHINE_PROVIDER_ISSUER` | Mode-specific | *(none)* | Signed workload-ticket verification, used only when `NYXID_REMOTE_MACHINE_KUBE_API` is unset. Set both or neither; one alone or an invalid key keeps admission closed. When `NYXID_REMOTE_MACHINE_KUBE_API` is set, bootstrap uses Kubernetes TokenReview and ignores both. |
+| `NYXID_REMOTE_MACHINE_CONTROLLER_NAMESPACE`, `NYXID_REMOTE_MACHINE_CONTROLLER_DEPLOYMENT`, `NYXID_REMOTE_MACHINE_CONTROLLER_IMAGE_DIGEST`, `NYXID_REMOTE_MACHINE_CONTROLLER_CONTAINER` | Optional | *(none)* | Sandbox controller health on the admin platform view only; the first three are needed together (`sha256:<64 lowercase hex>` digest), the container is optional. Not a lifecycle prerequisite. |
+| `NYXID_REMOTE_MACHINE_KUBELET_ENDPOINTS`, `NYXID_REMOTE_MACHINE_KUBELET_CA_FILE`, `NYXID_REMOTE_MACHINE_KUBELET_TOKEN_FILE`, `NYXID_REMOTE_MACHINE_KUBELET_AUDIENCE` | Optional | *(none)* | Direct kubelet Pod-storage collector. Unset or blank endpoints disable it; once endpoints (a JSON map of node name to HTTPS origin) are set, the other three are required. |
+
+See [Remote Machine deployment](../deploy/remote-machine/README.md) for the
+matching approved-runtime ConfigMap values.
+
 ## Cluster coordination
 
 NyxID uses MongoDB for shared ownership, leases, replay checks, rate windows,
@@ -605,6 +628,7 @@ The same interval schedules an independent [bot-link recovery and delivery sweep
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AUTH_DEVICE_EIGHT_CHAR_CODES` | `true` | Issue eight-character public codes for installed app compatibility. All backend readers and writers must support the shared public-code namespace. Set `false` to restore prefixed v2 issuance during rollback. Legacy account requests always use eight characters. |
+| `STAGING_QR_PRODUCTION_PUBLIC_KEY_PATH` | unset | On the staging API, path to the PEM containing the active production JWT **public** key. Enables verification of production approvals for staging device logins. See [staging QR rollout](DEVICE_LOGIN_PROTOCOL.md#production-ios-approvals-for-staging). |
 
 When upgrading servers that predate public-code reservations, explicitly deploy
 with this flag off, drain older servers, then enable it across the upgraded fleet.
@@ -786,7 +810,7 @@ Channel relay is a first-class metadata-only gateway under ADR-013. See [CHANNEL
 |----------|---------|-------------|
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_PER_SECOND` | `1` | Shared per-conversation proactive send rate, checked before authentication; deliberately lower than replies because unsolicited messages are a spam surface |
 | `CHANNEL_RELAY_INITIATE_RATE_LIMIT_BURST` | `5` | Burst capacity for proactive sends, including retries/idempotent replays |
-| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/reply` and `/send` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64. |
+| `CHANNEL_MEDIA_MAX_BYTES` | `20971520` (20 MiB) | Maximum bytes per inbound download or outbound attachment; enforced while reading. Only `/channel-relay/send`, `/reply` and `/thread-reply` accept JSON up to `ceil(cap / 3) * 4 + 65536` bytes for base64; `/reply` and `/thread-reply` accept at least 2 MiB. |
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
@@ -912,7 +936,7 @@ unsupported. Roll back only to a v3-compatible binary while retaining its keys.
 After authenticated migration readiness across every field adapter, separately
 turn legacy reads off. Old backups and historical KMS key versions retain their
 own decryption requirements; the currently configured KMS resource can still
-serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Pending field adapters still block complete readiness; the runbook does not certify a deployment.
+serve historical versions. See [the explicit migration API procedure](SECURITY.md#encrypted-record-migration). Verify the retained rows after every serving replica upgrades.
 
 
 ### CMA Sandbox prepaid admission
@@ -939,16 +963,48 @@ introduced. Upgrade all API readers and billing workers before enabling the
 three Sandbox metrics; old enum readers are unsafe
 once those units have been persisted. See [CMA billing](CMA_BILLING.md).
 
+### PDF vision renderer
+
+`NYXID_PDF_RENDERER` optionally supplies an absolute path to `pdftoppm` for native
+development. The backend image installs Poppler for both supported Linux
+architectures and defaults to `/usr/bin/pdftoppm`. The runtime
+`assistant:pdf-vision` feature flag controls fallback; see
+[uploads](chat/10-uploads.md#scanned-pdf-pages) for bounds and rollout.
+
 
 ## Android App Links
 
 `ANDROID_APP_PACKAGE` is the Android application id (for example `fun.chronoai.nyxid`). `ANDROID_APP_SHA256_CERT_FINGERPRINTS` is a comma-separated list of SHA-256 signing-certificate fingerprints, each exactly 32 colon-delimited hexadecimal bytes (`AA:BB:…`). Empty or whitespace-only comma-separated segments are ignored; surrounding whitespace is trimmed and fingerprints are normalized to uppercase and deduplicated. Malformed nonempty values fail startup, consistent with other validated configuration. Missing either value makes `GET /.well-known/assetlinks.json` return 404. With both configured, it returns standard Digital Asset Links JSON with `application/json` and `Cache-Control: public, max-age=300`. These values are public identity metadata.
 
-Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every selected association origin before enabling the profile-local `DEV_ANDROID_HTTPS_APP_LINKS=true` or `PROD_ANDROID_HTTPS_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Frontend-host association remains an owner decision; the shared path manifest is `shared/native-app-links.json`. See [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
+Use the Play App Signing certificate for store-installed apps; include the upload/release certificate only for builds directly installed with that certificate. Deploy the file on every selected association origin before enabling the profile-local `DEV_ANDROID_HTTPS_APP_LINKS=true` or `PROD_ANDROID_HTTPS_APP_LINKS=true` mobile build opt-in. Defaults preserve the existing OneLink filter. Before Android 12, verification can fail for all hosts when any host is unverified. Mobile `DEV_NATIVE_LINK_HOSTS` and `PROD_NATIVE_LINK_HOSTS` select `api` (default) or `api+frontend`; the latter also requires that active profile's explicit `*_FRONTEND_URL`, never a fallback from the other profile or legal URL. The shared path manifest is `shared/native-app-links.json`. See [business-link configuration](../mobile/docs/APP_LINKS.md#business-links-on-frontend-hosts) and [native integration and verification](../mobile/docs/NATIVE_INTEGRATION.md).
 
 `MOBILE_APP_RETURN_SCHEMES` is an optional comma-separated allowlist of custom RFC 3986 URL schemes used by NyxID mobile builds for service OAuth returns. `nyxid` is always accepted implicitly. Empty segments are ignored; values are trimmed, normalized to lowercase and deduplicated, and must be non-web mobile schemes; reserved web, file, script, browser, and device schemes (including `exp` and uppercase inputs such as `HTTPS`) are rejected after normalization. A malformed nonempty value fails backend startup. Set the same value on every replica when a build uses a custom `APP_SCHEME`; otherwise leave it empty and the app uses `nyxid://services/oauth-return`. Service OAuth accepts only the exact lowercase `<scheme>://services/oauth-return` destination; sent or stored uppercase URIs are rejected.
 
 `MOBILE_SOCIAL_REDIRECT_URIS` lists additional exact mobile account sign-in destinations, separated by commas. The released app's `nyxid://auth/social/callback` works by default. Configure a custom app's complete `<scheme>://auth/social/callback` URI on every replica before distribution. In development an explicitly listed Expo URI may use `exp://<host>:<port>/--/auth/social/callback`. Production refuses Expo returns. Malformed configuration fails at startup.
+
+### Platform admin MFA rollout
+
+Set `ADMIN_MFA_ENFORCEMENT` to `off`, `audit`, or `enforce` on every API
+replica. `off` is the default. In `audit`, the administration guards admit
+existing authorized requests and record unverified privileged access.
+In `enforce`, guarded platform actions require MFA enrollment and a verified
+first-party session. Read and write paths that also admit ordinary owner
+authority may continue using that authority.
+
+Deploy the enrollment banner, verify enrollment and account recovery for
+each active privileged user, and exercise the assessed administration paths
+before setting `enforce`. Check audit events across the fleet before cutover.
+
+
+### Legacy email verification cutoff
+
+New email verification tokens expire after 24 hours. An optional RFC 3339
+`AUTH_VERIFICATION_LEGACY_CUTOFF_AT` timestamp sets the end of redemption
+for legacy verification tokens without an expiration. An empty value keeps
+those tokens redeemable. Confirm that affected users have a verification or
+operator-assisted recovery path before setting the cutoff. Password reset and
+email verification use separate five-per-minute source IP limits with the
+existing `TRUSTED_PROXY_IPS` configuration.
 
 ## Crash diagnostics
 

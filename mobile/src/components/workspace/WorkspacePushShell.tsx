@@ -65,6 +65,7 @@ import {
   type WorkspaceColumnHeaderControls,
 } from "./workspaceColumnHeader";
 import { useWorkspaceStatusOffset } from "./useWorkspaceStatusOffset";
+import { WorkspaceKeyboardFocusBoundary } from "./WorkspaceKeyboardFocusBoundary";
 
 export type WorkspaceContentTransitionHandle = {
   fadeOut: (onHidden: () => void) => void;
@@ -532,7 +533,16 @@ export function WorkspacePushShell(props: Props) {
             sidebarInteractive ? "auto" : "no-hide-descendants"
           }
           pointerEvents={sidebarInteractive ? "auto" : "none"}
-          style={[styles.sidebar, { width: openWidth }]}
+          style={[
+            styles.sidebar,
+            { width: openWidth },
+            // Android's Tab search includes pressable children of a touch- and
+            // accessibility-hidden View. Hide the parked drawer at the native
+            // view level too, keeping its React state through the next reveal.
+            Platform.OS === "android" && !persistent && !props.presented && !visible
+              ? styles.parkedSidebar
+              : undefined,
+          ]}
         >
           {props.sidebar}
         </View>
@@ -557,7 +567,8 @@ export function WorkspacePushShell(props: Props) {
           }
           style={[styles.content, clipStyle]}
         >
-          <View
+          <WorkspaceKeyboardFocusBoundary
+            blocked={active}
             testID="workspace-slab-body"
             style={styles.content}
             // Observes every touch in the slab (pages, headers, rail, sheets)
@@ -591,7 +602,7 @@ export function WorkspacePushShell(props: Props) {
                 </WorkspaceRailMotionContext.Provider>
               </WorkspaceQuickRailContext.Provider>
             </WorkspaceCornerSensorContext.Provider>
-          </View>
+          </WorkspaceKeyboardFocusBoundary>
         </Animated.View>
         {props.enabled &&
         !props.obscured &&
@@ -606,6 +617,9 @@ export function WorkspacePushShell(props: Props) {
                   : "workspace-sidebar-reveal-edge"
               }
               accessible={active}
+              focusable={active}
+              accessibilityElementsHidden={!active}
+              importantForAccessibility={active ? "yes" : "no-hide-descendants"}
               accessibilityRole={active ? "button" : undefined}
               accessibilityLabel={
                 active ? translateApp("Close navigation") : undefined
@@ -651,6 +665,7 @@ export function WorkspacePushShell(props: Props) {
 }
 const styles = StyleSheet.create({
   root: { flex: 1, overflow: "hidden" },
+  parkedSidebar: { display: "none" },
   edge: {
     position: "absolute",
     left: 0,

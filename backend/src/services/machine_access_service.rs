@@ -226,14 +226,12 @@ async fn compatibility_capabilities(
         .iter()
         .flat_map(|node| [node.id.clone(), format!("{}:{actor}", node.user_id)])
         .collect();
-    let snapshots: Vec<Document> = db
+    let mut cursor = db
         .collection::<Document>(model::SEPARATION_COMPATIBILITY)
         .find(doc! {"_id":{"$in":ids}})
         .session(&mut *session)
-        .await?
-        .stream(&mut *session)
-        .try_collect()
         .await?;
+    let snapshots: Vec<Document> = crate::db::read_documents(&mut cursor, session).await?;
     let rows: std::collections::BTreeMap<&str, &Document> = snapshots
         .iter()
         .filter_map(|row| row.get_str("_id").ok().map(|id| (id, row)))
@@ -353,7 +351,7 @@ pub async fn migrate_in_session(
             let mut owners = super::machine_service::usable_owners(db, &agent.user_id).await?;
             // A delayed migration must not inherit organizations joined after
             // the cutover. Live ACL checks still apply on every execution.
-            let memberships: Vec<Document> = db
+            let mut cursor = db
                 .collection::<Document>(crate::models::org_membership::COLLECTION_NAME)
                 .find(
                     doc! {"member_user_id": &agent.user_id, "org_user_id": {"$in": &owners},
@@ -361,10 +359,9 @@ pub async fn migrate_in_session(
                 )
                 .projection(doc! {"org_user_id": 1})
                 .session(&mut *session)
-                .await?
-                .stream(&mut *session)
-                .try_collect()
                 .await?;
+            let memberships: Vec<Document> =
+                crate::db::read_documents(&mut cursor, session).await?;
             owners.retain(|owner| {
                 owner == &agent.user_id
                     || memberships
@@ -396,7 +393,7 @@ pub async fn migrate_in_session(
         loop {
             let mut batch = Vec::with_capacity(100);
             while batch.len() < 100 {
-                match nodes.stream(&mut *session).try_next().await? {
+                match crate::db::next_document(&mut nodes, session).await? {
                     Some(node) => batch.push(node),
                     None => break,
                 }
@@ -564,9 +561,10 @@ async fn legacy_nyxbot_assignments(
             // Re-read the authorized batch in this transaction. Discovery's
             // batched projection never becomes one database lookup per node.
             let ids: Vec<&str> = nodes.iter().map(|node| node.id.as_str()).collect();
-            let live_nodes: Vec<Node> = db.collection::<Node>(NODES)
+            let mut cursor = db.collection::<Node>(NODES)
                 .find(doc! {"_id":{"$in":ids},"is_active":true,"user_id":{"$in":&owners}})
-                .session(&mut *session).await?.stream(&mut *session).try_collect().await?;
+                .session(&mut *session).await?;
+            let live_nodes: Vec<Node> = crate::db::read_documents(&mut cursor, session).await?;
             let compatibility = compatibility_capabilities(&db,&actor,&live_nodes,session).await?;
             for node in &live_nodes {
                 if !policy.assignments.contains_key(&node.id)
@@ -997,7 +995,7 @@ pub async fn configure(
         let result=Box::pin(async {
             let mut agent=db.collection::<AssistantAgent>(AGENTS).find_one(doc!{"_id":&agent_id,"destroyed_at":bson::Bson::Null})
                 .session(&mut *session).await?.ok_or_else(refused)?;
-            Box::pin(super::org_agent_service::require_maintain(&db, &actor, &agent)).await?;
+            Box::pin(super::org_agent_service::fence_maintenance(&db,session,&actor,&agent)).await?;
             if !super::org_service::resolve_owner_access(&db,&actor,&node.user_id).await?.can_write() {return Err(refused());}
             if actor != agent.user_id {
                 let fenced = db.collection::<Document>(crate::models::user::COLLECTION_NAME).update_one(doc! {"_id": &agent.user_id, "is_active": true},doc! {"$inc": {"agent_team_fence":1}}).session(&mut *session).await?;

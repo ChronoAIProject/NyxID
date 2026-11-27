@@ -1,12 +1,25 @@
 import { formatDateTime } from "@/lib/utils";
 import { appI18n } from "@/i18n/instance";
 import zh from "@/i18n/locales/app/zh-CN";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, render as renderView, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { assistantAgentSchema, nyxAgentChannelAgentSchema, type AssistantAgent } from "@/schemas/assistant-nyxagent";
 import { ChannelBotsManager } from "./nyxbot-channels";
 import { ApiError } from "@/lib/api-client";
+
+vi.mock("@/lib/api-client", async (original) => ({
+  ...(await original<typeof import("@/lib/api-client")>()),
+  api: { get: vi.fn().mockResolvedValue({ available: false, enabled: false, bot_revision: 0 }) },
+}));
+
+function render(element: React.ReactElement) {
+  const client = new QueryClient();
+  return renderView(element, {
+    wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+  });
+}
 
 const data = vi.hoisted(() => ({
   channels: [] as unknown[],
@@ -271,11 +284,11 @@ it.each([
   ],
   [
     "gateway_provider_not_registered",
-    "The Agent Event Gateway has not registered NyxBot as a provider yet (operator step). Telegram bots cannot use NyxBot until it is.",
+    "The gateway has not registered NyxBot as a provider yet (operator step). Ask an administrator to register the nyxbot provider, then reconnect after the 60-second retry delay.",
   ],
   [
     "gateway_rejected_request",
-    "The channel gateway rejected this connection request. Contact an administrator.",
+    "The gateway rejected the connection request (HTTP 400). Ask an administrator to check the gateway request contract before reconnecting. Bot verification and owner pairing do not fix this rejection.",
   ],
   [
     "gateway_conflict",

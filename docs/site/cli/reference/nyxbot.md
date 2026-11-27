@@ -34,6 +34,34 @@ selection.
 Every command accepts `--profile`, `--base-url`, `--access-token-env`, and
 `--output table|json`. Use the saved profile for routine local work.
 
+## Manage organization specialist access
+
+Use a first-party account for a live Admin of the specialist’s owning
+organization. Read the policy and its revision before editing.
+
+```bash
+nyxid nyxbot access show "$agent_id" --output json
+```
+
+For example, if the response reports revision 3, this policy file grants
+maintenance to nobody and lets every eligible organization member use the
+specialist.
+
+```json
+{"maintainers":[],"users":null,"expected_revision":3}
+```
+
+```bash
+nyxid nyxbot access set "$agent_id" --file policy.json --output json
+```
+
+Both commands return the current lists, revision and authoring availability.
+The default display labels inheritance and an empty list separately. HTTP 409
+means another change advanced the revision. Run `access show`, compare the
+saved policy with your file, and submit the reviewed edit with its new
+expected revision. The CLI sends a stale edit once. The authoring rollout
+can be disabled while the saved policy continues to apply.
+
 ## Submit work
 
 ```bash

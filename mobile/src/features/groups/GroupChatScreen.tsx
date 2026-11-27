@@ -1,4 +1,6 @@
+import { AttachmentSourcePicker } from "../assistant/AttachmentSourcePicker";
 import { useContext } from "react";
+import { useIsFocused } from "@react-navigation/native";
 import { WorkspaceQuickRailContext } from "../../components/workspace/WorkspaceLayoutContext";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { Platform } from "react-native";
@@ -12,6 +14,7 @@ import {
   ChatTranscriptSeparator,
   chatSurfaceStyles,
 } from "../assistant/ChatSurface";
+import { CrewHeaderActions } from "../assistant/ChatHeaderActions";
 import { CrewVoiceComposer } from "./CrewVoiceComposer";
 import {
   ChatComposerInput,
@@ -53,7 +56,7 @@ import { workspaceSidebarLayout } from "../../components/workspace/workspacePush
 import { workspaceSheetRailReserve } from "../../components/workspace/workspaceLayout";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AssistantReplyBody } from "../assistant/AssistantReplyBody";
-import { Check, Plus, MoreHorizontal, X } from "lucide-react-native";
+import { Check, Plus, X } from "lucide-react-native";
 import {
   ActionButton,
   Card,
@@ -156,6 +159,7 @@ function GroupChat({
   onOpenAgent,
 }: GroupChatScreenProps) {
   const railIndicator = useRailScrollIndicator();
+  const focused = useIsFocused();
   const { t } = useAppLanguage();
   const { colors } = useTheme();
   const reducedMotion = useReducedMotion();
@@ -222,7 +226,17 @@ function GroupChat({
     setVoiceMinimized(minimized);
   }
   const [localError, setLocalError] = useLocalizedState<string>();
-  const group = chat.isError ? undefined : chat.data?.group;
+  const names = useQuery({
+    queryKey: ["workspace", "agents", "group-labels", chat.epoch],
+    queryFn: ({ signal }) => agentsApi.list(signal),
+    enabled: chat.active,
+    retry: false,
+    staleTime: 60_000,
+  });
+  const roster = chat.isError ? undefined : chat.data?.group;
+  const restricted = new Set(names.data?.agents.filter((agent) => agent.can_use === false).map((agent) => agent.id));
+  const group = roster && { ...roster, members: roster.members.map((member) =>
+    restricted.has(member.id) ? { ...member, unavailable: true } : member) };
   const recipientRoster = useRef<Group["members"]>(
     assistantDraftStore.get<Group["members"]>(`recipient-roster:${draftKey}`) ??
       [],
@@ -270,13 +284,6 @@ function GroupChat({
       );
     else assistantDraftStore.delete(`recipient-mentions:${draftKey}`);
   }, [draftKey, routingMembers, selection]);
-  const names = useQuery({
-    queryKey: ["workspace", "agents", "group-labels", chat.epoch],
-    queryFn: ({ signal }) => agentsApi.list(signal),
-    enabled: chat.active,
-    retry: false,
-    staleTime: 60_000,
-  });
   const identity = useQuery({
     queryKey: [...groupKeys(chat.epoch), "identity"],
     queryFn: ({ signal }) => accountApi.getProfile(signal),
@@ -421,14 +428,13 @@ function GroupChat({
   const groupHeaderOptions = useMemo<NativeStackNavigationOptions>(() => {
     const settings = () => (
       <WorkspaceHeaderVisibility>
-        <Icon
-          label={t("Crew options")}
-          onPress={onSettings}
-          disabled={!group || chat.sending || uploads.session.sending}
-          floating
-        >
-          <MoreHorizontal size={23} color={colors.textPrimary} />
-        </Icon>
+        <CrewHeaderActions
+          scope={`${chat.epoch}:${groupId}`}
+          onSettings={onSettings}
+          disabled={
+            !focused || !group || chat.sending || uploads.session.sending
+          }
+        />
       </WorkspaceHeaderVisibility>
     );
     return {
@@ -466,6 +472,7 @@ function GroupChat({
     };
   }, [
     group,
+    focused,
     chat.data?.pending_actions.length,
     chat.data?.collaboration_decisions,
     names.data,
@@ -1086,105 +1093,121 @@ function GroupChat({
             />
           ) : (
             <ComposerDictationFrame dictation={dictation}>
-              <OverflowScrollView
-                fadeColor={colors.composerBg}
-                horizontal
-                style={styles.horizontalStrip}
-                keyboardShouldPersistTaps="handled"
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.recipients}
-              >
-                <Label muted style={styles.small}>
-                  {translateApp("To")}
-                </Label>
-                {recipients.ids.map((id) => {
-                  const member = liveMembers.find((row) => row.id === id);
-                  return member ? (
-                    <Pressable
-                      key={id}
-                      accessibilityRole="button"
-                      accessibilityLabel={translateApp(
-                        "Remove recipient {{title}}",
-                        { title: title(id, member.name) },
-                      )}
-                      disabled={blocked}
-                      onPress={() =>
-                        editRecipients((old) => withRemoved(old, id))
-                      }
-                      style={[
-                        styles.recipient,
-                        {
-                          backgroundColor: colors.navActive,
-                          borderColor: colors.composerBorder,
-                        },
-                      ]}
-                    >
-                      <Label style={styles.small}>
-                        {title(id, member.name)}
-                      </Label>
-                      <X size={12} color={colors.textSecondary} />
-                    </Pressable>
-                  ) : null;
-                })}
-                {unavailableRecipients.map((id) => (
-                  <Pressable
-                    key={`unavailable:${id}`}
-                    accessibilityRole="button"
-                    accessibilityLabel={translateApp(
-                      "Remove unavailable recipient {{title}}",
-                      {
-                        title: title(
-                          id,
-                          routingMembers.find((member) => member.id === id)
-                            ?.name ?? id,
-                        ),
-                      },
-                    )}
-                    disabled={blocked}
-                    onPress={() =>
-                      editRecipients((old) => withRemoved(old, id))
-                    }
-                    style={[styles.recipient, { borderColor: colors.danger }]}
-                  >
-                    <Label style={[styles.small, { color: colors.danger }]}>
-                      {translateApp("{{title}} · Unavailable", {
-                        title: title(
-                          id,
-                          routingMembers.find((member) => member.id === id)
-                            ?.name ?? id,
-                        ),
-                      })}
-                    </Label>
-                    <X size={12} color={colors.danger} />
-                  </Pressable>
-                ))}
-                {(liveMembers.some(
-                  (member) => !recipients.ids.includes(member.id),
-                ) ||
-                  unavailableMembers.length > 0) && (
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={translateApp("Add recipient")}
-                    disabled={blocked}
-                    onPress={() => showRecipientPicker("add")}
-                    style={styles.addRecipient}
-                  >
-                    <Plus size={14} color={colors.primaryOnTint} />
-                    <Label
-                      style={[styles.small, { color: colors.primaryOnTint }]}
-                    >
-                      {translateApp("Add")}
-                    </Label>
-                  </Pressable>
-                )}
-              </OverflowScrollView>
               <AssistantPendingUploads
                 files={uploads.files}
+                reselect={uploads.session.reselect}
+                retryDiscard={uploads.session.discardPending ? uploads.retryDiscard : undefined}
+                choose={() => void uploads.pick("files")}
+                dismiss={() => uploads.session.dismissReselection()}
+                resume={() => uploads.session.resume()}
+                canResume={
+                  canParticipate &&
+                  chat.online &&
+                  !chat.isError &&
+                  !chat.recoveryRequired &&
+                  liveMembers.length > 0 &&
+                  !uploads.picking &&
+                  !uploads.session.sending
+                }
                 remove={removeAttachment}
                 disabled={chat.sending || uploads.session.sending}
               />
               <ChatComposerInput
                 dictation={dictation}
+                expandedContent={
+                  <OverflowScrollView
+                    fadeColor={colors.composerBg}
+                    horizontal
+                    style={styles.horizontalStrip}
+                    keyboardShouldPersistTaps="handled"
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.recipients}
+                  >
+                    <Label muted style={styles.small}>
+                      {translateApp("To")}
+                    </Label>
+                    {recipients.ids.map((id) => {
+                      const member = liveMembers.find((row) => row.id === id);
+                      return member ? (
+                        <Pressable
+                          key={id}
+                          accessibilityRole="button"
+                          accessibilityLabel={translateApp(
+                            "Remove recipient {{title}}",
+                            { title: title(id, member.name) },
+                          )}
+                          disabled={blocked}
+                          onPress={() =>
+                            editRecipients((old) => withRemoved(old, id))
+                          }
+                          style={[
+                            styles.recipient,
+                            {
+                              backgroundColor: colors.navActive,
+                              borderColor: colors.composerBorder,
+                            },
+                          ]}
+                        >
+                          <Label style={styles.small}>
+                            {title(id, member.name)}
+                          </Label>
+                          <X size={12} color={colors.textSecondary} />
+                        </Pressable>
+                      ) : null;
+                    })}
+                    {unavailableRecipients.map((id) => (
+                      <Pressable
+                        key={`unavailable:${id}`}
+                        accessibilityRole="button"
+                        accessibilityLabel={translateApp(
+                          "Remove unavailable recipient {{title}}",
+                          {
+                            title: title(
+                              id,
+                              routingMembers.find((member) => member.id === id)
+                                ?.name ?? id,
+                            ),
+                          },
+                        )}
+                        disabled={blocked}
+                        onPress={() =>
+                          editRecipients((old) => withRemoved(old, id))
+                        }
+                        style={[styles.recipient, { borderColor: colors.danger }]}
+                      >
+                        <Label style={[styles.small, { color: colors.danger }]}>
+                          {translateApp("{{title}} · Unavailable", {
+                            title: title(
+                              id,
+                              routingMembers.find((member) => member.id === id)
+                                ?.name ?? id,
+                            ),
+                          })}
+                        </Label>
+                        <X size={12} color={colors.danger} />
+                      </Pressable>
+                    ))}
+                    {(liveMembers.some(
+                      (member) => !recipients.ids.includes(member.id),
+                    ) ||
+                      unavailableMembers.length > 0) && (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={translateApp("Add recipient")}
+                        disabled={blocked}
+                        onPress={() => showRecipientPicker("add")}
+                        style={styles.addRecipient}
+                      >
+                        <Plus size={14} color={colors.primaryOnTint} />
+                        <Label
+                          style={[styles.small, { color: colors.primaryOnTint }]}
+                        >
+                          {translateApp("Add")}
+                        </Label>
+                      </Pressable>
+                    )}
+                  </OverflowScrollView>
+                }
                 generation={composerGeneration}
                 accessibilityLabel={translateApp("Message the crew")}
                 placeholder={translateApp("Message the crew")}
@@ -1195,18 +1218,10 @@ function GroupChat({
                     edit(value);
                 }}
                 editable={!blocked && (collaboration || !!liveMembers.length)}
-                // Phones: same one-row idle composer as private chats.
-                compactWhenIdle={
-                  cornerWindow &&
-                  narrow &&
-                  !dictation.active &&
-                  uploads.files.length === 0 &&
-                  !uploads.picking &&
-                  !uploads.session.sending
-                }
+                compactWhenIdle={!dictation.active}
                 renderActions={(mentionAction, layout) => (
                   <ChatComposerToolbar
-                    layout={cornerWindow ? layout : undefined}
+                    layout={layout}
                     dictation={dictation}
                     dictationDisabled={
                       blocked || uploads.picking || uploads.session.sending
@@ -1366,6 +1381,7 @@ function GroupChat({
           </View>
         </View>
       </Modal>
+      {uploads.sourcePicker && <AttachmentSourcePicker {...uploads.sourcePicker} />}
     </WorkspacePage>
   );
 }

@@ -607,7 +607,7 @@ mod tests {
         // Same shape as issued recovery codes; never a fixed credential.
         let recovery = crate::crypto::token::generate_random_token()[..32].to_string();
         let factor_id = uuid::Uuid::new_v4().to_string();
-        let secret_encrypted = crate::services::record_field_service::encrypt(
+        let secret_encrypted = crate::crypto::record_field::encrypt(
             &a.encryption_keys,
             MFA_FACTORS,
             &factor_id,

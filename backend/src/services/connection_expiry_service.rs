@@ -460,6 +460,7 @@ mod tests {
             connection_webhook_url: Some(url),
             connection_webhook_secret_encrypted: Some(encrypted_secret),
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: true,
             created_by: Some(owner.to_string()),
             created_at: now,
@@ -766,7 +767,10 @@ mod tests {
         )
         .await
         .expect("transient refresh failure should fall back to the existing access token");
-        assert_eq!(active.access_token.as_deref(), Some("existing-access"));
+        assert_eq!(
+            active.access_token.as_ref().map(|s| s.as_str()),
+            Some("existing-access")
+        );
 
         let stored_token = db
             .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
@@ -815,7 +819,10 @@ mod tests {
         )
         .await
         .expect("terminal refresh failure should still return the existing access token once");
-        assert_eq!(active.access_token.as_deref(), Some("existing-access"));
+        assert_eq!(
+            active.access_token.as_ref().map(|s| s.as_str()),
+            Some("existing-access")
+        );
 
         let stored_token = db
             .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)

@@ -17,6 +17,7 @@ import { normalizeScreenKey } from "@/lib/assistant/screen-context";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { OnboardingTakeover } from "@/components/dashboard/onboarding-takeover";
 import { ThemeToggle } from "@/components/dashboard/theme-toggle";
+import { PrivilegedMfaEnrollmentBanner } from "@/components/auth/privileged-mfa-enrollment-banner";
 import { BreadcrumbLabelContext } from "./breadcrumb-context";
 import { buildStudioBreadcrumbs } from "@/lib/studio-breadcrumbs";
 import { StudioBreadcrumbTrail } from "./studio-breadcrumb-trail";
@@ -120,6 +121,10 @@ export function DashboardLayout() {
           onMobileMenu={() => setMobileNavState("open")}
         />
 
+        <div className="shrink-0 px-4 py-3 empty:hidden sm:px-6">
+          <PrivilegedMfaEnrollmentBanner />
+        </div>
+
         <div className="flex flex-1 min-h-0 overflow-hidden">
           <div className="hidden md:flex shrink-0">
             <Sidebar />
@@ -221,7 +226,7 @@ function TopBar({
     "/orgs",
     "/nodes",
     "/channel-bots",
-    "/settings", "/guide", "/approvals/settings", "/approvals/history",
+    "/settings", "/guide", "/approvals/history",
     "/approvals/grants", "/developer/apps", "/ai-setup", "/integration-guide",
   ]);
   const showBack = !ROOT_PATHS.has(pathname);

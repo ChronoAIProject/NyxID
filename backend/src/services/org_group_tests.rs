@@ -42,6 +42,7 @@ async fn enqueue(
 ) -> String {
     let id = Uuid::new_v4().to_string();
     let request = GroupRequest {
+        org_use_revisions: Default::default(),
         execution_task: None,
         collaboration: None,
         id: id.clone(),
@@ -1712,6 +1713,26 @@ async fn org_group_pending_cards_batch_acknowledgements_and_bound_approvals() {
                 .contains(card["acknowledgement_id"].as_str().unwrap())
         );
     }
+    let now = bson::DateTime::now();
+    f.state.db.collection::<bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+        .insert_one(doc! {
+            "_id":"participant-card","user_id":&group.user_id,"service_id":"catalog","service_name":"Service",
+            "service_slug":"service","requester_type":"user","requester_id":&f.admin,"operation_summary":"read",
+            "from_org_policy":true,"status":"pending","idempotency_key":"group-card","created_at":now,
+            "expires_at":bson::DateTime::from_chrono(chrono::Utc::now()+chrono::Duration::minutes(5)),
+            "assistant_group":{"group_id":&group.id,"conversation_id":"thread","actor_user_id":&f.admin,"request_id":"chain"}
+        }).await.unwrap();
+    for participant in [&f.admin, &f.member] {
+        let access = access(&f, participant, &group.id).await;
+        let cards = crate::handlers::assistant_group::org_pending_actions(&state, &access)
+            .await
+            .unwrap();
+        let org_card = cards
+            .iter()
+            .find(|card| card["approval_request_id"] == "participant-card")
+            .unwrap();
+        assert_eq!(org_card["can_decide"], participant == &f.admin);
+    }
     f.state.db.drop().await.unwrap();
 }
 
@@ -2088,6 +2109,7 @@ async fn org_group_concurrent_appends_retry_transaction_conflicts_without_duplic
     let first = TransactionCollisionHook::new(barrier.clone());
     let second = TransactionCollisionHook::new(barrier);
     let request = |id: &str| GroupRequest {
+        org_use_revisions: Default::default(),
         execution_task: None,
         collaboration: None,
         id: id.into(),

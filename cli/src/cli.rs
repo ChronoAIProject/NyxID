@@ -200,7 +200,7 @@ pub enum Commands {
     },
     /// Update the CLI and installed skills
     Update(UpdateArgs),
-    /// Manage channel bot relay (Telegram/Discord/Lark/Feishu/Slack/WhatsApp)
+    /// Manage messaging channel bots, relay delivery, and inbox connections
     ChannelBot {
         #[command(subcommand)]
         command: ChannelBotCommands,
@@ -4997,7 +4997,7 @@ pub enum ProxyCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Send a request through the NyxID proxy
+    /// Send a proxy request. Eligible approvals return a pending ID (exit 2) for approval status.
     Request {
         /// Service slug or UUID
         service: String,
@@ -5013,6 +5013,12 @@ pub enum ProxyCommands {
         /// Extra headers (repeatable, format: Key:Value)
         #[arg(long = "header", short = 'H')]
         headers: Vec<String>,
+        /// Connected approval wait budget in seconds (10–300, default 80).
+        #[arg(long, value_name = "SECS", value_parser = clap::value_parser!(u32).range(10..=300))]
+        approval_wait: Option<u32>,
+        /// Omit the connected wait budget and use the server's configured timeout.
+        #[arg(long, conflicts_with = "approval_wait")]
+        no_approval_wait: bool,
         /// Stream the response (for SSE, video, audio, large files)
         #[arg(long)]
         stream: bool,
@@ -5219,8 +5225,55 @@ pub enum NotificationCommands {
 
 // ---- Approval (I15-I20) ----
 
+#[derive(clap::Args)]
+pub struct ApproverTarget {
+    /// Organization UUID, slug or exact display name
+    #[arg(long)]
+    pub org: String,
+    /// Owned connection ID or catalog service ID
+    #[arg(long)]
+    pub service: String,
+    #[command(flatten)]
+    pub auth: AuthArgs,
+}
+
+#[derive(clap::Args)]
+#[group(required = true, multiple = true)]
+pub struct ApproverEdit {
+    /// Restore automatic selection of all eligible Admins
+    #[arg(long, conflicts_with_all = ["set", "add", "remove"])]
+    pub inherit: bool,
+    /// Replace the entire list with these person UUIDs
+    #[arg(long, value_delimiter = ',', conflicts_with_all = ["add", "remove"])]
+    pub set: Vec<uuid::Uuid>,
+    /// Include these person UUIDs
+    #[arg(long, value_delimiter = ',')]
+    pub add: Vec<uuid::Uuid>,
+    /// Exclude these person UUIDs
+    #[arg(long, value_delimiter = ',')]
+    pub remove: Vec<uuid::Uuid>,
+}
+
+#[derive(Subcommand)]
+pub enum ApproverCommands {
+    /// Show saved policy and eligible Admins
+    Show(ApproverTarget),
+    /// Update the saved policy
+    Set {
+        #[command(flatten)]
+        target: ApproverTarget,
+        #[command(flatten)]
+        edit: ApproverEdit,
+    },
+}
+
 #[derive(Subcommand)]
 pub enum ApprovalCommands {
+    /// Manage approvers for an organization service
+    Approvers {
+        #[command(subcommand)]
+        command: ApproverCommands,
+    },
     /// List approval requests
     List {
         /// List approval history scoped to the given org instead of your
@@ -5237,6 +5290,13 @@ pub enum ApprovalCommands {
     /// Show approval request details
     Show {
         /// Request ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Read the decision and any retained execution result using the original requester credentials
+    Status {
+        /// Approval request ID returned by the proxy
         id: String,
         #[command(flatten)]
         auth: AuthArgs,
@@ -5354,7 +5414,7 @@ pub enum ApprovalCommands {
         /// scope. You must be an admin of that org. The org's policy is
         /// authoritative for org-shared services -- it overrides any
         /// personal policy each member may have set, and notifications
-        /// fan out to every active org admin.
+        /// reach the eligible approvers for that service.
         #[arg(
             long,
             value_name = "ID|SLUG|NAME",
@@ -5853,6 +5913,26 @@ pub enum AiSetupCommands {
 
 #[derive(Subcommand)]
 pub enum ChannelBotCommands {
+    /// Suspend or verify and resume a Messenger/Instagram inbox without deleting its identity
+    Delivery {
+        id: String,
+        #[arg(long, conflicts_with = "resume", required_unless_present = "resume")]
+        suspend: bool,
+        #[arg(long, conflicts_with = "suspend")]
+        resume: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Suspend or restore a Meta platform's delivery gate (platform admin)
+    PlatformDelivery {
+        platform: String,
+        #[arg(long, conflicts_with = "resume", required_unless_present = "resume")]
+        suspend: bool,
+        #[arg(long, conflicts_with = "suspend")]
+        resume: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Create a one-time hosted setup link, optionally with a completion webhook
     ConnectLink {
         /// Platform ID from channel-bot platforms
@@ -5903,7 +5983,7 @@ pub enum ChannelBotCommands {
         after_help = "Discover required fields and capabilities with: nyxid channel-bot platforms --output json"
     )]
     Register {
-        /// Platform: telegram, telegram-new (use --managed), discord, lark, feishu, slack, whatsapp, aurinko (email)
+        /// Platform ID from channel-bot platforms, including messenger and instagram
         #[arg(long)]
         platform: String,
         /// Complete managed onboarding in your browser
@@ -5919,7 +5999,7 @@ pub enum ChannelBotCommands {
         /// Label for this bot
         #[arg(long, required_unless_present = "managed")]
         label: Option<String>,
-        /// Platform app ID (required for Lark/Feishu)
+        /// Platform app ID for manual Lark, Feishu, Messenger, or Instagram setup
         #[arg(long)]
         app_id: Option<String>,
         /// App secret (hidden from help -- use --app-secret-env instead).
@@ -5929,7 +6009,8 @@ pub enum ChannelBotCommands {
         /// Read app secret from this environment variable
         #[arg(long)]
         app_secret_env: Option<String>,
-        /// Lark/Feishu verification token. Falls back to
+        /// For manual Messenger and Instagram setup, pass "exclusive" after verifying routing.
+        /// Lark/Feishu verification token falls back to
         /// NYXID_LARK_VERIFICATION_TOKEN when omitted.
         #[arg(long)]
         verification_token: Option<String>,

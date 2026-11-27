@@ -430,6 +430,8 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
     assert_eq!(result.status, "active");
     assert_eq!(result.platform, "telegram-new");
     assert_eq!(result.credential_source, "platform");
+    assert!(result.guest_access_v1);
+    assert_eq!(result.guest_access_v1_revision, 1);
     let provenance = state
         .db
         .collection::<crate::models::telegram_bot_request::ManagedBotEvents>(
@@ -443,11 +445,24 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
         provenance.retired,
         "provisioning permanently consumes the creation identity"
     );
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! {"_id":&result.id},
+            doc! {"$set":{
+                "guest_access_v1":false,"guest_access_v1_revision":2_i64,
+            }},
+        )
+        .await
+        .unwrap();
     let repeated = service
         .connect(&actor, &ready.id, 900, ready.revision)
         .await
         .unwrap();
     assert_eq!(result.id, repeated.id);
+    assert!(!repeated.guest_access_v1);
+    assert_eq!(repeated.guest_access_v1_revision, 2);
     assert_eq!(
         state
             .db
@@ -460,7 +475,8 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
     assert_eq!(
         super::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &result)
             .await
-            .unwrap(),
+            .unwrap()
+            .as_str(),
         CHILD
     );
     let response = serde_json::to_string(&crate::handlers::telegram_new::RequestResponse::from(
@@ -621,6 +637,9 @@ async fn telegram_new_failed_webhook_resumes_same_saved_bot_after_expiry() {
     let saved = super::channel_bot_service::get_bot(&state.db, &ready.id)
         .await
         .unwrap();
+    for field in ["bot_token_encrypted", "webhook_secret_encrypted"] {
+        assert_eq!(saved.secret_context_versions.get(field), Some(&3));
+    }
     assert_eq!(saved.status, "pending");
     state.db.collection::<TelegramBotRequest>(REQUESTS).update_one(doc! {"_id": &ready.id}, doc! {"$set": {"expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::hours(1))}}).await.unwrap();
     assert_eq!(
@@ -3033,3 +3052,33 @@ async fn platform_onboarding_native_command_errors_reply_safely_and_provider_fai
 
 #[path = "telegram_new_delivery_tests.rs"]
 mod delivery_tests;
+
+pub(crate) async fn mixed_telegram_record(
+    keys: std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+) -> bson::Document {
+    let (mut state, actor, server) = fixture().await;
+    state.encryption_keys = keys;
+    let pending = waiting_consent(&state, &actor, &server).await;
+    let ready = approve(&state, &actor, &server, &pending.id, 700).await;
+    provider_connection(&server, &ready.id, 200).await;
+    let base = server.uri();
+    service(&state, &base)
+        .connect(&actor, &ready.id, 900, ready.revision)
+        .await
+        .unwrap();
+    let row = state
+        .db
+        .collection::<bson::Document>(BOTS)
+        .find_one(doc! {"_id": &ready.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let sent = server.received_requests().await.unwrap();
+    let hook: Value = sent
+        .iter()
+        .find(|r| r.url.path() == format!("/bot{CHILD}/setWebhook"))
+        .unwrap()
+        .body_json()
+        .unwrap();
+    doc! {"row":row,"expected":{"bot_token_encrypted":CHILD,"webhook_secret_encrypted":hook["secret_token"].as_str().unwrap()}}
+}

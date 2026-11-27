@@ -769,6 +769,7 @@ fn approval_event(
     event.invocation_id = watch.delivery.invocation_id.clone();
     event.automation_work = watch.delivery.automation_work.clone();
     event.execution_task = watch.execution_task.clone();
+    event.channel_contexts = watch.meta_contexts.clone();
     event.bound = watch.delivery.report_provenance == REPORT_PROVENANCE_V1;
     event.report_to = carried_report_to(
         watch.delivery.report_to.as_deref(),
@@ -884,6 +885,7 @@ async fn observe_approval(
     session.start_transaction().and_run2(async move |session| {
         let result:crate::errors::AppResult<bool>=Box::pin(async {
             super::erasure_admission::fence_in_session(&db,&watch.user_id,session).await?;
+            super::async_service_operation::meta_lineage::fence(&db,session,&watch.meta_contexts,true).await?;
             if !super::assistant_invocation_service::fence_in_session(&db,session,&watch.user_id,watch.delivery.invocation_id.as_deref()).await? {return Ok(false);}
             if let Some(work) = watch.delivery.automation_work.as_ref() {super::trigger_schedule::continuation::fence_work(&db, &watch.user_id, &watch.conversation_id, work, session).await?;}
             if let Some(task) = &watch.execution_task {super::execution_permission_dispatch::tasks::fence(&db, session, task).await?;}

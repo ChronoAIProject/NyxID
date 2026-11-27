@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use bson::doc;
 use mongodb::Database;
-use zeroize::Zeroizing;
 
 use crate::{
     crypto::aes::EncryptionKeys,
@@ -62,10 +61,15 @@ pub(in crate::services) async fn deliver_intent(
     let Some(encrypted) = client.revocation_webhook_secret_encrypted.as_ref() else {
         return Ok(Outcome::Failed("signing_key_missing"));
     };
-    let secret = match keys.decrypt(encrypted).await {
-        Ok(secret) if !secret.is_empty() && std::str::from_utf8(&secret).is_ok() => {
-            Zeroizing::new(secret)
-        }
+    let secret = match crate::services::oauth_client_webhook_record::open(
+        keys,
+        &client,
+        crate::services::oauth_client_webhook_record::REVOCATION,
+        encrypted,
+    )
+    .await
+    {
+        Ok(secret) if !secret.is_empty() && std::str::from_utf8(&secret).is_ok() => secret,
         Ok(_) => return Ok(Outcome::Failed("signing_key_invalid")),
         Err(_) => return Ok(Outcome::Retry("signing_key_unavailable")),
     };

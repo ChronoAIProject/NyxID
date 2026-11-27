@@ -29,9 +29,9 @@ export type AwayItem =
  */
 export function awayItems(agents: readonly AssistantAgent[]): AwayItem[] {
   const specialists = agents.filter(
-    (agent) => agent.kind === "specialist" && agent.status !== "destroyed",
+    (agent) => agent.kind === "specialist" && agent.can_use !== false && agent.status !== "destroyed",
   );
-  const requests: AwayItem[] = specialists.flatMap((agent) =>
+  const requests: AwayItem[] = specialists.filter((agent) => agent.owner_kind !== "org" || agent.can_maintain !== false).flatMap((agent) =>
     agent.pending_requests.map((request) => ({
       key: `request:${request.request_id}`,
       kind: "request" as const,

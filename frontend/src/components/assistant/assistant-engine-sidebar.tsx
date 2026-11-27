@@ -1,7 +1,8 @@
 import { readGroupInvite, clearGroupInvite } from "@/lib/collaboration-invite";
 import { GroupInviteDialog } from "./collaboration-group-controls";
 import { useConnectionDown } from "@/hooks/use-connection-down";
-import { useEffect, useMemo, useState, useSyncExternalStore, type ComponentProps } from "react";
+import { useContext, useEffect, useMemo, useState, useSyncExternalStore, type ComponentProps } from "react";
+import { AssistantMobileThreadsContext } from "./assistant-threads-context";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -20,6 +21,7 @@ import {
   useNotificationsEnabled,
 } from "@/hooks/use-assistant-notifications";
 import { useNyxAgentThreads } from "@/hooks/use-assistant-nyxagent";
+import { useOrgGuestConversations } from "@/hooks/use-org-guest-conversations";
 import { selectedAgentOf, useNyxBotAgents } from "@/hooks/use-nyxbot-agents";
 import { useNyxBotGroups } from "@/hooks/use-nyxbot-groups";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
@@ -30,15 +32,22 @@ import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { groupWithDisplayNames } from "@/lib/assistant/nyxbot-labels";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { useAuthStore } from "@/stores/auth-store";
+import { orgGuestConversationId } from "@/schemas/org-guest-conversation";
+import { translateUi } from "@/i18n/use-ui-translation";
 import type { Conversation } from "@/types/assistant";
 
 export function AssistantEngineSidebar({
   engine,
+  guestAgentId,
   ...props
 }: ComponentProps<typeof AssistantSidebar> & {
   readonly engine: "actor" | "direct" | "nyxagent";
+  readonly guestAgentId?: string;
 }) {
   const userId = useAuthStore((state) => state.user?.id);
+  const mobileDrawer = useContext(AssistantMobileThreadsContext);
+  const [mobileBrowse, setMobileBrowse] = useState<{ owner?: string; agent?: string; workspace: boolean }>();
+  const browse = mobileBrowse?.owner === userId ? mobileBrowse : undefined;
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const search = useRouterState({
@@ -75,16 +84,29 @@ export function AssistantEngineSidebar({
   const notificationSummary = useNotificationSummary(notificationsEnabled);
   const unread = useMemo(() => unreadSources(notificationSummary.data), [notificationSummary.data]);
   useNotificationSourceRead({
-    conversationId: openThread,
+    conversationId: openThread && !orgGuestConversationId.test(openThread) ? openThread : undefined,
     groupId: openGroup,
     enabled: notificationsEnabled,
   });
   // An open group expands no agent; otherwise the open thread's agent, the
   // agent in the URL, or NyxBot.
-  const selectedAgent = openGroup
+  const selectedAgent = mobileDrawer && browse?.agent
+    ? agents.data?.agents.find((agent) => agent.id === browse.agent)
+    : openGroup
     ? undefined
-    : selectedAgentOf(agents.data?.agents, openThreadAgentId, search.agent);
-  const nyx = useNyxAgentThreads({ agentId: selectedAgent?.id, enabled: nyxagentEnabled });
+    : selectedAgentOf(agents.data?.agents, guestAgentId ?? openThreadAgentId, search.agent);
+  const nyx = useNyxAgentThreads({ agentId: selectedAgent?.id, enabled: nyxagentEnabled && selectedAgent?.can_use !== false });
+  const guest = useOrgGuestConversations(nyxagentEnabled && selectedAgent?.owner_kind === "org" && selectedAgent.can_govern
+    ? selectedAgent.id : undefined);
+  const guestThreads: Conversation[] = guest.isError ? [] : (guest.data?.pages ?? [])
+    .flatMap((page) => page.conversations.map((conversation) => ({
+      ...conversation,
+      title: translateUi("Guest conversation"),
+      channel: {
+        ...conversation.channel,
+        channel_agent_id: conversation.channel.nyxbot_channel_id,
+      },
+    })));
   const actorKey = ["assistant", "actor", userId, "sidebar"];
   // The earlier engines' chats are not listed in NyxAgent mode, so they are
   // not fetched either.
@@ -144,10 +166,20 @@ export function AssistantEngineSidebar({
           : undefined,
         onRetry: () => { void agents.refetch(); },
         selectedAgentId: selectedAgent?.id,
-        threads: nyx.conversations,
+        threads: [...nyx.conversations, ...guestThreads].sort((a, b) =>
+          b.last_message_at.localeCompare(a.last_message_at)),
         threadsLoading: Boolean(selectedAgent) && !nyx.threadsLoaded,
+        onMoreGuestThreads: guest.hasNextPage ? () => { void guest.fetchNextPage(); } : undefined,
+        loadingGuestThreads: guest.isFetchingNextPage,
+        guestThreadsError: guest.isError,
         // An agent lands on its latest thread (or a new one when it has none).
-        onSelectAgent: (agentId) => goTo({ agent: agentId }),
+        onSelectAgent: (agentId) => {
+          if (mobileDrawer) setMobileBrowse({ owner: userId, agent: agentId, workspace: false });
+          else goTo({ agent: agentId });
+        },
+        mobileThreadList: mobileDrawer && !browse?.workspace && Boolean(selectedAgent) &&
+          (Boolean(browse?.agent) || (onChatRoute && !home && !openGroup)),
+        onBackToWorkspace: mobileDrawer ? () => setMobileBrowse({ owner: userId, agent: selectedAgent?.id, workspace: true }) : undefined,
         onNewThread: (agentId) => goTo({ draft: true, agent: agentId }),
         onAgentDetails: setDetailsAgentId,
         onNewAgent: setCreatingAgent,
@@ -193,6 +225,10 @@ export function AssistantEngineSidebar({
         conversations={[...rows.values()].sort((a, b) =>
           b.last_message_at.localeCompare(a.last_message_at),
         )}
+        onSelect={(id) => {
+          if (orgGuestConversationId.test(id)) goTo({ c: id, agent: selectedAgent?.id });
+          else props.onSelect(id);
+        }}
         onRename={(id, title) => nyxAgentTransport.rename(id, title)}
         onDelete={async (id) => {
           if (isNyxAgentConversationId(id)) {

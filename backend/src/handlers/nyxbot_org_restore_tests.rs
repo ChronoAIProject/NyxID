@@ -203,6 +203,87 @@ async fn backdate_org_restore_proof(state: &AppState, channel_id: &str) {
         .unwrap();
 }
 
+#[tokio::test]
+async fn meta_org_restoration_does_not_replace_a_concurrently_selected_default() {
+    for platform in ["messenger", "instagram"] {
+        let (state, _, server) = setup("meta_org_restore_default").await;
+        let (predecessor, org_id) = retired_real_org_row(&state, platform, "direct").await;
+        let other = crate::services::key_service::create_api_key(
+            &state.db,
+            &org_id,
+            "Organization callback",
+            "read proxy",
+            crate::services::api_key_validation::NewKeyExpiry::Default,
+            None,
+            Some(&[]),
+            Some(&[]),
+            Some(false),
+            Some(false),
+            Some(false),
+            None,
+            None,
+            Some("generic"),
+            Some("https://callbacks.example.test/org"),
+        )
+        .await
+        .unwrap();
+        crate::services::durable_wake_tests::resume_after(
+            "meta_default_before_insert",
+            async {
+                let error = restore_org_channel(state.clone(), predecessor.clone(), "meta-restore")
+                    .await
+                    .unwrap_err();
+                assert!(matches!(error, AppError::Conflict(_)), "{error:?}");
+            },
+            async {
+                crate::services::channel_routing_service::create_conversation(
+                    &state.db,
+                    &org_id,
+                    Some(&predecessor.channel_bot_id),
+                    platform,
+                    "*",
+                    "private",
+                    None,
+                    &other.id,
+                    true,
+                    false,
+                )
+                .await
+                .unwrap();
+            },
+        )
+        .await;
+        let route = crate::services::channel_routing_service::resolve_agent(
+            &state.db,
+            &predecessor.channel_bot_id,
+            "new-member",
+            None,
+            &org_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(route.api_key_id, other.id);
+        assert!(
+            crate::services::key_service::get_api_key(&state.db, &org_id, &other.id)
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<NyxbotChannel>(CHANNELS)
+                .count_documents(
+                    doc! {"channel_bot_id": &predecessor.channel_bot_id, "status": "active"}
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        drop_state(state, server).await;
+    }
+}
+
 async fn assert_restored_admin_roundtrip(
     state: &AppState,
     predecessor: &NyxbotChannel,
@@ -287,12 +368,7 @@ async fn assert_restored_admin_roundtrip(
         );
         return;
     }
-    let restored_key = state
-        .encryption_keys
-        .decrypt(live.agent_key_ciphertext.as_ref().unwrap())
-        .await
-        .unwrap();
-    let restored_key = String::from_utf8(restored_key.to_vec()).unwrap();
+    let restored_key = decrypt_agent_key(state, live).await.unwrap().unwrap();
     if let Some(binding_id) = live.binding_id.as_deref() {
         let ensured = super::put_conversation(
             State(state.clone()),
@@ -567,12 +643,7 @@ async fn org_restore_gateway_telegram_rebuild_uses_creator_bearer_and_new_route(
             .unwrap(),
         0
     );
-    let restored_key = state
-        .encryption_keys
-        .decrypt(live.agent_key_ciphertext.as_ref().unwrap())
-        .await
-        .unwrap();
-    let restored_key = String::from_utf8(restored_key.to_vec()).unwrap();
+    let restored_key = decrypt_agent_key(&state, &live).await.unwrap().unwrap();
     let binding_id = live
         .binding_id
         .as_deref()
@@ -2882,12 +2953,7 @@ async fn org_restore_guest_defaults_preserves_on_without_wallet_and_reports_bill
         .0;
         assert_eq!(health.nyxbot_status.as_deref(), Some("active"));
         assert_eq!(health.recommended_action, "enable_billing");
-        let key = state
-            .encryption_keys
-            .decrypt(live.agent_key_ciphertext.as_ref().unwrap())
-            .await
-            .unwrap();
-        let key = String::from_utf8(key.to_vec()).unwrap();
+        let key = decrypt_agent_key(&state, &live).await.unwrap().unwrap();
         assert_eq!(
             super::put_conversation(
                 State(state.clone()),

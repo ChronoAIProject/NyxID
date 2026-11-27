@@ -4,6 +4,7 @@ import { translateApp } from "../../../i18n/appTranslation";
 import { useEffect, useMemo, useRef } from "react";
 import { Platform, StyleSheet } from "react-native";
 import { WebView } from "react-native-webview";
+import type { VoiceProtocol } from "./voiceContracts";
 import { claimVoiceAudioSession } from "./audioSessionOwnership";
 import { claimSystemStatusActivity } from "../../../lib/systemStatusActivity";
 import { createNativeOpenAIMedia } from "./createNativeOpenAIMedia";
@@ -572,17 +573,23 @@ export class NativeVoiceMedia implements VoiceMediaAdapter {
 
 export function VoiceMediaBridge({
   media,
+  protocol,
   origin,
 }: {
   media: NativeVoiceMedia;
+  protocol: VoiceProtocol | undefined;
   origin: string;
 }) {
   useAppLanguage();
   const webView = useRef<WebView>(null);
   const loaded = useRef(false);
+  const nativeCall =
+    protocol === "openai_live" &&
+    (Platform.OS === "ios" || Platform.OS === "android");
   const source = useMemo(
-    () => ({ html: createVoiceMediaDocument(), baseUrl: origin }),
-    [origin],
+    () =>
+      nativeCall ? undefined : { html: createVoiceMediaDocument(), baseUrl: origin },
+    [nativeCall, origin],
   );
   useEffect(() => {
     loaded.current = false;
@@ -598,6 +605,7 @@ export function VoiceMediaBridge({
     });
   }, [media, origin]);
 
+  if (!source) return null;
   return (
     <WebView
       ref={webView}

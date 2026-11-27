@@ -45,10 +45,10 @@ pub(crate) async fn cancel_in_session(
         );
         db.collection::<Document>(REQUESTS).update_many(version.selector(current.clone()),version.update(doc!{
             "$set":{"status":"expired","execution_proposal.v1.state":"cancelled","execution_proposal.v1.failure_code":reason},
-            "$unset":{"execution_proposal.v1.payload":"","execution_proposal.v1.result":""}
+            "$unset":Slot::Assistant(version).unset(&[Field::Payload, Field::Result])
         })).session(&mut *session).await?;
         current.insert("execution_proposal.v1.state",doc! {"$in":["dispatched","unknown","completed","not_sent","denied","expired","cancelled"]});
-        db.collection::<Document>(REQUESTS).update_many(version.selector(current),version.update(doc!{"$set":{"execution_proposal.v1.delivery_abandoned":true},"$unset":{"execution_proposal.v1.payload":"","execution_proposal.v1.result":""}})).session(&mut *session).await?;
+        db.collection::<Document>(REQUESTS).update_many(version.selector(current),version.update(doc!{"$set":{"execution_proposal.v1.delivery_abandoned":true},"$unset":Slot::Assistant(version).unset(&[Field::Payload, Field::Result])})).session(&mut *session).await?;
     }
     Ok(())
 }
@@ -91,7 +91,7 @@ pub(crate) async fn sweep(state: &crate::AppState) -> AppResult<()> {
         state.db.collection::<Document>(REQUESTS).update_many(version.selector(doc!{
             "created_at":{"$lt":bson::DateTime::from_chrono(Utc::now()-Duration::days(1))},
             "$or":[{"execution_proposal.v1.payload":{"$ne":null}},{"execution_proposal.v1.result":{"$ne":null}}]
-        }),version.update(doc!{"$unset":{"execution_proposal.v1.payload":"","execution_proposal.v1.result":""}})).await?;
+        }),version.update(doc!{"$unset":Slot::Assistant(version).unset(&[Field::Payload, Field::Result])})).await?;
     }
     Ok(())
 }
@@ -164,17 +164,19 @@ async fn maintain(state: &crate::AppState, row: &ApprovalRequest) -> AppResult<(
                 let mut update=doc!{"$set":{"execution_proposal.v1.state":next_state}};
                 if !allowed {
                     update.get_document_mut("$set").expect("set").insert("execution_proposal.v1.failure_code","independent_review_unavailable");
-                    update.insert("$unset",doc!{"execution_proposal.v1.payload":""});
+                    update.insert("$unset",Slot::Assistant(version).unset(&[Field::Payload]));
                     retire_operations(db,session,std::slice::from_ref(&row.id)).await?;
                 }
                 if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":&row.id,"execution_proposal.v1.state":"waiting"}),version.update(update)).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
             }
             if p.state=="pending"&&(row.status!="pending"||row.expires_at<=Utc::now()) {
-                if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":&row.id,"execution_proposal.v1.state":"pending"}),version.update(doc!{"$set":{"status":"expired","execution_proposal.v1.state":"expired"},"$unset":{"execution_proposal.v1.payload":""}})).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
+                if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":&row.id,"execution_proposal.v1.state":"pending"}),version.update(doc!{"$set":{"status":"expired","execution_proposal.v1.state":"expired"},"$unset":Slot::Assistant(version).unset(&[Field::Payload])})).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
                 next_state="expired";
             }
             if source.collaboration.is_some(){super::super::super::collaboration_group_service::runtime::queue_decision(db,&source,session).await?;}
-            let entry=bson::to_bson(&event(&row,p)).map_err(encoding)?;
+            let mut wake = event(&row, p);
+            wake.org_use_revision = source.org_use_revision;
+            let entry=bson::to_bson(&wake).map_err(encoding)?;
             if chats.update_one(doc!{"_id":&source.id,"active_turn":null,"pending_events.63":{"$exists":false},"pending_events.id":{"$ne":&event_id}},doc!{"$push":{"pending_events":entry},"$inc":{"execution_dispatch_fence":1_i64}}).session(&mut *session).await?.matched_count!=1{return Err(conflict());}
             if db.collection::<Document>(REQUESTS).update_one(version.selector(doc!{"_id":&row.id,"execution_proposal.v1.state":next_state}),version.update(doc!{"$set":{"execution_proposal.v1.wake_at":bson::DateTime::now()}})).session(&mut *session).await?.matched_count!=1 {return Err(conflict());}
             Ok(())

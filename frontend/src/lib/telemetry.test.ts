@@ -123,7 +123,7 @@ describe('authenticated relay analytics', () => {
     Object.defineProperty(navigator, 'doNotTrack', { value: '1', configurable: true });
     expect(isTelemetryActive()).toBe(false); await capture(event);
     Object.defineProperty(navigator, 'doNotTrack', { value: '0', configurable: true });
-    for (const path of ['/login/agent-key/secret', '/reset-password/secret', '/oauth/callback?code=secret', '/approve/secret']) {
+    for (const path of ['/login/agent-key/secret', '/reset-password/secret', '/oauth/callback?code=secret', '/channel-bots/meta-callback/instagram?code=secret', '/approve/secret']) {
       window.history.replaceState(null, '', path); await capture(event);
     }
     expect(state.api).not.toHaveBeenCalled();

@@ -25,7 +25,9 @@ use crate::{
         user_service::{COLLECTION_NAME as SERVICES, UserService},
     },
     services::{
-        api_key_mutation_service as transactions, assistant_team_service as team, mcp_service,
+        api_key_mutation_service as transactions,
+        assistant_acknowledgement_service::{OwnerActionClass, service_action_class},
+        assistant_team_service as team, mcp_service,
         proxy_authorization::{self, CanonicalPath},
     },
 };
@@ -408,11 +410,26 @@ struct Holder<'a> {
     revision: i64,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct SpecialistSelection<'a> {
+    pub input: &'a OperationSelection,
+    pub read_only: bool,
+}
+
+impl<'a> From<&'a OperationSelection> for SpecialistSelection<'a> {
+    fn from(input: &'a OperationSelection) -> Self {
+        Self {
+            input,
+            read_only: false,
+        }
+    }
+}
+
 async fn compile(
     db: &Database,
     agent: &AssistantAgent,
     service: &str,
-    input: &OperationSelection,
+    edit: SpecialistSelection<'_>,
     session: &mut ClientSession,
 ) -> AppResult<Option<AgentOperationScope>> {
     let holder = Holder {
@@ -420,7 +437,20 @@ async fn compile(
         platform_service_ids: &agent.grants.platform_service_ids,
         revision: revision(agent, service),
     };
-    Box::pin(compile_for(db, &holder, service, input, session)).await
+    let snapshot = if edit.read_only {
+        EndpointChoice::ReadOnly(agent.operation_scopes.get(service))
+    } else {
+        EndpointChoice::Explicit
+    };
+    Box::pin(compile_for(
+        db, &holder, service, edit.input, snapshot, session,
+    ))
+    .await
+}
+
+enum EndpointChoice<'a> {
+    Explicit,
+    ReadOnly(Option<&'a AgentOperationScope>),
 }
 
 async fn compile_for(
@@ -428,6 +458,7 @@ async fn compile_for(
     holder: &Holder<'_>,
     service: &str,
     input: &OperationSelection,
+    choice: EndpointChoice<'_>,
     session: &mut ClientSession,
 ) -> AppResult<Option<AgentOperationScope>> {
     if !holder
@@ -492,6 +523,13 @@ async fn compile_for(
     } else {
         None
     };
+    let snapshot;
+    let input = if let EndpointChoice::ReadOnly(previous) = choice {
+        snapshot = read_only_selection(input, previous, &endpoints, catalog_slug.as_deref())?;
+        &snapshot
+    } else {
+        input
+    };
     let mut operations = Vec::new();
     let mut ids = BTreeSet::new();
     for id in &input.endpoint_ids {
@@ -513,17 +551,7 @@ async fn compile_for(
         )?;
         let policy =
             proxy_authorization::normalize_policy(ProxyOperationPolicy { rules: vec![rule] })?;
-        let marks = catalog_slug
-            .as_deref()
-            .map(|slug| {
-                super::catalog_spec_registry::operation_marks(
-                    slug,
-                    &endpoint.method,
-                    &endpoint.path,
-                    &endpoint.name,
-                )
-            })
-            .unwrap_or_default();
+        let metadata = mcp_service::stored_endpoint_metadata(endpoint, catalog_slug.as_deref());
         let rule = policy.rules[0].clone();
         let inputs = match input.inputs.get(id) {
             Some(inputs) if !inputs.is_empty() => {
@@ -538,8 +566,8 @@ async fn compile_for(
             endpoint_id: Some(id.clone()),
             rule,
             risk: endpoint.risk,
-            destructive: marks.destructive,
-            changes_existing: marks.changes_existing,
+            destructive: metadata.destructive,
+            changes_existing: metadata.changes_existing,
             inputs,
         });
     }
@@ -578,6 +606,57 @@ async fn compile_for(
     }))
 }
 
+fn published_effect_class(
+    endpoint: &ServiceEndpoint,
+    slug: Option<&str>,
+) -> Option<OwnerActionClass> {
+    if !endpoint.is_active
+        || endpoint.publication != crate::models::service_endpoint::PublicationState::Published
+    {
+        return None;
+    }
+    let method = reqwest::Method::from_bytes(endpoint.method.as_bytes()).ok()?;
+    let effects = mcp_service::operation_effects(
+        &method,
+        mcp_service::stored_endpoint_metadata(endpoint, slug),
+    );
+    Some(service_action_class(effects.reads, effects.destructive))
+}
+
+fn read_only_selection(
+    input: &OperationSelection,
+    previous: Option<&AgentOperationScope>,
+    endpoints: &[ServiceEndpoint],
+    catalog_slug: Option<&str>,
+) -> AppResult<OperationSelection> {
+    let mut selected = input.clone();
+    for endpoint in endpoints {
+        if published_effect_class(endpoint, catalog_slug) != Some(OwnerActionClass::Read) {
+            continue;
+        }
+        if let Some(scope) = previous {
+            let Some(saved) = scope
+                .operations
+                .iter()
+                .find(|op| op.endpoint_id.as_ref() == Some(&endpoint.id))
+            else {
+                continue;
+            };
+            if let Some(inputs) = &saved.inputs {
+                selected.inputs.insert(endpoint.id.clone(), inputs.clone());
+            }
+        }
+        selected.endpoint_ids.push(endpoint.id.clone());
+    }
+    if selected.endpoint_ids.len() > 256 {
+        return Err(AppError::ValidationError(
+            "Read-only snapshot exceeds 256 operations. Select explicit endpoint IDs.".into(),
+        ));
+    }
+    selected.endpoint_ids.sort();
+    Ok(selected)
+}
+
 /// Digest of the compiled contract a selection resolves to, excluding its
 /// revision. Owner cards carry it so endpoint edits cannot ride an approval.
 pub fn contract_digest(scope: Option<&AgentOperationScope>) -> String {
@@ -588,12 +667,12 @@ pub fn contract_digest(scope: Option<&AgentOperationScope>) -> String {
 }
 
 /// Compile a selection without saving it, returning the digest an owner card binds.
-pub async fn preview_digest(
+pub(crate) async fn preview_digest(
     db: &Database,
     owner: &str,
     agent_id: &str,
     service: &str,
-    input: &OperationSelection,
+    input: SpecialistSelection<'_>,
 ) -> AppResult<String> {
     let agent = team::maintained_agent(db, owner, agent_id).await?;
     preview_agent_digest(db, &agent, service, input).await
@@ -612,14 +691,14 @@ pub async fn preview_request_digest(
         .find_one(doc! {"_id": agent_id, "kind": "specialist", "destroyed_at": bson::Bson::Null})
         .await?
         .ok_or_else(|| AppError::NotFound("Specialist not found".into()))?;
-    preview_agent_digest(db, &agent, service, input).await
+    preview_agent_digest(db, &agent, service, input.into()).await
 }
 
 async fn preview_agent_digest(
     db: &Database,
     agent: &AssistantAgent,
     service: &str,
-    input: &OperationSelection,
+    input: SpecialistSelection<'_>,
 ) -> AppResult<String> {
     let mut session = db.client().start_session().await?;
     let scope = Box::pin(compile(db, agent, service, input, &mut session)).await?;
@@ -628,12 +707,12 @@ async fn preview_agent_digest(
 
 /// `allow_widening` is supplied only by a human handler or after a digest-bound
 /// owner action card. Agent writes always use false until that card is consumed.
-pub async fn set(
+pub async fn set<'a>(
     db: &Database,
     owner: &str,
     agent_id: &str,
     service: &str,
-    input: &OperationSelection,
+    edit: impl Into<SpecialistSelection<'a>>,
     allow_widening: bool,
 ) -> AppResult<AssistantAgent> {
     let mut session = db.client().start_session().await?;
@@ -641,7 +720,9 @@ pub async fn set(
     let owner_owned = owner.to_owned();
     let agent_id = agent_id.to_owned();
     let service_owned = service.to_owned();
-    let input = input.clone();
+    let edit = edit.into();
+    let read_only = edit.read_only;
+    let input = edit.input.clone();
     let agent = session
         .start_transaction()
         .and_run2(async move |session| {
@@ -651,7 +732,10 @@ pub async fn set(
                     &owner_owned,
                     &agent_id,
                     &service_owned,
-                    &input,
+                    SpecialistSelection {
+                        input: &input,
+                        read_only,
+                    },
                     allow_widening,
                     session,
                 ))
@@ -699,7 +783,7 @@ pub async fn options(
     owner: &str,
     agent_id: &str,
 ) -> AppResult<Vec<ServiceOptions>> {
-    options_for(db, owner, agent_id, false, None).await
+    options_for(db, owner, agent_id, false, None, None).await
 }
 
 pub async fn guest_options(
@@ -707,7 +791,7 @@ pub async fn guest_options(
     owner: &str,
     agent_id: &str,
 ) -> AppResult<Vec<ServiceOptions>> {
-    options_for(db, owner, agent_id, true, None).await
+    options_for(db, owner, agent_id, true, None, None).await
 }
 
 /// Native discovery uses the same live management ACL as REST. Cursors are
@@ -724,6 +808,7 @@ pub(crate) async fn options_page(
         agent_id,
         request.guests,
         request.service_id.as_deref(),
+        request.effect_class,
     )
     .await?;
     discovery::page(
@@ -745,6 +830,7 @@ async fn options_for(
     agent_id: &str,
     guests: bool,
     service_filter: Option<&str>,
+    effect_class: Option<OwnerActionClass>,
 ) -> AppResult<Vec<ServiceOptions>> {
     let mut agent = team::live_specialist(db, owner, agent_id).await?;
     super::org_agent_service::require_maintain(db, owner, &agent).await?;
@@ -793,6 +879,7 @@ async fn options_for(
         &platform_ids,
         &agent.operation_scopes,
         |service| revision(&agent, service),
+        effect_class,
     ))
     .await?;
     if guests {
@@ -810,6 +897,7 @@ async fn build_options(
     platform_ids: &[String],
     scopes: &OperationScopes,
     revision_of: impl Fn(&str) -> i64,
+    effect_class: Option<OwnerActionClass>,
 ) -> AppResult<Vec<ServiceOptions>> {
     let catalog_ids: Vec<&str> = platform_ids
         .iter()
@@ -869,28 +957,17 @@ async fn build_options(
         let allows_explicit_rules = endpoints.is_empty();
         let mut operations = Vec::new();
         for endpoint in endpoints.into_iter().filter(|row| row.is_active) {
-            let marks = catalog_slug
-                .map(|slug| {
-                    super::catalog_spec_registry::operation_marks(
-                        slug,
-                        &endpoint.method,
-                        &endpoint.path,
-                        &endpoint.name,
-                    )
-                })
-                .unwrap_or_default();
-            let metadata = mcp_service::McpDurableEndpointMetadata {
-                risk: endpoint.risk,
-                catalog_contract: true,
-                destructive: marks.destructive,
-                changes_existing: marks.changes_existing,
-                append_only: marks.append_only,
-                append_only_query: marks.append_only_query,
-                ..Default::default()
-            };
+            if effect_class
+                .is_some_and(|class| published_effect_class(endpoint, catalog_slug) != Some(class))
+            {
+                continue;
+            }
             let method = reqwest::Method::from_bytes(endpoint.method.as_bytes())
                 .map_err(|_| AppError::Internal("Invalid endpoint method".into()))?;
-            let effects = mcp_service::possible_operation_effects(&method, metadata);
+            let effects = mcp_service::possible_operation_effects(
+                &method,
+                mcp_service::stored_endpoint_metadata(endpoint, catalog_slug),
+            );
             operations.push(OperationOption {
                 endpoint_id: endpoint.id.clone(),
                 method: endpoint.method.clone(),
@@ -900,7 +977,7 @@ async fn build_options(
                 changes_existing: !effects.uses,
             });
         }
-        result.push(ServiceOptions {
+        let mut row = ServiceOptions {
             revision: revision_of(service_id),
             service_id: service_id.clone(),
             service_slug: service_slug.to_owned(),
@@ -933,7 +1010,15 @@ async fn build_options(
                 })
                 .unwrap_or_default(),
             operations,
-        });
+        };
+        if effect_class.is_some() {
+            let visible: BTreeSet<_> = row.operations.iter().map(|op| &op.endpoint_id).collect();
+            row.endpoint_ids.retain(|id| visible.contains(id));
+            row.inputs.retain(|id, _| visible.contains(id));
+            row.rules.clear();
+            row.allows_explicit_rules = false;
+        }
+        result.push(row);
     }
     Ok(result)
 }
@@ -1342,12 +1427,12 @@ pub fn check_guest_approval(
     Ok(())
 }
 
-pub(crate) async fn apply_in_session(
+pub(crate) async fn apply_in_session<'a>(
     db: &Database,
     owner: &str,
     agent_id: &str,
     service: &str,
-    input: &OperationSelection,
+    edit: impl Into<SpecialistSelection<'a>>,
     allow_widening: bool,
     session: &mut ClientSession,
 ) -> AppResult<AssistantAgent> {
@@ -1362,12 +1447,23 @@ pub(crate) async fn apply_in_session(
         .session(&mut *session)
         .await?
         .ok_or_else(|| AppError::NotFound("Specialist not found".into()))?;
-    let scope = Box::pin(compile(db, &agent, service, input, session)).await?;
+    super::org_agent_service::fence_maintenance(db, session, owner, &agent).await?;
+    let edit = edit.into();
+    let input = edit.input;
+    let scope = Box::pin(compile(db, &agent, service, edit, session)).await?;
     ensure_reviewed(input, scope.as_ref())?;
-    if !allow_widening && widens(agent.operation_scopes.get(service), scope.as_ref()) {
-        return Err(AppError::Forbidden(
-            "Widening operation access requires an owner action card".into(),
-        ));
+    if widens(agent.operation_scopes.get(service), scope.as_ref()) {
+        if edit.read_only {
+            return Err(AppError::Conflict(
+                "A saved read operation changed its contract. Review the explicit selection."
+                    .into(),
+            ));
+        }
+        if !allow_widening {
+            return Err(AppError::Forbidden(
+                "Widening operation access requires an owner action card".into(),
+            ));
+        }
     }
     let next = input
         .expected_revision
@@ -1421,14 +1517,16 @@ pub fn route_visible(
     })
 }
 
-pub async fn selection_summary(
+pub async fn selection_summary<'a>(
     db: &Database,
     nodes: &super::node_ws_manager::NodeWsManager,
     owner: &str,
     agent: &str,
     service: &str,
-    selection: &OperationSelection,
+    edit: impl Into<SpecialistSelection<'a>>,
 ) -> AppResult<String> {
+    let edit = edit.into();
+    let selection = edit.input;
     let services = options(db, nodes, owner, agent).await?;
     let current = services
         .iter()
@@ -1442,6 +1540,12 @@ pub async fn selection_summary(
             current.endpoint_ids.len() + current.rules.len()
         )
     };
+    if edit.read_only {
+        return Ok(format!(
+            "{}: keep only currently allowed published read operations with their saved input limits (revision {}).",
+            current.service_name, selection.expected_revision
+        ));
+    }
     let after = if selection.all_operations {
         "all operations".to_owned()
     } else {
@@ -1702,6 +1806,7 @@ pub async fn key_options(
         &[],
         &key.assistant_operation_scopes,
         |service| key_revision(&key, &revisions, service),
+        None,
     ))
     .await
 }
@@ -1727,7 +1832,15 @@ pub async fn set_key(
         revision: current,
     };
     let mut session = db.client().start_session().await?;
-    let scope = Box::pin(compile_for(db, &holder, service, input, &mut session)).await?;
+    let scope = Box::pin(compile_for(
+        db,
+        &holder,
+        service,
+        input,
+        EndpointChoice::Explicit,
+        &mut session,
+    ))
+    .await?;
     ensure_reviewed(input, scope.as_ref())?;
     if scope.is_some()
         && !key.assistant_operation_scopes.contains_key(service)
@@ -1859,7 +1972,15 @@ pub(crate) async fn apply_guest_selection(
         platform_service_ids: &agent.grants.platform_service_ids,
         revision: current_revision,
     };
-    let scope = Box::pin(compile_for(db, &holder, service, selection, session)).await?;
+    let scope = Box::pin(compile_for(
+        db,
+        &holder,
+        service,
+        selection,
+        EndpointChoice::Explicit,
+        session,
+    ))
+    .await?;
     ensure_reviewed(selection, scope.as_ref())?;
     let next = current_revision
         .checked_add(1)
@@ -1910,19 +2031,38 @@ pub async fn filter_guest_catalog(
             continue;
         }
         let access = guest_level(&agent, &service.service_id, mcp_catalog_id(service));
-        service.endpoints.retain(|endpoint| {
+        service.endpoints.retain_mut(|endpoint| {
             let Ok(method) = reqwest::Method::from_bytes(endpoint.method.as_bytes()) else {
                 return false;
             };
-            let effects = mcp_service::possible_operation_effects(
-                &method,
-                service
-                    .durable_endpoint_metadata
-                    .get(&endpoint.endpoint_id)
-                    .copied()
-                    .unwrap_or_default(),
-            );
-            guest_level_allows(access, effects)
+            let metadata = service
+                .durable_endpoint_metadata
+                .get(&endpoint.endpoint_id)
+                .copied()
+                .unwrap_or_default();
+            let effects = mcp_service::possible_operation_effects(&method, metadata);
+            if !guest_level_allows(access, effects) {
+                return false;
+            }
+            if access == crate::models::assistant_agent::GuestAccess::Use
+                && metadata.destructive
+                && metadata.append_only
+                && let Some(query) = metadata.append_only_query.filter(|query| !query.is_empty())
+            {
+                // Chat search can truncate long descriptions when it omits the schema.
+                let mut description = String::new();
+                for (name, value) in query.iter().filter_map(|(name, value)| {
+                    value.as_str().map(|value| (name, value))
+                }) {
+                    description.push_str(&format!(
+                        "Guest access requires the query argument {name}={value}. Supply it once per request. "
+                    ));
+                }
+                description.push_str("The effective approval policy must also allow the write. ");
+                description.push_str(endpoint.description.as_deref().unwrap_or(&endpoint.name));
+                endpoint.description = Some(description);
+            }
+            true
         });
     }
     services.retain(|service| !service.endpoints.is_empty());

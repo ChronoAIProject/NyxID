@@ -425,17 +425,45 @@ pub async fn insert_one(
     key: &ApiKey,
     session: Option<&mut ClientSession>,
 ) -> AppResult<InsertOneResult> {
+    insert_one_for_actor(db, key, None, session).await
+}
+
+pub(crate) async fn insert_one_for_actor(
+    db: &Database,
+    key: &ApiKey,
+    actor: Option<&str>,
+    session: Option<&mut ClientSession>,
+) -> AppResult<InsertOneResult> {
     if key.state_version <= 0 || key.updated_at.is_none() {
         return Err(AppError::Internal(
             "new API keys require positive authority evidence".to_string(),
         ));
     }
-    let collection = db.collection::<ApiKey>(API_KEYS);
-    let action = collection.insert_one(key);
-    Ok(match session {
-        Some(session) => action.session(session).await?,
-        None => action.await?,
+    let actor = actor.filter(|actor| *actor != key.user_id.as_str());
+    if let Some(session) = session {
+        return insert_with_erasure_fence(db, key, actor, session).await;
+    }
+    super::transaction_service::run_db_only(db, &(db, key, actor), |tx, (db, key, actor)| {
+        Box::pin(insert_with_erasure_fence(db, key, *actor, tx))
     })
+    .await
+}
+
+async fn insert_with_erasure_fence(
+    db: &Database,
+    key: &ApiKey,
+    actor: Option<&str>,
+    tx: &mut ClientSession,
+) -> AppResult<InsertOneResult> {
+    if let Some(actor) = actor {
+        super::erasure_admission::fence_in_session(db, actor, tx).await?;
+    }
+    super::erasure_admission::fence_in_session(db, &key.user_id, tx).await?;
+    Ok(db
+        .collection::<ApiKey>(API_KEYS)
+        .insert_one(key)
+        .session(tx)
+        .await?)
 }
 
 #[cfg(test)]

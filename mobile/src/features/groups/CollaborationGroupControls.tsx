@@ -1,3 +1,6 @@
+import { discardUploadDraft } from "../assistant/assistantDraftStore";
+import { getAuthAccountId } from "../../lib/auth/authAccount";
+import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { localizedError } from "../../i18n/localizedError";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
@@ -112,8 +115,15 @@ export function CollaborationGroupControls({
         if (
           !result.group &&
           (change.action === "leave" || change.action === "delete")
-        )
+        ) {
+          const owner = getAuthAccountId();
+          const epoch = getAuthEpoch();
+          void discardUploadDraft(owner, `crew:${group.id}`).catch(() => {
+            if (epoch === getAuthEpoch() && owner === getAuthAccountId())
+              Alert.alert(translateApp("The draft could not be discarded. Try again."));
+          });
           onRemoved();
+        }
       },
       {
         feature:

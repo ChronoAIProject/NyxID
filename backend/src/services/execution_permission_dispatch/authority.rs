@@ -255,16 +255,14 @@ impl Snapshot {
 
     pub(super) async fn fence(&self, db: &Database, session: &mut ClientSession) -> AppResult<()> {
         for (collection, filter, expected) in &self.0 {
-            let rows = db
+            let mut cursor = db
                 .collection::<Document>(collection)
                 .find(filter.clone())
                 .projection(projection(collection))
                 .sort(doc! {"_id":1})
                 .session(&mut *session)
-                .await?
-                .stream(&mut *session)
-                .try_collect::<Vec<_>>()
                 .await?;
+            let rows = crate::db::read_documents(&mut cursor, session).await?;
             if *collection == "api_key_credentials" {
                 require_live_credential(&rows)?;
             }

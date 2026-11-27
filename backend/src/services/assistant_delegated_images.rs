@@ -5,7 +5,7 @@ use crate::{
     models::{
         assistant_conversation::{
             ActiveTurn, AgentEvent, AssistantConversation, COLLECTION_NAME as CONVERSATIONS,
-            ChannelOrigin, TeamRestartSource, TurnOrigin,
+            ChannelOrigin, TurnOrigin,
         },
         assistant_delegated_image::{Assignment, DeliveryReference},
         assistant_message::{AssistantMessage, COLLECTION_NAME as MESSAGES},
@@ -13,7 +13,6 @@ use crate::{
 };
 use bson::{Document, doc};
 use chrono::Utc;
-use futures::TryStreamExt;
 use mongodb::{ClientSession, Database};
 
 pub const MAX_REFERENCES: usize = 16;
@@ -82,6 +81,7 @@ pub async fn assign_in_session(
     }
     destinations.truncate(engine::MAX_ALSO_DELIVER + 1);
     let assignment = Assignment {
+        org_use_revision: source.org_use_revision,
         id: turn.turn_id.clone(),
         actor: source.user_id.clone(),
         source_agent: source
@@ -108,12 +108,34 @@ pub async fn assign_in_session(
     Ok(())
 }
 
+pub(super) fn text_report_target<'a>(
+    source: &AssistantConversation,
+    turn: &'a ActiveTurn,
+) -> Option<&'a str> {
+    if !source.is_subagent()
+        || source.guest_turn
+        || source.collaboration.is_some()
+        || turn
+            .automation_work
+            .as_ref()
+            .is_some_and(|work| matches!(work.role.as_str(), "direct" | "group"))
+    {
+        return None;
+    }
+    let target = turn.report_to.as_deref()?;
+    if super::org_agent_service::ordinary_member_org(source).is_some()
+        || turn.restart_admission.as_ref().is_some_and(|admission| matches!(
+            &admission.team_source, Some(crate::models::assistant_conversation::TeamRestartSource::Assignment {report_to}) if report_to == target))
+    { Some(target) } else { None }
+}
+
 /// Accepted results and their queue entries commit together. Business refusals
 /// must not roll back source settlement; the caller persists the refusal so the
 /// existing after-settlement hook can attempt a text-only notice instead.
 pub async fn publish_in_session(
     db: &Database,
     tx: &mut ClientSession,
+    source: &AssistantConversation,
     message: &AssistantMessage,
     turn: &ActiveTurn,
 ) -> AppResult<Option<&'static str>> {
@@ -126,26 +148,18 @@ pub async fn publish_in_session(
         return Ok(None);
     }
     let edge = message.delegated_images.assignment.as_ref();
-    let team_assignment =
-        turn.restart_admission
-            .as_ref()
-            .and_then(|source| match &source.team_source {
-                Some(TeamRestartSource::Assignment { report_to })
-                    if message.report_to.as_ref() == Some(report_to) =>
-                {
-                    Some((&source.actor_id, &source.agent_id, report_to))
-                }
-                _ => None,
-            });
+    let text_assignment = text_report_target(source, turn)
+        .filter(|target| message.report_to.as_deref() == Some(*target))
+        .and_then(|target| Some((&source.user_id, source.agent_id.as_ref()?, target)));
     let Some((actor, source_agent, target)) = edge
         .map(|edge| {
             (
                 &edge.actor,
                 &edge.source_agent,
-                &edge.recipient_conversation,
+                edge.recipient_conversation.as_str(),
             )
         })
-        .or(team_assignment)
+        .or(text_assignment)
     else {
         return Ok(None);
     };
@@ -170,6 +184,7 @@ pub async fn publish_in_session(
         .await?;
     let Some(agent) = agent else { return Ok(None) };
     let mut event = team::specialist_settled_event(
+        source,
         &agent,
         turn,
         &message.text,
@@ -212,6 +227,7 @@ fn publication_outcome(result: AppResult<bool>) -> AppResult<Option<&'static str
         }
         Err(AppError::Conflict(_)) => Ok(Some("event_identity_conflict")),
         Err(AppError::AssistantTurnRequired) => Ok(Some("event_invocation_unavailable")),
+        Err(AppError::Forbidden(_) | AppError::NotFound(_)) => Ok(Some("authority_changed")),
         // These are all business refusals append currently returns. Database,
         // transport and encoding/internal errors retain transaction semantics.
         Err(error) => Err(error),
@@ -228,6 +244,19 @@ async fn source_result(
         .session(&mut *tx).await? else { return Ok(None) };
     // Assigned home work only. Hidden group history is never exported by an ID.
     if !source.is_subagent() || source.group_id.is_some() || source.collaboration.is_some() {
+        return Ok(None);
+    }
+    if let Some(org) = super::org_agent_service::ordinary_member_org(&source)
+        && !super::org_agent_service::use_revision_is_live(
+            db,
+            tx,
+            &edge.actor,
+            org,
+            &edge.source_agent,
+            edge.org_use_revision,
+        )
+        .await?
+    {
         return Ok(None);
     }
     let agent = team::agent_for_conversation(db, &source).await?;
@@ -419,7 +448,7 @@ async fn references(
         .filter(|w| w.role == "direct")
     {
         let mut cursor = db.collection::<AssistantMessage>(MESSAGES).find(doc! {"user_id": &edge.actor, "conversation_id": &edge.source_conversation, "role": "assistant", "automation_work.work_id": &work.work_id, "automation_work.run_id": &work.run_id, "delegated_images.assignment.id": &edge.id, "status": "completed"}).sort(doc! {"seq": -1}).limit(32).session(&mut *tx).await?;
-        cursor.stream(&mut *tx).try_collect::<Vec<_>>().await?
+        crate::db::read_documents(&mut cursor, tx).await?
     } else {
         vec![message]
     };

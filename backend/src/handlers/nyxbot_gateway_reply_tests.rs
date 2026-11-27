@@ -887,7 +887,7 @@ async fn gateway_reply_stored_get_events_and_repeated_post_are_empty_completed_c
         recovery::metadata(&request["metadata"]).unwrap(),
     );
     payload.finish(Some("Useful answer"), true);
-    let stored = GatewayResponse {
+    let mut stored = GatewayResponse {
         id: Uuid::new_v4().to_string(),
         response_id: id.clone(),
         user_id: OWNER.into(),
@@ -900,10 +900,37 @@ async fn gateway_reply_stored_get_events_and_repeated_post_are_empty_completed_c
         terminal: true,
         answer_delivery: None,
         revision: 1,
-        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        payload_context_version: None,
+        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
+    let field = [
+        "payload_ciphertext",
+        &stored.channel_id,
+        &stored.binding_id,
+        &stored.response_id,
+    ];
+    let context = crate::crypto::record_field::RecordContext::new(
+        RESPONSES,
+        &stored.id,
+        &stored.user_id,
+        &field,
+    )
+    .unwrap();
+    let bytes = f
+        .state
+        .encryption_keys
+        .decrypt(&stored.payload_ciphertext)
+        .await
+        .unwrap();
+    stored.payload_ciphertext = f
+        .state
+        .encryption_keys
+        .encrypt_record(&bytes, &context)
+        .await
+        .unwrap();
+    stored.payload_context_version = Some(3);
     f.state
         .db
         .collection::<GatewayResponse>(RESPONSES)
@@ -1157,15 +1184,16 @@ async fn gateway_reply_target_mint_race_uses_only_committed_target() {
         .await
         .unwrap()
         .unwrap();
-    let d = event.delivery.unwrap();
-    let target = String::from_utf8(
-        f.state
-            .encryption_keys
-            .decrypt(d.target_ciphertext.as_ref().unwrap())
-            .await
-            .unwrap(),
+    let d = event.delivery.as_ref().unwrap();
+    let target_bytes = event_record::delivery_target(
+        &f.state.encryption_keys,
+        &event,
+        d,
+        d.target_ciphertext.as_ref().unwrap(),
     )
+    .await
     .unwrap();
+    let target = std::str::from_utf8(&target_bytes).unwrap();
     assert_eq!(status(&f).await, "unknown");
     let first = sends(&f).await;
     assert_eq!(first.len(), 1);

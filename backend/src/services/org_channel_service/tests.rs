@@ -43,6 +43,125 @@ pub(crate) struct Fixture {
     pub(crate) agent: AssistantAgent,
     bot: ChannelBot,
 }
+
+#[tokio::test]
+async fn meta_member_confirmation_and_admission_require_the_current_consent() {
+    use crate::services::channel_meta_service::scopes;
+    let mut f = Fixture::new("meta_member_grants").await;
+    let db = &f.org.state.db;
+    f.bot.platform = "instagram".into();
+    f.channel.platform = "instagram".into();
+    f.bot.meta_binding = Some(bson::from_document(doc! {
+        "grant_id":uuid::Uuid::new_v4().to_string(),"generation":1_i64,"grant_start_generation":1_i64,
+        "token_fingerprint":"a".repeat(64),"grant_actor_id":&f.org.admin,"grant_subject_id":"900",
+        "app_id":"111","exclusive_routing_verified":true,"subscription":"active","authorized_at":bson::DateTime::now(),
+    }).unwrap());
+    db.collection::<ChannelBot>("channel_bots")
+        .replace_one(doc! {"_id":&f.bot.id}, &f.bot)
+        .await
+        .unwrap();
+    db.collection::<NyxbotChannel>("nyxbot_channels")
+        .replace_one(doc! {"_id":&f.channel.id}, &f.channel)
+        .await
+        .unwrap();
+    let actor = &f.org.member;
+    let a = scopes::reference(&f.bot).unwrap();
+    let issued = links::issue(db, actor, &f.channel).await.unwrap();
+    assert!(
+        links::receive_for_grant(
+            db,
+            &f.channel,
+            "same-participant",
+            issued["code"].as_str().unwrap(),
+            None,
+            Some(&a)
+        )
+        .await
+        .unwrap()
+    );
+    links::confirm(db, actor, &f.channel, issued["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        sender(db, &f.channel, "same-participant", true, &f.agent.id)
+            .await
+            .is_ok()
+    );
+    let delayed = links::issue(db, actor, &f.channel).await.unwrap();
+    assert!(
+        links::receive_for_grant(
+            db,
+            &f.channel,
+            "second-participant",
+            delayed["code"].as_str().unwrap(),
+            None,
+            Some(&a)
+        )
+        .await
+        .unwrap()
+    );
+    let mut b = f.bot.clone();
+    let binding = b.meta_binding.as_mut().unwrap();
+    binding.grant_id = uuid::Uuid::new_v4().to_string();
+    binding.grant_subject_id = "901".into();
+    binding.generation = 2;
+    binding.grant_start_generation = 2;
+    crate::services::transaction_service::run_db_only(
+        db,
+        &(db, &f.bot, &b),
+        |tx, &(db, old, next)| {
+            Box::pin(async move {
+                scopes::cutover(db, tx, old, next.meta_binding.as_ref().unwrap()).await?;
+                db.collection::<ChannelBot>("channel_bots")
+                    .replace_one(doc! {"_id":&old.id}, next)
+                    .session(tx)
+                    .await?;
+                Ok(())
+            })
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        links::confirm(db, actor, &f.channel, delayed["id"].as_str().unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        sender(db, &f.channel, "same-participant", true, &f.agent.id)
+            .await
+            .is_err()
+    );
+    let fresh = links::issue(db, actor, &f.channel).await.unwrap();
+    let b = scopes::reference(&b).unwrap();
+    assert!(
+        links::receive_for_grant(
+            db,
+            &f.channel,
+            "same-participant",
+            fresh["code"].as_str().unwrap(),
+            None,
+            Some(&b)
+        )
+        .await
+        .unwrap()
+    );
+    links::confirm(db, actor, &f.channel, fresh["id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        sender(db, &f.channel, "same-participant", true, &f.agent.id)
+            .await
+            .is_ok()
+    );
+    let stored = db
+        .collection::<SenderLink>(LINKS)
+        .find_one(doc! {"channel_id":&f.channel.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.meta_grant.as_ref().unwrap().grant_id, b.grant_id);
+}
 impl Fixture {
     pub(crate) async fn new(name: &str) -> Self {
         let mut org = crate::services::org_agent_tests::Fixture::new(name).await;
@@ -160,6 +279,7 @@ impl Fixture {
                 service_ids: Some(ids),
                 daily_credits: Some(Credits::from_whole(1)),
             },
+            None,
         )
         .await
         .unwrap();
@@ -455,7 +575,8 @@ async fn exact_guest_billing_lane_preserves_ordinary_platform_key_payers() {
                 enabled: true,
                 service_ids: Some(vec![]),
                 daily_credits: Some(Credits::from_whole(1))
-            }
+            },
+            None
         )
         .await
         .is_err()
@@ -570,7 +691,8 @@ async fn guest_delegation_requires_admin_and_live_agent_policy_intersection() {
                     enabled: true,
                     service_ids: Some(vec![id.clone()]),
                     daily_credits: Some(Credits::from_whole(1))
-                }
+                },
+                None
             )
             .await
             .is_err()
@@ -779,6 +901,7 @@ async fn guest_budget_reserves_fractional_tax_upward_at_the_exact_cap() {
                 service_ids: Some(vec![]),
                 daily_credits: Some(Credits::from_pico(cap).unwrap()),
             },
+            None,
         )
         .await
         .unwrap();
@@ -1293,6 +1416,7 @@ async fn org_channel_rotated_guest_key_keeps_typed_lane_and_is_revoked_with_expo
             service_ids: Some(vec![]),
             daily_credits: Some(Credits::from_whole(1)),
         },
+        None,
     )
     .await
     .unwrap();
@@ -1451,7 +1575,8 @@ async fn public_transcript_excludes_private_messages_and_erasure_purges_actor_co
             &f.org.member,
             &row.id,
             work.clone(),
-            Some("Queued public question")
+            Some("Queued public question"),
+            false
         )
         .await
         .unwrap()
@@ -1462,7 +1587,8 @@ async fn public_transcript_excludes_private_messages_and_erasure_purges_actor_co
             &f.org.member,
             &row.id,
             work,
-            Some("Duplicate question")
+            Some("Duplicate question"),
+            false
         )
         .await
         .is_err()
@@ -1562,14 +1688,20 @@ async fn member_private_home_remains_usable_from_own_session_after_unlink() {
     let f = Fixture::new("org_channel_member_home_unlink").await;
     let origin = f.link(&f.org.member, "member").await;
     let db = &f.org.state.db;
-    let home = Box::pin(team::home_thread_for(
-        db,
-        &f.org.state.encryption_keys,
-        &f.org.member,
-        &f.agent,
-    ))
-    .await
-    .unwrap();
+    let homes = db.collection::<Document>("assistant_conversations");
+    let filter = team::thread_filter_for(&f.org.member, &f.agent);
+    assert_eq!(homes.count_documents(filter.clone()).await.unwrap(), 0);
+    let first_dm = || {
+        Box::pin(team::home_thread_for(
+            db,
+            &f.org.state.encryption_keys,
+            &f.org.member,
+            &f.agent,
+        ))
+    };
+    let (home, other) = tokio::try_join!(first_dm(), first_dm()).unwrap();
+    assert_eq!(home.id, other.id);
+    assert_eq!(homes.count_documents(filter).await.unwrap(), 1);
     let request = engine::TurnRequest {
         acknowledgement_id: None,
         retry_of: None,
@@ -1734,6 +1866,7 @@ async fn narrowing_guest_exposure_stops_guest_and_setup_keys_but_preserves_membe
             service_ids: Some(vec![]),
             daily_credits: Some(Credits::from_whole(1)),
         },
+        None,
     )
     .await
     .unwrap();
@@ -2389,3 +2522,589 @@ impl Fixture {
 
 #[path = "defaults_tests.rs"]
 mod defaults_2482;
+
+#[tokio::test]
+async fn guest_history_routes_limit_live_admins_to_retained_guest_exchanges() {
+    use crate::services::{
+        assistant_nyxagent as engine,
+        feature_flag_service::{self, FlagTarget},
+    };
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode},
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    let mut f = Fixture::new("org_guest_history_http").await;
+    f.wallet().await;
+    f.guests(vec![]).await;
+    let db = &f.org.state.db;
+    feature_flag_service::set_platform_override(
+        db,
+        feature_flag_service::NYXAGENT_ENGINE_FLAG_KEY,
+        &FlagTarget::Global,
+        true,
+        &f.org.admin,
+    )
+    .await
+    .unwrap();
+
+    let group_chat = uuid::Uuid::new_v4().to_string();
+    db.collection::<Document>("nyxbot_threads")
+        .insert_one(doc! {
+            "_id": &group_chat, "channel_id": &f.channel.id, "user_id": &f.org.admin,
+            "partition": "group", "kind": "group", "title": "Shared support", "members": "everyone",
+            "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+        })
+        .await
+        .unwrap();
+    let private = channel_turn(&f, &f.guest("dm-guest").await, "private guest question").await;
+    let mut group_a = f.guest("group-guest-a").await;
+    group_a.partition = "group".into();
+    let a = channel_turn(&f, &group_a, "first group guest question").await;
+    let mut group_b = f.guest("group-guest-b").await;
+    group_b.partition = "group".into();
+    let b = channel_turn(&f, &group_b, "second group guest question").await;
+    let mut member_source = f.link(&f.org.member, "member").await;
+    member_source.partition = "group".into();
+    let member = channel_turn(&f, &member_source, "GROUP_MEMBER_PRIVATE_SENTINEL").await;
+    use crate::models::channel_guest_access::{
+        AnswerAudience, GuestActor, GuestAssurance, GuestTurn,
+    };
+
+    db.collection::<Document>("channel_bots")
+        .update_one(
+            doc! {"_id": &f.bot.id},
+            doc! {"$set": {"guest_access_v1": true, "guest_access_v1_revision": 1_i64}},
+        )
+        .await
+        .unwrap();
+
+    let private_turn = GuestTurn {
+        bot_id: f.bot.id.clone(),
+        binding_id: f.channel.id.clone(),
+        platform: f.channel.platform.clone(),
+        conversation_id: "private-destination".into(),
+        source_event_id: uuid::Uuid::new_v4().to_string(),
+        actor: GuestActor {
+            id: "private-addon-actor".into(),
+            assurance: GuestAssurance::ProviderVerified,
+        },
+        audience: AnswerAudience::Private,
+        policy_revision: 1,
+        activation_epoch: 1,
+        bot_revision: 1,
+        meta_grant_id: None,
+        hosted_assignment: None,
+    };
+    let hosted_id = private_turn.hosted_conversation_id();
+    let hosted_suffix = hosted_id.strip_prefix("nyxag-").unwrap();
+    let forged_id = format!("nyxa-{hosted_suffix}");
+    let conversations = db.collection::<Document>("assistant_conversations");
+    let lanes = db.collection::<Document>(crate::models::org_channel::LANES);
+    let template_conversation = conversations
+        .find_one(doc! {"_id": &private.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let template_lane = lanes
+        .find_one(doc! {"conversation_id": &private.id})
+        .await
+        .unwrap()
+        .unwrap();
+    // Model a settled private add-on row with an ordinary lane pointer and a
+    // forged ordinary handle whose stored turn still carries private evidence.
+    for (id, active_private) in [(&hosted_id, false), (&forged_id, true)] {
+        let mut row = template_conversation.clone();
+        row.insert("_id", id.as_str());
+        row.insert(
+            "updated_at",
+            bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::minutes(1)),
+        );
+        row.get_document_mut("channel")
+            .unwrap()
+            .get_document_mut("org_execution")
+            .unwrap()
+            .insert("sender_hash", id.as_str());
+        if active_private {
+            row.get_document_mut("active_turn")
+                .unwrap()
+                .insert("channel_guest", bson::to_bson(&private_turn).unwrap());
+        } else {
+            row.remove("active_turn");
+        }
+        conversations.insert_one(row).await.unwrap();
+
+        let mut lane = template_lane.clone();
+        lane.insert("_id", uuid::Uuid::new_v4().to_string());
+        lane.insert("sender_hash", id.as_str());
+        lane.insert("conversation_id", id.as_str());
+        lanes.insert_one(lane).await.unwrap();
+
+        db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(), "conversation_id": id, "user_id": &f.org.org,
+                "seq": 1_i64, "turn_id": "private-addon-turn", "role": "user", "author": "guest",
+                "origin": "channel", "text": "PRIVATE_ADDON_SENTINEL", "status": "completed",
+                "created_at": bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+    }
+    let reply = uuid::Uuid::new_v4().to_string();
+    engine::finish_turn(
+        db,
+        &a,
+        &a.credential_api_key_id,
+        &reply,
+        &engine::TurnResult {
+            text: "visible guest reply".into(),
+            session_id: None,
+            response_id: None,
+            error: None,
+        },
+    )
+    .await
+    .unwrap();
+    engine::finish_turn(
+        db,
+        &b,
+        &b.credential_api_key_id,
+        &uuid::Uuid::new_v4().to_string(),
+        &engine::TurnResult {
+            text: "PRIVATE_FAILED_DRAFT".into(),
+            session_id: None,
+            response_id: None,
+            error: Some(engine::TurnError::new("cancelled")),
+        },
+    )
+    .await
+    .unwrap();
+    let messages = db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME);
+    messages
+        .update_one(
+            doc! {"_id": &reply},
+            doc! {"$set": {
+                "activities": [
+                    {"label": "INTERNAL_TOOL", "failure": {
+                        "kind": "service_status", "reason": "downstream_http_error", "status": 502,
+                        "arguments": "PRIVATE_TOOL_ARGUMENTS",
+                    }},
+                    {"failure": {"kind": "PRIVATE_TOOL_KIND", "reason": "PRIVATE_ERROR"}},
+                ],
+                "attachments": [{"id": "PRIVATE_ATTACHMENT"}],
+            }},
+        )
+        .await
+        .unwrap();
+    messages.insert_one(doc! {
+        "_id": uuid::Uuid::new_v4().to_string(), "conversation_id": &a.id, "user_id": &f.org.org,
+        "seq": 99_i64, "turn_id": "unrelated", "role": "assistant", "origin": "channel",
+        "text": "UNRELATED_PRIVATE_REPLY", "status": "completed", "created_at": bson::DateTime::now(),
+    }).await.unwrap();
+
+    // Guest execution can be unavailable while retained history stays readable.
+    db.collection::<Document>("assistant_conversations")
+        .update_one(doc! {"_id": &a.id}, doc! {"$set": {"guest_turn": false}})
+        .await
+        .unwrap();
+    db.collection::<Document>("nyxbot_channels").update_one(doc! {"_id": &f.channel.id},
+        doc! {"$set": {"org_specialist.guests.enabled": false, "org_specialist.guests.revision": "new-policy"}}
+    ).await.unwrap();
+    let second_admin = &f.org.viewer;
+    db.collection::<Document>("org_memberships")
+        .update_one(
+            doc! {"org_user_id": &f.org.org, "member_user_id": second_admin},
+            doc! {"$set": {"role": "admin"}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>(crate::models::assistant_agent::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &f.agent.id},
+            doc! {"$set": {"org_user_ids": [&f.org.admin], "org_maintainer_user_ids": [&f.org.admin]}},
+        )
+        .await
+        .unwrap();
+
+    let (_, router) = crate::routes::build_router();
+    let router = router.with_state(f.org.state.clone());
+    let token = |actor: &str| {
+        crate::crypto::jwt::generate_access_token(
+            &f.org.state.jwt_keys,
+            &f.org.state.config,
+            &uuid::Uuid::parse_str(actor).unwrap(),
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    };
+    let request = |actor: &str, method: &str, path: String| {
+        let request = Request::builder()
+            .method(method)
+            .uri(format!("/api/v1/assistant/nyxagent/{path}"))
+            .header("authorization", format!("Bearer {}", token(actor)))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"title":"edited"}"#))
+            .unwrap();
+        let router = router.clone();
+        async move {
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            let value = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            (status, value)
+        }
+    };
+    let handle = |id: &str| format!("org-guest-{}", id.strip_prefix("nyxa-").unwrap());
+    let discovery = format!("agents/{}/guest-conversations?limit=1", f.agent.id);
+    let forged_handles = [format!("org-guest-{hosted_id}"), handle(&forged_id)];
+    for handle in &forged_handles {
+        let (status, body) =
+            request(second_admin, "GET", format!("guest-conversations/{handle}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+    let (status, refusal) = request(
+        second_admin,
+        "GET",
+        format!("conversations?agent_id={}", f.agent.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refusal}");
+    let mut path = discovery.clone();
+    let mut discovered = Vec::new();
+    for _ in 0..3 {
+        let (status, page) = request(second_admin, "GET", path.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        let rows = page["conversations"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["read_only"], true);
+        discovered.push(rows[0].clone());
+        if let Some(cursor) = page["next_cursor"].as_str() {
+            path = format!("{discovery}&cursor={}", urlencoding::encode(cursor));
+        } else {
+            break;
+        }
+    }
+    let ids = discovered
+        .iter()
+        .map(|v| v["id"].as_str().unwrap().to_owned())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        ids,
+        [&private.id, &a.id, &b.id]
+            .into_iter()
+            .map(|id| handle(id))
+            .collect()
+    );
+    assert!(!ids.contains(handle(&member.id).as_str()));
+    assert_eq!(
+        discovered
+            .iter()
+            .filter(|v| v["channel"]["chat_id"] == group_chat)
+            .count(),
+        2
+    );
+
+    let transcript_path = format!("guest-conversations/{}?limit=1", handle(&a.id));
+    let (status, page) = request(second_admin, "GET", transcript_path.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["messages"][0]["text"], "visible guest reply");
+    assert_eq!(
+        page["messages"][0]["tool_failures"][0]["reason"],
+        "downstream_http_error"
+    );
+    assert_eq!(page["messages"][0]["tool_failures"][0]["status"], 502);
+    assert_eq!(
+        page["messages"][0]["tool_failures"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let encoded = page.to_string();
+    for hidden in [
+        "GROUP_MEMBER_PRIVATE_SENTINEL",
+        "UNRELATED_PRIVATE_REPLY",
+        "INTERNAL_TOOL",
+        "PRIVATE_TOOL_ARGUMENTS",
+        "PRIVATE_ATTACHMENT",
+        "PRIVATE_ERROR",
+        "sender_hash",
+        "active_turn",
+    ] {
+        assert!(!encoded.contains(hidden), "unexpected {hidden}");
+    }
+    let (status, earlier) = request(
+        &f.org.admin,
+        "GET",
+        format!("{transcript_path}&before_seq={}", page["before_seq"]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{earlier}");
+    assert_eq!(earlier["messages"][0]["text"], "first group guest question");
+    assert_eq!(earlier["before_seq"], Value::Null);
+    let (status, failed) = request(
+        &f.org.admin,
+        "GET",
+        format!("guest-conversations/{}", handle(&b.id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{failed}");
+    assert_eq!(failed["messages"][1]["text"], "");
+    assert_eq!(failed["messages"][1]["error_code"], "cancelled");
+    assert!(!failed.to_string().contains("PRIVATE_FAILED_DRAFT"));
+    let audit = db
+        .collection::<Document>("audit_log")
+        .find_one(doc! {
+            "event_type": "org_channel_guest_history_read", "user_id": second_admin,
+            "event_data.org_id": &f.org.org, "event_data.conversation_id": handle(&a.id),
+            "event_data.channel_id": &f.channel.id, "event_data.agent_id": &f.agent.id,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(audit.get_document("event_data").unwrap().len(), 4);
+
+    let (status, chats) = request(
+        &f.org.admin,
+        "GET",
+        format!("channels/{}/chats", f.channel.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{chats}");
+    let private_chat = chats["chats"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|chat| chat["kind"] == "private")
+        .unwrap();
+    assert_eq!(private_chat["guest_conversation_id"], handle(&private.id));
+    assert_eq!(private_chat["conversation_id"], Value::Null);
+    let opt_out = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/v1/channel-bots/{}/guest-setup", f.bot.id))
+                .header("authorization", format!("Bearer {}", token(&f.org.admin)))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":false,"expected_bot_revision":1}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = opt_out.status();
+    let body = to_bytes(opt_out.into_body(), 64 * 1024).await.unwrap();
+    let opt_out: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(status, StatusCode::OK, "{opt_out}");
+    assert_eq!(opt_out["enabled"], false);
+    assert_eq!(opt_out["bot_revision"], 2);
+
+    let (status, ordinary) = request(
+        &f.org.admin,
+        "GET",
+        format!("guest-conversations/{}", handle(&private.id)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ordinary}");
+    assert_eq!(ordinary["messages"][0]["text"], "private guest question");
+    let (status, visible) = request(
+        &f.org.admin,
+        "GET",
+        format!("agents/{}/guest-conversations?limit=10", f.agent.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{visible}");
+    assert_eq!(
+        visible["conversations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .collect::<std::collections::HashSet<_>>(),
+        ids,
+    );
+    let (status, chats_after_opt_out) = request(
+        &f.org.admin,
+        "GET",
+        format!("channels/{}/chats", f.channel.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{chats_after_opt_out}");
+    assert_eq!(
+        chats_after_opt_out["chats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chat| chat["kind"] == "private")
+            .unwrap()["guest_conversation_id"],
+        handle(&private.id),
+    );
+    for handle in &forged_handles {
+        let (status, body) =
+            request(&f.org.admin, "GET", format!("guest-conversations/{handle}")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    }
+    for actor in [&f.org.member, &f.org.outsider] {
+        assert_eq!(
+            request(actor, "GET", discovery.clone()).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            request(actor, "GET", transcript_path.clone()).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    assert_eq!(
+        request(&f.org.admin, "GET", format!("conversations/{}", a.id))
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        request(
+            &f.org.admin,
+            "PATCH",
+            format!("conversations/{}", handle(&a.id))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    f.org.revoke(second_admin).await;
+    assert_eq!(
+        request(second_admin, "GET", transcript_path.clone())
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    lifecycle::erase_hidden(db, doc! {"_id": &b.id, "user_id": &f.org.org})
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &f.org.admin,
+            "GET",
+            format!("guest-conversations/{}", handle(&b.id))
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    db.collection::<Document>(crate::models::org_channel::LANES)
+        .update_one(
+            doc! {"conversation_id": &a.id},
+            doc! {"$set": {"sender_hash": "incorrect"}},
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&f.org.admin, "GET", transcript_path).await.0,
+        StatusCode::NOT_FOUND
+    );
+    db.collection::<Document>("nyxbot_channels")
+        .update_one(
+            doc! {"_id": &f.channel.id},
+            doc! {"$set": {"org_specialist.revision": "replacement"}},
+        )
+        .await
+        .unwrap();
+    let (_, emptied) = request(&f.org.admin, "GET", discovery).await;
+    assert_eq!(emptied["conversations"], json!([]));
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn guest_history_keeps_retained_meta_generation_until_its_erasure_is_claimed() {
+    use crate::models::channel_meta::GRANT_SCOPES;
+    let mut f = Fixture::new("org_guest_history_meta").await;
+    f.wallet().await;
+    f.guests(vec![]).await;
+    let db = &f.org.state.db;
+    let guest = channel_turn(&f, &f.guest("visitor").await, "guest Meta input").await;
+    let grant_id = uuid::Uuid::new_v4().to_string();
+    let scope = uuid::Uuid::new_v4().to_string();
+    let proof = doc! {"bot_id": &f.bot.id, "grant_id": &grant_id, "generation": 1_i64};
+    db.collection::<Document>("assistant_conversations")
+        .update_one(
+            doc! {"_id": &guest.id},
+            doc! {"$set": {"meta_grant": &proof}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>(crate::models::org_channel::LANES)
+        .update_one(
+            doc! {"conversation_id": &guest.id},
+            doc! {"$set": {"meta_grant": &proof}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>("nyxbot_channels")
+        .update_one(
+            doc! {"_id": &f.channel.id},
+            doc! {"$set": {"platform": "instagram", "status": "pending"}},
+        )
+        .await
+        .unwrap();
+    db.collection::<Document>("channel_bots")
+        .update_one(
+            doc! {"_id": &f.bot.id},
+            doc! {"$set": {"platform": "instagram", "status": "suspended"}},
+        )
+        .await
+        .unwrap();
+    let scopes = db.collection::<Document>(GRANT_SCOPES);
+    scopes.insert_one(doc! {"_id": &scope, "bot_id": &f.bot.id, "grant_id": &grant_id,
+        "from_generation": 1_i64, "to_generation": 1_i64, "status": "sealed", "erasure_requested": false,
+    }).await.unwrap();
+    let handle = format!("org-guest-{}", guest.id.strip_prefix("nyxa-").unwrap());
+    let list = || guest_history::list(db, &f.org.admin, &f.agent.id, 10, None);
+    assert_eq!(list().await.unwrap().0[0].id, handle);
+    assert!(
+        guest_history::history(db, &f.org.admin, &handle, 10, None)
+            .await
+            .is_ok()
+    );
+
+    scopes
+        .update_one(
+            doc! {"_id": &scope},
+            doc! {"$set": {"erasure_requested": true}},
+        )
+        .await
+        .unwrap();
+    assert!(list().await.unwrap().0.is_empty());
+    assert!(matches!(
+        guest_history::history(db, &f.org.admin, &handle, 10, None).await,
+        Err(AppError::NotFound(_))
+    ));
+
+    scopes
+        .update_one(
+            doc! {"_id": &scope},
+            doc! {"$set": {"erasure_requested": false, "status": "completed"}},
+        )
+        .await
+        .unwrap();
+    assert!(list().await.unwrap().0.is_empty());
+
+    scopes
+        .update_one(doc! {"_id": &scope}, doc! {"$set": {"status": "sealed"}})
+        .await
+        .unwrap();
+    db.collection::<Document>("nyxbot_channels")
+        .update_one(
+            doc! {"_id": &f.channel.id},
+            doc! {"$set": {"status": "failed", "last_error": "org_access_lost"}},
+        )
+        .await
+        .unwrap();
+    assert!(list().await.unwrap().0.is_empty());
+    db.drop().await.unwrap();
+}

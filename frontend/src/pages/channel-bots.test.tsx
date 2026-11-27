@@ -603,7 +603,7 @@ it("re-seeds scope when reopening Add Bot after changing the list scope", async 
     label: "Org bot",
     target_org_id: orgId,
     bot_token: "fixture-token",
-  });
+  }, { authorityGuard: expect.any(Function) });
 });
 
 
@@ -625,7 +625,7 @@ it.each(["lark", "feishu"])("registers %s with app credentials and no bot token 
   await waitFor(() => expect(post).toHaveBeenCalledExactlyOnceWith("/channel-bots", {
     platform, label: "Support", target_org_id: undefined,
     app_id: "cli_test", app_secret: "app-secret", verification_token: "verification-token",
-  }));
+  }, { authorityGuard: expect.any(Function) }));
 });
 
 it("renders and validates required secret fields from the catalog, including new fields", async () => {
@@ -656,7 +656,7 @@ it("renders and validates required secret fields from the catalog, including new
   await user.type(secret, "private-field");
   await waitFor(() => expect(submit).toBeEnabled());
   await user.click(submit);
-  await waitFor(() => expect(post).toHaveBeenCalledWith("/channel-bots", expect.objectContaining({ future_secret: "private-field", label: "Catalog bot" })));
+  await waitFor(() => expect(post).toHaveBeenCalledWith("/channel-bots", expect.objectContaining({ future_secret: "private-field", label: "Catalog bot" }), { authorityGuard: expect.any(Function) }));
 });
 
 it("generates shareable setup links for enabled catalog entries, including new platforms", async () => {
@@ -710,7 +710,7 @@ it.each([[], [{ id: orgId, your_role: "member" }], [{ id: orgId, your_role: "vie
   await user.click(submit);
   expect(post).toHaveBeenCalledExactlyOnceWith("/channel-bots", {
     platform: "telegram", label: "", bot_token: "fixture-token", target_org_id: undefined,
-  });
+  }, { authorityGuard: expect.any(Function) });
 });
 
 it("shows ownership when an admin organization is available and preserves its prefill", async () => {
@@ -746,7 +746,7 @@ it("fills a blank Telegram bot name from the pasted BotFather token", async () =
   await user.click(screen.getByRole("button", { name: "Connect bot" }));
   await waitFor(() => expect(post).toHaveBeenLastCalledWith("/channel-bots", {
     platform: "telegram", label: "Acme Support", bot_token: botFatherToken, target_org_id: undefined,
-  }));
+  }, { authorityGuard: expect.any(Function) }));
 });
 
 it("never replaces a Telegram bot name supplied by the link or typed by the user", async () => {
@@ -763,7 +763,7 @@ it("never replaces a Telegram bot name supplied by the link or typed by the user
   await user.clear(name);
   await user.type(name, "Typed name");
   await user.click(screen.getByRole("button", { name: "Connect bot" }));
-  await waitFor(() => expect(post).toHaveBeenLastCalledWith("/channel-bots", expect.objectContaining({ label: "Typed name" })));
+  await waitFor(() => expect(post).toHaveBeenLastCalledWith("/channel-bots", expect.objectContaining({ label: "Typed name" }), { authorityGuard: expect.any(Function) }));
 });
 
 it("does not look up partial Telegram tokens", async () => {
@@ -820,7 +820,7 @@ it("registers a newly described platform on its dedicated page using catalog fie
   await screen.findByRole("heading", { name: "Bot details" });
   expect(post).toHaveBeenCalledExactlyOnceWith("/channel-bots", {
     platform: "future-chat", label: "Team bot", target_org_id: orgId, bot_token: "fixture-token",
-  });
+  }, { authorityGuard: expect.any(Function) });
   expect(view.history.length).toBe(2);
 });
 
@@ -931,7 +931,7 @@ it("prefills credential fields from a URL, removes secrets from the address, and
   await waitFor(() => expect(post).toHaveBeenCalledExactlyOnceWith("/channel-bots", {
     platform: "lark", label: "Support", target_org_id: undefined,
     app_id: "90071992547409931234", app_secret: "secret+/=&value", verification_token: "verify-token",
-  }));
+  }, { authorityGuard: expect.any(Function) }));
 });
 
 it("prefills future catalog fields without hardcoding query parameter names", async () => {
@@ -948,7 +948,7 @@ it("prefills future catalog fields without hardcoding query parameter names", as
   await user.click(screen.getByRole("button", { name: "Create channel bot" }));
   expect(post).toHaveBeenCalledExactlyOnceWith("/channel-bots", {
     platform: "future-chat", label: "Future", target_org_id: undefined, field1: "team", field2: "fixture-secret",
-  });
+  }, { authorityGuard: expect.any(Function) });
 });
 
 it("validates invalid prefills and allows corrections before registration", async () => {

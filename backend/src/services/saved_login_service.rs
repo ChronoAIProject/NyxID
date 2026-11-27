@@ -1,4 +1,5 @@
 //! Write-only website credentials. All access uses the polymorphic owner ACL.
+use crate::crypto::record_field;
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::{
@@ -301,17 +302,11 @@ async fn encrypt_field(
     field: &str,
     value: &[u8],
 ) -> AppResult<Vec<u8>> {
-    if keys.contextual_record_writes() {
-        keys.encrypt_record(
-            value,
-            &crate::crypto::aes::RecordContext::new(COLLECTION_NAME, id, owner, &[field])?,
-        )
-        .await
-    } else {
-        // Compatible-reader stage retains the existing encrypted format. No
-        // new plaintext storage is introduced before the drained writer cutover.
-        keys.encrypt(value).await
-    }
+    let path = [field];
+    record_field::encrypt_with_context(keys, value, || {
+        crate::crypto::aes::RecordContext::new(COLLECTION_NAME, id, owner, &path)
+    })
+    .await
 }
 async fn decrypt_field(
     keys: &EncryptionKeys,
@@ -319,26 +314,22 @@ async fn decrypt_field(
     field: &str,
     value: &[u8],
 ) -> AppResult<Zeroizing<Vec<u8>>> {
-    let plaintext = match login.secret_context_version {
-        Some(3) => {
-            keys.decrypt_record(
-                value,
-                &crate::crypto::aes::RecordContext::new(
-                    COLLECTION_NAME,
-                    &login.id,
-                    &login.user_id,
-                    &[field],
-                )?,
+    let path = [field];
+    let plaintext = record_field::decrypt_with_context(
+        keys,
+        value,
+        login.secret_context_version,
+        || {
+            crate::crypto::aes::RecordContext::new(
+                COLLECTION_NAME,
+                &login.id,
+                &login.user_id,
+                &path,
             )
-            .await?
-        }
-        None if keys.allow_legacy_record_reads() => Zeroizing::new(keys.decrypt(value).await?),
-        _ => {
-            return Err(AppError::Internal(
-                "Saved login format is unavailable".into(),
-            ));
-        }
-    };
+        },
+        || AppError::Internal("Saved login format is unavailable".into()),
+    )
+    .await?;
     validate_plaintext(field, &plaintext)?;
     Ok(plaintext)
 }
@@ -623,7 +614,10 @@ mod tests {
         assert_eq!(legacy.secret_context_version, None);
         // A compatible old reader receives the exact prior encrypted format.
         assert_eq!(
-            keys.decrypt(&legacy.username_encrypted).await.unwrap(),
+            keys.decrypt(&legacy.username_encrypted)
+                .await
+                .unwrap()
+                .as_slice(),
             b"legacy-username"
         );
         assert!(

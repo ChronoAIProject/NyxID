@@ -62,8 +62,12 @@ async fn delete_bot_result(api: &mut ApiClient, id: &str) -> Result<Value> {
         let cleanup = result["webhook_cleanup"]
             .as_str()
             .filter(|value| matches!(*value, "removed" | "failed"))
-            .ok_or_else(|| anyhow::anyhow!("Invalid Aurinko deletion cleanup response"))?;
-        Ok(serde_json::json!({"ok": true, "webhook_cleanup": cleanup}))
+            .ok_or_else(|| anyhow::anyhow!("Invalid channel bot deletion cleanup response"))?;
+        let mut output = serde_json::json!({"ok": true, "webhook_cleanup": cleanup});
+        if result["local_delivery_stopped"] == true {
+            output["local_delivery_stopped"] = Value::Bool(true);
+        }
+        Ok(output)
     } else {
         Ok(serde_json::json!({"ok": true}))
     }
@@ -71,6 +75,67 @@ async fn delete_bot_result(api: &mut ApiClient, id: &str) -> Result<Value> {
 
 pub async fn run(command: ChannelBotCommands) -> Result<()> {
     match command {
+        ChannelBotCommands::Delivery {
+            id,
+            suspend,
+            resume,
+            auth,
+        } => {
+            if suspend == resume {
+                bail!("Choose exactly one of --suspend or --resume");
+            }
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api
+                .post(
+                    &format!("/channel-bots/{}/delivery", urlencoding::encode(&id)),
+                    &serde_json::json!({"enabled":resume}),
+                )
+                .await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => println!(
+                    "Inbox {id}: {}",
+                    if resume {
+                        "verified and resumed"
+                    } else {
+                        "delivery suspended"
+                    }
+                ),
+            }
+            Ok(())
+        }
+        ChannelBotCommands::PlatformDelivery {
+            platform,
+            suspend,
+            resume,
+            auth,
+        } => {
+            if suspend == resume {
+                bail!("Choose exactly one of --suspend or --resume");
+            }
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api
+                .put(
+                    &format!(
+                        "/admin/channel-platforms/{}/delivery",
+                        urlencoding::encode(&platform)
+                    ),
+                    &serde_json::json!({"enabled":resume}),
+                )
+                .await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => println!(
+                    "Platform {platform}: {}",
+                    if resume {
+                        "gate restored; verify affected inboxes before resuming them"
+                    } else {
+                        "dispatch and replies suspended"
+                    }
+                ),
+            }
+            Ok(())
+        }
         ChannelBotCommands::ConnectLink {
             platform,
             label,
@@ -359,12 +424,12 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 resolved_app_secret.as_deref(),
             )?;
             let resolved_verification_token = verification_token.or_else(|| {
-                (platform != "whatsapp" && platform != "aurinko")
+                matches!(platform.as_str(), "lark" | "feishu")
                     .then(|| env_secret("NYXID_LARK_VERIFICATION_TOKEN"))
                     .flatten()
             });
             let resolved_encrypt_key = encrypt_key.or_else(|| {
-                (platform != "whatsapp" && platform != "aurinko")
+                matches!(platform.as_str(), "lark" | "feishu")
                     .then(|| env_secret("NYXID_LARK_ENCRYPT_KEY"))
                     .flatten()
             });
@@ -548,7 +613,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 || (!explicit_encrypt_key && body.get("encrypt_key").is_some())
             {
                 let bot: Value = api.get(&format!("/channel-bots/{id}")).await?;
-                if matches!(bot["platform"].as_str(), Some("whatsapp" | "aurinko")) {
+                if !matches!(bot["platform"].as_str(), Some("lark" | "feishu")) {
                     let fields = body.as_object_mut().expect("update body is an object");
                     if !explicit_verification_token {
                         fields.remove("verification_token");
@@ -754,7 +819,9 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
 
         ChannelBotCommands::Delete { id, yes, auth } => {
             if !yes {
-                eprint!("Delete bot {id}? This will also remove all conversation routes. [y/N] ");
+                eprint!(
+                    "Delete bot {id} and all its routes? For a manually configured Messenger or Instagram inbox, this also erases its guest conversations, message records and delivery history after unsubscribe. [y/N] "
+                );
                 std::io::stderr().flush()?;
                 let mut answer = String::new();
                 std::io::stdin().read_line(&mut answer)?;
@@ -767,12 +834,25 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let result = delete_bot_result(&mut api, &id).await?;
             if result["webhook_cleanup"] == "failed" {
-                eprintln!(
-                    "Bot deleted locally. Remove its remaining subscription in the Aurinko dashboard."
-                );
+                if result["local_delivery_stopped"] == true {
+                    eprintln!(
+                        "Inbox delivery stopped. NyxID will retry removing the subscription."
+                    );
+                } else {
+                    eprintln!(
+                        "Bot deleted locally. Remove its remaining subscription in the Aurinko dashboard."
+                    );
+                }
             }
             match auth.output {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table if result["local_delivery_stopped"] == true => {
+                    if result["webhook_cleanup"] == "removed" {
+                        eprintln!(
+                            "Inbox delivery stopped. Subscription cleanup for this inbox is complete."
+                        );
+                    }
+                }
                 OutputFormat::Table => eprintln!("Bot deleted."),
             }
             Ok(())
@@ -1951,8 +2031,14 @@ Action:             wait_rate_limit: X rate-limited the last reply. Later replie
     }
 
     #[tokio::test]
-    async fn aurinko_delete_json_preserves_cleanup_outcome_and_legacy_204() {
-        for outcome in [Some("removed"), Some("failed"), None] {
+    async fn channel_delete_json_preserves_meta_aurinko_and_legacy_outcomes() {
+        for (outcome, meta) in [
+            (Some("removed"), true),
+            (Some("failed"), true),
+            (Some("removed"), false),
+            (Some("failed"), false),
+            (None, false),
+        ] {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .respond_with(ResponseTemplate::new(403))
@@ -1960,6 +2046,9 @@ Action:             wait_rate_limit: X rate-limited the last reply. Later replie
                 .mount(&server)
                 .await;
             let response = match outcome {
+                Some(value) if meta => ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"webhook_cleanup":value,"local_delivery_stopped":true}),
+                ),
                 Some(value) => ResponseTemplate::new(200)
                     .set_body_json(serde_json::json!({"webhook_cleanup":value})),
                 None => ResponseTemplate::new(204),
@@ -1975,6 +2064,9 @@ Action:             wait_rate_limit: X rate-limited the last reply. Later replie
                 .unwrap();
             let json_output = delete_bot_result(&mut api, "bot-1").await.unwrap();
             let expected = match outcome {
+                Some(value) if meta => {
+                    serde_json::json!({"ok":true,"webhook_cleanup":value,"local_delivery_stopped":true})
+                }
                 Some(value) => serde_json::json!({"ok":true, "webhook_cleanup":value}),
                 None => serde_json::json!({"ok":true}),
             };
@@ -2719,6 +2811,78 @@ mod x_events_tests {
             .unwrap();
         } else {
             panic!("expected X event update");
+        }
+    }
+}
+
+#[cfg(test)]
+mod meta_delivery_tests {
+    use super::*;
+    use clap::Parser;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
+    #[tokio::test]
+    async fn meta_delivery_commands_use_owner_and_admin_endpoints_and_explicit_direction() {
+        for (command, verb, endpoint, target) in [
+            (
+                "delivery",
+                "POST",
+                "/api/v1/channel-bots/bot/delivery",
+                "bot",
+            ),
+            (
+                "platform-delivery",
+                "PUT",
+                "/api/v1/admin/channel-platforms/instagram/delivery",
+                "instagram",
+            ),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method(verb))
+                .and(path(endpoint))
+                .and(body_json(serde_json::json!({"enabled":false})))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"enabled":false})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let cli = crate::cli::Cli::try_parse_from([
+                "nyxid",
+                "channel-bot",
+                command,
+                target,
+                "--suspend",
+                "--base-url",
+                &server.uri(),
+                "--access-token",
+                "test-key",
+                "--output",
+                "json",
+            ])
+            .unwrap();
+            let crate::cli::Commands::ChannelBot { command: parsed } = cli.command else {
+                panic!("channel command")
+            };
+            run(parsed).await.unwrap();
+            assert!(
+                crate::cli::Cli::try_parse_from(["nyxid", "channel-bot", command, target]).is_err()
+            );
+            assert!(
+                crate::cli::Cli::try_parse_from([
+                    "nyxid",
+                    "channel-bot",
+                    command,
+                    target,
+                    "--suspend",
+                    "--resume"
+                ])
+                .is_err()
+            );
+            server.verify().await;
         }
     }
 }

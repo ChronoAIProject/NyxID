@@ -198,7 +198,7 @@ pub async fn create(
         Err(error) => return Err(error),
     }
     if let Some(id) = start.conversation_id.as_deref() {
-        let row = engine::get(&state.db, &owner, id).await?;
+        let row = engine::get_public(&state.db, &owner, id).await?;
         invocations::require_owner_conversation(&row)?;
         let agent =
             crate::services::assistant_team_service::agent_for_conversation(&state.db, &row)

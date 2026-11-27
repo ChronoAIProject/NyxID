@@ -2,6 +2,7 @@ import { localizedError } from "../../i18n/localizedError";
 import { useLocalizedState } from "../../i18n/useLocalizedState";
 import { channelDetail } from "./channelPresentation";
 import { translateApp, appLocale } from "../../i18n/appTranslation";
+import { isAgentAccessRefusal } from "./agentAccess";
 import { OrgGuestChannel, OrgGuestGrantsAdoption } from "./OrgGuestControls";
 import { AgentAvatar } from "../../components/AgentAvatar";
 import {
@@ -336,6 +337,7 @@ export function AgentsScreen({
       if (success) setNotice(success);
       return true;
     } catch (cause) {
+      if (isAgentAccessRefusal(cause)) await reload();
       setError(() => (errorMessage(cause)));
       return false;
     } finally {
@@ -481,7 +483,7 @@ export function AgentsScreen({
     );
 
   if (selectedId) {
-    const agent = detail.data?.agent;
+    const agent = isAgentAccessRefusal(detail.error) ? undefined : detail.data?.agent;
     const maintain = agent?.can_maintain === true;
     const alive = agent && agent.status !== "destroyed";
     const profileEditable = !!agent && maintain && !!alive && !busy;
@@ -566,7 +568,12 @@ export function AgentsScreen({
                 }
               />
             )}
-            {!maintain && !agent.share_role && (
+            {agent.owner_kind === "org" && agent.can_use !== undefined && agent.can_maintain !== undefined && (!agent.can_use || !maintain) ? (
+              <Notice message={agent.can_use
+                ? translateApp("You can chat with this specialist. Its settings are read-only.")
+                : maintain ? translateApp("You can maintain this specialist. Chat access is restricted.")
+                  : translateApp("You can view this specialist's profile.")} />
+            ) : !maintain && !agent.share_role && (
               <Notice message={translateApp(
                   "Your current role can view this agent. A maintainer can change its profile and permissions.",
                 )}
@@ -722,12 +729,12 @@ export function AgentsScreen({
               key={`${getAuthEpoch()}:${agent.id}:operations:${editorVersion}`}
               agent={agent}
               onOpenChat={
-                onOpenChat
+                onOpenChat && agent.can_use !== false
                   ? () => onOpenChat({ agentId: agent.id, openLatest: true })
                   : undefined
               }
             />
-            {!agent.share_role && (
+            {!agent.share_role && !(agent.owner_kind === "org" && agent.can_maintain === false) && (
               <SettingsGroup
                 inset={false}
                 title={translateApp("Memory")}
@@ -810,7 +817,7 @@ export function AgentsScreen({
                 ); })}
               </SettingsGroup>
             )}
-            <SettingsGroup inset={false} title={translateApp("Recent threads")}>
+            {agent.can_use !== false && <SettingsGroup inset={false} title={translateApp("Recent threads")}>
               {!threads.length && (
                 <SettingsRow label={translateApp("No conversations yet")}
                   disabled />
@@ -836,7 +843,7 @@ export function AgentsScreen({
                   }
                 />
               ))}
-            </SettingsGroup>
+            </SettingsGroup>}
             {maintain && !agent.share_role && agent.kind === "specialist" && (
               <SettingsGroup
                 inset={false}
@@ -1351,6 +1358,16 @@ function AgentIdentityHeader({
 }) {
   useAppLanguage();
   const { colors } = useTheme();
+  const status = translateApp({
+    running: "Running",
+    idle: "Idle",
+    destroyed: "Destroyed",
+  }[agent.status]);
+  const identityFormat = agent.owner_kind === "org" && agent.can_maintain === false
+    ? "@{{agent}} · {{status}}"
+    : agent.kind === "nyxbot"
+      ? "@{{agent}} · {{status}} · Your orchestrator · {{memoryCount}} memories"
+      : "@{{agent}} · {{status}} · Specialist · {{memoryCount}} memories";
   return (
     <View style={styles.identity}>
       <AgentAvatar agent={agent} size="xl" />
@@ -1360,7 +1377,9 @@ function AgentIdentityHeader({
       >
         {title}
       </Text>
-      <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>{(agent.kind === "nyxbot" ? translateApp("@{{agent}} · {{status}} · Your orchestrator · {{memoryCount}} memories", { agent: agent.name, status: agent.status, memoryCount: agent.memory_count}) : translateApp("@{{agent}} · {{status}} · Specialist · {{memoryCount}} memories", { agent: agent.name, status: agent.status, memoryCount: agent.memory_count }))}</Text>
+      <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>
+        {translateApp(identityFormat, { agent: agent.name, status, memoryCount: agent.memory_count })}
+      </Text>
       <Text style={[styles.identityMeta, { color: colors.textSecondary }]}>
         {subtitle}
       </Text>

@@ -267,6 +267,29 @@ async fn apply_group_in_session(
             doc! {"$and": [filter, super::personal_attribution_service::pending_filter(spec, Some(&group.owner_id))]},
             super::personal_attribution_service::update(spec),
         ).session(&mut *tx).await?.modified_count > 0
+    } else if group.collection == crate::models::service_approval_config::COLLECTION_NAME
+        && group.field == "approver_user_ids"
+    {
+        db.collection::<Document>(group.collection)
+            .update_many(
+                doc! {"$and":[filter,{"approver_user_ids":&group.owner_id}]},
+                super::org_service_approvers::prune_update(&group.owner_id),
+            )
+            .session(&mut *tx)
+            .await?
+            .modified_count
+            > 0
+    } else if group.collection == crate::models::assistant_agent::COLLECTION_NAME
+        && matches!(group.field, "org_user_ids" | "org_maintainer_user_ids")
+    {
+        db.collection::<Document>(group.collection)
+            .update_many(
+                doc! {"$and": [filter, super::org_agent_service::member_list_filter(&group.owner_id)]},
+                super::org_agent_service::prune_member_update(&group.owner_id),
+            )
+            .session(&mut *tx)
+            .await?
+            .modified_count > 0
     } else if group.collection == "invite_codes" {
         if group.field == "created_by" {
             db.collection::<Document>("invite_codes")
@@ -566,6 +589,11 @@ mod tests {
             ])
             .await
             .unwrap();
+        let specialists =
+            db.collection::<Document>(crate::models::assistant_agent::COLLECTION_NAME);
+        specialists.insert_one(doc! {"_id":"kept-specialist","kind":"specialist","user_id":&org,
+            "org_user_ids":[&orphan,&person],"org_maintainer_user_ids":[&orphan],"org_access_revision":7_i64})
+            .await.unwrap();
         let orphan_child = Uuid::new_v4().to_string();
         db.collection::<Document>("service_history_heads")
             .insert_one(doc! {"_id": &orphan_child, "fixture_marker": "orphan-child"})
@@ -613,6 +641,32 @@ mod tests {
                 .await
                 .unwrap()
                 .is_none()
+        );
+        let specialist = specialists
+            .find_one(doc! {"_id":"kept-specialist"})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            specialist.get_array("org_user_ids").unwrap(),
+            &[Bson::String(person.clone())]
+        );
+        assert!(
+            specialist
+                .get_array("org_maintainer_user_ids")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(specialist.get_i64("org_access_revision").unwrap(), 8);
+        assert_eq!(specialist.get_i64("org_use_revision").unwrap(), 1);
+        assert_eq!(specialist.get_i64("org_maintain_revision").unwrap(), 1);
+        assert!(
+            !scan(&db)
+                .await
+                .unwrap()
+                .collections
+                .iter()
+                .any(|c| c.collection == "assistant_agents" && c.candidate_count > 0)
         );
         let second = apply(&db, &person, &report.digest).await.unwrap();
         assert_eq!(second.candidate_count, report.candidate_count);

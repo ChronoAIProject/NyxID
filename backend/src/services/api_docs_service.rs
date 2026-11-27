@@ -157,23 +157,6 @@ pub async fn fetch_spec_json_scoped(url: &str, scope: &str) -> AppResult<Arc<ser
     fetch_json_spec_internal(url, Some(scope)).await
 }
 
-/// Render a URL for logs without leaking userinfo or query parameters.
-/// User-supplied spec URLs can be signed URLs or include bearer tokens in
-/// the query string, so we only emit scheme + host (+ port) + path. Parse
-/// failures collapse to `<invalid-url>` rather than the raw input.
-pub fn redact_url_for_logs(url: &str) -> String {
-    match url::Url::parse(url) {
-        Ok(parsed) => {
-            let scheme = parsed.scheme();
-            let host = parsed.host_str().unwrap_or("");
-            let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
-            let path = parsed.path();
-            format!("{scheme}://{host}{port}{path}")
-        }
-        Err(_) => "<invalid-url>".to_string(),
-    }
-}
-
 pub async fn fetch_downstream_openapi_spec(
     service: &DownstreamService,
     proxy_base_url: &str,
@@ -892,14 +875,14 @@ async fn fetch_json_spec_internal(
 
     // Pre-compute the redacted URL once -- validated targets strip userinfo
     // but query strings may still carry signed-URL secrets.
-    let log_url = redact_url_for_logs(url.as_ref());
+    let log_url = crate::services::url_validation::url_host_for_logs(url.as_ref());
     let response = client
         .get(url)
         .timeout(SPEC_FETCH_TIMEOUT)
         .send()
         .await
         .map_err(|error| {
-            if super::proxy_destination::http::refused_connection(&error) {
+            if super::proxy_destination::http::denied_address(&error) {
                 return AppError::BadRequest("Spec URL must resolve to public addresses".into());
             }
             tracing::warn!(url = %log_url, "Failed to fetch downstream API spec");
@@ -1752,26 +1735,6 @@ paths:
     }
 
     #[test]
-    fn redact_url_strips_userinfo_and_query() {
-        // Signed URL: the query carries the token and must never appear in logs.
-        let redacted = super::redact_url_for_logs(
-            "https://user:secret@host.example.com:8443/specs/openapi.json?sig=DEADBEEF&exp=12345",
-        );
-        assert_eq!(redacted, "https://host.example.com:8443/specs/openapi.json");
-    }
-
-    #[test]
-    fn redact_url_preserves_default_port() {
-        let redacted = super::redact_url_for_logs("https://host.example.com/openapi.json");
-        assert_eq!(redacted, "https://host.example.com/openapi.json");
-    }
-
-    #[test]
-    fn redact_url_collapses_invalid_input() {
-        assert_eq!(super::redact_url_for_logs("not a url"), "<invalid-url>");
-    }
-
-    #[test]
     fn validate_rejects_urls_with_embedded_credentials() {
         assert!(validate_spec_fetch_target("https://user:pass@example.com/openapi.json").is_err());
         assert!(validate_spec_fetch_target("https://user@example.com/openapi.json").is_err());
@@ -2090,20 +2053,6 @@ paths:
     fn build_cache_key_scoped_includes_prefix() {
         let key = super::build_cache_key("https://example.com/spec.json", Some("user-abc"));
         assert_eq!(key, "scope:user-abc|https://example.com/spec.json");
-    }
-
-    // ---- redact_url_for_logs (additional edge cases) ----
-
-    #[test]
-    fn redact_url_handles_http_scheme() {
-        let redacted = super::redact_url_for_logs("http://example.com/api/v1");
-        assert_eq!(redacted, "http://example.com/api/v1");
-    }
-
-    #[test]
-    fn redact_url_strips_fragment() {
-        let redacted = super::redact_url_for_logs("https://example.com/docs#section");
-        assert_eq!(redacted, "https://example.com/docs");
     }
 
     // ---- build_asyncapi_document ----

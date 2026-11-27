@@ -11,6 +11,81 @@ permission to use every listed specialist. The conversation header identifies
 the agent being addressed and offers Working context and Details controls.
 Delegation and specialist replies appear in the conversation's activity cards.
 
+The desktop thread column groups channel conversations by their source chat,
+with the platform and bot connection on the group's secondary line. Each source
+has one level of conversation rows; it does not add another bot tree. Sources
+open by default, and searching by thread title, chat name, bot label
+or platform exposes every matching row. Missing chat names use a platform/kind
+fallback, while opaque bot and parent IDs keep distinct sources separate.
+Pins retain their existing order within each bot, including separate pinned
+and ordinary partitions with the parent context repeated when necessary.
+Every source retains its header. Each previews five ordinary rows and always
+includes pinned, unread, working, drafted and selected rows; Show more expands
+only that source. Source status summarizes all of its rows. Pin/unpin opens the
+receiving source and restores focus to the visible row or its exact source header.
+
+On phones, Open chats opens a full-screen navigation view. A selected agent's
+thread list uses the same source groups as desktop; Back to workspace shows the
+agent roster. Browsing another agent loads its threads without navigating away
+from the conversation. Selecting a thread navigates and closes the drawer;
+opening it again restores the current conversation's agent and selection.
+Workspace pages open the roster rather than a fallback agent list. Switching
+between the roster and thread list moves focus to the new view's Back control
+or the originating agent, without focusing the search keyboard.
+
+Channel child rows use a thread icon and their conversation title. Existing
+generic minute-resolution titles include creation-time seconds in a compact
+time label, formatted in the selected interface language and marked UTC. Only
+the exact default format whose minute matches conversation creation is recognized;
+channel defaults also have `title_source=user`. Other owner titles stay verbatim.
+Child-row date metadata shows creation date, and the full persisted title remains
+available on hover and in both rename editors. Persisted titles, conversations
+and reply routing are unchanged. An open
+child conversation identifies the platform and source chat in its header. These
+labels describe the conversation's origin, not its current follow status.
+
+At desktop widths of 1024px and above, the navigation lists agents only.
+Selecting an agent opens its threads in a separate, independently scrollable
+column within the content area. Selecting a conversation keeps that list open;
+selecting another agent replaces it with that agent's threads. Home, the close
+button, or Escape inside that column returns to the landing page. The desktop
+roster has no nested thread preview, Show more, or Show fewer controls.
+Its header identifies the individual agent, offers New chat
+and agent details, and searches thread titles and channel chat names locally.
+Pinned threads precede Today, Yesterday, Previous 7 days, and Earlier sections;
+channel conversations retain their bot and parent-chat grouping. Rows retain
+unread, running, draft, pin, rename, and confirmed-delete behavior. Agents appear
+in one flat roster. Navigation uses the existing sidebar surface, while the
+thread list and conversation share the existing content surface, with
+neutral selection highlights. Smaller screens keep threads
+inside the agent drawer; collapsed desktop navigation retains its chat popovers.
+
+The thread panel header shows Channels followed by compact platform-logo and
+count capsules below the agent identity and thread total. Only external channels
+appear; a list of app-only conversations has no channel summary. Logos have
+channel-name/count hover labels and accessible names. Compact conversation rows
+keep the title and external channel logo on one line, preserving the logo while
+the title truncates. Expanded rows place date/message count (or a draft) on the
+left and the external channel logo/name on the right. Ordinary app conversations
+have no source label, logo, or header badge. Linked bots and platform-managed
+personal chats use their saved platform, and search includes those channel names.
+The external channel badge remains visible in both the expanded conversation
+header and its compact pill.
+Thread rows use the same horizontal inset on both sides. The options menu
+overlays the right edge and fades the content beneath it when shown; it reserves
+no additional space. Personal conversations contain private app and platform-managed
+personal chats, grouped by date. Connected bot chats contain conversations from
+linked bots, grouped by their source chat. Both sections explain this distinction
+in a short caption. Source-group headers explicitly say Source chat above the
+external chat name and bot metadata, distinguishing the expandable container from
+the indented saved conversations inside it.
+
+For organization specialists, eligible admins see retained guest conversations
+under the existing Connected bot chats source groups. A guest conversation
+opens a read-only transcript with guest messages, retained replies, and
+available outcome codes. Source chat identity keeps conversations from the
+same shared chat together.
+
 In individual NyxBot and specialist threads, scrolling beyond 160px collapses
 the agent row into a compact pill at the upper right, with icon buttons for
 Working context and Details. Taller thread notices raise that threshold to
@@ -65,6 +140,82 @@ Direct surface. Typed query and turn ownership live in
 `frontend/src/hooks/use-assistant-direct.ts`. Visible transcript contracts live
 in `chat-message.tsx`, `chat-composer.tsx`, `assistant-sidebar.tsx`, and the
 card components.
+
+## Specialist setup handoffs
+
+A specialist in a direct user turn can offer a `nyxbot-handoff` fenced JSON
+artifact when account setup requires NyxBot, including creating an Agent Key,
+setting up a channel bot, or connecting a service. Version 1 contains exactly
+`version: 1`, `title` (1–120 characters), and `task` (1–4000 characters).
+The task must stand alone, include only relevant user-supplied context, and
+exclude credentials, private memory, and unrelated history.
+
+Only the first top-level artifact in a completed assistant reply with
+`origin: user`, no `via`, and server `handoff_eligible: true` renders an active
+**Continue with NyxBot** card. Thread eligibility is defined in the
+[engine's conversation DTO contract](08-nyxagent-engine.md#browser-routes).
+Other replies render the artifact as inert code. Active cards also require an available,
+non-destroyed specialist and a loaded personal NyxBot roster. Voice-grouped
+replies use their grouped content renderer and remain inert.
+The entire proposed task is visible and the CTA says it will be sent as the
+person's message. Known credential patterns (NyxID, bearer, Telegram, OpenAI,
+GitHub, Slack, JWT and PEM, among others) are refused. This screening does not
+replace the rule that secrets belong in setup forms.
+
+Rendering or restoring history starts no work. Clicking starts an ordinary
+user turn with the owner's live NyxBot agent ID and no model override, then
+opens the new conversation in the same app. The specialist's authority is not
+inherited. NyxBot's profile, access mode, live checks and approvals apply.
+If navigation changes while admission is pending, adoption does not undo it.
+
+A bounded browser receipt stores only a payload hash and outcome, keyed by
+actor, source conversation and message. It survives reload, navigation and
+virtualized row remounts; returning to the source card opens the existing
+NyxBot thread. Unknown admitted outcomes remain non-replayable. Web Locks
+serialize duplicate clicks across tabs where available. Receipts are local to
+this browser (at most 200); they are not a server-wide or cross-device
+exactly-once guarantee.
+
+The browser advertises support through the engine's
+[current-turn capability contract](08-nyxagent-engine.md#session-instructions-and-per-turn-context).
+Active handoff rendering is a browser feature; native mobile/CLI history renders
+browser artifacts as inert fenced text.
+
+## Platform setup and navigation over chat
+
+| Journey | In-app surface | Completion |
+| --- | --- | --- |
+| Service connector link | Existing connection dialog | Existing server watch resumes the chat |
+| Hosted channel-bot link | Existing token-bound bot setup in a dialog | Existing server watch resumes the chat |
+| Fresh direct channel setup | Existing bot setup dialog | Explicit finish verifies metadata and sends a continuation to the source chat |
+| Telegram request recovery | Existing bot setup dialog, retaining the exact request ID | Plain Back to chat; existing server watch or app webhook owns completion |
+| Agent Key creation | Existing key form and one-time result dialog | Explicit Back to chat verifies the resource ID and sends a continuation to the source chat |
+| Agent details / Grants | Existing sheet over the selected chat | Existing permission controls |
+| Automations, Machines, Saved logins and canonical Studio management links | Existing route within the same app | Existing page controls; Back returns to chat |
+
+The shared platform completion contract accepts only a resource kind and UUID.
+It reads the resource back through the authenticated API before sending a
+user continuation to the captured source conversation. The actor and identity
+revision are fenced across the read and send; changing the viewed thread does
+not retarget the result. Raw API keys, webhook secrets, credentials and arbitrary
+form values are never included. A rejected continuation preserves the one-time
+result for retry, without creating the resource again. Hosted connector/bot
+flows keep their server watches and do not add a second client continuation.
+Request recovery is not bound to the chat in which its link was opened, so it
+never synthesizes a continuation into that chat.
+
+Same-origin links are classified through an explicit allowlist. Modified clicks
+retain browser behavior. External, credentialed, fragmented and unsupported
+queries are excluded. Bot dialogs inherit app theme and accessibility settings.
+Hosted bot dialogs block Escape/outside dismissal. The Agent Key one-time
+result blocks these gestures when it has a source-chat continuation. Hosted bot
+embedding follows the
+[bot-link contract](../CHANNEL_BOT_RELAY.md#bot-link-implementation-and-compatibility).
+Telegram and other provider authorization steps use their external flow.
+
+Advanced Studio links use their existing full app pages. The supported journeys
+above use the shared setup/completion path; other account-management operations
+retain their existing controls.
 
 ## Conversation selection
 

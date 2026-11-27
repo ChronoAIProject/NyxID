@@ -189,11 +189,10 @@ function DictationInline({
   draft: string;
 }) {
   const railIndicator = useRailScrollIndicator();
-  const { t } = useAppLanguage();
+  const { t, language: uiLanguage } = useAppLanguage();
   const { colors } = useTheme();
   const language = useDictationLanguage(true);
   const [picker, setPicker] = useState(false);
-  const { language: uiLanguage } = useAppLanguage();
   const { fontScale } = useWindowDimensions();
   const minHeight = composerInputMinHeight(fontScale);
   const maxHeight = Math.max(minHeight, useComposerHeight());
@@ -209,6 +208,13 @@ function DictationInline({
     return () => clearInterval(timer);
   }, [phase]);
   const capturing = phase === "listening" || phase === "stopping";
+  const currentLanguage = dictation.recognitionLocale
+    ? languageLabel(dictation.recognitionLocale, uiLanguage)
+    : t("Device language");
+  const showNextLanguage =
+    capturing &&
+    !language.loading &&
+    language.resolved !== dictation.recognitionLocale;
   const before = draft.trim() ? draft.replace(/\s+$/, "") : "";
   const spoken = !!dictation.text;
   const status =
@@ -276,7 +282,10 @@ function DictationInline({
         </Pressable>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel={t("Choose language")}
+          accessibilityLabel={t("Language for the next recording")}
+          accessibilityValue={capturing ? { text: currentLanguage } : undefined}
+          accessibilityState={{ disabled: phase !== "listening" }}
+          disabled={phase !== "listening"}
           onPress={() => setPicker(true)}
           style={styles.languageChip}
         >
@@ -284,9 +293,7 @@ function DictationInline({
             numberOfLines={1}
             style={[styles.languageLabel, { color: colors.textSecondary }]}
           >
-            {dictation.recognitionLocale
-              ? languageLabel(dictation.recognitionLocale, uiLanguage)
-              : language.label}
+            {capturing ? currentLanguage : t("Dictation language")}
           </Text>
         </Pressable>
         <View style={styles.inlineWaveRow}>
@@ -357,9 +364,19 @@ function DictationInline({
           )}
         </Pressable>
       </View>
-      {picker && (
+      {showNextLanguage && (
+        <Label
+          muted
+          accessibilityLiveRegion="polite"
+          style={styles.languageNotice}
+        >
+          {t("For the next recording: {{language}}", { language: language.label })}
+        </Label>
+      )}
+      {picker && phase === "listening" && (
         <DictationLanguagePicker
           language={language}
+          currentRecordingLanguage={currentLanguage}
           onClose={() => setPicker(false)}
         />
       )}
@@ -374,6 +391,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 4,
   },
+  languageNotice: { paddingHorizontal: 12, paddingBottom: 6 },
   languageLabel: { fontFamily: fonts.body, fontSize: 11 },
   target: {
     width: 44,

@@ -7,6 +7,76 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, role_service};
 
+/// Keep commit-time catalog checks from regranting an elevation refused at ingress.
+pub(crate) fn privileged_mfa_denied(state: &AppState, auth: &AuthUser) -> bool {
+    state.config.admin_mfa_enforcement == crate::config::AdminMfaEnforcement::Enforce
+        && (crate::mw::auth::require_first_party_human(auth).is_err()
+            || auth.session_id.is_none()
+            || !auth.mfa_assured
+            || auth.mfa_enabled != Some(true))
+}
+
+/// Called after the existing role check grants platform privileges.
+pub(crate) async fn privileged_session_denial(
+    state: &AppState,
+    auth: &AuthUser,
+    user: &User,
+) -> Option<AppError> {
+    use crate::config::AdminMfaEnforcement;
+    let mode = state.config.admin_mfa_enforcement;
+    if mode == AdminMfaEnforcement::Off {
+        return None;
+    }
+    let (reason, denial) = if let Err(error) = crate::mw::auth::require_first_party_human(auth) {
+        ("non_first_party", error)
+    } else if !user.is_active || !user.user_type.is_person() {
+        (
+            "inactive_or_non_person",
+            AppError::Forbidden("An active person account is required".into()),
+        )
+    } else if !user.mfa_enabled {
+        (
+            "not_enrolled",
+            AppError::Forbidden("Set up MFA in Settings to use admin access".into()),
+        )
+    } else if auth.session_id.is_none() || !auth.mfa_assured || auth.mfa_enabled != Some(true) {
+        ("unverified_session", AppError::MfaStepUpRequired)
+    } else {
+        return None;
+    };
+    if mode == AdminMfaEnforcement::Enforce {
+        return Some(denial);
+    }
+    if crate::services::coordination_service::RateWindowStore::admit(
+        &state.db,
+        "admin_mfa_audit",
+        &user.id,
+        1,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .is_ok_and(|admission| admission.allowed)
+    {
+        audit_service::log_for_user(
+            state.db.clone(),
+            auth,
+            "admin_mfa_unverified_access",
+            Some(serde_json::json!({"reason": reason})),
+        );
+    }
+    None
+}
+
+pub(crate) async fn require_privileged_session(
+    state: &AppState,
+    auth: &AuthUser,
+    user: &User,
+) -> AppResult<()> {
+    privileged_session_denial(state, auth, user)
+        .await
+        .map_or(Ok(()), Err)
+}
+
 /// Check that the authenticated user has admin (write) privileges.
 ///
 /// Admin access is determined by platform RBAC role membership. This is the
@@ -25,7 +95,7 @@ pub async fn require_admin(state: &AppState, auth_user: &AuthUser) -> AppResult<
     if !platform_role.is_admin() {
         return Err(AppError::Forbidden("Admin access required".to_string()));
     }
-    Ok(())
+    require_privileged_session(state, auth_user, &user_model).await
 }
 
 /// Check that the authenticated user has at least read-only platform admin
@@ -68,6 +138,8 @@ pub async fn require_admin_or_operator(
         return Err(AppError::Forbidden("Admin access required".to_string()));
     }
 
+    require_privileged_session(state, auth_user, &user_model).await?;
+
     if matches!(platform_role, crate::models::user::PlatformRole::Operator) {
         audit_service::log_for_user(
             state.db.clone(),
@@ -99,7 +171,7 @@ pub(crate) async fn require_reconciliation_operator(
     {
         return Err(AppError::Forbidden("Admin access required".into()));
     }
-    Ok(())
+    require_privileged_session(state, auth_user, &user).await
 }
 
 /// Check that the caller may read platform-wide usage data
@@ -122,6 +194,8 @@ pub async fn require_admin_usage_read(
     if !role_service::can_read_admin_usage(&state.db, &user_model, platform_role).await? {
         return Err(AppError::Forbidden("Admin access required".to_string()));
     }
+
+    require_privileged_session(state, auth_user, &user_model).await?;
 
     let event_type = match platform_role {
         crate::models::user::PlatformRole::Admin => return Ok(platform_role),
@@ -155,7 +229,7 @@ pub async fn require_credit_grant_manager(state: &AppState, auth_user: &AuthUser
             "Credit grant management requires Admin or Credits Manager access".to_string(),
         ));
     }
-    Ok(())
+    require_privileged_session(state, auth_user, &user_model).await
 }
 
 pub fn extract_ip(headers: &HeaderMap) -> Option<String> {
@@ -216,6 +290,38 @@ mod tests {
             .await
             .expect("insert test user");
         id
+    }
+
+    #[tokio::test]
+    async fn privileged_mfa_modes_keep_audit_compatible_and_enforce_verified_sessions() {
+        use crate::config::AdminMfaEnforcement;
+        let db = crate::test_utils::connect_transaction_test_database("admin_mfa_policy").await;
+        let user_id = insert_user(&db, true, false).await;
+        let mut state = test_app_state(db.clone());
+        let mut auth = test_auth_user(&user_id);
+        auth.auth_method = crate::mw::auth::AuthMethod::Session;
+        state.config.admin_mfa_enforcement = AdminMfaEnforcement::Audit;
+        assert!(require_admin(&state, &auth).await.is_ok());
+
+        state.config.admin_mfa_enforcement = AdminMfaEnforcement::Enforce;
+        assert!(matches!(
+            require_admin(&state, &auth).await,
+            Err(AppError::Forbidden(_))
+        ));
+        db.collection::<User>(USERS)
+            .update_one(doc! {"_id": &user_id}, doc! {"$set": {"mfa_enabled": true}})
+            .await
+            .expect("record admin enrollment");
+        assert!(matches!(
+            require_admin(&state, &auth).await,
+            Err(AppError::MfaStepUpRequired)
+        ));
+        auth.session_id = Some(Uuid::new_v4());
+        auth.mfa_assured = true;
+        auth.mfa_enabled = Some(true);
+        assert!(require_admin(&state, &auth).await.is_ok());
+        auth.auth_method = crate::mw::auth::AuthMethod::ApiKey;
+        assert!(require_admin(&state, &auth).await.is_err());
     }
 
     #[tokio::test]

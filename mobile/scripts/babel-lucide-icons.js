@@ -76,9 +76,13 @@ function lucideIcons({ types: t, parseSync }) {
           );
         }
         if (!leaves.length) return;
-        if (remaining.length)
-          leaves.push(t.importDeclaration(remaining, node.source));
-        importPath.replaceWithMultiple(leaves);
+        if (remaining.length) {
+          // Metro uses the original import location to select the ESM entry.
+          node.specifiers = remaining;
+          importPath.insertBefore(leaves);
+        } else {
+          importPath.replaceWithMultiple(leaves);
+        }
       },
     },
   };

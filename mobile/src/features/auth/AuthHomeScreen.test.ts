@@ -72,6 +72,8 @@ function setup({
   const calls: LoginInput[] = [];
   const sessions: Session[] = [];
   const socialUrls: string[] = [];
+  let openSocial: () => Promise<{ type: "success"; url: string } | { type: "cancel" }> =
+    async () => ({ type: "cancel" });
   const registrationUrls: string[] = [];
   const navigations: string[] = [];
   const waitlistUrls: string[] = [];
@@ -83,7 +85,7 @@ function setup({
   let configRefetches = 0;
   const appStateListeners: Array<(state: string) => void> = [];
   const colors = new Proxy(
-    { dangerTone: { bg: "#fee", border: "#f00" } },
+    { danger: "#f00", dangerTone: { bg: "#fee", border: "#f00" } },
     { get: (target, key) => Reflect.get(target, key) ?? "#111" },
   );
   const jsx = (type: unknown, props: Record<string, unknown>) => ({
@@ -93,6 +95,12 @@ function setup({
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "../../i18n/LanguageProvider": { useAppLanguage: () => ({ language: appLocale(), t: translateApp }) },
+    "expo-crypto": {
+      getRandomBytesAsync: async (length: number) => new Uint8Array(length),
+      digestStringAsync: async () => "fixture-challenge",
+      CryptoDigestAlgorithm: { SHA256: "SHA-256" },
+      CryptoEncoding: { BASE64: "base64" },
+    },
     "expo-web-browser": {
       openBrowserAsync: async (url: string) => {
         registrationUrls.push(url);
@@ -100,7 +108,7 @@ function setup({
       },
       openAuthSessionAsync: async (url: string) => {
         socialUrls.push(url);
-        return { type: "cancel" };
+        return openSocial();
       },
     },
     "@react-navigation/native": { useIsFocused: () => true },
@@ -270,6 +278,7 @@ function setup({
     showKeyboard: () => { keyboardVisible = true; },
     sessions,
     socialUrls,
+    setOpenSocial: (handler: typeof openSocial) => { openSocial = handler; },
     registrationUrls,
     waitlistUrls,
     navigations,
@@ -308,7 +317,8 @@ for (const platform of ["ios", "android"] as const) {
     assert.ok(scroller);
     assert.equal(
       scroller.props.keyboardDismissMode,
-      platform === "ios" ? "interactive" : "on-drag",
+      platform === "ios" ? "interactive" : "none",
+      "dragging the Android form must keep the IME open",
     );
     assert.equal(scroller.props.keyboardShouldPersistTaps, "handled");
     assert.ok(
@@ -540,9 +550,12 @@ test("Create account opens the configured registration page only when registrati
 test("registration-disabled social sign-in still verifies MFA, supports recovery and keeps legal links", async (t) => {
   const screen = setup({ emailEnabled: false, providers: ["google"] });
   t.after(screen.harness.unmount);
-  screen.openUrl(
-    "nyxid://auth/social/callback#status=mfa_required&provider=google&mfa_token=synthetic-challenge",
-  );
+  const callback = "nyxid://auth/social/callback#status=mfa_required&provider=google&mfa_token=synthetic-challenge";
+  screen.openUrl(callback);
+  assert.doesNotMatch(textContent(screen.harness.value()), /Verify your Google sign-in/);
+  screen.setOpenSocial(async () => ({ type: "success", url: callback }));
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
   assert.match(
     textContent(screen.harness.value()),
     /Verify your Google sign-in/,
@@ -586,12 +599,15 @@ test("registration-disabled social sign-in still verifies MFA, supports recovery
   assert.deepEqual(screen.navigations, ["TermsOfService", "PrivacyPolicy"]);
 });
 
-test("registration-disabled configuration preserves provider error mapping and email login", (t) => {
+test("registration-disabled configuration preserves provider error mapping and email login", async (t) => {
   const screen = setup({ emailEnabled: false, providers: ["github"] });
   t.after(screen.harness.unmount);
-  screen.openUrl(
-    "nyxid://auth/social/callback?status=error&provider=github&error=social_auth_conflict",
-  );
+  screen.setOpenSocial(async () => ({
+    type: "success",
+    url: "nyxid://auth/social/callback?status=error&provider=github&error=social_auth_conflict",
+  }));
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
   assert.match(
     textContent(screen.harness.value()),
     /This email is linked to another login method\./,
@@ -627,15 +643,15 @@ test("registration-disabled email authentication handles the actual MFA challeng
   assert.equal(screen.sessions.length, 1);
 });
 
-test("failed credentials show feedback and permit retry without a false MFA prompt", async (t) => {
+for (const validationError of [false, true]) test(`${validationError ? "invalid email" : "failed credentials"} marks only the password field and permits retry without a false MFA prompt`, async (t) => {
   const screen = setup({ emailEnabled: false });
   t.after(screen.harness.unmount);
   screen.setLogin(async () => {
     throw new ApiError({
-      errorKey: "authentication_failed",
-      errorCode: 2000,
-      statusCode: 401,
-      message: "Invalid email or password",
+      errorKey: validationError ? "validation_error" : "authentication_failed",
+      errorCode: validationError ? 1008 : 2000,
+      statusCode: validationError ? 400 : 401,
+      message: validationError ? "Validation error: email: Invalid email address" : "Invalid email or password",
     });
   });
   screen.change("Email", "reviewer@example.test");
@@ -644,7 +660,23 @@ test("failed credentials show feedback and permit retry without a false MFA prom
   await screen.harness.settle();
   assert.match(
     textContent(screen.harness.value()),
-    /Invalid email or password/,
+    /Incorrect login details\./,
+  );
+  assert.equal(screen.input("Email").props.invalid, undefined);
+  assert.equal(screen.input("Email").props.frameStyle.borderColor, "#111");
+  assert.equal(screen.input("Password").props.invalid, true);
+  assert.equal(Object.assign({}, ...screen.input("Password").props.frameStyle).borderColor, "#f00");
+  const alert = elements(screen.harness.value()).find(
+    (element) => element.props.accessibilityRole === "alert",
+  )!;
+  assert.equal(textContent(alert), "Incorrect login details.");
+  assert.equal(alert.props.style.borderWidth, undefined);
+  assert.equal(alert.props.style.backgroundColor, undefined);
+  const alertText = elements(alert).find((element) => element.type === "Text")!;
+  assert.equal(
+    alertText.props.numberOfLines,
+    undefined,
+    "credential errors can wrap on narrow screens and at larger text sizes",
   );
   assert.equal(screen.sessions.length, 0);
   assert.equal(
@@ -655,6 +687,8 @@ test("failed credentials show feedback and permit retry without a false MFA prom
   );
   screen.setLogin(async () => signedIn);
   screen.change("Password", "correct-password");
+  assert.equal(screen.input("Password").props.invalid, false);
+  assert.doesNotMatch(textContent(screen.harness.value()), /Incorrect login details\./);
   screen.submit().props.onPress();
   await screen.harness.settle();
   assert.equal(screen.calls.length, 2);
@@ -859,6 +893,7 @@ test("registration and waitlist callbacks resolve the domain after import and at
     },
   );
   const screen = setup({
+    providers: ["google"],
     getFrontendUrl: domains.getFrontendUrl,
     beforeMount: () => domains.selectNewDomains(true),
   });
@@ -869,9 +904,12 @@ test("registration and waitlist callbacks resolve the domain after import and at
   registration.props.onPress();
   await screen.harness.settle();
   assert.deepEqual(screen.registrationUrls, ["https://nyxid.ai/register"]);
-  screen.openUrl(
-    "nyxid://auth/social/callback?status=error&error=social_auth_registration_closed",
-  );
+  screen.setOpenSocial(async () => ({
+    type: "success",
+    url: "nyxid://auth/social/callback?status=error&error=social_auth_registration_closed",
+  }));
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
   const waitlist = elements(screen.harness.value()).find(
     (element) =>
       element.type === "Text" && textContent(element) === "Join the waitlist",
@@ -930,18 +968,18 @@ for (const platform of ["ios", "android"] as const) test(`P11 wrong password is 
   const scrolls: unknown[]=[];
   scroller.props.revealController.current={reveal:(view:unknown)=>scrolls.push(view)};
   screen.showKeyboard(); screen.change("Email","reviewer@example.test"); screen.change("Password","wrong");
-  screen.setLogin(async()=>{throw new Error("Invalid email or password");});
+  screen.setLogin(async()=>{throw new ApiError({statusCode:401,errorCode:2000,errorKey:"authentication_failed",message:"Invalid email or password"});});
   screen.submit().props.onPress(); await screen.harness.settle();
-  const all=elements(screen.harness.value()); const alert=all.find(e=>e.props.accessibilityRole==="alert" && textContent(e).includes("Invalid email or password"));
+  const all=elements(screen.harness.value()); const alert=all.find(e=>e.props.accessibilityRole==="alert" && textContent(e).includes("Incorrect login details."));
   assert.ok(alert,"login failure must be an accessible alert"); assert.equal(alert.props.accessibilityLiveRegion,"assertive");
   assert.ok(all.indexOf(alert)<all.indexOf(screen.submit()),"error sits immediately above the sign-in action");
   assert.ok(all.indexOf(alert)>all.indexOf(screen.input("Password")));
   alert.props.ref.current={measureInWindow:(cb:any)=>cb(20,650,350,48)};
   alert.props.onLayout();
   assert.deepEqual(scrolls,[alert.props.ref.current],"banner delegates to the shared measured keyboard viewport");
-  assert.deepEqual(screen.announcements,platform==="ios"?["Invalid email or password"]:[]);
-  screen.harness.render(); assert.match(textContent(screen.harness.value()),/Invalid email or password/);
-  screen.change("Password","changed"); assert.doesNotMatch(textContent(screen.harness.value()),/Invalid email or password/);
+  assert.deepEqual(screen.announcements,platform==="ios"?["Incorrect login details."]:[]);
+  screen.harness.render(); assert.match(textContent(screen.harness.value()),/Incorrect login details\./);
+  screen.change("Password","changed"); assert.doesNotMatch(textContent(screen.harness.value()),/Incorrect login details\./);
 });
 
 
@@ -953,7 +991,8 @@ test("P1-6 retained login error follows language changes without resubmitting or
   for (const language of ['zh-CN','zh-TW','en'] as const) {
     setAppTranslationLanguage(language);screen.harness.render();
     const alert=elements(screen.harness.value()).find(e=>e.props.accessibilityRole==='alert');
-    assert.ok(alert);assert.equal(textContent(alert).trim(),translate(language,'Invalid email or password'));
+    assert.ok(alert);assert.equal(textContent(alert).trim(),translate(language,'Incorrect login details.'));
+    assert.equal(screen.input(translate(language,'Password')).props.invalid,true);
     assert.equal(screen.calls.length,1);assert.equal(screen.input(translate(language,'Email')).props.value,'reviewer@example.test');
   }
 });

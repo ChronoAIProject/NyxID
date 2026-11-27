@@ -2,7 +2,10 @@
 //! requesting person. Bind the selected service and exact retained public key;
 //! user/node principals and certificate admission remain with ssh_service.
 use crate::{
-    crypto::aes::{EncryptionKeys, RecordContext},
+    crypto::{
+        aes::EncryptionKeys,
+        record_field::{self, RecordContext},
+    },
     errors::{AppError, AppResult},
     models::downstream_service::{COLLECTION_NAME, DownstreamService, SshServiceConfig},
 };
@@ -35,7 +38,7 @@ pub(crate) async fn encrypt(
 ) -> AppResult<Vec<u8>> {
     validate_key(public, private)?;
     let digest = public_digest(public);
-    super::record_field_service::encrypt_context(
+    record_field::encrypt_context(
         keys,
         &RecordContext::new(
             COLLECTION_NAME,
@@ -54,7 +57,7 @@ pub(crate) async fn private_key(
 ) -> AppResult<Zeroizing<Vec<u8>>> {
     let public = row.ca_public_key.as_deref().ok_or_else(invalid)?;
     let digest = public_digest(public);
-    let private = super::record_field_service::decrypt_context(
+    let private = record_field::decrypt_context(
         keys,
         &RecordContext::new(
             COLLECTION_NAME,

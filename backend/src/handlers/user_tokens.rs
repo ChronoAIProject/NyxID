@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use axum::{
     Form, Json,
     extract::{Path, Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, header},
+    response::IntoResponse,
 };
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
@@ -19,8 +20,9 @@ use crate::models::user_provider_token::{
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::url_validation::validate_base_url;
 use crate::services::{
-    admin_user_service, audit_service, credential_push_service, org_service, provider_service,
-    unified_key_service, user_api_key_service, user_service_service, user_token_service,
+    admin_user_service, audit_service, connector_launch_service, credential_push_service,
+    org_service, provider_service, unified_key_service, user_api_key_service, user_service_service,
+    user_token_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -172,7 +174,7 @@ pub struct GenericOAuthCallbackQuery {
     pub error_description: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct DeviceCodeInitiateResponse {
     pub user_code: String,
     pub verification_uri: String,
@@ -181,10 +183,12 @@ pub struct DeviceCodeInitiateResponse {
     pub interval: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct DeviceCodePollRequest {
     pub state: String,
 }
+
+crate::errors::redacted_debug!(DeviceCodeInitiateResponse, DeviceCodePollRequest,);
 
 #[derive(Debug, Serialize)]
 pub struct DeviceCodePollResponse {
@@ -373,7 +377,7 @@ pub async fn initiate_oauth_connect(
     auth_user: AuthUser,
     Path(provider_id): Path<String>,
     Query(query): Query<OAuthInitiateQuery>,
-) -> AppResult<Json<OAuthInitiateResponse>> {
+) -> AppResult<(HeaderMap, Json<OAuthInitiateResponse>)> {
     let user_id_str = auth_user.user_id.to_string();
     if let Some(ref redirect_path) = query.redirect_path {
         validate_redirect_path(redirect_path)?;
@@ -463,80 +467,97 @@ pub async fn initiate_oauth_connect(
         Some(audit_metadata),
     );
 
-    Ok(Json(OAuthInitiateResponse {
-        authorization_url: initiate_result.authorization_url,
-        attempt_nonce: initiate_result.attempt_nonce,
-    }))
+    let headers = connector_launch_headers(
+        &state,
+        &auth_user,
+        &initiate_result.state_id,
+        &initiate_result.launch_proof,
+    )?;
+    Ok((
+        headers,
+        Json(OAuthInitiateResponse {
+            authorization_url: initiate_result.authorization_url,
+            attempt_nonce: initiate_result.attempt_nonce,
+        }),
+    ))
+}
+
+pub(crate) fn connector_launch_headers(
+    state: &AppState,
+    user: &AuthUser,
+    state_id: &str,
+    launch_proof: &str,
+) -> AppResult<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    if super::login_client_context::require_first_party_human(user).is_ok() {
+        let secure = state.config.use_secure_cookies();
+        let cookie = super::auth::build_cookie_with_same_site(
+            &connector_launch_service::cookie_name(state_id),
+            launch_proof,
+            600,
+            connector_launch_service::CALLBACK_PATH,
+            secure,
+            state.config.cookie_domain(),
+            if secure { "None" } else { "Lax" },
+        );
+        headers.insert(
+            header::SET_COOKIE,
+            cookie
+                .parse()
+                .map_err(|_| AppError::Internal("Could not set connector launch cookie".into()))?,
+        );
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        http::HeaderValue::from_static("no-store"),
+    );
+    Ok(headers)
 }
 
 /// GET /api/v1/providers/{provider_id}/callback (legacy per-provider route)
 pub async fn oauth_callback(
     State(state): State<AppState>,
+    opt_auth_user: OptionalAuthUser,
     Path(provider_id): Path<String>,
     Query(query): Query<OAuthCallbackQuery>,
     headers: HeaderMap,
-) -> AppResult<Json<ConnectResponse>> {
-    let outcome = user_token_service::handle_oauth_callback(
-        &state.db,
-        &state.encryption_keys,
-        &state.config.base_url,
-        &provider_id,
-        &query.code,
-        &query.state,
-    )
-    .await?;
-
-    if outcome.connection_id.is_none() {
-        sync_provider_credentials_to_unified_keys(
-            &state,
-            &outcome.user_id,
-            &provider_id,
-            true,
-            true,
-        )
-        .await?;
+) -> AppResult<axum::response::Redirect> {
+    let saved = user_token_service::peek_oauth_state(&state.db, &query.state).await?;
+    if saved.provider_config_id != provider_id {
+        return Err(AppError::NotFound("OAuth callback not found".into()));
     }
-
-    audit_service::log_async(
-        state.db.clone(),
-        Some(outcome.user_id.clone()),
-        "provider_token_connected".to_string(),
-        Some(serde_json::json!({
-            "provider_id": &provider_id,
-            "token_type": "oauth2",
-            // Surfaces which write path executed: a UUID for multi-
-            // connection, null for the legacy single-tenant path.
-            "connection_id": &outcome.connection_id,
-        })),
-        crate::handlers::admin_helpers::extract_ip(&headers),
-        crate::handlers::admin_helpers::extract_user_agent(&headers),
-        None,
-        None,
-    );
-
-    Ok(Json(ConnectResponse {
-        status: "connected".to_string(),
-        message: "OAuth connection established successfully".to_string(),
-    }))
+    Ok(generic_oauth_callback_with_headers(
+        state,
+        opt_auth_user.0,
+        GenericOAuthCallbackQuery {
+            code: Some(query.code),
+            state: Some(query.state),
+            error: None,
+            error_description: None,
+        },
+        &headers,
+    )
+    .await)
 }
 
 /// GET /api/v1/providers/callback?code=...&state=...
 ///
 /// Generic OAuth callback that resolves the provider from the state parameter.
-/// If the browser still has an active session cookie, the callback verifies it
-/// matches the initiating user. Otherwise it relies on the one-time OAuth state.
+/// The browser presents its launch cookie or the initiator confirms the continuation.
 pub async fn generic_oauth_callback(
     State(state): State<AppState>,
     opt_auth_user: OptionalAuthUser,
+    headers: HeaderMap,
     Query(query): Query<GenericOAuthCallbackQuery>,
 ) -> axum::response::Redirect {
-    generic_oauth_callback_impl(state, opt_auth_user.0, query).await
+    generic_oauth_callback_with_headers(state, opt_auth_user.0, query, &headers).await
 }
 
-async fn generic_oauth_callback_impl(
+async fn generic_oauth_callback_with_headers(
     state: AppState,
     auth_user: Option<AuthUser>,
     query: GenericOAuthCallbackQuery,
+    headers: &HeaderMap,
 ) -> axum::response::Redirect {
     let frontend_url = state.config.frontend_url.trim_end_matches('/');
 
@@ -558,6 +579,17 @@ async fn generic_oauth_callback_impl(
                     redirect_path = oauth_state.redirect_path.clone();
                     completion_flow = completion_page_flow(&oauth_state);
                     completion_nonce = oauth_state.attempt_nonce.clone();
+                    if ensure_callback_user_matches_state(auth_user.as_ref(), &oauth_state.user_id)
+                        .is_err()
+                        || !claim_callback_launch(&state, &oauth_state, headers).await
+                    {
+                        let code = if normalized_oauth_error_code(error) == "access_denied" {
+                            "access_denied"
+                        } else {
+                            "provider_error"
+                        };
+                        return connector_error_return(&state, &oauth_state, code, &msg);
+                    }
                     let owner_id = oauth_state
                         .target_user_id
                         .as_deref()
@@ -744,7 +776,7 @@ async fn generic_oauth_callback_impl(
             .target_user_id
             .as_deref()
             .unwrap_or(&oauth_state.user_id);
-        let failed_placeholders =
+        let failed_placeholders = if claim_callback_launch(&state, &oauth_state, headers).await {
             match fail_callback_placeholders(&state.db, &oauth_state, owner_id, &message).await {
                 Ok(count) => Some(count),
                 Err(error) => {
@@ -756,7 +788,10 @@ async fn generic_oauth_callback_impl(
                     );
                     None
                 }
-            };
+            }
+        } else {
+            None
+        };
         audit_service::log_async(
             state.db.clone(),
             Some(oauth_state.user_id.clone()),
@@ -793,15 +828,82 @@ async fn generic_oauth_callback_impl(
         return redirect_callback(frontend_url, "error", Some(&message));
     }
 
-    let redirect_path = oauth_state.redirect_path.clone();
+    let oauth_state = if let Some(proof) = connector_browser_proof(&oauth_state, headers) {
+        match connector_launch_service::claim_browser(&state.db, &oauth_state, &proof).await {
+            Ok(claimed) => claimed,
+            Err(_) => {
+                let code = if oauth_state.expires_at <= chrono::Utc::now() {
+                    "state_expired"
+                } else if oauth_state.consumed {
+                    "state_replayed"
+                } else {
+                    "state_invalid"
+                };
+                return connector_error_return(
+                    &state,
+                    &oauth_state,
+                    code,
+                    "Invalid or expired OAuth state",
+                );
+            }
+        }
+    } else {
+        return match connector_launch_service::stage(
+            &state.db,
+            &state.encryption_keys,
+            &oauth_state,
+            code,
+        )
+        .await
+        {
+            Ok(id) => {
+                axum::response::Redirect::to(&format!("{frontend_url}/connector-continuation/{id}"))
+            }
+            Err(_) => connector_error_return(
+                &state,
+                &oauth_state,
+                "state_invalid",
+                "Invalid or expired OAuth state",
+            ),
+        };
+    };
+    finish_connector_callback(&state, auth_user.as_ref(), &oauth_state, code).await
+}
 
-    match user_token_service::handle_oauth_callback(
+#[cfg(test)]
+async fn generic_oauth_callback_impl(
+    state: AppState,
+    auth_user: Option<AuthUser>,
+    query: GenericOAuthCallbackQuery,
+) -> axum::response::Redirect {
+    let mut headers = HeaderMap::new();
+    if let Some(id) = query.state.as_deref() {
+        let cookie = format!(
+            "{}=test-launch-proof",
+            connector_launch_service::cookie_name(id)
+        );
+        headers.insert(header::COOKIE, cookie.parse().unwrap());
+    }
+    generic_oauth_callback_with_headers(state, auth_user, query, &headers).await
+}
+
+async fn finish_connector_callback(
+    state: &AppState,
+    auth_user: Option<&AuthUser>,
+    oauth_state: &OAuthState,
+    code: &str,
+) -> axum::response::Redirect {
+    let frontend_url = state.config.frontend_url.trim_end_matches('/');
+    let provider_id = &oauth_state.provider_config_id;
+    let completion_flow = completion_page_flow(oauth_state);
+    let completion_nonce = oauth_state.attempt_nonce.as_deref();
+    let redirect_path = oauth_state.redirect_path.as_deref();
+    match user_token_service::complete_claimed_oauth_callback(
         &state.db,
         &state.encryption_keys,
         &state.config.base_url,
-        provider_id,
         code,
-        state_param,
+        oauth_state,
     )
     .await
     {
@@ -816,10 +918,10 @@ async fn generic_oauth_callback_impl(
                     "on_behalf_of": &oauth_state.target_user_id,
                     "connection_id": &outcome.connection_id,
                 })),
-                auth_user.as_ref().and_then(|u| u.ip_address.clone()),
-                auth_user.as_ref().and_then(|u| u.user_agent.clone()),
-                auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
-                auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
+                auth_user.and_then(|u| u.ip_address.clone()),
+                auth_user.and_then(|u| u.user_agent.clone()),
+                auth_user.and_then(|u| u.api_key_id.clone()),
+                auth_user.and_then(|u| u.api_key_name.clone()),
             );
 
             // Multi-connection writes already populated the UserApiKey
@@ -836,7 +938,7 @@ async fn generic_oauth_callback_impl(
                     "Multi-connection callback complete; skipping legacy sync"
                 );
             } else if let Err(error) = sync_provider_credentials_to_unified_keys(
-                &state,
+                state,
                 &outcome.user_id,
                 provider_id,
                 true,
@@ -850,7 +952,7 @@ async fn generic_oauth_callback_impl(
                 let user_msg = safe_error_message(&error);
                 let failed_placeholders = match fail_callback_placeholders(
                     &state.db,
-                    &oauth_state,
+                    oauth_state,
                     &outcome.user_id,
                     &user_msg,
                 )
@@ -877,10 +979,10 @@ async fn generic_oauth_callback_impl(
                         "reason": "failed_to_sync_unified_keys",
                         "failed_placeholders": failed_placeholders,
                     })),
-                    auth_user.as_ref().and_then(|u| u.ip_address.clone()),
-                    auth_user.as_ref().and_then(|u| u.user_agent.clone()),
-                    auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
-                    auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
+                    auth_user.and_then(|u| u.ip_address.clone()),
+                    auth_user.and_then(|u| u.user_agent.clone()),
+                    auth_user.and_then(|u| u.api_key_id.clone()),
+                    auth_user.and_then(|u| u.api_key_name.clone()),
                 );
                 if let Some(uri) = oauth_state.app_return_uri.as_deref()
                     && let Some(redirect) =
@@ -897,7 +999,7 @@ async fn generic_oauth_callback_impl(
                         completion_nonce,
                     );
                 }
-                if let Some(ref path) = redirect_path {
+                if let Some(path) = redirect_path {
                     return redirect_to_path(frontend_url, path, "error", Some(&user_msg));
                 }
                 return redirect_callback(frontend_url, "error", Some(&user_msg));
@@ -927,12 +1029,10 @@ async fn generic_oauth_callback_impl(
                                 "user_service_id": &view.link.completed_user_service_id,
                                 "scopes": &view.link.scopes,
                             })),
-                            auth_user.as_ref().and_then(|user| user.ip_address.clone()),
-                            auth_user.as_ref().and_then(|user| user.user_agent.clone()),
-                            auth_user.as_ref().and_then(|user| user.api_key_id.clone()),
-                            auth_user
-                                .as_ref()
-                                .and_then(|user| user.api_key_name.clone()),
+                            auth_user.and_then(|user| user.ip_address.clone()),
+                            auth_user.and_then(|user| user.user_agent.clone()),
+                            auth_user.and_then(|user| user.api_key_id.clone()),
+                            auth_user.and_then(|user| user.api_key_name.clone()),
                         );
                         crate::services::connect_link_service::dispatch_terminal_webhook_if_needed(
                             &state.db,
@@ -941,7 +1041,7 @@ async fn generic_oauth_callback_impl(
                         )
                         .await;
                         // Correlate the hosted tab with the OAuth attempt that completed the link.
-                        let receipt = crate::crypto::token::hash_token(state_param);
+                        let receipt = crate::crypto::token::hash_token(&oauth_state.id);
                         let path = format!("/connect/return/{connect_link_id}#flow={receipt}");
                         return redirect_to_path(frontend_url, &path, "success", None);
                     }
@@ -974,7 +1074,7 @@ async fn generic_oauth_callback_impl(
                     None,
                     completion_nonce,
                 )
-            } else if let Some(ref path) = redirect_path {
+            } else if let Some(path) = redirect_path {
                 redirect_to_path(frontend_url, path, "success", None)
             } else {
                 redirect_callback(frontend_url, "success", None)
@@ -986,25 +1086,20 @@ async fn generic_oauth_callback_impl(
                 .as_deref()
                 .unwrap_or(&oauth_state.user_id);
             let user_msg = safe_error_message(&e);
-            let failed_placeholders = match fail_callback_placeholders(
-                &state.db,
-                &oauth_state,
-                owner_id,
-                &user_msg,
-            )
-            .await
-            {
-                Ok(count) => Some(count),
-                Err(error) => {
-                    tracing::warn!(
-                        user_id = %owner_id,
-                        provider_id = %provider_id,
-                        error = %error,
-                        "failed to mark OAuth placeholders as failed"
-                    );
-                    None
-                }
-            };
+            let failed_placeholders =
+                match fail_callback_placeholders(&state.db, oauth_state, owner_id, &user_msg).await
+                {
+                    Ok(count) => Some(count),
+                    Err(error) => {
+                        tracing::warn!(
+                            user_id = %owner_id,
+                            provider_id = %provider_id,
+                            error = %error,
+                            "failed to mark OAuth placeholders as failed"
+                        );
+                        None
+                    }
+                };
             audit_service::log_async(
                 state.db.clone(),
                 Some(oauth_state.user_id.clone()),
@@ -1015,10 +1110,10 @@ async fn generic_oauth_callback_impl(
                     "on_behalf_of": &oauth_state.target_user_id,
                     "failed_placeholders": failed_placeholders,
                 })),
-                auth_user.as_ref().and_then(|u| u.ip_address.clone()),
-                auth_user.as_ref().and_then(|u| u.user_agent.clone()),
-                auth_user.as_ref().and_then(|u| u.api_key_id.clone()),
-                auth_user.as_ref().and_then(|u| u.api_key_name.clone()),
+                auth_user.and_then(|u| u.ip_address.clone()),
+                auth_user.and_then(|u| u.user_agent.clone()),
+                auth_user.and_then(|u| u.api_key_id.clone()),
+                auth_user.and_then(|u| u.api_key_name.clone()),
             );
             // Sanitize error for user-facing redirect -- never leak internal details
             if let Some(uri) = oauth_state.app_return_uri.as_deref()
@@ -1041,7 +1136,7 @@ async fn generic_oauth_callback_impl(
                     Some(code),
                     completion_nonce,
                 )
-            } else if let Some(ref path) = redirect_path {
+            } else if let Some(path) = redirect_path {
                 redirect_to_path(frontend_url, path, "error", Some(&user_msg))
             } else {
                 redirect_callback(frontend_url, "error", Some(&user_msg))
@@ -1116,6 +1211,134 @@ fn completion_page_flow(oauth_state: &OAuthState) -> Option<OAuthFlowKind> {
     }
 }
 
+fn connector_browser_proof(state: &OAuthState, headers: &HeaderMap) -> Option<String> {
+    let cookie = super::social_auth::extract_cookie_value(
+        headers,
+        &connector_launch_service::cookie_name(&state.id),
+    );
+    connector_launch_service::matching_proof(state, cookie.as_deref())
+}
+
+async fn claim_callback_launch(state: &AppState, oauth: &OAuthState, headers: &HeaderMap) -> bool {
+    let Some(proof) = connector_browser_proof(oauth, headers) else {
+        return false;
+    };
+    connector_launch_service::claim_browser(&state.db, oauth, &proof)
+        .await
+        .is_ok()
+}
+
+fn connector_error_return(
+    state: &AppState,
+    oauth: &OAuthState,
+    code: &str,
+    message: &str,
+) -> axum::response::Redirect {
+    let frontend = state.config.frontend_url.trim_end_matches('/');
+    if let Some(uri) = oauth.app_return_uri.as_deref()
+        && let Some(redirect) = app_return_redirect(&state.config, uri, Some(code))
+    {
+        return redirect;
+    }
+    if let Some(flow) = completion_page_flow(oauth) {
+        return redirect_to_oauth_completion(
+            frontend,
+            "error",
+            flow.as_wire(),
+            Some(code),
+            oauth.attempt_nonce.as_deref(),
+        );
+    }
+    if let Some(path) = oauth.redirect_path.as_deref() {
+        return redirect_to_path(frontend, path, "error", Some(message));
+    }
+    redirect_callback(frontend, "error", Some(message))
+}
+
+#[derive(Deserialize)]
+pub struct ConnectorConfirmation {
+    confirm: bool,
+}
+
+#[derive(Serialize)]
+pub struct ConnectorContinuationPreview {
+    provider: String,
+    account: String,
+}
+
+pub async fn preview_connector_continuation(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<ConnectorContinuationPreview>> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    let user_id = auth_user.user_id.to_string();
+    let pending = connector_launch_service::preview(&state.db, &id, &user_id).await?;
+    let provider = provider_service::get_provider(&state.db, &pending.provider_config_id).await?;
+    let account = admin_user_service::get_user_email(&state.db, &user_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Connection request unavailable".into()))?;
+    Ok(Json(ConnectorContinuationPreview {
+        provider: provider.name,
+        account,
+    }))
+}
+
+pub async fn confirm_connector_continuation(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<String>,
+    Form(body): Form<ConnectorConfirmation>,
+) -> AppResult<axum::response::Response> {
+    super::login_client_context::require_first_party_human(&auth_user)?;
+    if !body.confirm {
+        return Err(AppError::ValidationError(
+            "Confirm the connection to continue".into(),
+        ));
+    }
+    let user_id = auth_user.user_id.to_string();
+    let (pending, code) =
+        connector_launch_service::confirm(&state.db, &state.encryption_keys, &id, &user_id).await?;
+    let response = finish_connector_callback(&state, Some(&auth_user), &pending, &code)
+        .await
+        .into_response();
+    let location = response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| url::Url::parse(value).ok());
+    let frontend =
+        url::Url::parse(&state.config.frontend_url).expect("configured frontend URL should parse");
+    let return_url = location
+        .filter(|location| {
+            if location.origin() == frontend.origin() {
+                return true;
+            }
+            let mut base = location.clone();
+            base.set_query(None);
+            base.set_fragment(None);
+            pending.app_return_uri.as_deref() == Some(base.as_str())
+                && super::mobile_redirect::validate_app_return_uri(
+                    base.as_str(),
+                    &state.config.mobile_app_return_schemes,
+                )
+                .is_ok()
+        })
+        .unwrap_or_else(|| {
+            frontend
+                .join("/providers/callback?status=error")
+                .expect("local URL")
+        });
+    // End the form submission before a custom-scheme or cross-origin
+    // navigation. The interstitial rechecks the destination at the sink.
+    Ok(super::oauth_consent_response::redirect_interstitial(
+        return_url.as_str(),
+        "Returning to the application",
+        "Redirecting to the application…",
+        0,
+    ))
+}
+
 async fn fail_callback_placeholders(
     db: &mongodb::Database,
     oauth_state: &OAuthState,
@@ -1156,6 +1379,7 @@ async fn fail_callback_placeholders(
 pub async fn generic_oauth_callback_post(
     State(state): State<AppState>,
     opt_auth_user: OptionalAuthUser,
+    headers: HeaderMap,
     Form(params): Form<HashMap<String, String>>,
 ) -> axum::response::Redirect {
     let query = GenericOAuthCallbackQuery {
@@ -1164,7 +1388,7 @@ pub async fn generic_oauth_callback_post(
         error: params.get("error").cloned(),
         error_description: params.get("error_description").cloned(),
     };
-    generic_oauth_callback_impl(state, opt_auth_user.0, query).await
+    generic_oauth_callback_with_headers(state, opt_auth_user.0, query, &headers).await
 }
 
 /// Build a redirect URL to the frontend callback page with status params.
@@ -1725,7 +1949,10 @@ fn ensure_callback_user_matches_state(
 
 #[cfg(test)]
 mod tests {
+    mod legacy_device_codes;
+
     use super::*;
+    use crate::crypto::aes::EncryptionKeys;
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::connect_link::{
         COLLECTION_NAME as CONNECT_LINKS, ConnectLink, ConnectLinkStatus,
@@ -1743,6 +1970,7 @@ mod tests {
     };
     use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
     use crate::mw::auth::AuthMethod;
+    use crate::services::credential_record_service;
     use crate::test_utils::{
         connect_test_database, test_app_state, test_membership, test_user, test_user_endpoint,
         test_user_service,
@@ -1833,6 +2061,72 @@ mod tests {
         }
     }
 
+    async fn set_provider_client(
+        keys: &EncryptionKeys,
+        provider: &mut ProviderConfig,
+        client: &str,
+        secret: Option<&str>,
+    ) {
+        for (field, slot, value) in [
+            (
+                "client_id_encrypted",
+                &mut provider.client_id_encrypted,
+                Some(client),
+            ),
+            (
+                "client_secret_encrypted",
+                &mut provider.client_secret_encrypted,
+                secret,
+            ),
+        ] {
+            *slot = match value {
+                Some(value) => {
+                    let encrypted = credential_record_service::encrypt(
+                        keys,
+                        PROVIDER_CONFIGS,
+                        &provider.id,
+                        credential_record_service::PLATFORM_OWNER,
+                        field,
+                        value.as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                    credential_record_service::mark_version(
+                        &mut provider.secret_context_versions,
+                        keys,
+                        field,
+                    );
+                    Some(encrypted)
+                }
+                None => {
+                    provider.secret_context_versions.remove(field);
+                    None
+                }
+            };
+        }
+    }
+
+    async fn set_provider_tokens(
+        keys: &EncryptionKeys,
+        token: &mut UserProviderToken,
+        access: &str,
+        refresh: &str,
+    ) {
+        let (versions, access, refresh) = credential_record_service::oauth_token_fields(
+            keys,
+            &token.id,
+            &token.user_id,
+            Some(token),
+            access,
+            Some(refresh),
+        )
+        .await
+        .unwrap();
+        token.secret_context_versions = versions;
+        token.access_token_encrypted = Some(access);
+        token.refresh_token_encrypted = refresh;
+    }
+
     fn test_provider_token(token_id: &str, user_id: &str, provider_id: &str) -> UserProviderToken {
         let now = Utc::now();
         UserProviderToken {
@@ -1864,6 +2158,8 @@ mod tests {
     fn test_oauth_state(state_id: &str, user_id: &str, provider_id: &str) -> OAuthState {
         let now = Utc::now();
         OAuthState {
+            launch_proof_hash: Some(crate::crypto::token::hash_token("test-launch-proof")),
+            pending_callback: None,
             history_context: crate::services::service_history::context::current(),
             id: state_id.to_string(),
             user_id: user_id.to_string(),
@@ -2214,20 +2510,13 @@ mod tests {
         let provider_id = Uuid::new_v4().to_string();
 
         let mut provider = test_provider_config(&provider_id);
-        provider.client_id_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-id")
-                .await
-                .unwrap(),
-        );
-        provider.client_secret_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-secret")
-                .await
-                .unwrap(),
-        );
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-client-id",
+            Some("test-client-secret"),
+        )
+        .await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(provider)
             .await
@@ -2237,7 +2526,7 @@ mod tests {
         let connection_id = before.connection_id.clone().expect("connection id");
         assert_eq!(before.status, "failed");
 
-        let Json(response) = initiate_oauth_connect(
+        let (_, Json(response)) = initiate_oauth_connect(
             State(state),
             crate::test_utils::test_auth_user(&user_id),
             Path(provider_id.clone()),
@@ -2297,27 +2586,20 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
         let mut provider = test_provider_config(&provider_id);
-        provider.client_id_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-id")
-                .await
-                .unwrap(),
-        );
-        provider.client_secret_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-secret")
-                .await
-                .unwrap(),
-        );
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-client-id",
+            Some("test-client-secret"),
+        )
+        .await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(provider)
             .await
             .unwrap();
         let (service_id, key_id) = insert_failed_oauth_service(&db, &user_id, &provider_id).await;
 
-        let Json(response) = initiate_oauth_connect(
+        let (_, Json(response)) = initiate_oauth_connect(
             State(state),
             crate::test_utils::test_auth_user(&user_id),
             Path(provider_id),
@@ -2394,14 +2676,13 @@ mod tests {
         provider.token_url = None;
         provider.device_code_url = Some(device_url);
         provider.device_verification_url = Some("https://provider.example/device".to_string());
-        provider.client_id_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-id")
-                .await
-                .unwrap(),
-        );
-        provider.client_secret_encrypted = None;
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-client-id",
+            None,
+        )
+        .await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(provider)
             .await
@@ -3079,20 +3360,13 @@ mod tests {
 
         let mut provider = test_provider_config(&provider_id);
         provider.token_url = Some(token_url);
-        provider.client_id_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-id")
-                .await
-                .unwrap(),
-        );
-        provider.client_secret_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"test-client-secret")
-                .await
-                .unwrap(),
-        );
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-client-id",
+            Some("test-client-secret"),
+        )
+        .await;
 
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(provider)
@@ -3335,10 +3609,13 @@ mod tests {
             .mount(&remote)
             .await;
         let mut provider = test_provider_config(&provider_id);
-        provider.client_id_encrypted =
-            Some(state.encryption_keys.encrypt(b"test-app").await.unwrap());
-        provider.client_secret_encrypted =
-            Some(state.encryption_keys.encrypt(b"test-secret").await.unwrap());
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "test-app",
+            Some("test-secret"),
+        )
+        .await;
         provider.revocation = Some(RevocationConfig {
             effect_scope: None,
             request_encoding: "form".to_string(),
@@ -3352,20 +3629,13 @@ mod tests {
             .await
             .unwrap();
         let mut token = test_provider_token(&token_id, &user_id, &provider_id);
-        token.access_token_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"provider-access")
-                .await
-                .unwrap(),
-        );
-        token.refresh_token_encrypted = Some(
-            state
-                .encryption_keys
-                .encrypt(b"provider-refresh")
-                .await
-                .unwrap(),
-        );
+        set_provider_tokens(
+            &state.encryption_keys,
+            &mut token,
+            "provider-access",
+            "provider-refresh",
+        )
+        .await;
         db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .insert_one(token)
             .await
@@ -3627,10 +3897,13 @@ mod tests {
             let key_id = Uuid::new_v4().to_string();
             let mut provider = test_provider_config(&provider_id);
             provider.token_url = Some(token_url.clone());
-            provider.client_id_encrypted =
-                Some(state.encryption_keys.encrypt(b"client").await.unwrap());
-            provider.client_secret_encrypted =
-                Some(state.encryption_keys.encrypt(b"secret").await.unwrap());
+            set_provider_client(
+                &state.encryption_keys,
+                &mut provider,
+                "client",
+                Some("secret"),
+            )
+            .await;
             db.collection(PROVIDER_CONFIGS)
                 .insert_one(provider)
                 .await
@@ -3812,15 +4085,43 @@ mod tests {
         let epochs = get_api_key(&db, &key_id).await.credential_epoch;
         assert!(epochs >= 1);
         let (token_url, server) = spawn_oauth_token_server().await;
-        db.collection::<bson::Document>(PROVIDER_CONFIGS).update_one(doc! { "_id": &provider_id },doc! { "$set": { "provider_type": "device_code", "device_token_url": token_url, "client_id_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: state.encryption_keys.encrypt(b"client").await.unwrap() } } }).await.unwrap();
+        let mut set = doc! { "provider_type": "device_code", "device_token_url": token_url };
+        let field = "client_id_encrypted";
+        let client_id = credential_record_service::encrypt(
+            &state.encryption_keys,
+            PROVIDER_CONFIGS,
+            &provider_id,
+            credential_record_service::PLATFORM_OWNER,
+            field,
+            b"client",
+        )
+        .await
+        .unwrap();
+        set.insert(
+            field,
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: client_id,
+            },
+        );
+        let mut unset = bson::Document::new();
+        credential_record_service::mark_classic_update(
+            &mut set,
+            &mut unset,
+            &state.encryption_keys,
+            field,
+        );
+        db.collection::<bson::Document>(PROVIDER_CONFIGS)
+            .update_one(
+                doc! { "_id": &provider_id },
+                doc! { "$set": set, "$unset": unset },
+            )
+            .await
+            .unwrap();
         let state_id = Uuid::new_v4().to_string();
         let mut oauth = test_oauth_state(&state_id, &owner, &provider_id);
-        oauth.device_code_encrypted = Some(hex::encode(
-            state.encryption_keys.encrypt(b"device").await.unwrap(),
-        ));
-        oauth.user_code_encrypted = Some(hex::encode(
-            state.encryption_keys.encrypt(b"user-code").await.unwrap(),
-        ));
+        oauth.device_code_encrypted = Some(legacy_device_codes::DEVICE_CODE.into());
+        oauth.user_code_encrypted = Some(legacy_device_codes::USER_CODE.into());
         oauth.history_context = Some(context.clone());
         db.collection(OAUTH_STATES).insert_one(oauth).await.unwrap();
         context::scope(context::system("polling_request"), async {
@@ -3884,8 +4185,7 @@ mod tests {
         db.collection(USER_API_KEYS).insert_one(key).await.unwrap();
         let keys = crate::test_utils::test_encryption_keys();
         let mut token = test_provider_token(&Uuid::new_v4().to_string(), &owner, &provider);
-        token.access_token_encrypted = Some(keys.encrypt(b"recovered-access").await.unwrap());
-        token.refresh_token_encrypted = Some(keys.encrypt(b"recovered-refresh").await.unwrap());
+        set_provider_tokens(&keys, &mut token, "recovered-access", "recovered-refresh").await;
         db.collection(USER_PROVIDER_TOKENS)
             .insert_one(token)
             .await
@@ -4042,15 +4342,18 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
         let mut provider = test_provider_config(&provider_id);
-        provider.client_id_encrypted =
-            Some(state.encryption_keys.encrypt(b"client").await.unwrap());
-        provider.client_secret_encrypted =
-            Some(state.encryption_keys.encrypt(b"secret").await.unwrap());
+        set_provider_client(
+            &state.encryption_keys,
+            &mut provider,
+            "client",
+            Some("secret"),
+        )
+        .await;
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(provider)
             .await
             .unwrap();
-        let Json(response) = initiate_oauth_connect(
+        let (_, Json(response)) = initiate_oauth_connect(
             State(state),
             crate::test_utils::test_auth_user(&user_id),
             Path(provider_id),
@@ -4073,6 +4376,77 @@ mod tests {
             Some("nyxid://services/oauth-return")
         );
         assert_eq!((saved.expires_at - saved.created_at).num_seconds(), 600);
+    }
+
+    #[tokio::test]
+    async fn connector_continuation_preserves_mobile_result_and_requires_the_initiator() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("connector_mobile_continue").await;
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let state_id = Uuid::new_v4().to_string();
+        let mut oauth_state = test_oauth_state(&state_id, &user_id, &provider_id);
+        oauth_state.app_return_uri = Some("nyxid://services/oauth-return".into());
+        let collection = db.collection::<OAuthState>(OAUTH_STATES);
+        collection.insert_one(&oauth_state).await.unwrap();
+
+        let location = redirect_location(
+            generic_oauth_callback_with_headers(
+                state.clone(),
+                None,
+                GenericOAuthCallbackQuery {
+                    code: Some("test-provider-code".into()),
+                    state: Some(state_id.clone()),
+                    error: None,
+                    error_description: None,
+                },
+                &HeaderMap::new(),
+            )
+            .await,
+        );
+        let id = location
+            .strip_prefix("http://localhost:3000/connector-continuation/")
+            .unwrap();
+        let saved = collection
+            .find_one(doc! { "_id": &state_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!saved.consumed);
+        assert_eq!(saved.pending_callback.unwrap().id, id);
+        assert!(!location.contains("test-provider-code"));
+
+        let other_user = crate::test_utils::test_auth_user(&Uuid::new_v4().to_string());
+        let denied = confirm_connector_continuation(
+            State(state.clone()),
+            other_user,
+            Path(id.to_string()),
+            Form(ConnectorConfirmation { confirm: true }),
+        )
+        .await;
+        assert!(matches!(denied, Err(AppError::NotFound(_))));
+
+        // The provider is intentionally absent. The original mobile client
+        // must get the fixed exchange error when the initiator confirms.
+        let completed = confirm_connector_continuation(
+            State(state),
+            crate::test_utils::test_auth_user(&user_id),
+            Path(id.to_string()),
+            Form(ConnectorConfirmation { confirm: true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed.status(), axum::http::StatusCode::OK);
+        assert_eq!(completed.headers()[header::CACHE_CONTROL], "no-store");
+        let html = axum::body::to_bytes(completed.into_body(), 16_384)
+            .await
+            .unwrap();
+        let html = std::str::from_utf8(&html).unwrap();
+        assert!(
+            html.contains("nyxid://services/oauth-return?status=error&amp;code=exchange_failed")
+        );
+        assert!(!html.contains("test-provider-code"));
     }
 
     #[tokio::test]
@@ -4110,10 +4484,13 @@ mod tests {
                 server = Some(handle);
                 let mut provider = test_provider_config(&provider_id);
                 provider.token_url = Some(token_url);
-                provider.client_id_encrypted =
-                    Some(state.encryption_keys.encrypt(b"client").await.unwrap());
-                provider.client_secret_encrypted =
-                    Some(state.encryption_keys.encrypt(b"secret").await.unwrap());
+                set_provider_client(
+                    &state.encryption_keys,
+                    &mut provider,
+                    "client",
+                    Some("secret"),
+                )
+                .await;
                 db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
                     .insert_one(provider)
                     .await

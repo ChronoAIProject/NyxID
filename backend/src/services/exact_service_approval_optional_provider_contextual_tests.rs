@@ -32,6 +32,7 @@ async fn optional_authority_exact_redemption_forwards_frozen_header_once() {
         )
         .insert_one(
             crate::models::service_approval_config::ServiceApprovalConfig {
+                approvers: Default::default(),
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: f.caller.approval_owner_user_id.clone(),
                 service_id: approval_target.service_id,

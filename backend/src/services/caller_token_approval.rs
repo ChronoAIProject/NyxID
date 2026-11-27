@@ -255,6 +255,7 @@ mod tests {
     };
     use axum::Json;
     use axum::extract::{Path, State};
+    use futures::TryStreamExt;
 
     #[tokio::test]
     async fn caller_token_approval_bootstrap_is_once_and_excludes_manager_rows() {
@@ -364,15 +365,17 @@ mod tests {
             .await
             .unwrap();
         let state = test_app_state(db.clone());
-        let update = |actor: &str, approved: bool, url: &str| {
-            let body = serde_json::from_value(serde_json::json!({
+        let approval = |approved: bool, url: &str| {
+            serde_json::from_value(serde_json::json!({
                 "approve_caller_token_destination": {
                     "target_id": "docs",
                     "destination_url": url,
                     "approved": approved,
                 },
             }))
-            .unwrap();
+            .unwrap()
+        };
+        let update = |actor: &str, body| {
             crate::handlers::services::update_service(
                 State(state.clone()),
                 test_auth_user(actor),
@@ -381,17 +384,28 @@ mod tests {
                 Json(body),
             )
         };
+        // The handler returns before service_updated commits. Finish that write
+        // before another approval transaction reads this fixture's unindexed tail.
+        let admin_update = async |body| {
+            let written =
+                audit_service::notify_on_audit_write_for_user("service_updated", &admin.id);
+            let _ = update(&admin.id, body).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(30), written)
+                .await
+                .expect("timed out waiting for service_updated to commit")
+                .expect("service_updated audit watcher closed");
+        };
         assert!(matches!(
-            update(&manager.id, true, target).await,
+            update(&manager.id, approval(true, target)).await,
             Err(AppError::Forbidden(_))
         ));
-        let stale = update(&admin.id, true, &catalog.base_url)
+        let stale = update(&admin.id, approval(true, &catalog.base_url))
             .await
             .err()
             .unwrap();
         assert!(matches!(stale, AppError::Conflict(_)), "{stale}");
-        let _ = update(&admin.id, true, target).await.unwrap();
-        let _ = update(&admin.id, true, target).await.unwrap();
+        admin_update(approval(true, target)).await;
+        admin_update(approval(true, target)).await;
         let rows = db.collection::<DownstreamService>(COLLECTION_NAME);
         let policy = rows
             .find_one(doc! {"_id":&catalog.id})
@@ -401,7 +415,7 @@ mod tests {
         assert!(approved(&policy, Some("docs"), target));
         assert!(!approved(&policy, None, &catalog.base_url));
         assert!(!approved(&policy, Some("docs"), &catalog.base_url));
-        let _ = update(&admin.id, false, target).await.unwrap();
+        admin_update(approval(false, target)).await;
         assert!(!approved(
             &rows
                 .find_one(doc! {"_id":&catalog.id})
@@ -411,20 +425,12 @@ mod tests {
             Some("docs"),
             target
         ));
-        let _ = update(&admin.id, true, target).await.unwrap();
+        admin_update(approval(true, target)).await;
         for url in ["https://updated.example.test", target] {
             let change =
                 serde_json::from_value(serde_json::json!({"destination_targets":{"docs":url}}))
                     .unwrap();
-            let _ = crate::handlers::services::update_service(
-                State(state.clone()),
-                test_auth_user(&admin.id),
-                Default::default(),
-                Path(catalog.id.clone()),
-                Json(change),
-            )
-            .await
-            .unwrap();
+            admin_update(change).await;
             let current = rows
                 .find_one(doc! {"_id":&catalog.id})
                 .await
@@ -455,6 +461,26 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(report.status, audit_chain_service::AuditChainStatus::Ok);
+        let nearby_rows = async {
+            let Some(broken) = &report.break_info else {
+                return Ok(Vec::new());
+            };
+            let seq = broken.break_seq;
+            logs.find(doc! {"seq": {"$gte": seq.saturating_sub(2), "$lte": seq.saturating_add(2)}})
+                .projection(
+                    doc! {"_id": 1, "seq": 1, "event_type": 1, "prev_hash": 1, "entry_hash": 1},
+                )
+                .sort(doc! {"seq": 1, "_id": 1})
+                .limit(12)
+                .await?
+                .try_collect::<Vec<_>>()
+                .await
+        };
+        assert_eq!(
+            report.status,
+            audit_chain_service::AuditChainStatus::Ok,
+            "{report:?}\nNearby audit rows: {:?}",
+            nearby_rows.await
+        );
     }
 }

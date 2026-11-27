@@ -47,13 +47,12 @@ async fn execute_public_proxy(
                 .get::<crate::services::billing::route_inventory::BillingRoutePolicy>()
                 .copied(),
         )?;
-    let request_path = request.uri().path().to_string();
     let client_ip = crate::mw::rate_limit::enforce_public_ip_rate_limit(
         &state.public_proxy_limiter,
         request.headers(),
         peer,
         &state.config.trusted_proxy_ips,
-        &request_path,
+        crate::mw::request_trace::route_label(request.extensions()),
     )
     .await?;
 
@@ -158,7 +157,7 @@ async fn execute_public_proxy(
     Ok(sanitized)
 }
 
-fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTarget {
+pub(super) fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTarget {
     service.auth_method = "none".to_string();
     service.auth_key_name = String::new();
     service.identity_propagation_mode = "none".to_string();

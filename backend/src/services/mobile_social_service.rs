@@ -1,5 +1,9 @@
+#[cfg(test)]
+mod mixed;
+pub(super) mod record;
+
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use bson::{Binary, doc, spec::BinarySubtype};
+use bson::doc;
 use chrono::{Duration, Utc};
 use mongodb::{Database, options::WriteConcern};
 use serde::{Deserialize, Serialize};
@@ -86,6 +90,17 @@ struct PendingDelivery {
 
 crate::errors::redacted_debug!(TokenDelivery, PendingDelivery);
 
+impl PendingDelivery {
+    fn decode(bytes: &[u8], user_id: &str) -> AppResult<Self> {
+        let invalid = || AppError::Internal("Invalid stored mobile sign-in response".into());
+        let pending: Self = bson::from_slice(bytes).map_err(|_| invalid())?;
+        if !pending.rows.matches_delivery_user(user_id) {
+            return Err(invalid());
+        }
+        Ok(pending)
+    }
+}
+
 pub(crate) async fn issue_code(
     db: &Database,
     keys: &EncryptionKeys,
@@ -107,23 +122,26 @@ pub(crate) async fn issue_code(
         bson::to_vec(&pending)
             .map_err(|_| AppError::Internal("Could not encode mobile sign-in response".into()))?,
     );
-    let aad = format!("mobile-social-delivery-v1:{code_hash}:{challenge}:{user_id}");
-    let bytes = keys.encrypt_with_aad(&payload, aad.as_bytes()).await?;
+    let id = Uuid::new_v4().to_string();
+    let ciphertext = record::Binding::new(&id, user_id, &code_hash, challenge)
+        .seal(keys, &payload)
+        .await?;
     let delivery = MobileSocialDelivery {
-        id: Uuid::new_v4().to_string(),
+        id,
         code_hash,
         code_challenge: challenge.into(),
         user_id: user_id.into(),
-        ciphertext: Binary {
-            subtype: BinarySubtype::Generic,
-            bytes,
-        },
+        ciphertext,
+        ciphertext_context_version: keys.contextual_record_writes().then_some(3),
         expires_at: Utc::now() + Duration::seconds(60),
     };
-    db.collection::<MobileSocialDelivery>(MobileSocialDelivery::COLLECTION_NAME)
-        .insert_one(delivery)
-        .write_concern(WriteConcern::majority())
-        .await?;
+    super::erasure_admission::insert_owned(
+        db,
+        MobileSocialDelivery::COLLECTION_NAME,
+        user_id,
+        &delivery,
+    )
+    .await?;
     Ok(code)
 }
 
@@ -155,18 +173,13 @@ pub(crate) async fn redeem(
         .find_one(filter.clone())
         .await?
         .ok_or_else(invalid_code)?;
-    let aad = format!(
-        "mobile-social-delivery-v1:{code_hash}:{challenge}:{}",
-        row.user_id
-    );
-    let payload = Zeroizing::new(
-        keys.decrypt_with_aad(&row.ciphertext.bytes, aad.as_bytes())
-            .await?,
-    );
-    let pending: PendingDelivery = bson::from_slice(&payload)
-        .map_err(|_| AppError::Internal("Invalid stored mobile sign-in response".into()))?;
+    let payload = record::Binding::new(&row.id, &row.user_id, &code_hash, &challenge)
+        .open(keys, &row)
+        .await?;
+    let pending = PendingDelivery::decode(&payload, &row.user_id)?;
     let mut claim_filter = filter;
     claim_filter.insert("_id", row.id);
+    claim_filter.insert("user_id", row.user_id);
     super::transaction_service::run_db_only(
         db,
         &(db, deliveries, claim_filter, pending.rows),

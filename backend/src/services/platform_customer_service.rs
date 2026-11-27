@@ -142,13 +142,11 @@ async fn handle_message(
                 return Err(error);
             };
             let bot = crate::services::channel_bot_service::get_bot(&state.db, bot_id).await?;
-            let token = zeroize::Zeroizing::new(
-                crate::services::channel_bot_service::decrypt_bot_token(
-                    &state.encryption_keys,
-                    &bot,
-                )
-                .await?,
-            );
+            let token = crate::services::channel_bot_service::decrypt_bot_token(
+                &state.encryption_keys,
+                &bot,
+            )
+            .await?;
             inference::admit_effect(state, authority).await?;
             if inference::admit_public_reply(state, authority).await? {
                 api.call(
@@ -181,10 +179,9 @@ async fn handle_message(
     };
     let reply = customer_message(setup.template, &reply)?;
     let bot = crate::services::channel_bot_service::get_bot(&state.db, bot_id).await?;
-    let token = zeroize::Zeroizing::new(
+    let token =
         crate::services::channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot)
-            .await?,
-    );
+            .await?;
     inference::admit_effect(state, &authority).await?;
     if !inference::admit_public_reply(state, &authority).await? {
         return Ok(());

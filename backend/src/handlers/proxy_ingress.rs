@@ -3,9 +3,9 @@ use std::future::Future;
 
 use axum::{
     body::Body,
-    extract::OriginalUri,
+    extract::{MatchedPath, OriginalUri},
     http::{Method, Request},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 
 use crate::{
@@ -23,8 +23,7 @@ mod body;
 #[derive(Clone, Copy)]
 pub(crate) struct HttpIngress;
 
-/// Set before routing, authentication or body reads. Only callback routes open
-/// the approval scope, including their nested service dispatches.
+/// Start of the caller's wait budget, before routing, authentication or body reads.
 #[derive(Clone, Copy)]
 pub(crate) struct RequestReceivedAt(pub(super) chrono::DateTime<chrono::Utc>);
 
@@ -35,14 +34,53 @@ pub(crate) async fn stamp(mut request: Request<Body>) -> Request<Body> {
     request
 }
 
+/// Consume the request-local control before any adapter can retain or forward it.
+pub(crate) async fn approval_wait_budget(
+    mut request: Request<Body>,
+    next: axum::middleware::Next,
+) -> AppResult<Response> {
+    use crate::services::approval_service::{CONNECTED_WAIT_BUDGET, WaitBudget};
+    const HEADER: &str = "x-nyxid-approval-wait-seconds";
+    let mut values = request.headers().get_all(HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(next.run(request).await);
+    };
+    let seconds = value
+        .to_str()
+        .ok()
+        .filter(|s| s.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|s| (10..=300).contains(s) && values.next().is_none())
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "X-NyxID-Approval-Wait-Seconds must be one integer between 10 and 300".into(),
+            )
+        })?;
+    let received_at = request
+        .extensions()
+        .get::<RequestReceivedAt>()
+        .map_or_else(chrono::Utc::now, |at| at.0);
+    request.headers_mut().remove(HEADER);
+    Ok(CONNECTED_WAIT_BUDGET
+        .scope(
+            WaitBudget {
+                received_at,
+                seconds,
+            },
+            next.run(request),
+        )
+        .await)
+}
+
 pub(crate) async fn callback(request: Request<Body>, next: axum::middleware::Next) -> Response {
     let received = request
         .extensions()
         .get::<RequestReceivedAt>()
         .map_or_else(chrono::Utc::now, |at| at.0);
     let mut response = crate::services::approval_service::CALLBACK_INGRESS
-        .scope(received, next.run(request))
-        .await;
+        .scope(received, approval_wait_budget(request, next))
+        .await
+        .into_response();
     // Apply the document sandbox regardless of the media type declared upstream.
     response.headers_mut().append(
         axum::http::header::CONTENT_SECURITY_POLICY,
@@ -94,6 +132,7 @@ pub(super) async fn execute<F: Future<Output = AppResult<Response>>>(
             crate::mw::refusal_throttle::RETRY_SECONDS,
         ));
     }
+    let route = request.extensions().get::<MatchedPath>().cloned();
     let guard = ProbeGuard::new(limiter, key, admission == Admission::Probe);
     let (result, dispatched) = destination_routing::observe_http_dispatch(forward(request)).await;
     let code = if dispatched {
@@ -105,16 +144,17 @@ pub(super) async fn execute<F: Future<Output = AppResult<Response>>>(
             .filter(|error| error.counts_for_refusal_throttle())
             .map(AppError::error_code)
     };
+    let path = route.as_ref().map_or("<unmatched>", MatchedPath::as_str);
     match guard.finish(code) {
         Some(Transition::Armed { code, count }) => tracing::warn!(
             request_digest = %hex::encode(key),
-            caller_id = %caller, caller_kind = kind, service, path = uri.path(),
+            caller_id = %caller, caller_kind = kind, service, path,
             method = method.as_str(), error_code = code, count,
             "Proxy refusal throttle armed"
         ),
         Some(Transition::Cleared { code, count }) => tracing::warn!(
             request_digest = %hex::encode(key),
-            caller_id = %caller, caller_kind = kind, service, path = uri.path(),
+            caller_id = %caller, caller_kind = kind, service, path,
             method = method.as_str(), error_code = code, count,
             "Proxy refusal throttle cleared"
         ),
@@ -138,6 +178,48 @@ fn caller_identity<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn approval_wait_2874_validates_one_header_and_clamps_to_configured_timeout() {
+        use axum::{Router, http::StatusCode, middleware, routing::get};
+        use tower::ServiceExt;
+
+        const HEADER: &str = "x-nyxid-approval-wait-seconds";
+        let start = chrono::Utc::now();
+        let route = Router::new()
+            .route(
+                "/",
+                get(move |req: Request<Body>| async move {
+                    assert!(!req.headers().contains_key(HEADER));
+                    assert_eq!(
+                        crate::services::approval_service::connected_budget_deadline(30),
+                        Some(start + chrono::Duration::seconds(30))
+                    );
+                }),
+            )
+            .layer(middleware::from_fn(callback))
+            .layer(axum::Extension(RequestReceivedAt(start)));
+        for (values, expected) in [
+            (vec!["80"], StatusCode::OK),
+            (vec!["300"], StatusCode::OK),
+            (vec!["301"], StatusCode::BAD_REQUEST),
+            (vec!["-10"], StatusCode::BAD_REQUEST),
+            (vec!["10.5"], StatusCode::BAD_REQUEST),
+            (vec![""], StatusCode::BAD_REQUEST),
+            (vec!["10", "20"], StatusCode::BAD_REQUEST),
+        ] {
+            let mut req = Request::builder().uri("/");
+            for value in values {
+                req = req.header(HEADER, value);
+            }
+            let response = route
+                .clone()
+                .oneshot(req.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
+    }
 
     #[tokio::test]
     async fn proxy_documents_have_an_opaque_origin_and_preserve_response_bytes() {

@@ -45,6 +45,7 @@ fn generated_artifact_metadata_omits_absent_fields_but_persists_populated_bson()
         artifact: Metadata::default(),
         chat_delivery: None,
         image_input: None,
+        pdf: None,
         image_inspection: None,
         origin: "tool".into(),
         pages: None,
@@ -1860,3 +1861,143 @@ async fn generated_live_retention_enforces_both_materialization_policy_orderings
 }
 
 include!("writer_cutover_tests.rs");
+
+#[tokio::test]
+async fn generated_artifact_publication_uses_retained_turn_grant_and_refuses_after_claim() {
+    use crate::services::channel_meta_service::scopes;
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    let db =
+        crate::test_utils::connect_transaction_test_database("meta_artifact_source_fence").await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    ensure_indexes(&db).await.unwrap();
+    let (w, _) = seeded(&db, &state.encryption_keys).await;
+    let bot = crate::services::channel_adapters::meta::tests::registered_bot(
+        &state,
+        &w.user_id,
+        "instagram",
+    )
+    .await;
+    scopes::ensure_indexes(&db).await.unwrap();
+    let scope =
+        crate::services::transaction_service::run_db_only(&db, &(&db, &bot), |tx, &(db, bot)| {
+            Box::pin(scopes::ensure_current(db, tx, bot, true))
+        })
+        .await
+        .unwrap();
+    let grant = scopes::reference(&bot).unwrap();
+    // The immutable source row is the authority, not the mutable artifact
+    // watch or a caller-supplied grant. This also pins the generic writer's
+    // refusal if a channel-derived source reaches this retained lineage.
+    db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .update_one(
+            doc! {"user_id":&w.user_id,"conversation_id":&w.conversation_id,"turn_id":&w.turn_id},
+            doc! {"$set":{"meta_grants":[bson::to_bson(&grant).unwrap()]}},
+        )
+        .await
+        .unwrap();
+    // Long ordinary histories share this artifact path. Untagged rows must
+    // neither exhaust the proof limit nor hide the one tagged source.
+    let ordinary: Vec<_> = (2..=102).map(|seq| doc! {
+        "_id": Uuid::new_v4().to_string(), "user_id": &w.user_id,
+        "conversation_id": &w.conversation_id, "turn_id": &w.turn_id,
+        "role": "assistant", "origin":"user", "seq":seq,
+        "text":"Independent progress", "status":"completed", "created_at":bson::DateTime::now(),
+    }).collect();
+    db.collection::<Document>(crate::models::assistant_message::COLLECTION_NAME)
+        .insert_many(ordinary)
+        .await
+        .unwrap();
+    db.collection::<Document>(WATCHES)
+        .update_one(
+            doc! {"_id":&w.id},
+            doc! {"$set":{"state":"waiting","lease_id":"source-fence",
+            "lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(1))}},
+        )
+        .await
+        .unwrap();
+    let live = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"_id":&w.id})
+        .await
+        .unwrap()
+        .unwrap();
+    let result = sandbox::parse(
+        &body("../../movie.mp4", MP4),
+        live.operation_id.as_deref().unwrap(),
+    )
+    .unwrap();
+    let reservation = byte_budget::reserve(sandbox::RESERVATION).await.unwrap();
+    persist(
+        &db,
+        &state.encryption_keys,
+        &live,
+        &result,
+        &sandbox::Status {
+            expires_at: None,
+            version: Some("7".into()),
+        },
+        &reservation,
+    )
+    .await
+    .unwrap();
+    db.collection::<Document>(WATCHES)
+        .update_one(
+            doc! {"_id":&w.id},
+            doc! {"$set":{"state":"waiting","lease_id":"source-fence",
+            "lease_until":bson::DateTime::from_chrono(Utc::now()+Duration::minutes(1))}},
+        )
+        .await
+        .unwrap();
+    let live = db
+        .collection::<AsyncServiceOperation>(WATCHES)
+        .find_one(doc! {"_id":&w.id})
+        .await
+        .unwrap()
+        .unwrap();
+    db.collection::<Document>(crate::models::channel_meta::GRANT_SCOPES)
+        .update_one(
+            doc! {"_id":&scope.id},
+            doc! {"$set":{"erasure_requested":true},"$inc":{"revision":1_i64}},
+        )
+        .await
+        .unwrap();
+    let before = db
+        .collection::<Document>(ARTIFACTS)
+        .find_one(doc! {"watch_id":&w.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        persist(
+            &db,
+            &state.encryption_keys,
+            &live,
+            &result,
+            &sandbox::Status {
+                expires_at: None,
+                version: Some("7".into())
+            },
+            &reservation
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        db.collection::<Document>(ARTIFACTS)
+            .find_one(doc! {"watch_id":&w.id})
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        db.collection::<Document>(WATCHES)
+            .find_one(doc! {"_id":&w.id})
+            .await
+            .unwrap()
+            .unwrap()
+            .get_str("state"),
+        Ok("waiting")
+    );
+    db.drop().await.unwrap();
+}

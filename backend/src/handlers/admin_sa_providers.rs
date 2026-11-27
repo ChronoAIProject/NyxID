@@ -80,7 +80,7 @@ pub struct AdminSaOAuthInitiateResponse {
     pub authorization_url: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct AdminSaDeviceCodeInitiateResponse {
     pub user_code: String,
     pub verification_uri: String,
@@ -89,10 +89,15 @@ pub struct AdminSaDeviceCodeInitiateResponse {
     pub interval: i32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct AdminSaDeviceCodePollRequest {
     pub state: String,
 }
+
+crate::errors::redacted_debug!(
+    AdminSaDeviceCodeInitiateResponse,
+    AdminSaDeviceCodePollRequest,
+);
 
 #[derive(Debug, Serialize)]
 pub struct AdminSaDeviceCodePollResponse {
@@ -262,7 +267,7 @@ pub async fn initiate_oauth_for_sa(
     auth_user: AuthUser,
     _headers: HeaderMap,
     Path((sa_id, provider_id)): Path<(String, String)>,
-) -> AppResult<Json<AdminSaOAuthInitiateResponse>> {
+) -> AppResult<(HeaderMap, Json<AdminSaOAuthInitiateResponse>)> {
     require_admin(&state, &auth_user).await?;
 
     let sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
@@ -299,9 +304,18 @@ pub async fn initiate_oauth_for_sa(
     )
     .await?;
 
-    Ok(Json(AdminSaOAuthInitiateResponse {
-        authorization_url: auth_result.authorization_url,
-    }))
+    let headers = super::user_tokens::connector_launch_headers(
+        &state,
+        &auth_user,
+        &auth_result.state_id,
+        &auth_result.launch_proof,
+    )?;
+    Ok((
+        headers,
+        Json(AdminSaOAuthInitiateResponse {
+            authorization_url: auth_result.authorization_url,
+        }),
+    ))
 }
 
 /// POST /api/v1/admin/service-accounts/{sa_id}/providers/{provider_id}/connect/device-code/initiate

@@ -3,7 +3,9 @@ import test from "node:test";
 import { URL, fileURLToPath } from "node:url";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
 import { historySchema, type AssistantHistory } from "./assistantTypes";
+import { AssistantTurnPerformance, CHAT_COMMIT_GRACE_MS, type ChatTurnTimings } from "./assistantTurnPerformance";
 import type { useAssistant } from "./useAssistant";
+import { buildApiError } from "../../lib/api/responseError";
 import type { streamAssistantTurn } from "../../lib/api/assistantApi";
 
 const A = `nyxa-${"a".repeat(32)}`;
@@ -27,7 +29,7 @@ function history(id: string): AssistantHistory {
   });
 }
 
-async function harness() {
+async function harness(overrideStream?: typeof streamAssistantTurn) {
   const agent = {
     id: "nyxbot",
     kind: "nyxbot",
@@ -84,7 +86,7 @@ async function harness() {
     },
     "../../lib/api/agentsApi": { agentsApi: { list: async () => agentList } },
     "../../lib/api/assistantApi": {
-      streamAssistantTurn: stream,
+      streamAssistantTurn: overrideStream ?? stream,
       assistantApi: {
         history: async (id: string) => {
           if (historyError) throw historyError;
@@ -411,4 +413,142 @@ test("2345 malformed history never leaks validation JSON or creates a recovery l
   await x.h.settle();
   assert.equal(x.h.value().error, undefined);
   x.h.unmount();
+});
+
+test("private send surfaces definite attachment refusals and consumes after possible admission", async () => {
+  for (const [error, admitted, expected] of [
+    [buildApiError({ error: "attachment_expired", error_code: 12101, message: "Attachment expired" }, 410), false, "attachment"],
+    [buildApiError({ error: "not_found", error_code: 1003, message: "Not found: Attachment not found" }, 404), false, "attachment"],
+    [buildApiError({ error: "not_found", error_code: 1003, message: "Not found: Conversation not found" }, 404), false, "refused"],
+    [buildApiError({ error: "attachment_expired", error_code: 12101, message: "Attachment expired" }, 410), true, "uncertain"],
+    [buildApiError(null, 0), false, "uncertain"],
+  ] as const) {
+    let attempts = 0;
+    const x = await harness(async (input, _event, _controller, accept) => {
+      attempts++;
+      assert.equal(input.attachmentIds?.length, 1);
+      if (admitted) accept?.();
+      throw error;
+    });
+    if (expected === "uncertain") x.setHistoryError(new Error("History connection lost"));
+    const send = x.h.value().send("Read this", undefined, {
+      conversationId: A,
+      attachmentIds: ["11111111-1111-4111-8111-111111111111"],
+      attachments: [],
+    });
+    if (expected === "attachment")
+      await assert.rejects(send, (cause) => cause === error);
+    else
+      assert.equal(await send, expected === "uncertain");
+    await x.h.settle();
+    assert.equal(x.h.value().sending, false);
+    assert.equal(x.h.value().recoveryRequired, expected === "uncertain");
+    assert.equal(attempts, 1);
+    x.h.unmount();
+  }
+});
+
+test("sampled streaming measures the first renderable text and freezes duration at the terminal event", async () => {
+  let tick = 0;
+  const metrics: ChatTurnTimings[] = [];
+  const sample = new AssistantTurnPerformance((timings) => metrics.push(timings), () => tick);
+  const x = await harness(async (_input, emit, _controller, admitted) => {
+    tick = 8;
+    admitted?.();
+    emit({ event: "turn.status", cursor: 1, conversation_id: A, turn_id: "private-turn", status: "running" });
+    emit({ event: "message.started", cursor: 2, message_id: "private-message", role: "assistant" });
+    emit({
+      event: "block.started", cursor: 3, block_id: "b", index: 0, message_id: "private-message",
+      block: { type: "text", block_id: "b", text: "<function_calls>internal data" },
+    });
+    tick = 15;
+    emit({ event: "block.delta", cursor: 4, block_id: "b", text: "</function_calls>" });
+    tick = 30;
+    emit({ event: "block.delta", cursor: 5, block_id: "b", text: "Private answer" });
+    tick = 40;
+    emit({ event: "turn.completed", turn_id: "private-turn", cursor: 6, status: "completed", error: null });
+    tick = 80;
+  });
+  await x.h.value().send("Private prompt", undefined, undefined, undefined, undefined, sample);
+  assert.equal(metrics.length, 0);
+  assert.equal(sample.commitFor("other"), undefined);
+  const commit = sample.commitFor("private-turn")!;
+  commit();
+  commit();
+  sample.finish("error");
+  assert.deepEqual(metrics, [{ outcome: "completed", headers_ms: 8, first_text_ms: 30, first_text_commit_ms: 80, duration_ms: 40 }]);
+  x.h.unmount();
+});
+
+test("tool-only completions, transport errors, deadlines and lifecycle cancellation produce one terminal result", async () => {
+  const configurations: [ChatTurnTimings["outcome"], typeof streamAssistantTurn][] = [
+    ["no_text", async (_input, emit) => {
+      emit({ event: "turn.status", cursor: 1, conversation_id: A, turn_id: "turn", status: "running" });
+      emit({ event: "turn.completed", cursor: 2, turn_id: "turn", status: "completed", error: null });
+    }],
+    ["error", async () => { throw new Error("transport failed"); }],
+    ["timeout", async (_input, _event, _controller, _admitted, onTimeout) => {
+      onTimeout?.();
+      throw new Error("transport aborted");
+    }],
+  ];
+  for (const [expected, stream] of configurations) {
+    const x = await harness(stream);
+    const metrics: ChatTurnTimings[] = [];
+    const sample = new AssistantTurnPerformance((value) => metrics.push(value), () => 0);
+    await x.h.value().send("secret", undefined, undefined, undefined, undefined, sample);
+    assert.deepEqual(metrics, [{ outcome: expected, duration_ms: 0 }]);
+    x.h.unmount();
+  }
+  const x = await harness();
+  const metrics: ChatTurnTimings[] = [];
+  const sample = new AssistantTurnPerformance((value) => metrics.push(value), () => 0);
+  const send = x.h.value().send("secret", undefined, undefined, undefined, undefined, sample);
+  x.h.value().openConversation(B);
+  x.streams[0]!.done.reject(new Error("request aborted"));
+  await send;
+  assert.deepEqual(metrics, [{ outcome: "cancelled", headers_ms: 0, duration_ms: 0 }]);
+  x.h.unmount();
+});
+
+test("a virtualized reply that never commits produces no synthetic commit time", (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const metrics: ChatTurnTimings[] = [];
+  const sample = new AssistantTurnPerformance((value) => metrics.push(value), () => 0);
+  const reply = { cursor: 2, turnId: "turn", blocks: [{ id: "b", index: 0, text: "Private answer" }] };
+  sample.observe({ event: "turn.status", turn_id: "turn", cursor: 1, conversation_id: A, status: "running" }, reply);
+  sample.observe({ event: "block.delta", cursor: 2, block_id: "b", text: "Private answer" }, reply);
+  const lateCommit = sample.commitFor("turn")!;
+  sample.finish("completed");
+  context.mock.timers.tick(CHAT_COMMIT_GRACE_MS);
+  lateCommit();
+  assert.deepEqual(metrics, [{ outcome: "completed", first_text_ms: 0, duration_ms: 0 }]);
+});
+
+test("withdrawing the local chat grant stops clock reads and discards a pending text commit", (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let reads = 0;
+  let unsubscriptions = 0;
+  let discard!: () => void;
+  const results: ChatTurnTimings[] = [];
+  const sample = new AssistantTurnPerformance(
+    (result) => results.push(result),
+    () => ++reads,
+    (listener) => { discard = listener; return () => { unsubscriptions++; }; },
+  );
+  const live = { cursor: 2, turnId: "t", blocks: [{ id: "b", index: 0, text: "body" }] };
+  sample.observe({ event: "turn.status", turn_id: "t", cursor: 1, conversation_id: A, status: "running" }, live);
+  sample.observe({ event: "block.delta", cursor: 2, block_id: "b", text: "body" }, live);
+  const commit = sample.commitFor("t")!;
+  sample.finish("completed");
+  discard();
+  const previous = reads;
+  sample.admitted();
+  commit();
+  sample.observe({ event: "block.delta", cursor: 3, block_id: "b", text: "later" }, live);
+  sample.finish("completed");
+  context.mock.timers.tick(CHAT_COMMIT_GRACE_MS);
+  assert.equal(reads, previous);
+  assert.equal(unsubscriptions, 1);
+  assert.deepEqual(results, []);
 });

@@ -242,3 +242,36 @@ export function billingUsage(
     },
   };
 }
+
+export function billingBenefitPreview(
+  allowances = [
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "images",
+  ].map((metric) =>
+    billingAllowance(metric as Parameters<typeof billingAllowance>[0]),
+  ),
+  page = 1,
+) {
+  return {
+    summary: {
+      remaining: "2",
+      unreserved: "1.5",
+      held: "0.5",
+      pending_activation: "0",
+      pending_reclaim: "0",
+      expired_awaiting_cleanup: "0",
+      restricted: "0",
+      generated_at: "2026-10-01T00:00:00Z",
+    },
+    grants: [
+      { ...billingGrant({ expires_at: null }), available: "1.5", held: "0.5" },
+    ],
+    allowances,
+    total_grants: 1,
+    page,
+    per_page: 50,
+  };
+}

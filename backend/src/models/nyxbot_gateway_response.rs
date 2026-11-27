@@ -23,6 +23,8 @@ pub struct GatewayResponse {
     pub revision: i64,
     #[serde(with = "crate::models::bson_bytes::required")]
     pub payload_ciphertext: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload_context_version: Option<u8>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

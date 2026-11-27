@@ -194,10 +194,14 @@ async fn read_document(
         .unwrap();
     let rpc: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(rpc.get("error").is_none());
-    assert_eq!(rpc["result"]["isError"], false);
     let text = rpc["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.chars().count() < 10_000);
-    serde_json::from_str(text).unwrap()
+    let value: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        rpc["result"]["isError"],
+        value["error"] == "attachment_has_no_extracted_text"
+    );
+    value
 }
 
 async fn read_image(
@@ -590,4 +594,282 @@ async fn upload_classification_uses_bytes_and_case_insensitive_extensions_not_br
         resumed = true;
     }
     server.abort();
+}
+
+#[tokio::test]
+async fn scanned_pdf_runtime_delivers_parent_pages_through_real_thread_image_route() {
+    let _budget_guard = crate::services::assistant_upload_service::byte_budget::test_guard().await;
+    use tower::ServiceExt;
+    for (channel, replace_credential) in [(false, false), (true, false), (false, true)] {
+        let (state, calls, server) = setup_options_with_tools(
+            replace_credential.then_some((401, "agent_key_required")),
+            Duration::ZERO,
+            Vec::new(),
+            true,
+            0,
+            Arc::new(AtomicUsize::new(0)),
+        )
+        .await;
+        crate::services::assistant_upload_service::pdf_vision::ensure_indexes(&state.db)
+            .await
+            .unwrap();
+        state.db.collection::<bson::Document>("feature_flag_overrides").insert_one(doc!{"_id":Uuid::new_v4().to_string(),"flag_key":"assistant:pdf-vision","enabled":true,"target_kind":"global","created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now(),"updated_by":OWNER}).await.unwrap();
+        let id = crate::handlers::assistant_uploads::draft(
+            State(state.clone()),
+            test_auth_user(OWNER),
+            Json(crate::handlers::assistant_uploads::Draft { agent_id: None }),
+        )
+        .await
+        .unwrap()
+        .0["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let bytes = crate::services::attachment_extraction::pdf_fixture(&[None, None], 0);
+        let upload = if channel {
+            crate::services::assistant_upload_service::upload_channel_authorized(
+                &state.db,
+                &state.encryption_keys,
+                OWNER,
+                &id,
+                "scan.pdf",
+                bytes,
+                crate::models::assistant_channel_media::UploadSource {
+                    guest: None,
+                    turn_id: String::new(),
+                    event_key: "lark-fixture".into(),
+                    index: 0,
+                    embedded: false,
+                    declared: 1,
+                },
+            )
+            .await
+            .unwrap()
+        } else {
+            crate::services::assistant_upload_service::upload(
+                &state.db,
+                &state.encryption_keys,
+                OWNER,
+                &id,
+                "scan.pdf",
+                bytes,
+            )
+            .await
+            .unwrap()
+        };
+        let image = fixtures()
+            .into_iter()
+            .find(|file| file.name == "photo.png")
+            .unwrap();
+        let image_id = Box::pin(upload_file(&state, &id, &image, image.mime)).await;
+        let second = crate::services::assistant_upload_service::upload(
+            &state.db,
+            &state.encryption_keys,
+            OWNER,
+            &id,
+            "second.pdf",
+            crate::services::attachment_extraction::pdf_fixture(
+                &[
+                    None,
+                    Some("Second page text"),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ],
+                0,
+            ),
+        )
+        .await
+        .unwrap();
+        let request = serde_json::from_value::<engine::TurnRequest>(
+            json!({"conversation_id":id,"text":"Read every page","attachment_ids":[image_id,upload.id,second.id]}),
+        )
+        .unwrap();
+        let row = Box::pin(engine::begin_turn(
+            &state.db,
+            OWNER,
+            &request,
+            &state.encryption_keys,
+        ))
+        .await
+        .unwrap();
+        let mut credential =
+            credentials::load_for_conversation(&state.db, &state.encryption_keys, OWNER, &id)
+                .await
+                .unwrap()
+                .unwrap();
+        let (sender, _receiver) = broadcast::channel(256);
+        let mut events = Events {
+            checkpoint: None,
+            sender,
+            cursor: 0,
+            reset_notified: false,
+        };
+        let result = Box::pin(execute_turn(
+            &state,
+            &test_auth_user(OWNER),
+            &row,
+            "Read every page",
+            &mut credential,
+            Some(SERVER_TURN_POLICY),
+            &mut events,
+            "block",
+            &mut String::new(),
+            &mut None,
+        ))
+        .await
+        .unwrap();
+        assert!(result.error.is_none(), "{:?}", result.error);
+        if replace_credential {
+            let captures = calls.lock().await;
+            assert_eq!(captures.len(), 2);
+            let first = captures[0].body["input"][0]["content"].as_array().unwrap();
+            assert_eq!(
+                first
+                    .iter()
+                    .filter(|part| part["type"] == "input_image")
+                    .count(),
+                8
+            );
+            let retry = captures[1].body["input"][0]["content"].as_array().unwrap();
+            assert_eq!(
+                retry
+                    .iter()
+                    .filter(|part| part["type"] == "input_image")
+                    .count(),
+                1
+            );
+            assert!(
+                retry[0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("credential_replaced")
+            );
+            let saved = crate::services::assistant_upload_service::turn_attachments(
+                &state.db,
+                OWNER,
+                &id,
+                &row.active_turn.as_ref().unwrap().turn_id,
+            )
+            .await
+            .unwrap();
+            let report = saved
+                .iter()
+                .find(|item| item.id == upload.id)
+                .unwrap()
+                .pdf
+                .as_ref()
+                .unwrap();
+            assert!(report.image_pages.is_empty());
+            assert_eq!(report.unread_pages, [1, 2]);
+            assert_eq!(report.reason.as_deref(), Some("credential_replaced"));
+            server.abort();
+            state.db.drop().await.unwrap();
+            continue;
+        }
+        let body = calls.lock().await.last().unwrap().body.clone();
+        let parts = body["input"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 16); // request text, ordinary image, seven labeled PDF images
+        assert_eq!(parts[1]["type"], "input_image");
+        assert!(
+            parts[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("PDF page coverage")
+        );
+        let router = Router::new()
+            .route(
+                "/api/v1/assistant-attachments/{id}/content",
+                axum::routing::get(super::super::super::assistant_uploads::thread_image),
+            )
+            .with_state(state.clone());
+        let expected = [
+            (&upload.id, 1),
+            (&upload.id, 2),
+            (&second.id, 1),
+            (&second.id, 3),
+            (&second.id, 4),
+            (&second.id, 5),
+            (&second.id, 6),
+        ];
+        for (offset, (parent, page)) in expected.into_iter().enumerate() {
+            let label = &parts[2 + offset * 2];
+            assert_eq!(label["type"], "input_text");
+            let label: Value =
+                serde_json::from_str(label["text"].as_str().unwrap().split_once(": ").unwrap().1)
+                    .unwrap();
+            let image = &parts[3 + offset * 2];
+            assert_eq!(image["type"], "input_image");
+            assert_eq!(label["image_index"], offset + 2);
+            assert_eq!(label["parent_attachment_id"], *parent);
+            assert_eq!(label["page"], page);
+            assert!(image["image_url"].as_str().unwrap().ends_with(&format!(
+                "/{}/content",
+                label["source_attachment_id"].as_str().unwrap()
+            )));
+        }
+        for part in parts.iter().filter(|part| part["type"] == "input_image") {
+            let url = url::Url::parse(part["image_url"].as_str().unwrap()).unwrap();
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(url.path())
+                        .header("x-api-key", credential.raw_key.as_str())
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let expected_mime = if url.path().ends_with(&format!("/{image_id}/content")) {
+                "image/png"
+            } else {
+                "image/jpeg"
+            };
+            assert_eq!(response.headers()["content-type"], expected_mime);
+            let bytes = axum::body::to_bytes(response.into_body(), 3 * 1024 * 1024)
+                .await
+                .unwrap();
+            assert!(image::load_from_memory(&bytes).is_ok());
+        }
+        let stored = crate::services::assistant_upload_service::turn_attachments(
+            &state.db,
+            OWNER,
+            &id,
+            &row.active_turn.as_ref().unwrap().turn_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored.len(), 3); // the ordinary image and two parent PDFs, no derived attachments
+        let first = stored.iter().find(|item| item.id == upload.id).unwrap();
+        assert_eq!(first.pdf.as_ref().unwrap().image_pages, vec![1, 2]);
+        let second_coverage = stored
+            .iter()
+            .find(|item| item.id == second.id)
+            .unwrap()
+            .pdf
+            .as_ref()
+            .unwrap();
+        assert_eq!(second_coverage.text_pages, vec![2]);
+        assert_eq!(second_coverage.image_pages, vec![1, 3, 4, 5, 6]);
+        assert_eq!(second_coverage.unread_pages, vec![7, 8, 9]);
+        let dto = serde_json::to_value(AttachmentResponse::from(first.clone())).unwrap();
+        assert_eq!(dto["pdf"]["image_pages"], json!([1, 2]));
+        let text = read_document(&state, &credential, &upload.id, 0).await;
+        assert_eq!(text["error"], "attachment_has_no_extracted_text");
+        assert_eq!(text["pdf"]["image_pages"], json!([1, 2]));
+        let mixed = read_document(&state, &credential, &second.id, 0).await;
+        assert!(mixed["text"].as_str().unwrap().contains("Second page text"));
+        assert_eq!(mixed["complete"], true);
+        assert_eq!(mixed["text_complete"], true);
+        assert_eq!(mixed["next_offset"], Value::Null);
+        assert_eq!(mixed["pdf"]["unread_pages"], json!([7, 8, 9]));
+        server.abort();
+        state.db.drop().await.unwrap();
+    }
 }

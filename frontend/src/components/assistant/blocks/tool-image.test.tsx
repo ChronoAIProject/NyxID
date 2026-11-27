@@ -88,3 +88,15 @@ it("shows retained guest images with an honest model notice and no tool suggesti
   expect(screen.getByRole("status")).toHaveTextContent("unavailable to the model in that turn");
   expect(screen.getByRole("status")).not.toHaveTextContent(/machine|smaller/);
 });
+
+it("shows scanned PDF page coverage without fetching or claiming a complete read", () => {
+  render(<ToolImage image={{ id: "pdf", endpoint: "/private/pdf", contentType: "application/pdf", label: "scan.pdf", pdf: {
+    classification: "mixed", text_pages: [1], image_pages: [2], unread_pages: [3, 4], reason: "image_limit",
+  } }} />);
+  expect(screen.getByRole("status")).toHaveTextContent("PDF pages with text: 1");
+  expect(screen.getByRole("status")).toHaveTextContent("Pages sent as images: 2");
+  expect(screen.getByRole("status")).toHaveTextContent("Pages without text or confirmed image delivery: 3, 4");
+  expect(screen.getByRole("status")).not.toHaveTextContent("fully read");
+  expect(screen.getAllByRole("button")).toHaveLength(1);
+  expect(assistantHttp).not.toHaveBeenCalled();
+});

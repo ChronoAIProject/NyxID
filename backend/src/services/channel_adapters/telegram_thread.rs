@@ -36,13 +36,28 @@ impl TelegramAdapter {
             .resolve_native_thread(target.facts(), &[])
             .ok_or_else(threads::unavailable)?;
         let mut reply = reply.clone();
+        let entities = reply
+            .metadata
+            .as_ref()
+            .filter(|metadata| metadata["text_format"] == "telegram_entities")
+            .and_then(|metadata| metadata.get("entities"))
+            .cloned();
+        let formatted = entities.is_some();
         // Ignore conflicting caller routing metadata, including non-topic IDs.
         reply.metadata = crate::services::channel_image_audience::facts_thread("telegram", &facts)
             .map(|id| serde_json::json!({ "message_thread_id": id }));
+        if let Some(entities) = entities {
+            reply.metadata.get_or_insert_with(|| serde_json::json!({}))["entities"] = entities;
+        }
         reply.reply_to_platform_message_id = Some(facts.message_id);
-        self.send_reply(http, credentials, &facts.chat_id, &reply)
-            .await
-            .map_err(|_| threads::unavailable())
+        let sent = self
+            .send_reply(http, credentials, &facts.chat_id, &reply)
+            .await;
+        if formatted {
+            sent
+        } else {
+            sent.map_err(|_| threads::unavailable())
+        }
     }
 }
 

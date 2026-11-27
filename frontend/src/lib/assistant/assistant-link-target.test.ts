@@ -4,6 +4,25 @@ import { assistantModalLinkTarget } from "./assistant-link-target";
 const ORIGIN = "https://nyxid.example";
 
 describe("assistantModalLinkTarget", () => {
+  it("keeps Telegram request recovery and assistant workspace journeys in the app", () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    expect(assistantModalLinkTarget(`/channel-bots?connect=telegram-new&request_id=${id}`, ORIGIN)).toMatchObject({ kind: "channel-bot", platform: "telegram-new", requestId: id });
+    expect(assistantModalLinkTarget(`/assistant?agent=${id}&details=grants`, ORIGIN)).toMatchObject({ kind: "workspace" });
+    for (const href of ["/assistant/automations", "/assistant/automations?setup=bounded-setup", "/assistant/machines", "/assistant/machines?tab=logins"]) expect(assistantModalLinkTarget(href, ORIGIN)).toMatchObject({ kind: "workspace" });
+    for (const href of ["/channel-bots?connect=telegram-new&request_id=invalid", `/channel-bots?connect=telegram-new&request_id=${id}&request_id=${id}`, "/assistant/machines?return_to=https://evil.example", `/assistant?agent=${id}&details=invalid`, "https://evil.example/assistant/automations"]) expect(assistantModalLinkTarget(href, ORIGIN)).toBeNull();
+  });
+  it("preserves hosted bot setup tokens and accepts the agent-key creation journey", () => {
+    expect(assistantModalLinkTarget("/connect/bot/nyx_bcl_example-123", ORIGIN)).toEqual({ kind: "channel-connect", href: `${ORIGIN}/connect/bot/nyx_bcl_example-123`, token: "nyx_bcl_example-123" });
+    expect(assistantModalLinkTarget("/keys?tab=nyxid&action=create-key", ORIGIN)).toEqual({ kind: "agent-key", href: `${ORIGIN}/keys?tab=nyxid&action=create-key` });
+    for (const href of [
+      "https://evil.example/connect/bot/nyx_bcl_example", "/connect/bot/not-a-token",
+      "/connect/bot/nyx_bcl_example?callback=https://evil.example", "/connect/bot/nyx_bcl_example#secret",
+      "/connect/bot/nyx_bcl_example/extra", "/connect/bot/nyx_bcl_",
+      "https://user:secret@nyxid.example/connect/bot/nyx_bcl_example",
+      "https://evil.example/keys?tab=nyxid&action=create-key", "/keys?tab=nyxid&action=create-key&scope=admin",
+      "/keys?tab=nyxid&action=create-key&tab=nyxid", "/keys?tab=nyxid&action=delete-key",
+    ]) expect(assistantModalLinkTarget(href, ORIGIN)).toBeNull();
+  });
   it("classifies hosted connector links and preserves their token", () => {
     expect(
       assistantModalLinkTarget(`${ORIGIN}/connect/nyx_clk_abc-123`, ORIGIN),

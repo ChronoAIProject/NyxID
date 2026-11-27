@@ -98,10 +98,7 @@ pub struct BindingGrantSnapshot {
 }
 
 pub fn is_binding_hash(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    crate::crypto::record_field::historical::HistoricalAad::broker_binding(value).is_some()
 }
 
 /// Resolve the service grant currently held by one browser-reviewed broker
@@ -1216,6 +1213,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: None,
             created_at: Utc::now(),
@@ -1509,6 +1507,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,

@@ -1,8 +1,17 @@
 import type { ReactNode } from "react";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render as renderView, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { AddRouteDialog, ChannelBotDetailPage } from "./channel-bot-detail";
+
+function render(element: React.ReactElement) {
+  const client = new QueryClient();
+  client.setQueryData(["channel-guest-setup", "bot", false], { available: false, enabled: false, bot_revision: 0 });
+  return renderView(element, {
+    wrapper: ({ children }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+  });
+}
 
 const { refetch, apiKeys, queryState, create, verify, botFixture } = vi.hoisted(() => ({
   refetch: vi.fn(),
@@ -165,4 +174,24 @@ it.each([
   fireEvent.click(screen.getByRole("button", { name: "Verify Bot" }));
   await waitFor(() => expect(success).toHaveBeenCalledWith(message));
   expect(screen.getByText(message)).toBeVisible();
+});
+
+
+it.each(["telegram", "telegram-new"])("shows connection health to the personal owner for %s", (platform) => {
+  Object.assign(botFixture, { platform, owner: "member" });
+  render(<ChannelBotDetailPage />);
+  expect(screen.getByText("Bot health")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Verify Bot" })).toBeVisible();
+});
+
+vi.mock("@/components/channels/meta-customer-setup", () => ({ MetaCustomerSetup: () => null }));
+
+it.each(["messenger", "instagram"])("guides manual %s credential repair according to the delivery hold", (platform) => {
+  Object.assign(botFixture, { platform, owner: "member", status: "suspended" });
+  const page = render(<ChannelBotDetailPage />);
+  expect(screen.getByText(/nyxid channel-bot delivery org-bot --resume/)).toBeVisible();
+  botFixture.status = "pending_webhook";
+  page.rerender(<ChannelBotDetailPage />);
+  expect(screen.queryByText(/nyxid channel-bot delivery org-bot --resume/)).toBeNull();
+  expect(screen.getByText(/Run Verify Bot to check the saved credentials/)).toBeVisible();
 });

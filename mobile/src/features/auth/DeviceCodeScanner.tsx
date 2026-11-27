@@ -6,6 +6,7 @@ import {
   ActivityIndicator,
   AppState,
   Linking,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -31,12 +32,14 @@ import {
   TOUCH_TARGET,
   fonts,
 } from "../../theme/designTokens";
-import { extractLoginRequestFromQr } from "./deviceUserCode";
+import { mobileApi } from "../../lib/api/mobileApi";
+import { authSessionGeneration } from "../../lib/auth/sessionStore";
+import { extractCameraLoginRequest } from "./deviceUserCode";
 import { claimSystemStatusActivity } from "../../lib/systemStatusActivity";
 
 type DeviceCodeScannerProps = {
   onCancel: () => void;
-  onCode: (userCode: string, kind: "device" | "agent-key") => void;
+  onCode: (userCode: string, kind: "device" | "agent-key" | "staging-device") => void;
   onManualEntry: () => void;
   paused?: boolean;
   showHeader?: boolean;
@@ -62,6 +65,13 @@ export function DeviceCodeScanner({
   const [permissionPending, setPermissionPending] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const scanHandled = useRef(false);
+  const scanGeneration = useRef(0);
+  useLayoutEffect(() => {
+    scanGeneration.current++;
+    scanHandled.current = false;
+    return () => { scanGeneration.current++; };
+  }, [paused]);
+
   const reticleSize = Math.max(196, Math.min(272, width - 64, height * 0.35));
 
   useLayoutEffect(() => {
@@ -74,7 +84,11 @@ export function DeviceCodeScanner({
 
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState) => {
-      if (nextState !== "active") return;
+      if (nextState !== "active") {
+        scanGeneration.current++;
+        scanHandled.current = false;
+        return;
+      }
       void getPermission().catch(() => {
         setPermissionError(
           () => (translateApp("Camera access could not be checked. Please try again.")),
@@ -95,14 +109,34 @@ export function DeviceCodeScanner({
     return () => clearTimeout(timeout);
   }, [paused, scanError]);
 
-  const handleBarcode = (result: BarcodeScanningResult) => {
+  const handleBarcode = async (result: BarcodeScanningResult) => {
     if (paused || scanHandled.current) return;
     scanHandled.current = true;
 
-    const request = extractLoginRequestFromQr(result.data);
-    if (!request) {
+    const request = extractCameraLoginRequest(result.data);
+    if (request?.kind === "staging-device" && Platform.OS === "ios") {
+      const scan = scanGeneration.current;
+      const session = authSessionGeneration();
+      const profile = await mobileApi.getAccountProfile().catch(() => null);
+      if (scan !== scanGeneration.current || session !== authSessionGeneration()) return;
+      if (!profile) {
+        setScanError(
+          () => (translateApp("Could not check your staging sign-in access. Try scanning again.")),
+        );
+        return;
+      }
+      if (!profile.capabilities?.enabled_features?.includes("auth:staging-qr-login")) {
+        setScanError(
+          () => (translateApp("Staging sign-in is not enabled for this account. Ask your administrator for access.")),
+        );
+        return;
+      }
+      onCode(request.userCode, request.kind);
+      return;
+    }
+    if (!request || request.kind === "staging-device") {
       setScanError(
-        () => (translateApp("This QR code is not a valid NyxID login request.")),
+        () => (translateApp("This QR code cannot be used to sign in to NyxID. Scan the sign-in QR code shown on the NyxID website or in your terminal.")),
       );
       return;
     }

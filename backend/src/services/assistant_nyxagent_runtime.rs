@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 #[path = "assistant_nyxagent_subscriber.rs"]
 mod subscriber;
-pub(crate) use subscriber::cancel_background;
+pub(crate) use subscriber::{cancel_background, record as window_record};
 
 /// HTTP composition supplies existing reporting and queue wake-up behavior.
 /// Called only with a confirmed durable reply, never a candidate stream result.
@@ -558,6 +558,7 @@ pub(crate) async fn turn_notes(
     previous_user_message: Option<DateTime<Utc>>,
 ) -> String {
     let mut notes = engine::channel_note(row);
+    notes.push_str(engine::specialist_handoff_capability(row));
     notes.push_str(
         &engine::additional_channel_length_note(&state.db, row)
             .await
@@ -576,7 +577,7 @@ pub(crate) async fn turn_notes(
         }
         if let Some(note) = turn.note.as_deref() {
             notes.push_str("\n\n");
-            notes.push_str(note);
+            notes.push_str(&note.replace(engine::HANDOFF_UI_NOTE, ""));
         }
     }
     // Someone other than the owner is talking: nothing private to the owner
@@ -783,6 +784,18 @@ async fn request(
     let method = method
         .parse()
         .map_err(|_| AppError::Internal("Invalid assistant method".into()))?;
+    if let contract::NyxAgentExecutionContext::Owner { user_id, turn, .. } = authority
+        && super::channel_guest_access::is_hosted_conversation(&turn.conversation_id)
+    {
+        super::channel_guest_access::require_live_request(
+            &_state.db,
+            user_id,
+            &turn.conversation_id,
+            &turn.turn_id,
+            &credential.api_key_id,
+        )
+        .await?;
+    }
     egress
         .request(
             authority,
@@ -1329,8 +1342,7 @@ async fn drive_owner_turn(
         }
     }
     // Never echo the system-managed credential, even if an upstream reflects it.
-    result.text = result
-        .text
+    result.text = super::assistant_citation_markers::sanitize(&result.text)
         .replace(credential.raw_key.as_str(), "[redacted]");
     // A voice task's model-authored reply cannot reconstruct private URLs.
     // Sanitize before checkpoint/settlement as well as at visible publication.
@@ -1340,6 +1352,8 @@ async fn drive_owner_turn(
             &super::voice::links::frontend_origins(&state.config),
         );
     }
+    #[cfg(test)]
+    super::channel_guest_access::test_hooks::wait_before_settlement(&state.db, &row.id).await;
     let settled = complete_turn(
         &state.db,
         &row,
@@ -1520,6 +1534,21 @@ async fn watch_stop(state: &AppState, row: &AssistantConversation, turn_id: &str
     // do that every 5 s (20 polls) and only the stored stop flag in between.
     let mut polls: u32 = 0;
     loop {
+        if super::channel_guest_access::is_hosted_conversation(&row.id) {
+            let full = polls.is_multiple_of(4);
+            polls = polls.wrapping_add(1);
+            if full
+                && super::channel_guest_access::live_turn(
+                    &state.db,
+                    row,
+                    engine::live_turn(row, Utc::now()),
+                )
+                .await
+                .is_err()
+            {
+                return TurnError::internal("cancelled", "stop");
+            }
+        }
         let stopped = if row.collaboration.is_some() {
             let full = polls.is_multiple_of(20);
             polls = polls.wrapping_add(1);
@@ -2042,9 +2071,10 @@ async fn execute_turn_inner(
         // Only the chat's own messages and the replies to them; never NyxID's
         // notices, event-turn replies (not always delivered) or anything
         // said in the app.
+        let audience_scope = super::channel_guest_access::is_hosted_conversation(&row.id);
         history.retain(|message| {
             message.origin == Some(TurnOrigin::Channel)
-                && matches!(message.role.as_str(), "user" | "assistant")
+                && (message.role == "user" || (!audience_scope && message.role == "assistant"))
         });
     }
     // Cards decided while an earlier turn was still running never reached the
@@ -2116,6 +2146,11 @@ async fn execute_turn_inner(
         crate::services::assistant_skill_authoring::GUIDANCE
     };
     let mut guidance = guidance.to_owned();
+    if let Some(guest) = turn.channel_guest.as_ref() {
+        guidance.push_str(super::channel_guest_access::audience_guidance(
+            guest.audience,
+        ));
+    }
     // NYX template outlines (`assistant:skill-runs`, default off): owner turns only.
     let outlines = !row.guest_model_setup
         && !row.guest_turn
@@ -2176,9 +2211,25 @@ async fn execute_turn_inner(
         guidance
             .push_str(crate::services::assistant_service_execution::instruction::PROMPT_GUIDANCE);
     }
+    let guest_skill_turn = row.guest_turn
+        && row
+            .active_turn
+            .as_ref()
+            .is_some_and(|turn| turn.channel_guest.is_some());
+    if guest_skill_turn
+        && !row.guest_model_setup
+        && let Ok(Some(chat)) = acknowledgements::chat_for_conversation(&state.db, row).await
+        && chat.api_key_id == credential.api_key_id
+        && chat.turn_id.as_deref() == Some(turn.turn_id.as_str())
+        && chat.channel_guest.as_ref() == turn.channel_guest.as_ref()
+        && let Ok(agent) =
+            super::channel_guest_access::skills::visible_agent(&state.db, &chat).await
+    {
+        guidance.push_str(&super::channel_guest_access::skills::instructions(&agent));
+    }
     if !row.guest_model_setup
         && let Some(agent) = agent.as_ref()
-        && crate::services::agent_skill_preload::enabled(agent, row.guest_turn)
+        && crate::services::agent_skill_preload::enabled(agent, row.guest_turn && !guest_skill_turn)
     {
         let preloaded =
             tokio::time::timeout(Duration::from_secs(30), egress.preload_skills(row, agent)).await;
@@ -2218,7 +2269,7 @@ async fn execute_turn_inner(
                 .context_reset_reason
                 .as_deref()
                 .is_some_and(|reason| reason != "user_reset"));
-    if recap {
+    if recap && row.context_reset_reason.as_deref() != Some("work_boundary") {
         events.notice();
     }
     let saved_recap = tokio::sync::OnceCell::new();
@@ -2272,9 +2323,14 @@ async fn execute_turn_inner(
             attachments.retain(|a| !expired.contains(&a.id));
         }
     }
-    let has_images = attachments
-        .iter()
-        .any(|a| a.origin == "user_upload" && a.content_type.starts_with("image/"));
+    let has_images = attachments.iter().any(|a| {
+        a.origin == "user_upload"
+            && (a.content_type.starts_with("image/")
+                || (a.content_type == "application/pdf"
+                    && a.pdf
+                        .as_ref()
+                        .is_none_or(|pdf| !pdf.unread_pages.is_empty())))
+    });
     let model_text_only = has_images
         && match platform_plan.as_ref() {
             Some(plan) => plan.image_limits().is_none(),
@@ -2309,11 +2365,27 @@ async fn execute_turn_inner(
     } else {
         crate::services::assistant_upload_service::IMAGE_FALLBACK
     };
+    let mut pdf_input = Box::pin(
+        crate::services::assistant_upload_service::pdf_vision::prepare(
+            state,
+            row,
+            &attachments,
+            &capabilities,
+            model_text_only,
+        ),
+    )
+    .await
+    .map_err(|_| TurnError::internal("assistant_unavailable", "prepare"))?;
+    let mut image_attachments = attachments.clone();
+    image_attachments.extend(pdf_input.images.clone());
     let (mut image_parts, omitted) = crate::services::assistant_upload_service::image_plan(
-        &attachments,
+        &image_attachments,
         &capabilities,
         &state.config.base_url,
     );
+    pdf_input.finalize(&omitted, "image_limit");
+    let mut pdf_delivery = pdf_input.delivery();
+    images::record_pdf_outcomes(state, row, &pdf_delivery.reports).await?;
     if !omitted.is_empty() {
         let notice = image_notice;
         listing.push_str(&format!(
@@ -2492,6 +2564,19 @@ async fn execute_turn_inner(
             format!("{base}:continuation:{}", continuations.count)
         };
         tool_images.attempted(state, row).await;
+        let first_input = continuations.count == 0 && tool_images.fallback.is_none();
+        let parts: &[Value] = if !tool_images.parts.is_empty() {
+            &tool_images.parts
+        } else if first_input {
+            &image_parts
+        } else {
+            &[]
+        };
+        // Select page coverage with the exact image URLs in this request.
+        // Channel capacity retries reuse the sealed request body below.
+        let mut content = vec![json!({"type":"input_text","text":""})];
+        content.extend(pdf_input.with_page_labels(parts));
+        pdf_delivery.requested = pdf_input.requested(parts);
         let mut request_body = if let Some(original) = &channel_retry_body {
             original.clone()
         } else {
@@ -2500,18 +2585,13 @@ async fn execute_turn_inner(
             } else {
                 format!("{input}\n\n{}", tool_images.note)
             };
+            let notes = if first_input || binding.is_none() {
+                &decisions
+            } else {
+                &listing
+            };
             let input = context.input_with_memory(
-                if (continuations.count == 0 && tool_images.fallback.is_none()) || binding.is_none()
-                {
-                    // Recovery into a fresh session must restore the
-                    // turn facts that its discarded session had seen.
-                    &decisions
-                } else {
-                    // Documents have no image part. Keep their listing
-                    // and availability notices visible on continuations
-                    // too, once per request, without repeating events.
-                    &listing
-                },
+                &format!("{notes}{}", pdf_delivery.notice()),
                 &request_input,
                 continuations.count == 0 || binding.is_none(),
             );
@@ -2520,20 +2600,29 @@ async fn execute_turn_inner(
                 body["input"] = json!(super::assistant_guest_model_setup::INSTRUCTION);
                 body["instructions"] = json!(super::assistant_guest_model_setup::INSTRUCTION);
             }
-            let parts = if !tool_images.parts.is_empty() {
-                &tool_images.parts
-            } else if continuations.count == 0 && tool_images.fallback.is_none() {
-                &image_parts
-            } else {
-                &Vec::new()
-            };
             if !parts.is_empty() {
-                let mut content = vec![json!({"type":"input_text", "text":input})];
-                content.extend(parts.clone());
-                body["input"] = json!([{"role":"user", "content":content}]);
+                content[0]["text"] = json!(input);
+                body["input"] = json!([{"role":"user","content":content}]);
             }
             body
         };
+        if let Some(parts) = request_body["input"][0]["content"].as_array() {
+            pdf_delivery.requested = pdf_input.requested(parts);
+        } else {
+            pdf_delivery.requested.clear();
+        }
+        let request_user_images: Vec<_> = attachments
+            .iter()
+            .filter(|item| {
+                item.origin == "user_upload"
+                    && item.content_type.starts_with("image/")
+                    && crate::services::assistant_upload_service::pdf_vision::includes_image(
+                        &request_body,
+                        &item.id,
+                    )
+            })
+            .map(|item| item.id.clone())
+            .collect();
         // Refusal retries share one request window. Explicit continuations
         // are new requests; credential/session recovery flags stay turn-scoped.
         if admission
@@ -2581,6 +2670,17 @@ async fn execute_turn_inner(
         {
             return Err(error);
         }
+        if super::channel_guest_access::is_hosted_conversation(&row.id) {
+            super::channel_guest_access::require_live_request(
+                &state.db,
+                &row.user_id,
+                &row.id,
+                turn_id,
+                &credential.api_key_id,
+            )
+            .await
+            .map_err(|_| TurnError::internal("cancelled", "stop"))?;
+        }
         if channel_retry_body.is_some() && !guest_input_ids.is_empty() {
             super::assistant_channel_media::guest::recheck_retry_inputs(
                 &state.db,
@@ -2605,15 +2705,8 @@ async fn execute_turn_inner(
                         tool_images,
                         context,
                         &listing,
-                        attachments
-                            .iter()
-                            .filter(|item| {
-                                item.origin == "user_upload"
-                                    && item.content_type.starts_with("image/")
-                                    && !omitted.contains(&item.id)
-                            })
-                            .map(|item| item.id.clone())
-                            .collect(),
+                        request_user_images.clone(),
+                        pdf_delivery.clone(),
                     )),
                 )
                 .await?,
@@ -2742,6 +2835,16 @@ async fn execute_turn_inner(
             let code = upstream_error_code(status, &envelope);
             attempt.upstream_code = TurnError::new(code).upstream_code;
             let exact_capacity = status == 503 && code == "capacity_exceeded";
+            if code == "image_input_unsupported" {
+                images::settle_pdf_request(
+                    state,
+                    row,
+                    &mut pdf_delivery,
+                    Some("image_input_unsupported"),
+                    false,
+                )
+                .await?;
+            }
             if channel_retry_body.is_some() && !engine::admission_refusal(status, code) {
                 return Err(post_refusal(status, code, upstream_request_id));
             }
@@ -2926,6 +3029,29 @@ async fn execute_turn_inner(
                     )
                     .await
                     .map_err(|_| TurnError::internal("agent_key_required", "recovery"))?;
+                    if !pdf_delivery.requested.is_empty()
+                        && engine::get(&state.db, &row.user_id, &row.id)
+                            .await
+                            .is_ok_and(|current| {
+                                current.credential_api_key_id != credential.api_key_id
+                            })
+                    {
+                        // A successor bound only at settlement cannot fetch this
+                        // turn's page URLs. Keep the exact text fallback.
+                        image_parts.retain(|part| {
+                            !pdf_delivery.requested.iter().any(|(id, _, _)| {
+                                crate::services::assistant_upload_service::pdf_vision::is_image_part(part, id)
+                            })
+                        });
+                        images::settle_pdf_request(
+                            state,
+                            row,
+                            &mut pdf_delivery,
+                            Some("credential_replaced"),
+                            false,
+                        )
+                        .await?;
+                    }
                     binding = None;
                     context.fresh_session();
                     prompt = context
@@ -3155,33 +3281,58 @@ async fn execute_turn_inner(
         if !cleared.map_err(|_| TurnError::internal("assistant_unavailable", "stream"))? {
             return Err(TurnError::new("cancelled"));
         }
-        if decoder.image_input_unsupported {
-            for item in attachments.iter().filter(|a| {
-                a.origin == "user_upload"
-                    && a.content_type.starts_with("image/")
-                    && !omitted.contains(&a.id)
-            }) {
-                if images::record_upload_outcome(
-                    state,
-                    row,
-                    &item.id,
-                    "unavailable",
-                    Some("image_input_unsupported"),
-                )
-                .await
-                .is_err()
-                {
-                    tracing::warn!("Image delivery notice could not be saved");
-                }
-            }
-            tool_images.unsupported(state, row).await;
-            events.emit("turn.notice", json!({"code":"image_input_unavailable","message":crate::services::assistant_upload_service::MODEL_IMAGE_FALLBACK}));
-        }
         let mut result = decoder.terminal.ok_or_else(|| {
             let mut error = TurnError::internal("invalid_stream", "stream");
             error.response_id = running_response_id.map(String::into_boxed_str);
             error
         })?;
+        let rejected = decoder.image_input_unsupported
+            || result.error.as_ref().is_some_and(images::image_rejected);
+        let rejected_pdf_ids = if rejected {
+            pdf_delivery.requested.clone()
+        } else {
+            Vec::new()
+        };
+        images::settle_pdf_request(
+            state,
+            row,
+            &mut pdf_delivery,
+            rejected.then_some("image_input_unsupported"),
+            result.error.is_none(),
+        )
+        .await?;
+        if rejected {
+            // Only the current request can reject its image parts.
+            if !request_user_images.is_empty() {
+                for id in &request_user_images {
+                    if images::record_upload_outcome(
+                        state,
+                        row,
+                        id,
+                        "unavailable",
+                        Some("image_input_unsupported"),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        tracing::warn!("Image delivery notice could not be saved");
+                    }
+                }
+            }
+            image_parts.retain(|part| {
+                !request_user_images
+                    .iter()
+                    .map(String::as_str)
+                    .chain(rejected_pdf_ids.iter().map(|(id, _, _)| id.as_str()))
+                    .any(|id| {
+                        crate::services::assistant_upload_service::pdf_vision::is_image_part(
+                            part, id,
+                        )
+                    })
+            });
+            tool_images.unsupported(state, row).await;
+            events.emit("turn.notice", json!({"code":"image_input_unavailable","message":crate::services::assistant_upload_service::MODEL_IMAGE_FALLBACK}));
+        }
         result.text = context.redact(
             &result
                 .text
@@ -3232,7 +3383,7 @@ async fn execute_turn_inner(
                 } else {
                     format!("{}\n\n", result.text)
                 };
-                input = "Continue after viewing the tool images.";
+                input = "Continue answering the user.";
                 continue;
             }
             tool_images.fallback = None;

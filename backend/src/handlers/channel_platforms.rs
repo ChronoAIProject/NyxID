@@ -126,15 +126,23 @@ impl From<PlatformCatalogEntry> for PlatformItem {
 
 pub async fn list_platforms(
     State(state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
 ) -> AppResult<Json<PlatformListResponse>> {
-    Ok(Json(PlatformListResponse {
-        platforms: channel_platform_catalog_service::list(&state.db, &state.token_exchange_cache)
+    let mut platforms: Vec<PlatformItem> =
+        channel_platform_catalog_service::list(&state.db, &state.token_exchange_cache)
             .await?
             .into_iter()
             .map(Into::into)
-            .collect(),
-    }))
+            .collect();
+    for item in &mut platforms {
+        item.enabled &= crate::services::channel_adapters::meta_managed::enrolled(
+            &state.db,
+            &auth.user_id.to_string(),
+            &item.platform,
+        )
+        .await?;
+    }
+    Ok(Json(PlatformListResponse { platforms }))
 }
 
 #[cfg(test)]
@@ -162,7 +170,7 @@ mod tests {
         let adapters = registered_adapters(&cache);
         assert_eq!(entries.len(), adapters.len());
         let ids: std::collections::HashSet<_> = entries.iter().map(|e| &e.platform).collect();
-        assert_eq!(ids.len(), 10);
+        assert_eq!(ids.len(), 12);
         for adapter in adapters {
             let entry = entries
                 .iter()

@@ -2,7 +2,7 @@
 
 New NyxBot users get a short, skippable intro on web (`/assistant`) and mobile
 (the NyxBot home). A first-timer is greeted by name on a welcome page first;
-a replay starts at the questions. It then has three parts:
+a replay on the native app starts at the questions. It then has three parts:
 
 1. **Who it's for and interests.** The user first picks who NyxBot is for: just
    me, my team, or my business. The topic list then follows that answer, using
@@ -88,8 +88,8 @@ a replay starts at the questions. It then has three parts:
 - the user has no `assistant_conversations` row.
 
 Existing NyxBot users are therefore never interrupted, and no backfill is
-needed. Anyone can replay the intro: on web from the account menu (**Replay
-intro**) or the home section, on mobile from the home section.
+needed. The web intro appears on first run. The native app also offers replay
+from its home section.
 
 ## What NyxBot sees
 

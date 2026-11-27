@@ -10,6 +10,22 @@ pub struct TextCompleteness {
     pub truncated: bool,
 }
 
+/// Server-owned reply authority from one authenticated private inbox message.
+/// No customer text or bearer credential is retained.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MetaMessageAuthority {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_id: Option<String>,
+    pub generation: i64,
+    pub asset_id: String,
+    pub sender_id: String,
+    pub binding: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub event_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub reply_expires_at: DateTime<Utc>,
+}
+
 /// Provider handles and descriptive metadata only; never media bytes or captions.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StoredAttachment {
@@ -91,12 +107,23 @@ pub struct NyxbotAdmission {
 /// grain state, or wherever the agent persists its conversation history).
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelMessage {
+    /// Positive provider-authenticated evidence for the stored inbound sender.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_transport_audience: Option<crate::services::channel_guest_access::AnswerAudience>,
+    /// Original admission for an external guest relay callback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_relay: Option<crate::services::channel_guest_access::GuestTurn>,
+    /// Server-observed guest selector outage on this authenticated hosted source.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hosted_guest_selector_unavailable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text_completeness: Option<TextCompleteness>,
     /// Private download-name overrides aligned with top-level attachments.
     /// Public callback/history DTOs continue to expose the raw source metadata.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) effective_attachment_filenames: Vec<Option<String>>,
+    #[serde(default)]
+    pub meta_authority: Option<MetaMessageAuthority>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nyxbot_admission: Option<NyxbotAdmission>,
     /// SHA-256 media identity of a suppressed native redelivery (64 hex chars).
@@ -214,10 +241,14 @@ mod tests {
         ChannelMessage {
             text_completeness: None,
             effective_attachment_filenames: Vec::new(),
+            guest_transport_audience: None,
+            guest_relay: None,
+            hosted_guest_selector_unavailable: false,
             embedded_attachments: Vec::new(),
             embedded_attachments_omitted: 0,
             duplicate_of_media_key: None,
             original_message: None,
+            meta_authority: None,
             nyxbot_admission: None,
             thread_context: None,
             activity: None,

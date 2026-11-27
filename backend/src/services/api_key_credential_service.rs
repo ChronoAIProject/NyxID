@@ -82,6 +82,7 @@ pub async fn issue(
     let secret_prefix = agent_key_display_prefix(secret)
         .ok_or_else(|| AppError::ValidationError("Invalid Agent Key credential prefix".into()))?;
     validate_stored_credential_expiry(parent.expires_at, Some(expires_at), Utc::now())?;
+    super::erasure_admission::fence_in_session(db, &parent.user_id, session).await?;
     let row = ApiKeyCredential {
         id: id.into(),
         api_key_id: parent.id.clone(),

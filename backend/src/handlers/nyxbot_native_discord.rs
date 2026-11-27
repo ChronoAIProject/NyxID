@@ -5,6 +5,69 @@ use crate::services::discord_gateway::valid_message_id as snowflake;
 pub(super) struct Evidence {
     pub addressed: bool,
     pub source_message: Option<String>,
+    pub guest_sender_verified: bool,
+}
+
+/// Resolve positive private audience evidence against the receiving Discord bot.
+/// A normalized CMA activity is insufficient to establish a DM on its own.
+pub(super) async fn private_guest_facts<'a>(
+    state: &AppState,
+    row: &NyxbotChannel,
+    activity: &'a Value,
+) -> AppResult<crate::services::channel_guest_access::transport::TransportFacts<'a>> {
+    use crate::services::channel_guest_access::transport::TransportFacts;
+    let unknown = TransportFacts::default();
+    let chat = activity["conversation"]["id"].as_str().unwrap_or_default();
+    let id = activity["event_id"]
+        .as_str()
+        .unwrap_or_default()
+        .rsplit(':')
+        .next()
+        .unwrap_or_default();
+    let sender = activity["actor"]["id"].as_str().unwrap_or_default();
+    if activity["conversation"]["kind"] != "private"
+        || !activity["conversation"]["thread_id"].is_null()
+        || activity["actor"]["kind"] != "human"
+        || !snowflake(chat)
+        || !snowflake(id)
+        || !snowflake(sender)
+    {
+        return Ok(unknown);
+    }
+    let bot = channel_bot_service::get_bot(&state.db, &row.channel_bot_id).await?;
+    if sender == bot.platform_bot_id {
+        return Ok(unknown);
+    }
+    let token =
+        Zeroizing::new(channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?);
+    use crate::services::nyxbot_gateway_source::discord_read;
+    let message_path = format!("/channels/{chat}/messages/{id}");
+    let channel_path = format!("/channels/{chat}");
+    let (message, channel) = tokio::try_join!(
+        discord_read(&bot, &token, &message_path),
+        discord_read(&bot, &token, &channel_path),
+    )?;
+    if message["id"] != id
+        || message["channel_id"] != chat
+        || message["author"]["id"] != sender
+        || !matches!(
+            message["author"].get("bot"),
+            None | Some(Value::Bool(false))
+        )
+        || !message["webhook_id"].is_null()
+        || !matches!(message["type"].as_u64(), Some(0 | 19))
+        || message["content"] != activity["kind"]["text"]
+        || !message["edited_timestamp"].is_null()
+        || channel["id"] != chat
+        || channel["type"] != 1
+        || !channel["guild_id"].is_null()
+    {
+        return Ok(unknown);
+    }
+    Ok(TransportFacts {
+        sender_id: Some(sender),
+        audience: crate::services::channel_guest_access::AnswerAudience::Private,
+    })
 }
 
 /// A maximum of four authenticated, capped Discord reads: original message,
@@ -21,14 +84,14 @@ pub(super) async fn evidence(
     let mut result = Evidence {
         addressed: mentioned,
         source_message: None,
+        guest_sender_verified: false,
     };
     if activity["conversation"]["kind"] == "private" {
         result.addressed = true;
         return Ok(result);
     }
     let bot = Box::pin(channel_bot_service::get_bot(&state.db, &row.channel_bot_id)).await?;
-    let token =
-        Zeroizing::new(channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?);
+    let token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
     let chat = activity["conversation"]["id"].as_str().unwrap_or_default();
     let id = activity["event_id"]
         .as_str()
@@ -104,6 +167,8 @@ pub(super) async fn evidence(
     // Native thread/reply-chain metadata reuses the existing follow selector,
     // including members, reply_mode, limits, stop, expiry and turn-time fences.
     let follow_supported = matches!(facts.kind, ThreadKind::Native | ThreadKind::ReplyChain);
+    result.guest_sender_verified = activity["actor"]["kind"] == "human"
+        && facts.sender_kind == crate::models::channel_thread::ThreadSenderKind::Human;
     let Some(response) = Box::pin(async {
         state
             .db

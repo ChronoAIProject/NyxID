@@ -29,7 +29,9 @@ function sources(dir: string): string[] {
 
 test("glass and the floating-control surface have one source: the primitive", () => {
   const glass = sources(SRC)
-    .filter((file) => /from "expo-glass-effect"/.test(readFileSync(file, "utf8")))
+    .filter((file) =>
+      /from "expo-glass-effect"/.test(readFileSync(file, "utf8")),
+    )
     .map((file) => relative(SRC, file));
   assert.deepEqual(glass, ["components/FloatingControl.tsx"]);
   const blur = sources(SRC)
@@ -38,7 +40,9 @@ test("glass and the floating-control surface have one source: the primitive", ()
   assert.deepEqual(blur, []);
   const surfaceUsers = sources(SRC)
     .filter((file) =>
-      /floatingControlSurface\(|floatingControlGlassTint\(/.test(readFileSync(file, "utf8")),
+      /floatingControlSurface\(|floatingControlGlassTint\(/.test(
+        readFileSync(file, "utf8"),
+      ),
     )
     .map((file) => relative(SRC, file))
     .sort();
@@ -59,9 +63,15 @@ test("every floating control renders through the floating-control primitive", ()
     // Header ☰ / Back (and the sidebar toggle beside the persistent sidebar).
     ["app/WorkspaceHeader.tsx", [/<FloatingButton \{\.\.\.controlProps\}>/]],
     // New chat, More and crew options.
-    ["features/assistant/ChatSurface.tsx", [/if \(floating\)\s+return \(\s+<FloatingButton/]],
+    [
+      "features/assistant/ChatSurface.tsx",
+      [/if \(floating\)\s+return \(\s+<FloatingButton/],
+    ],
     // The agent / crew identity pill.
-    ["features/assistant/ChatIdentityHeader.tsx", [/return floating \? \(\s+<FloatingButton/]],
+    [
+      "features/assistant/ChatIdentityHeader.tsx",
+      [/return floating \? \(\s+<FloatingButton/],
+    ],
     // The ordinary bar's bell, when notifications are enabled.
     ["features/notifications/NotificationBell.tsx", [/<FloatingButton/]],
     // The rail: the toggle (and restore) button, the grouped capsule and,
@@ -83,24 +93,42 @@ test("every floating control renders through the floating-control primitive", ()
   for (const [file, patterns] of controls) {
     const source = read(file);
     assert.match(source, /from "[./]+(components\/)?FloatingControl"/, file);
-    for (const pattern of patterns) assert.match(source, pattern, `${file}: ${pattern}`);
+    for (const pattern of patterns)
+      assert.match(source, pattern, `${file}: ${pattern}`);
     // No floating fill, border or shadow of their own: the primitive's
     // surface is the only treatment (the same for header and rail).
-    assert.doesNotMatch(source, /shadowRadius|shadowOpacity|floatingControlBg/, file);
+    assert.doesNotMatch(
+      source,
+      /shadowRadius|shadowOpacity|floatingControlBg/,
+      file,
+    );
   }
 });
 
 test("narrow and wide bars float the same glass controls", () => {
-  // Every ChatIconButton in the bar floats, in every layout.
+  // The trailing chat actions share one floating surface at all widths.
   const actions = read("features/assistant/ChatHeaderActions.tsx");
-  assert.equal(actions.match(/<ChatIconButton/g)!.length, 2);
-  assert.ok([...actions.matchAll(/<ChatIconButton\b[^>]*>/gs)].every(([tag])=>/\bfloating\b/.test(tag)));
-  assert.doesNotMatch(actions, /floating=\{/);
+  assert.match(actions, /<ChatHeaderMenu/);
+  assert.equal(
+    actions.match(/<FloatingItem\b/g)?.length,
+    3,
+    "two private controls and one crew control",
+  );
+  const menu = read("features/assistant/ChatHeaderMenu.tsx");
+  assert.equal(
+    menu.match(/<FloatingCapsule\b/g)?.length,
+    2,
+    "source and overlay share the floating surface",
+  );
   // The identity pill floats (compact) and crew options float everywhere.
-  assert.match(read("features/assistant/AssistantScreen.tsx"), /<ChatIdentity\s+compact=\{quickRail\}\s+floating\s/);
+  assert.match(
+    read("features/assistant/AssistantScreen.tsx"),
+    /<ChatIdentity\s+compact=\{quickRail\}\s+floating\s/,
+  );
   const group = read("features/groups/GroupChatScreen.tsx");
   assert.doesNotMatch(group, /floating=\{/);
-  assert.equal(group.match(/^\s+floating$/gm)!.length, 2);
+  assert.match(group, /<CrewHeaderActions/);
+  assert.equal(group.match(/^\s+floating$/gm)!.length, 1);
   // ☰ / Back float on every bar, slab and sheet alike; only a sheet's own
   // Close stays plain.
   assert.match(read("app/WorkspaceHeader.tsx"), /const floating = !close;/);
@@ -113,17 +141,25 @@ test("every other workspace bar floats the chat bar's glass controls: Menu/Back,
   const producers: Record<string, RegExp> = {
     // Menu/Back on every page and sheet page (Close is the one plain control).
     "app/WorkspaceHeader.tsx": /<FloatingButton \{\.\.\.controlProps\}>/,
-    // The chat and crew bars (identity pill, bell / New chat / More, crew
+    // The chat and crew bars (identity pill, New chat / More, crew
     // options).
-    "features/assistant/AssistantScreen.tsx": /<ChatHeaderActions[\s\S]*<ChatIdentity\s+compact=\{quickRail\}\s+floating/,
-    "features/groups/GroupChatScreen.tsx": /floating\s*>\s*<MoreHorizontal/,
+    "features/assistant/AssistantScreen.tsx":
+      /<ChatHeaderActions[\s\S]*<ChatIdentity\s+compact=\{quickRail\}\s+floating/,
+    "features/groups/GroupChatScreen.tsx": /<CrewHeaderActions/,
+    "features/notifications/NotificationsScreen.tsx":
+      /<WorkspaceHeaderVisibility>\s*<FloatingButton[\s\S]*?<Settings2/,
     // Edit pages' Save, in the workspace and in the Settings sheet.
     "features/assistant/AssistantDetailsScreen.tsx": /<SettingsHeaderButton/,
     "features/agents/AgentProfileEditScreen.tsx": /<SettingsHeaderButton/,
-    "components/settings/SettingsList.tsx": /headerRight: \(\) => \(\s*<SettingsHeaderButton/,
+    "components/settings/SettingsList.tsx":
+      /headerRight: \(\) => \(\s*<SettingsHeaderButton/,
   };
   const found = sources(SRC)
-    .filter((file) => /\bheader(Left|Right)\s*[:=(]|\bheader(Left|Right),/.test(readFileSync(file, "utf8")))
+    .filter((file) =>
+      /\bheader(Left|Right)\s*[:=(]|\bheader(Left|Right),/.test(
+        readFileSync(file, "utf8"),
+      ),
+    )
     .map((file) => relative(SRC, file))
     // The bar renderers only call the options they are given.
     .filter(
@@ -173,7 +209,9 @@ const SURFACE_KEYS = [
 ] as const;
 
 test("header buttons, the identity pill and both rail capsules resolve to the same glass (and the same fallback surface) in light and dark", async () => {
-  const { hookHarness } = await import("../features/assistant/assistantHookTestHarness");
+  const { hookHarness } = await import(
+    "../features/assistant/assistantHookTestHarness"
+  );
   const { darkColors, lightColors } = await import("../theme/mobileTheme");
   // The theme pair: the colours the header buttons resolved to (#F9F9F9 on
   // the white page, #353539 on the dark one), now explicit tokens.
@@ -207,7 +245,10 @@ test("header buttons, the identity pill and both rail capsules resolve to the sa
       // FloatingButton → FloatingCapsule → the native view.
       let node = element;
       while (typeof node.type === "function") node = node.type(node.props);
-      const style = Object.assign({}, ...[node.props.style].flat(Infinity).filter(Boolean));
+      const style = Object.assign(
+        {},
+        ...[node.props.style].flat(Infinity).filter(Boolean),
+      );
       return JSON.stringify(
         liquidGlass
           ? {
@@ -227,30 +268,50 @@ test("header buttons, the identity pill and both rail capsules resolve to the sa
       // The identity pill (its capsule hugs the pill).
       identityPill: surfaceOf(
         ui.FloatingButton({
-          capsuleStyle: { alignSelf: "flex-start", maxWidth: "100%", minWidth: 0 },
+          capsuleStyle: {
+            alignSelf: "flex-start",
+            maxWidth: "100%",
+            minWidth: 0,
+          },
           children: "Pill",
         }),
       ),
       // The rail's toggle and grouped capsule (their layout styles).
       railToggle: surfaceOf(
-        ui.FloatingButton({ capsuleStyle: { width: 44, borderRadius: 22 }, children: "Icon" }),
+        ui.FloatingButton({
+          capsuleStyle: { width: 44, borderRadius: 22 },
+          children: "Icon",
+        }),
       ),
       railGroup: surfaceOf(
         ui.FloatingCapsule({
-          style: [{ width: 44, borderRadius: 22 }, { alignItems: "center", gap: 4 }],
+          style: [
+            { width: 44, borderRadius: 22 },
+            { alignItems: "center", gap: 4 },
+          ],
           children: "Items",
         }),
       ),
     };
-    const fallback = SURFACE_KEYS.map((key) => ({
-      backgroundColor: colors.floatingControlBg,
-      borderColor: colors.floatingControlBorder,
-      borderWidth: 0.5,
-      shadowColor: colors.shadowColor,
-      ...(mode === "light"
-        ? { shadowOffset: { width: 0, height: 2 }, shadowOpacity: 1, shadowRadius: 10, elevation: 3 }
-        : {}),
-    } as Record<string, unknown>)[key]);
+    const fallback = SURFACE_KEYS.map(
+      (key) =>
+        (
+          ({
+            backgroundColor: colors.floatingControlBg,
+            borderColor: colors.floatingControlBorder,
+            borderWidth: 0.5,
+            shadowColor: colors.shadowColor,
+            ...(mode === "light"
+              ? {
+                  shadowOffset: { width: 0, height: 2 },
+                  shadowOpacity: 1,
+                  shadowRadius: 10,
+                  elevation: 3,
+                }
+              : {}),
+          }) as Record<string, unknown>
+        )[key],
+    );
     const expected = JSON.stringify(
       liquidGlass
         ? {
@@ -258,7 +319,11 @@ test("header buttons, the identity pill and both rail capsules resolve to the sa
             // The header-button token at 60% alpha, style 'regular', the
             // app's colour scheme, interactive; no opaque surface on top.
             tintColor: `${colors.floatingControlBg}99`,
-            glassEffectStyle: { style: "regular", animate: true, animationDuration: 0.25 },
+            glassEffectStyle: {
+              style: "regular",
+              animate: true,
+              animationDuration: 0.25,
+            },
             colorScheme: mode,
             isInteractive: true,
             surface: SURFACE_KEYS.map(() => undefined),
@@ -266,16 +331,30 @@ test("header buttons, the identity pill and both rail capsules resolve to the sa
         : { type: "View", surface: fallback },
     );
     for (const [control, surface] of Object.entries(surfaces))
-      assert.equal(surface, expected, `${liquidGlass ? "glass" : "fallback"} ${mode} ${control}`);
+      assert.equal(
+        surface,
+        expected,
+        `${liquidGlass ? "glass" : "fallback"} ${mode} ${control}`,
+      );
   }
   // The call sites only lay out their capsules: none sets a surface key.
   for (const [file, block] of [
-    ["components/workspace/WorkspaceQuickRail.tsx", /const styles = StyleSheet\.create\(\{[\s\S]*?\n\}\);/],
-    ["features/assistant/ChatIdentityHeader.tsx", /floatingIdentity: \{[\s\S]*?floatingCapsule: \{[\s\S]*?\}/],
+    [
+      "components/workspace/WorkspaceQuickRail.tsx",
+      /const styles = StyleSheet\.create\(\{[\s\S]*?\n\}\);/,
+    ],
+    [
+      "features/assistant/ChatIdentityHeader.tsx",
+      /floatingIdentity: \{[\s\S]*?floatingCapsule: \{[\s\S]*?\}/,
+    ],
   ] as const) {
     const styles = read(file).match(block)![0];
     // The unread dot draws its own small badge; nothing else does.
     const withoutDot = styles.replace(/dot: \{[\s\S]*?\}/, "");
-    assert.doesNotMatch(withoutDot, /backgroundColor|borderColor|borderWidth|shadow/, file);
+    assert.doesNotMatch(
+      withoutDot,
+      /backgroundColor|borderColor|borderWidth|shadow/,
+      file,
+    );
   }
 });

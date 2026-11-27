@@ -8,6 +8,7 @@ export async function readAssistantResponse(
   body: ReadableStream<Uint8Array>,
   onEvent: (event: AssistantTurnEvent) => void,
   controller: AbortController,
+  onTimeout?: () => void,
 ): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -23,6 +24,7 @@ export async function readAssistantResponse(
           reader,
           terminal ? 5000 : 135000,
           controller,
+          terminal ? undefined : onTimeout,
         );
       } catch (cause) {
         // A rejected read means the stream has already errored (a deadline
@@ -65,6 +67,7 @@ async function readWithDeadline(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   milliseconds: number,
   controller: AbortController,
+  onTimeout?: () => void,
 ): Promise<ReadableStreamReadResult<Uint8Array>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -72,6 +75,7 @@ async function readWithDeadline(
       reader.read(),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
+          onTimeout?.();
           controller.abort();
           reject(
             localizedError("The connection was interrupted. Refresh history before sending again."),

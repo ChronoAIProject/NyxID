@@ -895,7 +895,7 @@ Measurements and reproduction commands are under
     mismatches and managed-browser readiness.
 - **Existing codes.** Reuse the node codes (8000/8001/8002) for not found,
   offline and timeout.
-- **Documentation.** Add the block to CLAUDE.md's reserved table.
+- **Documentation.** Add the block to the reserved table in `AGENTS.md` (Critical Rule 3).
 - **Tool results.** Tool results carry the stable code and a short
   instruction.
 
@@ -903,7 +903,7 @@ Measurements and reproduction commands are under
 
 - **Additive.** Every model field is additive and serde-defaulted. No new
   environment variables unless unavoidable; if one is added, document it in
-  `docs/ENV.md` and CLAUDE.md.
+  `docs/ENV.md` and `AGENTS.md`.
 - **Mixed versions.** Nodes that predate machine capability never receive machine
   requests. Machine-capable nodes that predate W9.4 retain existing legacy
   assignments; absent evidence never establishes a new separated assignment.
@@ -964,8 +964,8 @@ This document describes what shipped. Also update:
 - `docs/NODE_PROXY_PROTOCOL.md` (messages, signing);
 - `docs/chat/09-nyxbot-orchestrator.md` (machines for NyxBot and specialists,
   grants, permission requests, guests never);
-- CLAUDE.md: the Node Proxy Conventions and NyxAgent paragraphs, error codes,
-  and commands (a short CLAUDE.md paragraph pointing here, not a copy).
+- `AGENTS.md`: the Node Proxy Conventions and NyxAgent paragraphs, error codes,
+  and commands (a short `AGENTS.md` paragraph pointing here, not a copy).
 
 ## Acceptance
 

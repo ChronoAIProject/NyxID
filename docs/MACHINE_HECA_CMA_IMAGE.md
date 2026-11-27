@@ -152,7 +152,7 @@ usual workspace lifecycle and access rules. An operator must make any future
 credential-persistence decision explicitly; installing these tools does not
 create a protected per-tool persistent secret store.
 
-Free and paid hosted Machines use the single `remote-machine` profile, with fixed 2 vCPU, 2 GiB memory and a 20 GiB persistent `/workspace`. Product consent is `remote-machine-mvp`; individual and account deletion remain distinct (`remote-machine-data` and `machine-data`). The full profile supports optional Browser/Computer; default Commands/Files are not its capability ceiling. No undeployed historical profile or policy compatibility remains.
+Free and paid hosted Machines use the single `remote-machine` profile, with fixed 2 vCPU, 2 GiB memory and a 20 GiB persistent `/workspace`. Product consent is `remote-machine-mvp`; individual and account deletion remain distinct (`remote-machine-data` and `machine-data-provider-revocation-v2`). The full profile supports optional Browser/Computer; default Commands/Files are not its capability ceiling. No undeployed historical profile or policy compatibility remains.
 
 Temporary storage is environment-managed, with no fixed capacity promise, option or extra charge. Both ephemeral-storage resource fields and home/tmp disk emptyDir sizeLimit are absent. Protected identity memory volumes retain their bounds. Pause or Pod replacement may lose temporary state. A retained current Machine preserves its pinned image and workspace even when the deployment default changes. Existing prices, benefits, paused-storage and data-retention policies,
 insufficient-balance pause and manual resume remain unchanged. The daemon and

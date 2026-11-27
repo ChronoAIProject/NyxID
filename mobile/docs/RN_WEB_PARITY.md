@@ -20,7 +20,13 @@ This increment starts the mobile migration against the existing NyxID Web and ba
 
 Chat ownership and navigation align one-to-one Agent selection with Web: saved thread owner first, explicit Agent second, NyxBot by default. History is Agent-scoped, New chat retains the current Agent, selecting an Agent opens its latest thread, and the side-menu logo/Chats entry opens NyxBot Home after the menu host dismisses. Home is explicit route state: a new NyxBot chat uses the same normal empty-chat screen as a new specialist chat. Header compose, picker New chat and per-agent menu New chat retain the selected agent and start an empty compose session. Text and attachments stay scoped to their original saved thread or compose session, including when visiting Home; account changes clear retained drafts. Workspace sibling selection retains mounted page state without adding native stack history; contextual Agent/Skill chats use separate detail routes and return to their exact caller. Workspace header returns preserve local detail/form history before route history. The Agents & Crews hub follows the approved paired tabs. UI copy calls shared agent conversations Crews; server contracts, identifiers and existing native links retain `groups`. Web still uses `/assistant?g={id}`, so no URL migration is needed. Crew chats and settings use dedicated native detail routes and retain their list tab and calling transcript.
 
-The chat header separates the current title from labeled History/New chat actions, marks the selected history item Current, and replaces the anonymous menu with Details. Details includes the effective permission mode and its permission-only chooser; saved-chat rename/delete retain their existing contracts. Workspace headers show exactly one navigation control on the left: Menu at a top-level destination, Back for local/native details, and Close inside temporary sheets. The header role follows page hierarchy rather than global stack history. Controls retain 44-point targets and critical navigation-disabled guards. Android Back consumes local detail state first, then native detail history; top-level sibling visits do not create Back history.
+The chat header keeps the current title separate from its New chat/More capsule.
+More animates that same measured capsule into an anchored options bubble and back,
+with Chat details, available Notifications, Settings and active-call preferences.
+Crew options use the same motion and retain their Settings route. Outside tap,
+Back and accessibility escape dismiss; reduced motion skips travel, focus enters
+and restores appropriately, and destination actions wait for dismissal. The
+corner status-column controls keep their direct Details/crew-settings actions. Details includes the effective permission mode and its permission-only chooser; saved-chat rename/delete retain their existing contracts. Workspace headers show exactly one navigation control on the left: Menu at a top-level destination, Back for local/native details, and Close inside temporary sheets. The header role follows page hierarchy rather than global stack history. Controls retain 44-point targets and critical navigation-disabled guards. Android Back consumes local detail state first, then native detail history; top-level sibling visits do not create Back history.
 
 Backend contracts remain in [NyxAgent handlers](../../backend/src/handlers/assistant_nyxagent.rs), [Agent management handlers](../../backend/src/handlers/assistant_team.rs), [key handlers](../../backend/src/handlers/keys.rs), [catalog handlers](../../backend/src/handlers/catalog.rs), [provider authorization handlers](../../backend/src/handlers/user_tokens.rs), and [auth/MFA handlers](../../backend/src/handlers/auth.rs). Service OAuth adds an optional `app_return_uri` and preserves old-client redirects. Existing SSH terminal and push protocols are reused; association files share a native path manifest.
 
@@ -80,9 +86,12 @@ accessibility descendants are hidden while management is open.
 
 Private user bubbles and compact crew/private headers follow the native
 reference while preserving real speaker attribution. Private, contextual and
-crew chats share one ChatGPT-style composer: a filled pill with full-width text
-above a toolbar containing "+" for attachments, optional mentions, dictation and a
-trailing send/stop circle. "+" offers Camera, Photos (the system photo library) and Files
+crew chats share one ChatGPT-style composer: an idle pill keeps attachments,
+the input, dictation and send/stop on one line. Focus or a draft whose trimmed
+length is positive expands the text above the toolbar, revealing optional
+mentions, permissions and crew recipients. Blurring an empty or whitespace-only
+draft restores the single line without remounting the native input.
+"+" offers Camera, Photos (the system photo library) and Files
 (the document browser). Camera permission is requested at use; denied access links
 to Settings, and unavailable cameras report a recoverable message. Captures reuse
 the same conversion, attachment limits and upload session. Unsupported photo formats such as HEIC are converted to
@@ -92,6 +101,18 @@ above the text. Private, contextual and crew transcript viewports span the safe-
 width, including wide windows, so scroll indicators stay at the window edge.
 Their centered content containers carry the 12pt horizontal padding and column
 maximum; the composer's own margins and the 4pt page bottom padding remain.
+Selected attachments use one horizontal strip constrained to the composer's actual
+width, showing about three equal square tiles. Image and local first-page PDF
+previews hide filenames; other files and failed previews show concise type and
+filename. All upload states retain the square frame, with accessible names/errors,
+a separate 44pt circular remove target and the existing bottom progress bar.
+Overflow alone adds stronger directional fades and a localized visible range below
+the strip; swipes, resize and selection changes update and clamp it. Local metadata
+validation previews later selections without waiting for an earlier upload, while
+byte reads and uploads remain serialized. PDF thumbnails use the local
+`nyx-pdf-thumbnail` Expo module (native rebuild required); older binaries show a
+file fallback. Renderer checks confine PDFs to app cache and 20 MiB, and discard
+work for detached/recycled views.
 The side-navigation footer combines its bottom padding with
 the safe-area clearance instead of stacking both. iOS sizes
 the multiline input to its text under the shared cap; Android applies the
@@ -284,7 +305,9 @@ animation `none`, then waits for the new page to paint. The new content fades
 in (180ms) while the slab closes (300ms). Reduced motion skips both. Settings
 and quick actions preserve the expanded sidebar behind their animated sheet.
 Sheet owners wait for native dismissal before unmounting; the shell exposes
-sidebar accessibility only at its settled open endpoint.
+sidebar accessibility only at its settled open endpoint. On iOS, opening
+Notifications preserves the current content stack. Its Back button and native
+left-edge swipe return to the page that opened the inbox.
 
 Native reply layout uses 16pt between receipts/activity and prose, 12pt between
 ordinary Markdown blocks, 20pt before h1 and 16pt before other headings, and 8pt

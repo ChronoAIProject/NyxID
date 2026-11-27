@@ -58,6 +58,7 @@ impl Parent {
 
 struct Boundary {
     db: Database,
+    meta_grant: Option<crate::models::channel_meta::GrantRef>,
     parent: Parent,
     id: String,
     fingerprint: String,
@@ -86,6 +87,7 @@ pub async fn with_part<F: Future>(
             .scope(
                 Arc::new(Boundary {
                     db: db.clone(),
+                    meta_grant: row.meta_grant.clone(),
                     parent,
                     id: row.id.clone(),
                     fingerprint: row.fingerprint.clone(),
@@ -130,10 +132,15 @@ pub async fn claim(
             "preparation": {"version":1, "lease_until":{"$add":["$$NOW", PREPARATION_SECS*1000]}},
         },
     );
-    let changed = db
-        .collection::<Document>(COLLECTION_NAME)
-        .update_one(filter, vec![doc! {"$set": set}])
-        .await?;
+    let changed = super::channel_meta_service::scopes::update_record(
+        db,
+        row.meta_grant.as_ref(),
+        true,
+        COLLECTION_NAME,
+        filter,
+        vec![doc! {"$set":set}],
+    )
+    .await?;
     if changed.matched_count == 1 {
         #[cfg(test)]
         {
@@ -170,6 +177,9 @@ async fn commit_effect(boundary: Arc<Boundary>) -> AppResult<()> {
         .and_run(boundary, |session, boundary| {
             Box::pin(async move {
                 let result: AppResult<()> = async {
+                    if let Some(grant)=&boundary.meta_grant {
+                        super::channel_meta_service::scopes::fence_reference(&boundary.db,session,grant,true).await?;
+                    }
                     // The parent write conflicts with recovery, so a survivor cannot
                     // replace its claim between this check and the part transition.
                     let parent = boundary
@@ -238,7 +248,7 @@ pub async fn release(
     attempt: &str,
 ) -> AppResult<bool> {
     let prefix = format!("parts.{index}");
-    Ok(db.collection::<Document>(COLLECTION_NAME).update_one(
+    Ok(super::channel_meta_service::scopes::update_record(db,row.meta_grant.as_ref(),false,COLLECTION_NAME,
         doc! {"_id":&row.id,format!("{prefix}.state"):"pending",format!("{prefix}.attempt_id"):attempt,format!("{prefix}.preparation.version"):1},
         doc! {"$unset":{format!("{prefix}.preparation"):""}},
     ).await?.matched_count==1)

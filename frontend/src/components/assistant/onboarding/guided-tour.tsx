@@ -215,10 +215,10 @@ export function GuidedTour({
           {index + 1}{translateUi(" of ")}{available.length}
         </p>
         <h2 id="guided-tour-title" className="type-card-title text-foreground">
-          {step.title}
+          {translateUi(step.title)}
         </h2>
         <p id="guided-tour-body" className="text-14 text-muted-foreground">
-          {step.body}
+          {translateUi(step.body)}
         </p>
         <div className="flex flex-wrap items-center gap-2 pt-1">
           <Button variant="ghost" size="sm" onClick={() => finish(false)}>{translateUi("End tour")}</Button>

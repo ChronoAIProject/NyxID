@@ -295,3 +295,28 @@ test("P9 fitting labels use the base equal cells and fixed badge without a scrol
   assert.equal(style(highlight).top, style(x.tree()).padding);
   assert.equal(style(highlight).left, style(x.tree()).padding);
 });
+
+test("compact badges can grow at 2× font scale in fitting and scrolling layouts", (t) => {
+  const screen = setupSegmentControl({ ...filters, compact: true }, { fontScale: 2 });
+  t.after(screen.harness.unmount);
+  for (const [width, scrolling] of [[800, false], [320, true]] as const) {
+    screen.layout(width);
+    screen.measure([110, 140, 185, 120]);
+    const tree = screen.tree();
+    const scroller = nodes(tree).find((node) => node.type === "ScrollView");
+    assert.equal(scroller?.props.scrollEnabled ?? false, scrolling);
+    if (!scrolling) assert.equal(scroller, undefined, "the wide layout uses equal cells");
+    const measuring = nodes(tree).find(
+      (node) => node.props.testID === "segment-measure-0",
+    )!;
+    for (const item of [tabs(tree)[0]!, measuring]) {
+      const badge = nodes(item).find((node) => style(node).minWidth === 18)!;
+      const count = nodes(badge).find((node) => node.type === "Text")!;
+      assert.equal(text(count), "1");
+      assert.equal(count.key, 2);
+      assert.equal(style(count).lineHeight * 2, 28);
+      assert.equal(style(badge).height, undefined);
+      assert.equal(style(badge).minHeight, 18);
+    }
+  }
+});

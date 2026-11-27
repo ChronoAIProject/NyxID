@@ -267,12 +267,16 @@ it("shows a sanitized unresolved-publication message and prevents discard", asyn
   mocks.json.mockResolvedValue({ ...preview, status: "publication_failed", actions: ["check"], failure_code: "publish_uncertain" });
   show({ ...card, status: "used" });
   expect(await screen.findByText(/cannot yet confirm whether Ornn published/)).toBeVisible();
+  expect(screen.getByText(/start a new skill draft\. NyxID will not publish this draft twice/)).toBeVisible();
+  expect(screen.getByRole("button", { name: "Check again" })).toBeVisible();
+  expect(screen.queryByRole("button", { name: "Retry publication" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
 });
 it("keeps a conflicting uncertain version available for read-only checks", async () => {
-  mocks.json.mockResolvedValue({ ...preview, status: "publication_failed", actions: ["check"], failure_code: "version_conflict" });
+  mocks.json.mockResolvedValue({ ...preview, base_scripts_not_copied: true, status: "publication_failed", actions: ["check"], failure_code: "version_conflict" });
   show({ ...card, status: "used" });
   expect(await screen.findByText(/Ask NyxBot for a new draft after this publication is resolved/)).toBeVisible();
+  expect(screen.queryByText(/start a new skill draft/)).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Check again" })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Discard" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Retry publication" })).not.toBeInTheDocument();
@@ -295,6 +299,7 @@ it("does not claim an interrupted attempt is still in progress", async () => {
   show({ ...card, status: "used" });
   expect(await screen.findByText(/The last attempt was interrupted\. NyxID cannot yet confirm whether Ornn published this version; Check again only reads/)).toBeVisible();
   expect(screen.queryByText("Publication is in progress.")).not.toBeInTheDocument();
+  expect(screen.getByText(/start a new skill draft/)).toBeVisible();
   expect(screen.getByRole("button", { name: "Check again" })).toBeVisible();
 });
 it("says nothing was sent when an interrupted attempt can still be retried", async () => {
@@ -329,8 +334,26 @@ it("refetches and retains a failed retry state after the decision request fails"
   fireEvent.click(await screen.findByRole("button", { name: "Retry publication" }));
   await waitFor(() => expect(decide).toHaveBeenCalledExactlyOnceWith("allow"));
   expect(await screen.findByText(/Publication did not finish/)).toBeVisible();
-  expect(screen.getByText(/Ornn update permission or skill write access denied/)).toBeVisible();
+  expect(screen.getByText(/Ornn denied publication/)).toHaveTextContent("ornn:skill:create");
   expect(mocks.json.mock.calls.length).toBeGreaterThan(1);
+});
+
+it("keeps publication failures visible after switching to Full access", async () => {
+  mocks.json.mockResolvedValue({ ...preview, status: "publication_failed", actions: ["retry"], failure_code: "ornn_write_forbidden" });
+  const decide = show({ ...card, status: "used" }, undefined, "autopilot");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Ornn denied publication");
+  expect(screen.getByRole("alert")).toHaveTextContent("Approval does not grant these account permissions");
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  expect(decide).not.toHaveBeenCalled();
+});
+
+it.each(["nyxmode", "autopilot"] as const)("does not hide an unavailable publication outcome behind a used receipt in %s", async (accessMode) => {
+  mocks.json.mockRejectedValue(new Error("offline"));
+  const decide = show({ ...card, status: "used" }, undefined, accessMode);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Publication status unavailable");
+  expect(screen.getByRole("alert")).toHaveTextContent("check whether the skill was published and attached");
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+  expect(decide).not.toHaveBeenCalled();
 });
 
 it("accepts a preview from a backend without actions or state", () => {
@@ -340,6 +363,15 @@ it("accepts a preview from a backend without actions or state", () => {
   const parsed = authoredSkillPreviewSchema.parse(legacy);
   expect(parsed.actions).toEqual([]);
   expect(parsed.state).toBe("active");
+});
+
+it("lets the owner deny a pending review when its draft preview cannot load", async () => {
+  mocks.json.mockRejectedValue(new Error("offline"));
+  const decide = show();
+  await screen.findByText("Draft unavailable or changed. Reload and review it again.");
+  expect(screen.queryByRole("button", { name: "Allow and publish" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+  await waitFor(() => expect(decide).toHaveBeenCalledExactlyOnceWith("deny"));
 });
 
 it("explains a computed target_busy block on a live pending card", async () => {

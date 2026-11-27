@@ -4251,7 +4251,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid"
-version = "0.78.0"
+version = "0.79.0"
 dependencies = [
  "aes 0.8.4",
  "aes-gcm 0.10.3",
@@ -4279,6 +4279,7 @@ dependencies = [
  "ed25519-dalek 2.2.0",
  "flate2",
  "futures",
+ "futures-timer",
  "globset",
  "google-cloud-kms",
  "governor",
@@ -4348,7 +4349,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.78.0"
+version = "0.79.0"
 dependencies = [
  "aes-gcm 0.10.3",
  "anyhow",
@@ -4560,10 +4561,13 @@ dependencies = [
  "http 1.4.0",
  "rcgen",
  "reqwest 0.12.28",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
+ "urlencoding",
+ "zeroize",
 ]
 
 [[package]]

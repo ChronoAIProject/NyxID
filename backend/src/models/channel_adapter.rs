@@ -33,6 +33,9 @@ pub struct Binding {
     pub revision: i64,
     pub label: String,
     pub agent_id: String,
+    /// Optional owner-authorized ChannelBot installation for guest rollout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_channel_bot_id: Option<String>,
     pub credential: CredentialBinding,
     pub account_id: String,
     pub resource_id: String,

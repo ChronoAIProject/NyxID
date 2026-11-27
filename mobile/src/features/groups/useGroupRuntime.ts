@@ -9,7 +9,7 @@ import { ApiError } from "../../lib/api/ApiError";
 import { getAuthEpoch } from "../../lib/auth/authEpoch";
 import { useNetworkStatus } from "../../hooks/useNetworkStatus";
 import { mergeGroupPage, mergeGroupMessages } from "./groupState";
-import { restoreRefusedAssistantSend } from "../assistant/assistantTurnRequest";
+import { isAttachmentBindRefusal, restoreRefusedAssistantSend } from "../assistant/assistantTurnRequest";
 import { livePollInterval } from "../../lib/api/assistantLiveTransport";
 import { groupKeys } from "./groupLiveRefresh";
 import { useGroupsLive } from "./useGroupsLive";
@@ -165,6 +165,8 @@ export function useGroupChat(groupId: string) {
           const refused =
             cause instanceof ApiError &&
             restoreRefusedAssistantSend(cause, false);
+          if (refused && payload.attachment_ids?.length && isAttachmentBindRefusal(cause))
+            throw cause;
           if (alive()) {
             if (!refused) {
               recovery.current = true;

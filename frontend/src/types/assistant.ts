@@ -117,10 +117,12 @@ export interface ActionCardContentBlock {
 }
 
 export interface Conversation {
+  readonly read_only?: boolean;
   readonly platform_thread?: PlatformThread | null;
   readonly active_turn?: { readonly turn_id: string; readonly started_at: string } | null;
   readonly id: string;
   readonly title: string;
+  readonly title_source?: string;
   readonly created_at: string;
   readonly last_message_at: string;
   readonly message_count?: number;

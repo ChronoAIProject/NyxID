@@ -760,6 +760,41 @@ pub struct UpdateKeyRequest {
     pub copy_oauth_client_from: Option<String>,
 }
 
+impl UpdateKeyRequest {
+    fn is_endpoint_only(&self) -> bool {
+        matches!(
+            self,
+            Self {
+                endpoint_url: Some(_),
+                label: None,
+                icon_url: None,
+                auth_method: None,
+                auth_key_name: None,
+                node_id: None,
+                credential: None,
+                use_platform_key: None,
+                is_active: None,
+                admin_only: None,
+                identity_propagation_mode: None,
+                identity_include_user_id: None,
+                identity_include_email: None,
+                identity_include_name: None,
+                identity_jwt_audience: None,
+                forward_access_token: None,
+                inject_delegation_token: None,
+                delegation_token_scope: None,
+                custom_user_agent: None,
+                default_request_headers: None,
+                openapi_spec_url: None,
+                recommended_skills: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                copy_oauth_client_from: None,
+            }
+        )
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteKeyResponse {
     pub message: String,
@@ -1800,6 +1835,13 @@ pub async fn update_key(
         )?);
     }
 
+    let custom_url_only = actor == user_id_str
+        && view.catalog_service_id.is_none()
+        && view.service_type == "http"
+        && view.node_id.as_deref().is_none_or(str::is_empty)
+        && !view.auto_connected
+        && body.is_endpoint_only();
+
     // NOTE: label writes are intentionally deferred past the strict
     // node push below. A label change combined with a node-routed
     // credential update must be atomic — committing the label before
@@ -2395,6 +2437,36 @@ pub async fn update_key(
     } else {
         None
     };
+
+    if custom_url_only && let Some(migration) = target_migration.as_ref().filter(|m| m.is_direct())
+    {
+        // Custom discovery depends on the service ID, slug and spec. Resolve
+        // the full authorized response before writing the direct endpoint.
+        let mut response = key_response_from_view(view);
+        enrich_key_response(
+            &state.db,
+            &state.node_ws_manager,
+            &actor,
+            state.config.node_heartbeat_timeout_secs,
+            state.config.base_url.trim_end_matches('/'),
+            &mut response,
+        )
+        .await?;
+        crate::handlers::service_history::enrich_summaries(
+            &state.db,
+            &auth_user,
+            std::slice::from_mut(&mut response),
+        )
+        .await?;
+        let (endpoint, service) = migration
+            .commit_for_connection(&state.db, &key_id, response.state_version)
+            .await?;
+        response.endpoint_url = Some(endpoint.url);
+        if let Some(authorship) = &mut response.authorship {
+            authorship.last_change = service.last_change.as_ref().map(Into::into);
+        }
+        return Ok(Json(response));
+    }
 
     // Deferred label write. See the matching note at the top of the
     // handler: committing the label up front would break the atomic
@@ -3369,15 +3441,14 @@ async fn enrich_key_discovery_metadata(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::{
         extract_app_id_from_api_key, extract_app_id_from_credential,
         validate_optional_label_for_update,
     };
-    use crate::crypto::aes::EncryptionKeys;
-    use crate::crypto::local_key_provider::LocalKeyProvider;
     use crate::errors::AppError;
+    use crate::handlers::credential_record_fixtures::{
+        KeySecret, test_encryption_keys, unrelated_encryption_keys,
+    };
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
     };
@@ -3402,10 +3473,6 @@ mod tests {
     };
     use chrono::Utc;
     use mongodb::bson::doc;
-
-    fn test_encryption_keys() -> EncryptionKeys {
-        EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x22; 32], None)))
-    }
 
     #[tokio::test]
     async fn conversation_key_inventory_requires_a_live_turn_for_every_projection() {
@@ -3877,7 +3944,9 @@ mod tests {
         let keys = test_encryption_keys();
         let mut api_key = make_blank_api_key();
         let plaintext = r#"{"app_id":"cli_token_exchange","app_secret":"shh"}"#;
-        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
+        KeySecret::Credential
+            .set(&keys, &mut api_key, plaintext.as_bytes())
+            .await;
 
         let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
         assert_eq!(app_id, Some("cli_token_exchange".to_string()));
@@ -3887,8 +3956,9 @@ mod tests {
     async fn extract_from_api_key_falls_back_to_byo_oauth_client_id() {
         let keys = test_encryption_keys();
         let mut api_key = make_blank_api_key();
-        api_key.user_oauth_client_id_encrypted =
-            Some(keys.encrypt(b"  cli_byo_oauth  ").await.unwrap());
+        KeySecret::OAuthClientId
+            .set(&keys, &mut api_key, b"  cli_byo_oauth  ")
+            .await;
 
         let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
         assert_eq!(app_id, Some("cli_byo_oauth".to_string()));
@@ -3903,9 +3973,12 @@ mod tests {
         let keys = test_encryption_keys();
         let mut api_key = make_blank_api_key();
         let plaintext = r#"{"app_id":"cli_from_blob","app_secret":"shh"}"#;
-        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
-        api_key.user_oauth_client_id_encrypted =
-            Some(keys.encrypt(b"cli_from_oauth").await.unwrap());
+        KeySecret::Credential
+            .set(&keys, &mut api_key, plaintext.as_bytes())
+            .await;
+        KeySecret::OAuthClientId
+            .set(&keys, &mut api_key, b"cli_from_oauth")
+            .await;
 
         let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
         assert_eq!(app_id, Some("cli_from_blob".to_string()));
@@ -3919,12 +3992,12 @@ mod tests {
         let writer_keys = test_encryption_keys();
         let mut api_key = make_blank_api_key();
         let plaintext = r#"{"app_id":"cli_xyz","app_secret":"shh"}"#;
-        api_key.credential_encrypted =
-            Some(writer_keys.encrypt(plaintext.as_bytes()).await.unwrap());
+        KeySecret::Credential
+            .set(&writer_keys, &mut api_key, plaintext.as_bytes())
+            .await;
 
         // Use a completely different key set to read it back.
-        let reader_keys =
-            EncryptionKeys::with_provider(Arc::new(LocalKeyProvider::new([0x99; 32], None)));
+        let reader_keys = unrelated_encryption_keys();
         let app_id = extract_app_id_from_api_key(&reader_keys, &api_key).await;
         assert_eq!(app_id, None);
     }
@@ -3935,7 +4008,9 @@ mod tests {
         let mut api_key = make_blank_api_key();
         // Encrypt raw bytes that aren't valid UTF-8 (eg an arbitrary
         // binary blob someone shoved into credential_encrypted).
-        api_key.credential_encrypted = Some(keys.encrypt(&[0xff, 0xfe, 0xfd]).await.unwrap());
+        KeySecret::Credential
+            .set(&keys, &mut api_key, &[0xff, 0xfe, 0xfd])
+            .await;
 
         let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
         assert_eq!(app_id, None);
@@ -3948,7 +4023,9 @@ mod tests {
         let keys = test_encryption_keys();
         let mut api_key = make_blank_api_key();
         let plaintext = r#"{"app_secret":"shh"}"#;
-        api_key.credential_encrypted = Some(keys.encrypt(plaintext.as_bytes()).await.unwrap());
+        KeySecret::Credential
+            .set(&keys, &mut api_key, plaintext.as_bytes())
+            .await;
 
         let app_id = extract_app_id_from_api_key(&keys, &api_key).await;
         assert_eq!(app_id, None);

@@ -814,6 +814,7 @@ pub(crate) fn prepare<'a>(
         {
             proposals::existing_effect(
                 db,
+                context,
                 chat,
                 effect.connection,
                 &digest,
@@ -1057,6 +1058,9 @@ pub(crate) fn prepare<'a>(
             )
             .await?
         {
+            if let Ok(p) = proposals::proposal(&request) {
+                context.observation.replay(&request.status, &p.state);
+            }
             return Err(
                 if request.status == "pending" && request.expires_at > Utc::now() {
                     AppError::ApprovalRequired {
@@ -1108,6 +1112,9 @@ pub(crate) fn prepare<'a>(
                     .await?;
                 }
                 return prepare(state, Some(context), chat, key, effect).await;
+            }
+            if let Ok(p) = proposals::v2::proposal(&request) {
+                context.observation.replay(&request.status, &p.state);
             }
             return Err(proposals::v2::pending(&request, &state.config.frontend_url));
         }
@@ -1812,6 +1819,7 @@ pub(crate) fn admit_http<'a>(
             &actor,
             owner,
             &target.service.id,
+            Some(connection),
             descriptor,
             auth.approval_requester_type(),
             &auth.approval_requester_id(),
@@ -2035,6 +2043,7 @@ pub(crate) fn approval<'a>(
     actor: &'a str,
     owner: &'a str,
     catalog: &'a str,
+    connection: Option<&'a str>,
     descriptor: &'a super::operation_descriptor::OperationDescriptor,
     requester_type: Option<&'a str>,
     requester_id: &'a str,
@@ -2054,12 +2063,13 @@ pub(crate) fn approval<'a>(
                 requester_id,
                 bypass,
                 auto_connected,
+                connection,
                 chat,
             )
             .await;
         };
         let key = format!(
-            "{actor}:{owner}:{catalog}:{descriptor:?}:{requester_type:?}:{requester_id}:{bypass}:{auto_connected}"
+            "{actor}:{owner}:{catalog}:{connection:?}:{descriptor:?}:{requester_type:?}:{requester_id}:{bypass}:{auto_connected}"
         );
         let mut cache = context.policies.lock().await;
         if let Some((_, value)) = cache.iter().find(|(k, _)| k == &key) {
@@ -2094,6 +2104,7 @@ pub(crate) fn approval<'a>(
             requester_id,
             bypass,
             auto_connected,
+            connection,
             chat,
         )
         .await?;

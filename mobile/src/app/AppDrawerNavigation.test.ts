@@ -135,6 +135,7 @@ function setup(
 ) {
   const fades: (() => void)[] = [];
   const sequence: string[] = [];
+  let keyboardDismissals = 0;
   let timerId = 0;
   const timers = new Map<number, { callback: () => void; delay: number }>();
   let rootState = fixture();
@@ -272,6 +273,7 @@ function setup(
     Platform: {OS:"ios"},
     workspaceCornerSensor,
     useDiagnosticsNotice: () => {},
+    useLaunchShell: () => {},
     useAuthSession: () => ({ isAuthenticated: authenticated }),
     getAuthAccountId: () => accountId,
     getAuthEpoch: () => authEpoch,
@@ -285,6 +287,7 @@ function setup(
     newAssistantChatParams,
     workspaceSidebarLayout,
     findNodeHandle: () => 300,
+    Keyboard: { dismiss: () => { keyboardDismissals++; } },
     ...Object.fromEntries(
       [
         "NavigationContainer",
@@ -388,6 +391,7 @@ function setup(
   };
   return {
     sequence,
+    keyboardDismissals: () => keyboardDismissals,
     watchdogs: () => [...timers.values()],
     expireWatchdog: () => {
       const pending = [...timers.values()];
@@ -1379,6 +1383,30 @@ test("persistent sidebar opens account sheets without hiding or resetting the se
   assert.equal(x.shell().props.presented, false);
   x.authenticate(false);
   assert.equal(x.hasDrawer(), false);
+});
+
+test("sidebar menu and edge reveal dismiss the composer keyboard without navigating", () => {
+  const menu = setup();
+  menu.open();
+  assert.equal(menu.keyboardDismissals(), 1);
+  assert.equal(menu.shell().props.visible, true);
+  assert.equal(menu.dispatched.length, 0);
+  const edge = setup();
+  edge.shell().props.onRevealStart();
+  edge.flush();
+  assert.equal(edge.keyboardDismissals(), 1);
+  assert.equal(edge.dispatched.length, 0);
+  const blocked = setup();
+  blocked.blockNavigation(true);
+  blocked.open();
+  assert.equal(blocked.keyboardDismissals(), 0, "blocked navigation keeps the current editor focus");
+  const wide = setup(false, 1194, true, true);
+  wide.navigator().props.onOpenMenu();
+  wide.flush();
+  assert.equal(wide.keyboardDismissals(), 1);
+  wide.navigator().props.onOpenMenu();
+  wide.flush();
+  assert.equal(wide.keyboardDismissals(), 1, "hiding a sidebar does not change input focus");
 });
 
 test("deferred persistent menu focus cannot land on a compact or sheet-covered sidebar", () => {

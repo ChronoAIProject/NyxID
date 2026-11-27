@@ -272,6 +272,13 @@ test("navigation can invoke chat header options repeatedly without calling hooks
   let hookCalls = 0;
   const h = hookHarness<E>({
     ...mocks,
+    "../../i18n/appTranslation": { translateApp: (phrase: string) => phrase },
+    "../../i18n/LanguageProvider": {
+      useAppLanguage: () => {
+        hookCalls++;
+        return { t: (phrase: string) => phrase };
+      },
+    },
     "../../theme/ThemeContext": {
       useTheme: () => {
         hookCalls++;
@@ -296,10 +303,32 @@ test("navigation can invoke chat header options repeatedly without calling hooks
     assert.equal(hookCalls, 0, "option callback must not run component hooks");
     assert.equal(typeof element.type, "function");
     h.mount(() => (element.type as (props: any) => E)(element.props));
-    assert.equal(hookCalls, 1);
+    assert.equal(hookCalls, 2);
     h.unmount();
     hookCalls = 0;
   }
+});
+
+test("narrow chat headers give identity a separate full-width row while retaining every action", () => {
+  window = { width: 274, height: 610 };
+  const x = setup();
+  let picked = 0;
+  x.h.mount(() => {
+    const element = x.ChatHeaderFrame({ route: { name: "Assistant" }, options: {
+      headerLeft: () => ({ type: "Menu", props: {} }),
+      headerTitle: () => ({ type: "Identity", props: { onPress: () => picked++ } }),
+      headerRight: () => ({ type: "AllActions", props: {} }),
+    } });
+    return (element.type as (props: any) => E)(element.props);
+  });
+  const identityRow = nodes(x.h.value()).find((node) => node.props.testID === "workspace-chat-identity-row");
+  assert.ok(identityRow, "identity must not compete with the navigation controls at 274pt");
+  assert.equal(nodes(headerRow(x.h.value())).some((node) => node.type === "Identity"), false);
+  assert.ok(nodes(headerRow(x.h.value())).some((node) => node.type === "AllActions"));
+  nodes(identityRow).find((node) => node.type === "Identity")!.props.onPress();
+  assert.equal(picked, 1);
+  x.h.unmount();
+  window = { width: 402, height: 874 };
 });
 
 test("on the Duo (folded or unfolded) a chat has no top bar in rail mode and its own bar, fading in, in full screen; ordinary phones and iPads keep theirs", () => {

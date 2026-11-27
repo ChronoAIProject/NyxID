@@ -373,6 +373,8 @@ pub struct User {
     pub avatar_url: Option<String>,
     pub email_verified: bool,
     pub email_verification_token: Option<String>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub email_verification_expires_at: Option<DateTime<Utc>>,
     pub password_reset_token: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub password_reset_expires_at: Option<DateTime<Utc>>,
@@ -437,6 +439,7 @@ mod tests {
             avatar_url: None,
             email_verified: true,
             email_verification_token: None,
+            email_verification_expires_at: None,
             password_reset_token: None,
             password_reset_expires_at: None,
             is_active: true,

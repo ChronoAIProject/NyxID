@@ -16,9 +16,11 @@ use proc_macro2::{Delimiter, TokenStream, TokenTree};
 
 type Inventory = BTreeMap<(String, String, &'static str), usize>;
 
-const WRAPPERS: [&str; 3] = [
+const WRAPPERS: [&str; 5] = [
     "verify_token",
     "validate_relay_reply_token",
+    "validate_channel_reply_token",
+    "validate_guest_relay_data_token",
     "validate_relay_callback_token",
 ];
 
@@ -444,20 +446,20 @@ const ALLOWLIST: &[Verifier] = &[
     ),
     v(
         "crypto/jwt.rs",
-        "validate_relay_reply_token",
+        "decode_relay_reply_token",
         "decoding_key",
         1,
-        "relay reply token (aud channel-relay/reply)",
+        "closed relay reply and guest data audiences",
         "kid-selected key and signature; manual exp/iat skew, TTL bound, token_type, \
          aud and iss; single-use and live key checks belong to callers",
     ),
     v(
         "crypto/jwt.rs",
-        "validate_relay_reply_token",
+        "decode_relay_reply_token",
         "jsonwebtoken::decode",
         1,
-        "relay reply token (aud channel-relay/reply)",
-        "see validate_relay_reply_token decoding_key entry",
+        "closed relay reply and guest data audiences",
+        "see decode_relay_reply_token decoding_key entry",
     ),
     v(
         "crypto/jwt.rs",
@@ -590,6 +592,24 @@ const ALLOWLIST: &[Verifier] = &[
         "Ornn org-membership capability (typ nyxid-ornn-org-read+jwt)",
         "see agent_skill_org_access lookup decoding_key entry",
     ),
+    v(
+        "services/channel_guest_access/skills.rs",
+        "lookup",
+        "decoding_key",
+        1,
+        "Ornn exact bot package capability (typ nyxid-ornn-channel-skill+jwt)",
+        "kid-selected RS256 key, typ, issuer, exact audience, zero leeway and 60s lifetime; \
+         live bot, binding, maintainer membership, enabled pin, guest actor/audience, \
+         activation, key, turn/invocation, catalog, operation scopes and approval",
+    ),
+    v(
+        "services/channel_guest_access/skills.rs",
+        "lookup",
+        "jsonwebtoken::decode",
+        1,
+        "Ornn exact bot package capability (typ nyxid-ornn-channel-skill+jwt)",
+        "see channel_guest_access::skills lookup decoding_key entry",
+    ),
     // Refresh and token exchange.
     v(
         "services/token_service.rs",
@@ -642,8 +662,17 @@ const ALLOWLIST: &[Verifier] = &[
     // Relay and callback receivers.
     v(
         "handlers/channel_relay.rs",
+        "guest_tools",
+        "validate_guest_relay_data_token",
+        1,
+        "external guest data capability at /channel-relay/guest-tools",
+        "exact live source, actor, destination, route and key; live policy and activation; \
+         writes revalidate in the same transaction as the connector and request receipt",
+    ),
+    v(
+        "handlers/channel_relay.rs",
         "resolve_reply_token_message_context_classified",
-        "validate_relay_reply_token",
+        "validate_channel_reply_token",
         1,
         "per-inbound relay reply capability at reply, thread-reply and attachment reads",
         "RS256 kid selection, issuer, reply audience/type and bounded lifetime; inbound \
@@ -651,7 +680,7 @@ const ALLOWLIST: &[Verifier] = &[
          and active bot with owner/platform scope. Durable adapters also check current \
          key assignment. Carried claims bind thread dispatch and recheck expiry before \
          unique JTI insert; \
-         ordinary non-durable replies consume here, attachment reads do not consume. \
+         ordinary non-durable replies consume at dispatch and attachment reads do not consume. \
          Failed preflight Health requires the same verified message/key/platform binding. \
          No OAuth consent authority: this is a callback capability. Unknown signing kid \
          refuses 401; local key selection has no network outage; live-key database errors \
@@ -660,7 +689,7 @@ const ALLOWLIST: &[Verifier] = &[
     v(
         "handlers/channel_relay.rs",
         "resolve_reply_token_edit_context",
-        "validate_relay_reply_token",
+        "validate_channel_reply_token",
         1,
         "relay reply token at /channel-relay/reply/update",
         "JTI must already be recorded in reply_token_uses (used to send first); outbound \
@@ -692,6 +721,24 @@ const ALLOWLIST: &[Verifier] = &[
         1,
         "NyxID public-authority assertion (typ nyxid-public+jwt)",
         "see verify_assertion decoding_key entry",
+    ),
+    // Production-to-staging sign-in decisions are operation assertions, not access tokens.
+    v(
+        "services/staging_qr.rs",
+        "verify",
+        "jsonwebtoken::decode",
+        1,
+        "production staging-device assertion (typ nyxid-staging-device+jwt)",
+        "RS256 with the mounted production public key (one pinned key, no kid selection \
+         or fallback); exact issuer and staging receiver audience, typ, zero leeway, \
+         20s lifetime and bounded iat. Production requires a live first-party human \
+         session, personal feature entitlement, active verified person and MFA before \
+         signing approval. Staging matches the verified email and exact request/account \
+         binding; approve_bound fences current account/MFA state with the pending, \
+         unexpired one-time claim. Denial binds the same request. No OAuth consent or \
+         access-token authority; production bearer tokens fail typ/claim validation. \
+         Key rotation requires replacing the pinned PEM and restarting staging; \
+         unavailable database/transport authority fails without issuing a session",
     ),
     // Non-NyxID keys (recorded so a new JWT verifier anywhere is reviewed).
     v(

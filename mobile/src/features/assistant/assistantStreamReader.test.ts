@@ -217,3 +217,32 @@ test("invalid SSE aborts its request once and releases the reader", async () => 
   assert.equal(cancelled, 0);
   assert.equal(body.locked, false);
 });
+
+test("SSE read deadline reports timeout only before the terminal event", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const completed of [false, true]) {
+    let timeouts = 0;
+    const controller = new AbortController();
+    const body = new ReadableStream<Uint8Array>({
+      start(stream) {
+        if (completed) stream.enqueue(frame(terminal));
+        controller.signal.addEventListener("abort", () =>
+          stream.error(new Error("aborted")),
+        );
+      },
+    });
+    const read = readAssistantResponse(
+      body,
+      () => {},
+      controller,
+      () => {
+        timeouts++;
+      },
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    context.mock.timers.tick(completed ? 5000 : 135000);
+    if (completed) await read;
+    else await assert.rejects(read);
+    assert.equal(timeouts, completed ? 0 : 1);
+  }
+});

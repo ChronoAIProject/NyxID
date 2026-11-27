@@ -256,6 +256,7 @@ export const runSchema = z.object({
     .object({ count: z.number(), from: instant, through: instant })
     .nullish(),
   reason: z.string().nullable(),
+  blocking_run_id: z.string().nullish(),
   failure_reason: z
     .object({
       source: z.string(),

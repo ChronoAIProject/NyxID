@@ -89,6 +89,18 @@ curl http://localhost:3001/health
 5. **Commit** using [conventional commit messages](#commit-messages)
 6. **Push** your branch and open a pull request against `dev`
 
+### Continuing work in another tab
+
+Git worktrees share commits and fetched branches. Each worktree has its own
+checked-out files, including uncommitted edits. When handing off a change that
+has been tested, commit the files that produced that result, push the branch,
+and include its remote branch and commit in the handoff.
+
+For a follow-up to an open PR, fetch the PR branch and start the new worktree
+at its latest commit. After the PR lands, start follow-ups from the updated
+`origin/dev`. Check the diff against the handoff commit before testing so the
+review covers just the intended addition.
+
 ### Branch Naming
 
 | Prefix      | Use Case                        |
@@ -460,10 +472,14 @@ check evidence:
 
 ## Documentation
 
-- Update `docs/API.md` if you add or change API endpoints
-- Update `docs/ARCHITECTURE.md` if you add new collections, services, or architectural patterns
-- Update `README.md` if you add new features visible to users
-- Do **not** create new documentation files unless the feature is significant enough to warrant a standalone guide
+- Update the governing spec in the same PR as the code, and name the sections you changed in the PR
+  description (or write "Spec impact: none"). The rules are in [`AGENTS.md`](AGENTS.md)
+  ("Specs: keep them current as you work").
+- One place per fact: change a fact in its governing spec and link to it from `docs/API.md`,
+  `docs/ARCHITECTURE.md` or `README.md` rather than restating it. New endpoints still get a `docs/API.md` entry.
+- Edit specs in place, in present tense; history belongs in git and PR descriptions.
+- Update `README.md` if you add new features visible to users.
+- Do **not** create new documentation files unless the feature is significant enough to warrant a standalone guide.
 
 ### In-Code Documentation
 

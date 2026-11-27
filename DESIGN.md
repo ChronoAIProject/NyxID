@@ -500,6 +500,45 @@ its controls, including wrapped compact headers. Defer rail position and size
 writes to an animation frame outside ResizeObserver delivery: moving the
 rail's top also changes the measured viewport height during header animation.
 
+### Pending decision stack
+
+NyxAgent private chats pin live human decisions above the composer, between its
+error notice and input. Multiple requests share one card with up to two neutral
+layers peeking above it (6px/12px offsets); use `bg-card`, `bg-muted`,
+`border-border`, `rounded-xl` and `shadow-sm`. Layers are decorative and never
+contain controls. The stack owns the frame; its cards omit transcript margins,
+width limits and duplicate outer frames. The user requested this layered pattern
+on 2026-11-26, with an Opus design consultation.
+
+The desktop header says “Needs your decision” or “N requests need your decision”
+(“N decisions” on mobile); a
+separate “1 out of N” pager has labelled Previous/Next buttons and stops at each
+end. A collapse button retains the header and count. Only the front card is
+accessible and interactive; preserve inactive review state with `hidden` and
+`inert`. New requests do not replace the front card. Settled or expired requests
+leave the stack and keep their history; markers provide Review navigation while
+a request is pinned. Do not add bulk approval or decision keyboard shortcuts.
+
+Keep pinned cards compact. Long requests show their title, effect, target and a
+bounded preview; skill drafts also show file/line counts and any scope omissions.
+Their footer offers Review and Deny (or the request's existing dismissal action).
+Allow is available only in full review. Short requests keep direct decision
+controls in the pinned footer. The footer stays outside the card's scroll area,
+whose height is capped at `min(30dvh,14rem)` on mobile and `min(36dvh,20rem)` on
+desktop. Keep the composer visible and reserve the measured dock height below
+the transcript.
+
+Full review uses a desktop dialog and full-height mobile sheet, with one scrolling
+body and an always-visible decision footer. Full skill files wrap without nested
+scrolling; edits open the existing Skills editor. Preserve scope and validity
+choices when review closes and reopens. Opening review focuses its heading;
+closing returns focus to Review, and changing the selected request closes review.
+Count changes use a
+small live announcement, not a live region around the review content. Arrivals
+never steal focus. Resolving the focused card moves focus to the next card's
+header, or the composer when empty, with a 750ms guard on newly promoted
+decision controls. Layer transitions obey both reduced-motion settings.
+
 ### Agent drawer search
 
 The agent details drawer has matching circular Search and Close header icon
@@ -883,6 +922,7 @@ Get Started / Shortcuts = actionable setup steps inside the product. Quick Links
 ## Decisions Log
 | Date | Decision | Rationale |
 |------|----------|-----------|
+| 2026-11-26 | Pending human decisions share a compact pinned card stack | User-requested layering keeps live decisions above the composer, separates the pending count from card position, and returns settled requests to history. Following Opus visual review, long requests open full review with one scrolling body and a fixed decision footer; short requests keep direct controls in a fixed card footer. One interactive copy, stable selection, preserved choices, inert inactive cards and guarded promotion protect exact approvals. |
 | 2026-11-05 | Account text and range rows use deliberate shared layouts | Stack account text labels above left-aligned borderless inputs, provide explicit password placeholders and an editable-name affordance, and truncate long read-only email values beside their verification context. RangeControl aligns each label and current value above the slider with one muted helper, in both shells and mobile widths. MFA switches reflect the server state through setup/disable confirmation, announce pending/errors, and prevent dismissal during requests. |
 | 2026-11-05 | Conversation previews require an intentional gesture | Passing pointers leave the rail quiet. Press and drag preview until release; keyboard focus retains its preview. Browser coverage includes virtualized-message jumps, isolated wheel scrolling and one roving tab stop. |
 | 2026-11-05 | Account Settings shares inset grouped editing in both shells | Profile, Security, Sessions, MCP, Display and Privacy use sibling groups and external help. The panel header shares its background; visited segmented tabs retain drafts and one dirty-only viewport bar reviews profile/password edits without exposing passwords. Studio reuses the same forms; immediate actions and URL/focus/dismiss behavior stay intact. Mobile uses the full-width dialog sheet with keyboard-aware actions. |
@@ -1013,9 +1053,17 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
 - Every slab header bar, narrow or beside the persistent sidebar, floats its
   controls as these floating buttons, 8pt apart with 12pt side margins:
   Menu/Back (or Show/Hide sidebar), the agent identity (avatar, title,
-  chevron) as one glass pill, then the bell, New chat and More, and crew options.
-  Ordinary devices keep their existing action set and thread/member details;
-  More opens Details directly, or offers Voice preferences and Details during a call. The Duo's chats (folded or
+  chevron) as one glass pill, then New chat and More together in a capsule.
+  More grows that exact measured capsule into an anchored options bubble over
+  the existing chat, then shrinks back on dismissal. The floating surface keeps
+  its top-right anchor, with a rounded theme border and soft floating elevation
+  outside the clipped content; icons yield to Chat details, Notifications when enabled
+  (with its unread count), Settings and Voice preferences during a call. Crew
+  options use the same transition from their single-button capsule to Settings,
+  retaining the crew's existing settings destination. Outside tap, Android Back
+  and accessibility escape reverse the transition. Reduced motion changes size
+  immediately; focus enters the menu and returns to its trigger on dismissal.
+  A selected destination opens only after the bubble/native modal dismisses. The Duo's chats (folded or
   unfolded, either mode) have no bar: these controls sit in the status
   column (below). The chevron always follows the title.
   Every other workspace bar uses the same floating controls, on ordinary
@@ -1223,14 +1271,16 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   Finish circle. Permission, startup, capture and stopping retain the same toolbar.
   Finish adds the words to the draft for editing and explicit Send. Dictation
   errors and their Settings/Dismiss actions sit outside, above the composer pill
-  (user decision 2026-11-11). Only on narrow iOS corner-sensor windows an idle
-  composer is one row:
+  (user decision 2026-11-11). On every window on both iOS and Android an idle
+  Home, private, contextual or crew composer is one row:
   unfocused with an empty or whitespace-only draft (the draft itself is never
   trimmed), Attach, dictation and Send overlay its text line and the permission
-  pill hides. Focus, non-whitespace text, attachments, uploads or dictation
-  restore two rows without remounting the input. Ordinary devices retain the
-  full-width text row and existing toolbar, permission dropdown and input focus
-  behavior. On corner-sensor windows, a tap outside the composer blurs it as the touch ends, so the tapped control still acts on the
+  pill hides. Focus, non-whitespace text or active dictation restore two rows
+  without remounting the input. Attachments retain their own preview strip;
+  uploads do not expand an idle text input. Crew recipients appear above the
+  active input. Input and toolbar use the same compact layout on ordinary and
+  corner-sensor phones, iPad and wide windows (user clarification 2026-11-24).
+  On corner-sensor windows, a tap outside the composer blurs it as the touch ends, so the tapped control still acts on the
   first tap; dragging the transcript dismisses the keyboard. The jump-to-latest arrow
   dips 6pt and springs back as the transcript scrolls to the newest message
   (immediate under Reduce Motion). Chat pages
@@ -1249,12 +1299,20 @@ account pages and QR/terminal quick actions use the retained pull-up surface. Se
   white canvas. Sign-in, device codes, Agent Key login and MFA share this
   treatment. Workspace tokens, dark auth styling and the existing faint brand
   halo remain unchanged.
-- Native pending attachment chips keep their width and text-scaled height through
-  waiting, upload, checking, ready and error states, with a 44pt remove target.
+- Native selected attachments share one horizontal row, with equal square tiles
+  sized to fit three within the actual composer viewport, including padding and
+  gaps. Images and first-page PDF thumbnails hide visible filenames; other files
+  and failed previews show a concise type and filename. All states retain the
+  same square frame. An inset circular remove action has a separate 44pt target.
+  Strong left/right fades appear only toward hidden content, with a localized
+  visible attachment range below the viewport only while it overflows. Range and
+  offset adapt to swipes, resizing and selection changes. Local preview validation
+  runs independently of the serialized upload queue. Full filenames and errors
+  remain accessible, including when visible text truncates.
   A thin bottom bar shows upload progress; waiting/checking gently pulse a short
   segment (static under Reduce Motion). Status text owns accessibility. Ready
-  chips show only the thumbnail/icon, filename and remove control, without a
-  tick or Ready label. Errors keep red text and remove the loader.
+  tiles omit the tick and Ready label. Errors keep red text and remove the loader,
+  preserving a usable local preview when uploading fails.
 - Chat Details, History and Working context are nested pages in the content slab.
   History shares the cursor-paged Recents browser, filtered to the current agent.
   Title edits, deletion and context reset retain dirty/critical-write guards.

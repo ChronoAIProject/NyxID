@@ -1,6 +1,7 @@
 //! Exact field identities shared by credential readers, revocation preparation
 //! and storage migration. Callers supply trusted record/owner identities after
 //! their ordinary ACL checks; no identity comes from the envelope header.
+use crate::crypto::record_field;
 use crate::{
     crypto::aes::{EncryptionKeys, RecordContext},
     errors::{AppError, AppResult},
@@ -105,19 +106,15 @@ impl<'a> CredentialRecord<'a> {
             if !fields(self.collection)?.contains(&field) {
                 return Err(invalid());
             }
-            match self.versions.get(field) {
-                Some(3) => {
-                    keys.decrypt_record(
-                        ciphertext,
-                        &RecordContext::new(self.collection, self.id, self.owner, &[field])?,
-                    )
-                    .await
-                }
-                None if keys.allow_legacy_record_reads() => {
-                    keys.decrypt(ciphertext).await.map(Zeroizing::new)
-                }
-                _ => Err(invalid()),
-            }
+            let path = [field];
+            record_field::decrypt_with_context(
+                keys,
+                ciphertext,
+                self.versions.get(field).copied().map(u32::from),
+                || RecordContext::new(self.collection, self.id, self.owner, &path),
+                invalid,
+            )
+            .await
         })
     }
     pub(crate) async fn text(
@@ -146,15 +143,11 @@ pub(crate) async fn encrypt(
     if !fields(collection)?.contains(&field) {
         return Err(invalid());
     }
-    if keys.contextual_record_writes() {
-        keys.encrypt_record(
-            plaintext,
-            &RecordContext::new(collection, id, owner, &[field])?,
-        )
-        .await
-    } else {
-        keys.encrypt(plaintext).await
-    }
+    let path = [field];
+    record_field::encrypt_with_context(keys, plaintext, || {
+        RecordContext::new(collection, id, owner, &path)
+    })
+    .await
 }
 pub(crate) fn mark_version(
     versions: &mut BTreeMap<String, u8>,
@@ -332,6 +325,8 @@ pub(crate) fn exact_source_filter(
         "gateway_url",
         "credential_source",
         "oauth_app_observation",
+        super::channel_signing_migration::SIGNING_PREPARATION_FIELD,
+        "slug",
         "source_id",
         "metadata",
         VERSIONS,
@@ -399,7 +394,7 @@ fn stored_versions(row: &bson::Document) -> AppResult<BTreeMap<String, u8>> {
         Some(value) => bson::from_bson(value.clone()).map_err(|_| invalid()),
     }
 }
-fn stored_bytes(value: &bson::Bson) -> AppResult<Option<Vec<u8>>> {
+pub(super) fn stored_bytes(value: &bson::Bson) -> AppResult<Option<Vec<u8>>> {
     #[derive(serde::Deserialize)]
     struct Bytes {
         #[serde(with = "crate::models::bson_bytes::optional")]
@@ -572,6 +567,12 @@ pub(crate) async fn migrate_snapshot(
     let result: AppResult<bool> = async {
         // Read/CAS before the owner revision: an obsolete migration attempt
         // never invalidates otherwise current dependency preparation.
+        if collection == crate::models::provider_config::COLLECTION_NAME {
+            super::channel_signing_migration::authorize_rewrap(
+                &db, &mut tx, collection, source, &mut set,
+            )
+            .await?;
+        }
         let changed = db
             .collection::<bson::Document>(collection)
             .update_one(

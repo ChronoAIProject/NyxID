@@ -96,7 +96,17 @@ pub async fn recover(db: &Database, event: &str) -> AppResult<Option<NyxbotEvent
         .await?)
 }
 
+#[cfg(test)]
 pub async fn before_effect(db: &Database, event: &str, claim: &str) -> AppResult<()> {
+    before_gateway_effect(db, event, None, claim).await
+}
+
+pub(crate) async fn before_gateway_effect(
+    db: &Database,
+    event: &str,
+    source: Option<&crate::models::nyxbot_channel::NyxbotEvent>,
+    claim: &str,
+) -> AppResult<()> {
     let mut filter = pending(event);
     filter.insert("delivery.claim_id", claim);
     filter.insert(
@@ -106,26 +116,15 @@ pub async fn before_effect(db: &Database, event: &str, claim: &str) -> AppResult
             {"$gt":["$delivery.preparation.gateway_receipt.deadline","$$NOW"]}
         ]},
     );
-    if db
-        .collection::<Document>(EVENTS)
-        .update_one(
-            filter,
-            vec![doc! {"$set":{
-                "delivery.gateway_attempted":true,
-                "delivery.preparation.lease_until":{"$add":["$$NOW",SEND_SECS*1000]},
-                "delivery.receipt_due_at":{"$max":["$delivery.receipt_due_at",
-                    {"$add":["$$NOW",SEND_SECS*1000]}]},
-            }}],
-        )
-        .await?
-        .matched_count
-        == 1
-    {
-        Ok(())
-    } else {
-        Err(lost())
-    }
+    let pipeline = vec![doc! {"$set":{
+        "delivery.gateway_attempted":true,
+        "delivery.preparation.lease_until":{"$add":["$$NOW",SEND_SECS*1000]},
+        "delivery.receipt_due_at":{"$max":["$delivery.receipt_due_at",
+            {"$add":["$$NOW",SEND_SECS*1000]}]},
+    }}];
+    super::commit_text_effect(db, source, filter, pipeline).await
 }
+
 pub async fn plan(db: &Database, event: &str, claim: &str, hash: &str) -> AppResult<()> {
     let result = db
         .collection::<Document>(EVENTS)

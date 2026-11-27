@@ -11,16 +11,22 @@ async fn fixture() -> AppState {
     state
 }
 
-async fn start(state: &AppState, redirect: &str) -> AppResult<String> {
-    let query = serde_json::from_value(serde_json::json!({
-        "client": "mobile", "redirect_uri": redirect
+fn code_query(redirect_uri: &str) -> AuthorizeQuery {
+    let challenge = crate::services::oauth_flow::generate_code_challenge(&"v".repeat(43));
+    serde_json::from_value(serde_json::json!({
+        "redirect_uri": redirect_uri,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256"
     }))
-    .unwrap();
-    let (_, headers, ()) = authorize(
+    .unwrap()
+}
+
+async fn start(state: &AppState, redirect: &str) -> AppResult<String> {
+    let (_, headers, ()) = authorize_mobile_code(
         State(state.clone()),
         None,
         Path("google".into()),
-        Query(query),
+        Query(code_query(redirect)),
         HeaderMap::new(),
     )
     .await?;
@@ -52,6 +58,44 @@ async fn cancel(state: &AppState, provider: &str, csrf: &str, headers: HeaderMap
 }
 
 #[tokio::test]
+async fn retired_mobile_start_and_pending_attempt_return_update_required() {
+    let state = fixture().await;
+    let query = serde_json::from_value(serde_json::json!({
+        "client": "mobile", "redirect_uri": RETURN
+    }))
+    .unwrap();
+    let (status, headers, _) = authorize(
+        State(state.clone()),
+        None,
+        Path("google".into()),
+        Query(query),
+        HeaderMap::new(),
+    )
+    .await
+    .unwrap();
+    let update = format!("{RETURN}?status=error&error=social_auth_update_required");
+    assert_eq!(status, StatusCode::FOUND);
+    assert_eq!(headers[header::LOCATION].to_str().unwrap(), update);
+
+    let csrf = format!("{}{}", mobile::STATE_PREFIX, "a".repeat(64));
+    mobile::start(
+        &state.db,
+        &csrf,
+        "google",
+        social_auth_service::configured_callback_base(&state.config, None),
+        RETURN,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        cancel(&state, "google", &csrf, HeaderMap::new()).await,
+        update
+    );
+}
+
+#[tokio::test]
 async fn mobile_redirect_requires_exact_login_destination() {
     let state = fixture().await;
     for uri in [
@@ -71,7 +115,7 @@ async fn mobile_redirect_requires_exact_login_destination() {
 }
 
 #[tokio::test]
-async fn released_mobile_start_resolves_once_without_a_cookie() {
+async fn mobile_code_start_resolves_once_without_a_cookie() {
     let state = fixture().await;
     let csrf = start(&state, RETURN).await.unwrap();
     let cancel_once = || cancel(&state, "google", &csrf, HeaderMap::new());
@@ -194,14 +238,11 @@ async fn apple_start_recovers_the_nonce_and_target_without_cookies() {
     app.config.apple_team_id = Some("fixture-team".into());
     app.config.apple_key_id = Some("fixture-key".into());
     app.config.apple_private_key_path = Some("unused-fixture-path".into());
-    let query =
-        serde_json::from_value(serde_json::json!({"client":"mobile","redirect_uri":RETURN}))
-            .unwrap();
-    let (_, headers, ()) = authorize(
+    let (_, headers, ()) = authorize_mobile_code(
         State(app.clone()),
         None,
         Path("apple".into()),
-        Query(query),
+        Query(code_query(RETURN)),
         HeaderMap::new(),
     )
     .await
@@ -348,14 +389,11 @@ async fn code_delivery_releases_tokens_once_with_the_matching_verifier() {
 #[tokio::test]
 async fn mobile_cookie_and_state_round_trip_on_the_issuing_origin() {
     let app = fixture().await;
-    let query =
-        serde_json::from_value(serde_json::json!({"client": "mobile", "redirect_uri": RETURN}))
-            .unwrap();
-    let (_, start_headers, ()) = authorize(
+    let (_, start_headers, ()) = authorize_mobile_code(
         State(app.clone()),
         None,
         Path("google".into()),
-        Query(query),
+        Query(code_query(RETURN)),
         HeaderMap::new(),
     )
     .await

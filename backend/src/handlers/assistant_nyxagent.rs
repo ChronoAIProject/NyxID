@@ -111,6 +111,14 @@ struct ActivityDecisionResponse {
 }
 
 #[derive(Serialize)]
+struct MemoryRecoveryResponse {
+    failed_activity_id: String,
+    part: u8,
+    total: u8,
+    committed: bool,
+}
+
+#[derive(Serialize)]
 pub struct ActivityResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     decision: Option<ActivityDecisionResponse>,
@@ -122,6 +130,8 @@ pub struct ActivityResponse {
     ended_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     failure: Option<crate::models::assistant_conversation::ToolFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memory_recovery: Option<MemoryRecoveryResponse>,
 }
 impl From<crate::models::assistant_conversation::TurnActivity> for ActivityResponse {
     fn from(row: crate::models::assistant_conversation::TurnActivity) -> Self {
@@ -138,6 +148,15 @@ impl From<crate::models::assistant_conversation::TurnActivity> for ActivityRespo
             started_at: row.started_at,
             ended_at: row.ended_at,
             failure: row.failure,
+            memory_recovery: row
+                .memory_recovery
+                .filter(|part| !part.unlinked)
+                .map(|part| MemoryRecoveryResponse {
+                    failed_activity_id: part.failed_activity_id,
+                    part: part.part,
+                    total: part.total,
+                    committed: part.committed,
+                }),
         }
     }
 }
@@ -159,13 +178,21 @@ pub struct AttachmentResponse {
     image_input_reason: Option<String>,
     origin: String,
     pages: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pdf: Option<crate::models::assistant_upload::PdfCoverage>,
     id: String,
     content_type: String,
     size: i64,
     label: String,
 }
 impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentResponse {
-    fn from(row: crate::models::assistant_conversation::TurnAttachment) -> Self {
+    fn from(mut row: crate::models::assistant_conversation::TurnAttachment) -> Self {
+        if let Some(pdf) = &mut row.pdf {
+            crate::services::assistant_upload_service::pdf_vision::discard_unconfirmed_images(
+                pdf,
+                "image_delivery_unconfirmed",
+            );
+        }
         Self {
             filename: row.artifact.filename,
             source: row.artifact.source,
@@ -177,6 +204,7 @@ impl From<crate::models::assistant_conversation::TurnAttachment> for AttachmentR
             image_input_reason: row.image_input_reason,
             origin: row.origin,
             pages: row.pages,
+            pdf: row.pdf,
             id: row.id,
             content_type: row.content_type,
             size: row.size,
@@ -321,6 +349,8 @@ pub struct ConversationResponse {
     context_reset_at: Option<DateTime<Utc>>,
     context_reset_reason: Option<String>,
     role: crate::models::assistant_conversation::AgentRole,
+    /// Presentation eligibility only; never an execution or permission grant.
+    handoff_eligible: bool,
     /// The agent this thread belongs to; `None` only when it could not be
     /// resolved (legacy rows resolve to the owner's NyxBot).
     agent: Option<AgentRefResponse>,
@@ -430,6 +460,7 @@ impl From<AssistantConversation> for ConversationResponse {
                 .collect(),
         });
         Self {
+            handoff_eligible: engine::handoff_thread_eligible(&row),
             platform_thread: row
                 .platform_thread
                 .as_ref()
@@ -946,7 +977,7 @@ pub struct HistoryQuery {
     limit: Option<i64>,
     before_seq: Option<i64>,
 }
-fn limit(value: Option<i64>) -> AppResult<i64> {
+pub(super) fn limit(value: Option<i64>) -> AppResult<i64> {
     let value = value.unwrap_or(50);
     if !(1..=100).contains(&value) {
         return Err(AppError::BadRequest(
@@ -1345,7 +1376,7 @@ pub async fn history(
         acknowledgements: acknowledgements.into_iter().map(Into::into).collect(),
         approvals: approval_history
             .iter()
-            .filter(|row| row.status == "pending")
+            .filter(|row| row.status == "pending" && row.expires_at > Utc::now())
             .cloned()
             .collect(),
         approval_history,
@@ -1478,6 +1509,7 @@ pub async fn attachment(
 ) -> AppResult<Response> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
+    engine::require_public_conversation(&id)?;
     auth.ensure_live_assistant_turn(&state.db, "assistant.attachment")
         .await?;
     if Uuid::parse_str(&attachment_id).is_err() {
@@ -1572,7 +1604,7 @@ pub async fn artifact_delivery(
             "Artifact recovery requires an empty body".into(),
         ));
     }
-    let row = engine::get(&state.db, &user, &id).await?;
+    let row = engine::get_public(&state.db, &user, &id).await?;
     if row.active_turn.is_some() {
         return Err(AppError::AssistantTurnActive);
     }
@@ -1676,6 +1708,7 @@ pub async fn decide_acknowledgement(
     Path((id, ack_id)): Path<(String, String)>,
     Json(body): Json<AcknowledgementDecision>,
 ) -> AppResult<Json<AcknowledgementResponse>> {
+    engine::require_public_conversation(&id)?;
     let user = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user).await?;
     if let Some(card) = state.db.collection::<crate::models::assistant_acknowledgement::AssistantAcknowledgement>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
@@ -1758,6 +1791,7 @@ pub async fn change_model(
     let artifacts_enabled = features.iter().any(|key| {
         key == crate::services::feature_flag_service::ASSISTANT_GENERATED_ARTIFACTS_FLAG_KEY
     });
+    engine::require_public_conversation(&id)?;
     require_available_model(&state, &auth, &body.model).await?;
     let (before, row) = engine::change_model(&state.db, &owner, &id, &body.model).await?;
     engine::audit_model_change(
@@ -1813,7 +1847,7 @@ pub async fn stop(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    let target = engine::get(&state.db, &user_id, &id).await?;
+    let target = engine::get_public(&state.db, &user_id, &id).await?;
     let stopped = engine::request_stop_row_target(&state.db, &target).await?;
     if let Some(row) = stopped.as_ref().filter(|row| {
         row.active_turn
@@ -1867,7 +1901,7 @@ pub async fn delete(
 ) -> AppResult<StatusCode> {
     let user_id = auth.user_id.to_string();
     engine::require_enabled(&state.db, &user_id).await?;
-    let target = engine::get(&state.db, &user_id, &id).await?;
+    let target = engine::get_public(&state.db, &user_id, &id).await?;
     // Preserve the existing voice live-slot rule before recording a stop. The
     // delete service repeats this check in its transaction for race safety.
     if state
@@ -2577,7 +2611,9 @@ pub async fn turns(
     }
     // Ownership is checked before provisioning or touching a credential.
     let org_access = if let Some(id) = &input.conversation_id {
-        engine::get_authorized(&state.db, &user_id, id).await?.1
+        engine::get_public_authorized(&state.db, &user_id, id)
+            .await?
+            .1
     } else {
         None
     };
@@ -2589,6 +2625,18 @@ pub async fn turns(
     start.org_access = org_access;
     if super::login_client_context::require_first_party_human(&auth).is_ok() {
         start.owner_instruction_source = Some(engine::OwnerInstructionSource::FirstPartyOwner);
+        if parts
+            .headers
+            .get("x-nyxid-chat-capabilities")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                value
+                    .split(',')
+                    .any(|part| part.trim() == "nyxbot-handoff-v1")
+            })
+        {
+            start.note = Some(engine::HANDOFF_UI_NOTE.into());
+        }
         start.title_language = parts
             .headers
             .get("accept-language")

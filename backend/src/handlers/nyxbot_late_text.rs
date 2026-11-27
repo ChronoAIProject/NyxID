@@ -115,7 +115,14 @@ pub(super) async fn send(
                             "Channel answer authority changed".into(),
                         ));
                     }
-                    preparation::before_effect(&state.db, &event.id, &claim, index).await
+                    preparation::before_text_effect(
+                        &state.db,
+                        &event.id,
+                        Some(&event),
+                        &claim,
+                        index,
+                    )
+                    .await
                 }) as futures::future::BoxFuture<'static, AppResult<()>>
             })
         };
@@ -391,7 +398,13 @@ pub(super) async fn resume_receipt(state: &AppState, event: &NyxbotEvent) -> App
                         "Channel answer authority changed".into(),
                     ));
                 }
-                preparation::gateway::before_effect(&state.db, &event.id, &claim).await
+                preparation::gateway::before_gateway_effect(
+                    &state.db,
+                    &event.id,
+                    Some(&event),
+                    &claim,
+                )
+                .await
             }) as futures::future::BoxFuture<'static, AppResult<()>>
         })
     };

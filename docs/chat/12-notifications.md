@@ -156,7 +156,8 @@ ACL checks; missing or destroyed agents use the system identity. `outcome` and
 `by_kind` contains unread row counts for all six kinds, using the same visibility
 filter and single aggregate as the total. Clients tolerate these additive fields
 being absent during rollout. Rows reuse the sidebar's agent and stacked crew
-avatars, with a small kind badge; mark-all stays in the feed footer.
+avatars, with a small kind badge. Web keeps mark-all in the feed footer;
+mobile places it in the header's Notification options menu.
 
 The list response is:
 
@@ -265,8 +266,9 @@ through **99**, then **99+**. The single count pill uses the warning tone while 
 **Automations** and **Chats**. Rows show their kind, current source title, bounded
 preview, age, unread state and a count chip when activity coalesced. The panel
 supports cursor pagination, empty/error states and mark-all with the viewed
-`as_of` fence. Both clients label the action **Mark all notifications as read**,
-enable it from the global summary unread count on every filter, and clear all
+`as_of` fence. Web labels the action **Mark all notifications as read**; mobile
+offers **Mark all as read** under Notification options. Both enable it from the
+global summary unread count on every filter, and clear all
 kinds through the same server fence. Opening a row navigates to its canonical source and marks it seen.
 An empty page can still have a cursor when all its sources are hidden. Both clients
 keep pagination available until that cursor is exhausted, bound automatic traversal
@@ -286,6 +288,18 @@ refresh, cursor pagination and the same filters. It refreshes on focus, app
 foreground, push receipt and notification live frames. Push taps use the existing
 canonical assistant-link router and mark the supplied `notification_id` seen.
 Approvals Activity remains separate.
+
+iOS filters show text labels without counts. Android filters show counts as
+described in the [native workspace routes](../../mobile/docs/NATIVE_WORKSPACE_ROUTES.md).
+Search matches titles, previews,
+agents, participants, source labels and platform names within the selected filter.
+Search filters the fetched pages locally; when no match is visible it follows
+up to five distinct cursors, then offers **Search older notifications**. That
+action also remains available below matching results while older pages exist.
+An empty search result is final only after the server's cursor is exhausted.
+Searching and opening Notification options do not mark rows read. The mark-all
+menu action retains the global `as_of` fence and is disabled while offline,
+pending, or when there is nothing unread.
 
 The existing owner live stream emits identifiers only:
 
@@ -319,15 +333,22 @@ Push consent and payload kind use that original kind. Source access, labels and
 preview follow the latest activity, so merging chat and event replies cannot
 invent or omit a channel visibility check. Group mentions retain their original
 mention title using the current group label.
-The worker rechecks preferences, visibility and the
-existing FCM/APNs configuration. It permits at most one push per person/source
+The worker rechecks preferences, visibility, the account
+push switch (`push_enabled`), at least one registered device and the existing
+FCM/APNs configuration. It permits at most one push per person/source
 in ten minutes and at most thirty pushes per person/hour, across replicas.
 
 The row's durable send barrier is:
 
 ```text
-pending → sending → sent | failed | unknown | skipped
+pending → sending → sent | failed | unknown | retrying
+retrying → sending            (once retry_at is due)
+pending | retrying → skipped | failed   (decided before any send)
 ```
+
+`skipped` records a deliberate non-send (for example `preference_off` at row
+creation, `already_seen`, `source_rate` or `hourly_limit`); `failed` at claim
+means the retry budget is exhausted.
 
 A dedicated notification task runs every 15 seconds, including decision-expiry
 resolution. It does not run inline with the shared assistant sweep, so provider
@@ -374,8 +395,9 @@ retry deadline and attempt budget before it can authorize another send.
 No provider prose or preview enters delivery diagnostics.
 
 The body uses the current source's title and at most 200 preview characters.
-Data includes the kind, `notification_id` and canonical `deeplink`. An automation
-whose own destination is `deliver_to: notification` suppresses the feed's push,
+Data includes `type` and `kind` (both the push kind), `notification_id`,
+canonical `deeplink`, and `conversation_id` when the row's source records one.
+An automation whose own destination is `deliver_to: notification` suppresses the feed's push,
 including its problem result; the run still appears in the feed. Existing pause
 notice push must likewise retain only one external delivery.
 

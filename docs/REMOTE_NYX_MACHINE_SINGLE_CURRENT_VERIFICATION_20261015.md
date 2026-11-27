@@ -1,5 +1,7 @@
 # Remote Machine single-current local verification — 2026-10-15
 
+> **Status:** Historical — point-in-time verification evidence that cites local artifacts not kept in the repository. Current spec: [Remote Machine source recovery and owner read contracts](REMOTE_NYX_MACHINE_FINAL_READ_CONTRACTS.md).
+
 > **Prior-stage verification retained for full-feature coverage.** The measurements and commands below belong to the single-current resource-contract phase. The later optional StorageClass and relocated hosted-image results are recorded in [HOSTED_STORAGE_VERIFICATION_20261015](REMOTE_NYX_MACHINE_HOSTED_STORAGE_VERIFICATION_20261015.md). Older working notes mentioned below remain local and are not required repository documentation.
 
 Implementation status: all eight approved implementation steps are complete for the authorized local scope. Final required checks below passed. This is not independent SSHX review, termination, whole-goal completion, selected-cluster acceptance or an MVP release claim. S7 remains caller-owned.

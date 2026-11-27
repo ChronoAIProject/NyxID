@@ -207,13 +207,14 @@ interface CreateApiKeyPayload {
   readonly target_org_id?: string;
 }
 
-export function useCreateApiKey() {
+export function useCreateApiKey(authorityGuard?: () => void) {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (
       data: CreateApiKeyFormData,
     ): Promise<ApiKeyCreateResponse> => {
+      authorityGuard?.();
       // Backend expects scopes as a space-separated string, not an array.
       // Normalize date-only input while preserving an already absolute expiry.
       if (data.never_expires && data.expires_at) {
@@ -243,9 +244,14 @@ export function useCreateApiKey() {
         callback_url: data.callback_url ?? undefined,
         target_org_id: data.target_org_id ?? undefined,
       };
-      return api.post<ApiKeyCreateResponse>("/api-keys", {
+      const request = {
         ...payload, ...(data.never_expires ? { never_expires: true } : {}),
-      });
+      };
+      const result = authorityGuard
+        ? await api.post<ApiKeyCreateResponse>("/api-keys", request, { authorityGuard })
+        : await api.post<ApiKeyCreateResponse>("/api-keys", request);
+      authorityGuard?.();
+      return result;
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys", "insights"] });

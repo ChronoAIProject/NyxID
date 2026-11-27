@@ -57,6 +57,8 @@ function readProfile(env, prefix) {
     legalBaseUrl: env[`${prefix}_LEGAL_BASE_URL`] || "",
     allowedEmails: env[`${prefix}_ALLOWED_EMAILS`] || "",
     telemetryDsn: env[`${prefix}_TELEMETRY_DSN`] || "",
+    performanceToken: env[`${prefix}_PERFORMANCE_POSTHOG_TOKEN`] || "",
+    performanceHost: env[`${prefix}_PERFORMANCE_POSTHOG_HOST`] || "",
     telemetryHost: env[`${prefix}_TELEMETRY_HOST`] || "",
     shareAnalytics: env[`${prefix}_SHARE_ANALYTICS`] || "",
   };
@@ -144,6 +146,22 @@ function readNewProductionDomains(env) {
   return domains;
 }
 
+function validateFrontendAssociation(value, variable, production) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    fatal(`${variable} must be an absolute frontend origin for native app links.`);
+  }
+  if (
+    !/^https?:\/\/[^/?#@\\\s]+(?:\/[^?#]*)?$/i.test(value) ||
+    url.username || url.password || url.search || url.hash ||
+    (production && url.protocol !== "https:")
+  ) {
+    fatal(`${variable} must use ${production ? "HTTPS" : "HTTP or HTTPS"} without credentials, a query, or a fragment for native app links.`);
+  }
+}
+
 function resolveProfile(appEnv, env, options = {}) {
   if (appEnv !== "dev" && appEnv !== "prod") {
     fatal(`APP_ENV must be "dev" or "prod"; got "${appEnv}"`);
@@ -153,6 +171,11 @@ function resolveProfile(appEnv, env, options = {}) {
     env[`${appEnv.toUpperCase()}_ANDROID_HTTPS_APP_LINKS`] || "false";
   if (!["true", "false"].includes(linkOptIn))
     fatal("ANDROID_HTTPS_APP_LINKS must be true or false");
+  // This rollout selector is intentionally profile-local; do not use pick().
+  const nativeLinkHostsVariable = `${appEnv.toUpperCase()}_NATIVE_LINK_HOSTS`;
+  const nativeLinkHosts = env[nativeLinkHostsVariable] || "api";
+  if (!["api", "api+frontend"].includes(nativeLinkHosts))
+    fatal(`${nativeLinkHostsVariable} must be api or api+frontend`);
   const dev = readProfile(env, "DEV");
   const prod = readProfile(env, "PROD");
   if (env.PROD_USE_NEW_DOMAINS !== undefined) {
@@ -183,12 +206,33 @@ function resolveProfile(appEnv, env, options = {}) {
 
   const pick = (k) => primary[k] || fallback[k] || "";
   const androidPackage = pick("androidPackage");
+  // The ingest destination is profile-local and must be valid as a pair.
+  const performance = performanceDestination(
+    primary.performanceHost,
+    primary.performanceToken,
+  );
   const explicitFrontendUrl = pick("frontendUrl");
   const legalBaseUrl = pick("legalBaseUrl");
+  const apiBaseUrl = pick("apiBaseUrl");
+  const frontendUrl = explicitFrontendUrl || legalBaseUrl;
+  if (nativeLinkHosts === "api+frontend" && !primary.frontendUrl) {
+    const frontendVariable = `${appEnv.toUpperCase()}_FRONTEND_URL`;
+    fatal(
+      `${frontendVariable} must be explicitly configured when ` +
+        `${nativeLinkHostsVariable}=api+frontend; the legal base URL cannot be claimed as a native association host.`,
+    );
+  }
+  const associatedUrls = [apiBaseUrl, newDomains?.apiBaseUrl ?? ""];
+  if (nativeLinkHosts === "api+frontend") {
+    validateFrontendAssociation(frontendUrl, `${appEnv.toUpperCase()}_FRONTEND_URL`, appEnv === "prod");
+    if (newDomains)
+      validateFrontendAssociation(newDomains.frontendUrl, "PROD_NEW_FRONTEND_URL", true);
+    associatedUrls.push(frontendUrl, newDomains?.frontendUrl ?? "");
+  }
 
   const resolved = {
-    apiBaseUrl: pick("apiBaseUrl"),
-    frontendUrl: explicitFrontendUrl || legalBaseUrl,
+    apiBaseUrl,
+    frontendUrl,
     newApiBaseUrl: newDomains?.apiBaseUrl ?? "",
     newFrontendUrl: newDomains?.frontendUrl ?? "",
     newLegalBaseUrl: newDomains?.legalBaseUrl ?? "",
@@ -204,12 +248,16 @@ function resolveProfile(appEnv, env, options = {}) {
     appleAscAppId: pick("appleAscAppId"),
     iosBuildNumber: pick("iosBuildNumber") || "1",
     androidVersionCode: pick("androidVersionCode") || "1",
+    nativeLinkHosts,
+    associatedUrls,
     androidHttpsAppLinks: linkOptIn === "true",
     universalLinkHost: pick("universalLinkHost"),
     universalLinkPathPrefix: pick("universalLinkPathPrefix"),
     legalBaseUrl,
     allowedEmails: pick("allowedEmails"),
     telemetryDsn: pick("telemetryDsn"),
+    performanceToken: performance?.token ?? "",
+    performanceHost: performance?.host ?? "",
     telemetryHost: pick("telemetryHost"),
     shareAnalytics: pick("shareAnalytics") || "false",
   };
@@ -256,6 +304,31 @@ function resolveProfile(appEnv, env, options = {}) {
   return resolved;
 }
 
+function performanceDestination(host, token) {
+  if (
+    typeof token !== "string" ||
+    !/^phc_[A-Za-z0-9_-]+$/.test(token) ||
+    typeof host !== "string" ||
+    !/^https:\/\/[^/?#@\\\s]+\/?$/i.test(host)
+  ) return null;
+  try {
+    const url = new URL(host);
+    return url.hostname && url.protocol === "https:"
+      ? { host: url.origin, token }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+// Native launch listeners run before JS and must match the saved grant to this build.
+function performanceLaunchBinding(profile) {
+  const destination = performanceDestination(profile.performanceHost, profile.performanceToken);
+  if (!destination) return "";
+  return require("node:crypto").createHash("sha256")
+    .update(JSON.stringify([destination.host, destination.token])).digest("hex");
+}
+
 function appIdentity(env) {
   return {
     name: env.APP_NAME || "NyxID Mobile",
@@ -270,6 +343,8 @@ module.exports = {
   resolveProfile,
   validateAndroidGoogleServicesFile,
   appIdentity,
+  performanceDestination,
+  performanceLaunchBinding,
   fatal,
   MOBILE_ROOT,
 };

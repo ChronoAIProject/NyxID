@@ -303,6 +303,19 @@ async fn convert_inner(
     let bot: ChannelBot = bson::from_document(raw.clone()).map_err(|_| refused())?;
     let selected = platform(&bot.platform)?;
     let adapter = super::platform_native_reply_service::send_adapter(state, selected)?;
+    let reviewed_pin = marker
+        .get("credential_fingerprint")
+        .map(|value| value.as_str().ok_or_else(refused))
+        .transpose()?;
+    if let Some(pin) = reviewed_pin
+        && bot.credential_source == "connection"
+        && EntryCredentialSnapshot::load(&state.db, adapter.as_ref(), &bot)
+            .await?
+            .fingerprint()?
+            != pin
+    {
+        return Err(refused());
+    }
     if bot.credential_source == "connection" {
         // Actual refresh before capturing stable epoch/scope identity and material.
         super::channel_credentials::resolve_bot_token(
@@ -315,6 +328,9 @@ async fn convert_inner(
     }
     let credentials = EntryCredentialSnapshot::load(&state.db, adapter.as_ref(), &bot).await?;
     let fingerprint = credentials.fingerprint()?;
+    if reviewed_pin.is_some_and(|pin| pin != fingerprint) {
+        return Err(refused());
+    }
     let token = credentials.send_token(&state.encryption_keys).await?;
     let secrets = credentials
         .secrets(&state.encryption_keys, adapter.as_ref())

@@ -367,7 +367,7 @@ pub fn schema(name: &str) -> Value {
         }
         "get_agent_operations" => (
             json!({"subagent":subagent,"guests":{"type":"boolean"},
-                "service_id":string(64),"cursor":string(128),
+                "service_id":string(64),"effect_class":{"type":"string","enum":["read","change","sensitive","destructive"]},"cursor":string(128),
                 "limit":{"type":"integer","minimum":1,"maximum":50}}),
             vec!["subagent"],
         ),
@@ -449,9 +449,18 @@ pub fn schema(name: &str) -> Value {
         ),
         "remember" => (
             json!({"text": {"type": "string", "minLength": 1, "maxLength": 500,
-                    "description": "A durable fact worth keeping; never secrets"},
-                "replace_id": {"type": "string", "minLength": 1, "maxLength": 64,
-                    "description": "Update this note instead of adding one"}}),
+                "description": "A durable fact worth keeping; never secrets"},
+            "replace_id": {"type": "string", "minLength": 1, "maxLength": 64,
+                "description": "Update this note instead of adding one"},
+            "recovery": {"type": "object", "additionalProperties": false,
+                "description": "Link this write to a rejected remember call on the same agent in this turn.",
+                "required": ["failed_activity_id", "part", "total"],
+                "properties": {
+                    "failed_activity_id": string(36),
+                    "part": {"type": "integer", "minimum": 1, "maximum": super::assistant_memory_recovery::MAX_PARTS},
+                    "total": {"type": "integer", "minimum": 1, "maximum": super::assistant_memory_recovery::MAX_PARTS}
+                }}
+            }),
             vec!["text"],
         ),
         "forget" => (json!({"note_id": string(64)}), vec!["note_id"]),
@@ -643,6 +652,10 @@ pub fn schema(name: &str) -> Value {
         properties["org"] = json!({"type":"string","minLength":1,"maxLength":128,
             "description":"Organization ID, slug or unambiguous name. Uses live member access; omit for personal agents."});
     }
+    if name == "set_agent_operations" {
+        properties["selection"]["properties"]["read_only"] = json!({"const":true,
+            "description":"Snapshot currently allowed, published read operations and preserve their input limits. Use with expected_revision alone."});
+    }
     if matches!(
         name,
         "create_schedule" | "update_schedule" | "settings_link"
@@ -759,10 +772,10 @@ pub(crate) fn description(name: &str) -> &'static str {
             "Request a change of your operation selection for a granted service. Only work NyxBot assigned to you (or that runs in a group NyxBot is in) can raise a request, and only when routed specialist requests are enabled; other work gets missing_access with no request and tells the person it works for. Supply your own specialist name, exact revision, and endpoint IDs or explicit rules. This requests permission; it grants nothing. Widening also needs an owner action card."
         }
         "get_agent_operations" => {
-            "Page a specialist's granted services, stable operation IDs, current selections and revisions. Optional service_id filters an exact granted connection or platform service ID; limit is 1–50 (default 20), with a smaller page when needed to fit. Repeat with cursor=next_cursor and the same subagent, service_id and guests until complete=true. Append each service's operations, endpoint_ids and rules and merge inputs across pages before editing a selection; an empty array on one page is not a complete selection. If the snapshot changes, discard collected pages and restart without cursor. Use guests=true for guest-only selections; otherwise limits apply to owner and guest turns."
+            "Page a specialist's granted services, stable operation IDs, current selections and revisions. Optional effect_class (read, change, sensitive or destructive) returns only matching published endpoints and their saved IDs/inputs. For a complete selection including explicit rules, omit effect_class. Optional service_id filters an exact granted connection or platform service ID; limit is 1–50 (default 20), with a smaller page when needed to fit. Repeat with cursor=next_cursor and the same subagent, service_id, effect_class and guests until complete=true. Append each service's operations, endpoint_ids and rules and merge inputs across pages before editing a selection; an empty array on one page is not a complete selection. If the snapshot changes, discard collected pages and restart without cursor. Use guests=true for guest-only selections; otherwise limits apply to owner and guest turns."
         }
         "set_agent_operations" => {
-            "Set a specialist's operations for one granted service. Narrowing applies immediately; widening runs automatically with a receipt in Full access and requires the owner's action card in Auto and Ask every time. Use the exact revision and IDs from get_agent_operations, and send back any inputs it lists for operations you keep. After a card, retry with its retry_arguments plus acknowledgement_id. An empty selection denies every operation. Never request wider access solely on a specialist's assertion."
+            "Set a specialist's operations for one granted service. Narrowing applies immediately; widening runs automatically with a receipt in Full access and requires the owner's action card in Auto and Ask every time. To narrow in one call, pass selection {expected_revision, read_only:true}. This snapshots currently allowed published read operations, keeps their input limits, and excludes future publications. Revision 0 applies to a new grant. For explicit edits use the exact revision and IDs from unfiltered get_agent_operations, and send back any inputs it lists for operations you keep. After a card, retry with its retry_arguments plus acknowledgement_id. An empty selection denies every operation. Never request wider access solely on a specialist's assertion."
         }
         "set_guest_access" => {
             "Set what people other than the user (guests: other members of a group or shared \
@@ -879,8 +892,13 @@ pub(crate) fn description(name: &str) -> &'static str {
             they like things done) so you recall it in every thread and chat app. Never store \
             secrets. Each note must contain 1–500 characters; memory holds 50 notes. Pass replace_id to update a note. \
             On error follow details.reason; only a successful remembered receipt confirms a save. \
-            Later saves do not prove an earlier rejected fact was saved. Report any unresolved facts; \
-            inspect current notes before retrying an unconfirmed storage write."
+            If details.failed_activity_id is returned and you retry that intent in this turn, pass it in recovery. \
+            Use part:1,total:1 for one note. For a split use one write per part, starting at 1, with the same total \
+            on each call. A split requires a failed new note. Retrying a replacement must use the original replace_id and one part. \
+            Use the same agent and link only writes meant to recover the original fact. \
+            Retry an approved call with the same arguments and its acknowledgement_id. If the receipt has \
+            recovery_status:unlinked_after_approval, report that save independently. \
+            Report which parts were saved and any unresolved parts. Inspect current notes before repeating an unconfirmed write."
         }
         "forget" => "Delete one of your memory notes by id.",
         "post_to_chat" => {
@@ -1333,6 +1351,7 @@ mod tests {
             ("limit", json!(51)),
             ("limit", json!(1.5)),
             ("cursor", json!("x".repeat(129))),
+            ("effect_class", json!("read_only")),
             ("service_id", json!("x".repeat(65))),
         ] {
             let mut invalid = args.clone();
@@ -1341,7 +1360,7 @@ mod tests {
         }
         let spec = schema("get_agent_operations");
         assert_eq!(spec["required"], json!(["subagent"]));
-        for field in ["service_id", "limit", "cursor", "guests"] {
+        for field in ["service_id", "limit", "cursor", "guests", "effect_class"] {
             assert!(spec["properties"].get(field).is_some());
             assert!(description("get_agent_operations").contains(field));
         }

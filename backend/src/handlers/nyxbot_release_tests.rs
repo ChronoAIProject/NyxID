@@ -172,6 +172,138 @@ async fn release_crash_boundaries_reservation_dispatch_post_attachment_and_activ
     }
 }
 
+#[test]
+fn terminal_provider_absence_preserves_original_owner_issuer_and_legacy_evidence_fences() {
+    crate::test_utils::run_native_journey_test("provider_absence_scope", || async {
+        for mode in [
+            "original",
+            "historical",
+            "issuer_overlap",
+            "inactive_owner",
+            "binding_changed",
+        ] {
+            let (mut state, row, _, server, upstream) = fixture("provider_absence_scope").await;
+            let _upstream = tokio_util::task::AbortOnDropHandle::new(upstream);
+            let reserved = reserve(&state, &row).await;
+            assert!(
+                release::record_provider_refusal(&state.db, &row, &reserved.id)
+                    .await
+                    .is_ok()
+            );
+            assert!(!current(&state, &reserved.id).await.create_provider_refused);
+            release::dispatch(&state.db, &reserved).await.unwrap();
+            let mut foreign = row.clone();
+            foreign.user_id = Uuid::new_v4().to_string();
+            assert!(
+                release::record_provider_refusal(&state.db, &foreign, &reserved.id)
+                    .await
+                    .is_ok()
+            );
+            assert!(!current(&state, &reserved.id).await.create_provider_refused);
+            if mode != "historical" {
+                release::record_provider_refusal(&state.db, &row, &reserved.id)
+                    .await
+                    .unwrap();
+            }
+            release::retire_attempt(&state, &reserved.id, ReleaseReason::SetupFailed)
+                .await
+                .unwrap();
+            // Older workers/rows have no additive evidence flag. A row's error
+            // code alone must never make an uncertain CREATE conclusive.
+            if mode == "historical" {
+                state.db.collection::<Document>(RELEASES).update_one(doc!{"_id":&reserved.id},
+                    doc!{"$unset":{"create_provider_refused":""},"$set":{"last_error":"gateway_provider_not_registered"}}).await.unwrap();
+            }
+            if mode == "issuer_overlap" {
+                state.config.domain_aliases.base_urls = vec![state.config.jwt_issuer.clone()];
+                state.config.jwt_issuer = "https://new.example".into();
+            }
+            if mode == "inactive_owner" {
+                state
+                    .db
+                    .collection::<Document>(USERS)
+                    .update_one(doc! {"_id":OWNER}, doc! {"$set":{"is_active":false}})
+                    .await
+                    .unwrap();
+            }
+            if mode == "binding_changed" {
+                state
+                    .db
+                    .collection::<Document>(RELEASES)
+                    .update_one(
+                        doc! {"_id":&reserved.id},
+                        doc! {"$set":{"binding_id":"bnd_other"}},
+                    )
+                    .await
+                    .unwrap();
+            }
+            Mock::given(method("GET"))
+                .and(path(format!("/channel-records/{}", reserved.id)))
+                .respond_with(
+                    ResponseTemplate::new(404)
+                        .set_body_json(json!({"status":404,"code":"channel_not_found"})),
+                )
+                .expect(if mode == "inactive_owner" { 0 } else { 1 })
+                .mount(&server)
+                .await;
+            if mode == "original" {
+                Mock::given(method("GET"))
+                    .and(path("/channel-records/cancel-create-capability"))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_json(json!({"contract_version":1})),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                Mock::given(method("POST")).and(path(format!("/channel-records/{}/cancel-create",reserved.id)))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(json!({"contract_version":1,"status":"creation_fenced_absent",
+                        "record_id":reserved.record_id,"owner":{"issuer":reserved.creator_issuer,"kind":"human","subject":OWNER},
+                        "provider":{"slug":"nyxbot","binding_id":reserved.binding_id}}))).expect(1).mount(&server).await;
+            }
+            assert_eq!(
+                execute(&state, &reserved.id).await,
+                mode == "original",
+                "{mode}"
+            );
+            let stored = current(&state, &reserved.id).await;
+            assert_eq!(
+                stored.state == ReleaseState::Settled,
+                mode == "original",
+                "{mode}"
+            );
+            assert_eq!(
+                stored.resolution.as_deref(),
+                if mode == "original" {
+                    Some("missing")
+                } else {
+                    None
+                },
+                "{mode}"
+            );
+            for request in server.received_requests().await.unwrap() {
+                assert!(
+                    request.method == "GET" || (mode == "original" && request.method == "POST")
+                );
+                let bearer = request
+                    .headers
+                    .get("authorization")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .strip_prefix("Bearer ")
+                    .unwrap();
+                let claims =
+                    crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, bearer)
+                        .unwrap();
+                assert_eq!(claims.sub, OWNER);
+                assert_eq!(claims.iss, state.config.jwt_issuer);
+            }
+            server.verify().await;
+            state.db.drop().await.unwrap();
+        }
+    });
+}
+
 #[tokio::test]
 async fn release_uncertain_create_404_escalates_then_late_record_is_attributable() {
     let (state, row, _, server, upstream) = fixture("release_uncertain").await;
@@ -667,6 +799,18 @@ async fn release_retirement_and_route_key_revocation_roll_back_together() {
 async fn release_disconnect_org_loss_fallback_and_setup_failure_capture_pending_attempts() {
     for mode in ["disconnect", "org", "fallback", "setup_failure"] {
         let (state, row, _, _, upstream) = fixture("release_paths").await;
+        let rows = state.db.collection::<Document>(CHANNELS);
+        let source = rows.find_one(doc! {"_id":&row.id}).await.unwrap().unwrap();
+        assert!(
+            channel_key::migrate(&state.db, &state.encryption_keys, &source)
+                .await
+                .unwrap()
+        );
+        let row = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert_eq!(
+            row.secret_context_versions.get(channel_key::FIELD),
+            Some(&3)
+        );
         let reserved = reserve(&state, &row).await;
         release::dispatch(&state.db, &reserved).await.unwrap();
         match mode {
@@ -702,13 +846,10 @@ async fn release_disconnect_org_loss_fallback_and_setup_failure_capture_pending_
         assert_eq!(retired.owner_user_id, OWNER);
         assert_retired_key(&state, &reserved.agent_api_key_id).await;
         assert_retired_key(&state, &reserved.route_api_key_id).await;
-        assert!(
-            load_channel(&state, OWNER, &row.id)
-                .await
-                .unwrap()
-                .gateway_setup_release_id
-                .is_none()
-        );
+        let retired_channel = load_channel(&state, OWNER, &row.id).await.unwrap();
+        assert!(retired_channel.gateway_setup_release_id.is_none());
+        assert!(retired_channel.agent_key_ciphertext.is_none());
+        assert!(retired_channel.secret_context_versions.is_empty());
         upstream.abort();
         state.db.drop().await.unwrap();
     }
@@ -738,10 +879,13 @@ async fn release_activation_and_stale_reclaimer_have_one_winner() {
             &state.db,
             OWNER,
             &row.id,
-            row.route_id.as_deref().unwrap(),
-            None,
-            true,
-            "fresh-hash",
+            continuity::ActivationBinding {
+                route_id: row.route_id.as_deref().unwrap(),
+                predecessor_id: None,
+                default_agent: true,
+                link_hash: "fresh-hash",
+                expected_callback: None,
+            },
         )
         .await;
         if expired {
@@ -865,10 +1009,13 @@ async fn continuity_restores_stable_chats_policy_verified_owners_and_both_reply_
             &state.db,
             OWNER,
             &next.id,
-            next.route_id.as_deref().unwrap(),
-            None,
-            false,
-            "fresh-link-hash",
+            continuity::ActivationBinding {
+                route_id: next.route_id.as_deref().unwrap(),
+                predecessor_id: None,
+                default_agent: false,
+                link_hash: "fresh-link-hash",
+                expected_callback: None,
+            },
         )
         .await
         .unwrap();
@@ -990,10 +1137,13 @@ async fn continuity_failed_restoration_and_disconnect_cannot_consume_predecessor
             &state.db,
             OWNER,
             &next.id,
-            next.route_id.as_deref().unwrap(),
-            None,
-            true,
-            "fresh"
+            continuity::ActivationBinding {
+                route_id: next.route_id.as_deref().unwrap(),
+                predecessor_id: None,
+                default_agent: true,
+                link_hash: "fresh",
+                expected_callback: None,
+            }
         )
         .await
         .is_err()
@@ -1020,10 +1170,13 @@ async fn continuity_failed_restoration_and_disconnect_cannot_consume_predecessor
             &state.db,
             OWNER,
             &next.id,
-            next.route_id.as_deref().unwrap(),
-            None,
-            true,
-            "fresh"
+            continuity::ActivationBinding {
+                route_id: next.route_id.as_deref().unwrap(),
+                predecessor_id: None,
+                default_agent: true,
+                link_hash: "fresh",
+                expected_callback: None,
+            }
         )
         .await
         .is_err()
@@ -1417,10 +1570,13 @@ async fn continuity_newest_incompatible_predecessor_blocks_older_history_and_con
         &state.db,
         OWNER,
         &next.id,
-        next.route_id.as_deref().unwrap(),
-        None,
-        true,
-        "fresh",
+        continuity::ActivationBinding {
+            route_id: next.route_id.as_deref().unwrap(),
+            predecessor_id: None,
+            default_agent: true,
+            link_hash: "fresh",
+            expected_callback: None,
+        },
     )
     .await
     .unwrap();
@@ -1455,19 +1611,25 @@ async fn continuity_newest_incompatible_predecessor_blocks_older_history_and_con
             &state.db,
             OWNER,
             &one.id,
-            one.route_id.as_deref().unwrap(),
-            Some(&previous.id),
-            true,
-            "one"
+            continuity::ActivationBinding {
+                route_id: one.route_id.as_deref().unwrap(),
+                predecessor_id: Some(&previous.id),
+                default_agent: true,
+                link_hash: "one",
+                expected_callback: None,
+            }
         ),
         continuity::activate(
             &state.db,
             OWNER,
             &two.id,
-            two.route_id.as_deref().unwrap(),
-            Some(&previous.id),
-            true,
-            "two"
+            continuity::ActivationBinding {
+                route_id: two.route_id.as_deref().unwrap(),
+                predecessor_id: Some(&previous.id),
+                default_agent: true,
+                link_hash: "two",
+                expected_callback: None,
+            }
         )
     );
     // A successor that lost the predecessor claim must not activate without it.
@@ -1490,10 +1652,13 @@ async fn continuity_newest_incompatible_predecessor_blocks_older_history_and_con
         &state.db,
         OWNER,
         &next.id,
-        next.route_id.as_deref().unwrap(),
-        Some(&abandoned.id),
-        true,
-        "fresh",
+        continuity::ActivationBinding {
+            route_id: next.route_id.as_deref().unwrap(),
+            predecessor_id: Some(&abandoned.id),
+            default_agent: true,
+            link_hash: "fresh",
+            expected_callback: None,
+        },
     )
     .await
     .unwrap();
@@ -1660,9 +1825,12 @@ async fn release_debug_admin_dto_and_audit_metadata_exclude_credential_material(
         .await
         .unwrap();
     let debug = format!("{reserved:?}");
-    let dto = crate::handlers::nyxbot_gateway_releases::ReleaseResponse::from(
-        current(&state, &reserved.id).await,
-    );
+    let dispatched = current(&state, &reserved.id).await;
+    let started_at = dispatched.dispatch_started_at.unwrap();
+    let dto = crate::handlers::nyxbot_gateway_releases::ReleaseResponse::from(dispatched);
+    let review = serde_json::to_value(&dto).unwrap();
+    assert_eq!(review["channel_bot_id"], row.channel_bot_id);
+    assert_eq!(review["dispatch_started_at"], json!(started_at));
     let serialized = serde_json::to_string(&dto).unwrap();
     let audit = state
         .db
@@ -1696,10 +1864,13 @@ async fn release_unknown_activation_reply_and_unavailable_reread_never_delete_ad
         &state.db,
         OWNER,
         &row.id,
-        row.route_id.as_deref().unwrap(),
-        None,
-        true,
-        "committed-link",
+        continuity::ActivationBinding {
+            route_id: row.route_id.as_deref().unwrap(),
+            predecessor_id: None,
+            default_agent: true,
+            link_hash: "committed-link",
+            expected_callback: None,
+        },
     )
     .await
     .unwrap();
@@ -1900,10 +2071,13 @@ async fn release_concurrent_activation_and_expiry_reclamation_commit_one_outcome
                 &state.db,
                 OWNER,
                 &row.id,
-                row.route_id.as_deref().unwrap(),
-                None,
-                true,
-                "racing-link"
+                continuity::ActivationBinding {
+                    route_id: row.route_id.as_deref().unwrap(),
+                    predecessor_id: None,
+                    default_agent: true,
+                    link_hash: "racing-link",
+                    expected_callback: None,
+                }
             ),
             release::retire_attempt(&state, &reserved.id, ReleaseReason::StaleSetup)
         );
@@ -1991,10 +2165,13 @@ async fn continuity_activation_policy_sync_survives_a_crash_before_inline_sync()
         &state.db,
         OWNER,
         &row.id,
-        row.route_id.as_deref().unwrap(),
-        None,
-        true,
-        "crash-safe-link",
+        continuity::ActivationBinding {
+            route_id: row.route_id.as_deref().unwrap(),
+            predecessor_id: None,
+            default_agent: true,
+            link_hash: "crash-safe-link",
+            expected_callback: None,
+        },
     )
     .await
     .unwrap();
@@ -2237,6 +2414,89 @@ async fn release_delete_authority_refusal_escalates_without_changing_authority()
     assert_eq!(review.expected_version, Some(1));
     upstream.abort();
     state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn telegram_setup_custody_review_does_not_change_other_transport_releases() {
+    for platform in ["telegram", "discord", "whatsapp", "lark"] {
+        for status in [400, 409] {
+            let (state, mut row, _, server, upstream) = fixture("release_transport_scope").await;
+            row.platform = platform.into();
+            state
+                .db
+                .collection::<Document>(CHANNELS)
+                .update_one(doc! {"_id":&row.id}, doc! {"$set":{"platform":platform}})
+                .await
+                .unwrap();
+            state
+                .db
+                .collection::<Document>(crate::models::channel_bot::COLLECTION_NAME)
+                .update_one(
+                    doc! {"_id":&row.channel_bot_id},
+                    doc! {"$set":{"platform":platform}},
+                )
+                .await
+                .unwrap();
+            let reserved = reserve(&state, &row).await;
+            release::dispatch(&state.db, &reserved).await.unwrap();
+            release::record_ack(&state.db, &reserved, "cmaeg1.ch.remote", 1)
+                .await
+                .unwrap();
+            release::retire_attempt(&state, &reserved.id, ReleaseReason::SetupFailed)
+                .await
+                .unwrap();
+            // Keep the known setup failure identical; only Telegram may select
+            // its new operator-dependent review path over existing transitions.
+            state
+                .db
+                .collection::<Document>(CHANNELS)
+                .update_one(
+                    doc! {"_id":&row.id},
+                    doc! {"$set":{"last_error":"gateway_provider_not_registered"}},
+                )
+                .await
+                .unwrap();
+            mount_remote(&server, &reserved, 1).await;
+            let body = if status == 400 {
+                json!({"code":"invalid_request","detail":"nyxbot"})
+            } else {
+                json!({"code":"conflict","detail":"expected version 1, actual Some(1)"})
+            };
+            Mock::given(method("DELETE"))
+                .and(path("/channels/cmaeg1.ch.remote"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(body))
+                .mount(&server)
+                .await;
+            assert!(!execute(&state, &reserved.id).await);
+            let after = current(&state, &reserved.id).await;
+            let (expected_state, expected_reason) = if platform == "telegram" {
+                (
+                    ReleaseState::ReviewRequired,
+                    "gateway_provider_setup_required",
+                )
+            } else if status == 400 {
+                (ReleaseState::Due, "release_unconfirmed")
+            } else {
+                (ReleaseState::ReviewRequired, "remote_version_changed")
+            };
+            assert_eq!(after.state, expected_state, "{platform} HTTP {status}");
+            assert_eq!(after.last_error.as_deref(), Some(expected_reason));
+            assert_eq!(after.expected_version, Some(1));
+            assert!(after.resolution.is_none());
+            assert_eq!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.method.as_str() == "DELETE")
+                    .count(),
+                1
+            );
+            upstream.abort();
+            state.db.drop().await.unwrap();
+        }
+    }
 }
 
 struct CapturedReleaseLog(Arc<std::sync::Mutex<Vec<u8>>>);

@@ -123,6 +123,16 @@ pub async fn resolve_bot_token(
     adapter: &dyn PlatformAdapter,
     bot: &ChannelBot,
 ) -> AppResult<Zeroizing<String>> {
+    if super::channel_adapters::meta::is_meta(&bot.platform)
+        && bot
+            .meta_binding
+            .as_ref()
+            .is_some_and(|binding| binding.provider_revoked)
+    {
+        return Err(super::channel_adapters::meta::unreachable(
+            "reconnect_required",
+        ));
+    }
     if bot.credential_source == "telegram_manager" {
         let values =
             super::telegram_manager_registry::values(db, keys, Some(&bot.platform_bot_id)).await?;
@@ -146,9 +156,7 @@ pub async fn resolve_bot_token(
         required_scopes,
     } = adapter.credential_resolution()
     else {
-        return super::channel_bot_service::decrypt_bot_token(keys, bot)
-            .await
-            .map(Zeroizing::new);
+        return super::channel_bot_service::decrypt_bot_token(keys, bot).await;
     };
     let result = if bot.credential_source != "connection" {
         Err(reconnect("Bot is missing its OAuth connection"))
@@ -245,6 +253,8 @@ pub struct ConnectionStart {
     pub connection_id: String,
     pub authorization_url: String,
     pub attempt_nonce: Option<String>,
+    pub state_id: String,
+    pub launch_proof: Zeroizing<String>,
 }
 
 impl std::fmt::Debug for ConnectionStart {
@@ -345,6 +355,8 @@ pub async fn start_connection(
             connection_id: key.id,
             authorization_url: flow.authorization_url,
             attempt_nonce: flow.attempt_nonce,
+            state_id: flow.state_id,
+            launch_proof: flow.launch_proof,
         }),
         Err(error) => {
             let _ = crate::services::service_history::collection::<UserApiKey>(

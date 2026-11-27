@@ -1,5 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
-import { openAccountMenu, openAssistant, sendMessage, composerInput, stopButton } from "./helpers";
+import { openAccountMenu, openNyxBotSettings, openAssistant, sendMessage, composerInput, stopButton } from "./helpers";
 import { mockDashboard } from "./managed-onboarding-fixtures";
 
 const unexpectedRequests = new WeakMap<Page, string[]>();
@@ -54,6 +54,9 @@ test.beforeEach(async ({ page }) => {
   );
   await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) =>
     route.fulfill({ json: [] }),
+  );
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) =>
+    route.fulfill({ json: { sessions: [] } }),
   );
   await page.route("**/api/v1/saved-logins**", (route) =>
     route.fulfill({ json: [] }),
@@ -163,28 +166,30 @@ test("NyxBot settings ask before destructive actions in Auto; Full access delete
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  await openAccountMenu(page);
-  await page.getByRole("menuitem", { name: "NyxBot settings", exact: true }).click();
+  await openNyxBotSettings(page);
   const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
   const mode = settings.getByRole("combobox", { name: "Access mode" });
   await expect(mode).toHaveText("Auto");
-  const save = settings.getByRole("button", { name: "Save settings" });
-  await expect(save).toBeDisabled();
+  const bar = settings.getByRole("region", { name: "Unsaved changes" });
+  await expect(bar).toHaveCount(0);
   await mode.click();
   await page.getByRole("option", { name: "Full access", exact: true }).click();
   await expect(mode).toHaveText("Full access");
   await expect(settings.getByRole("alert")).toContainText("without asking you first");
-  await save.click();
-  await expect(save).toBeDisabled();
+  await bar.getByRole("button", { name: "Save changes" }).click();
+  await page.getByRole("dialog", { name: "Review changes" }).getByRole("button", { name: "Save changes" }).click();
+  await expect(bar).toHaveCount(0);
 
   // Channel bots: connect one (to NyxBot by default) and get a one-time owner link.
-  await settings.getByRole("button", { name: "Connect NyxID Approvals" }).click();
-  const link = settings.getByRole("region", { name: "Owner link" });
+  await settings.getByRole("button", { name: "Connect another bot", exact: true }).click();
+  await page.getByRole("button", { name: "Connect NyxID Approvals", exact: true }).click();
+  const link = page.getByRole("region", { name: "Owner link" });
   await expect(link.getByRole("link", { name: "Open link" })).toHaveAttribute(
     "href",
     /^https:\/\/t\.me\/nyxid_approvals_bot\?start=nyxlink_[a-f0-9]{12}$/,
   );
   await expect(link).toContainText("press Start");
+  await page.getByRole("button", { name: "Back to Channels", exact: true }).click();
   await expect(
     settings.getByRole("list", { name: "Connected channel bots" }),
   ).toContainText("NyxID Approvals");
@@ -197,8 +202,7 @@ test("NyxBot settings ask before destructive actions in Auto; Full access delete
   await settled(page);
   await expect(page.getByRole("button", { name: "Allow", exact: true })).toHaveCount(0);
   await page.reload();
-  await openAccountMenu(page);
-  await page.getByRole("menuitem", { name: "NyxBot settings", exact: true }).click();
+  await openNyxBotSettings(page);
   await expect(
     settings.getByRole("combobox", { name: "Access mode" }),
   ).toHaveText("Full access");
@@ -354,10 +358,11 @@ test("NyxBot delegates to a sidebar specialist and is woken by its reply", async
 
 test("channel bots can be relinked to a specialist", async ({ page }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  await openAccountMenu(page);
-  await page.getByRole("menuitem", { name: "NyxBot settings", exact: true }).click();
+  await openNyxBotSettings(page);
   const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
-  await settings.getByRole("button", { name: "Connect NyxID Approvals" }).click();
+  await settings.getByRole("button", { name: "Connect another bot", exact: true }).click();
+  await page.getByRole("button", { name: "Connect NyxID Approvals", exact: true }).click();
+  await page.getByRole("button", { name: "Back to Channels", exact: true }).click();
   const connected = settings.getByRole("list", { name: "Connected channel bots" });
   const agentFor = connected.getByRole("combobox", { name: "Agent for NyxID Approvals" });
   await expect(agentFor).toContainText("NyxBot");
@@ -372,6 +377,7 @@ test("channel bots can be relinked to a specialist", async ({ page }) => {
   await researcher.click();
   await page.getByRole("button", { name: "Agent details" }).click();
   const details = page.getByRole("dialog", { name: "Agent details" });
+  await details.getByRole("tab", { name: "Channels", exact: true }).click();
   await expect(
     details.getByRole("list", { name: "Connected channel bots" }),
   ).toContainText("NyxID Approvals");
@@ -381,10 +387,11 @@ test("a bot's chats: who can talk, how it answers, and posting are set per chat"
   page,
 }) => {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
-  await openAccountMenu(page);
-  await page.getByRole("menuitem", { name: "NyxBot settings", exact: true }).click();
+  await openNyxBotSettings(page);
   const settings = page.getByRole("dialog", { name: "NyxBot settings", exact: true });
-  await settings.getByRole("button", { name: "Connect NyxID Approvals" }).click();
+  await settings.getByRole("button", { name: "Connect another bot", exact: true }).click();
+  await page.getByRole("button", { name: "Connect NyxID Approvals", exact: true }).click();
+  await page.getByRole("button", { name: "Back to Channels", exact: true }).click();
   const connected = settings.getByRole("list", { name: "Connected channel bots" });
   await connected.getByRole("button", { name: "Chats and posting" }).click();
   const chats = settings.getByRole("list", { name: "Chats of NyxID Approvals" });
@@ -568,7 +575,8 @@ test("assistant chat keys are hidden until requested and detail links back to th
 });
 
 test("chat width resizes the transcript and composer together, persists, and fits smaller screens", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  // Leave room for a 200px expansion alongside both desktop navigation columns.
+  await page.setViewportSize({ width: 1920, height: 900 });
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await sendMessage(page, "Use GitHub");
   await expect(page.getByText("Repository lookup succeeded.")).toBeVisible();
@@ -761,6 +769,7 @@ test("conversation controls float after scrolling without moving the reading pos
   await sendMessage(page, text);
   await expect(page.getByText(/^Working on it: Section 1/)).toBeVisible();
   await settled(page);
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
   const controls = page.getByRole("group", { name: "Conversation controls" });
   const transcript = page.locator("[data-chat-transcript]");
   await expect(controls).toHaveAttribute("data-compact", "true");
@@ -778,7 +787,8 @@ test("conversation controls float after scrolling without moving the reading pos
   await page.mouse.move(viewport.x + viewport.width / 2, viewport.y + 200);
   await page.mouse.wheel(0, 100);
   await expect(controls).toHaveAttribute("data-compact", "true");
-  await expect.poll(async () => (await message.boundingBox())!.y).toBeCloseTo(before - 100, 0);
+  // Allow less than two CSS pixels for fractional layout and browser scroll rounding.
+  await expect.poll(async () => Math.abs((await message.boundingBox())!.y - (before - 100))).toBeLessThan(2);
   expect(await transcript.evaluate((element) => element.clientHeight)).toBeGreaterThan(expandedHeight);
 
   // Small movements around the collapse point must not toggle the row again.
@@ -800,7 +810,7 @@ test("conversation controls float after scrolling without moving the reading pos
     return element.querySelector("[id^=message-]")!.getBoundingClientRect().y;
   });
   await expect(controls).toHaveAttribute("data-compact", "false");
-  await expect.poll(async () => (await message.boundingBox())!.y).toBeCloseTo(restoredY, 0);
+  await expect.poll(async () => Math.abs((await message.boundingBox())!.y - restoredY)).toBeLessThan(2);
 
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 700 });
@@ -823,7 +833,8 @@ test("conversation controls float after scrolling without moving the reading pos
   await settled(page);
   await expect.poll(() => transcript.evaluate((element) => element.scrollHeight - element.clientHeight - element.scrollTop)).toBeLessThanOrEqual(1);
   await expect(controls).toHaveAttribute("data-compact", "true");
-  await agentsNav(page).getByRole("button", { name: "New chat with researcher" }).click();
+  await page.getByRole("complementary", { name: "Threads", exact: true })
+    .getByRole("button", { name: "New chat with researcher", exact: true }).click();
   await expect(controls).toHaveAttribute("data-compact", "false");
   await expect.poll(() => transcript.evaluate((element) => element.scrollTop)).toBe(0);
 });

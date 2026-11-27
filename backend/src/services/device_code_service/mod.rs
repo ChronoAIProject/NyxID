@@ -9,8 +9,11 @@ use crate::redaction::RedactedLen;
 mod approve;
 mod initiate;
 mod lockout;
+#[cfg(test)]
+mod mixed_delivery;
 mod onboard;
 mod poll;
+pub(super) mod record;
 mod rotation;
 
 pub use approve::approve;
@@ -73,9 +76,9 @@ pub enum DeviceCodePoll {
         interval: u32,
     },
     Approved {
-        api_key: String,
+        api_key: zeroize::Zeroizing<String>,
         node_id: String,
-        refresh_token: String,
+        refresh_token: zeroize::Zeroizing<String>,
         /// Delivery envelope lifetime, not the API key lifetime.
         expires_in: i64,
         api_key_expires_at: Option<String>,
@@ -359,6 +362,7 @@ mod tests {
             approved_org_id: None,
             issued_api_key_id: None,
             issued_node_id: None,
+            delivery_context_version: None,
             delivery_api_key_encrypted: None,
             delivery_refresh_token_encrypted: None,
             refresh_token_hash: None,

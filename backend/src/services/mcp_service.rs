@@ -1825,7 +1825,7 @@ async fn load_user_tools_with_grants(
                         None if !template_rows.endpoints.is_empty() => {
                             tracing::warn!(
                                 user_service_id = %us.id,
-                                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                                spec_url = %crate::services::url_validation::url_host_for_logs(spec_url),
                                 "User-mounted spec unusable; falling back to catalog template endpoints"
                             );
                             (template_rows, false, false)
@@ -2006,32 +2006,39 @@ fn service_endpoint_durable_metadata(
 ) -> HashMap<String, McpDurableEndpointMetadata> {
     eps.iter()
         .map(|endpoint| {
-            let marks = catalog_slug
-                .map(|slug| {
-                    super::catalog_spec_registry::operation_marks(
-                        slug,
-                        &endpoint.method,
-                        &endpoint.path,
-                        &endpoint.name,
-                    )
-                })
-                .unwrap_or_default();
             (
                 endpoint.id.clone(),
-                McpDurableEndpointMetadata {
-                    risk: endpoint.risk,
-                    catalog_contract: true,
-                    destructive: marks.destructive,
-                    changes_existing: marks.changes_existing,
-                    generic_spec_key: None,
-                    append_only: marks.append_only,
-                    append_only_query: marks.append_only_query,
-                    supports_idempotency_key: endpoint.supports_idempotency_key,
-                    operation_generation: endpoint.operation_generation,
-                },
+                stored_endpoint_metadata(endpoint, catalog_slug),
             )
         })
         .collect()
+}
+
+pub(super) fn stored_endpoint_metadata(
+    endpoint: &ServiceEndpoint,
+    catalog_slug: Option<&str>,
+) -> McpDurableEndpointMetadata {
+    let marks = catalog_slug
+        .map(|slug| {
+            super::catalog_spec_registry::operation_marks(
+                slug,
+                &endpoint.method,
+                &endpoint.path,
+                &endpoint.name,
+            )
+        })
+        .unwrap_or_default();
+    McpDurableEndpointMetadata {
+        risk: endpoint.risk,
+        catalog_contract: true,
+        destructive: marks.destructive,
+        changes_existing: marks.changes_existing,
+        append_only: marks.append_only,
+        append_only_query: marks.append_only_query,
+        supports_idempotency_key: endpoint.supports_idempotency_key,
+        operation_generation: endpoint.operation_generation,
+        generic_spec_key: None,
+    }
 }
 
 /// An instance-mounted spec of a catalog service keeps what the catalog
@@ -2236,7 +2243,7 @@ async fn try_user_spec_endpoints(
         Ok(_) => {
             tracing::debug!(
                 user_service_id = %user_service_id,
-                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                spec_url = %crate::services::url_validation::url_host_for_logs(spec_url),
                 "Parsed user OpenAPI spec contained no operations"
             );
             None
@@ -2244,7 +2251,7 @@ async fn try_user_spec_endpoints(
         Err(error) => {
             tracing::warn!(
                 user_service_id = %user_service_id,
-                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                spec_url = %crate::services::url_validation::url_host_for_logs(spec_url),
                 %error,
                 "Failed to parse user OpenAPI spec"
             );
@@ -3126,7 +3133,9 @@ pub fn generate_tool_definitions(
 /// as potentially destructive. Unknown names return `None`.
 pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde_json::Value> {
     let (read_only, destructive, open_world) = match name {
-        "nyxid__task_status"
+        "nyxid__set_agent_operations" => (false, false, false),
+        "nyxid__get_agent_operations"
+        | "nyxid__task_status"
         | "nyxid__list_notifications"
         | "nyxid__list_schedules"
         | "nyxid__read_tool_result" => (true, false, false),
@@ -3180,6 +3189,8 @@ pub fn tool_annotations(name: &str, services: &[McpToolService]) -> Option<serde
 /// Unknown names return `None`.
 pub fn tool_title(name: &str, services: &[McpToolService]) -> Option<String> {
     let fixed = match name {
+        "nyxid__get_agent_operations" => "List specialist operations by effect",
+        "nyxid__set_agent_operations" => "Set specialist operation scope",
         "nyxid__task_status" => "Read task execution status",
         "nyxid__list_notifications" => "Read NyxBot notifications",
         "nyxid__list_schedules" => "List NyxBot schedules and automations",
@@ -4048,6 +4059,8 @@ type ServiceApprovalWait =
 pub struct PreparedProxyCall {
     /// Create the connected approval only after this exact action passes assistant admission.
     service_approval: Option<ServiceApprovalWait>,
+    pub(crate) channel_guest_approval:
+        Option<Box<super::channel_guest_access::guest_tools::SheetsApproval>>,
     lark_message: Option<super::lark_im_tool::MessageMode>,
     managed_base: Option<super::lark_base_writes::Prepared>,
     attachment_binding: Option<super::lark_attachment_tool::Binding>,
@@ -4484,6 +4497,55 @@ impl PreparedProxyCall {
         }
     }
 
+    pub(crate) async fn authorize_guest_data(
+        &self,
+        db: &mongodb::Database,
+        turn: &crate::models::channel_guest_access::GuestTurn,
+        service: &McpToolService,
+        endpoint: &McpToolEndpoint,
+    ) -> AppResult<()> {
+        use super::channel_guest_access::{google_sheets, guest_tools, policy};
+        let McpToolSource::UserManaged {
+            user_service_id,
+            catalog_service_id: Some(id),
+            node_id: None,
+            ..
+        } = &service.source
+        else {
+            return Err(policy::denied());
+        };
+        if self.is_generic_proxy_endpoint
+            || self.carries_method_override()
+            || !self.parameter_headers.is_empty()
+            || !self.server_owned_headers.is_empty()
+            || !service
+                .durable_endpoint_metadata
+                .get(&endpoint.endpoint_id)
+                .is_some_and(|metadata| metadata.catalog_contract)
+        {
+            return Err(policy::denied());
+        }
+        let catalog = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"_id": id, "is_active": true})
+            .await?
+            .ok_or_else(policy::denied)?;
+        let operation = google_sheets::classify(
+            &catalog.slug,
+            user_service_id,
+            &self.method,
+            &self.canonical_path()?,
+            self.query.as_deref(),
+            self.body.as_deref().unwrap_or_default(),
+            self.body_content_type.as_deref(),
+        )
+        .ok_or_else(policy::denied)?;
+        if guest_tools::sheets_endpoint_action(endpoint) != Some(operation.action) {
+            return Err(policy::denied());
+        }
+        guest_tools::authorize_sheets_operation(db, turn, &operation).await
+    }
+
     /// The HTTP method this call is sent with.
     pub fn method(&self) -> &reqwest::Method {
         &self.method
@@ -4601,6 +4663,7 @@ pub(crate) fn http_carries_method_override(
         attachment_binding: None,
         resource_source: None,
         service_approval: None,
+        channel_guest_approval: None,
         automatic_receipt: None,
         async_submission: None,
         async_continuation: None,
@@ -4734,6 +4797,7 @@ fn prepare_proxy_tool_call_inner(
         attachment_binding: None,
         resource_source: None,
         service_approval: None,
+        channel_guest_approval: None,
         automatic_receipt: None,
         async_submission: None,
         async_continuation: None,
@@ -6581,6 +6645,63 @@ async fn execute_tool_resolved_inner(
         )
         .await?
     };
+    use super::channel_guest_access::guest_tools;
+    let channel_guest_sheets = if let Some(chat) = assistant_chat
+        .as_ref()
+        .filter(|chat| chat.channel_guest.is_some())
+    {
+        let McpToolSource::UserManaged {
+            user_service_id,
+            catalog_service_id: Some(_),
+            ..
+        } = &service.source
+        else {
+            return Err(super::channel_guest_access::policy::denied());
+        };
+        if node_route.is_some()
+            || !has_server_credential
+            || prepared.is_generic_proxy_endpoint
+            || prepared.carries_method_override()
+            || prepared.async_submission.is_some()
+            || prepared.async_continuation.is_some()
+            || !prepared.parameter_headers.is_empty()
+            || !prepared.server_owned_headers.is_empty()
+            || !service
+                .durable_endpoint_metadata
+                .get(&endpoint.endpoint_id)
+                .is_some_and(|metadata| metadata.catalog_contract)
+        {
+            return Err(super::channel_guest_access::policy::denied());
+        }
+        let path = prepared.canonical_path()?;
+        let mut authorized = guest_tools::authorize_sheets(
+            db,
+            chat,
+            guest_tools::SheetsRequest {
+                catalog_slug: catalog_service_slug,
+                connection_id: Some(user_service_id),
+                target: &target,
+                method: &prepared.method,
+                path: &path,
+                query: prepared.query.as_deref(),
+                body: prepared.body.as_deref().unwrap_or_default(),
+                content_type: prepared.body_content_type.as_deref(),
+            },
+        )
+        .await?;
+        if guest_tools::sheets_endpoint_action(endpoint) != Some(authorized.action) {
+            return Err(super::channel_guest_access::policy::denied());
+        }
+        authorized.approval = Some(
+            *prepared
+                .channel_guest_approval
+                .take()
+                .ok_or_else(super::channel_guest_access::policy::denied)?,
+        );
+        Some((chat.clone(), authorized))
+    } else {
+        None
+    };
     let mut assistant_admission = None;
     let mut assistant_auto = None;
     let deferred = prepared.service_approval.take();
@@ -6784,6 +6905,7 @@ async fn execute_tool_resolved_inner(
         }
         let PreparedProxyCall {
             service_approval: _,
+            channel_guest_approval: _,
             lark_message: _,
             managed_base,
             attachment_binding,
@@ -7569,6 +7691,10 @@ async fn execute_tool_resolved_inner(
         });
         let egress_guard = super::assistant_service_execution::HttpEgressGuard::with_attachment(
             egress_guard,db,service,endpoint,attachment_binding.as_ref());
+        let egress_guard = super::assistant_service_execution::HttpEgressGuard::with_channel_guest(
+            egress_guard, db,
+            channel_guest_sheets.as_ref().map(|(chat, _)| chat),
+            channel_guest_sheets.as_ref().map(|(_, operation)| operation));
         if attachment_binding.is_some() {
             super::lark_attachment_tool::diagnostics::outcome(super::lark_attachment_tool::diagnostics::Outcome::Uncertain);
         }
@@ -7605,6 +7731,12 @@ async fn execute_tool_resolved_inner(
                 billing
                     .reject_before_send(&metered, "assistant_authority_changed", false)
                     .await?;
+                if matches!(error, AppError::PoolAttemptTransport(crate::errors::PoolAttemptTransportKind::ResolutionUnavailable)) {
+                    if let (Some(chat), Some(admission)) = (assistant_chat.as_ref(), assistant_admission.as_ref()) {
+                        admission.record_unavailable(db, chat, "pre_dispatch").await?;
+                    }
+                    return Ok(McpToolExecutionOutcome::ProviderUnreachable(error));
+                }
                 return Err(error);
             }
             Err(proxy_service::ForwardRequestError::Application(error)) => {
@@ -10964,6 +11096,7 @@ mod tests {
         crate::services::assistant_acknowledgement_service::ChatAuthority {
             key_version: 0,
             voice_parent_conversation_id: None,
+            channel_guest: None,
             platform_model_context: None,
             automation_work: None,
             execution_group_id: None,

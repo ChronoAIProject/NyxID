@@ -14,20 +14,30 @@ function elements(root: Element): Element[] {
   )];
 }
 
-function setup({ inSheet = true, scanner = true, reduced = false, authenticated = true, userCode, previewRequest, decisionRequest, canGoBack = true }:
+function setup({ inSheet = true, scanner = true, reduced = false, authenticated = true, userCode, previewRequest, decisionRequest, canGoBack = true, platform = "ios", stagingScan = false }:
   { inSheet?: boolean; scanner?: boolean; reduced?: boolean; authenticated?: boolean; userCode?: string; canGoBack?: boolean;
     previewRequest?: (code: string) => Promise<unknown>;
-    decisionRequest?: () => Promise<void> } = {}) {
+    decisionRequest?: () => Promise<void>; platform?: "ios" | "android"; stagingScan?: boolean } = {}) {
   let reducedMotion = reduced;
   let linkedCode = userCode;
   let language: Language = "en";
   const navigationCalls: unknown[] = [];
   const previews: { code: string }[] = [];
   const decisions: string[] = [];
+  const stagingDecisions: { action: string; code: string; binding: unknown }[] = [];
+  let keyboardVisible = false;
+  let keyboardDismissals = 0;
+  let readingModalInsets = false;
+  const modalInsets = { top: 45, bottom: 34 };
   // Render the local ManualCodeModal with the actual screen; native boundaries
   // remain inert elements, so its hook and visible/animation props are exercised.
-  const jsx = (type: any, props: Record<string, unknown>): Element =>
-    typeof type === "function" ? type(props) : { type, props };
+  const jsx = (type: any, props: Record<string, unknown>): Element => {
+    if (typeof type !== "function") return { type, props };
+    // JSX forms child elements before a provider is rendered. Defer the
+    // content under the native provider so its hooks see that provider.
+    if (type.name === "ManualCodeContent") return { type, props };
+    return type(props);
+  };
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "@react-navigation/routers": { StackActions },
@@ -37,13 +47,32 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
         "View", "Text", "TextInput", "Pressable", "ScrollView", "Modal",
         "KeyboardAvoidingView", "ActivityIndicator",
       ].map((name) => [name, name])),
-      Platform: { OS: "ios" },
+      Platform: { OS: platform },
+      Keyboard: {
+        isVisible: () => keyboardVisible,
+        dismiss: () => { keyboardDismissals++; keyboardVisible = false; },
+      },
     },
-    "react-native-safe-area-context": { useSafeAreaInsets: () => ({ top: 0, bottom: 0 }) },
+    "react-native-safe-area-context": {
+      SafeAreaProvider: (props: any) => {
+        const context = props.children;
+        assert.equal(context.type, "WorkspaceSheetProvider");
+        assert.equal(context.props.value, null);
+        const content = context.props.children;
+        readingModalInsets = true;
+        try {
+          return { type: "SafeAreaProvider", props: { children: content.type(content.props) } };
+        } finally {
+          readingModalInsets = false;
+        }
+      },
+      useSafeAreaInsets: () => readingModalInsets ? modalInsets : { top: 0, bottom: 0 },
+    },
     "lucide-react-native": Object.fromEntries([
       "ChevronDown", "ChevronLeft", "ChevronUp", "Info", "ScanQrCode", "X",
     ].map((name) => [name, name])),
     "../../app/WorkspaceHeader": {
+      WorkspaceSheetContext: { Provider: "WorkspaceSheetProvider" },
       useWorkspaceSheet: () => inSheet ? {} : null,
       useWorkspaceBack: () => {},
     },
@@ -51,6 +80,7 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
     "../../components/PrimaryButton": { PrimaryButton: "PrimaryButton" },
     "./AuthSubmitButton": { AuthSubmitButton: "PrimaryButton" },
     "../../components/ScreenContainer": { ScreenContainer: "ScreenContainer" },
+    "../../components/workspace/KeyboardViewport": { KeyboardViewport: "KeyboardViewport" },
     "../../components/icons/empty-state/MagicKeyIllustration": { MagicKeyIllustration: "MagicKeyIllustration" },
     "../../components/icons/empty-state/RoadBarrierIllustration": { RoadBarrierIllustration: "RoadBarrierIllustration" },
     "../../lib/accessibility/useReducedMotion": { useReducedMotion: () => reducedMotion },
@@ -59,6 +89,15 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
       previewAuthDevice: (code: string) => {
         previews.push({ code });
         return previewRequest?.(code) ?? Promise.reject(new Error("No preview configured"));
+      },
+      previewStagingDevice: (code: string) => {
+        previews.push({ code });
+        return previewRequest?.(code) ?? Promise.reject(new Error("No staging preview configured"));
+      },
+      decideStagingDevice: async (action: string, code: string, binding: unknown) => {
+        stagingDecisions.push({ action, code, binding });
+        decisions.push("staging-" + action);
+        await decisionRequest?.();
       },
       approveAuthDevice: async () => { decisions.push("approve"); await decisionRequest?.(); },
       denyAuthDevice: async () => { decisions.push("deny"); },
@@ -96,7 +135,7 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
       goBack: () => navigationCalls.push({ back: true }),
       setParams: () => {},
     },
-    route: { params: { start_scanner: scanner, user_code: linkedCode } },
+    route: { params: { start_scanner: scanner, user_code: linkedCode, staging_scan: stagingScan } },
   }));
   function find(type: string) {
     const found = elements(harness.value()).find((item) => item.type === type);
@@ -104,7 +143,9 @@ function setup({ inSheet = true, scanner = true, reduced = false, authenticated 
     return found;
   }
   return {
-    harness, find, previews, decisions, navigationCalls,
+    harness, find, previews, decisions, stagingDecisions, navigationCalls,
+    keyboard: (visible: boolean) => { keyboardVisible = visible; },
+    keyboardDismissals: () => keyboardDismissals,
     setLanguage(value: Language) { language = value; harness.render(); },
     setCode(value: string) { linkedCode = value; harness.render(); },
     setReducedMotion(value: boolean) { reducedMotion = value; harness.render(); },
@@ -130,6 +171,29 @@ test("manual code modal follows reduced motion on entry and while open", () => {
     assert.equal(env.find("Modal").props.visible, false);
     env.harness.unmount();
   }
+});
+
+test("Android manual-code Back hides the keyboard before closing and keeps the code", () => {
+  const env = setup({ platform: "android" });
+  env.find("DeviceCodeScanner").props.onManualEntry();
+  env.harness.flush();
+  const input = () => elements(env.harness.value()).find((item) => item.type === "TextInput" && item.props.accessibilityLabel === "Login code")!;
+  input().props.onChangeText("ABCD-EFGH");
+  env.harness.flush();
+  env.keyboard(true);
+  env.find("Modal").props.onRequestClose();
+  env.harness.flush();
+  assert.equal(env.keyboardDismissals(), 1);
+  assert.equal(env.find("Modal").props.visible, true);
+  assert.equal(input().props.value, "ABCD-EFGH");
+  assert.deepEqual(env.navigationCalls, []);
+  const scroller = elements(env.find("KeyboardViewport")).find((item) => item.type === "ScrollView")!;
+  assert.equal(scroller.props.keyboardShouldPersistTaps, "handled");
+  assert.equal(scroller.props.automaticallyAdjustKeyboardInsets, false);
+  env.find("Modal").props.onRequestClose();
+  env.harness.flush();
+  assert.equal(env.find("Modal").props.visible, false);
+  env.harness.unmount();
 });
 
 const pendingPreview = (label: string) => ({
@@ -325,3 +389,146 @@ for (const kind of ["browser", "cli", "unknown"] as const) {
     env.harness.unmount();
   });
 }
+
+test("manual code reads full-window safe-area values from its native Modal for both opener contexts", () => {
+  for (const inSheet of [true, false]) {
+    for (const platform of ["android", "ios"] as const) {
+      const env = setup({ inSheet, platform });
+      env.find("DeviceCodeScanner").props.onManualEntry();
+      env.harness.flush();
+      const provider = elements(env.find("Modal")).find((node) => node.type === "SafeAreaProvider")!;
+      const root = elements(provider).find((node) => node.props.accessibilityViewIsModal)!;
+      const scroll = elements(root).find((node) => node.type === "ScrollView")!;
+      assert.equal(root.props.style[1].paddingTop, 45);
+      assert.equal(scroll.props.contentContainerStyle[1].paddingBottom, 34);
+      assert.equal(scroll.props.automaticallyAdjustKeyboardInsets, false);
+      assert.equal(scroll.props.keyboardDismissMode, platform === "ios" ? "interactive" : "none");
+      env.harness.unmount();
+    }
+  }
+});
+
+
+test("staging review names the trusted environment and approves only its bound staging request", async (context) => {
+  let now = Date.now();
+  context.mock.method(Date, "now", () => now);
+  const binding = { request_id: "request", production_user: "production", staging_user: "staging" };
+  const env = setup({ stagingScan: true, userCode: "ABCD-EFGH", previewRequest: async () => ({
+    ...pendingPreview("Browser"), stagingBinding: binding,
+  }) });
+  await env.harness.settle();
+  const nodes = elements(env.harness.value());
+  assert.ok(nodes.some((node) => node.props.children === "staging.nyxid.ai"));
+  assert.ok(nodes.some((node) => node.props.children === "Sign-in environment"));
+  assert.deepEqual(env.decisions, []);
+  const approve = nodes.find((node) => node.props.label === "Approve staging account session")!;
+  assert.ok(approve);
+  now += 750;
+  await approve.props.onPress();
+  await env.harness.settle();
+  assert.deepEqual(env.stagingDecisions, [{ action: "approve", code: "ABCDEFGH", binding }]);
+  assert.deepEqual(env.decisions, ["staging-approve"]);
+  env.harness.unmount();
+});
+
+test("a local request cannot claim the trusted staging environment through requester hints", async () => {
+  const env = setup({ userCode: "ABCD-EFGH", previewRequest: async () => ({
+    ...pendingPreview("staging.nyxid.ai"), client_origin: "https://staging.nyxid.ai",
+  }) });
+  await env.harness.settle();
+  const nodes = elements(env.harness.value());
+  assert.equal(nodes.some((node) => node.props.children === "Sign-in environment"), false);
+  assert.ok(nodes.some((node) => node.props.label === "Approve full account session"));
+  assert.equal(nodes.some((node) => node.props.label === "Approve staging account session"), false);
+  env.harness.unmount();
+});
+
+test("review groups client and request details before actions and disclosures never decide a request", async (t) => {
+  const env = setup({ userCode: "ABCD-EFGH", previewRequest: async () => ({
+    ...pendingPreview("Browser request"),
+    client_app: "Chrome 127",
+    client_platform: "macOS",
+    client_timezone: "UTC",
+    client_screen_width: 1440,
+    client_screen_height: 900,
+    client_device_pixel_ratio: null,
+    client_hardware_concurrency: 8,
+    client_device_memory: 16,
+    client_user_agent: "Example browser user agent",
+  }) });
+  t.after(() => env.harness.unmount());
+  await env.harness.settle();
+  let nodes = elements(env.harness.value());
+  const approve = nodes.findIndex((node) => node.props.label === "Approve full account session");
+  const disclosure = nodes.findIndex((node) => node.props.accessibilityLabel === "Show more details");
+  assert.ok(disclosure >= 0 && approve > disclosure);
+  assert.ok(nodes.some((node) => node.props.label === "Reject"));
+  assert.ok(nodes.some((node) => node.props.children === "ABCD-EFGH"));
+  assert.ok(nodes.some((node) => node.props.children === "Expires in"));
+  assert.ok(nodes.some((node) => node.props.children === "Chrome 127 · macOS"));
+  assert.ok(nodes.some((node) => node.props.children === "Requested"));
+  assert.ok(nodes.some((node) => node.props.children === "Timezone"));
+  for (const label of ["Platform", "Screen", "Processor", "Memory", "Raw user agent"]) {
+    assert.equal(nodes.some((node) => node.props.children === label), false);
+  }
+  nodes[disclosure]!.props.onPress();
+  env.harness.flush();
+  nodes = elements(env.harness.value());
+  assert.ok(nodes.some((node) => node.props.children === "1440 x 900 CSS px"));
+  assert.ok(nodes.some((node) => node.props.children === "16 GB"));
+  const expanded = nodes.find((node) => node.props.accessibilityLabel === "Hide more details")!;
+  assert.equal(expanded.props.accessibilityState.expanded, true);
+  nodes.find((node) => node.props.accessibilityLabel === "Show raw user agent")!.props.onPress();
+  env.harness.flush();
+  assert.ok(elements(env.harness.value()).some((node) => node.props.children === "Example browser user agent"));
+  expanded.props.onPress();
+  env.harness.flush();
+  assert.equal(elements(env.harness.value()).some((node) => node.props.children === "Example browser user agent"), false);
+  assert.deepEqual(env.decisions, []);
+});
+
+test("collapsed review retains origin, timezone and unverified-requester warnings before approval", async (t) => {
+  const env = setup({ userCode: "ABCD-EFGH", previewRequest: async () => ({
+    ...pendingPreview("Browser request"),
+    initiating_origin_status: "mismatched", initiating_origin: "https://another.example",
+    client_timezone: "UTC", client_timezone_matches_ip: false,
+    client_ip_attribution: "unverified", client_ip: "198.51.100.23",
+  }) });
+  t.after(() => env.harness.unmount());
+  await env.harness.settle();
+  const nodes = elements(env.harness.value());
+  const approve = nodes.findIndex((node) => node.props.label === "Approve full account session");
+  for (const value of ["another.example", "Not verified", "Timezone"]) {
+    const index = nodes.findIndex((node) => node.props.children === value);
+    assert.ok(index >= 0 && index < approve, value);
+  }
+  assert.ok(nodes.some((node) => typeof node.props.children === "string" && node.props.children.includes("IP location")));
+  assert.ok(nodes.some((node) => node.props.children === "Reject if anything looks unfamiliar."));
+  assert.ok(nodes.some((node) => node.props.children === "A full account session grants account, service, credential, and organization access."));
+  assert.deepEqual(env.decisions, []);
+});
+
+test("a replacement request starts compact and clears the previous raw-user-agent disclosure", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const env = setup({ userCode: "ABCD-EFGH", previewRequest: async (code) => ({
+    ...pendingPreview(code), client_user_agent: "Example browser user agent",
+  }) });
+  t.after(() => env.harness.unmount());
+  await env.harness.settle();
+  elements(env.harness.value()).find((node) => node.props.accessibilityLabel === "Show more details")!.props.onPress();
+  env.harness.flush();
+  elements(env.harness.value()).find((node) => node.props.accessibilityLabel === "Show raw user agent")!.props.onPress();
+  env.harness.flush();
+  now += 1000;
+  env.setCode("JKMN-PQRS");
+  await env.harness.settle();
+  let nodes = elements(env.harness.value());
+  assert.ok(nodes.some((node) => node.props.children === "JKMN-PQRS"));
+  assert.equal(nodes.some((node) => node.props.children === "Example browser user agent"), false);
+  nodes.find((node) => node.props.accessibilityLabel === "Show more details")!.props.onPress();
+  env.harness.flush();
+  nodes = elements(env.harness.value());
+  assert.ok(nodes.some((node) => node.props.accessibilityLabel === "Show raw user agent"));
+  assert.deepEqual(env.decisions, []);
+});

@@ -1,4 +1,4 @@
-import { memo, type ReactNode } from "react";
+import { memo, useLayoutEffect, type ReactNode } from "react";
 import { View } from "react-native";
 import { AssistantMarkdownBody } from "./AssistantMarkdownBody";
 
@@ -7,8 +7,10 @@ export const AssistantReplyBody = memo(function AssistantReplyBody({
   text,
   activity,
   onLinkPress,
+  onTextCommit,
 }: {
   text: string;
+  onTextCommit?: () => void;
   activity?: ReactNode;
   onLinkPress?: (url: string) => boolean;
 }) {
@@ -18,6 +20,12 @@ export const AssistantReplyBody = memo(function AssistantReplyBody({
       {text ? (
         <AssistantMarkdownBody text={text} onLinkPress={onLinkPress} />
       ) : null}
+      {text && onTextCommit ? <TextCommit onCommit={onTextCommit} /> : null}
     </View>
   );
 });
+
+function TextCommit({ onCommit }: { onCommit: () => void }) {
+  useLayoutEffect(onCommit, [onCommit]);
+  return null;
+}

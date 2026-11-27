@@ -16,6 +16,7 @@ export interface ChannelBotConnectProps {
   readonly fullPage?: boolean;
   readonly stayInPlace?: boolean;
   readonly returnTo?: string;
+  readonly initialRequestId?: string;
   readonly preferManual?: boolean;
   readonly onConnected: (id: string, replace?: boolean, result?: CreateChannelBotResponse, botLabel?: string) => void;
   readonly renderFields: (state: {

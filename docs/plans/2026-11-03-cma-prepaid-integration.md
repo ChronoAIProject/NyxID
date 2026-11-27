@@ -1,5 +1,7 @@
 # CMA allocation billing through NyxID
 
+> **Status:** Historical — the implemented billing differs from this plan. Current spec: [CMA allocation billing through NyxID](../CMA_BILLING.md).
+
 Implementation update (2026-11-04): the user approved #2151's exact initial rates
 and requested an idempotent deploy-time seed plus immutable, effective-dated
 runtime configuration. This supersedes this original plan's no-seed/service-lane

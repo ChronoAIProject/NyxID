@@ -264,6 +264,7 @@ async fn provision_guest(f: &mut Fixture) {
             service_ids: Some(vec![]),
             daily_credits: Some(crate::models::credits::Credits::from_whole(1)),
         },
+        None,
     )
     .await
     .unwrap();
@@ -379,6 +380,7 @@ async fn org_notice_2625_member_removal_and_disabled_guests_complete_reads_and_r
                     OWNER,
                     &f.row,
                     serde_json::from_value(json!({"enabled":false})).unwrap(),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -680,6 +682,18 @@ async fn org_notice_2625_bot_or_route_closed_reads_complete_empty_and_record_hea
                     .modified_count,
                 1
             );
+            // Closed transport must complete the original cursors even when the retained reply cannot open.
+            let changed = f
+                .state
+                .db
+                .collection::<bson::Document>(EVENTS)
+                .update_one(
+                    doc! {"channel_id":&f.row.id,"event_id":&c.source},
+                    doc! {"$set":{"response_reply.context_version":99}},
+                )
+                .await
+                .unwrap();
+            assert_eq!(changed.modified_count, 1);
             let empty = match first_read {
                 "snapshot" => snapshot(&f, &c.id).await,
                 "events" => closed_history(read_events(&f, &c, None).await, text)

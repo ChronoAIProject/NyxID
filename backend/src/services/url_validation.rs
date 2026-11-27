@@ -14,6 +14,14 @@ use crate::errors::{AppError, AppResult};
 
 pub const MAX_URL_LEN: usize = 2048;
 
+pub(crate) fn url_host_for_logs(value: &str) -> String {
+    url::Url::parse(value)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .and_then(|url| Some(format!("{}://{}", url.scheme(), url.host_str()?)))
+        .unwrap_or_else(|| "<invalid-url>".to_owned())
+}
+
 /// Validate a user-supplied URL that will be stored and later shown to a
 /// remote operator. Unlike `validate_base_url`, this rejects private,
 /// loopback, link-local, CGNAT, unspecified, and metadata targets because
@@ -365,6 +373,21 @@ mod tests {
         MAX_URL_LEN, reject_url_userinfo, validate_advisory_http_url, validate_base_url,
         validate_optional_spec_url, validate_public_http_url, validate_user_endpoint_url,
     };
+
+    #[test]
+    fn diagnostics_format_scheme_and_host() {
+        for (input, expected) in [
+            (
+                "https://user:pass@example.com:8443/path?query=value#fragment",
+                "https://example.com",
+            ),
+            ("http://[::1]:8080/test", "http://[::1]"),
+            ("not a url", "<invalid-url>"),
+            ("data:text/plain,fixture", "<invalid-url>"),
+        ] {
+            assert_eq!(super::url_host_for_logs(input), expected);
+        }
+    }
 
     #[test]
     fn proxy_destination_public_address_classes() {

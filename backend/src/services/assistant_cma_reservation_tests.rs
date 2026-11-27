@@ -563,7 +563,7 @@ async fn admin_cma_occupied_audit_is_atomic_hourly_and_shared_between_app_states
         .err()
         .unwrap();
     assert!(
-        matches!(err,AppError::Conflict(ref message) if message=="cma_sandbox_account_slot_occupied")
+        err.response_body().message == "Conflict: cma_sandbox_account_slot_occupied"
     );
     let logs =
         f.db.collection::<Document>(crate::models::audit_log::COLLECTION_NAME);

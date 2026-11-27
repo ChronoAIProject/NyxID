@@ -50,7 +50,9 @@
 
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, LazyLock, Weak};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
+
+use crate::crypto::secret_json::{SecretJson, to_secret_string};
 
 const MAX_TOKEN_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 
@@ -378,38 +380,39 @@ pub fn extract_json_path<'a>(
 /// Returns an error if any `$field` placeholder has no matching credential
 /// key -- surfaces misconfiguration loudly instead of silently sending
 /// `null`.
-pub fn substitute_template(
+fn substitute_template(
     template: &serde_json::Value,
-    credential: &serde_json::Map<String, serde_json::Value>,
-) -> AppResult<serde_json::Value> {
-    match template {
-        serde_json::Value::String(s) => {
-            if let Some(field_name) = s.strip_prefix('$') {
-                credential.get(field_name).cloned().ok_or_else(|| {
-                    AppError::BadRequest(format!(
-                        "token_exchange credential missing required field: {field_name}"
-                    ))
-                })
-            } else {
-                Ok(template.clone())
+    credential: &SecretJson,
+) -> AppResult<SecretJson> {
+    fn substitute(value: &mut serde_json::Value, credential: &SecretJson) -> AppResult<()> {
+        match value {
+            serde_json::Value::String(text) => {
+                if let Some(name) = text.strip_prefix('$') {
+                    *value = credential.get(name).cloned().ok_or_else(|| {
+                        AppError::BadRequest(format!(
+                            "token_exchange credential missing required field: {name}"
+                        ))
+                    })?;
+                }
             }
-        }
-        serde_json::Value::Object(map) => {
-            let mut result = serde_json::Map::with_capacity(map.len());
-            for (k, v) in map {
-                result.insert(k.clone(), substitute_template(v, credential)?);
+            serde_json::Value::Object(map) => {
+                for child in map.values_mut() {
+                    substitute(child, credential)?;
+                }
             }
-            Ok(serde_json::Value::Object(result))
-        }
-        serde_json::Value::Array(items) => {
-            let mut result = Vec::with_capacity(items.len());
-            for item in items {
-                result.push(substitute_template(item, credential)?);
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    substitute(child, credential)?;
+                }
             }
-            Ok(serde_json::Value::Array(result))
+            _ => {}
         }
-        _ => Ok(template.clone()),
+        Ok(())
     }
+
+    let mut body = SecretJson(template.clone());
+    substitute(&mut body, credential)?;
+    Ok(body)
 }
 
 /// Parse a token-exchange credential from its stored JSON form.
@@ -422,8 +425,8 @@ pub fn substitute_template(
 pub fn parse_credential(
     credential: &str,
     declared_fields: &[CredentialFieldSpec],
-) -> AppResult<serde_json::Map<String, serde_json::Value>> {
-    let value: serde_json::Value = serde_json::from_str(credential).map_err(|_| {
+) -> AppResult<SecretJson> {
+    let mut value: SecretJson = serde_json::from_str(credential).map_err(|_| {
         AppError::BadRequest(
             "token_exchange credential must be a JSON object matching the service's \
              declared credential fields"
@@ -431,14 +434,9 @@ pub fn parse_credential(
         )
     })?;
 
-    let mut map = match value {
-        serde_json::Value::Object(m) => m,
-        _ => {
-            return Err(AppError::BadRequest(
-                "token_exchange credential must be a JSON object".to_string(),
-            ));
-        }
-    };
+    let map = value.as_object_mut().ok_or_else(|| {
+        AppError::BadRequest("token_exchange credential must be a JSON object".into())
+    })?;
 
     for spec in declared_fields {
         let present = match map.get(&spec.name) {
@@ -455,13 +453,17 @@ pub fn parse_credential(
     }
 
     // Trim string values so the template sees clean input.
-    for (_, value) in map.iter_mut() {
-        if let serde_json::Value::String(s) = value {
-            *s = s.trim().to_string();
+    for value in map.values_mut() {
+        if let serde_json::Value::String(s) = value
+            && s.len() != s.trim().len()
+        {
+            let trimmed = s.trim().to_owned();
+            s.zeroize();
+            *s = trimmed;
         }
     }
 
-    Ok(map)
+    Ok(value)
 }
 
 /// Apply a [`TokenExchangeConfig::injection`] directive to a reqwest
@@ -515,7 +517,7 @@ pub async fn fetch_exchange_token(
     http: &reqwest::Client,
     base_url: &str,
     config: &TokenExchangeConfig,
-    credential: &serde_json::Map<String, serde_json::Value>,
+    credential: &SecretJson,
 ) -> AppResult<CachedToken> {
     fetch_exchange_token_with_response_check(http, base_url, config, credential, |_| Ok(())).await
 }
@@ -526,7 +528,7 @@ pub(crate) async fn fetch_exchange_token_with_response_check(
     http: &reqwest::Client,
     base_url: &str,
     config: &TokenExchangeConfig,
-    credential: &serde_json::Map<String, serde_json::Value>,
+    credential: &SecretJson,
     check: impl FnOnce(&reqwest::Response) -> AppResult<()> + Send,
 ) -> AppResult<CachedToken> {
     let url = resolve_endpoint(&config.endpoint, base_url);
@@ -535,18 +537,22 @@ pub(crate) async fn fetch_exchange_token_with_response_check(
     let request = match config.request_encoding.as_str() {
         "json" => http.post(&url).json(&body),
         "form" => {
-            // Flatten to Vec<(String, String)>. Only top-level keys are
-            // supported for form encoding -- that covers every OAuth-style
-            // exchange I know of.
             let map = body.as_object().ok_or_else(|| {
                 AppError::Internal(
-                    "token_exchange form encoding requires a JSON object template".to_string(),
+                    "token_exchange form encoding requires a JSON object template".into(),
                 )
             })?;
-            let pairs: Vec<(String, String)> = map
-                .iter()
-                .map(|(k, v)| (k.clone(), stringify_form_value(v)))
-                .collect();
+            let mut pairs = Vec::with_capacity(map.len());
+            for (name, value) in map {
+                let text = match value {
+                    serde_json::Value::String(text) => Zeroizing::new(text.clone()),
+                    serde_json::Value::Null => Zeroizing::default(),
+                    other => to_secret_string(other).map_err(|_| {
+                        AppError::Internal("Invalid token_exchange form value".into())
+                    })?,
+                };
+                pairs.push((name, text));
+            }
             http.post(&url).form(&pairs)
         }
         other => {
@@ -557,15 +563,15 @@ pub(crate) async fn fetch_exchange_token_with_response_check(
     };
 
     let response = request.send().await.map_err(|error| {
-        if super::proxy_destination::http::refused_connection(&error) {
-            super::proxy_destination::refused()
+        if let Some(failure) = super::proxy_destination::http::connection_failure(&error) {
+            failure.into()
         } else {
             AppError::ChannelPlatformError("token_exchange transport failed".into())
         }
     })?;
     check(&response)?;
     let status = response.status();
-    let response: serde_json::Value = response.json().await.map_err(|_| {
+    let response: SecretJson = response.json().await.map_err(|_| {
         AppError::ChannelPlatformError("Invalid token_exchange JSON response".into())
     })?;
 
@@ -589,7 +595,6 @@ pub(crate) async fn fetch_exchange_token_with_response_check(
     // Extract the token.
     let token = extract_json_path(&response, &config.token_response_path)
         .and_then(|v| v.as_str())
-        .map(str::to_string)
         .ok_or_else(|| {
             AppError::ChannelPlatformError(format!(
                 "token_exchange response missing token at path '{}'",
@@ -619,7 +624,7 @@ pub(crate) async fn fetch_exchange_token_with_response_check(
         })?;
 
     Ok(CachedToken {
-        token: Zeroizing::new(token),
+        token: Zeroizing::new(token.to_owned()),
         expires_at,
     })
 }
@@ -633,7 +638,7 @@ pub async fn get_cached_exchange_token(
     base_url: &str,
     credential_json: &str,
     config: &TokenExchangeConfig,
-    credential: &serde_json::Map<String, serde_json::Value>,
+    credential: &SecretJson,
 ) -> AppResult<Zeroizing<String>> {
     let key = cache_key(base_url, credential_json, config);
     cache
@@ -641,14 +646,6 @@ pub async fn get_cached_exchange_token(
             fetch_exchange_token(http, base_url, config, credential).await
         })
         .await
-}
-
-fn stringify_form_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Null => String::new(),
-        other => other.to_string(),
-    }
 }
 
 fn is_success_value(value: &serde_json::Value) -> bool {
@@ -972,9 +969,9 @@ mod tests {
         let mut cred = serde_json::Map::new();
         cred.insert("app_id".into(), serde_json::json!("cli_xxx"));
         cred.insert("app_secret".into(), serde_json::json!("s3cret"));
-        let result = substitute_template(&tmpl, &cred).unwrap();
+        let result = substitute_template(&tmpl, &SecretJson(cred.into())).unwrap();
         assert_eq!(
-            result,
+            result.0,
             serde_json::json!({
                 "app_id": "cli_xxx",
                 "app_secret": "s3cret",
@@ -988,7 +985,7 @@ mod tests {
     fn substitute_template_errors_on_missing_field() {
         let tmpl = serde_json::json!({"x": "$missing"});
         let cred = serde_json::Map::new();
-        let err = substitute_template(&tmpl, &cred).unwrap_err();
+        let err = substitute_template(&tmpl, &SecretJson(cred.into())).unwrap_err();
         assert!(err.to_string().contains("missing"));
     }
 
@@ -1002,7 +999,7 @@ mod tests {
         let mut cred = serde_json::Map::new();
         cred.insert("a".into(), serde_json::json!("A"));
         cred.insert("b".into(), serde_json::json!("B"));
-        let result = substitute_template(&tmpl, &cred).unwrap();
+        let result = substitute_template(&tmpl, &SecretJson(cred.into())).unwrap();
         assert_eq!(result["top"]["nested"][0], serde_json::json!("A"));
         assert_eq!(result["top"]["nested"][1], serde_json::json!("literal"));
         assert_eq!(result["top"]["nested"][2]["deep"], serde_json::json!("B"));
@@ -1016,6 +1013,55 @@ mod tests {
         let map = parse_credential(r#"{"app_id":"cli_xxx","app_secret":"yyy"}"#, &specs).unwrap();
         assert_eq!(map["app_id"].as_str(), Some("cli_xxx"));
         assert_eq!(map["app_secret"].as_str(), Some("yyy"));
+    }
+
+    #[tokio::test]
+    async fn guarded_exchange_preserves_nested_json_and_form_values() {
+        use serde_json::json;
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        let secret = "fixture-exchange +&";
+        let raw = json!({"app_id": "id", "app_secret": format!("  {secret}  "), "nested": [secret, "$app_id"]});
+        let credential = parse_credential(&raw.to_string(), &lark_field_specs()).unwrap();
+        let mut config = exchange_config();
+        config.request_template = json!({"key":"$app_secret", "data":"$nested", "empty":null});
+        let body = substitute_template(&config.request_template, &credential).unwrap();
+        for value in [&credential, &body] {
+            assert!(!format!("{value:?}").contains(secret));
+            assert!(!format!("{value:#?}").contains(secret));
+        }
+        let error =
+            substitute_template(&json!(["$app_secret", "$missing"]), &credential).unwrap_err();
+        assert!(!error.to_string().contains(secret));
+
+        for encoding in ["json", "form"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({"token_a": secret})))
+                .mount(&server)
+                .await;
+            config.request_encoding = encoding.into();
+            let token =
+                fetch_exchange_token(&reqwest::Client::new(), &server.uri(), &config, &credential)
+                    .await
+                    .unwrap();
+            assert_eq!(token.token.as_str(), secret);
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1);
+            let expected_nested = json!([secret, "$app_id"]);
+            if encoding == "json" {
+                assert_eq!(
+                    requests[0].body_json::<serde_json::Value>().unwrap(),
+                    json!({"key": secret, "data": expected_nested, "empty": null})
+                );
+            } else {
+                let fields: std::collections::BTreeMap<String, String> =
+                    serde_urlencoded::from_bytes(&requests[0].body).unwrap();
+                assert_eq!(fields["key"], secret);
+                assert_eq!(fields["data"], expected_nested.to_string());
+                assert_eq!(fields["empty"], "");
+            }
+        }
     }
 
     #[test]

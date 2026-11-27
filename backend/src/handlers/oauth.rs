@@ -4,6 +4,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use zeroize::Zeroizing;
 // axum-extra's Form/Query decode repeated keys (`resource=a&resource=b`,
 // `allowed_service_ids=...`) into Vec fields via serde_html_form; axum's
 // built-in serde_urlencoded extractors reject them (#1115).
@@ -40,7 +41,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_
 
 // --- Request / Response types ---
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct AuthorizeQuery {
     #[serde(default)]
     pub response_type: String,
@@ -80,7 +81,7 @@ pub struct AuthorizeQuery {
     pub consent_request_fence: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct ConsentDecisionForm {
     pub response_type: String,
     pub client_id: String,
@@ -129,7 +130,7 @@ fn default_allow_all_services_form() -> bool {
     false
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct AuthorizeResponse {
     pub redirect_url: String,
 }
@@ -137,14 +138,14 @@ pub struct AuthorizeResponse {
 #[derive(Deserialize)]
 pub struct TokenRequest {
     pub grant_type: String,
-    pub code: Option<String>,
+    pub code: Option<Zeroizing<String>>,
     pub redirect_uri: Option<String>,
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-    pub code_verifier: Option<String>,
-    pub refresh_token: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
+    pub code_verifier: Option<Zeroizing<String>>,
+    pub refresh_token: Option<Zeroizing<String>>,
     /// RFC 8693 Token Exchange: the user's access token
-    pub subject_token: Option<String>,
+    pub subject_token: Option<Zeroizing<String>>,
     /// RFC 8693 Token Exchange: must be "urn:ietf:params:oauth:token-type:access_token"
     pub subject_token_type: Option<String>,
     /// Requested scope (used by token exchange)
@@ -207,10 +208,10 @@ pub struct UserinfoResponse {
 
 #[derive(Deserialize)]
 pub struct IntrospectRequest {
-    pub token: String,
+    pub token: Zeroizing<String>,
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
     /// Catalog service whose registered confidential client verifies an agent key.
     pub service_id: Option<String>,
     #[serde(flatten)]
@@ -252,19 +253,19 @@ pub struct IntrospectResponse {
 
 #[derive(Deserialize)]
 pub struct RevokeRequest {
-    pub token: String,
+    pub token: Zeroizing<String>,
     pub token_type_hint: Option<String>,
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
 }
 
 #[derive(Deserialize)]
 pub struct GetBindingQuery {
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct GetBindingResponse {
     pub binding_id: String,
     pub client_id: String,
@@ -280,7 +281,7 @@ pub struct GetBindingResponse {
 #[derive(Deserialize)]
 pub struct ListBindingsByExternalSubjectQuery {
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
     pub external_subject_platform: Option<String>,
     pub external_subject_tenant: Option<String>,
     pub external_subject_external_user_id: Option<String>,
@@ -307,7 +308,7 @@ pub struct ListBindingsResponse {
 pub struct PushedAuthorizationRequestForm {
     pub response_type: String,
     pub client_id: Option<String>,
-    pub client_secret: Option<String>,
+    pub client_secret: Option<Zeroizing<String>>,
     pub redirect_uri: String,
     pub scope: Option<String>,
     pub state: Option<String>,
@@ -329,7 +330,7 @@ pub struct PushedAuthorizationRequestForm {
     pub requested_service_ids: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct PushedAuthorizationRequestResponse {
     pub request_uri: String,
     pub expires_in: i64,
@@ -430,7 +431,9 @@ fn oauth_error_response(err: AppError) -> Response {
     response
 }
 
-fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(String, String)>> {
+fn parse_basic_client_credentials(
+    headers: &HeaderMap,
+) -> AppResult<Option<(String, Zeroizing<String>)>> {
     let Some(value) = headers.get(header::AUTHORIZATION) else {
         return Ok(None);
     };
@@ -444,10 +447,11 @@ fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(Stri
         return Ok(None);
     };
 
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(encoded.trim())
+    let mut decoded = Zeroizing::new(Vec::new());
+    base64::engine::general_purpose::STANDARD
+        .decode_vec(encoded.trim(), &mut decoded)
         .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?;
-    let decoded = String::from_utf8(decoded)
+    let decoded = std::str::from_utf8(&decoded)
         .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?;
     let (client_id, client_secret) = decoded
         .split_once(':')
@@ -456,18 +460,20 @@ fn parse_basic_client_credentials(headers: &HeaderMap) -> AppResult<Option<(Stri
     let client_id = urlencoding::decode(client_id)
         .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?
         .into_owned();
-    let client_secret = urlencoding::decode(client_secret)
-        .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?
-        .into_owned();
+    let client_secret = match urlencoding::decode_binary(client_secret.as_bytes()) {
+        std::borrow::Cow::Borrowed(_) => Zeroizing::new(client_secret.to_owned()),
+        std::borrow::Cow::Owned(bytes) => crate::crypto::guarded_utf8(Zeroizing::new(bytes))
+            .map_err(|_| AppError::Unauthorized("Invalid client credentials".to_string()))?,
+    };
 
     Ok(Some((client_id, client_secret)))
 }
 
 fn client_credentials_from_basic_or_params(
-    basic: Option<(String, String)>,
+    basic: Option<(String, Zeroizing<String>)>,
     client_id: Option<String>,
-    client_secret: Option<String>,
-) -> Option<(String, Option<String>)> {
+    client_secret: Option<Zeroizing<String>>,
+) -> Option<(String, Option<Zeroizing<String>>)> {
     match (basic, client_id, client_secret) {
         (Some((id, _)), Some(query_id), _) if query_id != id => None,
         (Some((id, secret)), _, _) => Some((id, Some(secret))),
@@ -2367,21 +2373,20 @@ pub async fn pushed_authorization_request(
     Form(body): Form<PushedAuthorizationRequestForm>,
 ) -> AppResult<(StatusCode, Json<PushedAuthorizationRequestResponse>)> {
     let basic = parse_basic_client_credentials(&headers)?;
-    let (client_id, client_secret) =
-        match (basic, body.client_id.clone(), body.client_secret.clone()) {
-            (Some((id, _)), Some(form_id), _) if form_id != id => {
-                return Err(AppError::BadRequest(
-                    "client_id does not match authenticated client".to_string(),
-                ));
-            }
-            (Some((id, secret)), _, _) => (id, secret),
-            (None, Some(id), Some(secret)) => (id, secret),
-            _ => {
-                return Err(AppError::Unauthorized(
-                    "Missing client credentials".to_string(),
-                ));
-            }
-        };
+    let (client_id, client_secret) = match (basic, body.client_id, body.client_secret) {
+        (Some((id, _)), Some(form_id), _) if form_id != id => {
+            return Err(AppError::BadRequest(
+                "client_id does not match authenticated client".to_string(),
+            ));
+        }
+        (Some((id, secret)), _, _) => (id, secret),
+        (None, Some(id), Some(secret)) => (id, secret),
+        _ => {
+            return Err(AppError::Unauthorized(
+                "Missing client credentials".to_string(),
+            ));
+        }
+    };
 
     oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret)).await?;
     let client = oauth_service::validate_client(&state.db, &client_id, &body.redirect_uri).await?;
@@ -2550,8 +2555,8 @@ async fn token_inner(
                 code,
                 client_id_str,
                 redirect_uri,
-                body.code_verifier.as_deref(),
-                body.client_secret.as_deref(),
+                body.code_verifier.as_ref().map(|s| s.as_str()),
+                body.client_secret.as_ref().map(|s| s.as_str()),
                 Some(oauth_broker_service::BROKER_ACCESS_TTL_SECS),
                 non_empty_resources(&body.resource),
                 dpop_jkt,
@@ -2745,7 +2750,7 @@ async fn token_inner(
             let credentials = match (
                 &basic,
                 body.client_id.as_deref(),
-                body.client_secret.as_deref(),
+                body.client_secret.as_ref().map(|s| s.as_str()),
             ) {
                 (Err(_), _, _) => RefreshClient::Invalid("invalid_basic"),
                 (Ok(Some(_)), _, Some(_)) => RefreshClient::Invalid("ambiguous_credentials"),
@@ -2802,11 +2807,12 @@ async fn token_inner(
                         .map(|(client_id, _)| client_id.as_str())
                 })
                 .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
-            let client_secret_for_auth = body.client_secret.as_deref().or_else(|| {
-                basic_client_credentials
-                    .as_ref()
-                    .map(|(_, client_secret)| client_secret.as_str())
-            });
+            let client_secret_for_auth =
+                body.client_secret.as_ref().map(|s| s.as_str()).or_else(|| {
+                    basic_client_credentials
+                        .as_ref()
+                        .map(|(_, client_secret)| client_secret.as_str())
+                });
             let subject_token = body
                 .subject_token
                 .as_deref()
@@ -2877,7 +2883,8 @@ async fn token_inner(
                 // Existing: Delegated token exchange (NyxID access token -> delegated token)
                 let client_secret = body
                     .client_secret
-                    .as_deref()
+                    .as_ref()
+                    .map(|s| s.as_str())
                     .or(client_secret_for_auth)
                     .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
 
@@ -3026,7 +3033,8 @@ async fn token_inner(
                 .ok_or_else(|| AppError::BadRequest("Missing client_id".to_string()))?;
             let client_secret = body
                 .client_secret
-                .as_deref()
+                .as_ref()
+                .map(|s| s.as_str())
                 .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
 
             let result = service_account_service::authenticate_client_credentials(
@@ -3205,7 +3213,7 @@ pub async fn introspect(
     let client = match oauth_service::authenticate_client(
         &state.db,
         caller_client_id,
-        body.client_secret.as_deref(),
+        body.client_secret.as_ref().map(|s| s.as_str()),
     )
     .await
     {
@@ -3466,13 +3474,12 @@ pub async fn list_bindings_by_external_subject(
         })
     };
     let basic = parse_basic_client_credentials(&headers).ok().flatten();
-    let (client_id, client_secret) =
-        match (basic, query.client_id.clone(), query.client_secret.clone()) {
-            (Some((id, _)), Some(query_id), _) if query_id != id => return Ok(empty()),
-            (Some((id, secret)), _, _) => (id, secret),
-            (None, Some(id), Some(secret)) => (id, secret),
-            _ => return Ok(empty()),
-        };
+    let (client_id, client_secret) = match (basic, query.client_id, query.client_secret) {
+        (Some((id, _)), Some(query_id), _) if query_id != id => return Ok(empty()),
+        (Some((id, secret)), _, _) => (id, secret),
+        (None, Some(id), Some(secret)) => (id, secret),
+        _ => return Ok(empty()),
+    };
 
     if oauth_service::authenticate_client(&state.db, &client_id, Some(&client_secret))
         .await
@@ -3542,9 +3549,13 @@ pub async fn get_binding(
         None => return Err(not_found()),
     };
 
-    if oauth_service::authenticate_client(&state.db, &client_id, client_secret.as_deref())
-        .await
-        .is_err()
+    if oauth_service::authenticate_client(
+        &state.db,
+        &client_id,
+        client_secret.as_ref().map(|s| s.as_str()),
+    )
+    .await
+    .is_err()
     {
         return Err(not_found());
     }
@@ -3590,9 +3601,13 @@ pub async fn delete_binding(
         None => return Ok(StatusCode::NO_CONTENT),
     };
 
-    if oauth_service::authenticate_client(&state.db, &client_id, client_secret.as_deref())
-        .await
-        .is_err()
+    if oauth_service::authenticate_client(
+        &state.db,
+        &client_id,
+        client_secret.as_ref().map(|s| s.as_str()),
+    )
+    .await
+    .is_err()
     {
         return Ok(StatusCode::NO_CONTENT);
     }
@@ -3622,18 +3637,19 @@ pub async fn revoke(
     // Authenticate the calling client (RFC 7009 requirement).
     // Per the spec, always return 200 even if authentication fails.
     let basic = parse_basic_client_credentials(&headers).ok().flatten();
-    let (caller_client_id, client_secret) = match client_credentials_from_basic_or_params(
-        basic,
-        body.client_id.clone(),
-        body.client_secret.clone(),
-    ) {
-        Some((id, secret)) if !id.is_empty() => (id, secret),
-        _ => return Ok(StatusCode::OK),
-    };
+    let (caller_client_id, client_secret) =
+        match client_credentials_from_basic_or_params(basic, body.client_id, body.client_secret) {
+            Some((id, secret)) if !id.is_empty() => (id, secret),
+            _ => return Ok(StatusCode::OK),
+        };
 
-    if oauth_service::authenticate_client(&state.db, &caller_client_id, client_secret.as_deref())
-        .await
-        .is_err()
+    if oauth_service::authenticate_client(
+        &state.db,
+        &caller_client_id,
+        client_secret.as_ref().map(|s| s.as_str()),
+    )
+    .await
+    .is_err()
     {
         return Ok(StatusCode::OK);
     }
@@ -4200,7 +4216,7 @@ mod wire_decoding_tests {
             .await
             .expect("scalar-only token request must decode");
         assert_eq!(body.grant_type, "authorization_code");
-        assert_eq!(body.code.as_deref(), Some("abc"));
+        assert_eq!(body.code.as_ref().map(|code| code.as_str()), Some("abc"));
         assert!(body.resource.is_empty());
     }
 
@@ -4264,6 +4280,7 @@ mod tests {
     use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
     use crate::models::ssh_auth_mode::SshAuthMode;
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::services::oauth_broker_record_service;
     use crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
     use crate::test_utils::{
         connect_test_database, test_app_state, test_app_state_with_config, test_membership,
@@ -4469,6 +4486,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
@@ -4536,13 +4554,17 @@ mod tests {
             .expect("insert refresh token");
 
         let binding_hash = hash_binding_id(raw_binding_id);
-        let refresh_token_encrypted = state
-            .encryption_keys
-            .encrypt_with_aad(refresh_jwt.as_bytes(), binding_hash.as_bytes())
-            .await
-            .expect("encrypt binding refresh token");
+        let refresh_token_encrypted = oauth_broker_record_service::encrypt(
+            &state.encryption_keys,
+            &binding_hash,
+            user_id,
+            client_id,
+            refresh_jwt.as_bytes(),
+        )
+        .await
+        .expect("encrypt binding refresh token");
         let binding = OauthBrokerBinding {
-            secret_context_versions: Default::default(),
+            secret_context_versions: oauth_broker_record_service::versions(&state.encryption_keys),
             id: binding_hash,
             client_id: client_id.to_string(),
             user_id: user_id.to_string(),
@@ -6056,7 +6078,7 @@ mod tests {
             &HeaderMap::new(),
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
-                code: Some(code.to_string()),
+                code: Some(code.to_string().into()),
                 redirect_uri: Some("http://localhost/callback".to_string()),
                 client_id: Some(client_id.to_string()),
                 client_secret: None,
@@ -6113,7 +6135,7 @@ mod tests {
                 client_id: Some(client_id.into()),
                 client_secret: None,
                 code_verifier: None,
-                refresh_token: Some(refresh_token),
+                refresh_token: Some(refresh_token.into()),
                 subject_token: None,
                 subject_token_type: None,
                 scope: None,
@@ -6143,7 +6165,7 @@ mod tests {
                 client_id: Some(client_id.into()),
                 client_secret: None,
                 code_verifier: None,
-                refresh_token: Some(rotated_refresh_token),
+                refresh_token: Some(rotated_refresh_token.into()),
                 subject_token: None,
                 subject_token_type: None,
                 scope: None,
@@ -6172,7 +6194,7 @@ mod tests {
                 client_secret: None,
                 code_verifier: None,
                 refresh_token: None,
-                subject_token: Some(binding_id),
+                subject_token: Some(binding_id.into()),
                 subject_token_type: Some(
                     oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE.to_string(),
                 ),
@@ -6326,11 +6348,11 @@ mod tests {
             &HeaderMap::new(),
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
-                code: Some(code),
+                code: Some(code.into()),
                 redirect_uri: Some(redirect_uri.to_string()),
                 client_id: Some(client_id.to_string()),
                 client_secret: None,
-                code_verifier: Some(verifier.to_string()),
+                code_verifier: Some(verifier.to_string().into()),
                 refresh_token: None,
                 subject_token: None,
                 subject_token_type: None,
@@ -6363,7 +6385,7 @@ mod tests {
                 client_secret: None,
                 code_verifier: None,
                 refresh_token: None,
-                subject_token: Some(binding_id),
+                subject_token: Some(binding_id.into()),
                 subject_token_type: Some(
                     oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE.to_string(),
                 ),
@@ -6416,7 +6438,7 @@ mod tests {
             &HeaderMap::new(),
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
-                code: Some(code.to_string()),
+                code: Some(code.to_string().into()),
                 redirect_uri: Some("http://localhost/callback".to_string()),
                 client_id: Some(client_id.to_string()),
                 client_secret: None,
@@ -6485,7 +6507,7 @@ mod tests {
             &headers,
             TokenRequest {
                 grant_type: "authorization_code".to_string(),
-                code: Some(code.to_string()),
+                code: Some(code.to_string().into()),
                 redirect_uri: Some("http://localhost/callback".to_string()),
                 client_id: Some(client_id.to_string()),
                 client_secret: None,
@@ -6601,7 +6623,7 @@ mod tests {
                 client_secret: None,
                 code_verifier: None,
                 refresh_token: None,
-                subject_token: Some(raw_binding_id),
+                subject_token: Some(raw_binding_id.into()),
                 subject_token_type: Some(
                     oauth_broker_service::BROKER_SUBJECT_TOKEN_TYPE.to_string(),
                 ),
@@ -6738,7 +6760,7 @@ mod tests {
         );
         let (client_id, client_secret) = parse_basic_client_credentials(&headers).unwrap().unwrap();
         assert_eq!(client_id, "my_client");
-        assert_eq!(client_secret, "my_secret");
+        assert_eq!(client_secret.as_str(), "my_secret");
     }
 
     #[test]
@@ -6754,14 +6776,14 @@ mod tests {
 
     #[test]
     fn client_credentials_from_basic_or_params_prefers_basic() {
-        let basic = Some(("basic_id".to_string(), "basic_secret".to_string()));
+        let basic = Some(("basic_id".to_string(), "basic_secret".to_string().into()));
         let result = client_credentials_from_basic_or_params(basic, None, None);
         assert_eq!(result.unwrap().0, "basic_id");
     }
 
     #[test]
     fn client_credentials_from_basic_or_params_rejects_conflicting_ids() {
-        let basic = Some(("basic_id".to_string(), "basic_secret".to_string()));
+        let basic = Some(("basic_id".to_string(), "basic_secret".to_string().into()));
         let result =
             client_credentials_from_basic_or_params(basic, Some("different_id".to_string()), None);
         assert!(result.is_none());
@@ -6772,11 +6794,11 @@ mod tests {
         let result = client_credentials_from_basic_or_params(
             None,
             Some("form_id".to_string()),
-            Some("form_secret".to_string()),
+            Some("form_secret".to_string().into()),
         );
         let (id, secret) = result.unwrap();
         assert_eq!(id, "form_id");
-        assert_eq!(secret.unwrap(), "form_secret");
+        assert_eq!(secret.unwrap().as_str(), "form_secret");
     }
 
     #[test]
@@ -6861,7 +6883,7 @@ mod tests {
             client_id: None,
             client_secret: None,
             code_verifier: None,
-            refresh_token: Some(refresh_token.to_string()),
+            refresh_token: Some(refresh_token.to_string().into()),
             subject_token: None,
             subject_token_type: None,
             scope: None,
@@ -7049,7 +7071,7 @@ mod tests {
         for secret in [None, Some("different")] {
             let mut request = refresh_grant_request(&refresh);
             request.client_id = Some(client.into());
-            request.client_secret = secret.map(str::to_owned);
+            request.client_secret = secret.map(|s| Zeroizing::new(s.to_owned()));
             assert!(matches!(
                 Box::pin(token_inner(&state, &tele, &headers, request)).await,
                 Err(AppError::AuthenticationFailed(_))
@@ -7067,7 +7089,7 @@ mod tests {
                 );
             } else {
                 request.client_id = Some(client.into());
-                request.client_secret = Some("test-secret".into());
+                request.client_secret = Some("test-secret".to_owned().into());
             }
             assert!(matches!(
                 Box::pin(token_inner(&state, &tele, &headers, request)).await,
@@ -7136,7 +7158,7 @@ mod tests {
                                 request.client_id = Some("untrusted-input".into())
                             }
                             "ambiguous_credentials" => {
-                                request.client_secret = Some("private-form".into());
+                                request.client_secret = Some("private-form".to_owned().into());
                                 headers
                                     .insert(header::AUTHORIZATION, "Basic YTpi".parse().unwrap());
                             }
@@ -7146,7 +7168,7 @@ mod tests {
                             "missing_client_secret" => request.client_id = Some(client.clone()),
                             "invalid_client_secret" => {
                                 request.client_id = Some(client.clone());
-                                request.client_secret = Some("private-form".into());
+                                request.client_secret = Some("private-form".to_owned().into());
                             }
                             _ => {}
                         }
@@ -7198,7 +7220,7 @@ mod tests {
             let mut valid = refresh_grant_request(&refresh);
             valid.client_id = Some(client.clone());
             if kind == "confidential" {
-                valid.client_secret = Some("configured-secret".into());
+                valid.client_secret = Some("configured-secret".to_owned().into());
             }
             let renewed = Box::pin(token_inner(&state, &tele, &headers, valid))
                 .await
@@ -7435,6 +7457,7 @@ mod tests {
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: None,
                 created_at: now,
@@ -7525,7 +7548,7 @@ mod tests {
                 code: None,
                 redirect_uri: None,
                 client_id: None,
-                client_secret: Some("some-secret".to_string()),
+                client_secret: Some("some-secret".to_string().into()),
                 code_verifier: None,
                 refresh_token: None,
                 subject_token: None,
@@ -7632,7 +7655,7 @@ mod tests {
                 client_secret: None,
                 code_verifier: None,
                 refresh_token: None,
-                subject_token: Some("some-token".to_string()),
+                subject_token: Some("some-token".to_string().into()),
                 subject_token_type: Some("urn:unknown:type".to_string()),
                 scope: None,
                 provider: None,
@@ -7858,6 +7881,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("dev".to_string()),
             created_at: Utc::now(),
@@ -7979,7 +8003,15 @@ mod tests {
 #[path = "oauth_registration_tests.rs"]
 mod registration_tests;
 
-crate::errors::redacted_debug!(TokenRequest, TokenResponse);
+crate::errors::redacted_debug!(
+    TokenRequest,
+    TokenResponse,
+    GetBindingResponse,
+    AuthorizeQuery,
+    ConsentDecisionForm,
+    AuthorizeResponse,
+    PushedAuthorizationRequestResponse
+);
 
 impl std::fmt::Debug for IntrospectRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -8016,6 +8048,89 @@ impl std::fmt::Debug for PushedAuthorizationRequestForm {
 #[cfg(test)]
 mod credential_debug_tests {
     use super::*;
+    #[test]
+    fn binding_response_debug_redacts_the_issued_id_and_preserves_json() {
+        let sentinel = "bnd_test-distinctive-binding-728a";
+        let response = GetBindingResponse {
+            binding_id: sentinel.to_owned(),
+            client_id: "test-client".into(),
+            nyx_subject: "test-subject".into(),
+            external_subject_ref: None,
+            scopes: vec![],
+            created_at: "2026-01-01T00:00:00Z".into(),
+            last_used_at: None,
+            revoked: false,
+        };
+        assert!(!format!("{response:?}").contains(sentinel));
+        assert!(!format!("{response:#?}").contains(sentinel));
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["binding_id"],
+            sentinel
+        );
+    }
+
+    #[test]
+    fn authorization_debug_redacts_codes_and_one_time_handles() {
+        let marker = "test-sensitive-handle-429";
+        let query: AuthorizeQuery = serde_json::from_value(serde_json::json!({
+            "client_id": "fixture", "request_uri": marker,
+        }))
+        .unwrap();
+        let consent: ConsentDecisionForm = serde_json::from_value(serde_json::json!({
+            "response_type": "code", "client_id": "fixture", "redirect_uri": "https://client.test",
+            "decision": "allow", "consent_request": marker,
+        }))
+        .unwrap();
+        let redirect = AuthorizeResponse {
+            redirect_url: format!("https://client.test/?code={marker}"),
+        };
+        let pushed = PushedAuthorizationRequestResponse {
+            request_uri: marker.to_owned(),
+            expires_in: 60,
+        };
+        for value in [&query as &dyn std::fmt::Debug, &consent, &redirect, &pushed] {
+            assert!(!format!("{value:?}").contains(marker));
+            assert!(!format!("{value:#?}").contains(marker));
+        }
+        assert_eq!(
+            serde_json::to_value(&redirect).unwrap()["redirect_url"],
+            redirect.redirect_url
+        );
+        assert_eq!(
+            serde_json::to_value(&pushed).unwrap()["request_uri"],
+            marker
+        );
+    }
+
+    #[test]
+    fn basic_and_form_secrets_keep_their_exact_value_and_errors() {
+        let marker = "dummy+secret:421";
+        let mut headers = HeaderMap::new();
+        let mut set_basic = |value: &str| {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(value);
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Basic {encoded}").parse().unwrap(),
+            );
+            parse_basic_client_credentials(&headers)
+        };
+        let (client, secret) = set_basic("client:dummy%2Bsecret%3A421").unwrap().unwrap();
+        let secret: Zeroizing<String> = secret;
+        assert_eq!(client, "client");
+        assert_eq!(secret.as_str(), marker);
+        let invalid = set_basic("client:dummy+secret:421%FF").unwrap_err();
+        assert!(
+            matches!(&invalid, AppError::Unauthorized(message) if message == "Invalid client credentials")
+        );
+        assert!(!format!("{invalid} {invalid:?}").contains(marker));
+
+        let form: RevokeRequest = serde_urlencoded::from_str(
+            "token=t&client_id=client&client_secret=dummy%2Bsecret%3A421",
+        )
+        .unwrap();
+        assert_eq!(form.client_secret.unwrap().as_str(), marker);
+    }
+
     #[test]
     fn introspection_and_revocation_debug_redact_bearer_and_client_secrets() {
         let secret = "distinctive-oauth-diagnostic-secret-28a4";

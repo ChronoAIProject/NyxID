@@ -1,4 +1,5 @@
 use crate::models::default_request_header::SecretHeaders;
+use nyxid_service_adapters::SecretText;
 use std::sync::Arc;
 
 use futures::TryStreamExt;
@@ -273,6 +274,7 @@ impl ProxyTarget {
     pub(crate) async fn direct_destination(
         &self,
         url: &str,
+        path: &str,
     ) -> AppResult<super::proxy_destination::Destination> {
         super::proxy_destination::Destination::for_request(
             self.approved_private_base(),
@@ -280,16 +282,16 @@ impl ProxyTarget {
             url,
         )
         .await
-        .inspect_err(|_| self.log_destination_refusal())
-    }
-
-    fn log_destination_refusal(&self) {
-        tracing::warn!(service_id=%self.service.id, "Direct proxy destination refused");
+        .inspect_err(|failure| failure.log(&self.service, "GET", path, false))
+        .map_err(AppError::from)
     }
 
     fn http_clients(
         &self,
         url: &reqwest::Url,
+        method: &str,
+        path: &str,
+        redirect: bool,
     ) -> AppResult<Arc<super::proxy_destination::http::Clients>> {
         super::proxy_destination::http::for_url(
             self.approved_private_base(),
@@ -297,7 +299,8 @@ impl ProxyTarget {
             url,
             false,
         )
-        .inspect_err(|_| self.log_destination_refusal())
+        .inspect_err(|failure| failure.log(&self.service, method, path, redirect))
+        .map_err(AppError::from)
     }
 
     pub(crate) fn require_credential_materialized(&self) -> AppResult<()> {
@@ -519,8 +522,8 @@ fn is_valid_master_credential_service(service: &DownstreamService) -> bool {
 }
 
 pub(crate) struct PreparedDelegatedRequest {
-    pub path: String,
-    pub query: Option<String>,
+    pub path: SecretText,
+    pub query: Option<SecretText>,
     pub delegated_headers: SecretHeaders,
 }
 
@@ -1148,20 +1151,20 @@ fn contains_raw_path_breaker(value: &str) -> bool {
 }
 
 fn contains_percent_encoded_path_breaker(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
+    let lower = Zeroizing::new(value.to_ascii_lowercase());
     lower.contains("%2f")
         || lower.contains("%5c")
         || lower.contains("%00")
         || lower.contains("%3f")
         || lower.contains("%23")
         || lower.split('/').any(|segment| {
-            let decoded_dots = segment.replace("%2e", ".");
-            decoded_dots == "." || decoded_dots == ".."
+            let decoded_dots = Zeroizing::new(segment.replace("%2e", "."));
+            matches!(decoded_dots.as_str(), "." | "..")
         })
 }
 
 fn contains_nested_percent_encoded_path_breaker(value: &str) -> bool {
-    let mut current = value.to_string();
+    let mut current = Zeroizing::new(value.to_string());
 
     // Axum decodes one layer before handlers see the wildcard path. Some
     // downstream routers and proxies decode additional layers, so walk a few
@@ -1172,14 +1175,12 @@ fn contains_nested_percent_encoded_path_breaker(value: &str) -> bool {
             return true;
         }
 
-        let decoded = match urlencoding::decode(&current) {
-            Ok(decoded) => decoded.into_owned(),
-            Err(_) => break,
-        };
-
-        if decoded == current {
+        let std::borrow::Cow::Owned(bytes) = urlencoding::decode_binary(current.as_bytes()) else {
             break;
-        }
+        };
+        let Ok(decoded) = crate::crypto::guarded_utf8(Zeroizing::new(bytes)) else {
+            break;
+        };
 
         if contains_raw_path_breaker(&decoded) {
             return true;
@@ -1280,31 +1281,23 @@ pub fn extend_with_path_credential(delegated: &mut Vec<DelegatedCredential>, tar
 pub(crate) fn build_forward_path(
     path: &str,
     delegated_credentials: &[DelegatedCredential],
-) -> AppResult<String> {
+) -> AppResult<SecretText> {
     validate_requested_proxy_path(path)?;
-
-    let mut prefix_segments = Vec::new();
+    let mut parts: Vec<&str> = Vec::new();
     for cred in delegated_credentials {
         if cred.injection_method == "path" {
             validate_path_injection_prefix(&cred.injection_key)?;
             validate_path_injection_credential(&cred.credential)?;
-            prefix_segments.push(format!(
-                "{}{}",
-                cred.injection_key,
-                cred.credential.as_str()
-            ));
+            parts.extend([cred.injection_key.as_str(), cred.credential.as_str(), "/"]);
         }
     }
-
-    let trimmed_path = path.trim_start_matches('/');
-    let final_path = if prefix_segments.is_empty() {
-        trimmed_path.to_string()
-    } else if trimmed_path.is_empty() {
-        prefix_segments.join("/")
+    let path = path.trim_start_matches('/');
+    if path.is_empty() {
+        parts.pop();
     } else {
-        format!("{}/{}", prefix_segments.join("/"), trimmed_path)
-    };
-
+        parts.push(path);
+    }
+    let final_path = SecretText::concat(&parts);
     validate_requested_proxy_path(&final_path)?;
     Ok(final_path)
 }
@@ -1315,9 +1308,10 @@ pub(crate) fn prepare_delegated_request(
     delegated_credentials: &[DelegatedCredential],
 ) -> AppResult<PreparedDelegatedRequest> {
     let mut delegated_headers = SecretHeaders::default();
-    let mut forwarded_query = query
-        .map(str::to_string)
-        .filter(|existing| !existing.is_empty());
+    let mut query_parts = Vec::new();
+    if let Some(query) = query.filter(|q| !q.is_empty()) {
+        query_parts.push(SecretText::from(query));
+    }
 
     for cred in delegated_credentials {
         match cred.injection_method.as_str() {
@@ -1332,16 +1326,12 @@ pub(crate) fn prepare_delegated_request(
                 ));
             }
             "query" => {
-                let encoded = form_urlencoded::Serializer::new(String::new())
+                // Percent encoding uses at most three output bytes per input byte.
+                let capacity = 3 * (cred.injection_key.len() + cred.credential.len()) + 1;
+                let encoded = form_urlencoded::Serializer::new(String::with_capacity(capacity))
                     .append_pair(&cred.injection_key, &cred.credential)
                     .finish();
-                match forwarded_query.as_mut() {
-                    Some(existing) => {
-                        existing.push('&');
-                        existing.push_str(&encoded);
-                    }
-                    None => forwarded_query = Some(encoded),
-                }
+                query_parts.push(SecretText::from(encoded));
             }
             "path" => {}
             _ => {}
@@ -1350,14 +1340,24 @@ pub(crate) fn prepare_delegated_request(
 
     Ok(PreparedDelegatedRequest {
         path: build_forward_path(path, delegated_credentials)?,
-        query: forwarded_query,
+        query: match query_parts.len() {
+            0 | 1 => query_parts.pop(),
+            _ => Some(
+                query_parts
+                    .iter()
+                    .map(SecretText::as_str)
+                    .collect::<Vec<_>>()
+                    .join("&")
+                    .into(),
+            ),
+        },
         delegated_headers,
     })
 }
 
 pub(crate) struct PreparedNodeRequest {
-    pub path: String,
-    pub query: Option<String>,
+    pub path: SecretText,
+    pub query: Option<SecretText>,
     pub headers: SecretHeaders,
 }
 
@@ -1380,9 +1380,9 @@ pub(crate) fn prepare_node_request(
     extend_with_path_credential(&mut node_delegated, target);
     let prepared = prepare_delegated_request(path, query, &node_delegated)?;
     let path = if prepared.path.starts_with('/') {
-        prepared.path.clone()
+        prepared.path
     } else {
-        format!("/{}", prepared.path)
+        SecretText::concat(&["/", &prepared.path])
     };
     if let Some(token) = forwarded_caller_token(target, caller_token, extra_outbound_headers) {
         base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
@@ -4827,46 +4827,59 @@ pub(crate) fn forward_request_with_resource_proof<'a>(
     ))
 }
 
+/// Relative references followed before the response was returned to the proxy.
+#[derive(Clone)]
+pub(crate) struct FollowedLocations(pub Vec<reqwest::header::HeaderValue>);
+
 async fn return_or_follow_same_origin(
     target: &ProxyTarget,
     mut client: Client,
     mut request: reqwest::Request,
+    path: &str,
     egress_guard: Option<&super::assistant_service_execution::HttpEgressGuard<'_>>,
 ) -> Result<reqwest::Response, ForwardRequestError> {
     use reqwest::header::{
         CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, LOCATION, TRANSFER_ENCODING,
     };
-    for hop in 0.. {
+    let mut followed = Vec::new();
+    let mut response = loop {
         let replay = request.try_clone();
+        let method = request.method().clone();
         let response = client.execute(request).await.map_err(|error| {
-            if hop > 0 && super::proxy_destination::http::refused_connection(&error) {
-                target.log_destination_refusal();
-                ForwardRequestError::Application(super::proxy_destination::refused())
+            if !followed.is_empty()
+                && let Some(failure) = super::proxy_destination::http::connection_failure(&error)
+            {
+                // The first request already reached the provider.
+                failure.log(&target.service, method.as_str(), path, true);
+                ForwardRequestError::Application(failure.into())
             } else {
                 ForwardRequestError::from(error)
             }
         })?;
         let status = response.status();
-        if hop == 5 || !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
-            return Ok(response);
+        if followed.len() == 5 || !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+            break response;
         }
         let Some(mut next) = replay else {
-            return Ok(response);
+            break response;
         };
-        let Some(url) = response
-            .headers()
-            .get(LOCATION)
-            .and_then(|v| v.to_str().ok())
+        let Some(location) = response.headers().get(LOCATION) else {
+            break response;
+        };
+        let Some(url) = location
+            .to_str()
+            .ok()
             .and_then(|location| next.url().join(location).ok())
         else {
-            return Ok(response);
+            break response;
         };
         if next.url().origin() != url.origin()
             || !url.username().is_empty()
             || url.password().is_some()
         {
-            return Ok(response);
+            break response;
         }
+        followed.push(location.clone());
         *next.url_mut() = url;
         next.url_mut().set_fragment(None);
         if status.as_u16() == 303
@@ -4883,13 +4896,20 @@ async fn return_or_follow_same_origin(
                 next.headers_mut().remove(name);
             }
         }
-        client = target.http_clients(next.url())?.ordinary()?;
+        client = target
+            .http_clients(next.url(), next.method().as_str(), path, true)?
+            .ordinary()?;
         if let Some(guard) = egress_guard {
             Box::pin(guard.revalidate()).await?;
         }
         request = next;
+    };
+    if !followed.is_empty() {
+        response
+            .extensions_mut()
+            .insert(FollowedLocations(followed));
     }
-    unreachable!()
+    Ok(response)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4980,23 +5000,18 @@ async fn forward_request_with_egress_guard_inner(
             .map_err(ForwardRequestError::PreDispatchRejected)?,
         None => prepared.path.as_str(),
     };
-    let url = if let Some(q) = prepared.query.as_deref() {
-        format!(
-            "{}/{}?{}",
-            target.base_url.trim_end_matches('/'),
-            wire_path,
-            q
-        )
-    } else {
-        format!(
-            "{}/{}",
-            target.base_url.trim_end_matches('/'),
-            wire_path
-        )
+    let base = target.base_url.trim_end_matches('/');
+    let url = match prepared.query.as_deref() {
+        Some(q) => SecretText::concat(&[base, "/", wire_path, "?", q]),
+        None => SecretText::concat(&[base, "/", wire_path]),
     };
 
-    let url = reqwest::Url::parse(&url).map_err(|_| ForwardRequestError::PreDispatchRejected(super::proxy_destination::refused()))?;
-    let clients = target.http_clients(&url).map_err(ForwardRequestError::PreDispatchRejected)?;
+    let url = reqwest::Url::parse(&url).map_err(|_| {
+        let failure = super::proxy_destination::Failure::UrlShape;
+        failure.log(&target.service, method.as_str(), path, false);
+        ForwardRequestError::PreDispatchRejected(failure.into())
+    })?;
+    let clients = target.http_clients(&url, method.as_str(), path, false).map_err(ForwardRequestError::PreDispatchRejected)?;
     let client = if super::credential_verification::checking() {
         clients.verification()?
     } else {
@@ -5148,7 +5163,7 @@ async fn forward_request_with_egress_guard_inner(
     // BLOCKER 1) and two AWS JSON-RPC operations with the same body
     // but different `x-amz-target` headers don't replay each other
     // (BLOCKER 2).
-    let cache_key: Option<String> =
+    let cache_key: Option<SecretText> =
         if cloud_response_cache::is_cacheable_auth_method(&target.auth_method) {
             let body_bytes_for_key: &[u8] = match &body {
                 ProxyBody::Buffered(Some(b)) => b.as_ref(),
@@ -5161,7 +5176,7 @@ async fn forward_request_with_egress_guard_inner(
                 }
             };
             let path_and_query = match prepared.query.as_deref() {
-                Some(q) => format!("{}?{}", prepared.path, q),
+                Some(q) => SecretText::concat(&[&prepared.path, "?", q]),
                 None => prepared.path.clone(),
             };
             // Headers that have actually been attached to the outgoing
@@ -5180,7 +5195,7 @@ async fn forward_request_with_egress_guard_inner(
             if let Some(cached) = cloud_response_cache.get(&key) {
                 tracing::debug!(
                     auth_method = %target.auth_method,
-                    base_url = %target.base_url,
+                    host = %crate::services::url_validation::url_host_for_logs(&target.base_url),
                     "cloud_response_cache hit"
                 );
                 if let Some(guard) = egress_guard {
@@ -5275,9 +5290,16 @@ async fn forward_request_with_egress_guard_inner(
             let token = token_exchange_cache.get_or_fetch(&cache_key, || async {
                 let exchange_url = provider_token_exchange_service::resolve_endpoint(&exchange_config.endpoint, &target.base_url);
                 let url = reqwest::Url::parse(&exchange_url).map_err(|_| super::proxy_destination::refused())?;
-                let client = target.http_clients(&url)?.ordinary()?;
+                let client = target.http_clients(&url, "POST", "/{token_exchange}", false)?.ordinary()?;
                 provider_token_exchange_service::fetch_exchange_token(&client, &target.base_url, exchange_config, &credential_map).await
-            }).await?;
+            }).await.map_err(|error| {
+                if matches!(error, AppError::PoolAttemptTransport(crate::errors::PoolAttemptTransportKind::ResolutionUnavailable)) {
+                    super::proxy_destination::Failure::ResolutionUnavailable.log(&target.service, "POST", "/{token_exchange}", false);
+                    ForwardRequestError::PreDispatchRejected(error)
+                } else {
+                    ForwardRequestError::Application(error)
+                }
+            })?;
             request = provider_token_exchange_service::apply_injection(
                 request,
                 &exchange_config.injection,
@@ -5359,7 +5381,20 @@ async fn forward_request_with_egress_guard_inner(
             .await
             .map_err(ForwardRequestError::PreDispatchRejected)?;
     }
-    let response = if let Some(guard) = dispatch_guard {
+    let response = if let Some(guard) = egress_guard.filter(|guard| guard.has_guest_data()) {
+        if dispatch_guard.is_some() || resource_proof.is_some()
+            || target.execution_permission.is_some() || target.execution_request.is_some()
+        {
+            return Err(ForwardRequestError::PreDispatchRejected(
+                super::channel_guest_access::policy::denied(),
+            ));
+        }
+        let request = request.build()?;
+        guard.authorize_guest_request(&request)
+            .await
+            .map_err(ForwardRequestError::PreDispatchRejected)?;
+        client.execute(request).await?
+    } else if let Some(guard) = dispatch_guard {
         let mut request = request.build()?;
         if let Some(proof) = resource_proof {
             proof
@@ -5438,7 +5473,7 @@ async fn forward_request_with_egress_guard_inner(
                 && target.service.offering_kind != crate::models::downstream_service::OfferingKind::Tool
                 && !super::telegram_new_api::original_bot_api_request(request.url())
             {
-                return_or_follow_same_origin(target, client, request, egress_guard).await
+                return_or_follow_same_origin(target, client, request, path, egress_guard).await
             } else { client.execute(request).await.map_err(ForwardRequestError::from) }
         };
         if let Some(permit) = &target.execution_permission {
@@ -5466,17 +5501,19 @@ async fn forward_request_with_egress_guard_inner(
     Ok(response)
 
     }).await;
-    let result = match result {
-        Err(ForwardRequestError::Transport(error))
-            if super::proxy_destination::http::refused_connection(&error) =>
+    let result = result.map_err(|error| {
+        if let ForwardRequestError::Transport(transport) = &error
+            && let Some(failure) = super::proxy_destination::http::connection_failure(transport)
         {
-            target.log_destination_refusal();
-            Err(ForwardRequestError::PreDispatchRejected(
-                super::proxy_destination::refused(),
-            ))
+            failure.log(&target.service, method.as_str(), path, false);
+            if failure == super::proxy_destination::Failure::ResolutionUnavailable {
+                super::credential_verification::record("not_verified", "check_unavailable");
+            }
+            ForwardRequestError::PreDispatchRejected(failure.into())
+        } else {
+            error
         }
-        result => result,
-    };
+    });
     if let Err(ForwardRequestError::Transport(error)) = &result {
         super::credential_verification::record(
             "not_verified",
@@ -5528,16 +5565,17 @@ fn inject_credential_into_json_body(
     key: &str,
     credential: &str,
 ) -> Result<bytes::Bytes, AppError> {
-    let mut value: serde_json::Value = match existing {
+    use nyxid_service_adapters::secret_json::WireJson;
+    let mut value: WireJson = match existing {
         Some(bytes) if !bytes.is_empty() => serde_json::from_slice(bytes).map_err(|e| {
             AppError::BadRequest(format!(
                 "Body auth method requires a JSON request body: {e}"
             ))
         })?,
-        _ => serde_json::Value::Object(serde_json::Map::new()),
+        _ => serde_json::Value::Object(serde_json::Map::new()).into(),
     };
 
-    let obj = value.as_object_mut().ok_or_else(|| {
+    let obj = value.0.as_object_mut().ok_or_else(|| {
         AppError::BadRequest(
             "Body auth method requires a JSON object as the request body".to_string(),
         )
@@ -5551,11 +5589,11 @@ fn inject_credential_into_json_body(
         );
     }
 
-    let bytes = serde_json::to_vec(&value).map_err(|e| {
+    let bytes = crate::crypto::secret_json::to_secret_string(&value).map_err(|e| {
         AppError::Internal(format!("Failed to re-serialize body after injection: {e}"))
     })?;
 
-    Ok(bytes::Bytes::from(bytes))
+    Ok(bytes::Bytes::from_owner(bytes))
 }
 
 /// Reuse the exact execution resolver's live ACL, destination and credential
@@ -5994,6 +6032,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some(actor_id.clone()),
             created_at: now,
@@ -9193,7 +9232,7 @@ mod tests {
         )
         .expect("delegated request should prepare");
 
-        assert_eq!(prepared.path, "models");
+        assert_eq!(prepared.path.as_str(), "models");
         assert_eq!(
             prepared.query.as_deref(),
             Some("stream=true&api_key=abc+123")
@@ -9624,7 +9663,7 @@ mod tests {
         )
         .expect("delegated request should prepare");
 
-        assert_eq!(prepared.path, "bot123456:ABC-DEF/sendMessage");
+        assert_eq!(prepared.path.as_str(), "bot123456:ABC-DEF/sendMessage");
         assert_eq!(prepared.query.as_deref(), Some("chat_id=123"));
         assert!(
             prepared.delegated_headers.is_empty(),
@@ -9663,6 +9702,57 @@ mod tests {
     }
 
     // ─── inject_credential_into_json_body tests ─────────────────────────
+
+    #[test]
+    fn credential_transport_preserves_body_and_delegated_wire_bytes() {
+        let sentinel = "dummy/quoted\"+λ";
+        let body =
+            inject_credential_into_json_body(Some(br#"{"caller":7}"#), "key", sentinel).unwrap();
+        assert_eq!(
+            body.as_ref(),
+            serde_json::to_vec(&serde_json::json!({"caller":7, "key":sentinel})).unwrap()
+        );
+
+        let request = prepare_delegated_request(
+            "v1/list",
+            Some("a=%2f"),
+            &[DelegatedCredential {
+                provider_slug: "test".into(),
+                injection_method: "query".into(),
+                injection_key: "access".into(),
+                credential: sentinel.to_owned().into(),
+            }],
+        )
+        .unwrap();
+        let query = request.query.unwrap();
+        assert_eq!(query.as_str(), "a=%2f&access=dummy%2Fquoted%22%2B%CE%BB");
+        assert_eq!(format!("{query:?}"), "SecretText([REDACTED])");
+        assert_eq!(serde_json::to_value(&query).unwrap(), query.as_str());
+    }
+
+    #[test]
+    fn body_injection_preserves_nested_duplicate_key_order_and_parse_errors() {
+        let body = br#"{"first":0,"nested":[{"a":0,"b":2,"a":3}],"first":1}"#;
+        let mut expected: serde_json::Value = serde_json::from_slice(body).unwrap();
+        expected["token"] = "dummy-token".into();
+        let actual = inject_credential_into_json_body(Some(body), "token", "dummy-token").unwrap();
+        assert_eq!(actual.as_ref(), serde_json::to_vec(&expected).unwrap());
+
+        for input in [r#"{"x":"dummy-value","y":["#, r#"{"x":"dummy-value"} 1"#] {
+            let parse_error = serde_json::from_str::<serde_json::Value>(input).unwrap_err();
+            let AppError::BadRequest(message) =
+                inject_credential_into_json_body(Some(input.as_bytes()), "token", "dummy-token")
+                    .unwrap_err()
+            else {
+                panic!("expected the JSON body validation error");
+            };
+            assert_eq!(
+                message,
+                format!("Body auth method requires a JSON request body: {parse_error}")
+            );
+            assert!(!message.contains("dummy"));
+        }
+    }
 
     #[test]
     fn body_injection_merges_into_existing_object() {
@@ -10890,7 +10980,7 @@ mod tests {
             credential: "TOKEN".to_string().into(),
         }];
         assert_eq!(
-            build_forward_path("v1/send", &creds).unwrap(),
+            build_forward_path("v1/send", &creds).unwrap().as_str(),
             "botTOKEN/v1/send"
         );
     }
@@ -10903,12 +10993,15 @@ mod tests {
             injection_key: "bot".to_string(),
             credential: "T".to_string().into(),
         }];
-        assert_eq!(build_forward_path("", &creds).unwrap(), "botT");
+        assert_eq!(build_forward_path("", &creds).unwrap().as_str(), "botT");
     }
 
     #[test]
     fn build_forward_path_no_creds() {
-        assert_eq!(build_forward_path("/v1/models", &[]).unwrap(), "v1/models");
+        assert_eq!(
+            build_forward_path("/v1/models", &[]).unwrap().as_str(),
+            "v1/models"
+        );
     }
 
     // ---- credential_header_name tests ----
@@ -11609,7 +11702,7 @@ mod tests {
             credential: "sk-123".to_owned().into(),
         }];
         let result = prepare_delegated_request("/chat", None, &creds).unwrap();
-        assert_eq!(result.path, "chat");
+        assert_eq!(result.path.as_str(), "chat");
         assert_eq!(result.delegated_headers.len(), 1);
         assert_eq!(result.delegated_headers[0].0, "Authorization");
         assert_eq!(result.delegated_headers[0].1, "Bearer sk-123");
@@ -11679,7 +11772,7 @@ mod tests {
     #[test]
     fn prepare_delegated_empty_creds() {
         let result = prepare_delegated_request("/plain", Some("q=1"), &[]).unwrap();
-        assert_eq!(result.path, "plain");
+        assert_eq!(result.path.as_str(), "plain");
         assert_eq!(result.query.as_deref(), Some("q=1"));
         assert!(result.delegated_headers.is_empty());
     }

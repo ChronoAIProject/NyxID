@@ -33,6 +33,7 @@ const {
   runFile,
 } = require("./android-build-command");
 
+const { reportReleaseArtifact } = require("./performance-artifact");
 const { loadEnv, resolveProfile, appIdentity, MOBILE_ROOT } = require("./lib/load-env");
 
 const APP_ENV = process.env.APP_ENV === "dev" ? "dev" : "prod";
@@ -139,4 +140,5 @@ console.log(`\n[build-android] ✓ produced: ${aabPath}`);
 console.log(
   `\nNext: pnpm submit:android   (uploads this .aab to Play Internal testing)`,
 );
-process.stdout.write(`\n${aabPath}\n`);
+reportReleaseArtifact(aabPath, "aab", r.androidVersionCode, appIdentity(env).version, APP_ENV, r)
+  .then(() => process.stdout.write(`\n${aabPath}\n`));

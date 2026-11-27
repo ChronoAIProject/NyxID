@@ -6634,10 +6634,13 @@ pub async fn seed_default_services(
         #[cfg(test)]
         super::startup_seed_tests::missing(db, "service", seed.service_slug).await;
 
-        // Create an empty encrypted credential (field is required)
-        let empty_credential = encryption_keys.encrypt(b"").await?;
-
         let service_id = Uuid::new_v4().to_string();
+        let empty_credential = super::catalog_credential_record_service::empty_credential(
+            encryption_keys,
+            &service_id,
+            "system",
+        )
+        .await?;
         let is_llm_service = seed.service_slug.starts_with("llm-");
         let description = seed.description.map(String::from).unwrap_or_else(|| {
             if is_llm_service {
@@ -8208,8 +8211,6 @@ pub async fn update_provider_if_unchanged(
         }
     }
 
-    use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
-
     if clearing_credentials {
         unset_doc.insert("client_id_encrypted", "");
         unset_doc.insert("client_secret_encrypted", "");
@@ -8231,15 +8232,11 @@ pub async fn update_provider_if_unchanged(
         filter.extend(guard);
     }
 
-    let updated = db
-        .collection::<ProviderConfig>(COLLECTION_NAME)
-        .find_one_and_update(filter, update_doc)
-        .with_options(
-            FindOneAndUpdateOptions::builder()
-                .return_document(ReturnDocument::After)
-                .build(),
-        )
-        .await?;
+    let updated = super::channel_signing_migration::update_provider(db, filter, update_doc)
+        .await?
+        .map(bson::from_document::<ProviderConfig>)
+        .transpose()
+        .map_err(|_| AppError::Internal("Invalid provider credential storage".into()))?;
     let Some(updated) = updated else {
         return Err(provider_update_miss_error(
             db,

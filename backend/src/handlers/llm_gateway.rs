@@ -449,11 +449,21 @@ async fn llm_proxy_request_inner(
     // policies can short-circuit without decrypting downstream credentials.
     let request_method_str = request.method().as_str().to_string();
     let method = request.method().clone();
+    let caller_uri = request.uri().clone();
+    let caller_path = path.clone();
     let query = request.uri().query().map(String::from);
     let headers = request.headers().clone();
     let body_bytes =
         super::body_limit::read_request_body(request, state.config.llm_max_body_size, "LLM proxy")
             .await?;
+    check_channel_guest_model_request(
+        &auth_user,
+        &method,
+        &path,
+        query.as_deref(),
+        &headers,
+        &body_bytes,
+    )?;
 
     capture_permission_input(
         &auth_user,
@@ -762,6 +772,7 @@ async fn llm_proxy_request_inner(
         owner_for_approval.as_deref(),
         is_auto_connected_for_approval,
         llm_scope.guest,
+        operation_user_service_id.as_deref(),
         crate::services::mcp_service::http_carries_method_override(
             method.as_str(),
             &headers,
@@ -943,6 +954,13 @@ async fn llm_proxy_request_inner(
                 model_request.as_ref(),
             )
         });
+    let egress_guard =
+        crate::services::assistant_service_execution::HttpEgressGuard::with_channel_guest(
+            egress_guard,
+            &state.db,
+            auth_user.assistant_chat.as_deref(),
+            None,
+        );
     let execution = Box::pin(async {
         if let (Some(chat), Some(admission), Some(id)) = (
             auth_user.assistant_chat.as_deref(),
@@ -1020,6 +1038,7 @@ async fn llm_proxy_request_inner(
             );
 
             state.billing.mark_forwarded(&metered).await?;
+            fence_guest_model_dispatch(&state, &auth_user, &metered).await?;
             if let Some(guard) = egress_guard.as_ref()
                 && let Err(error) = guard.revalidate().await
             {
@@ -1057,6 +1076,13 @@ async fn llm_proxy_request_inner(
             let reqwest_headers = convert_headers(&headers);
 
             state.billing.mark_forwarded(&metered).await?;
+            let location = super::proxy::AsyncLocationContext::new(
+                &target,
+                &caller_uri,
+                &caller_path,
+                &delegated,
+            );
+            fence_guest_model_dispatch(&state, &auth_user, &metered).await?;
             let downstream_result = proxy_service::forward_request_with_egress_guard(
                 llm_scope.redirects(),
                 &target,
@@ -1105,8 +1131,10 @@ async fn llm_proxy_request_inner(
                 api_key_name: auth_user.api_key_name.clone(),
             };
 
+            let location = location.map(|ctx| ctx.after_redirects(&downstream_response));
             build_filtered_response(
                 downstream_response,
+                location.as_ref(),
                 Some(usage_context),
                 state.config.proxy_stream_idle_timeout_secs,
                 metered.clone(),
@@ -1265,6 +1293,14 @@ async fn gateway_request_inner(
         "LLM gateway",
     )
     .await?;
+    check_channel_guest_model_request(
+        &auth_user,
+        &method,
+        &path,
+        query.as_deref(),
+        &headers,
+        &body_bytes,
+    )?;
 
     capture_permission_input(
         &auth_user,
@@ -1359,6 +1395,28 @@ async fn gateway_request_inner(
             .cloned(),
     ))
     .await
+}
+
+async fn fence_guest_model_dispatch(
+    state: &AppState,
+    auth: &AuthUser,
+    metered: &crate::services::billing::meter::MeteredProxyContext,
+) -> AppResult<()> {
+    if auth
+        .assistant_chat
+        .as_ref()
+        .is_some_and(|chat| chat.channel_guest.is_some())
+        && let Err(error) = auth
+            .ensure_live_assistant_turn(&state.db, "llm.dispatch")
+            .await
+    {
+        state
+            .billing
+            .reject_before_send(metered, "assistant_authority_changed", false)
+            .await?;
+        return Err(error);
+    }
+    Ok(())
 }
 
 // Provider-specific resolution and translation is outside the pool entrance's
@@ -1714,6 +1772,7 @@ async fn gateway_provider_request(
         effective_owner_for_approval.as_deref(),
         is_auto_connected_for_approval,
         llm_scope.guest,
+        operation_user_service_id.as_deref(),
         crate::services::mcp_service::http_carries_method_override(
             method.as_str(),
             &headers,
@@ -1935,6 +1994,13 @@ async fn gateway_provider_request(
                 model_request.as_ref(),
             )
         });
+    let egress_guard =
+        crate::services::assistant_service_execution::HttpEgressGuard::with_channel_guest(
+            egress_guard,
+            &state.db,
+            auth_user.assistant_chat.as_deref(),
+            None,
+        );
     let execution = Box::pin(async {
         if let (Some(chat), Some(admission), Some(id)) = (
             auth_user.assistant_chat.as_deref(),
@@ -1987,6 +2053,7 @@ async fn gateway_provider_request(
             );
 
             state.billing.mark_forwarded(&metered).await?;
+            fence_guest_model_dispatch(&state, &auth_user, &metered).await?;
             if let Some(guard) = egress_guard.as_ref()
                 && let Err(error) = guard.revalidate().await
             {
@@ -2010,6 +2077,9 @@ async fn gateway_provider_request(
             .await?
         } else {
             state.billing.mark_forwarded(&metered).await?;
+            // The body selects the provider, so only external downloads have a caller URL.
+            let location = super::proxy::AsyncLocationContext::for_target(&target, &delegated);
+            fence_guest_model_dispatch(&state, &auth_user, &metered).await?;
             let downstream_result = proxy_service::forward_request_with_egress_guard(
                 llm_scope.redirects(),
                 &target,
@@ -2076,6 +2146,7 @@ async fn gateway_provider_request(
             } else {
                 build_filtered_response(
                     downstream_response,
+                    location.as_ref(),
                     Some(usage_context),
                     idle_timeout_secs,
                     metered.clone(),
@@ -2136,6 +2207,26 @@ async fn gateway_provider_request(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+fn check_channel_guest_model_request(
+    auth: &AuthUser,
+    method: &Method,
+    path: &str,
+    query: Option<&str>,
+    headers: &axum::http::HeaderMap,
+    body: &[u8],
+) -> AppResult<()> {
+    use crate::services::channel_guest_access::{guest_tools, policy};
+    if auth
+        .assistant_chat
+        .as_deref()
+        .is_some_and(|chat| chat.channel_guest.is_some())
+        && !guest_tools::stateless_model_request(method, path, query, headers, body)
+    {
+        return Err(policy::denied());
+    }
+    Ok(())
+}
 
 /// Assistant selection is resolved before legacy provider fallback. In
 /// particular an org primary must reach its exact consent gate instead of
@@ -2370,6 +2461,7 @@ async fn read_response_with_limit(response: reqwest::Response) -> AppResult<byte
 
 async fn build_filtered_response(
     downstream_response: reqwest::Response,
+    location: Option<&super::proxy::AsyncLocationContext>,
     usage_context: Option<llm_usage_service::UsageAuditContext>,
     idle_timeout_secs: u64,
     metered: crate::services::billing::MeteredProxyContext,
@@ -2393,8 +2485,15 @@ async fn build_filtered_response(
         if is_sse && name_lower == "content-length" {
             continue;
         }
-        if (ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
-            || (status.is_redirection() && name_lower == "location"))
+        if status.is_redirection() && name_lower == "location" {
+            if let Some(value) = location
+                .and_then(|context| context.header_value(status, &name_lower, value.to_str().ok()?))
+            {
+                response_builder = response_builder.header(name, value);
+            }
+            continue;
+        }
+        if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
             && let Ok(header_name) =
                 axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
             && let Ok(header_value) = axum::http::header::HeaderValue::from_bytes(value.as_bytes())
@@ -2921,6 +3020,7 @@ pub(crate) async fn check_llm_approval(
     service_owner_user_id: Option<&str>,
     is_auto_connected: bool,
     operation_guest: bool,
+    connection_id: Option<&str>,
     method_override: bool,
 ) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
     let mut operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
@@ -2944,6 +3044,7 @@ pub(crate) async fn check_llm_approval(
         service_owner_user_id,
         is_auto_connected,
         operation_guest,
+        connection_id,
     )
     .await
 }
@@ -2960,6 +3061,7 @@ pub(super) async fn check_llm_approval_descriptor(
     service_owner_user_id: Option<&str>,
     is_auto_connected: bool,
     operation_guest: bool,
+    connection_id: Option<&str>,
 ) -> AppResult<Option<crate::services::assistant_acknowledgement_service::AutoAllowed>> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
@@ -2969,6 +3071,7 @@ pub(super) async fn check_llm_approval_descriptor(
         &approval_owner_user_id,
         owner_for_resolution,
         service_id,
+        connection_id,
         &operation,
         auth_user.approval_requester_type(),
         &auth_user.approval_requester_id(),
@@ -3016,6 +3119,7 @@ pub(super) async fn check_llm_approval_descriptor(
         &operation,
         pending.resolution.grant_scope.clone(),
     );
+    request_operation.org_policy = pending.resolution.policy_stamp();
     request_operation.assistant_group = crate::services::org_group_service::approval_binding(
         &state.db,
         auth_user.assistant_group_id.as_deref(),
@@ -3023,6 +3127,7 @@ pub(super) async fn check_llm_approval_descriptor(
         auth_user.api_key_id.as_deref(),
     )
     .await?;
+    request_operation.apply_connected_budget(timeout_secs);
     let approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
@@ -3261,6 +3366,7 @@ mod tests {
                 None,
                 false,
                 false,
+                None,
                 false,
             ),
         )
@@ -3310,6 +3416,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             method_override,
         );
         tokio::pin!(request);

@@ -161,6 +161,7 @@ pub struct AppState {
     pub db: DbHandle,
     pub config: AppConfig,
     pub jwt_keys: JwtKeys,
+    pub staging_qr: services::staging_qr::Peer,
     pub http_client: reqwest::Client,
     /// Pre-computed JWK for the JWKS endpoint
     pub jwk_json: serde_json::Value,
@@ -1209,9 +1210,12 @@ async fn server_run(cli: Cli) {
         services::crash_report_export::CrashConfig::from_config(&config)
             .expect("Invalid crash reporting configuration"),
     );
+    let staging_qr = services::staging_qr::Peer::from_environment(&config)
+        .expect("Invalid staging QR configuration");
     let state = AppState {
         jobs,
         app_management_observations: Arc::default(),
+        staging_qr,
         refusal_throttle: Arc::new(mw::refusal_throttle::RefusalThrottle::default()),
         shutdown: services::shutdown::process(),
         crash_reports: crash_reports.clone(),
@@ -1784,6 +1788,42 @@ async fn server_run(cli: Cli) {
         });
     }
 
+    {
+        let meta_state = state.clone();
+        services::shutdown::process().spawn_worker(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(60));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                let Some(_work) = services::shutdown::process().tick(&mut ticks).await else {
+                    break;
+                };
+                if let Err(error) = services::channel_meta_service::sweep(&meta_state).await {
+                    tracing::warn!(
+                        error_code = error.error_code(),
+                        "Meta inbox lifecycle reconciliation deferred"
+                    );
+                }
+            }
+        });
+    }
+
+    {
+        let db = state.db.clone();
+        services::shutdown::process().spawn_worker(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(30));
+            ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            while let Some(_work) = services::shutdown::process().tick(&mut ticks).await {
+                if let Err(error) = services::channel_bot_service::sweep_guest_retirement(&db).await
+                {
+                    tracing::warn!(
+                        error_code = error.error_code(),
+                        "Channel guest retirement reconciliation deferred"
+                    );
+                }
+            }
+        });
+    }
+
     let discord_shutdown = tokio_util::sync::CancellationToken::new();
     let discord_worker = services::shutdown::process().spawn_worker(
         services::discord_gateway::run(state.clone(), discord_shutdown.clone()),
@@ -1863,7 +1903,9 @@ async fn server_run(cli: Cli) {
         )
         .await
         {
-            Ok(()) => tracing::info!("Telegram webhook registered: {webhook_url}"),
+            Ok(()) => {
+                tracing::info!(host = %crate::services::url_validation::url_host_for_logs(webhook_url), "Telegram webhook registered")
+            }
             Err(e) => tracing::error!("Failed to register Telegram webhook: {e}"),
         }
 
@@ -2527,6 +2569,7 @@ fn private_cors(allowed_origins: std::collections::HashSet<axum::http::HeaderVal
             "X-API-Key".parse().unwrap(),
             "X-NyxID-Client".parse().unwrap(),
             "X-NyxID-Client-Version".parse().unwrap(),
+            "X-NyxID-Chat-Capabilities".parse().unwrap(),
             "X-NyxID-Analytics".parse().unwrap(),
             "X-NyxID-Analytics-Account".parse().unwrap(),
             "DNT".parse().unwrap(),
@@ -3294,7 +3337,7 @@ mod tests {
                         .header("Access-Control-Request-Method", "PUT")
                         .header(
                             "Access-Control-Request-Headers",
-                            "content-type,x-nyxid-analytics,x-nyxid-analytics-account,dnt",
+                            "content-type,x-nyxid-analytics,x-nyxid-analytics-account,dnt,x-nyxid-chat-capabilities",
                         )
                         .body(axum::body::Body::empty())
                         .unwrap(),
@@ -3318,6 +3361,7 @@ mod tests {
                 assert!(allowed.contains("x-nyxid-analytics"));
                 assert!(allowed.contains("x-nyxid-analytics-account"));
                 assert!(allowed.contains("dnt"));
+                assert!(allowed.contains("x-nyxid-chat-capabilities"));
             } else {
                 assert!(
                     !response

@@ -710,14 +710,27 @@ pub async fn send_approval_notification(
                 .as_deref()
                 .unwrap_or(&request.requester_type);
 
-            if proposal {
+            let link_only = request.from_org_policy
+                && !super::org_service_approvers::can_edit_chat(
+                    db,
+                    request,
+                    chat_id,
+                    &[user_id.to_owned()],
+                )
+                .await?;
+            if proposal || link_only {
                 let link = format!(
                     "{}{}",
                     config.frontend_url.trim_end_matches('/'),
                     super::assistant_links::AssistantPage::Approvals.path()
                 );
+                let subject = if proposal {
+                    "An execution permission"
+                } else {
+                    "An organization service approval"
+                };
                 let text = format!(
-                    "An execution permission needs your review. Open the web app: {}",
+                    "{subject} needs your review. Open the web app: {}",
                     html_escape(&link)
                 );
                 if telegram_service::send_text_message(http_client, bot_token, chat_id, &text)
@@ -728,6 +741,15 @@ pub async fn send_approval_notification(
                     telegram_chat_id = Some(chat_id);
                 }
             } else {
+                // Each recipient sees the deadline of the same connected request.
+                let expires_in_secs = if super::approval_service::CONNECTED_WAIT_BUDGET
+                    .try_with(|_| ())
+                    .is_ok()
+                {
+                    (request.expires_at - Utc::now()).num_seconds().max(0) as u32
+                } else {
+                    channel.approval_timeout_secs
+                };
                 match telegram_service::send_approval_message(
                     http_client,
                     bot_token,
@@ -740,7 +762,7 @@ pub async fn send_approval_notification(
                         .action_description
                         .as_deref()
                         .unwrap_or(&request.operation_summary),
-                    channel.approval_timeout_secs,
+                    expires_in_secs,
                     effective_org_name,
                 )
                 .await
@@ -895,6 +917,7 @@ pub async fn notify_decision(
     request: &ApprovalRequest,
     approved: bool,
 ) -> AppResult<()> {
+    let recipients = super::org_service_approvers::recipients(db, request).await?;
     // 1. Edit Telegram message (existing behavior)
     if request
         .notification_channel
@@ -902,6 +925,7 @@ pub async fn notify_decision(
         .is_some_and(|ch| ch.contains("telegram"))
         && let (Some(chat_id), Some(message_id)) =
             (request.telegram_chat_id, request.telegram_message_id)
+        && super::org_service_approvers::can_edit_chat(db, request, chat_id, &recipients).await?
     {
         let bot_token = config
             .telegram_bot_token
@@ -934,12 +958,6 @@ pub async fn notify_decision(
     data.insert("type".to_string(), "approval_decision".to_string());
     data.insert("request_id".to_string(), request.id.clone());
     data.insert("decision".to_string(), decision_str.to_string());
-
-    let recipients: Vec<String> = if request.notify_user_ids.is_empty() {
-        vec![request.user_id.clone()]
-    } else {
-        request.notify_user_ids.clone()
-    };
 
     for recipient in recipients {
         let channel = match get_or_create_channel(db, &recipient).await {
@@ -1010,16 +1028,16 @@ pub async fn get_or_create_channel(db: &Database, user_id: &str) -> AppResult<No
     }
 
     let channel = default_channel(user_id);
-    match collection.insert_one(&channel).await {
+    match super::erasure_admission::insert_owned(db, COLLECTION_NAME, user_id, &channel).await {
         Ok(_) => Ok(channel),
-        Err(e) if is_duplicate_key_error(&e) => {
+        Err(AppError::DatabaseError(e)) if is_duplicate_key_error(&e) => {
             // Another request created it first; fetch the existing channel
             collection
                 .find_one(doc! { "user_id": user_id })
                 .await?
                 .ok_or_else(|| AppError::Internal("Channel creation conflict".to_string()))
         }
-        Err(e) => Err(AppError::DatabaseError(e)),
+        Err(error) => Err(error),
     }
 }
 

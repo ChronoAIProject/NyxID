@@ -4,13 +4,15 @@ import { AssistantAccountPanel } from "./assistant-account-panel";
 import { useAssistantViewport } from "@/hooks/use-assistant-viewport";
 import { useMediaQuery } from "@/hooks/use-media-query";
 import { ThreadTitle } from "@/components/assistant/thread-title";
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { OverlayLayer } from "@/components/ui/overlay-layer";
 import { ASSISTANT_OVERLAY_BASE } from "@/lib/overlay-layer";
 import { Link, useRouter } from "@tanstack/react-router";
 import { Menu, PanelLeftClose, PanelLeftOpen, X } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { SidebarRailContext } from "./sidebar-rail-context";
+import { AssistantThreadsContext, AssistantMobileThreadsContext } from "./assistant-threads-context";
+import "./assistant-navigation.css";
 import { useAssistantLayoutStore } from "@/stores/assistant-layout-store";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import { AssistantDrawerDismissContext } from "@/components/assistant/assistant-drawer-context";
@@ -31,6 +33,7 @@ import type { CmaOperation } from "@/schemas/cma-operation";
 
 interface AssistantShellProps {
   readonly title: string;
+  readonly displayTitle?: string;
   readonly sidebar: ReactNode;
   readonly headerActions?: ReactNode;
   readonly onRenameTitle?: (title: string) => Promise<void>;
@@ -41,6 +44,7 @@ interface AssistantShellProps {
   /** Preview cards docked beside chat on wide screens. */
   readonly aside?: ReactNode;
   readonly cmaOperations?: readonly CmaOperation[];
+  readonly cmaConversationId?: string;
   /** Share of the content area `aside` takes, in percent. */
   readonly asidePercent?: number;
   /** Set by dragging (or keying) the divider between the content and `aside`. */
@@ -51,7 +55,7 @@ interface AssistantShellProps {
 export function AssistantShell(props: AssistantShellProps) {
   useUiTranslation();
   return (
-    <CmaSessionObserver operations={props.cmaOperations}>
+    <CmaSessionObserver operations={props.cmaOperations} conversationId={props.cmaConversationId}>
       {(cmaCards) => <AssistantShellLayout {...props} cmaCards={cmaCards} />}
     </CmaSessionObserver>
   );
@@ -59,6 +63,7 @@ export function AssistantShell(props: AssistantShellProps) {
 
 function AssistantShellLayout({
   title,
+  displayTitle,
   sidebar,
   headerActions,
   onRenameTitle,
@@ -73,14 +78,16 @@ function AssistantShellLayout({
 }: AssistantShellProps & { readonly cmaCards: ReactNode }) {
   useUiTranslation();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [threadsSlot, setThreadsSlot] = useState<HTMLElement | null>(null);
+  const threadsId = useId();
   const desktop = useMediaQuery("(min-width: 768px)");
   const wideScreen = useMediaQuery("(min-width: 1024px)");
   const savedPreviewPercent = useMachinePaneStore((state) => state.percent);
   const setPreviewPercent = useMachinePaneStore((state) => state.setPercent);
   const hasPreview = Boolean(aside || (wideScreen && cmaCards));
   const shellTitle = contentTitle ? null : onRenameTitle ? (
-    <ThreadTitle key={titleKey} title={title} onRename={onRenameTitle} heading />
-  ) : <h1 className="truncate type-card-title text-foreground" title={title}>{title}</h1>;
+    <ThreadTitle key={titleKey} title={title} displayTitle={displayTitle} onRename={onRenameTitle} heading />
+  ) : <h1 className="truncate type-card-title text-foreground" title={title}>{displayTitle ?? title}</h1>;
   const viewportRef = useAssistantViewport();
   useScrollFades(viewportRef);
   const savedSidebarWidth = useThemeStore((s) => s.sidebarWidths.assistant);
@@ -130,6 +137,7 @@ function AssistantShellLayout({
   }, [mobileSidebarOpen]);
 
   return (
+    <AssistantThreadsContext value={wideScreen ? threadsSlot : null}>
     <AssistantDrawerDismissContext value={dismissDrawer}>
       <OverlayLayer layer={ASSISTANT_OVERLAY_BASE}>
         <div
@@ -217,6 +225,7 @@ function AssistantShellLayout({
                 />
               </aside>
             )}
+            <aside id={threadsId} ref={setThreadsSlot} aria-label={translateUi("Threads")} className="assistant-threads-column" />
             {/* The slab is glued to the window's right edge: no gap, and only
                 its sidebar-facing corners are rounded. */}
             <div className="relative flex min-h-0 min-w-0 flex-1 md:mt-3 md:mb-2">
@@ -275,16 +284,18 @@ function AssistantShellLayout({
               />
               <aside
                 data-tour="sidebar"
-                className="relative flex h-full w-[min(20rem,88vw)] flex-col border-r border-border bg-sidebar shadow-xl"
+                className="relative flex h-full w-full flex-col bg-sidebar"
                 style={{
                   paddingTop: "var(--sat)",
                   paddingBottom: "var(--sab)",
                   paddingLeft: "var(--sal)",
+                  paddingRight: "var(--sar)",
                 }}
               >
                 <div className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center justify-between gap-1 border-b border-border/60 px-4 py-1">
                   <NyxidLogo className="mr-auto h-5 w-auto" />
                   <div data-header-actions="" className="-ml-1.5 flex shrink-0 flex-nowrap items-center gap-1">
+                    <NotificationsBell />
                     <AssistantSearchButton onOpen={openSearch} />
                     <button
                       type="button"
@@ -314,7 +325,7 @@ function AssistantShellLayout({
                     }
                   }}
                 >
-                  {sidebar}
+                  <AssistantMobileThreadsContext value>{sidebar}</AssistantMobileThreadsContext>
                 </div>
               </aside>
             </div>
@@ -324,6 +335,7 @@ function AssistantShellLayout({
         <AssistantAccountPanel />
       </OverlayLayer>
     </AssistantDrawerDismissContext>
+    </AssistantThreadsContext>
   );
 }
 

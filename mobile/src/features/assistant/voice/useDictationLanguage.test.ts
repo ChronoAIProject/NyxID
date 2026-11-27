@@ -9,7 +9,9 @@ import type { useDictationLanguage } from "./useDictationLanguage";
 function setup(
   saved?: string,
   recent = ["fr-FR", "ja-JP", "en-US"],
-  locales: Promise<{ locales: string[] }> = Promise.resolve({
+  locales:
+    | Promise<{ locales: string[] }>
+    | (() => Promise<{ locales: string[] }>) = Promise.resolve({
     locales: ["en-US", "zh-CN", "ja-JP", "fr-FR"],
   }),
   platform = "ios",
@@ -18,7 +20,10 @@ function setup(
   const h = hookHarness<ReturnType<typeof useDictationLanguage>>({
     "react-native": { Platform: { OS: platform } },
     "expo-speech-recognition": {
-      ExpoSpeechRecognitionModule: { getSupportedLocales: () => locales },
+      ExpoSpeechRecognitionModule: {
+        getSupportedLocales: () =>
+          typeof locales === "function" ? locales() : locales,
+      },
     },
     "../../../i18n/deviceLanguages": {
       deviceLanguages: () => ["zh-Hans-CN", "en-US"],
@@ -47,6 +52,10 @@ function setup(
       },
     },
   });
+  h.mock(
+    "./recognitionLocales",
+    h.load(fileURLToPath(new URL("./recognitionLocales.ts", import.meta.url))),
+  );
   const module = h.load(
     fileURLToPath(new URL("./useDictationLanguage.ts", import.meta.url)),
   ) as typeof import("./useDictationLanguage");
@@ -157,7 +166,42 @@ for (const rejected of [false, true]) {
     assert.equal(h.value().value, "cmn-Hans-CN");
     assert.equal(h.value().resolved, "cmn-Hans-CN");
     assert.equal(h.value().label, "中文（中国）");
-    assert.match(h.value().explanation!, /language list is unavailable/);
+    assert.match(h.value().explanation!, /did not provide a language list/);
     h.unmount();
   });
 }
+
+test("Android discovery times out at 2.5s and Retry re-queries the provider", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let queries = 0;
+  const { h } = setup(
+    undefined,
+    [],
+    () => {
+      queries++;
+      return queries === 1
+        ? new Promise(() => {})
+        : Promise.resolve({ locales: ["zh-CN"] });
+    },
+    "android",
+  );
+  await h.settle();
+  t.mock.timers.tick(2499);
+  await h.settle();
+  assert.equal(h.value().loading, true);
+  t.mock.timers.tick(1);
+  await h.settle();
+  assert.equal(h.value().loading, false);
+  assert.equal(h.value().listUnavailable, true);
+  assert.equal(h.value().manualEntry, true);
+  h.value().retry();
+  await h.settle();
+  assert.equal(queries, 2);
+  assert.equal(h.value().listUnavailable, false);
+  assert.equal(h.value().resolved, "zh-CN");
+  assert.deepEqual(
+    [...h.value().options].map((o) => o.value),
+    ["automatic", "zh-CN"],
+  );
+  h.unmount();
+});

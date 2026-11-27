@@ -230,6 +230,51 @@ async fn seed_conversation(f: &Fixture, owner: &str, title: &str) -> String {
     id
 }
 
+#[tokio::test]
+async fn hosted_guest_notifications_are_hidden_from_owner_feeds() {
+    let f = fixture("hosted_guest_notification_visibility").await;
+    let ordinary_id = seed_conversation(&f, &f.owner, "Ordinary thread").await;
+    let hosted_id = "nyxag-11111111111111111111111111111111";
+    f.state
+        .db
+        .collection::<Document>(CONVERSATIONS)
+        .insert_one(doc! {"_id": hosted_id, "user_id": &f.owner, "title": "Private thread"})
+        .await
+        .unwrap();
+    let ordinary = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(&ordinary_id),
+    );
+    let hosted = seeded(
+        &f.owner,
+        NotificationKind::AgentUpdate,
+        conversation_source(hosted_id),
+    );
+    insert_row(&f, &ordinary).await;
+    insert_row(&f, &hosted).await;
+
+    let page = list(&f.state, &f.owner, &page(1)).await.unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, ordinary.id);
+    assert!(page.next_cursor.is_none());
+    let summary = summary(&f.state.db, &f.owner).await.unwrap();
+    assert_eq!(summary.unread_count, 1);
+    assert_eq!(summary.by_source[0].id, ordinary_id);
+    assert!(
+        resolve_items(&f.state, &f.owner, vec![hosted.clone()])
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        mark_read(&f.state.db, &f.owner, ReadScope::Ids(vec![hosted.id]))
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 fn conversation_source(id: &str) -> NotificationSource {
     NotificationSource {
         source_type: SourceType::Conversation,
@@ -703,6 +748,7 @@ async fn org_guest_lane_notifies_the_route_admin_from_the_public_transcript_only
     first.guest = true;
     let row = begin(&f, &f.owner, &first).await;
     let execution = crate::models::org_channel::Execution {
+        org_use_revision: 0,
         version: 1,
         org_id: org.clone(),
         revision: "rev-1".into(),
@@ -1320,6 +1366,7 @@ fn chat_authority(row: &AssistantConversation, agent_id: &str) -> acks::ChatAuth
     acks::ChatAuthority {
         key_version: 0,
         voice_parent_conversation_id: None,
+        channel_guest: None,
         platform_model_context: None,
         automation_work: None,
         execution_group_id: None,
@@ -1745,6 +1792,24 @@ async fn group_cards_mark_the_visible_group_and_opening_it_reads_them_without_re
         None
     );
     let card = action_card(&f, &row, &researcher.id, "Delete service g?").await;
+    let turn_id = &row.active_turn.as_ref().unwrap().turn_id;
+    assert_eq!(card.requested_turn_id.as_ref(), Some(turn_id));
+    acks::record_auto_allowed(
+        db,
+        &chat_authority(&row, &researcher.id),
+        "read_item",
+        &json!({}),
+        &acks::AutoAllowed {
+            class: acks::OwnerActionClass::Read,
+            mode: crate::models::assistant_settings::AccessMode::Autopilot,
+            reason: "approval",
+        },
+        "Read the group item",
+    )
+    .await;
+    assert_eq!(db.collection::<bson::Document>(crate::models::assistant_acknowledgement::COLLECTION_NAME)
+        .count_documents(doc! {"conversation_id":&row.id,"requested_turn_id":turn_id,"decided_by":"access_mode"})
+        .await.unwrap(),1);
     let rows = rows_of(&f, &f.owner).await;
     assert_eq!(rows.len(), 1);
     let pending = &rows[0];
@@ -1956,6 +2021,7 @@ async fn concurrent_producers_on_one_source_yield_one_unread_row_with_the_full_c
         last_recipient_ids_by_actor: Default::default(),
         created_by: "user".into(),
         message_count: 0,
+        pending_org_use_revisions: Default::default(),
         pending_agent_ids: Vec::new(),
         hops_remaining: 0,
         followers: Vec::new(),

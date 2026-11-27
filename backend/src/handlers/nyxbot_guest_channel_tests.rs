@@ -922,7 +922,10 @@ async fn channel_model_turns_for(
                     let queued = tokio::select! { _=&mut request=>panic!("request finished before simulated crash"), row=tokio::time::timeout(Duration::from_secs(10),pending)=>row.unwrap() };
                     drop(request);
                     let event_id = queued.get_str("_id").unwrap();
-                    state.db.collection::<bson::Document>(EVENTS).update_one(doc!{"_id":event_id},doc!{"$set":{"guest_setup_lease":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(1))}}).await.unwrap();
+                    assert_eq!(queued.get_i32("guest_setup_context_version"), Ok(3));
+                    state.db.collection::<bson::Document>(EVENTS).update_one(doc!{"_id":event_id},doc!{"$set":{
+                        "guest_setup_lease":bson::DateTime::from_chrono(Utc::now()-ChronoDuration::seconds(1)),
+                    }}).await.unwrap();
                     let delivered = tokio::time::timeout(Duration::from_secs(30), async {
                         loop {
                             guest_setup_queue::sweep(state).await.unwrap();

@@ -135,22 +135,15 @@ pub async fn verify_platform_identity(
     if !matches_bot(config, bot) {
         return Err(refusal("native_whatsapp_identity_changed"));
     }
-    let app_secret = keys
-        .decrypt(
-            bot.app_secret_encrypted
-                .as_deref()
-                .ok_or_else(|| refusal("whatsapp_credentials_required"))?,
-        )
+    let app_secret = super::channel_registration::open_secret(keys, bot, "app_secret_encrypted")
+        .await
+        .map_err(|_| refusal("whatsapp_credentials_required"))?
+        .ok_or_else(|| refusal("whatsapp_credentials_required"))?;
+    let app_secret = crate::crypto::guarded_utf8(app_secret)
+        .map_err(|_| refusal("whatsapp_credentials_required"))?;
+    let token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
         .await
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
-    let app_secret = Zeroizing::new(
-        String::from_utf8(app_secret).map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
-    let token = Zeroizing::new(
-        crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
-            .await
-            .map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
     let app_token = Zeroizing::new(format!("{}|{}", config.meta_app_id, app_secret.as_str()));
     let debug = graph_read(
         http,
@@ -234,70 +227,8 @@ pub async fn note_activation_failure(db: &Database, bot: &ChannelBot) {
         .await;
 }
 
-/// Return the native CMA Verify Token, installing one atomically when this is
-/// the first management request for a legacy native settings row. Only the
-/// envelope ciphertext is persisted; the plaintext exists for this request.
-pub async fn native_verify_token(
-    db: &Database,
-    keys: &EncryptionKeys,
-    config: &NativeWhatsapp,
-) -> AppResult<Zeroizing<String>> {
-    if let Some(ciphertext) = config.native_verify_token_encrypted.as_deref() {
-        let plaintext = keys
-            .decrypt(ciphertext)
-            .await
-            .map_err(|_| refusal("native_whatsapp_verify_token_unavailable"))?;
-        return Ok(Zeroizing::new(String::from_utf8(plaintext).map_err(
-            |_| refusal("native_whatsapp_verify_token_unavailable"),
-        )?));
-    }
-    let generated = Zeroizing::new(hex::encode(rand::random::<[u8; 32]>()));
-    let encrypted = keys
-        .encrypt(generated.as_bytes())
-        .await
-        .map_err(|_| refusal("native_whatsapp_verify_token_unavailable"))?;
-    let result = db
-        .collection::<NativeWhatsapp>(COLLECTION_NAME)
-        .update_one(
-            doc! {
-                "_id": &config.bot_id,
-                "owner_id": &config.owner_id,
-                "ownership_version": config.ownership_version,
-                "revision": config.revision,
-                "native_verify_token_encrypted": bson::Bson::Null,
-            },
-            doc! {
-                "$set": {
-                    "native_verify_token_encrypted": bson::Binary {
-                        subtype: bson::spec::BinarySubtype::Generic,
-                        bytes: encrypted,
-                    },
-                    "updated_at": bson::DateTime::now(),
-                }
-            },
-        )
-        .await?;
-    if result.matched_count == 1 {
-        return Ok(generated);
-    }
-    let Some(current) = db
-        .collection::<NativeWhatsapp>(COLLECTION_NAME)
-        .find_one(doc! {"_id": &config.bot_id, "revision": config.revision})
-        .await?
-    else {
-        return Err(refusal("native_whatsapp_verify_token_unavailable"));
-    };
-    let Some(ciphertext) = current.native_verify_token_encrypted.as_deref() else {
-        return Err(refusal("native_whatsapp_verify_token_unavailable"));
-    };
-    let plaintext = keys
-        .decrypt(ciphertext)
-        .await
-        .map_err(|_| refusal("native_whatsapp_verify_token_unavailable"))?;
-    Ok(Zeroizing::new(String::from_utf8(plaintext).map_err(
-        |_| refusal("native_whatsapp_verify_token_unavailable"),
-    )?))
-}
+pub(crate) mod token_record;
+pub use token_record::native_verify_token;
 
 /// Only configuration, never a claim that CMA has verified credentials or intake.
 pub async fn configure(
@@ -327,6 +258,7 @@ pub async fn configure(
         phone_number_id: bot.platform_bot_id.clone(),
         dedicated_app,
         native_verify_token_encrypted: None,
+        secret_context_versions: Default::default(),
         revision: revision
             .checked_add(1)
             .filter(|r| *r > 0)
@@ -334,31 +266,62 @@ pub async fn configure(
         callback: CallbackState::default(),
         updated_at: Utc::now(),
     };
-    let rows = db.collection::<NativeWhatsapp>(COLLECTION_NAME);
-    if revision == 0 {
-        rows.insert_one(&config).await.map_err(|e| {
-            if e.to_string().contains("E11000") {
-                refusal("settings_changed_reload")
-            } else {
-                e.into()
+    super::transaction_service::run_db_only(db, &(db, &config), |tx, (db, config)| {
+        Box::pin(async move {
+            let parent = fence_enrollment(db, tx, &config.bot_id).await?;
+            if !matches_bot(config, &parent) {
+                return Err(refusal("settings_changed_reload"));
             }
-        })?;
-    } else {
-        let result = rows
-            .replace_one(
-                doc! {"_id": &bot.id, "owner_id": &bot.user_id,
-                "ownership_version": bot.ownership_version, "revision": revision,
-                "$or": [{"callback.phase": "relay"}, {"callback": {"$exists": false}}]},
-                &config,
-            )
-            .await?;
-        if result.matched_count != 1 {
-            return Err(refusal(
-                "restore_relay_before_changing_native_settings_or_reload",
-            ));
-        }
-    }
+            let rows = db.collection::<NativeWhatsapp>(COLLECTION_NAME);
+            let revision = config.revision - 1;
+            if revision == 0 {
+                rows.insert_one(*config)
+                    .session(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        if e.to_string().contains("E11000") {
+                            refusal("settings_changed_reload")
+                        } else {
+                            e.into()
+                        }
+                    })?;
+            } else {
+                let result = rows
+                    .replace_one(
+                        doc! {"_id":&config.bot_id,"owner_id":&config.owner_id,
+                        "ownership_version":config.ownership_version,"revision":revision,
+                        "$or":[{"callback.phase":"relay"},{"callback":{"$exists":false}}]},
+                        *config,
+                    )
+                    .session(&mut *tx)
+                    .await?;
+                if result.matched_count != 1 {
+                    return Err(refusal(
+                        "restore_relay_before_changing_native_settings_or_reload",
+                    ));
+                }
+            }
+            Ok(())
+        })
+    })
+    .await?;
     Ok(config)
+}
+
+/// Take a write conflict with a concurrent transfer or eligibility change.
+async fn fence_enrollment(
+    db: &Database,
+    tx: &mut mongodb::ClientSession,
+    id: &str,
+) -> AppResult<ChannelBot> {
+    db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one_and_update(
+            doc! {"_id":id},
+            doc! {"$inc":{"native_enrollment_fence":1_i64}},
+        )
+        .session(tx)
+        .await?
+        .ok_or_else(|| refusal("native_whatsapp_identity_changed"))
 }
 
 fn refusal(reason: &str) -> AppError {
@@ -485,22 +448,15 @@ async fn activate_gateway_inner(
     if !matches_bot(&config, bot) || config.callback.phase != CallbackPhase::Relay {
         return Err(refusal("native_whatsapp_callback_state_changed"));
     }
-    let secret = keys
-        .decrypt(
-            bot.app_secret_encrypted
-                .as_deref()
-                .ok_or_else(|| refusal("whatsapp_credentials_required"))?,
-        )
+    let secret = super::channel_registration::open_secret(keys, bot, "app_secret_encrypted")
+        .await
+        .map_err(|_| refusal("whatsapp_credentials_required"))?
+        .ok_or_else(|| refusal("whatsapp_credentials_required"))?;
+    let secret = crate::crypto::guarded_utf8(secret)
+        .map_err(|_| refusal("whatsapp_credentials_required"))?;
+    let system_token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
         .await
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
-    let secret = Zeroizing::new(
-        String::from_utf8(secret).map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
-    let system_token = Zeroizing::new(
-        crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
-            .await
-            .map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
     let verify_token = native_verify_token(db, keys, &config).await?;
     callback::configure_subscription(
         &config.meta_app_id,
@@ -531,7 +487,7 @@ async fn activate_gateway_inner(
             .ok_or_else(|| refusal("invalid_revision"))?;
         let updated = db
             .collection::<NativeWhatsapp>(COLLECTION_NAME)
-            .replace_one(
+            .update_one(
                 doc! {
                     "_id": &config.bot_id,
                     "owner_id": &config.owner_id,
@@ -539,7 +495,7 @@ async fn activate_gateway_inner(
                     "revision": config.revision,
                     "callback.phase": "relay",
                 },
-                &next,
+                callback_update(&next)?,
             )
             .await?;
         if updated.matched_count != 1 {
@@ -629,22 +585,15 @@ pub async fn restore_relay(
     {
         return Err(refusal("native_whatsapp_callback_not_active"));
     }
-    let secret = keys
-        .decrypt(
-            bot.app_secret_encrypted
-                .as_deref()
-                .ok_or_else(|| refusal("whatsapp_credentials_required"))?,
-        )
+    let secret = super::channel_registration::open_secret(keys, bot, "app_secret_encrypted")
+        .await
+        .map_err(|_| refusal("whatsapp_credentials_required"))?
+        .ok_or_else(|| refusal("whatsapp_credentials_required"))?;
+    let secret = crate::crypto::guarded_utf8(secret)
+        .map_err(|_| refusal("whatsapp_credentials_required"))?;
+    let system_token = crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
         .await
         .map_err(|_| refusal("whatsapp_credentials_required"))?;
-    let secret = Zeroizing::new(
-        String::from_utf8(secret).map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
-    let system_token = Zeroizing::new(
-        crate::services::channel_bot_service::decrypt_bot_token(keys, bot)
-            .await
-            .map_err(|_| refusal("whatsapp_credentials_required"))?,
-    );
     let replacement = if config.callback.relay_token_replaced_at.is_none() {
         Some(
             rollback::issue_for_restore(db, bot, config.revision)
@@ -700,7 +649,7 @@ pub async fn restore_relay(
         .ok_or_else(|| refusal("invalid_revision"))?;
     let updated = db
         .collection::<NativeWhatsapp>(COLLECTION_NAME)
-        .replace_one(
+        .update_one(
             doc! {
                 "_id": &config.bot_id,
                 "owner_id": &config.owner_id,
@@ -708,7 +657,7 @@ pub async fn restore_relay(
                 "revision": config.revision,
                 "callback.phase": {"$in": ["gateway", "awaiting_relay"]},
             },
-            &next,
+            callback_update(&next)?,
         )
         .await?;
     if updated.matched_count != 1 {
@@ -743,7 +692,7 @@ pub async fn begin_restore(db: &Database, bot: &ChannelBot) -> AppResult<()> {
         .ok_or_else(|| refusal("invalid_revision"))?;
     let updated = db
         .collection::<NativeWhatsapp>(COLLECTION_NAME)
-        .replace_one(
+        .update_one(
             doc! {
                 "_id": &config.bot_id,
                 "owner_id": &config.owner_id,
@@ -751,13 +700,19 @@ pub async fn begin_restore(db: &Database, bot: &ChannelBot) -> AppResult<()> {
                 "revision": config.revision,
                 "callback.phase": "gateway",
             },
-            &next,
+            callback_update(&next)?,
         )
         .await?;
     if updated.matched_count != 1 {
         return Err(refusal("native_whatsapp_callback_state_changed"));
     }
     Ok(())
+}
+
+fn callback_update(next: &NativeWhatsapp) -> AppResult<bson::Document> {
+    let callback = bson::to_document(&next.callback)
+        .map_err(|_| refusal("native_whatsapp_callback_state_changed"))?;
+    Ok(doc! {"$set": {"callback":callback, "revision":next.revision}})
 }
 
 /// Native sends cannot fall back to the local adapter for media or templates.
@@ -784,3 +739,6 @@ pub fn text_reply(reply: &crate::services::channel_platform::OutboundReply) -> A
 pub mod delivery;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod mixed_records;

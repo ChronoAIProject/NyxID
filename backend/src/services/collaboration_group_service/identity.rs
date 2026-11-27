@@ -187,7 +187,7 @@ pub(super) async fn for_group(
                 .find(|m| {
                     m.member_user_id == actor
                         && m.org_user_id == agent.user_id
-                        && m.role.can_proxy()
+                        && svc::org_agent_service::member_rights(actor, &agent, m.role).can_use
                 })
                 .map(|m| {
                     let allowed_service_ids = match m.scope_source {
@@ -214,7 +214,7 @@ pub(super) async fn for_group(
                     model::Authority {
                         owner_id: agent.user_id.clone(),
                         lane: model::Lane::OrgMember,
-                        revision: 0,
+                        revision: agent.org_use_revision,
                     }
                 })
         } else if !enabled(&agent.user_id) {

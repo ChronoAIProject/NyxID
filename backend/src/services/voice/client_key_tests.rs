@@ -761,6 +761,7 @@ async fn voice_connection_preserves_catalog_operations_without_service_approval(
             false,
             false,
             None,
+            None,
         )
         .await
         .unwrap();

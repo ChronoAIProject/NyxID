@@ -56,7 +56,7 @@ pub fn validate_preferences(p: &VoicePreferences) -> AppResult<()> {
 }
 
 pub async fn thread(db: &Database, user: &str, id: &str) -> AppResult<AssistantConversation> {
-    let row = super::assistant_nyxagent::get(db, user, id).await?;
+    let row = super::assistant_nyxagent::get_public(db, user, id).await?;
     private_thread(&row)?;
     if row.shared_agent_thread {
         super::shared_agent_transport::require_ready(db).await?;

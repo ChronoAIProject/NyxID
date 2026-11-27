@@ -1,3 +1,4 @@
+import type { AssistantTurnPerformance, ChatTurnTimings } from "./assistantTurnPerformance";
 import { buildApiError } from "../../lib/api/responseError";
 import {
   createAssistantDraftStore,
@@ -8,10 +9,7 @@ import { URL, fileURLToPath } from "node:url";
 import test from "node:test";
 import { deferred, hookHarness } from "./assistantHookTestHarness";
 import type { AssistantParams } from "../../app/navigationTypes";
-import {
-  openScannerSheetAction,
-  workspaceNavigateAction,
-} from "../../app/navigationHierarchy";
+import { workspaceNavigateAction } from "../../app/navigationHierarchy";
 import type { AssistantUploadedMessage } from "./AssistantUploadSession";
 import * as voiceSelection from "./voice/voiceSelection";
 import {
@@ -95,6 +93,11 @@ function setup(
   let navigationDisabled = false;
   const draft = deferred<string>();
   const events: unknown[][] = [];
+  const perf = { enabled: false, sample: undefined as AssistantTurnPerformance | undefined, submitted: [] as ChatTurnTimings[] };
+  const nativePerf = {
+    frames: [] as { focused: boolean; streaming: boolean; scope: unknown }[],
+    events: [] as string[],
+  };
   const alerts: { text: string; style?: string; onPress?: () => void }[][] = [];
   const drafts: {
     agentId: string;
@@ -121,6 +124,7 @@ function setup(
     for (const listener of [...keyboardListeners]) listener();
   };
   let transcriptFollowing = true;
+  let transcriptReady = false;
   let features: string[] | undefined = ["assistant:voice"];
   const agent = {
     id: "agent-a",
@@ -182,8 +186,12 @@ function setup(
       text: string,
       _options?: unknown,
       files?: AssistantUploadedMessage,
+      _acknowledgement?: string,
+      model?: string,
+      sample?: AssistantTurnPerformance,
     ) => {
-      events.push(["send", text, files]);
+      perf.sample = sample;
+      events.push(model ? ["send", text, files, model] : ["send", text, files]);
       return true;
     },
     setModel: (model: string) => events.push(["model", model]),
@@ -210,9 +218,16 @@ function setup(
     sent: () => events.push(["connection-sent"]),
   };
   const uploads = {
+    sourcePicker: undefined as undefined | { choices: { label: string; onPress: () => void }[]; onClose: () => void },
     files: [] as any[],
     session: {
       sending: false,
+      model: undefined as string | undefined,
+      ensureConversation: (create: () => Promise<string>) => create(),
+      applyDraftModel: async (id: string, _change: unknown) => {
+        events.push(["patch-draft-model", id, uploads.session.model]);
+      },
+      consumeDraft: async () => {},
       submit: async (
         submit: (
           payload: AssistantUploadedMessage | undefined,
@@ -237,7 +252,11 @@ function setup(
       } as AssistantParams,
     },
   };
-  const harness = hookHarness<Element>({
+  const mocks = {
+    "../../lib/performance/metrics": {
+      beginPerformanceSample: () => perf.enabled ? epoch : null,
+      submitPerformanceSample: (_epoch: number, _event: string, timings: ChatTurnTimings) => perf.submitted.push(timings),
+    },
     "../../i18n/LanguageProvider": {
       useAppLanguage: () => ({
         t: (phrase: string) => translations[phrase] ?? phrase,
@@ -345,7 +364,16 @@ function setup(
           if (hideOnDismiss) hideKeyboard();
         },
       },
-      StyleSheet: { create: (value: unknown) => value },
+      Animated: {
+        View: "Animated.View",
+        Value: class {
+          setValue() {}
+          interpolate(value: unknown) { return value; }
+        },
+        timing: () => ({ start: (complete: any) => complete({ finished: true }), stop() {} }),
+      },
+      Easing: { out: (value: unknown) => value, cubic: "cubic" },
+      StyleSheet: { create: (value: unknown) => value, hairlineWidth: 0.5 },
     },
     "@react-navigation/native": {
       useIsFocused: () => focused,
@@ -451,7 +479,9 @@ function setup(
         return assistant;
       },
     },
+    "./AttachmentSourcePicker": { AttachmentSourcePicker: "AttachmentSourcePicker" },
     "./useAssistantUploads": { useAssistantUploads: () => uploads },
+    "../../lib/api/assistantApi": { assistantApi: { changeModel: () => {} } },
     "./useComposerDictation": {
       useComposerDictation: () =>
         dictating
@@ -468,6 +498,7 @@ function setup(
     "./useTranscriptScrollFollow": {
       useTranscriptScrollFollow: () => ({
         following: transcriptFollowing,
+        ready: transcriptReady,
         listProps: {
           onLayout: (event: any) =>
             events.push(["follow-layout", event.nativeEvent.layout.height]),
@@ -476,10 +507,24 @@ function setup(
           onScroll: (event: any) =>
             events.push(["follow-scroll", event.nativeEvent.contentOffset.y]),
           onScrollBeginDrag: () => events.push(["follow-drag"]),
+          onScrollEndDrag: () => events.push(["follow-drag-end"]),
+          onMomentumScrollBegin: () => events.push(["follow-momentum"]),
+          onMomentumScrollEnd: () => events.push(["follow-momentum-end"]),
         },
         follow: () => {},
         pause: () => {},
       }),
+    },
+    "../../lib/performance/useNativePerformance": {
+      useChatNativeFrames: (options: { focused: boolean; streaming: boolean; scope: unknown }) => {
+        nativePerf.frames.push(options);
+        return {
+          beginDrag: () => nativePerf.events.push("drag"),
+          endDrag: () => nativePerf.events.push("drag-end"),
+          momentumBegin: () => nativePerf.events.push("momentum"),
+          momentumEnd: () => nativePerf.events.push("momentum-end"),
+        };
+      },
     },
     "./AssistantAcknowledgementCard": {
       AssistantAcknowledgementCard: "AssistantAcknowledgementCard",
@@ -520,10 +565,21 @@ function setup(
     },
     "./AssistantMentionInput": {
       AssistantMentionInput: (props: {
-        renderActions?: (mention: null) => unknown;
+        renderActions?: (mention: null, layout: {
+          compact: boolean;
+          onLeadingWidth: (width: number) => void;
+          onTrailingWidth: (width: number) => void;
+        }) => unknown;
       }) => ({
         type: "AssistantMentionInput",
-        props: { ...props, children: props.renderActions?.(null) },
+        props: {
+          ...props,
+          children: props.renderActions?.(null, {
+            compact: false,
+            onLeadingWidth() {},
+            onTrailingWidth() {},
+          }),
+        },
       }),
     },
     "./ChatComposer": {
@@ -567,9 +623,6 @@ function setup(
       },
     },
     "../../lib/auth/authEpoch": { getAuthEpoch: () => epoch },
-    "../notifications/NotificationBell": {
-      NotificationBell: "NotificationBell",
-    },
     "../notifications/useNotifications": {
       useNotificationIndicator: () => ({
         enabled: bellEnabled,
@@ -581,7 +634,13 @@ function setup(
       useNotificationRuntime: () => ({ active: true, online: true }),
       useVisibleThreadRead: () => {},
     },
-  });
+  };
+  const harness = hookHarness<Element>(mocks);
+  // React Navigation mounts headerRight separately from the screen.
+  const headerHarness = hookHarness<Element>({ ...mocks });
+  headerHarness.mock("./ChatHeaderMenu", headerHarness.load(
+    fileURLToPath(new URL("./ChatHeaderMenu.tsx", import.meta.url)),
+  ));
   harness.mock("expo-linear-gradient", { LinearGradient: "LinearGradient" });
   Object.assign(
     headerModule,
@@ -607,7 +666,7 @@ function setup(
   );
   harness.mock(
     "./ChatHeaderActions",
-    harness.load(
+    headerHarness.load(
       fileURLToPath(new URL("./ChatHeaderActions.tsx", import.meta.url)),
     ),
   );
@@ -615,6 +674,35 @@ function setup(
     fileURLToPath(new URL("./AssistantScreen.tsx", import.meta.url)),
   ).AssistantScreen as (input: typeof props) => Element;
   harness.mount(() => expand(Screen(props)));
+  headerHarness.mount(() => {
+    const tree = expand(headerOptions.headerRight());
+    const anchor = elements(tree).find(
+      (item) => item.props.testID === "chat-header-actions",
+    )!;
+    anchor.props.ref.current = {
+      measureInWindow: (report: (...values: number[]) => void) =>
+        report(windowWidth - 100, 66, 88, 44),
+    };
+    return tree;
+  });
+  const headerRight = () => headerHarness.render();
+  const headerNodes = () => elements(headerRight());
+  const menuItems = () =>
+    headerNodes().filter((n) => n.props.accessibilityRole === "menuitem");
+  const finishMenuDismissal = () => {
+    headerHarness.flush();
+    if (platform === "ios")
+      headerNodes()
+        .find((n) => n.type === "Modal")!
+        .props.onDismiss();
+    harness.flush();
+  };
+  function options() {
+    headerNodes()
+      .find((n) => n.props.accessibilityLabel === "Chat options")!
+      .props.onPress();
+    headerHarness.flush();
+  }
   const all = () => elements(harness.value());
   const button = (name: string) =>
     all().find((element) => element.props.accessibilityLabel === name);
@@ -622,6 +710,8 @@ function setup(
     all().find((element) => element.type === "AssistantVoiceConversation");
   return {
     harness,
+    perf,
+    nativePerf,
     navigationDisabled: () => navigationDisabled,
     assistant,
     uploads,
@@ -642,23 +732,17 @@ function setup(
     button,
     columnHeader: () => columnHeader!,
     header: () => expand(headerOptions.headerTitle()),
-    headerRight: () => expand(headerOptions.headerRight()),
-    headerActions: () =>
-      elements(expand(headerOptions.headerRight())).filter(
-        (n) => n.type === "FloatingButton",
-      ),
-    options: () => {
-      elements(expand(headerOptions.headerRight()))
-        .find((n) => n.props.accessibilityLabel === "Chat options")!
-        .props.onPress();
-      harness.flush();
+    headerRight,
+    headerActions: () => {
+      const nodes = headerNodes();
+      return nodes.some((n) => n.type === "Modal" && n.props.visible) ? [] : nodes.filter((n) => n.type === "FloatingItem");
     },
-    chooseOption: (text: string) => {
-      elements(expand(headerOptions.headerRight()))
-        .find((n) => n.props.accessibilityLabel === "Chat options")!
-        .props.onPress();
-      alerts.at(-1)!.find((action) => action.text === text)!.onPress!();
-      harness.flush();
+    options,
+    menuItems,
+    finishMenuDismissal,
+    chooseOption: (label: string) => {
+      menuItems().find((item) => item.props.accessibilityLabel === label)!.props.onPress();
+      finishMenuDismissal();
     },
     setWidth: (value: number) => {
       windowWidth = value;
@@ -685,7 +769,7 @@ function setup(
       harness.render();
     },
     compose: () => {
-      const actions = expand(headerOptions.headerRight());
+      const actions = headerRight();
       elements(actions)
         .find((n) => n.props.accessibilityLabel === "New chat")!
         .props.onPress();
@@ -722,6 +806,10 @@ function setup(
     },
     pauseTranscript: () => {
       transcriptFollowing = false;
+      harness.render();
+    },
+    setTranscriptReady: (value: boolean) => {
+      transcriptReady = value;
       harness.render();
     },
     setFeatures: (value: string[] | undefined) => {
@@ -1143,12 +1231,12 @@ test("old voice callbacks cannot populate a different chat or account", async ()
   }
 });
 
-test("the Duo: More always opens Details, even during a voice call, whose own control opens its preferences", async () => {
+test("the Duo rail opens Details during a call and the call exposes its own preferences", async () => {
   const x = setup(A);
   x.setQuickRail(true);
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
-  x.options();
+  x.columnHeader().more.onPress();
   assert.equal(x.alerts.length, 0);
   assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
   // Uncontrolled: the call shows its own Voice preferences control.
@@ -1156,47 +1244,65 @@ test("the Duo: More always opens Details, even during a voice call, whose own co
   x.harness.unmount();
 });
 
-test("wide windows: More opens Details directly and voice adds its preferences menu", async () => {
+test("a wide chat exposes voice preferences in the dropdown for the active call", async () => {
   const x = setup(A);
   x.setWidth(1024);
   x.options();
+  assert.deepEqual(
+    x.menuItems().map((n) => n.props.accessibilityLabel),
+    ["Chat details", "Settings"],
+  );
+  x.chooseOption("Chat details");
   assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
-  assert.equal(x.alerts.length, 0);
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
   x.options();
-  assert.deepEqual(
-    Array.from(x.alerts.at(-1)!, (action) => action.text),
-    ["Voice preferences", "Chat details", "Cancel"],
-  );
-  x.alerts.at(-1)![0]!.onPress!();
-  x.harness.flush();
+  x.chooseOption("Voice preferences");
   assert.equal(x.voice()!.props.preferencesOpen, true);
   x.voice()!.props.onPreferencesClose();
   x.harness.flush();
   assert.equal(x.voice()!.props.preferencesOpen, false);
+  assert.equal(x.alerts.length, 0);
   x.harness.unmount();
 });
 
-test("P9 ordinary More opens Details directly without a call and offers only call preferences with voice", async () => {
+test("the chat menu routes each option after dismissal and follows notification availability", () => {
   const x = setup(A);
   x.options();
-  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
-  assert.equal(x.alerts.length, 0);
+  assert.deepEqual(
+    x.menuItems().map((n) => n.props.accessibilityLabel),
+    ["Chat details", "Settings"],
+  );
+  x.chooseOption("Settings");
+  assert.deepEqual(x.events.at(-1), [
+    "dispatch",
+    workspaceNavigateAction("AccountSettings"),
+  ]);
   x.setBell(true);
   x.options();
-  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
-  assert.equal(x.alerts.length, 0);
-  x.button("Open voice call")!.props.onPress();
-  await x.harness.settle();
-  x.options();
   assert.deepEqual(
-    Array.from(x.alerts.at(-1)!, (action) => action.text),
-    ["Voice preferences", "Chat details", "Cancel"],
+    x.menuItems().map((n) => n.props.accessibilityLabel),
+    ["Chat details", "Notifications", "Settings"],
   );
-  x.alerts.at(-1)![0]!.onPress!();
-  x.harness.flush();
-  assert.equal(x.voice()!.props.preferencesOpen, true);
+  const select = x
+    .menuItems()
+    .find((n) => n.props.accessibilityLabel === "Notifications")!.props.onPress;
+  select();
+  assert.equal(
+    x.events.some(
+      ([type, route]) => type === "push" && route === "Notifications",
+    ),
+    false,
+  );
+  x.finishMenuDismissal();
+  x.finishMenuDismissal();
+  assert.equal(
+    x.events.filter(
+      ([type, route]) => type === "push" && route === "Notifications",
+    ).length,
+    1,
+  );
+  assert.equal(x.alerts.length, 0);
   x.harness.unmount();
 });
 
@@ -1205,12 +1311,41 @@ test("an account change while More is open makes its Preferences and Details ent
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
   x.options();
-  const menu = x.alerts.at(-1)!;
+  const menu = x.menuItems();
   const before = x.events.length;
   x.setEpoch(8);
-  for (const action of menu) action.onPress?.();
+  for (const action of menu) {
+    action.props.onPress();
+    x.finishMenuDismissal();
+  }
   x.harness.flush();
   assert.equal(x.events.length, before);
+  x.harness.unmount();
+});
+
+test("Android Back restores the capsule, and tapping an option twice navigates once", () => {
+  const x = setup(A, false, "android");
+  x.options();
+  elements(x.headerRight())
+    .find((n) => n.type === "Modal")!
+    .props.onRequestClose();
+  assert.deepEqual(
+    x.headerActions().map((n) => n.props.accessibilityLabel),
+    ["New chat", "Chat options"],
+  );
+  x.options();
+  const select = x
+    .menuItems()
+    .find((n) => n.props.accessibilityLabel === "Chat details")!.props.onPress;
+  select();
+  select();
+  x.finishMenuDismissal();
+  assert.equal(
+    x.events.filter(
+      ([type, route]) => type === "push" && route === "AssistantDetails",
+    ).length,
+    1,
+  );
   x.harness.unmount();
 });
 
@@ -1220,16 +1355,19 @@ test("closed voice surface callbacks and native menu actions cannot affect a new
   await x.harness.settle();
   const stale = x.voice()!.props;
   x.options();
-  const oldMenu = x.alerts.at(-1)!;
+  const oldMenu = x.menuItems();
   stale.onClose();
   x.harness.flush();
+  x.headerRight();
   x.button("Open voice call")!.props.onPress();
   await x.harness.settle();
   x.voice()!.props.onSnapshot(liveVoice("current call"));
   stale.onSnapshot(liveVoice("old call"));
   stale.onClose();
-  oldMenu[0]!.onPress!();
-  oldMenu[1]!.onPress!();
+  for (const item of oldMenu) {
+    item.props.onPress();
+    x.finishMenuDismissal();
+  }
   x.harness.flush();
   assert.ok(x.voice());
   assert.equal(x.voice()!.props.preferencesOpen, false);
@@ -2332,6 +2470,7 @@ test("header Details uses the latest conversation even when header identity stay
   const x = setup(A);
   x.adopt(B);
   x.options();
+  x.chooseOption("Chat details");
   const pushed = x.events.find((e) => e[0] === "push")!;
   assert.equal(pushed[1], "AssistantDetails");
   assert.equal((pushed[2] as any).conversationId, B);
@@ -2581,88 +2720,47 @@ test("private, specialist and contextual header identities open the picker witho
   draft.harness.unmount();
 });
 
-test("P9 ordinary bars retain bell, New chat and More with floating 44pt controls", () => {
-  const x = setup(A, false);
-  assert.deepEqual(
-    x.headerActions().map((n) => n.props.accessibilityLabel),
-    ["New chat", "Chat options"],
-  );
-  for (const action of x.headerActions()) {
-    assert.equal(action.type, "FloatingButton");
-    assert.equal(action.props.style, undefined);
-    assert.equal(action.props.capsuleStyle, undefined);
+test("Chat replaces the shared two-button capsule with a menu at its top-right corner", () => {
+  for (const width of [390, 1024]) {
+    const x = setup(undefined, false);
+    x.setWidth(width);
+    x.setBell(true);
+    const labels = () =>
+      x.headerActions().map((n) => n.props.accessibilityLabel);
+    const capsule = elements(x.headerRight()).find(
+      (n) => n.type === "FloatingCapsule",
+    )!;
+    assert.deepEqual(
+      elements(capsule)
+        .filter((n) => n.type === "FloatingItem")
+        .map((n) => n.props.accessibilityLabel),
+      ["New chat", "Chat options"],
+    );
+    for (const dismiss of ["outside", "back", "escape"]) {
+      x.options();
+      assert.deepEqual(labels(), []);
+      const nodes = elements(x.headerRight());
+      const menu = nodes.find((n) => n.props.accessibilityRole === "menu")!;
+      const style = Object.assign({}, ...[menu.props.style].flat(Infinity));
+      assert.equal(style.top, 66);
+      assert.equal(style.right, 12);
+      if (dismiss === "outside")
+        nodes
+          .find((n) => n.props.accessibilityLabel === "Close menu")!
+          .props.onPress();
+      if (dismiss === "back")
+        nodes.find((n) => n.type === "Modal")!.props.onRequestClose();
+      if (dismiss === "escape") menu.props.onAccessibilityEscape();
+      x.finishMenuDismissal();
+      assert.deepEqual(labels(), ["New chat", "Chat options"]);
+      assert.equal(x.menuItems().length, 0);
+    }
+    assert.equal(
+      x.events.some(([kind]) => kind === "push" || kind === "dispatch"),
+      false,
+    );
+    x.harness.unmount();
   }
-  const bar = elements(x.headerRight()).find(
-    (n) => n.props.testID === "chat-header-actions",
-  )!;
-  const barStyle = Object.assign(
-    {},
-    ...[bar.props.style].flat().filter(Boolean),
-  );
-  assert.equal(barStyle.flexShrink, 0);
-  assert.equal(barStyle.gap, 8);
-  x.setBell(true);
-  const controls = () =>
-    elements(x.headerRight())
-      .filter(
-        (n) => n.type === "FloatingButton" || n.type === "NotificationBell",
-      )
-      .map((n) => n.props.accessibilityLabel ?? n.type);
-  assert.deepEqual(controls(), [
-    "NotificationBell",
-    "New chat",
-    "Chat options",
-  ]);
-  x.setWidth(1024);
-  assert.deepEqual(controls(), [
-    "NotificationBell",
-    "New chat",
-    "Chat options",
-  ]);
-  x.harness.unmount();
-});
-
-test("beside the Duo's rail (folded or unfolded, either mode) the chat's controls live in the column and More is always Chat details; without a rail the bars are unchanged", () => {
-  const x = setup(A, false);
-  x.setBell(true);
-  x.setQuickRail(true);
-  // No top bar on the Duo (ChatHeaderFrame renders none): the column shows
-  // this chat's Menu, agent and More, registered with the bar's handlers.
-  const column = x.columnHeader();
-  assert.deepEqual(
-    [column.role, column.identity.label, column.more.label],
-    ["menu", "{{name}}. Choose agent", "Chat options"],
-  );
-  // More opens Chat details directly: Settings and Notifications are on the
-  // rail. The Duo's full-screen bar carries only More after the identity.
-  const alerts = x.alerts.length;
-  column.more.onPress();
-  x.harness.flush();
-  assert.equal(x.alerts.length, alerts, "no Chat options menu on the Duo");
-  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
-  assert.deepEqual(
-    x.headerActions().map((n) => n.props.accessibilityLabel),
-    ["Chat options"],
-  );
-  x.setQuickRail(false);
-  assert.deepEqual(
-    x.headerActions().map((n) => n.props.accessibilityLabel),
-    ["New chat", "Chat options"],
-  );
-  x.options();
-  assert.equal(x.events.at(-1)?.[1], "AssistantDetails");
-  assert.equal(x.alerts.length, alerts);
-  // iPad's wide bar (no corner cluster, no rail) is unchanged: the bell,
-  // New chat, More.
-  x.setWidth(1024);
-  const wideBar = () =>
-    elements(x.headerRight())
-      .filter(
-        (n) => n.type === "FloatingButton" || n.type === "NotificationBell",
-      )
-      .map((n) => n.props.accessibilityLabel ?? n.type);
-  assert.deepEqual(wideBar(), ["NotificationBell", "New chat", "Chat options"]);
-  x.harness.unmount();
 });
 
 test("on the Duo this chat's controls go to the column in both modes: Menu, the agent's picker and More, with the bar's handlers", () => {
@@ -2705,26 +2803,42 @@ test("on the Duo this chat's controls go to the column in both modes: Menu, the 
   x.harness.unmount();
 });
 
-test("P9 only folded Duo composers collapse while idle; ordinary devices, uploads and dictation retain two rows", () => {
+for (const platform of ["ios", "android"]) {
+  for (const surface of ["home", "private", "contextual"]) {
+    test(`${platform}: ${surface} enables the shared idle input and toolbar without corner hardware`, () => {
+      const x = setup(surface === "private" ? A : undefined, false, platform);
+      x.props.contextual = surface === "contextual";
+      x.harness.render();
+      assert.equal(x.input().props.compactWhenIdle, true);
+      const layout = { compact: true, onLeadingWidth() {}, onTrailingWidth() {} };
+      assert.equal(x.input().props.renderActions(undefined, layout).props.layout, layout);
+      x.harness.unmount();
+    });
+  }
+}
+
+test("all idle composers collapse across phone, Duo and wide windows; attachment previews stay separate", () => {
   const x = setup(A, false);
   const idle = () => x.input().props.compactWhenIdle;
-  assert.equal(idle(), false, "ordinary phone keeps the base two rows");
+  assert.equal(idle(), true, "ordinary phone uses the shared idle row");
+  const layout = { compact: true, onLeadingWidth() {}, onTrailingWidth() {} };
+  assert.equal(x.input().props.renderActions(undefined, layout).props.layout, layout, "ordinary toolbar receives the same compact layout");
   x.setQuickRail(true);
   assert.equal(idle(), true, "folded Duo may collapse");
   x.uploads.files.push({ key: "photo", status: "uploaded" });
   x.harness.render();
-  assert.equal(idle(), false, "pending attachments stay visible");
+  assert.equal(idle(), true, "attachments keep their own preview strip");
   x.uploads.files.length = 0;
   x.uploads.picking = true;
   x.harness.render();
-  assert.equal(idle(), false);
+  assert.equal(idle(), true, "the picker does not expand an idle text input");
   x.uploads.picking = false;
   x.setDictating(true);
   assert.equal(idle(), false, "dictation keeps its controls");
   x.setDictating(false);
   assert.equal(idle(), true);
   x.setWidth(1024);
-  assert.equal(idle(), false, "the persistent-sidebar layout is unchanged");
+  assert.equal(idle(), true, "wide windows use the same idle row");
   x.harness.unmount();
 });
 
@@ -3402,4 +3516,132 @@ test("P9 ordinary floating identity retains the base thread detail", () => {
   );
   assert.equal(lines.length, 2, "name and thread details stay visible");
   x.harness.unmount();
+});
+
+test("private chat mounts the guarded attachment-source sheet returned by its upload session", () => {
+  const x = setup("chat");
+  const sourcePicker = { choices: [{ label: "Files", onPress() {} }], onClose() {} };
+  x.uploads.sourcePicker = sourcePicker;
+  x.harness.render();
+  const picker = x.all().find(n => n.type === "AttachmentSourcePicker")!;
+  assert.equal(picker.props.choices, sourcePicker.choices);
+  assert.equal(picker.props.onClose, sourcePicker.onClose);
+  x.harness.unmount();
+});
+
+test("the selected draft model reaches a first text-only send", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxagent/research";
+  x.input().props.onChangeText("Compare these plans");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  assert.deepEqual(x.events.find(([name]) => name === "send"),
+    ["send", "Compare these plans", undefined, "nyxagent/research"]);
+  assert.equal(x.drafts.length, 0);
+  x.harness.unmount();
+});
+
+test("a previously created attachment draft applies the selected model to that ID before sending", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxid/model-choice";
+  const payload: AssistantUploadedMessage = {
+    conversationId: A,
+    attachmentIds: ["11111111-1111-4111-8111-111111111111"],
+    attachments: [],
+  };
+  x.uploads.session.submit = async (submit) => submit(payload);
+  x.input().props.onChangeText("Review this file");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  assert.deepEqual(x.events.filter(([name]) => name === "patch-draft-model" || name === "send"), [
+    ["patch-draft-model", A, "nyxid/model-choice"],
+    ["send", "Review this file", payload],
+  ]);
+  assert.equal(x.drafts.length, 0);
+  x.harness.unmount();
+});
+
+test("a refused draft model PATCH prevents dispatch and preserves the message and model", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxid/revoked";
+  x.uploads.session.applyDraftModel = async () => { throw new Error("The selected model is unavailable."); };
+  x.uploads.session.submit = async (submit) => submit({ conversationId: A, attachmentIds: [], attachments: [] });
+  x.input().props.onChangeText("Keep this draft");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  assert.equal(x.events.some(([name]) => name === "send"), false);
+  assert.equal(x.input().props.value, "Keep this draft");
+  assert.equal(x.uploads.session.model, "nyxid/revoked");
+  x.harness.unmount();
+});
+
+test("opening voice reuses a draft prepared earlier and applies its model before adoption", async () => {
+  const x = setup();
+  x.uploads.session.model = "nyxagent/research";
+  x.uploads.session.ensureConversation = async () => A;
+  x.button("Open voice call")!.props.onPress();
+  await x.harness.settle();
+  assert.equal(x.voice()?.props.thread, A);
+  assert.deepEqual(x.events.filter(([name]) => name === "patch-draft-model" || name === "open"), [
+    ["patch-draft-model", A, "nyxagent/research"],
+    ["open", A, undefined],
+  ]);
+  assert.equal(x.drafts.length, 0);
+  x.harness.unmount();
+});
+
+test("a batched reply commits through the matching saved bubble after the live row is gone", async () => {
+  const x = setup(A);
+  x.perf.enabled = true;
+  x.input().props.onChangeText("Private prompt");
+  x.harness.flush();
+  x.button("Send message")!.props.onPress();
+  await x.harness.settle();
+  const sample = x.perf.sample!;
+  const turnId = "fast-turn";
+  const reply = { cursor: 1, turnId, blocks: [{ id: "b", index: 0, text: "Private answer" }] };
+  sample.admitted();
+  sample.observe({ event: "turn.status", turn_id: turnId, conversation_id: A, status: "running", cursor: 1 }, reply);
+  sample.observe({ event: "block.delta", block_id: "b", text: "Private answer", cursor: 2 }, reply);
+  sample.finish("completed");
+  const row = (id: string, seq: number) => messageSchema.parse({
+    id, seq, turn_id: id, role: "assistant", text: "Private answer", status: "completed",
+    error_code: null, created_at: "2026-11-14T01:00:00Z", activities: [], attachments: [],
+  });
+  x.assistant.history!.messages = [row("older-turn", 1), row(turnId, 2)];
+  x.harness.render();
+  const list = x.all().find((node) => node.type === "FlatList")!;
+  const body = (index: number) => elements(expand(list.props.renderItem({ item: list.props.data[index], index })))
+    .find((node) => node.type === "ReplyBody")!.props;
+  assert.equal(body(0).onTextCommit, undefined);
+  assert.equal(x.perf.submitted.length, 0);
+  assert.equal(body(1).text, "Private answer");
+  const commit = body(1).onTextCommit;
+  commit();
+  commit();
+  assert.equal(x.perf.submitted.length, 1);
+  assert.equal(x.perf.submitted[0]?.outcome, "completed");
+  assert.equal(typeof x.perf.submitted[0]?.first_text_commit_ms, "number");
+  assert.equal(body(1).onTextCommit, undefined);
+  x.harness.unmount();
+});
+
+test("transcript handlers forward frame boundaries while retaining scroll follow", () => {
+  const view = setup("thread-a");
+  assert.equal(view.nativePerf.frames.at(-1)?.focused, false);
+  view.setTranscriptReady(true);
+  assert.equal(view.nativePerf.frames.at(-1)?.focused, true);
+  const list = view.all().find((element) => element.type === "FlatList")!;
+  list.props.onScrollBeginDrag();
+  list.props.onScrollEndDrag({});
+  list.props.onMomentumScrollBegin();
+  list.props.onMomentumScrollEnd({});
+  assert.deepEqual(view.nativePerf.events, ["drag", "drag-end", "momentum", "momentum-end"]);
+  assert.deepEqual(view.events.filter((event) => String(event[0]).startsWith("follow-")), [["follow-drag"], ["follow-drag-end"], ["follow-momentum"], ["follow-momentum-end"]]);
+  view.setFocused(false);
+  assert.equal(view.nativePerf.frames.at(-1)?.focused, false);
+  view.harness.unmount();
 });

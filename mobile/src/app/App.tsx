@@ -1,4 +1,6 @@
 import { useDiagnosticsNotice } from "../lib/crashReporting/useDiagnosticsNotice";
+import { useLaunchLifecycle, useLaunchShell, launchSplashHidden } from "../lib/performance/launchPerformance";
+import { usePerformanceLifecycle } from "../lib/performance/useNativePerformance";
 import { newAssistantChatParams } from "./assistantChatParams";
 import { workspaceCornerSensor } from "../components/workspace/workspaceLayout";
 import { useAppLanguage } from "../i18n/LanguageProvider";
@@ -42,6 +44,7 @@ import {
   ActivityIndicator,
   AppState,
   findNodeHandle,
+  Keyboard,
   StyleSheet,
   Text,
   useWindowDimensions,
@@ -194,6 +197,8 @@ export default function App() {
 
 function AppContent() {
   useAppLanguage();
+  usePerformanceLifecycle();
+  useLaunchLifecycle();
   const navigationRef = useNavigationContainerRef<RootStackParamList>();
   const [currentRouteName, setCurrentRouteName] = useState<string | undefined>(
     undefined,
@@ -280,7 +285,7 @@ function AppContent() {
   const ready = fontsLoaded || fontLoadTimeout;
   useEffect(() => {
     if (ready) {
-      SplashScreen.hideAsync().catch(() => {
+      SplashScreen.hideAsync().then(launchSplashHidden).catch(() => {
         /* already hidden — fine */
       });
     }
@@ -567,6 +572,7 @@ function ThemedAppShell({
     sheetOpen: false,
   });
   const sidebarOpen = !persistentSidebar && drawerPresented;
+  useLaunchShell(currentRouteName && navigationRef.getCurrentRoute()?.key, !!currentRouteName && !sidebarOpen && !accessibility.sheetOpen && !navigationBlocked);
   const workspaceAccessibility = useMemo(
     () => ({ ...accessibility, sidebarOpen }),
     [accessibility, sidebarOpen],
@@ -739,6 +745,7 @@ function ThemedAppShell({
       route,
       undefined,
       navigationRef.getRootState(),
+      Platform.OS,
     );
     // The root native modal sits above the whole push shell. Neither its
     // presentation nor its guarded dismissal changes the underlying offset.
@@ -759,6 +766,7 @@ function ThemedAppShell({
       isNavigationBlocked()
     )
       return;
+    Keyboard.dismiss();
     pendingMenuFocus.current = undefined;
     if (!drawerPresented)
       drawerOrigin.current = workspaceFocus.capture(accessibility.primaryKey);
@@ -774,6 +782,7 @@ function ThemedAppShell({
     const showing = !persistentSidebarOpen;
     setPersistentSidebarOpen(showing);
     if (showing) {
+      Keyboard.dismiss();
       workspaceFocus.releaseDrawer("persistent-workspace-sidebar");
       workspaceFocus.focusDrawerOnce("persistent-workspace-sidebar", () =>
         findNodeHandle(sidebarFocus.current),
@@ -788,6 +797,7 @@ function ThemedAppShell({
         !accessibility.sheetOpen &&
         !isNavigationBlocked()
       ) {
+        Keyboard.dismiss();
         workspaceFocus.releaseDrawer("persistent-workspace-sidebar");
         workspaceFocus.focusDrawerOnce("persistent-workspace-sidebar", () =>
           findNodeHandle(sidebarFocus.current),
@@ -889,7 +899,7 @@ function ThemedAppShell({
         !navigationBlocked &&
         !accessibility.sheetOpen &&
         (Boolean(edgeBackRevision && edgeBacks.current.size) ||
-          isWorkspaceSidebarRoot(currentRouteName))
+          isWorkspaceSidebarRoot(currentRouteName, Platform.OS))
       }
       onEdgeBack={
         edgeBacks.current.size

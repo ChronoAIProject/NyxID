@@ -769,6 +769,8 @@ fn recap_is_labeled_recent_and_bounded_without_splitting_unicode() {
     assert!(prompt.contains(SCHEDULE_PROMPT));
     assert!(prompt.len() <= base.len() + 16384);
     context.set_checkpoint(Some(AssistantCheckpoint {
+        source_turn_ids: None,
+        goal_turn_id: None,
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: "checkpoint-turn".into(),
@@ -806,6 +808,58 @@ fn failure_diagnostics_normalize_unknown_upstream_codes() {
     let known = TurnError::new("first_byte_timeout");
     assert_eq!(known.code, "first_byte_timeout");
     assert_eq!(known.upstream_code.as_deref(), Some("first_byte_timeout"));
+}
+
+#[test]
+fn handoff_cards_are_offered_only_in_direct_specialist_user_turns() {
+    let mut row = stale_test_row(Utc::now());
+    row.role = AgentRole::Subagent;
+    row.channel = None;
+    row.group_id = None;
+    row.guest_turn = false;
+    row.active_turn.as_mut().unwrap().origin = TurnOrigin::User;
+    row.active_turn.as_mut().unwrap().report_to = None;
+    assert!(specialist_handoff_capability(&row).is_empty());
+    let without_capability = base_prompt(&row, None);
+    row.active_turn.as_mut().unwrap().note = Some(HANDOFF_UI_NOTE.into());
+    let stable = base_prompt(&row, None);
+    assert_eq!(without_capability, stable);
+    assert_eq!(specialist_handoff_capability(&row), HANDOFF_UI_NOTE);
+    assert!(stable.contains("language nyxbot-handoff"));
+
+    for origin in [
+        TurnOrigin::Orchestrator,
+        TurnOrigin::Event,
+        TurnOrigin::Channel,
+        TurnOrigin::Group,
+        TurnOrigin::Trigger,
+    ] {
+        row.active_turn.as_mut().unwrap().origin = origin;
+        assert_eq!(base_prompt(&row, None), stable);
+        assert!(specialist_handoff_capability(&row).is_empty());
+    }
+    row.active_turn.as_mut().unwrap().origin = TurnOrigin::User;
+    row.active_turn.as_mut().unwrap().report_to = Some("nyxa-parent".into());
+    assert!(specialist_handoff_capability(&row).is_empty());
+    row.active_turn.as_mut().unwrap().report_to = None;
+    row.guest_turn = true;
+    assert!(specialist_handoff_capability(&row).is_empty());
+    row.guest_turn = false;
+    row.group_id = Some("group".into());
+    assert!(specialist_handoff_capability(&row).is_empty());
+    row.group_id = None;
+    row.role = AgentRole::Orchestrator;
+    assert!(specialist_handoff_capability(&row).is_empty());
+    row.role = AgentRole::Subagent;
+    row.active_turn.as_mut().unwrap().voice_request_id = Some("voice".into());
+    assert!(specialist_handoff_capability(&row).is_empty());
+    assert_eq!(base_prompt(&row, None), stable);
+    row.active_turn.as_mut().unwrap().voice_request_id = None;
+    row.shared_agent_thread = true;
+    assert!(!handoff_thread_eligible(&row));
+    row.shared_agent_thread = false;
+    row.agent_owner_id = Some("organization".into());
+    assert!(!handoff_thread_eligible(&row));
 }
 
 #[test]
@@ -1005,6 +1059,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
         created_at: Utc::now(),
         activities: (0..40)
             .map(|i| crate::models::assistant_conversation::TurnActivity {
+                memory_recovery: None,
                 decision: None,
                 retry_identity: None,
                 failure: None,
@@ -1088,6 +1143,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             failure: None,
@@ -1104,6 +1160,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
             origin: "tool".into(),
             pages: None,
@@ -1161,6 +1218,7 @@ fn guest_recap_omits_owner_tool_metadata() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             failure: None,
@@ -1177,6 +1235,7 @@ fn guest_recap_omits_owner_tool_metadata() {
             chat_delivery: None,
             image_input: None,
             image_input_reason: None,
+            pdf: None,
             image_inspection: None,
             origin: "tool".into(),
             pages: None,
@@ -1234,6 +1293,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
         error_detail: None,
         created_at: Utc::now(),
         activities: vec![crate::models::assistant_conversation::TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             failure: None,
@@ -1521,6 +1581,7 @@ fn live_turn_expires_at_the_exact_ttl_boundary() {
 
 fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
     AssistantConversation {
+        meta_grant: None,
         title_language: None,
         automation_v2: false,
         artifact_head: None,
@@ -1538,6 +1599,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         automation_thread: false,
         voice_parent_conversation_id: None,
         guest_model_setup: false,
+        org_use_revision: 0,
         shared_agent_thread: false,
         agent_owner_id: None,
         id: format!("nyxa-{}", Uuid::new_v4().simple()),
@@ -1556,6 +1618,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             restart_admission: None,
             execution_attempt: None,
             group_reply_in_settlement: false,
+            channel_guest: None,
             platform_model_context: None,
             automation_work: None,
             artifact_watch_id: None,
@@ -1641,6 +1704,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
         group_seen_seq: 0,
         guest_turn: false,
         reply_channel: None,
+        reply_channel_meta_grant: None,
         deliver_also: Vec::new(),
     }
 }
@@ -5811,6 +5875,7 @@ async fn reset_recap_queries_owner_rules_and_expired_manifest_outside_tail() {
                     origin: "user_upload".into(),
                     image_input: None,
                     image_input_reason: None,
+                    pdf: None,
                     image_inspection: None,
                 });
             db.collection::<bson::Document>(crate::models::assistant_upload_retention::TOMBSTONES)
@@ -6883,6 +6948,7 @@ fn async_delivery_keeps_original_platform_proof_and_fresh_execution_origin_separ
         report_provenance: crate::models::assistant_conversation::REPORT_PROVENANCE_V1,
     };
     let watch = AsyncServiceOperation {
+        meta_contexts: Vec::new(),
         artifact_catalog_service_id: None,
         artifact_mode: None,
         artifact_result: None,
@@ -9355,6 +9421,8 @@ async fn token_context_redaction_is_scoped_to_voice_rows_and_threads() {
 
 fn token_checkpoint(row: &AssistantConversation) -> AssistantCheckpoint {
     AssistantCheckpoint {
+        source_turn_ids: None,
+        goal_turn_id: None,
         conversation_id: row.id.clone(),
         user_id: row.user_id.clone(),
         turn_id: "turn".into(),

@@ -1,3 +1,8 @@
+import {
+  conversationModelsSchema,
+  platformModelPageSchema,
+  type ConversationModel,
+} from "../../features/assistant/conversationModels";
 import { localizedError } from "../../i18n/localizedError";
 import { parseHistoryResponse } from "../../features/assistant/assistantHistoryCompat";
 import { assistantTitleLanguage } from "../../features/assistant/titleLanguage";
@@ -56,6 +61,52 @@ export const assistantApi = {
       throw localizedError("The guidance response could not be confirmed.");
     return result;
   },
+  async models(signal?: AbortSignal) {
+    return conversationModelsSchema.parse(
+      await requestJson(`${ROOT}/models`, { signal }),
+    );
+  },
+  async platformModels(scope: { conversationId?: string; agentId?: string }, signal?: AbortSignal) {
+    const query = new URLSearchParams({ limit: "100" });
+    if (scope.conversationId)
+      query.set("conversation_id", conversationIdSchema.parse(scope.conversationId));
+    else if (scope.agentId) query.set("agent_id", scope.agentId);
+    const rows: ConversationModel[] = [];
+    const cursors = new Set<string>();
+    for (;;) {
+      const page = platformModelPageSchema.parse(
+        await requestJson(`${ROOT}/platform-models?${query}`, { signal }),
+      );
+      for (const model of page.models) {
+        rows.push({
+          id: model.id,
+          label: model.display_name,
+          available:
+            model.availability !== "unavailable" &&
+            model.retail_prices.some(
+              (price) =>
+                price.available && Object.keys(price.variant).length === 0,
+            ),
+        });
+      }
+      if (!page.next_after) return rows;
+      if (cursors.has(page.next_after))
+        throw localizedError("Couldn’t load models.");
+      cursors.add(page.next_after);
+      query.set("after", page.next_after);
+    }
+  },
+  async changeModel(id: string, model: string) {
+    const result = conversationSchema.parse(
+      await requestJson(`${path(id)}/model`, {
+        method: "PATCH",
+        body: { model },
+      }),
+    );
+    if (result.id !== id || result.model !== model)
+      throw localizedError("Could not confirm the model change.");
+    return result;
+  },
   async settings(signal?: AbortSignal) {
     return composerSettingsSchema.parse(
       await requestJson(`${ROOT}/settings`, { signal }),
@@ -84,7 +135,8 @@ export const assistantApi = {
     const query = new URLSearchParams({ limit: "50" });
     if (cursor) query.set("cursor", cursor);
     if (agentId) query.set("agent_id", agentId);
-    return parseHistoryResponse(indexSchema,
+    return parseHistoryResponse(
+      indexSchema,
       await requestJson(`${ROOT}/conversations?${query}`, { signal }),
     );
   },
@@ -94,7 +146,8 @@ export const assistantApi = {
     signal?: AbortSignal,
     acknowledgementId?: string,
   ) {
-    const result = parseHistoryResponse(historySchema,
+    const result = parseHistoryResponse(
+      historySchema,
       await requestJson(
         assistantHistoryRequestPath(id, beforeSeq, acknowledgementId),
         { signal },
@@ -166,6 +219,7 @@ export async function streamAssistantTurn(
   onEvent: (event: AssistantTurnEvent) => void,
   controller: AbortController,
   onAdmitted?: () => void,
+  onTimeout?: () => void,
 ): Promise<void> {
   const body = assistantTurnBody(input);
   const response = await withDeadline(
@@ -177,6 +231,7 @@ export async function streamAssistantTurn(
     }),
     45000,
     controller,
+    onTimeout,
   );
   onAdmitted?.();
   if (
@@ -185,13 +240,14 @@ export async function streamAssistantTurn(
   ) {
     throw localizedError("The connection was interrupted. Refresh history before sending again.");
   }
-  await readAssistantResponse(response.body, onEvent, controller);
+  await readAssistantResponse(response.body, onEvent, controller, onTimeout);
 }
 
 async function withDeadline<T>(
   promise: Promise<T>,
   milliseconds: number,
   controller: AbortController,
+  onTimeout?: () => void,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -199,6 +255,7 @@ async function withDeadline<T>(
       promise,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
+          onTimeout?.();
           controller.abort();
           reject(
             localizedError("The connection was interrupted. Refresh history before sending again."),

@@ -253,6 +253,14 @@ impl AssistantLive {
     /// may too). Owners' browser streams get only their own events, and
     /// every stream gets resyncs.
     pub fn publish(&self, event: LiveEvent) {
+        let conversation = match &event {
+            LiveEvent::Conversation { id, .. } => Some(id.as_str()),
+            LiveEvent::ChannelThread {
+                conversation_id, ..
+            } => conversation_id.as_deref(),
+            _ => None,
+        };
+        if !conversation.is_some_and(super::channel_guest_access::is_hosted_conversation_namespace)
         {
             let owners = self
                 .owners
@@ -478,7 +486,10 @@ fn pipeline() -> Vec<Document> {
                 {"ns.coll": MACHINES, "updateDescription.updatedFields.connected_at": {"$exists": true}},
                 {"ns.coll": crate::models::trigger::COLLECTION_NAME, "operationType": "insert", "fullDocument.setup_watch_id": {"$type":"string"}},
                 // Push bookkeeping writes only `push.*` and stays invisible.
-                {"ns.coll": NOTIFICATIONS, "$or": [
+                {"ns.coll": NOTIFICATIONS,
+                    "fullDocument.source.conversation_id": super::channel_guest_access::exclude_hosted_conversations(),
+                    "fullDocument.source.id": super::channel_guest_access::exclude_hosted_conversations(),
+                    "$or": [
                     {"operationType": "insert"},
                     {"updateDescription.updatedFields.updated_at": {"$exists": true}},
                     {"updateDescription.updatedFields.count": {"$exists": true}},
@@ -684,6 +695,48 @@ mod tests {
             resolutions.recv().await.is_none(),
             "all duplicate group ids coalesced into one resolution"
         );
+    }
+
+    #[test]
+    fn hosted_guest_changes_stay_off_the_owner_stream() {
+        let live = AssistantLive::new();
+        let mut internal = live.subscribe();
+        let mut owner = live.subscribe_owner("owner").unwrap();
+        let hosted = "nyxag-11111111111111111111111111111111";
+        for private in [
+            LiveEvent::Conversation {
+                id: hosted.into(),
+                user_id: "owner".into(),
+                group_id: None,
+                turn_id: Some("turn".into()),
+                messages: 2,
+                title_changed: false,
+            },
+            LiveEvent::ChannelThread {
+                id: "channel-thread".into(),
+                user_id: "owner".into(),
+                channel_id: "channel".into(),
+                parent_id: None,
+                conversation_id: Some(hosted.into()),
+            },
+        ] {
+            live.publish(private.clone());
+            assert_eq!(internal.try_recv().unwrap(), private);
+            assert_eq!(
+                owner.events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            );
+        }
+        let ordinary = LiveEvent::Conversation {
+            id: "nyxa-11111111111111111111111111111111".into(),
+            user_id: "owner".into(),
+            group_id: None,
+            turn_id: None,
+            messages: 1,
+            title_changed: false,
+        };
+        live.publish(ordinary.clone());
+        assert_eq!(owner.events.try_recv().unwrap(), ordinary);
     }
 
     #[test]

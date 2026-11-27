@@ -89,7 +89,7 @@ test("consumers imported before selection resolve auth, legal and frontend URLs 
 
   for (const read of [api.getApiBaseUrl, env.getFrontendUrl, env.getLegalBaseUrl, env.firstPartyFrontendUrls,
     () => legal.resolveLegalDocumentUrl("privacy"),
-    () => mobileApi.getSocialAuthorizeUrl("google", "nyxid://auth/social/callback")]) {
+    () => mobileApi.getSocialAuthorizeUrl("google", "nyxid://auth/social/callback", "test-challenge")]) {
     assert.throws(read, /Domains have not been selected/);
   }
   assert.deepEqual(requests, []);
@@ -98,9 +98,10 @@ test("consumers imported before selection resolve auth, legal and frontend URLs 
     const selected = enabled ? domains.DOMAIN_SETS.new! : domains.DOMAIN_SETS.legacy;
     assert.equal(api.buildApiUrl("/auth/login"), `${selected.apiBaseUrl}/auth/login`);
     for (const provider of ["google", "github", "apple"] as const) {
-      const social = new URL(mobileApi.getSocialAuthorizeUrl(provider, "nyxid://auth/social/callback"));
-      assert.equal(`${social.origin}${social.pathname}`, `${selected.apiBaseUrl}/auth/social/${provider}`);
-      assert.equal(social.searchParams.get("client"), "mobile");
+      const social = new URL(mobileApi.getSocialAuthorizeUrl(provider, "nyxid://auth/social/callback", "test-challenge"));
+      assert.equal(`${social.origin}${social.pathname}`, `${selected.apiBaseUrl}/auth/social/${provider}/mobile-code`);
+      assert.equal(social.searchParams.get("code_challenge"), "test-challenge");
+      assert.equal(social.searchParams.get("code_challenge_method"), "S256");
       assert.equal(social.searchParams.get("redirect_uri"), "nyxid://auth/social/callback");
     }
     for (const key of ["privacy", "terms"] as const)
@@ -148,8 +149,8 @@ for (const base of ["https://nyx-api.chrono-ai.fun/api/v1", "https://api.nyxid.a
       return new Response(JSON.stringify(payload), { status: requests.length === 1 ? 401 : 200 });
     });
 
-    const social = new URL(mobileApi.getSocialAuthorizeUrl("google", "nyxid://auth/social/callback"));
-    assert.equal(`${social.origin}${social.pathname}`, `${base}/auth/social/google`);
+    const social = new URL(mobileApi.getSocialAuthorizeUrl("google", "nyxid://auth/social/callback", "test-challenge"));
+    assert.equal(`${social.origin}${social.pathname}`, `${base}/auth/social/google/mobile-code`);
     assert.equal(social.searchParams.get("redirect_uri"), "nyxid://auth/social/callback");
     const profile = await http.requestJson<{ user_id: string }>("/users/me");
     assert.equal(profile.user_id, "test-user");

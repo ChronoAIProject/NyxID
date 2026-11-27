@@ -6,7 +6,6 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use futures::TryStreamExt;
 use mongodb::{
     ClientSession, Database,
     bson::{self, Document, doc},
@@ -16,6 +15,7 @@ use serde::Deserialize;
 
 use super::{GRANTS, METERS, PERIODS, WALLETS, live_index};
 use crate::{
+    db::next_document,
     errors::{AppError, AppResult},
     models::{
         credit_grant::CreditGrantSettlementLock,
@@ -412,7 +412,7 @@ async fn scan_once(
     let mut result = Inventory::default();
     loop {
         *stage.lock().unwrap() = "cursor";
-        let Some(row) = cursor.stream(&mut *session).try_next().await? else {
+        let Some(row) = next_document(&mut cursor, session).await? else {
             break;
         };
         if result.rows == limit {

@@ -683,7 +683,7 @@ pub(crate) async fn create_api_key_with_security_class_and_id(
         scheduled_write_enabled,
     };
 
-    key_mutations::insert_one(db, &new_key, session).await?;
+    key_mutations::insert_one_for_actor(db, &new_key, scope_actor_user_id, session).await?;
 
     Ok(CreatedApiKey {
         id,
@@ -1324,7 +1324,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         "rotation predecessor changed concurrently".to_string(),
                     ));
                 }
-                key_mutations::insert_one(&db, &successor, Some(&mut *session)).await?;
+                key_mutations::insert_one_for_actor(&db, &successor, actor_id.as_deref(), Some(&mut *session)).await?;
                 let assistant_managed =
                     super::assistant_agent_credential_service::adopt_rotated_key(
                         &db,
@@ -1390,6 +1390,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                             grants,
                             scopes,
                             owner,
+                            _,
                         ) | super::assistant_agent_credential_service::KeyAuthority::Shared(grants, scopes, owner)
                         | super::assistant_agent_credential_service::KeyAuthority::OrgChannelGuest(grants, scopes, owner) => {
                             successor.assistant_agent_owner_id = Some(owner.clone());
@@ -1421,10 +1422,10 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                                 .as_ref()
                                 .and(conversation.group_id.clone())
                         });
-                    if successor.assistant_group_id.is_some()
+                    if super::org_agent_service::ordinary_member_org(&conversation).is_some() || successor.assistant_group_id.is_some()
                         || super::org_channel_service::origin(&conversation).is_some()
                     {
-                        // Group, collaboration and org-channel authentication bind
+                        // Organization specialist and group authentication bind
                         // the key to its thread. Move that binding with the encrypted successor,
                         // rather than waiting for the next turn to refresh it.
                         db.collection::<bson::Document>(
@@ -1815,7 +1816,16 @@ pub async fn validate_api_key(
     db: &mongodb::Database,
     raw_key: &str,
 ) -> AppResult<(String, ApiKey, Option<String>)> {
-    let (user_id, key, credential_id) = observe_api_key(db, raw_key).await?;
+    validate_api_key_for_channel(db, raw_key, false).await
+}
+
+pub(crate) async fn validate_api_key_for_channel(
+    db: &mongodb::Database,
+    raw_key: &str,
+    exact_channel_reply: bool,
+) -> AppResult<(String, ApiKey, Option<String>)> {
+    let (user_id, key, credential_id) =
+        observe_api_key_for_channel(db, raw_key, exact_channel_reply).await?;
     // Update last_used_at
     let now = Utc::now();
     key_mutations::update_one(
@@ -1842,13 +1852,22 @@ pub(crate) async fn observe_api_key(
     db: &mongodb::Database,
     raw_key: &str,
 ) -> AppResult<(String, ApiKey, Option<String>)> {
+    observe_api_key_for_channel(db, raw_key, false).await
+}
+
+async fn observe_api_key_for_channel(
+    db: &mongodb::Database,
+    raw_key: &str,
+    exact_channel_reply: bool,
+) -> AppResult<(String, ApiKey, Option<String>)> {
+    use super::channel_guest_access::relay::RetainedRelayKey;
     let key_hash = hash_token(raw_key);
 
     let primary = db
-        .collection::<ApiKey>(API_KEYS)
+        .collection::<RetainedRelayKey>(API_KEYS)
         .find_one(doc! { "key_hash": &key_hash, "is_active": true })
         .await?;
-    let (key, credential_id) = if let Some(key) = primary {
+    let (retained, credential_id) = if let Some(key) = primary {
         (key, None)
     } else {
         let child = db
@@ -1862,12 +1881,14 @@ pub(crate) async fn observe_api_key(
             ));
         }
         let parent = db
-            .collection::<ApiKey>(API_KEYS)
+            .collection::<RetainedRelayKey>(API_KEYS)
             .find_one(doc! {"_id": &child.api_key_id, "user_id": &child.user_id, "is_active": true})
             .await?
             .ok_or_else(|| AppError::Unauthorized("Invalid API key".into()))?;
         (parent, Some(child.id))
     };
+
+    let key = &retained.key;
 
     if matches!(
         key.purpose,
@@ -1884,8 +1905,11 @@ pub(crate) async fn observe_api_key(
     {
         return Err(AppError::Unauthorized("API key has expired".to_string()));
     }
+    if !exact_channel_reply {
+        retained.require_broad_access(db).await?;
+    }
 
-    Ok((key.user_id.clone(), key, credential_id))
+    Ok((key.user_id.clone(), retained.key, credential_id))
 }
 
 #[cfg(test)]

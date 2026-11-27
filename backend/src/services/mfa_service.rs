@@ -1,3 +1,4 @@
+use crate::crypto::record_field;
 use chrono::Utc;
 use mongodb::bson::{self, doc};
 use totp_rs::{Algorithm, Secret, TOTP};
@@ -37,13 +38,10 @@ async fn encrypt_factor_secret(
     owner: &str,
     plaintext: &[u8],
 ) -> AppResult<Vec<u8>> {
-    if keys.contextual_record_writes() {
-        let field = ["secret_encrypted"];
-        let context = crate::crypto::aes::RecordContext::new(MFA_FACTORS, id, owner, &field)?;
-        keys.encrypt_record(plaintext, &context).await
-    } else {
-        keys.encrypt(plaintext).await
-    }
+    record_field::encrypt_with_context(keys, plaintext, || {
+        crate::crypto::aes::RecordContext::new(MFA_FACTORS, id, owner, &["secret_encrypted"])
+    })
+    .await
 }
 
 async fn decrypt_factor_secret(
@@ -62,15 +60,14 @@ async fn decrypt_factor_secret(
     let field = ["secret_encrypted"];
     let context =
         crate::crypto::aes::RecordContext::new(MFA_FACTORS, &factor.id, &factor.user_id, &field)?;
-    let plaintext = match factor.secret_context_version {
-        Some(3) => keys.decrypt_record(encrypted, &context).await?,
-        None if keys.allow_legacy_record_reads() => Zeroizing::new(keys.decrypt(encrypted).await?),
-        _ => {
-            return Err(AppError::Internal(
-                "MFA secret format is unavailable".into(),
-            ));
-        }
-    };
+    let plaintext = record_field::decrypt_with_context(
+        keys,
+        encrypted,
+        factor.secret_context_version,
+        || Ok(context),
+        || AppError::Internal("MFA secret format is unavailable".into()),
+    )
+    .await?;
     // Readiness requires a usable TOTP seed, including the library's key-size
     // validation. Authentication of an empty or malformed secret is insufficient.
     if plaintext.len() > 1024 {
@@ -1188,7 +1185,8 @@ mod tests {
         assert_eq!(
             keys.decrypt(legacy.secret_encrypted.as_ref().unwrap())
                 .await
-                .unwrap(),
+                .unwrap()
+                .as_slice(),
             setup.secret.as_bytes()
         );
         assert!(
@@ -1771,7 +1769,7 @@ mod tests {
             .decrypt(stored.secret_encrypted.as_ref().unwrap())
             .await
             .unwrap();
-        let secret = Secret::Encoded(String::from_utf8(plaintext).unwrap())
+        let secret = Secret::Encoded(std::str::from_utf8(&plaintext).unwrap().to_owned())
             .to_bytes()
             .unwrap();
         let totp = create_totp(secret, "NyxID", "test").unwrap();

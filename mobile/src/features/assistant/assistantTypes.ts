@@ -61,6 +61,7 @@ export type AssistantAttachment = z.infer<typeof attachmentSchema>;
 export const conversationSchema = z.object({
   id: conversationIdSchema,
   title: z.string(),
+  title_source: z.string().nullish().catch(undefined),
   model: z.string(),
   created_at: z.string(),
   last_message_at: z.string(),

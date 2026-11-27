@@ -202,11 +202,17 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
     for adapter in crate::services::channel_adapters::registered_adapters(&cache) {
         assert_eq!(
             adapter.managed_onboarding().is_some(),
-            matches!(adapter.platform_id(), "whatsapp" | "x")
+            matches!(
+                adapter.platform_id(),
+                "whatsapp" | "x" | "messenger" | "instagram"
+            )
         );
         assert_eq!(
             adapter.platform_webhook(),
-            matches!(adapter.platform_id(), "whatsapp" | "x")
+            matches!(
+                adapter.platform_id(),
+                "whatsapp" | "x" | "messenger" | "instagram"
+            )
         );
     }
     let all = credentials::descriptors(&cache);
@@ -215,7 +221,17 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
         .map(|(_, descriptor)| descriptor.provider)
         .collect();
     providers.sort_unstable();
-    assert_eq!(providers, ["aurinko", "meta", "telegram-new", "x"]);
+    assert_eq!(
+        providers,
+        [
+            "aurinko",
+            "instagram",
+            "messenger",
+            "meta",
+            "telegram-new",
+            "x"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -284,18 +300,35 @@ async fn managed_completion_success_encrypts_pin_and_reuses_registration() {
     assert_eq!(bot.app_id.as_deref(), Some("444"));
     assert!(bot.app_secret_encrypted.is_none());
     assert_eq!(
-        state
-            .encryption_keys
-            .decrypt(&bot.bot_token_encrypted)
-            .await
-            .unwrap(),
+        crate::crypto::record_field::decrypt(
+            &state.encryption_keys,
+            BOTS,
+            &bot.id,
+            &bot.user_id,
+            "bot_token_encrypted",
+            bot.secret_context_versions
+                .get("bot_token_encrypted")
+                .copied(),
+            &bot.bot_token_encrypted
+        )
+        .await
+        .unwrap()
+        .as_slice(),
         b"business-token"
     );
-    let pin = state
-        .encryption_keys
-        .decrypt(bot.registration_pin_encrypted.as_ref().unwrap())
-        .await
-        .unwrap();
+    let pin = crate::crypto::record_field::decrypt(
+        &state.encryption_keys,
+        BOTS,
+        &bot.id,
+        &bot.user_id,
+        "registration_pin_encrypted",
+        bot.secret_context_versions
+            .get("registration_pin_encrypted")
+            .copied(),
+        bot.registration_pin_encrypted.as_ref().unwrap(),
+    )
+    .await
+    .unwrap();
     assert_eq!(pin.len(), 6);
     assert!(pin.iter().all(u8::is_ascii_digit));
     assert_eq!(
@@ -327,7 +360,7 @@ async fn managed_completion_success_encrypts_pin_and_reuses_registration() {
         .unwrap()
         .body_json::<Value>()
         .unwrap();
-    assert_eq!(registration["pin"], String::from_utf8(pin).unwrap());
+    assert_eq!(registration["pin"], std::str::from_utf8(&pin).unwrap());
     for request in requests.iter().filter(|r| {
         r.headers
             .get("authorization")
@@ -488,6 +521,19 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
     let (_, Json(list)) = admin::list(State(state.clone()), auth.clone())
         .await
         .unwrap();
+    for platform in ["messenger", "instagram"] {
+        let row = list.iter().find(|row| row.platform == platform).unwrap();
+        let expected = format!(
+            "{}/api/v1/webhooks/channel/{platform}/platform",
+            state.config.base_url.trim_end_matches('/')
+        );
+        assert_eq!(row.callback_url.as_deref(), Some(expected.as_str()));
+        let adapter = resolve_adapter(platform, &state.token_exchange_cache).unwrap();
+        assert_eq!(
+            adapter.managed_onboarding().unwrap().completion_fields,
+            ["asset_id", "exclusive_routing_verified"]
+        );
+    }
     let serialized = serde_json::to_value(&list).unwrap();
     assert!(!serialized.to_string().contains("secret-for-test"));
     assert!(
@@ -1073,6 +1119,13 @@ async fn repair_recovers_partial_setup_and_reuses_encrypted_secrets() {
     let original = crate::services::channel_bot_service::get_bot(&state.db, &created.id)
         .await
         .unwrap();
+    for field in [
+        "registration_pin_encrypted",
+        "webhook_secret_encrypted",
+        "bot_token_encrypted",
+    ] {
+        assert_eq!(original.secret_context_versions.get(field), Some(&3));
+    }
     for _ in 0..2 {
         let Json(setup) =
             managed::repair(State(state.clone()), auth.clone(), Path(created.id.clone()))
@@ -1124,7 +1177,11 @@ async fn repair_recovers_partial_setup_and_reuses_encrypted_secrets() {
 
 #[tokio::test]
 async fn repair_migrates_hash_only_token_and_does_not_repeat_successful_coexistence_sync() {
-    let (state, auth, server) = fixture().await;
+    let (mut state, auth, server) = fixture().await;
+    let current_keys = state.encryption_keys.clone();
+    let mut legacy_keys = crate::test_utils::test_encryption_keys();
+    legacy_keys.set_contextual_record_writes(false);
+    state.encryption_keys = std::sync::Arc::new(legacy_keys);
     graph(&server, "444", "333", 200, 200, true).await;
     Mock::given(method("POST"))
         .and(path("/v25.0/333/smb_app_data"))
@@ -1150,6 +1207,7 @@ async fn repair_migrates_hash_only_token_and_does_not_repeat_successful_coexiste
         )
         .await
         .unwrap();
+    state.encryption_keys = current_keys;
     for _ in 0..2 {
         let Json(setup) =
             managed::repair(State(state.clone()), auth.clone(), Path(created.id.clone()))
@@ -1737,4 +1795,72 @@ async fn admin_health_requires_admin() {
         .await
         .unwrap_err();
     assert!(matches!(err, crate::errors::AppError::Forbidden(_)));
+}
+
+/// Registration and hash-only repair, sampled from the actual database and loopback Graph calls.
+pub(crate) async fn mixed_managed_records(
+    keys: std::sync::Arc<crate::crypto::aes::EncryptionKeys>,
+) -> Vec<bson::Document> {
+    let mut snapshots = Vec::new();
+    for repair in [false, true] {
+        let (mut state, auth, server) = fixture().await;
+        let mut legacy = crate::test_utils::test_encryption_keys();
+        legacy.set_contextual_record_writes(false);
+        state.encryption_keys = if repair {
+            std::sync::Arc::new(legacy)
+        } else {
+            keys.clone()
+        };
+        graph(&server, "444", "333", 200, 200, false).await;
+        let (_, Json(created)) = managed::complete_inner(
+            &state,
+            &auth,
+            "whatsapp",
+            input(),
+            &ManagedProgress::default(),
+        )
+        .await
+        .unwrap();
+        state.encryption_keys = keys.clone();
+        let bots = state.db.collection::<bson::Document>(BOTS);
+        let filter = doc! {"_id": &created.id};
+        if repair {
+            bots.update_one(
+                filter.clone(),
+                doc! {"$unset":{"webhook_secret_encrypted":""}},
+            )
+            .await
+            .unwrap();
+            if keys.contextual_record_writes() {
+                let raw = bots.find_one(filter.clone()).await.unwrap().unwrap();
+                assert!(
+                    crate::services::channel_bot_record::migrate(&state.db, &keys, &raw)
+                        .await
+                        .unwrap()
+                );
+            }
+            let Json(_) =
+                managed::repair(State(state.clone()), auth.clone(), Path(created.id.clone()))
+                    .await
+                    .unwrap();
+        }
+        let bodies: Vec<Value> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter_map(|r| r.body_json().ok())
+            .collect();
+        let value = |field: &str| {
+            bodies
+                .iter()
+                .rev()
+                .find_map(|body| body[field].as_str())
+                .unwrap()
+                .to_owned()
+        };
+        snapshots.push(doc!{"row":bots.find_one(filter.clone()).await.unwrap().unwrap(),
+            "expected":{"bot_token_encrypted":"business-token","registration_pin_encrypted":value("pin"),"webhook_secret_encrypted":value("verify_token")}});
+    }
+    snapshots
 }

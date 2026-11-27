@@ -32,6 +32,10 @@ impl RunOutcome {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TriggerRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_specialist_owner_id: Option<String>,
+    #[serde(default)]
+    pub org_use_revision: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<CoordinatorState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<super::assistant_message::WorkEvidence>,
@@ -60,6 +64,9 @@ pub struct TriggerRun {
     /// Includes upstream assistant error codes as well as scheduler reasons;
     /// this is deliberately an open diagnostic namespace.
     pub reason: Option<String>,
+    /// Run observed blocking this occurrence when the scheduler applied Skip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocking_run_id: Option<String>,
     /// Metadata-only failure of the settled turn or the scheduler.
     #[serde(default)]
     pub failure_reason: Option<Box<super::assistant_message::TurnFailureReason>>,

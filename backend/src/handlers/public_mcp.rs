@@ -38,13 +38,12 @@ async fn handle_public_mcp_post(
     peer: Option<SocketAddr>,
     request: Request<Body>,
 ) -> AppResult<Response<Body>> {
-    let path = request.uri().path().to_string();
     crate::mw::rate_limit::enforce_public_ip_rate_limit(
         &state.public_mcp_limiter,
         request.headers(),
         peer,
         &state.config.trusted_proxy_ips,
-        &path,
+        crate::mw::request_trace::route_label(request.extensions()),
     )
     .await?;
 

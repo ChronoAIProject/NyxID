@@ -28,6 +28,10 @@ use crate::services::{approved_sign_in_policy as app_policy, audit_service, toke
 #[cfg(test)]
 mod grant_tests;
 mod grants;
+#[cfg(test)]
+mod mixed_delivery;
+pub(super) mod record;
+pub(super) use grants::prepare_grant;
 pub use grants::{approve_with_agent_key, options, poll_agent_key, sweep_expired};
 
 type HmacSha256 = Hmac<sha2::Sha256>;
@@ -43,7 +47,7 @@ const AUTH_DEVICE_USER_CODE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ"
 pub(crate) use super::login_client_context::*;
 pub use crate::models::login_client_context::LoginClientContext as InitiateInput;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct InitiateOutput {
     pub device_code: String,
     pub user_code: String,
@@ -71,8 +75,8 @@ pub enum PollClaim {
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct AccountDelivery {
-    pub access_token: String,
-    pub refresh_token: String,
+    pub access_token: Zeroizing<String>,
+    pub refresh_token: Zeroizing<String>,
     pub expires_in: i64,
     pub user_id: String,
     pub session_id: String,
@@ -84,7 +88,7 @@ impl std::fmt::Debug for AccountDelivery {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ApproveInput {
     pub user_id: String,
     pub user_code: String,
@@ -92,13 +96,15 @@ pub struct ApproveInput {
     pub approver_user_agent: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DenyInput {
     pub user_id: String,
     pub user_code: String,
     pub denier_ip: Option<String>,
     pub denier_user_agent: Option<String>,
 }
+
+crate::errors::redacted_debug!(InitiateOutput, ApproveInput, DenyInput,);
 
 #[tracing::instrument(
     name = "auth_device.initiate",
@@ -289,6 +295,7 @@ where
             agent_key_grant: None,
             purge_at: None,
             approver_ip_hmac: None,
+            delivery_context_version: None,
             delivery_access_token_encrypted: None,
             delivery_refresh_token_encrypted: None,
             delivery_access_token_expires_in: None,
@@ -407,9 +414,18 @@ pub async fn poll_for_browser(
             let claimed = transaction_codes.find_one_and_update(doc! {
                 "device_code_hmac": &device_hash, "status": "approved", "agent_key_grant": Bson::Null,
                 "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
-            }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-                "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
-                "$unset": {"delivery_access_token_encrypted": "", "delivery_refresh_token_encrypted": ""}})
+            }, doc! {
+                "$set": {
+                    "status": "delivered",
+                    "delivered_at": bson::DateTime::from_chrono(now),
+                    "purge_at": bson::DateTime::from_chrono(now + Duration::days(1)),
+                },
+                "$unset": {
+                    "delivery_access_token_encrypted": "",
+                    "delivery_refresh_token_encrypted": "",
+                    "delivery_context_version": "",
+                },
+            })
                 .session(&mut *session).await?;
             let claimed = claimed.ok_or(AppError::AuthDeviceCodeAlreadyDelivered)?;
             app_policy::fence(db, &browser.user_id, claimed.mfa_policy_revision.as_deref(), session).await?;
@@ -553,6 +569,14 @@ pub async fn preview(
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
     let (_, row) = find_by_user_code(db, &user_code_hmac).await?;
 
+    Ok(preview_row(row, viewer_ip, viewer_ip_attribution))
+}
+
+pub(super) fn preview_row(
+    row: AuthDeviceCode,
+    viewer_ip: Option<&str>,
+    viewer_ip_attribution: AuthDeviceClientIpAttribution,
+) -> PreviewOutput {
     tracing::Span::current().record("row_id", row.id.as_str());
     let context = InitiateInput {
         requested_profile: row.requested_profile,
@@ -579,7 +603,7 @@ pub async fn preview(
         client_hardware_concurrency: row.client_hardware_concurrency,
         client_device_memory: row.client_device_memory,
     };
-    Ok(context_preview(
+    context_preview(
         context,
         row.created_at,
         row.expires_at,
@@ -587,10 +611,9 @@ pub async fn preview(
         row.supports_grant_choice,
         viewer_ip,
         viewer_ip_attribution,
-    ))
+    )
 }
 
-#[tracing::instrument(name = "auth_device.approve", skip_all, fields(row_id, user_id = %input.user_id, session_id))]
 pub async fn approve(
     db: &Database,
     config: &AppConfig,
@@ -600,12 +623,43 @@ pub async fn approve(
     input: ApproveInput,
     authority: super::session_authority::DerivedMfaAuthority,
 ) -> AppResult<()> {
+    approve_bound(
+        db,
+        config,
+        jwt_keys,
+        encryption_keys,
+        hmac_key,
+        input,
+        authority,
+        None,
+    )
+    .await
+}
+
+#[tracing::instrument(name = "auth_device.approve", skip_all, fields(row_id, user_id = %input.user_id, session_id))]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn approve_bound(
+    db: &Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    encryption_keys: &EncryptionKeys,
+    hmac_key: &[u8],
+    input: ApproveInput,
+    authority: super::session_authority::DerivedMfaAuthority,
+    staging: Option<super::staging_qr::VerifiedMatch>,
+) -> AppResult<()> {
     let mfa_policy_revision = app_policy::authorize(db, &input.user_id, authority).await?;
     let mfa_assured = authority.verified;
     let started_at = std::time::Instant::now();
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
     let (collection, row) = find_by_user_code(db, &user_code_hmac).await?;
+    if staging
+        .as_ref()
+        .is_some_and(|verified| verified.request_id != row.id)
+    {
+        return Err(AppError::AuthDeviceUserCodeInvalid);
+    }
     let now = Utc::now();
 
     tracing::Span::current().record("row_id", row.id.as_str());
@@ -626,6 +680,7 @@ pub async fn approve(
             mfa_assured,
             mfa_policy_revision.as_deref(),
             authority,
+            staging,
         )
         .await;
     }
@@ -645,8 +700,26 @@ pub async fn approve(
     prepared.set_app_policy_exempt(mfa_policy_revision.is_some());
     let access = Zeroizing::new(std::mem::take(&mut prepared.tokens.access_token));
     let refresh = Zeroizing::new(std::mem::take(&mut prepared.tokens.refresh_token));
-    let encrypted_access = encryption_keys.encrypt(access.as_bytes()).await?;
-    let encrypted_refresh = encryption_keys.encrypt(refresh.as_bytes()).await?;
+    let [access_path, refresh_path] = record::session_paths(&prepared.tokens.session_id);
+    let encrypted_access = record::seal(
+        encryption_keys,
+        collection.name(),
+        &row.id,
+        &input.user_id,
+        &access_path,
+        access.as_bytes(),
+    )
+    .await?;
+    let encrypted_refresh = record::seal(
+        encryption_keys,
+        collection.name(),
+        &row.id,
+        &input.user_id,
+        &refresh_path,
+        refresh.as_bytes(),
+    )
+    .await?;
+    let contextual = encryption_keys.contextual_record_writes();
     let approver_ip_hmac = input
         .approver_ip
         .as_deref()
@@ -661,6 +734,9 @@ pub async fn approve(
         transaction.start_transaction().and_run2(async move |session| {
     let db = &db_owned;
     let operation: AppResult<String> = async {
+    if let Some(verified) = staging.as_ref() {
+        verified.fence(db, &input.user_id, session, mfa_assured).await?;
+    }
     app_policy::fence_approval(db, &input.user_id, authority, mfa_policy_revision.as_deref(), session).await?;
     let claimed = collection.find_one_and_update(
         doc! {"_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
@@ -709,7 +785,7 @@ pub async fn approve(
     collection
         .find_one_and_update(
             doc! { "_id": &row.id, "status": "approved" },
-            doc! { "$set": set_doc },
+            record::approval_update(set_doc, contextual),
         )
         .return_document(ReturnDocument::After)
         .session(&mut *session)
@@ -747,15 +823,27 @@ pub async fn approve(
     Ok(())
 }
 
+pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult<()> {
+    deny_bound(db, hmac_key, input, None).await
+}
+
 #[tracing::instrument(
     name = "auth_device.deny",
     skip_all,
     fields(row_id, user_id = %input.user_id)
 )]
-pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult<()> {
+pub(super) async fn deny_bound(
+    db: &Database,
+    hmac_key: &[u8],
+    input: DenyInput,
+    expected_id: Option<&str>,
+) -> AppResult<()> {
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
     let (collection, row) = find_by_user_code(db, &user_code_hmac).await?;
+    if expected_id.is_some_and(|id| id != row.id) {
+        return Err(AppError::AuthDeviceUserCodeInvalid);
+    }
     let now = Utc::now();
 
     tracing::Span::current().record("row_id", row.id.as_str());
@@ -809,24 +897,6 @@ pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult
     );
 
     Ok(())
-}
-
-pub async fn decrypt_tokens(
-    encryption_keys: &EncryptionKeys,
-    encrypted_access: &[u8],
-    encrypted_refresh: &[u8],
-) -> AppResult<(String, String)> {
-    let access_plaintext = Zeroizing::new(encryption_keys.decrypt(encrypted_access).await?);
-    let refresh_plaintext = Zeroizing::new(encryption_keys.decrypt(encrypted_refresh).await?);
-
-    let access_token = String::from_utf8(access_plaintext.to_vec()).map_err(|_| {
-        AppError::Internal("auth-device delivery access token is not valid UTF-8".to_string())
-    })?;
-    let refresh_token = String::from_utf8(refresh_plaintext.to_vec()).map_err(|_| {
-        AppError::Internal("auth-device delivery refresh token is not valid UTF-8".to_string())
-    })?;
-
-    Ok((access_token, refresh_token))
 }
 
 pub fn normalize_user_code(raw: &str) -> Result<String, AppError> {
@@ -1059,6 +1129,7 @@ async fn claim_approved_delivery(
                 "$unset": {
                     "delivery_access_token_encrypted": "",
                     "delivery_refresh_token_encrypted": "",
+                    "delivery_context_version": "",
                 },
             },
         )
@@ -1074,12 +1145,25 @@ async fn claim_approved_delivery_in_transaction(
     tx: &mut mongodb::ClientSession,
 ) -> AppResult<Option<AuthDeviceCode>> {
     let now = Utc::now();
-    Ok(codes.find_one_and_update(doc! {"_id": id, "status": "approved", "agent_key_grant": Bson::Null,
-        "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
-        doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
-            "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
-            "$unset": {"delivery_access_token_encrypted": "", "delivery_refresh_token_encrypted": ""}})
-        .session(&mut *tx).await?)
+    Ok(codes
+        .find_one_and_update(
+            doc! {"_id": id, "status": "approved", "agent_key_grant": Bson::Null,
+            "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
+            doc! {
+                "$set": {
+                    "status": "delivered",
+                    "delivered_at": bson::DateTime::from_chrono(now),
+                    "purge_at": bson::DateTime::from_chrono(now + Duration::days(1)),
+                },
+                "$unset": {
+                    "delivery_access_token_encrypted": "",
+                    "delivery_refresh_token_encrypted": "",
+                    "delivery_context_version": "",
+                },
+            },
+        )
+        .session(&mut *tx)
+        .await?)
 }
 
 #[tracing::instrument(name = "auth_device.deliver", skip_all, fields(row_id = %row.id, latency_ms = (now - row.created_at).num_milliseconds()))]
@@ -1095,16 +1179,8 @@ async fn deliver_approved_claim(
         return Ok(PollClaim::AgentKey);
     }
     let prepared = if let Some(encryption) = encryption {
-        let (access_token, refresh_token) = decrypt_tokens(
-            encryption,
-            row.delivery_access_token_encrypted
-                .as_deref()
-                .ok_or_else(|| AppError::Internal("Missing account delivery".into()))?,
-            row.delivery_refresh_token_encrypted
-                .as_deref()
-                .ok_or_else(|| AppError::Internal("Missing account delivery".into()))?,
-        )
-        .await?;
+        let (access_token, refresh_token) =
+            record::open_session(encryption, collection.name(), row).await?;
         Some(AccountDelivery {
             access_token,
             refresh_token,
@@ -2155,13 +2231,9 @@ mod tests {
             .expect("reservation exists");
         assert!(reservation.get("approved_user_id").is_none());
 
-        let (access, refresh) = decrypt_tokens(
-            &encryption_keys,
-            updated.delivery_access_token_encrypted.as_deref().unwrap(),
-            updated.delivery_refresh_token_encrypted.as_deref().unwrap(),
-        )
-        .await
-        .expect("decrypt");
+        let (access, refresh) = record::open_session(&encryption_keys, AUTH_DEVICE_CODES, &updated)
+            .await
+            .expect("decrypt");
         assert_eq!(
             crate::crypto::jwt::verify_token(&jwt_keys, &config, &access)
                 .expect("access token")
@@ -2453,13 +2525,18 @@ mod tests {
         let encrypted_access = encryption_keys.encrypt(access.as_bytes()).await.unwrap();
         let encrypted_refresh = encryption_keys.encrypt(refresh.as_bytes()).await.unwrap();
 
+        let mut row = make_debug_row();
+        row.approved_user_id = Some("owner".into());
+        row.approved_session_id = Some("session".into());
+        row.delivery_access_token_encrypted = Some(encrypted_access);
+        row.delivery_refresh_token_encrypted = Some(encrypted_refresh);
         let (decrypted_access, decrypted_refresh) =
-            decrypt_tokens(&encryption_keys, &encrypted_access, &encrypted_refresh)
+            record::open_session(&encryption_keys, AUTH_DEVICE_CODES, &row)
                 .await
                 .unwrap();
 
-        assert_eq!(decrypted_access, access);
-        assert_eq!(decrypted_refresh, refresh);
+        assert_eq!(decrypted_access.as_str(), access);
+        assert_eq!(decrypted_refresh.as_str(), refresh);
     }
 
     #[tokio::test]
@@ -2680,6 +2757,7 @@ mod tests {
             agent_key_grant: None,
             purge_at: None,
             approver_ip_hmac: None,
+            delivery_context_version: None,
             delivery_access_token_encrypted: Some(b"encrypted-access".to_vec()),
             delivery_refresh_token_encrypted: Some(b"encrypted-refresh".to_vec()),
             delivery_access_token_expires_in: Some(900),
@@ -2767,6 +2845,7 @@ mod tests {
             agent_key_grant: None,
             purge_at: None,
             approver_ip_hmac: Some("33334444".repeat(8)),
+            delivery_context_version: None,
             delivery_access_token_encrypted: Some(vec![0xab, 0xcd, 0xef]),
             delivery_refresh_token_encrypted: Some(vec![0x12, 0x34, 0x56]),
             delivery_access_token_expires_in: Some(900),

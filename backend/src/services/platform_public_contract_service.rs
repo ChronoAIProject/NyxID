@@ -312,15 +312,14 @@ pub(crate) async fn fence_deployment(
             .await?
             .ok_or_else(denied)?;
         proxy::require_model_catalog_for_sponsor(&service, &e.binding.sponsor_owner_user_id, &op)?;
-        let endpoints: Vec<ServiceEndpoint> = db
+        let mut cursor = db
             .collection::<ServiceEndpoint>(ENDPOINTS)
             .find(doc! {"service_id":&service.id})
             .sort(doc! {"_id":1})
             .session(&mut *session)
-            .await?
-            .stream(&mut *session)
-            .try_collect()
             .await?;
+        let endpoints: Vec<ServiceEndpoint> =
+            crate::db::read_documents(&mut cursor, session).await?;
         if endpoint_set_digest(&endpoints)? != *endpoint_digest {
             return Err(denied());
         }
