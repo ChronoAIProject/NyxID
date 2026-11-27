@@ -155,6 +155,23 @@ impl KeyProvider for LocalKeyProvider {
             .map_err(|e| AppError::Internal(format!("DEK unwrap failed: {e}")))
     }
 
+    async fn unwrap_for_observation(
+        &self,
+        wrapped: &WrappedKey,
+    ) -> Result<super::key_provider::Unwrapped, AppError> {
+        use super::record_field::authenticated::{LogicalKey, Slot};
+        let dek = self.unwrap_dek(wrapped).await?;
+        let slot = if wrapped.key_id == self.current_id {
+            Slot::Current
+        } else {
+            Slot::Previous
+        };
+        Ok(super::key_provider::Unwrapped {
+            dek,
+            key: Some((slot, LogicalKey::Local)),
+        })
+    }
+
     fn current_key_id(&self) -> u8 {
         self.current_id
     }
