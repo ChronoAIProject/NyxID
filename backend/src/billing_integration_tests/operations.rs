@@ -4,6 +4,7 @@ use crate::models::credits::Credits;
 use crate::models::downstream_service::OfferingKind;
 use crate::models::service_billing::{LanePricing, OperationPrice, PricingSyncStatus};
 use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
+use crate::services::credential_record_service as key_record;
 use crate::test_utils::{connect_test_database_with_command_handler, test_service_endpoint};
 use futures::TryStreamExt;
 use mongodb::bson::Document;
@@ -71,15 +72,27 @@ async fn insert_rates(db: &mongodb::Database, rates: &[(String, i64)]) {
 /// so requests bill the BYOK lane as `UserOwned`.
 async fn fund_and_connect(state: &crate::AppState, owner: &str, user_service: &str) {
     let now = bson::DateTime::now();
-    let encrypted = state
-        .encryption_keys
-        .encrypt(b"operation-byok-secret")
-        .await
-        .unwrap();
     let key_id = Uuid::new_v4().to_string();
+    let encrypted = key_record::encrypt(
+        &state.encryption_keys,
+        crate::models::user_api_key::COLLECTION_NAME,
+        &key_id,
+        owner,
+        "credential_encrypted",
+        b"operation-byok-secret",
+    )
+    .await
+    .unwrap();
+    let mut versions = Default::default();
+    key_record::mark_version(
+        &mut versions,
+        &state.encryption_keys,
+        "credential_encrypted",
+    );
     state.db.collection::<Document>("user_api_keys").insert_one(doc! {
         "_id": &key_id, "user_id": owner, "label": "Operation BYOK", "credential_type": "bearer",
         "status": "active", "credential_epoch": 1_i64,
+        "secret_context_versions": bson::to_bson(&versions).unwrap(),
         "credential_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
         "created_at": now, "updated_at": now,
     }).await.unwrap();

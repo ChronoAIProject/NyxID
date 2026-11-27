@@ -1,5 +1,6 @@
 //! Run the detached worker, then authenticate NyxAgent's actual HTTP callbacks.
 use super::*;
+use crate::services::catalog_credential_record_service as catalog_record;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -62,12 +63,16 @@ async fn shared_group_turn_e2e(collaboration: bool, upstream_failure: bool) {
     model.auth_method = "bearer".into();
     model.requires_user_credential = false;
     model.identity_propagation_mode = "none".into();
-    model.credential_encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"test-master")
-        .await
-        .unwrap();
+    model.credential_encrypted = catalog_record::encrypt(
+        &f.state.encryption_keys,
+        &model.id,
+        catalog_record::owner(&model).unwrap(),
+        b"test-master",
+    )
+    .await
+    .unwrap();
+    model.secret_context_versions =
+        catalog_record::initial_versions(&f.state.encryption_keys, true);
     model.platform_key =
         Some(serde_json::from_value(json!({"enabled":true,"audience":"public"})).unwrap());
     model.inference = Some(
@@ -127,6 +132,7 @@ async fn shared_group_turn_e2e(collaboration: bool, upstream_failure: bool) {
     service.slug = "recipient-noauth".into();
     service.auth_method = "none".into();
     service.credential_encrypted.clear();
+    service.secret_context_versions.clear();
     service.platform_key = None;
     service.inference = None;
     f.state

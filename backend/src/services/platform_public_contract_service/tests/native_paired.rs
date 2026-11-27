@@ -1,6 +1,7 @@
 //! Real local NyxAgent/Codex, NyxID MCP/funding and durable native signup/final sends.
 //! The provider emits a deterministic four-step script; it never calls a model.
 use super::*;
+use crate::services::catalog_credential_record_service as catalog_record;
 use crate::{
     models::{
         billing_wallet::{BillingWallet, COLLECTION_NAME as WALLETS},
@@ -231,11 +232,16 @@ fn real_codex_native_v2_discovery_readiness_faq_search_read_signup_answer_use_ac
             outer.base_url = runtime_base.clone();
             let mut model = model();
             model.base_url = format!("{}/v1", provider.uri());
-            model.credential_encrypted = state
-                .encryption_keys
-                .encrypt(b"local-pairing-model-key")
-                .await
-                .unwrap();
+            model.credential_encrypted = catalog_record::encrypt(
+                &state.encryption_keys,
+                &model.id,
+                catalog_record::owner(&model).unwrap(),
+                b"local-pairing-model-key",
+            )
+            .await
+            .unwrap();
+            model.secret_context_versions =
+                catalog_record::initial_versions(&state.encryption_keys, true);
             model.billing=Some(serde_json::from_value(json!({"platform_key_pricing":{"metric":"input_tokens","credits_per_unit":"0.000005","lago_metric_code":"public_input","sync_status":"synced","components":[
         {"metric":"output_tokens","credits_per_unit":"0.00002","lago_metric_code":"public_output","sync_status":"synced"},
         {"metric":"cache_read_tokens","credits_per_unit":"0.0000008","lago_metric_code":"public_cache_read","sync_status":"synced"},

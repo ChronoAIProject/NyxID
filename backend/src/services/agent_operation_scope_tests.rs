@@ -1,5 +1,6 @@
 use super::agent_operation_scope_service::*;
 use crate::models::{agent_operation_scope::*, downstream_service::ProxyOperationRule};
+use crate::services::credential_record_service as key_record;
 use crate::services::proxy_authorization::CanonicalPath;
 
 fn scope() -> AgentOperationScope {
@@ -1487,15 +1488,26 @@ async fn receipt_bot_recipe_saves_real_lark_operations_and_checks_final_inputs()
     // Real catalog-backed Lark callers carry an owner credential. Keep the
     // specialist, live turn, flag and saved operation/input scopes unchanged.
     let credential = uuid::Uuid::new_v4().to_string();
-    let encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"receipt-owner-oauth-test-token")
-        .await
-        .unwrap();
+    let encrypted = key_record::encrypt(
+        &f.state.encryption_keys,
+        crate::models::user_api_key::COLLECTION_NAME,
+        &credential,
+        &f.owner,
+        "access_token_encrypted",
+        b"receipt-owner-oauth-test-token",
+    )
+    .await
+    .unwrap();
+    let mut versions = Default::default();
+    key_record::mark_version(
+        &mut versions,
+        &f.state.encryption_keys,
+        "access_token_encrypted",
+    );
     db.collection::<bson::Document>("user_api_keys")
         .insert_one(doc! {
             "_id": &credential, "user_id": &f.owner, "label": "Receipt account",
+            "secret_context_versions": bson::to_bson(&versions).unwrap(),
             "credential_type": "oauth2", "status": "active",
             "access_token_encrypted": bson::Binary {
                 subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted,

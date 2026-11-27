@@ -5,6 +5,7 @@ use crate::models::{
     assistant_conversation::AssistantConversation,
     assistant_sharing::{AgentConsent, ConsentDecision, SharedExecution},
 };
+use crate::services::catalog_credential_record_service as catalog_record;
 use crate::services::{
     assistant_service_execution as execution, proxy_service, shared_agent_consent as consent,
     shared_agent_transport as transport,
@@ -157,6 +158,29 @@ async fn migration_shared_once_survives_global_enrollment_and_is_still_one_use()
     f.f.state.db.drop().await.unwrap();
 }
 impl TransportFixture {
+    async fn catalog_credential_fields(&self, value: &[u8]) -> Document {
+        let keys = &self.f.state.encryption_keys;
+        let row = self
+            .f
+            .state
+            .db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &self.catalog})
+            .await
+            .unwrap()
+            .unwrap();
+        let encrypted =
+            catalog_record::encrypt(keys, &row.id, catalog_record::owner(&row).unwrap(), value)
+                .await
+                .unwrap();
+        doc! {
+            "credential_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted },
+            "secret_context_versions": catalog_record::version_update(keys, true).unwrap(),
+        }
+    }
+
     async fn new(name: &str, url: &str) -> Self {
         let f = Fixture::new(name).await;
         crate::test_utils::init_test_audit_chain_hmac_key();
@@ -1475,11 +1499,15 @@ async fn shared_transports_connect_fixed_origin_stops_before_next_buffer() {
 async fn shared_transports_platform_grants_are_recipient_scoped_and_live() {
     let f = TransportFixture::new("shared_transport_platform_acl", "https://example.invalid").await;
     let catalogs = f.f.state.db.collection::<Document>("downstream_services");
-    catalogs.update_one(doc! {"_id":&f.catalog}, doc! {"$set":{
-        "auth_method":"bearer", "credential_encrypted": bson::Binary {subtype:bson::spec::BinarySubtype::Generic,
-            bytes:f.f.state.encryption_keys.encrypt(b"test-platform-key").await.unwrap()},
+    let mut set = f.catalog_credential_fields(b"test-platform-key").await;
+    set.extend(doc! {
+        "auth_method":"bearer",
         "platform_key":{"enabled":true,"audience":"restricted","allowed_owner_ids":[&f.f.admin]}
-    }}).await.unwrap();
+    });
+    catalogs
+        .update_one(doc! {"_id":&f.catalog}, doc! {"$set":set})
+        .await
+        .unwrap();
     f.f.state
         .db
         .collection::<Document>("user_services")
@@ -1910,17 +1938,16 @@ async fn shared_transports_security_valid_uuid_stream_and_node_refusal() {
 #[tokio::test]
 async fn shared_transports_security_master_acl_is_bound_to_exact_connection_owner() {
     let f = TransportFixture::new("shared_exact_master_acl", "https://example.invalid").await;
-    let encrypted =
-        f.f.state
-            .encryption_keys
-            .encrypt(b"test-master")
-            .await
-            .unwrap();
     let catalogs = f.f.state.db.collection::<Document>("downstream_services");
-    catalogs.update_one(doc! {"_id":&f.catalog},doc! {"$set":{
-        "auth_method":"bearer", "credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted},
+    let mut set = f.catalog_credential_fields(b"test-master").await;
+    set.extend(doc! {
+        "auth_method":"bearer",
         "platform_key":{"enabled":true,"audience":"restricted","allowed_owner_ids":[&f.f.admin,&f.f.outsider]}
-    }}).await.unwrap();
+    });
+    catalogs
+        .update_one(doc! {"_id":&f.catalog}, doc! {"$set":set})
+        .await
+        .unwrap();
     f.f.state
         .db
         .collection::<Document>("user_services")

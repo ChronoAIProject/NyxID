@@ -1,4 +1,6 @@
 use super::*;
+use crate::services::catalog_credential_record_service as catalog_record;
+use crate::services::credential_record_service as key_record;
 use crate::{
     models::{
         assistant_voice::{VoiceInputMode, VoiceKeySource, VoicePreferences},
@@ -1115,7 +1117,10 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
         service.service_category = "connection".into(); service.requires_user_credential = true;
         service.auth_method = "bearer".into(); service.base_url = "https://api.openai.com/v1".into();
         service.platform_key = Some(PlatformKeyConfig { purpose: Default::default(), enabled: true, audience: PlatformKeyAudience::Public, allowed_owner_ids: vec![] });
-        service.credential_encrypted = state.encryption_keys.encrypt(b"fixture-key").await.unwrap();
+        service.credential_encrypted = catalog_record::encrypt(
+            &state.encryption_keys, &service.id, catalog_record::owner(&service).unwrap(), b"fixture-key",
+        ).await.unwrap();
+        service.secret_context_versions = catalog_record::initial_versions(&state.encryption_keys, true);
         service.inference = crate::services::inference_service::default_inference("llm-openai");
         let voice = service.inference.as_mut().unwrap().voice.as_mut().unwrap();
         voice.models[0].id = "admin-added-live-model".into();
@@ -1136,10 +1141,17 @@ async fn voice_options_use_catalog_models_voices_and_supported_protocols_only() 
         state.db.collection(crate::models::user_endpoint::COLLECTION_NAME).insert_one(test_user_endpoint(
             "endpoint", &thread.user_id, &service.slug, &service.base_url, None, Some(&service.id),
         )).await.unwrap();
+        let encrypted = key_record::encrypt(
+            &state.encryption_keys, crate::models::user_api_key::COLLECTION_NAME, "own-key",
+            &thread.user_id, "credential_encrypted", b"own-voice-key",
+        ).await.unwrap();
+        let mut versions = Default::default();
+        key_record::mark_version(&mut versions, &state.encryption_keys, "credential_encrypted");
         state.db.collection::<bson::Document>(crate::models::user_api_key::COLLECTION_NAME).insert_one(doc! {
+            "secret_context_versions": bson::to_bson(&versions).unwrap(),
             "_id":"own-key", "user_id":&thread.user_id, "label":"Own voice", "credential_type":"bearer",
             "credential_encrypted":bson::Binary {subtype:bson::spec::BinarySubtype::Generic,
-                bytes:state.encryption_keys.encrypt(b"own-voice-key").await.unwrap()},
+                bytes:encrypted},
             "status":"active", "created_at":bson::DateTime::now(), "updated_at":bson::DateTime::now()
         }).await.unwrap();
         state.db.collection(crate::models::user_service::COLLECTION_NAME).insert_one(connection).await.unwrap();
