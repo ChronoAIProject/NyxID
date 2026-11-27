@@ -9791,6 +9791,27 @@ conversation cursors for ordinary history discovery and uses a guest ID with
 `nyxid nyxbot history <id>` to read the guest transcript. A server without
 guest discovery continues to serve ordinary conversations.
 
+## Assistant agent avatars
+
+`PATCH /api/v1/assistant/nyxagent/agents/{id}` (first-party human sessions,
+profile authority as for `display_name`) accepts an optional `avatar`:
+
+```json
+{ "avatar": { "template": "blob-v1", "body": "deep", "eyes": "visor", "headwear": "crown",
+  "accessory": "pendant", "body_color": "sky", "accent_color": "gold" } }
+```
+
+An object sets the avatar, `null` clears it (clients then derive the default
+from the agent id; NyxBot has a fixed brand default) and omitting it leaves it
+unchanged. Every field is required and must be an id from the shared
+catalogue (`shared/agent-avatars/catalog.json`); anything else returns
+`400 validation_error`. Writes require the acting person's default-off
+`assistant:avatars` flag and return `403` while it is off; stored avatars are
+kept and still returned. Every agent DTO (agent list/detail, conversation
+`agent`, group members and message speakers, notification actors, machine
+activity agents, voice agents) carries `avatar` (or `null`). See
+[Agent avatars](chat/13-agent-avatars.md).
+
 ## Assistant skill review and image input
 
 `GET /api/v1/assistant/nyxagent/conversations/{id}` accepts an optional `card`

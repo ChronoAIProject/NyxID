@@ -2333,6 +2333,12 @@ async fn send_post_planned_impl(
                 }
                 journal::PartClaim::Send(attempt) => attempt,
             };
+        let slack_blocks = target.bot.platform == "slack"
+            && delivery.renderer_version == Some(plan::SLACK_RENDERER_VERSION)
+            && part
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.get("blocks").is_some());
         match crate::services::channel_text_preparation::with_part(
             &state.db,
             &delivery,
@@ -2342,7 +2348,10 @@ async fn send_post_planned_impl(
                 &state.db,
                 journal::formatting_receipt(&delivery, index, &attempt),
                 Some(&target.bot.id),
-                send_post_one(state, target, part, fence),
+                crate::services::channel_adapters::slack::with_planned_text_part(
+                    slack_blocks,
+                    send_post_one(state, target, part, fence),
+                ),
             ),
         )
         .await

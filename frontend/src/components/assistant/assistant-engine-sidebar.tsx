@@ -1,6 +1,7 @@
 import { readGroupInvite, clearGroupInvite } from "@/lib/collaboration-invite";
 import { GroupInviteDialog } from "./collaboration-group-controls";
 import { useConnectionDown } from "@/hooks/use-connection-down";
+import { useRosterActivity } from "@/hooks/use-agent-activity";
 import { useContext, useEffect, useMemo, useState, useSyncExternalStore, type ComponentProps } from "react";
 import { AssistantMobileThreadsContext } from "./assistant-threads-context";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -78,6 +79,7 @@ export function AssistantEngineSidebar({
     () => nyxAgentTransport.getConversation(openThread)?.agent?.id,
   );
   const agents = useNyxBotAgents(nyxagentEnabled);
+  const activityMood = useRosterActivity(agents.dataUpdatedAt, nyxagentEnabled);
   // Unread markers come from the notification summary; opening a thread or
   // crew reports it read once the tab has shown it for a moment.
   const notificationsEnabled = useNotificationsEnabled();
@@ -159,6 +161,7 @@ export function AssistantEngineSidebar({
   const agentsModel: SidebarAgents | undefined = nyxagentEnabled
     ? {
         agents: agents.data?.agents ?? [],
+        activityMood,
         destroyedTruncated: agents.data?.destroyed_truncated,
         loading: agents.isPending || agents.isFetching,
         loadError: agents.error

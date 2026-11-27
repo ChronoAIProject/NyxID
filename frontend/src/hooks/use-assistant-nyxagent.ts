@@ -259,9 +259,14 @@ export function useNyxAgentAssistantChat({
     const page = history.data;
     seenHistory.current = page;
     if (!previous || !page || previous.conversation.id !== page.conversation.id) return;
+    const pendingChanged =
+      previous.conversation.pending_acknowledgements !==
+      page.conversation.pending_acknowledgements;
+    if (pendingChanged)
+      void queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.activity(userId) }, { cancelRefetch: false });
     if (
       (previous.conversation.active_turn && !page.conversation.active_turn) ||
-      previous.conversation.pending_acknowledgements !== page.conversation.pending_acknowledgements ||
+      pendingChanged ||
       // Something the thread waited for happened: NyxID resumes it.
       previous.waiting.length > page.waiting.length
     ) {
@@ -360,6 +365,7 @@ export function useNyxAgentAssistantChat({
         queryClient.invalidateQueries({ queryKey: historyKey }, { cancelRefetch: false }),
         queryClient.invalidateQueries({ queryKey: threadsKey }, { cancelRefetch: false }),
         queryClient.invalidateQueries({ queryKey: agentsKey }, { cancelRefetch: false }),
+        queryClient.invalidateQueries({ queryKey: nyxBotQueryKeys.activity(userId) }, { cancelRefetch: false }),
       ]);
     },
   });

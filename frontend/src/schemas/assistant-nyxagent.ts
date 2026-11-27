@@ -3,11 +3,14 @@ import { discordIntakeSchema } from "./channel-bot-health";
 import { executionProposalSchema } from "./execution-proposal";
 import { collaborationGroupSchema, collaborationDecisionSchema } from "./collaboration-group";
 import { platformThreadSchema, platformTurnOriginSchema } from "./platform-personal";
+import { agentAvatarFieldSchema } from "./agent-avatar";
+import type { AvatarConfig } from "@/lib/assistant/agent-avatar-model";
 import { DEFAULT_SCHEDULE_MINIMUM_MINUTES } from "@/lib/automation-limits";
 import { z } from "zod";
 import { machineReceiptSchema } from "./machine-activity";
 import { cmaOperationSchema } from "./cma-operation";
 import { notificationSettingsSchema } from "./assistant-notifications";
+import { ROSTER_ACTIVITY_STATES } from "../../../shared/agent-avatars/activity";
 
 const conversationId = z.string().regex(/^nyxa-[a-f0-9]{32}$/);
 
@@ -78,6 +81,8 @@ export const nyxAgentConversationAgentSchema = z.object({
   id: z.string(),
   kind: historyEnum(["nyxbot", "specialist"]),
   name: z.string(),
+  display_name: z.string().nullable().optional(),
+  avatar: agentAvatarFieldSchema,
   /** A destroyed agent's threads are read-only. */
   destroyed: z.boolean().default(false),
 });
@@ -536,6 +541,25 @@ export const guestReadinessSettingsSchema = guestReadinessSchema.extend({
 });
 
 
+const agentThreadActivitySchema = z.object({
+  conversation_id: z.string(),
+  state: z.enum(ROSTER_ACTIVITY_STATES),
+});
+
+const agentThreadActivitiesSchema = z.array(z.unknown()).transform((items) =>
+  items.flatMap((item) => {
+    const result = agentThreadActivitySchema.safeParse(item);
+    return result.success ? [result.data] : [];
+  }),
+);
+
+export const assistantAgentActivitySchema = z.object({
+  agents: z.array(z.object({
+    agent_id: z.string(),
+    threads: agentThreadActivitiesSchema,
+  })),
+});
+
 export const assistantAgentSchema = z.object({
   guest_readiness: guestReadinessSchema.nullish(),
   share_role: z.enum(["manager", "user"]).nullable().optional(),
@@ -552,6 +576,8 @@ export const assistantAgentSchema = z.object({
   name: z.string(),
   /** A friendly name the user chose ("Luna"); shown instead of the handle. */
   display_name: z.string().nullable().default(null),
+  /** The chosen avatar; absent derives the default from the agent id. */
+  avatar: agentAvatarFieldSchema,
   /** Personality and tone the user asked for; style only, never authority. */
   persona: z.string().nullable().default(null),
   voice_instructions: z.string().nullable().optional(),
@@ -563,6 +589,7 @@ export const assistantAgentSchema = z.object({
   specialty: z.string().nullable().default(null),
   created_by: z.enum(["user", "nyxbot"]).catch("user"),
   status: assistantAgentStatusSchema,
+  activity: agentThreadActivitiesSchema.optional().catch(undefined),
   /** Granted service slugs (specialists). */
   services: z.array(z.string()).default([]),
   machines: z.array(z.string()).optional(),
@@ -721,6 +748,8 @@ export type AssistantAgentUpdate = {
   model?: string;
   access_mode_override?: NyxAgentAccessMode | null;
   channel_checking_notice?: boolean;
+  /** An object sets the avatar; null clears it back to the derived default. */
+  avatar?: AvatarConfig | null;
 };
 export type AssistantAgentProfile = {
   name: string;
@@ -903,6 +932,7 @@ export const assistantGroupMemberSchema = z.object({
   mention_handle: z.string().optional(),
   name: z.string(),
   display_name: z.string().nullable().optional(),
+  avatar: agentAvatarFieldSchema,
   kind: assistantAgentKindSchema,
   destroyed: z.boolean().default(false),
   unavailable: z.boolean().optional(),
@@ -949,7 +979,7 @@ export const assistantGroupMessageSchema = z.object({
   role: z.enum(["user", "agent", "notice"]),
   /** The speaking agent, set on `agent` messages. */
   agent: z
-    .object({ id: z.string(), name: z.string(), display_name: z.string().nullable().optional(), kind: assistantAgentKindSchema })
+    .object({ id: z.string(), name: z.string(), display_name: z.string().nullable().optional(), avatar: agentAvatarFieldSchema, kind: assistantAgentKindSchema })
     .nullable()
     .default(null),
   text: z.string(),

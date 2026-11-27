@@ -132,6 +132,24 @@ test("rejects injected inline scripts, event handlers and unlisted connections",
   expect(blocked.events).toContain("connect-src");
 });
 
+test("blocks WebAssembly compilation and JavaScript eval", async ({ page }, testInfo) => {
+  testInfo.annotations.push({ type: "expected-csp", description: JSON.stringify({ directive: "script-src", blocked: "eval" }) });
+  await page.goto("/login");
+  const result = await page.evaluate(async () => {
+    // The smallest valid module: magic number and version.
+    const wasm = await WebAssembly.compile(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]))
+      .then(() => "compiled", () => "blocked");
+    let evaluated = "ran";
+    try {
+      (0, eval)("1");
+    } catch {
+      evaluated = "blocked";
+    }
+    return { wasm, evaluated };
+  });
+  expect(result).toEqual({ wasm: "blocked", evaluated: "blocked" });
+});
+
 test("standalone credential page keeps its policy and packaged SRI assets", async ({ page, request }) => {
   const url = "/api/v1/nodes/fixture/credentials/pending/fixture/accept";
   const response = await request.get(url);

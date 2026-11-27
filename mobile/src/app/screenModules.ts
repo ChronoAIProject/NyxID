@@ -29,6 +29,8 @@ export const screenModules = {
     require("../features/activity/ActivityDetailScreen"),
   activity: (): typeof import("../features/activity/ActivityScreen") =>
     require("../features/activity/ActivityScreen"),
+  agentAvatarEdit: (): typeof import("../features/agents/AgentAvatarEditScreen") =>
+    require("../features/agents/AgentAvatarEditScreen"),
   assistantDetails: (): typeof import("../features/assistant/AssistantDetailsScreen") =>
     require("../features/assistant/AssistantDetailsScreen"),
   automations: (): typeof import("../features/automations/AutomationsScreen") =>

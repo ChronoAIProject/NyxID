@@ -10,6 +10,12 @@ const appEnv = process.env.APP_ENV ?? "dev";
 const profile = resolveProfile(appEnv, env);
 const config = getDefaultConfig(__dirname);
 config.watchFolders = [...config.watchFolders, path.resolve(__dirname, "../shared")];
+// `../shared` (agent avatars) has no node_modules of its own: its Babel
+// helpers resolve from the app's.
+config.resolver.nodeModulesPaths = [
+  ...(config.resolver.nodeModulesPaths ?? []),
+  path.resolve(__dirname, "node_modules"),
+];
 
 // Invalidate compiled domains and icon imports when their build inputs change.
 const transformHash = createHash("sha256")

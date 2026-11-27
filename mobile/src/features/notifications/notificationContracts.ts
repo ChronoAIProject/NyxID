@@ -1,6 +1,7 @@
 import { localizedError } from "../../i18n/localizedError";
 import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
+import { agentAvatarFieldSchema } from "../../lib/avatars/avatarSchema";
 
 /** Closed notification kinds; the server never sends anything else (SPEC D3). */
 export const NOTIFICATION_KINDS = [
@@ -55,6 +56,7 @@ export const notificationActorSchema = z.object({
   name: z.string(),
   display_name: z.string().nullable().optional(),
   kind: z.enum(["nyxbot", "specialist"]).nullable().optional(),
+  avatar: agentAvatarFieldSchema,
 });
 export type NotificationActor = z.infer<typeof notificationActorSchema>;
 

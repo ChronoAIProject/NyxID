@@ -916,6 +916,7 @@ fn approval_refuses_non_owner_guest_and_non_orchestrator() {
         home_conversation_id: None,
         memory: Vec::new(),
         display_name: None,
+        avatar: None,
         persona: None,
         voice_instructions: None,
         destroyed_at: None,

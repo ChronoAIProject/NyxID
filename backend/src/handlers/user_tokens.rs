@@ -3938,9 +3938,14 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let status = response.status();
-            let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
-            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            let (response, body) = response.into_parts();
+            let body = to_bytes(body, 1024 * 1024).await.unwrap();
+            assert_eq!(
+                response.status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&body)
+            );
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
             let url = url::Url::parse(body["authorization_url"].as_str().unwrap()).unwrap();
             let state_id = url
@@ -3958,6 +3963,13 @@ mod tests {
             let context = saved.history_context.unwrap();
             assert_eq!(context.actor.id, actor.to_string());
             assert_eq!(context.actor.name, "Initiating admin");
+            // #3017 binds immediate code exchange to the initiating browser's launch cookie.
+            let launch_cookie = response.headers[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap();
             let response = private
                 .clone()
                 .oneshot(
@@ -3965,6 +3977,7 @@ mod tests {
                         .uri(format!(
                             "/api/v1/providers/callback?state={state_id}&code=authorization"
                         ))
+                        .header(header::COOKIE, launch_cookie)
                         .body(Body::empty())
                         .unwrap(),
                 )

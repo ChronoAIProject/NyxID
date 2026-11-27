@@ -2397,13 +2397,45 @@ pub async fn pending_counts(
     user: &str,
     ids: &[String],
 ) -> AppResult<std::collections::HashMap<String, u32>> {
+    pending_counts_matching(db, user, doc! {"conversation_id": {"$in": ids}}, None).await
+}
+
+/// One bounded group read for the roster activity projection.
+pub(crate) async fn pending_activity_conversations(
+    db: &Database,
+    user: &str,
+    limit: i64,
+) -> AppResult<std::collections::HashSet<String>> {
+    Ok(pending_counts_matching(
+        db,
+        user,
+        doc! {"conversation_id": {"$type": "string"}},
+        Some(limit),
+    )
+    .await?
+    .into_keys()
+    .collect())
+}
+
+async fn pending_counts_matching(
+    db: &Database,
+    user: &str,
+    mut filter: bson::Document,
+    limit: Option<i64>,
+) -> AppResult<std::collections::HashMap<String, u32>> {
+    filter.extend(
+        doc! {"user_id": user, "status": "pending", "expires_at": {"$gt": bson::DateTime::now()}},
+    );
+    let mut pipeline = vec![
+        doc! {"$match": filter},
+        doc! {"$group": {"_id": "$conversation_id", "count": {"$sum": 1}}},
+    ];
+    if let Some(limit) = limit {
+        pipeline.extend([doc! {"$sort": {"_id": 1}}, doc! {"$limit": limit}]);
+    }
     let mut cursor = db
         .collection::<bson::Document>(ACKS)
-        .aggregate([
-            doc! {"$match": {"user_id": user, "conversation_id": {"$in": ids},
-            "status": "pending", "expires_at": {"$gt": bson::DateTime::now()}}},
-            doc! {"$group": {"_id": "$conversation_id", "count": {"$sum": 1}}},
-        ])
+        .aggregate(pipeline)
         .await?;
     let mut counts = std::collections::HashMap::new();
     while let Some(row) = cursor.try_next().await? {

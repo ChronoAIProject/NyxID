@@ -130,6 +130,7 @@
   "Changing the model restarts the working context for this chat.": "更換模型會重設此聊天的工作內容。",
   "Chat options": "聊天選項",
   "Chat title": "聊天標題",
+  "Chat with {{name}}, {{status}}": "與{{name}}聊天，{{status}}",
   "Chatting with {{name}}, {{details}}, {{status}}. Choose agent": "與 {{name}}、{{details}}，{{status}} 聊天。選擇智慧體",
   "Chatting with {{name}}, {{details}}. Choose agent": "與 {{name}}、{{details}} 聊天。選擇智慧體",
   "Check call status": "檢查通話狀態",

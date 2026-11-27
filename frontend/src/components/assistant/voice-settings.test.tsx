@@ -16,6 +16,9 @@ vi.mock("@/stores/auth-store", () => ({
 vi.mock("@/hooks/use-assistant-voice", () => ({
   useAssistantVoice: () => ({
     connected: false,
+    activity: {input:0,output:0},
+    inputAccepting: false,
+    restoredEvent: null,
     starting: false,
     start: vi.fn(),
     end: vi.fn(),

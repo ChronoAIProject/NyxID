@@ -1,3 +1,7 @@
+import { VoiceRippleBanner } from "./avatar/voice-ripple-banner";
+import { AgentAvatar, type AvatarAgent } from "./nyxbot-agent-avatar";
+import { resolveAvatar,resolveProcess } from "@/lib/assistant/agent-avatar-model";
+import { useAgentAvatarsEnabled } from "@/hooks/use-agent-avatars";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { Label } from "@/components/ui/label";
@@ -89,6 +93,7 @@ function VoiceCreditUsage({ option }: { option: VoiceOption }) {
 /** Media remains mounted when minimized; starting always needs a gesture. */
 export function VoicePanel({
   threadId,
+  agent,
   panelId,
   savedPreferences,
   preparation,
@@ -101,6 +106,7 @@ export function VoicePanel({
   onViewChange,
 }: {
   threadId: string;
+  agent?:AvatarAgent;
   panelId?: string;
   savedPreferences?: VoicePreferences | null;
   preparation?: PreparedMicrophone;
@@ -114,6 +120,10 @@ export function VoicePanel({
 }) {
   useUiTranslation();
   const voice = useAssistantVoice(threadId);
+  const avatarsEnabled=useAgentAvatarsEnabled();
+  const process=resolveProcess({surface:'voice',voice:{inputAccepting:voice.connected&&!voice.starting&&!!voice.inputAccepting,outputPlaying:voice.connected&&!voice.speakerMuted&&voice.activity.output>0,outputLevel:voice.activity.output},connection:voice.connectionStatus?{status:voice.connectionStatus==='ready'?'ready':voice.connectionStatus==='reconnecting'?'reconnecting':'connecting',restoredInSession:!!voice.restoredEvent}:undefined});
+  const avatarMood=process.state==='idle'&&process.connection?process.connection:process.state;
+
   const actorId = useAuthStore((state) => state.user?.id);
   const queryClient = useQueryClient();
   const [saving, setSaving] = useState(false);
@@ -764,7 +774,7 @@ export function VoicePanel({
       >
         {!settingsOnly && (
           <>
-            <span role="status">{status}</span>
+            {agent?<AgentAvatar agent={agent} size="xl" mood={avatarMood} animated/>:null}<span role="status">{status}</span>
             <span aria-label={translateUi("Call duration")} className="font-mono tabular-nums">
               {timer}
             </span>
@@ -850,6 +860,7 @@ export function VoicePanel({
           }}
         >{translateUi("Close")}</Button>
       </div>
+      {!settingsOnly&&agent&&avatarsEnabled?<div className="py-3"><VoiceRippleBanner config={resolveAvatar(agent)} kind={agent.kind} name={agent.display_name?.trim()||agent.name} connection={process.connection} status={translateUi(process.state==='listening'?'Listening':process.state==='speaking'?'Speaking':status)} inputAccepting={voice.connected&&!voice.starting&&!!voice.inputAccepting} outputPlaying={voice.connected&&!voice.speakerMuted&&voice.activity.output>0} outputLevel={voice.activity.output}/></div>:null}
       {settingsOnly && (
         <p className="mt-2 text-muted-foreground">{translateUi("Saved for your account across conversations. Changes apply to your next call.")}</p>
       )}

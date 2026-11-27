@@ -214,6 +214,7 @@ export function NotificationRow({
       name: actor.name,
       display_name: actor.display_name,
       kind: actor.kind ?? ("unknown" as const),
+      avatar: actor.avatar,
     }));
   const Fallback =
     item.actor?.type === "automation"
@@ -255,6 +256,7 @@ export function NotificationRow({
               name: item.actor.name,
               display_name: item.actor.display_name,
               kind: item.actor.kind ?? "unknown",
+              avatar: item.actor.avatar,
             }}
             size="lg"
           />

@@ -119,6 +119,7 @@ function AgentsRoute({ navigation, route }: WorkspaceScreenProps<"Agents">) {
       onEditProfile={(agentId, field) =>
         navigation.push("AgentProfileEdit", { agentId, field })
       }
+      onEditAvatar={(agentId) => navigation.push("AgentAvatarEdit", { agentId })}
       onOpenMachines={(agentId) =>
         navigation.push("AgentMachines", { agentId })
       }
@@ -203,6 +204,7 @@ function AgentDetailRoute({
       onEditProfile={(agentId, field) =>
         navigation.push("AgentProfileEdit", { agentId, field })
       }
+      onEditAvatar={(agentId) => navigation.push("AgentAvatarEdit", { agentId })}
       onOpenMachines={(agentId) =>
         navigation.push("AgentMachines", { agentId })
       }
@@ -422,6 +424,11 @@ function WorkspaceNavigator() {
         name="AgentDetail"
         component={AgentDetailRoute}
         options={{ title: t("Agent") }}
+      />
+      <ContentStack.Screen
+        name="AgentAvatarEdit"
+        getComponent={() => screenModules.agentAvatarEdit().AgentAvatarEditScreen}
+        options={{ title: t("Avatar") }}
       />
       <ContentStack.Screen
         name="AgentProfileEdit"

@@ -1458,6 +1458,11 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
         ),
         (
             crate::models::assistant_acknowledgement::COLLECTION_NAME,
+            doc! {"user_id": 1, "status": 1, "expires_at": 1, "conversation_id": 1},
+            false,
+        ),
+        (
+            crate::models::assistant_acknowledgement::COLLECTION_NAME,
             doc! {"kind": 1, "decider": 1, "status": 1, "user_id": 1, "requester_agent_id": 1, "_id": 1},
             false,
         ),

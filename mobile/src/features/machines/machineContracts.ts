@@ -1,5 +1,6 @@
 import { translateApp } from "../../i18n/appTranslation";
 import { z } from "zod";
+import { agentAvatarFieldSchema } from "../../lib/avatars/avatarSchema";
 
 export class MachineReviewRequired extends Error {}
 
@@ -158,6 +159,8 @@ export const machineActivitySchema = z.object({
       id: z.string(),
       name: z.string(),
       display_name: z.string().nullish(),
+      kind: z.enum(["nyxbot", "specialist"]).optional().catch(undefined),
+      avatar: agentAvatarFieldSchema,
     }),
   ),
 });

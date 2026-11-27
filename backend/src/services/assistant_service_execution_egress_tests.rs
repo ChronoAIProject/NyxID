@@ -664,62 +664,78 @@ async fn native_ssh_final_refusal_clears_only_presend_meter_bookkeeping() {
     );
 }
 
-#[tokio::test]
-async fn invisible_card_2072_sheets_write_ask_history_allow_and_single_dispatch() {
-    use crate::handlers::assistant_nyxagent as web;
-    use axum::{
-        body::{Body, to_bytes},
-        extract::{Path, Query, State},
-        http::Request,
-    };
-    let mut f = orchestrator_fixture("card2072_sheets_write").await;
+async fn sheets_write_fixture(
+    name: &str,
+) -> (
+    Fixture,
+    wiremock::MockServer,
+    Arc<std::sync::Mutex<Value>>,
+    String,
+) {
+    let mut f = orchestrator_fixture(name).await;
     mode(&f, AccessMode::AskEveryTime).await;
     let server = wiremock::MockServer::start().await;
+    let cells = Arc::new(std::sync::Mutex::new(json!([["Original", "unchanged"]])));
+    let written_cells = cells.clone();
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path(
             "/v4/spreadsheets/ledger/values:batchUpdate",
         ))
-        .respond_with(
-            wiremock::ResponseTemplate::new(200).set_body_json(json!({"totalUpdatedCells":2})),
-        )
+        .respond_with(move |request: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            *written_cells.lock().unwrap() = body["data"][0]["values"].clone();
+            wiremock::ResponseTemplate::new(200).set_body_json(json!({"totalUpdatedCells":2}))
+        })
         .mount(&server)
         .await;
     let id = connected(&f.state.db, &f.owner, "google-sheets", &server.uri()).await;
     grant_service(&mut f, &id).await;
-    async fn send(f: &Fixture, ack: Option<&str>) -> (axum::http::StatusCode, Value) {
-        let mut builder = Request::builder()
-            .method("POST")
-            .uri("/api/v1/proxy/s/google-sheets/v4/spreadsheets/ledger/values:batchUpdate")
-            .header("content-type", "application/json");
-        if let Some(id) = ack {
-            builder = builder.header(ACK_HEADER, id);
-        }
-        let mut request=builder.body(Body::from(json!({"valueInputOption":"USER_ENTERED","data":[{"range":"A1:B1","values":[["Ledger","=SUM(B2:B10)"]]}]}).to_string())).unwrap();
-        request.extensions_mut().insert(
-            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                crate::services::billing::BillingIngress::Proxy,
-            ),
-        );
-        let mut auth = f.auth.clone();
-        auth.assistant_chat = Some(Arc::new(f.chat.clone()));
-        let response = Box::pin(crate::handlers::proxy::proxy_request_by_slug(
-            State(f.state.clone()),
-            auth,
-            Default::default(),
-            Path((
-                "google-sheets".into(),
-                "v4/spreadsheets/ledger/values:batchUpdate".into(),
-            )),
-            request,
-        ))
-        .await
-        .unwrap();
-        let status = response.status();
-        let value =
-            serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
-        (status, value)
+    (f, server, cells, id)
+}
+
+async fn send_sheets_write(f: &Fixture, ack: Option<&str>) -> (axum::http::StatusCode, Value) {
+    use axum::{
+        body::{Body, to_bytes},
+        extract::{Path, State},
+        http::Request,
+    };
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri("/api/v1/proxy/s/google-sheets/v4/spreadsheets/ledger/values:batchUpdate")
+        .header("content-type", "application/json");
+    if let Some(id) = ack {
+        builder = builder.header(ACK_HEADER, id);
     }
-    let (status, card) = send(&f, None).await;
+    let mut request=builder.body(Body::from(json!({"valueInputOption":"USER_ENTERED","data":[{"range":"A1:B1","values":[["Ledger","=SUM(B2:B10)"]]}]}).to_string())).unwrap();
+    request.extensions_mut().insert(
+        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+            crate::services::billing::BillingIngress::Proxy,
+        ),
+    );
+    let mut auth = f.auth.clone();
+    auth.assistant_chat = Some(Arc::new(f.chat.clone()));
+    let response = Box::pin(crate::handlers::proxy::proxy_request_by_slug(
+        State(f.state.clone()),
+        auth,
+        Default::default(),
+        Path((
+            "google-sheets".into(),
+            "v4/spreadsheets/ledger/values:batchUpdate".into(),
+        )),
+        request,
+    ))
+    .await
+    .unwrap_or_else(axum::response::IntoResponse::into_response);
+    let status = response.status();
+    let value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 8192).await.unwrap()).unwrap();
+    (status, value)
+}
+
+async fn approve_sheets_write(f: &Fixture, server: &wiremock::MockServer) -> String {
+    use crate::handlers::assistant_nyxagent as web;
+    use axum::extract::{Path, Query, State};
+    let (status, card) = send_sheets_write(f, None).await;
     assert_eq!(status, 409, "{card}");
     assert_eq!(card["status"], "pending");
     assert_eq!(card["code"], "acknowledgement_required");
@@ -753,16 +769,157 @@ async fn invisible_card_2072_sheets_write_ask_history_allow_and_single_dispatch(
             card["review_path"]
         );
     }
-    acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
+    let approved = acks::decide(&f.state.db, &f.owner, &f.row.id, ack, true)
         .await
         .unwrap();
-    let (status, result) = send(&f, Some(ack)).await;
+    assert_eq!(approved.status, "allowed");
+    ack.to_owned()
+}
+
+#[tokio::test]
+async fn invisible_card_2072_sheets_write_ask_history_allow_and_single_dispatch() {
+    let (f, server, cells, _) = sheets_write_fixture("card2072_sheets_write").await;
+    let ack = approve_sheets_write(&f, &server).await;
+    let (status, result) = send_sheets_write(&f, Some(&ack)).await;
     assert_eq!(status, 200, "{result}");
     assert_eq!(result["totalUpdatedCells"], 2);
-    let (status, result) = send(&f, Some(ack)).await;
+    let (status, result) = send_sheets_write(&f, Some(&ack)).await;
     assert_eq!(status, 409, "{result}");
     assert_eq!(result["status"], "used");
     assert_eq!(result["code"], "acknowledgement_used");
     assert!(result.get("confirm_phrase").is_none());
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(*cells.lock().unwrap(), json!([["Ledger", "=SUM(B2:B10)"]]));
+}
+
+#[tokio::test]
+async fn d7_2607_approved_sheets_write_without_funds_refuses_before_dispatch_or_holds() {
+    use crate::models::{billing_wallet::BillingWallet, credits::Credits};
+    let (mut f, server, cells, id) = sheets_write_fixture("d7_2607_sheets_no_funds").await;
+    crate::billing_integration_tests::create_usage_index(&f.state.db).await;
+    f.state
+        .db
+        .collection("billing_rate_cache")
+        .insert_one(crate::billing_integration_tests::rate(
+            "platform_requests",
+            Utc::now(),
+        ))
+        .await
+        .unwrap();
+    let lago =
+        Arc::new(crate::billing_integration_tests::FakeLago::with_wallet_balance(Credits::ZERO));
+    f.state.billing = Arc::new(crate::billing_integration_tests::billing_service(
+        &f.state.db,
+        lago.clone(),
+        0,
+    ));
+    let catalog = catalog(&f).await;
+    let billing = crate::models::service_billing::ServiceBilling {
+        platform_billable: true,
+        platform_charge_nyxid_credentials_only: false,
+        platform_metric: Some(crate::models::service_billing::BillingMetric::Requests),
+        ..Default::default()
+    };
+    f.state
+        .db
+        .collection::<Document>("downstream_services")
+        .update_one(
+            doc! {"_id": &catalog},
+            doc! {"$set": {"inference": bson::Bson::Null, "billing": bson::to_bson(&billing).unwrap(),
+                "base_url": server.uri(), "slug": "google-sheets-d7-fixture", "name": "Synthetic Sheets"}},
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>("user_services")
+        .update_one(
+            doc! {"_id": &id},
+            doc! {"$set": {"catalog_service_id": &catalog}},
+        )
+        .await
+        .unwrap();
+    let wallet = f
+        .state
+        .billing
+        .ensure_wallet(&f.owner)
+        .await
+        .unwrap()
+        .wallet;
+    assert_eq!(wallet.balance_credits, Credits::ZERO);
+    assert_eq!(wallet.overdraft_cap_credits, Credits::ZERO);
+    assert_eq!(wallet.reserved_credits, Credits::ZERO);
+    let original_cells = cells.lock().unwrap().clone();
+    let ledger_before = f
+        .state
+        .db
+        .collection::<Document>("billing_ledger")
+        .count_documents(doc! {})
+        .await
+        .unwrap();
+    // This disposable fixture has no benefits that could hide wallet exhaustion.
+    for collection in [
+        "credit_grants",
+        "usage_allowances",
+        "usage_allowance_periods",
+        "usage_meter",
+    ] {
+        assert_eq!(
+            f.state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+            "{collection}"
+        );
+    }
+
+    let ack = approve_sheets_write(&f, &server).await;
+    let (status, result) = send_sheets_write(&f, Some(&ack)).await;
+    assert_eq!(status, axum::http::StatusCode::PAYMENT_REQUIRED, "{result}");
+    assert_eq!(result["error"], "insufficient_credits");
+    assert_eq!(result["error_code"], 11300);
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert_eq!(*cells.lock().unwrap(), original_cells);
+    assert_eq!(lago.recorded_events.load(Ordering::SeqCst), 0);
+    let after = f
+        .state
+        .db
+        .collection::<BillingWallet>("billing_wallet")
+        .find_one(doc! {"_id": &wallet.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.balance_credits, wallet.balance_credits);
+    assert_eq!(after.reserved_credits, Credits::ZERO);
+    assert_eq!(after.pending_lago_debits, Credits::ZERO);
+    assert_eq!(after.pending_topup_expiry_credits, Credits::ZERO);
+    for collection in [
+        "credit_grants",
+        "usage_allowances",
+        "usage_allowance_periods",
+        "usage_meter",
+    ] {
+        assert_eq!(
+            f.state
+                .db
+                .collection::<Document>(collection)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0,
+            "{collection}"
+        );
+    }
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("billing_ledger")
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        ledger_before
+    );
 }

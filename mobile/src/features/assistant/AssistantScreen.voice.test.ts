@@ -402,6 +402,14 @@ function setup(
       AssistantWaitingNote: "WaitingNote",
     },
     "./AssistantSystemMessage": { AssistantSystemMessage: "SystemMessage" },
+    "./agentMood": {
+      moodInputFor: () => ({ activeTurn: null }),
+      settledReplyOf: () => null,
+      useAgentMood: () => "idle",
+    },
+    "../../lib/avatars/useOwnNyxBot": {
+      useOwnNyxBotIdentity: () => ({ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }),
+    },
     "./AssistantReplyBody": {
       AssistantReplyBody: (props: any) => ({
         type: "ReplyBody",

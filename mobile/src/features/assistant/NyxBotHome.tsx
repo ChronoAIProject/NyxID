@@ -36,10 +36,16 @@ import { getCurrentUserProfileRequest } from "../../lib/api/http";
 import { livePollInterval } from "../../lib/api/assistantLiveTransport";
 import { formatRelativeTimeFromMs } from "../../lib/time";
 import { useTheme } from "../../theme/ThemeContext";
+import { useAgentAvatarsEnabled } from "../../lib/avatars/agentAvatarsFlag";
+import { rosterActivityLabel, rosterAvatarMood } from "../agents/agentRosterMood";
 import { fonts } from "../../theme/designTokens";
 import { groupKeys, useGroupAvailability } from "../groups/useGroupRuntime";
 import { useGroupsLive } from "../groups/useGroupsLive";
 import { chatAgentLabel } from "./assistantAgentContext";
+import {
+  NYXBOT_PLACEHOLDER,
+  ownNyxBot,
+} from "../../lib/avatars/ownNyxBot";
 import {
   AWAY_PREVIEW,
   agentOwnerSections,
@@ -79,6 +85,8 @@ export function NyxBotHome({
   const [hostWidth, setHostWidth] = useState<number>();
   useAppLanguage();
   const { colors } = useTheme();
+  const { t } = useAppLanguage();
+  const avatars = useAgentAvatarsEnabled();
   const { epoch, active, online, available } = useGroupAvailability();
   const live = useGroupsLive(epoch, active, available);
   const [now] = useState(() => new Date());
@@ -131,6 +139,16 @@ export function NyxBotHome({
   //   ? []
   //   : (onboarding.data?.recommendations ?? []);
   const roster = agents.data?.agents ?? [];
+  const nyxbot = ownNyxBot(roster);
+  const sections = agentOwnerSections(roster).map((section) => ({
+    ...section,
+    rows: section.agents.map((agent) => {
+      const mood = avatars ? rosterAvatarMood(agent) : undefined;
+      const name = chatAgentLabel(agent);
+      const status = t(rosterActivityLabel(mood ?? "idle"));
+      return { agent, mood, name, status };
+    }),
+  }));
   const groups = crews.data ?? [];
   const latest = useRef({ roster, groups });
   latest.current = { roster, groups };
@@ -168,8 +186,9 @@ export function NyxBotHome({
     <>
       <View style={styles.greeting}>
         <AgentAvatar
-          agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }}
+          agent={nyxbot ?? NYXBOT_PLACEHOLDER}
           size="lg"
+          mood={nyxbot && avatars ? rosterAvatarMood(nyxbot) : undefined}
         />
         <View style={styles.greetingText}>
           {/* A large title like every page's: capped growth so a word never
@@ -298,11 +317,12 @@ export function NyxBotHome({
               const request =
                 item.kind === "request" ? item.request : undefined;
               const failed = item.agent.last_reply?.status === "failed";
+              const mood = avatars ? rosterAvatarMood(item.agent) : undefined;
               return (
                 <HomeRow
                   hostWidth={hostWidth}
                   key={item.key}
-                  leading={<AgentAvatar agent={item.agent} size="lg" />}
+                  leading={<AgentAvatar agent={item.agent} size="lg" mood={mood} />}
                   title={name}
                   badge={
                     request ? (
@@ -383,7 +403,7 @@ export function NyxBotHome({
       </HomeGroup>
       ) : null}
       {!widePanel
-        ? agentOwnerSections(roster).map((section, index) => (
+        ? sections.map((section, index) => (
         <HomeGroup
           key={section.id}
           title={index === 0 ? translateApp("Your agents") : undefined}
@@ -400,12 +420,12 @@ export function NyxBotHome({
             ) : undefined
           }
         >
-          {section.agents.map((agent) => (
+          {section.rows.map(({ agent, mood, name, status }) => (
             <HomeRow
               hostWidth={hostWidth}
               key={agent.id}
-              leading={<AgentAvatar agent={agent} size="lg" />}
-              title={chatAgentLabel(agent)}
+              leading={<AgentAvatar agent={agent} size="lg" mood={mood} />}
+              title={name}
               badge={
                 agent.kind !== "nyxbot" ? (
                   agent.pending_acknowledgements > 0 ? (
@@ -440,9 +460,9 @@ export function NyxBotHome({
                         : translateApp("No role described yet.")),
                     },
                   )}
-              accessibilityLabel={translateApp("Chat with {{label}}", {
-                    label: chatAgentLabel(agent),
-                  })}
+              accessibilityLabel={avatars
+                ? t("Chat with {{name}}, {{status}}", { name, status })
+                : translateApp("Chat with {{label}}", { label: chatAgentLabel(agent) })}
               disabled={!active || agent.can_use === false}
               onPress={() => openAgent(agent.id)}
             />

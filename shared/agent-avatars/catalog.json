@@ -1,0 +1,834 @@
+{
+  "template": "face-v1",
+  "version": 1,
+  "reference_sha256": "9d91953d4e8a97a190ae75ce32f3b9acec1cb94e4024914b8d618a95ef30ea2e",
+  "max_choices": 32,
+  "max_identifier": 64,
+  "fields": {
+    "eyes": {
+      "dots": {
+        "label": "Dots"
+      },
+      "tall": {
+        "label": "Tall"
+      },
+      "calm": {
+        "label": "Calm"
+      },
+      "happy": {
+        "label": "Happy"
+      },
+      "wink": {
+        "label": "Wink"
+      },
+      "visor": {
+        "label": "Visor"
+      }
+    },
+    "head": {
+      "block": {
+        "label": "Block"
+      },
+      "tall": {
+        "label": "Tall"
+      },
+      "wide": {
+        "label": "Wide"
+      },
+      "round": {
+        "label": "Round"
+      },
+      "logo": {
+        "label": "Nyx",
+        "kinds": [
+          "nyxbot"
+        ]
+      }
+    },
+    "palette": {
+      "core-nyx": {
+        "label": "Nyx",
+        "group": "Core",
+        "kinds": [
+          "nyxbot"
+        ]
+      },
+      "core-violet": {
+        "label": "Violet",
+        "group": "Core"
+      },
+      "core-ocean": {
+        "label": "Ocean",
+        "group": "Core"
+      },
+      "core-mint": {
+        "label": "Mint",
+        "group": "Core"
+      },
+      "core-ember": {
+        "label": "Ember",
+        "group": "Core"
+      },
+      "core-indigo": {
+        "label": "Indigo",
+        "group": "Core"
+      },
+      "core-graphite": {
+        "label": "Graphite",
+        "group": "Core"
+      },
+      "vivid-magenta": {
+        "label": "Magenta",
+        "group": "Vivid"
+      },
+      "vivid-grape": {
+        "label": "Grape",
+        "group": "Vivid"
+      },
+      "vivid-sky": {
+        "label": "Sky",
+        "group": "Vivid"
+      },
+      "vivid-cyan": {
+        "label": "Cyan",
+        "group": "Vivid"
+      },
+      "vivid-lime": {
+        "label": "Lime",
+        "group": "Vivid"
+      },
+      "vivid-gold": {
+        "label": "Gold",
+        "group": "Vivid"
+      },
+      "vivid-tangerine": {
+        "label": "Tangerine",
+        "group": "Vivid"
+      },
+      "duo-dusk": {
+        "label": "Dusk",
+        "group": "Duo"
+      },
+      "duo-aurora": {
+        "label": "Aurora",
+        "group": "Duo"
+      },
+      "duo-sunset": {
+        "label": "Sunset",
+        "group": "Duo"
+      },
+      "duo-lagoon": {
+        "label": "Lagoon",
+        "group": "Duo"
+      },
+      "duo-twilight": {
+        "label": "Twilight",
+        "group": "Duo"
+      },
+      "duo-peach": {
+        "label": "Peach",
+        "group": "Duo"
+      },
+      "duo-citrus": {
+        "label": "Citrus",
+        "group": "Duo"
+      },
+      "soft-blush": {
+        "label": "Blush",
+        "group": "Soft"
+      },
+      "soft-lavender": {
+        "label": "Lavender",
+        "group": "Soft"
+      },
+      "soft-powder": {
+        "label": "Powder",
+        "group": "Soft"
+      },
+      "soft-pistachio": {
+        "label": "Pistachio",
+        "group": "Soft"
+      },
+      "soft-butter": {
+        "label": "Butter",
+        "group": "Soft"
+      },
+      "soft-seafoam": {
+        "label": "Seafoam",
+        "group": "Soft"
+      },
+      "soft-mist": {
+        "label": "Mist",
+        "group": "Soft"
+      },
+      "deep-midnight": {
+        "label": "Midnight",
+        "group": "Deep"
+      },
+      "deep-plum": {
+        "label": "Plum",
+        "group": "Deep"
+      },
+      "deep-navy": {
+        "label": "Navy",
+        "group": "Deep"
+      },
+      "deep-forest": {
+        "label": "Forest",
+        "group": "Deep"
+      },
+      "deep-teal": {
+        "label": "Teal",
+        "group": "Deep"
+      },
+      "deep-bronze": {
+        "label": "Bronze",
+        "group": "Deep"
+      },
+      "deep-ink": {
+        "label": "Ink",
+        "group": "Deep"
+      }
+    },
+    "treatment": {
+      "tint": {
+        "label": "Tint on dark"
+      },
+      "solid": {
+        "label": "Solid"
+      },
+      "gradient-tile": {
+        "label": "Gradient tile"
+      },
+      "three-stop": {
+        "label": "Three-stop"
+      },
+      "mesh": {
+        "label": "Mesh"
+      },
+      "conic-sheen": {
+        "label": "Conic sheen"
+      },
+      "glass": {
+        "label": "Glass"
+      },
+      "gradient-face": {
+        "label": "Gradient face"
+      },
+      "night-glow": {
+        "label": "Night glow"
+      },
+      "pastel": {
+        "label": "Pastel"
+      },
+      "neon-line": {
+        "label": "Neon line"
+      }
+    },
+    "surface": {
+      "flat": {
+        "label": "Flat",
+        "group": "Vector"
+      },
+      "dither-ordered": {
+        "label": "Ordered, 1-bit",
+        "group": "Dither"
+      },
+      "dither-chunky": {
+        "label": "Chunky",
+        "group": "Dither"
+      },
+      "dither-fine": {
+        "label": "Fine",
+        "group": "Dither"
+      },
+      "dither-diffusion": {
+        "label": "Error diffusion",
+        "group": "Dither"
+      },
+      "dither-halftone": {
+        "label": "Halftone",
+        "group": "Dither"
+      },
+      "dither-phosphor": {
+        "label": "Phosphor screen",
+        "group": "Dither"
+      },
+      "dither-handheld": {
+        "label": "Four-tone handheld",
+        "group": "Dither"
+      },
+      "dither-grain": {
+        "label": "Film grain",
+        "group": "Dither"
+      },
+      "dither-duotone": {
+        "label": "Duotone field",
+        "group": "Dither"
+      },
+      "ascii-shaded": {
+        "label": "Shaded",
+        "group": "Character"
+      },
+      "ascii-blocks": {
+        "label": "Blocks",
+        "group": "Character"
+      },
+      "ascii-braille": {
+        "label": "Braille",
+        "group": "Character"
+      },
+      "ascii-binary": {
+        "label": "Binary",
+        "group": "Character"
+      },
+      "ascii-name": {
+        "label": "Name fill",
+        "group": "Character"
+      },
+      "ascii-outline": {
+        "label": "Outline",
+        "group": "Character"
+      },
+      "ascii-gradient": {
+        "label": "Gradient",
+        "group": "Character"
+      },
+      "ascii-hatching": {
+        "label": "Hatching",
+        "group": "Character"
+      },
+      "ascii-inverted": {
+        "label": "Inverted",
+        "group": "Character"
+      }
+    },
+    "background": {
+      "treatment": {
+        "label": "Treatment background"
+      },
+      "tint": {
+        "label": "Tint"
+      },
+      "transparent": {
+        "label": "Transparent"
+      },
+      "solid": {
+        "label": "Solid"
+      },
+      "gradient": {
+        "label": "Gradient"
+      },
+      "three-stop": {
+        "label": "Three Stop"
+      },
+      "mesh": {
+        "label": "Mesh"
+      },
+      "conic": {
+        "label": "Conic"
+      },
+      "glass": {
+        "label": "Glass"
+      },
+      "dark": {
+        "label": "Dark"
+      },
+      "glow": {
+        "label": "Glow"
+      },
+      "pastel": {
+        "label": "Pastel"
+      },
+      "ripple": {
+        "label": "Ripple"
+      }
+    },
+    "frame": {
+      "circle": {
+        "label": "Circle"
+      },
+      "tile": {
+        "label": "Tile"
+      },
+      "none": {
+        "label": "None"
+      }
+    },
+    "motion": {
+      "automatic": {
+        "label": "Automatic"
+      },
+      "quiet": {
+        "label": "Quiet"
+      },
+      "still": {
+        "label": "Still"
+      }
+    },
+    "ripple_palette": {
+      "nyx": {
+        "label": "Nyx"
+      },
+      "dusk": {
+        "label": "Dusk"
+      },
+      "aurora": {
+        "label": "Aurora"
+      },
+      "ember": {
+        "label": "Ember"
+      },
+      "mint": {
+        "label": "Mint"
+      },
+      "ocean": {
+        "label": "Ocean"
+      },
+      "neon": {
+        "label": "Neon"
+      },
+      "midnight": {
+        "label": "Midnight"
+      },
+      "graphite": {
+        "label": "Graphite"
+      },
+      "sunrise": {
+        "label": "Sunrise"
+      },
+      "lilac": {
+        "label": "Lilac"
+      },
+      "seafoam": {
+        "label": "Seafoam"
+      }
+    },
+    "react_idle": {
+      "blink": {
+        "label": "Blink"
+      },
+      "still": {
+        "label": "Still"
+      },
+      "moving-light": {
+        "label": "Moving Light"
+      }
+    },
+    "react_thinking": {
+      "still": {
+        "label": "Still"
+      },
+      "character-churn": {
+        "label": "Character Churn"
+      },
+      "moving-light": {
+        "label": "Moving Light"
+      }
+    },
+    "react_working": {
+      "still": {
+        "label": "Still"
+      },
+      "rain": {
+        "label": "Rain"
+      },
+      "moving-light": {
+        "label": "Moving Light"
+      }
+    },
+    "react_drafting": {
+      "still": {
+        "label": "Still"
+      },
+      "typing": {
+        "label": "Typing"
+      }
+    },
+    "react_waiting": {
+      "blink": {
+        "label": "Blink"
+      },
+      "still": {
+        "label": "Still"
+      },
+      "slow-pulse": {
+        "label": "Slow Pulse"
+      }
+    },
+    "react_approval": {
+      "still": {
+        "label": "Still"
+      },
+      "attentive": {
+        "label": "Attentive"
+      }
+    },
+    "react_listening": {
+      "still": {
+        "label": "Still"
+      },
+      "halftone-ripple": {
+        "label": "Halftone Ripple"
+      }
+    },
+    "react_speaking": {
+      "still": {
+        "label": "Still"
+      },
+      "output-pulse": {
+        "label": "Output Pulse"
+      }
+    },
+    "react_connecting": {
+      "still": {
+        "label": "Still"
+      },
+      "scan": {
+        "label": "Scan"
+      }
+    },
+    "react_reconnecting": {
+      "still": {
+        "label": "Still"
+      },
+      "channel-offset": {
+        "label": "Channel Offset"
+      }
+    },
+    "react_connected": {
+      "still": {
+        "label": "Still"
+      },
+      "connection-ring": {
+        "label": "Connection Ring"
+      }
+    },
+    "react_stopping": {
+      "still": {
+        "label": "Still"
+      },
+      "settling": {
+        "label": "Settling"
+      }
+    },
+    "react_success": {
+      "still": {
+        "label": "Still"
+      },
+      "hop": {
+        "label": "Hop"
+      }
+    },
+    "react_failure": {
+      "still": {
+        "label": "Still"
+      },
+      "concerned": {
+        "label": "Concerned"
+      }
+    },
+    "react_created": {
+      "still": {
+        "label": "Still"
+      },
+      "pixel-assembly": {
+        "label": "Pixel Assembly"
+      }
+    },
+    "react_choosing": {
+      "still": {
+        "label": "Still"
+      },
+      "face-shuffle": {
+        "label": "Face Shuffle"
+      }
+    },
+    "react_retry": {
+      "still": {
+        "label": "Still"
+      },
+      "slow-pulse": {
+        "label": "Slow Pulse"
+      }
+    }
+  },
+  "reactions": {
+    "blink": {
+      "label": "Blink",
+      "states": [
+        "idle",
+        "waiting"
+      ],
+      "family": "vector",
+      "vector": "blink",
+      "quiet": "blink",
+      "static": "rest",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "still": {
+      "label": "Still",
+      "states": [
+        "idle",
+        "thinking",
+        "working",
+        "drafting",
+        "waiting",
+        "approval",
+        "listening",
+        "speaking",
+        "connecting",
+        "reconnecting",
+        "connected",
+        "stopping",
+        "success",
+        "failure",
+        "created",
+        "choosing",
+        "retry"
+      ],
+      "family": "vector",
+      "vector": "still",
+      "quiet": "still",
+      "static": "rest",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "character-churn": {
+      "label": "Character Churn",
+      "states": [
+        "thinking"
+      ],
+      "family": "character",
+      "vector": "thinking-pulse",
+      "quiet": "thinking-pulse",
+      "static": "rest",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "rain": {
+      "label": "Rain",
+      "states": [
+        "working"
+      ],
+      "family": "character",
+      "vector": "working-accent",
+      "quiet": "working-accent",
+      "static": "rest",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "typing": {
+      "label": "Typing",
+      "states": [
+        "drafting"
+      ],
+      "family": "character",
+      "vector": "drafting-pulse",
+      "quiet": "drafting-pulse",
+      "static": "rest",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "slow-pulse": {
+      "label": "Slow Pulse",
+      "states": [
+        "waiting",
+        "retry"
+      ],
+      "family": "vector",
+      "vector": "slow-pulse",
+      "quiet": "slow-pulse",
+      "static": "rest",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "attentive": {
+      "label": "Attentive",
+      "states": [
+        "approval"
+      ],
+      "family": "vector",
+      "vector": "attentive",
+      "quiet": "attentive",
+      "static": "tall",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "halftone-ripple": {
+      "label": "Halftone Ripple",
+      "states": [
+        "listening"
+      ],
+      "family": "vector",
+      "vector": "halftone-ripple",
+      "quiet": "listening-ring",
+      "static": "rest",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "output-pulse": {
+      "label": "Output Pulse",
+      "states": [
+        "speaking"
+      ],
+      "family": "vector",
+      "vector": "output-pulse",
+      "quiet": "output-pulse",
+      "static": "rest",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "scan": {
+      "label": "Scan",
+      "states": [
+        "connecting"
+      ],
+      "family": "character",
+      "vector": "connecting-pose",
+      "quiet": "connecting-pose",
+      "static": "rest",
+      "oneShot": true,
+      "duration": 2.2
+    },
+    "channel-offset": {
+      "label": "Channel Offset",
+      "states": [
+        "reconnecting"
+      ],
+      "family": "vector",
+      "vector": "channel-offset",
+      "quiet": "reconnecting-pose",
+      "static": "rest",
+      "oneShot": true,
+      "duration": 0.8
+    },
+    "connection-ring": {
+      "label": "Connection Ring",
+      "states": [
+        "connected"
+      ],
+      "family": "vector",
+      "vector": "connection-ring",
+      "quiet": "connected-accent",
+      "static": "rest",
+      "oneShot": true,
+      "duration": 1.2
+    },
+    "settling": {
+      "label": "Settling",
+      "states": [
+        "stopping"
+      ],
+      "family": "vector",
+      "vector": "settling",
+      "quiet": "stopping-pose",
+      "static": "calm",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "hop": {
+      "label": "Hop",
+      "states": [
+        "success"
+      ],
+      "family": "vector",
+      "vector": "hop",
+      "quiet": "happy",
+      "static": "happy",
+      "oneShot": true,
+      "duration": 1.6
+    },
+    "concerned": {
+      "label": "Concerned",
+      "states": [
+        "failure"
+      ],
+      "family": "vector",
+      "vector": "concerned",
+      "quiet": "concerned",
+      "static": "calm",
+      "oneShot": false,
+      "duration": 1.6
+    },
+    "pixel-assembly": {
+      "label": "Pixel Assembly",
+      "states": [
+        "created"
+      ],
+      "family": "dither",
+      "vector": "assembly-pulse",
+      "quiet": "assembly-pulse",
+      "static": "rest",
+      "oneShot": true,
+      "duration": 1.8
+    },
+    "face-shuffle": {
+      "label": "Face Shuffle",
+      "states": [
+        "choosing"
+      ],
+      "family": "dither",
+      "vector": "face-shuffle",
+      "quiet": "assembly-pulse",
+      "static": "rest",
+      "oneShot": true,
+      "duration": 1.6
+    },
+    "moving-light": {
+      "label": "Moving light",
+      "states": [
+        "idle",
+        "thinking",
+        "working"
+      ],
+      "family": "dither",
+      "vector": "pulse",
+      "quiet": "blink",
+      "static": "rest",
+      "oneShot": false,
+      "duration": 1.6
+    }
+  },
+  "defaults": {
+    "head": "round",
+    "eyes": "tall",
+    "palette": "core-nyx",
+    "treatment": "gradient-face",
+    "surface": "flat",
+    "background": "treatment",
+    "frame": "tile",
+    "motion": "automatic",
+    "ripple_palette": "nyx"
+  },
+  "default_reactions": {
+    "idle": "blink",
+    "thinking": "character-churn",
+    "working": "rain",
+    "drafting": "typing",
+    "waiting": "slow-pulse",
+    "approval": "attentive",
+    "listening": "halftone-ripple",
+    "speaking": "output-pulse",
+    "connecting": "scan",
+    "reconnecting": "channel-offset",
+    "connected": "connection-ring",
+    "stopping": "settling",
+    "success": "hop",
+    "failure": "concerned",
+    "created": "pixel-assembly",
+    "choosing": "face-shuffle",
+    "retry": "slow-pulse"
+  },
+  "compatibility": {
+    "stroke_treatment": "neon-line",
+    "stroke_surface": "flat",
+    "logo_kinds": [
+      "nyxbot"
+    ],
+    "nyx_palette_kinds": [
+      "nyxbot"
+    ]
+  }
+}

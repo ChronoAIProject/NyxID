@@ -1,3 +1,4 @@
+import type { AvatarConfig } from "@/lib/assistant/agent-avatar-model";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import {
@@ -150,6 +151,7 @@ export interface ComposerMention {
   readonly name: string;
   readonly kind: AssistantAgentKind | "person";
   readonly display_name?: string | null;
+  readonly avatar?: AvatarConfig | null;
   readonly shared?: boolean;
   readonly owner_name?: string | null;
 }

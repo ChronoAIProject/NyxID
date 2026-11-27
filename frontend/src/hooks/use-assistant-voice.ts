@@ -22,25 +22,70 @@ export function useAssistantVoice(thread: string) {
   const generation = useRef(0);
   const [activity, setActivity] = useState(silentActivity);
   const [holding, setHolding] = useState(false);
+  const [inputAccepting, setInputAccepting] = useState(false);
   const [connected, setConnected] = useState(false);
   const [snapshot, setSnapshot] = useState<VoiceSnapshot | null>(null);
   const [speakerMuted, setSpeakerMuted] = useState(false);
   const [starting, setStarting] = useState(false);
+  const transport = useRef<{
+    sessionId?: string;
+    last?: VoiceConnectionStatus;
+    sequence: number;
+  }>({ sequence: 0 });
+  const [restoredEvent, setRestoredEvent] = useState<{
+    id: string;
+    sessionId: string;
+  } | null>(null);
+  function observeStatus(status: VoiceConnectionStatus) {
+    const previous = transport.current;
+    if (
+      previous.last === "reconnecting" &&
+      status === "ready" &&
+      previous.sessionId
+    ) {
+      previous.sequence++;
+      setRestoredEvent({
+        id: `${previous.sessionId}:${previous.sequence}`,
+        sessionId: previous.sessionId,
+      });
+    }
+    previous.last = status;
+  }
+  function observeSession(sessionId: string) {
+    if (transport.current.sessionId !== sessionId) {
+      transport.current = { sessionId, sequence: 0 };
+      setRestoredEvent(null);
+    }
+  }
+  useEffect(() => {
+    if (!restoredEvent) return;
+    const timer = setTimeout(() => setRestoredEvent(null), 1200);
+    return () => clearTimeout(timer);
+  }, [restoredEvent]);
   const [connectionStatus, setConnectionStatus] =
     useState<VoiceConnectionStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [conflictSession, setConflictSession] = useState<VoiceSession | null>(
     null,
   );
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    // Actor/thread changes are an ownership boundary for this external media client.
+    setInputAccepting(false);
+    setHolding(false);
+    setStarting(false);
+    setConnected(false);
+    setConnectionStatus(null);
+    transport.current = { sequence: 0 };
+    setRestoredEvent(null);
+    return () => {
+      // This counter fences live media callbacks; cleanup must advance its current value.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
       generation.current++;
       const previous = client.current;
       client.current = null;
       if (previous) void previous.end();
-    },
-    [actor, thread],
-  );
+    };
+  }, [actor, thread]);
   const start = useCallback(
     async (
       preferences: VoicePreferences,
@@ -50,6 +95,9 @@ export function useAssistantVoice(thread: string) {
     ) => {
       if (client.current) return;
       const ticket = ++generation.current;
+      setInputAccepting(false);
+      transport.current = { sequence: 0 };
+      setRestoredEvent(null);
       setStarting(true);
       setError(null);
       setSnapshot(null);
@@ -59,6 +107,7 @@ export function useAssistantVoice(thread: string) {
         thread,
         (value) => {
           if (generation.current === ticket) {
+            observeSession(value.session.id);
             setSnapshot(value);
             if (value.session.state === "closing") {
               setStarting(false);
@@ -75,6 +124,7 @@ export function useAssistantVoice(thread: string) {
             client.current = null;
             setStarting(false);
             setConnected(false);
+            setInputAccepting(false);
             setHolding(false);
             setConnectionStatus(null);
           }
@@ -87,11 +137,18 @@ export function useAssistantVoice(thread: string) {
         },
         (status) => {
           if (generation.current === ticket) {
+            observeStatus(status);
             setConnectionStatus(status);
             setStarting(status !== "ready");
             setConnected(status === "ready");
-            if (status !== "ready") setHolding(false);
+            if (status !== "ready") {
+              setHolding(false);
+              setInputAccepting(false);
+            }
           }
+        },
+        (enabled) => {
+          if (generation.current === ticket) setInputAccepting(enabled);
         },
       );
       client.current = next;
@@ -103,6 +160,7 @@ export function useAssistantVoice(thread: string) {
         microphoneDevice(actor ?? ""),
       );
       if (generation.current === ticket && next.isClosed) {
+        setInputAccepting(false);
         setStarting(false);
         client.current = null;
       }
@@ -116,6 +174,7 @@ export function useAssistantVoice(thread: string) {
     setHolding(false);
     setStarting(false);
     setConnected(false);
+    setInputAccepting(false);
     setConnectionStatus(null);
     setSnapshot(null);
     setActivity((previous) => ({
@@ -142,11 +201,13 @@ export function useAssistantVoice(thread: string) {
   const rejoin = useCallback(() => {
     if (!conflictSession?.resumable || client.current) return;
     const ticket = ++generation.current;
+    setInputAccepting(false);
     const next = new AssistantVoiceClient(
       thread,
       (value) => {
         if (generation.current === ticket) {
           setConflictSession(null);
+          observeSession(value.session.id);
           setSnapshot(value);
           if (value.session.state === "closing") {
             setStarting(false);
@@ -163,6 +224,7 @@ export function useAssistantVoice(thread: string) {
           client.current = null;
           setStarting(false);
           setConnected(false);
+          setInputAccepting(false);
           setHolding(false);
           setConnectionStatus(null);
         }
@@ -173,11 +235,18 @@ export function useAssistantVoice(thread: string) {
       undefined,
       (status) => {
         if (generation.current === ticket) {
+          observeStatus(status);
           setConnectionStatus(status);
           setStarting(status !== "ready");
           setConnected(status === "ready");
-          if (status !== "ready") setHolding(false);
+          if (status !== "ready") {
+            setHolding(false);
+            setInputAccepting(false);
+          }
         }
+      },
+      (enabled) => {
+        if (generation.current === ticket) setInputAccepting(enabled);
       },
     );
     client.current = next;
@@ -187,6 +256,8 @@ export function useAssistantVoice(thread: string) {
   }, [conflictSession, thread]);
   return {
     activity,
+    inputAccepting,
+    restoredEvent,
     holding,
     connected,
     snapshot,
