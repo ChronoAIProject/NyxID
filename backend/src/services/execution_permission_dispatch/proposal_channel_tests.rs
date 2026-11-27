@@ -1,7 +1,7 @@
 use super::*;
 use crate::handlers::credential_record_fixtures::BotSecret;
 use crate::models::{
-    assistant_conversation::ChannelOrigin,
+    assistant_conversation::{ChannelOrigin, ChannelTurnContext},
     execution_permission_channel::{COLLECTION_NAME as DELIVERIES, Delivery},
     nyxbot_channel::{ChannelTurnDelivery, NyxbotEvent},
 };
@@ -567,6 +567,15 @@ async fn another_channel_turn(
     row: &AssistantConversation,
     event_id: &str,
 ) -> AssistantConversation {
+    another_channel_turn_with_context(f, row, event_id, false).await
+}
+
+async fn another_channel_turn_with_context(
+    f: &Fixture,
+    row: &AssistantConversation,
+    event_id: &str,
+    include_context: bool,
+) -> AssistantConversation {
     let mut event = f
         .state
         .db
@@ -655,6 +664,34 @@ async fn another_channel_turn(
         messages.insert_one(inbound).await.unwrap();
     }
     let origin = delivery.origin.clone();
+    let channel_context = if include_context {
+        let channel = f
+            .state
+            .db
+            .collection::<Document>("nyxbot_channels")
+            .find_one(doc! {"_id":&event.channel_id,"user_id":&f.owner})
+            .await
+            .unwrap()
+            .unwrap();
+        Some(ChannelTurnContext {
+            channel_guest: None,
+            meta_grant: None,
+            text_completeness: None,
+            org_origin: None,
+            display_name: None,
+            conversation_label: None,
+            followed: origin.thread.is_some(),
+            source_event_id: id.clone(),
+            channel_id: event.channel_id.clone(),
+            channel_bot_id: channel.get_str("channel_bot_id").unwrap().into(),
+            conversation_kind: "private".into(),
+            sender_kind: delivery.sender_kind.unwrap(),
+            guest: delivery.guest,
+            original_message: true,
+        })
+    } else {
+        None
+    };
     f.state
         .db
         .collection::<NyxbotEvent>("nyxbot_events")
@@ -675,6 +712,7 @@ async fn another_channel_turn(
     start.origin = TurnOrigin::Channel;
     start.execution_enrollment = true;
     start.channel_event_id = Some(id);
+    start.channel_context = channel_context;
     start.reply_channel = Some(origin);
     engine::begin_turn(&f.state.db, &f.owner, start, &f.state.encryption_keys)
         .await
@@ -2756,17 +2794,17 @@ async fn execution_result_unsupported_plan_retires_without_provider_effect_or_re
     f.cleanup().await;
 }
 
-/// A carried task keeps its root source, while the engine's independent
-/// assignment constructor captures the sole context of a later admitted Event.
-/// Both sources below come from real channel admission; the Event is a
-/// server-authored continuation fixture, not another human ingress claim.
+/// Constructor-level regression with two independently admitted channel sources.
+/// A pending review retains the original task; the later live owner turn is the
+/// product assignment constructor's parent. The child shell tests source capture,
+/// not delegation admission or a synthetic decision-event transition.
 #[tokio::test]
-async fn migration_channel_later_supervisor_event_retains_independent_proofs() {
-    use crate::models::assistant_conversation::{AgentRole, ChannelTurnContext};
-    use crate::services::{assistant_team_service as team, supervisor_write};
+async fn migration_channel_supervisor_assignment_constructor_retains_independent_proofs() {
+    use crate::models::assistant_conversation::AgentRole;
+    use crate::services::supervisor_write;
 
     let (f, original, original_event) =
-        channel_turn("migration_channel_later_supervisor_event", true).await;
+        channel_turn("migration_channel_assignment_constructor", true).await;
     let task = original
         .active_turn
         .as_ref()
@@ -2776,9 +2814,15 @@ async fn migration_channel_later_supervisor_event_retains_independent_proofs() {
         .unwrap();
     let root_source = task.channel_source.as_ref().unwrap();
     assert!(!root_source.audience_label.is_empty());
+    let (status, _) = write_call(&f).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let waiting = channel_proposal(&f).await;
+    assert_eq!(waiting.status, "pending");
+    assert_eq!(proposals::proposal(&waiting).unwrap().task, task);
     finish(&f, &original, "Original task waits").await;
-    let later = another_channel_turn(&f, &original, &original_event).await;
-    let later_source = later
+    tasks::check(&f.state.db, &task).await.unwrap();
+    let parent = another_channel_turn_with_context(&f, &original, &original_event, true).await;
+    let later_source = parent
         .active_turn
         .as_ref()
         .unwrap()
@@ -2791,51 +2835,11 @@ async fn migration_channel_later_supervisor_event_retains_independent_proofs() {
         .clone();
     assert_ne!(root_source.event_id, later_source.event_id);
     assert_ne!(root_source.original_turn_id, later_source.original_turn_id);
-    let channel = f
-        .state
-        .db
-        .collection::<Document>("nyxbot_channels")
-        .find_one(doc! {"_id":&later_source.channel_id})
-        .await
-        .unwrap()
-        .unwrap();
-    let context = ChannelTurnContext {
-        channel_guest: None,
-        meta_grant: None,
-        text_completeness: None,
-        org_origin: None,
-        display_name: None,
-        conversation_label: None,
-        followed: false,
-        source_event_id: later_source.event_id.clone(),
-        channel_id: later_source.channel_id.clone(),
-        channel_bot_id: channel.get_str("channel_bot_id").unwrap().into(),
-        conversation_kind: "private".into(),
-        sender_kind: crate::models::channel_thread::ThreadSenderKind::Human,
-        guest: false,
-        original_message: true,
-    };
-    finish(&f, &later, "Later owner message recorded").await;
-    let mut event = team::bound_event(
-        "owner_action_decided",
-        "Continue the original task".into(),
-        None,
-        None,
-    );
-    event.execution_task = Some(task.clone());
-    event.channel_contexts = vec![context];
-    let mut tx = f.state.db.client().start_session().await.unwrap();
-    tx.start_transaction().await.unwrap();
-    assert!(
-        engine::append_events_in_session(&f.state.db, &f.owner, &original.id, &[event], &mut tx)
-            .await
-            .unwrap()
-    );
-    tx.commit_transaction().await.unwrap();
-    let parent = event_turn(&f, &original).await;
     let assigning = parent.active_turn.as_ref().unwrap();
-    assert_eq!(assigning.origin, TurnOrigin::Event);
-    assert_eq!(assigning.execution_task.as_ref(), Some(&task));
+    assert_eq!(assigning.origin, TurnOrigin::Channel);
+    let later_task = assigning.execution_task.as_ref().unwrap();
+    assert_ne!(later_task.task, task.task);
+    tasks::check(&f.state.db, later_task).await.unwrap();
     let chat = acks::chat_for_conversation(&f.state.db, &parent)
         .await
         .unwrap()
@@ -2849,7 +2853,11 @@ async fn migration_channel_later_supervisor_event_retains_independent_proofs() {
     let turn = child.active_turn.as_mut().unwrap();
     turn.origin = TurnOrigin::Orchestrator;
     turn.report_to = Some(parent.id.clone());
+    turn.execution_task = Some(task.clone());
+    turn.channel_event_id = None;
+    turn.channel_context = None;
     turn.supervisor_source = None;
+    let mut tx = f.state.db.client().start_session().await.unwrap();
     tx.start_transaction().await.unwrap();
     supervisor_write::assign(&f.state.db, &mut tx, &mut child, Some(&causal))
         .await
@@ -2868,7 +2876,8 @@ async fn migration_channel_later_supervisor_event_retains_independent_proofs() {
         later_source.original_turn_id
     );
     assert_eq!(assigned.assigning_turn, assigning.turn_id);
-    assert_ne!(assigned.channel.original_turn_id, assigned.assigning_turn);
+    assert_eq!(assigned.channel.original_turn_id, assigned.assigning_turn);
+    assert_ne!(assigned.assigning_turn, root_source.original_turn_id);
     assert_ne!(assigned.channel.policy_digest, root_source.policy_digest);
     assert_ne!(assigned.channel.expires_at, root_source.expires_at);
     assert!(assigned.channel.audience_label.is_empty());

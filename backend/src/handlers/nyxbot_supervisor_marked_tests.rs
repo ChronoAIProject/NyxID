@@ -883,7 +883,7 @@ async fn supervisor_write_public_destination_keeps_owner_history_and_refuses_web
             .await
             .unwrap();
         let Json(control) =
-            approvals::get_request_by_id(State(j.state.clone()), auth(), Path(ordinary.id))
+            approvals::get_request_by_id(State(j.state.clone()), auth(), Path(ordinary.id.clone()))
                 .await
                 .unwrap();
         assert!(
@@ -892,16 +892,82 @@ async fn supervisor_write_public_destination_keeps_owner_history_and_refuses_web
                 .get("decision_destination")
                 .is_none()
         );
+        // The distinct ordinary row is only a public projection control. Remove
+        // it before releasing the real waiter so chat_approvals cannot include
+        // unrelated pending activity in the owner model or acknowledgement.
+        let requests = j
+            .state
+            .db
+            .collection::<ApprovalRequest>("approval_requests");
+        let removed = requests
+            .delete_one(doc! {"_id":&ordinary.id,"user_id":OWNER,"supervisor_write":null})
+            .await
+            .unwrap();
+        assert_eq!(removed.deleted_count, 1);
+        assert!(
+            requests
+                .find_one(doc! {"_id":&ordinary.id})
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         let delivery = cursor(&j).await;
-        let _ = body_text(owner(&j, &format!("no write-{code}"), "ws7-public-boundary-deny").await)
-            .await;
+        let decision =
+            body_text(owner(&j, &format!("no write-{code}"), "ws7-public-boundary-deny").await)
+                .await;
+        assert!(decision.contains("Write rejected. This decision authorizes no write."));
+        let rejected = load(&j, &review.id).await;
+        assert_eq!(rejected.status, "rejected");
+        assert_eq!(
+            rejected.decision_channel.as_deref(),
+            Some("supervisor_owner_dm")
+        );
+        assert!(rejected.decided_at.is_some());
+        assert!(!rejected.supervisor_write.as_ref().unwrap().dispatching);
         if let Some(connected) = connected {
             let report = tokio::time::timeout(Duration::from_secs(25), connected)
                 .await
                 .unwrap()
                 .unwrap();
-            assert!(owner_text(&report).contains(NO_CONFIRMATION));
+            // The unmarked connected model independently reads after refusal.
+            // That valid Pending observation is distinct from the marked
+            // retained receipt's intentionally unconfirmed outcome below.
+            let text = owner_text(&report);
+            assert_row_report(&text, &j, "Pending", 2);
+            assert_row_report(&text, &j, "Pending", 3);
+            assert!(!text.contains("Status = Approved"));
+            let observations = j.observed.lock().await;
+            let readbacks: Vec<_> = observations
+                .iter()
+                .filter(|event| event["stage"] == "independent_readback")
+                .collect();
+            assert_eq!(readbacks.len(), 1);
+            let observed = row_observation(&readbacks[0]["result"], &j.script.selected)
+                .expect("the actual selected provider row from the independent read");
+            assert_row_report(&observed, &j, "Pending", 3);
+            assert!(text.contains(&observed));
+            drop(observations);
+            assert_eq!(
+                j.ledger.lock().unwrap().reads,
+                ["Pending", "Pending", "Pending"]
+            );
+            let provider = j._ledger_server.received_requests().await.unwrap();
+            assert_eq!(
+                provider
+                    .iter()
+                    .filter(|request| request.method.as_str() == "PUT")
+                    .count(),
+                0
+            );
+            assert_eq!(
+                provider
+                    .iter()
+                    .filter(|request| request.method.as_str() == "POST"
+                        && request.url.path().ends_with("/records/search"))
+                    .count(),
+                3
+            );
         } else {
             later_dm_report(&j, &delivery, &review, NO_CONFIRMATION).await;
         }
