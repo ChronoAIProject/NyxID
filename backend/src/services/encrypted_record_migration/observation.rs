@@ -9,14 +9,17 @@ use crate::errors::AppResult;
 use crate::services::{channel_signing_migration, credential_record_service as credentials};
 use bson::{Bson, Document};
 
+mod companions;
+mod deliveries;
 mod families;
+mod nested;
+mod retained;
 #[cfg(test)]
 mod tests;
 
 pub(crate) struct Family {
     entry: &'static Entry,
-    /// Every mutable companion for these codecs lives on the source row.
-    /// Watching its _id covers changes to any of these paths in either direction.
+    /// Mutable source-row inputs in addition to the registered ciphertext slots.
     pub(crate) source_companions: &'static [&'static str],
 }
 
@@ -75,7 +78,9 @@ pub(crate) fn families() -> impl Iterator<Item = Family> {
             ],
             Adapter::Broker => &["user_id", "client_id", "secret_context_versions", "revoked"],
             Adapter::OAuthWebhook => &["created_by", "secret_context_versions"],
-            _ => return None,
+            _ => retained::source_companions(entry)
+                .or_else(|| deliveries::source_companions(entry))
+                .or_else(|| nested::source_companions(entry))?,
         };
         Some(Family {
             entry,
@@ -117,11 +122,14 @@ pub(crate) enum Finding {
     InvalidValue,
     AmbiguousBinding,
     UnknownKey,
+    MissingParent,
 }
 
 #[derive(Default)]
 pub(crate) struct Observation {
     pub(crate) instances: Vec<(&'static str, Storage)>,
+    refresh_jti: Option<zeroize::Zeroizing<String>>,
+    pub(crate) parents: Vec<crate::services::encrypted_record_census::Row>,
     pub(crate) findings: Vec<(&'static str, Finding)>,
 }
 
@@ -208,9 +216,15 @@ impl Family {
             .iter()
             .copied()
             .chain(matches!(self.entry.adapter, Adapter::OAuthState).then_some(CALLBACK))
+            .chain((self.collection() == "auth_device_codes").then_some(deliveries::GRANT))
     }
 
-    pub(crate) async fn observe(&self, keys: &EncryptionKeys, row: &Document) -> Observation {
+    async fn observe(
+        &self,
+        keys: &EncryptionKeys,
+        row: &Document,
+        parents: &companions::Parents,
+    ) -> Observation {
         let mut out = Observation::default();
         let observed = async {
             let source = Source {
@@ -241,21 +255,39 @@ impl Family {
                 }
                 Adapter::CatalogCa => source.ssh(&mut out).await,
                 Adapter::OAuthState => source.oauth(&mut out).await,
-                _ => Err(invalid()),
+                Adapter::LearningProposal => Box::pin(source.learning(&mut out)).await,
+                Adapter::ReattachWindow => source.window(&mut out).await,
+                Adapter::ApprovalProposal => source.approval(&mut out).await,
+                Adapter::AgentLogin | Adapter::AuthDevice | Adapter::NodeDevice => {
+                    Box::pin(source.delivery(&mut out, parents)).await
+                }
+                _ => Box::pin(source.retained(&mut out, parents)).await,
             }
         }
         .await;
         out.check(self.entry.fields[0], observed);
         // Node hashes and SSH public keys independently corroborate old plaintext.
-        if !matches!(self.entry.adapter, Adapter::Node | Adapter::CatalogCa) {
+        if !matches!(
+            self.entry.adapter,
+            Adapter::Node
+                | Adapter::CatalogCa
+                | Adapter::CmaRequest
+                | Adapter::AssistantCredential
+                | Adapter::GeneratedArtifact
+                | Adapter::NodeDevice
+                | Adapter::AuthDevice
+        ) {
             for (field, storage) in &out.instances {
-                if matches!(
-                    storage,
-                    Storage::Encrypted {
-                        contract: Contract::Unbound,
-                        ..
-                    }
-                ) {
+                if !(self.collection() == "platform_public_sessions"
+                    && *field == "credential_ciphertext")
+                    && matches!(
+                        storage,
+                        Storage::Encrypted {
+                            contract: Contract::Unbound,
+                            ..
+                        }
+                    )
+                {
                     out.findings.push((*field, Finding::AmbiguousBinding));
                 }
             }

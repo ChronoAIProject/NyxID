@@ -203,6 +203,11 @@ fn fields<'a>(collection: &str, row: &'a AuthDeviceCode) -> AppResult<Vec<Field<
     }
 }
 
+pub(crate) fn validate_shape(collection: &str, source: &Document) -> AppResult<()> {
+    let row = bson::from_document(source.clone()).map_err(|_| invalid())?;
+    fields(collection, &row).map(drop)
+}
+
 pub(crate) async fn verify(
     keys: &EncryptionKeys,
     collection: &str,
@@ -244,6 +249,35 @@ async fn check_legacy(
         .then_some(())
         .ok_or_else(invalid);
     }
+    let Some(jti) = issued_session(
+        row.approved_user_id.as_deref().ok_or_else(invalid)?,
+        path[0],
+        path[1],
+        value,
+    )?
+    else {
+        return Ok(());
+    };
+    let refresh = db
+        .collection::<Document>(refresh_token::COLLECTION_NAME)
+        .find_one(doc! {
+            "jti": jti.as_str(),
+        })
+        .projection(doc! {"user_id": 1, "session_id": 1})
+        .await?
+        .ok_or_else(|| AppError::Conflict(ISSUANCE_MISSING.into()))?;
+    (refresh.get_str("user_id") == Ok(row.approved_user_id.as_deref().ok_or_else(invalid)?)
+        && refresh.get_str("session_id") == Ok(path[1]))
+    .then_some(())
+    .ok_or_else(invalid)
+}
+
+pub(crate) fn issued_session(
+    owner: &str,
+    field: &str,
+    session: &str,
+    value: &str,
+) -> AppResult<Option<Zeroizing<String>>> {
     #[derive(serde::Deserialize)]
     struct Issued<'a> {
         sub: &'a str,
@@ -254,28 +288,18 @@ async fn check_legacy(
     let encoded = value.split('.').nth(1).ok_or_else(invalid)?;
     let decoded = Zeroizing::new(URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?);
     let claims: Issued<'_> = serde_json::from_slice(&decoded).map_err(|_| invalid())?;
-    if Some(claims.sub) != row.approved_user_id.as_deref() {
+    if claims.sub != owner {
         return Err(invalid());
     }
-    if path[0] == ACCESS {
-        return (claims.token_type == "access" && claims.sid == Some(path[1]))
-            .then_some(())
+    if field == ACCESS {
+        return (claims.token_type == "access" && claims.sid == Some(session))
+            .then_some(None)
             .ok_or_else(invalid);
     }
     if claims.token_type != "refresh" {
         return Err(invalid());
     }
-    let refresh = db
-        .collection::<Document>(refresh_token::COLLECTION_NAME)
-        .find_one(doc! {
-            "jti": claims.jti,
-        })
-        .projection(doc! {"user_id": 1, "session_id": 1})
-        .await?
-        .ok_or_else(|| AppError::Conflict(ISSUANCE_MISSING.into()))?;
-    (refresh.get_str("user_id") == Ok(claims.sub) && refresh.get_str("session_id") == Ok(path[1]))
-        .then_some(())
-        .ok_or_else(invalid)
+    Ok(Some(Zeroizing::new(claims.jti.to_owned())))
 }
 
 pub(crate) async fn migrate(

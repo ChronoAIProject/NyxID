@@ -514,7 +514,7 @@ fn lease_filter(w: &AsyncServiceOperation) -> bson::Document {
     doc! {"_id":&w.id,"state":&w.state,"lease_id":&w.lease_id}
 }
 
-fn validate_result_storage(w: &AsyncServiceOperation) -> AppResult<()> {
+pub(crate) fn validate_result_storage(w: &AsyncServiceOperation) -> AppResult<()> {
     if w.id.is_empty()
         || w.user_id.is_empty()
         || !matches!(

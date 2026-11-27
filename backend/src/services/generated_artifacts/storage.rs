@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 fn decode(source: &Document) -> AppResult<PendingArtifact> {
     bson::from_document(source.clone()).map_err(|_| invalid())
 }
-fn validate(row: &PendingArtifact, bytes: &[u8]) -> AppResult<()> {
+pub(crate) fn validate(row: &PendingArtifact, bytes: &[u8]) -> AppResult<()> {
     if row.state != "pending"
         || row.size <= 0
         || row.size as usize > sandbox::FILE_BYTES
