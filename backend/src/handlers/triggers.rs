@@ -643,6 +643,8 @@ pub struct RunResponse {
     pub finished_at: Option<String>,
     pub outcome: crate::models::trigger_run::RunOutcome,
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocking_run_id: Option<String>,
     pub failure_reason: Option<RunFailureReasonResponse>,
     pub thread_id: Option<String>,
     pub duration_ms: Option<i64>,
@@ -708,6 +710,7 @@ pub(crate) fn run_response(run: crate::models::trigger_run::TriggerRun) -> RunRe
         finished_at: run.finished_at.map(|t| t.to_rfc3339()),
         outcome: run.outcome,
         reason: run.reason,
+        blocking_run_id: run.blocking_run_id,
         failure_reason: run.failure_reason.map(|reason| RunFailureReasonResponse {
             source: reason.source,
             stage: reason.stage,
@@ -867,6 +870,7 @@ mod tests {
         let now = Utc::now();
         db.collection::<Trigger>(TRIGGERS)
             .insert_one(Trigger {
+                assistant_target_owner: None,
                 secret_context_versions: Default::default(),
                 source: Default::default(),
                 setup_watch_id: None,

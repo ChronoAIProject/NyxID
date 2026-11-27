@@ -1,6 +1,6 @@
 use super::*;
 use crate::models::{
-    platform_entry_identity::NativeEntryConfiguration,
+    platform_entry_identity::{NativeControlSurface, NativeEntryConfiguration},
     platform_manager_delivery::{DeliveryReference, DeliveryState},
     platform_manager_ingress::{IngressAudience, IngressPhase, PlatformManagerIngress},
 };
@@ -170,8 +170,16 @@ async fn claim(
 }
 
 pub(crate) async fn discord_fixture(base: &str) -> (AppState, ChannelBot, NativeEntryReceipt) {
+    discord_fixture_with_keys(base, crate::test_utils::test_encryption_keys()).await
+}
+
+async fn discord_fixture_with_keys(
+    base: &str,
+    keys: crate::crypto::aes::EncryptionKeys,
+) -> (AppState, ChannelBot, NativeEntryReceipt) {
     let db = crate::test_utils::connect_transaction_test_database("native_discord_reply").await;
-    let state = crate::test_utils::test_app_state(db.clone());
+    let mut state = crate::test_utils::test_app_state(db.clone());
+    state.encryption_keys = std::sync::Arc::new(keys);
     crate::services::platform_entry_migration::ensure(&db)
         .await
         .unwrap();
@@ -310,6 +318,31 @@ fn signed_discord_receipt_claim_uses_only_its_encrypted_interaction_followup() {
                 crate::services::channel_adapters::discord::DiscordAdapter::media_test_adapter(
                     &server.uri(),
                 );
+            let bot = crate::services::channel_bot_service::get_bot(
+                &state.db,
+                &receipt.configuration.identity.channel_bot_id,
+            )
+            .await
+            .unwrap();
+            let original_aad = binding_digest(&receipt).unwrap();
+            crate::services::channel_credential_continuity::rewrap_fixture(
+                &state.db,
+                &state.encryption_keys,
+                &bot,
+                &["bot_token_encrypted"],
+            )
+            .await;
+            let persisted = state
+                .db
+                .collection::<NativeEntryReceipt>(
+                    crate::models::platform_entry_identity::NATIVE_RECEIPTS,
+                )
+                .find_one(doc! {"_id":&receipt.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(binding_digest(&persisted).unwrap(), original_aad);
+            assert_eq!(persisted.content_commitment, receipt.content_commitment);
             let authority = claim(&state, &receipt, &adapter).await.unwrap();
             assert!(!format!("{authority:?}").contains("synthetic-interaction"));
             let result = send_claimed_for_test(
@@ -1416,3 +1449,6 @@ fn retained_signed_native_receipt_produces_real_login_status_and_manager_admissi
         },
     );
 }
+
+#[path = "platform_native_reply_mixed.rs"]
+mod mixed;

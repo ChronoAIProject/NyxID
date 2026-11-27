@@ -25,12 +25,13 @@ function ChannelIcon({ platform }: { readonly platform: string }) {
   );
 }
 
-export function ChannelConnectionShell({
+function ChannelConnectionContent({
   platform,
   platformName,
   complete,
   email,
   guideUrl,
+  embedded = false,
   children,
 }: {
   readonly platform: string;
@@ -38,14 +39,14 @@ export function ChannelConnectionShell({
   readonly complete: boolean;
   readonly email?: string;
   readonly guideUrl?: string | null;
+  readonly embedded?: boolean;
   readonly children: ReactNode;
 }) {
   useUiTranslation();
-  useApplyTheme();
   return (
-    <div className="flex min-h-dvh flex-col bg-background px-4 py-6 text-foreground sm:py-10">
+    <div className={embedded ? "text-foreground" : "flex min-h-dvh flex-col bg-background px-4 py-6 text-foreground sm:py-10"}>
       <div className="m-auto w-full max-w-[520px]">
-        <main className="channel-connection-card relative overflow-hidden rounded-xl border border-border bg-card">
+        <main className={`channel-connection-card relative overflow-hidden bg-card ${embedded ? "" : "rounded-xl border border-border"}`}>
           <div className="px-5 py-8 sm:px-8">
             {guideUrl && (
               <div className="mb-6 flex justify-end">
@@ -107,8 +108,17 @@ export function ChannelConnectionShell({
             </div>
           )}
         </main>
-        <footer className="mt-6 flex h-7 items-center justify-center text-center text-13 text-muted-foreground">{translateUi("Channel connections by NyxID")}</footer>
+        {!embedded && <footer className="mt-6 flex h-7 items-center justify-center text-center text-13 text-muted-foreground">{translateUi("Channel connections by NyxID")}</footer>}
       </div>
     </div>
   );
+}
+
+function StandaloneChannelConnectionShell(props: Parameters<typeof ChannelConnectionContent>[0]) {
+  useApplyTheme();
+  return <ChannelConnectionContent {...props} />;
+}
+
+export function ChannelConnectionShell(props: Parameters<typeof ChannelConnectionContent>[0]) {
+  return props.embedded ? <ChannelConnectionContent {...props} /> : <StandaloneChannelConnectionShell {...props} />;
 }

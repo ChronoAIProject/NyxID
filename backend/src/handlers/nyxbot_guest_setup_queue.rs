@@ -4,24 +4,7 @@
 use super::*;
 use crate::services::assistant_guest_model_setup as setup;
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct WaitingGuest {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    media_event_ids: Vec<String>,
-    #[serde(default)]
-    channel_context: Option<crate::models::assistant_conversation::ChannelTurnContext>,
-    conversation: String,
-    agent: String,
-    profile: String,
-    text: String,
-    note: Option<String>,
-    title: Option<String>,
-    question: Option<String>,
-    question_key: Option<String>,
-    origin: ChannelOrigin,
-    #[serde(default)]
-    reply_channel: Option<ChannelOrigin>,
-}
+use crate::models::nyxbot_channel::WaitingGuest;
 
 /// Returns None for an already-ready lane (and for shared recipients). The
 /// caller keeps its stream while waiting; the sweep can resume after a crash.
@@ -32,6 +15,13 @@ pub(super) async fn wait(
 ) -> AppResult<Option<Inbound>> {
     if !start.guest {
         return Ok(None);
+    }
+    let guest = start
+        .channel_context
+        .as_ref()
+        .and_then(|context| context.channel_guest.as_ref());
+    if let Some(guest) = guest {
+        crate::services::channel_guest_access::revalidate(&state.db, guest).await?;
     }
     let org_origin = start
         .channel
@@ -77,7 +67,11 @@ pub(super) async fn wait(
     let Some(permit) = state
         .direct_chat_limiter
         .try_acquire_pool(
-            "assistant_channel",
+            if guest.is_some() {
+                "assistant_channel_guest"
+            } else {
+                "assistant_channel"
+            },
             actor,
             crate::services::assistant_team_service::CHANNEL_TURNS_PER_OWNER,
         )
@@ -117,24 +111,76 @@ pub(super) async fn wait(
         serde_json::to_vec(&payload)
             .map_err(|_| AppError::Internal("Guest queue unavailable".into()))?,
     );
-    let ciphertext = state.encryption_keys.encrypt(&bytes).await?;
+    let keys = &state.encryption_keys;
+    let (field, marker) = if guest.is_some() {
+        (
+            event_record::CHANNEL_GUEST,
+            event_record::CHANNEL_GUEST_VERSION,
+        )
+    } else {
+        (event_record::GUEST, event_record::GUEST_VERSION)
+    };
+    let ciphertext =
+        event_record::seal(keys, event, &channel.user_id, &[field, &channel.id], &bytes).await?;
     let deadline = Utc::now() + ChronoDuration::seconds(60);
+    let update = event_record::set_material(
+        doc! {
+            "status": "queued",
+            "guest_setup_conversation_id": conversation,
+            "guest_setup_deadline": bson::DateTime::from_chrono(deadline),
+            field: bson::Binary { subtype:bson::spec::BinarySubtype::Generic, bytes:ciphertext },
+        },
+        marker,
+        event_record::version(keys),
+    );
     let context = (
         state.db.clone(),
         channel.user_id.clone(),
+        channel.id.clone(),
         event.to_owned(),
-        conversation.to_owned(),
-        ciphertext,
-        deadline,
+        update,
+        field,
+        guest.cloned(),
     );
-    let accepted=crate::services::transaction_service::run_db_only(&state.db,&context,|tx,(db,owner,event,conversation,ciphertext,deadline)|Box::pin(async move {
-        crate::services::erasure_admission::fence_in_session(db,owner,tx).await?;
-        let events=db.collection::<bson::Document>(EVENTS);
-        if events.count_documents(doc!{"user_id":owner,"status":"queued","guest_setup_payload":{"$exists":true}}).session(&mut *tx).await?>=32 {return Ok(false);}
-        Ok(events.update_one(doc!{"_id":event,"user_id":owner,"turn_id":bson::Bson::Null,"status":{"$in":["running","resuming"]}},
-            doc!{"$set":{"status":"queued","guest_setup_conversation_id":conversation,"guest_setup_deadline":bson::DateTime::from_chrono(*deadline),
-                "guest_setup_payload":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:ciphertext.clone()}}}).session(tx).await?.matched_count==1)
-    })).await?;
+    let accepted = crate::services::transaction_service::run_db_only(
+        &state.db,
+        &context,
+        |tx, (db, owner, channel, event, update, field, guest)| {
+            Box::pin(async move {
+                crate::services::erasure_admission::fence_in_session(db, owner, tx).await?;
+                if let Some(guest) = guest {
+                    crate::services::channel_guest_access::fence_in_session(db, tx, guest).await?;
+                }
+                let events = db.collection::<bson::Document>(EVENTS);
+                let queued = events
+                    .count_documents(doc! {
+                        "user_id": owner,
+                        "status": "queued",
+                        *field: {"$exists": true},
+                    })
+                    .session(&mut *tx)
+                    .await?;
+                if queued >= 32 {
+                    return Ok(false);
+                }
+                let result = events
+                    .update_one(
+                        doc! {
+                            "_id": event,
+                            "user_id": owner,
+                            "channel_id": channel,
+                            "turn_id": bson::Bson::Null,
+                            "status": {"$in": ["running", "resuming"]},
+                        },
+                        update.clone(),
+                    )
+                    .session(tx)
+                    .await?;
+                Ok(result.matched_count == 1)
+            })
+        },
+    )
+    .await?;
     if !accepted {
         return Ok(Some(Inbound::Busy));
     }
@@ -155,8 +201,10 @@ async fn resume(state: &AppState, id: &str) -> AppResult<Option<Inbound>> {
     let claim = Uuid::new_v4().to_string();
     let now = bson::DateTime::now();
     let Some(event) = events.find_one_and_update(
-        doc!{"_id":id,"status":"queued","turn_id":bson::Bson::Null,"guest_setup_payload":{"$exists":true},
-            "$or":[{"guest_setup_lease":null},{"guest_setup_lease":{"$lte":now}}]},
+        doc!{"_id":id,"status":"queued","turn_id":bson::Bson::Null,"$and":[
+                {"$or":[{"guest_setup_payload":{"$exists":true}},{"channel_guest_setup_payload":{"$exists":true}}]},
+                {"$or":[{"guest_setup_lease":null},{"guest_setup_lease":{"$lte":now}}]}
+            ]},
         doc!{"$set":{"guest_setup_claim":&claim,"guest_setup_lease":bson::DateTime::from_chrono(Utc::now()+ChronoDuration::seconds(10))}}
     ).await? else {
         let bound=events.find_one(doc!{"_id":id,"turn_id":{"$type":"string"}}).projection(doc!{"_id":1}).await?.is_some();
@@ -187,10 +235,19 @@ async fn resume(state: &AppState, id: &str) -> AppResult<Option<Inbound>> {
 }
 
 async fn retire(state: &AppState, id: &str) -> AppResult<()> {
-    state.db.collection::<bson::Document>(EVENTS).update_one(
-        doc!{"_id":id,"status":"queued","turn_id":bson::Bson::Null},
-        doc!{"$set":{"status":"refused","delivery.state":"refused"},"$unset":{"guest_setup_payload":""}}
-    ).await?;
+    state
+        .db
+        .collection::<bson::Document>(EVENTS)
+        .update_one(
+            doc! {"_id":id,"status":"queued","turn_id":bson::Bson::Null},
+            doc! {"$set":{"status":"refused","delivery.state":"refused"},"$unset": {
+                "guest_setup_payload": "",
+                "guest_setup_context_version": "",
+                "channel_guest_setup_payload": "",
+                "channel_guest_setup_context_version": "",
+            }},
+        )
+        .await?;
     Ok(())
 }
 
@@ -198,15 +255,26 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
     let invalid = || AppError::Internal("Guest queue unavailable".into());
     let id = event.get_str("_id").map_err(|_| invalid())?;
     let owner = event.get_str("user_id").map_err(|_| invalid())?;
-    let bytes = state
-        .encryption_keys
-        .decrypt(
-            event
-                .get_binary_generic("guest_setup_payload")
-                .map_err(|_| invalid())?,
-        )
-        .await?;
+    let addon = event.contains_key(event_record::CHANNEL_GUEST);
+    let bytes = event_record::guest_setup(&state.encryption_keys, event).await?;
     let payload: WaitingGuest = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    let guest = payload
+        .channel_context
+        .as_ref()
+        .and_then(|context| context.channel_guest.as_ref());
+    match (addon, guest) {
+        (true, Some(guest))
+            if guest.source_event_id == id
+                && guest.hosted_conversation_id() == payload.conversation =>
+        {
+            crate::services::channel_guest_access::revalidate(&state.db, guest).await?;
+        }
+        (false, None)
+            if !crate::services::channel_guest_access::is_hosted_conversation(
+                &payload.conversation,
+            ) => {}
+        _ => return Err(AppError::AssistantTurnRequired),
+    }
     let channel = load_channel(
         state,
         owner,
@@ -298,11 +366,19 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
         return Ok(Some(Inbound::Silent("refused_policy")));
     }
     if payload.origin.thread.is_some() {
+        let follow_conversation = if addon && payload.origin.org_execution.is_none() {
+            thread
+                .conversation_id
+                .as_deref()
+                .ok_or(AppError::AssistantTurnRequired)?
+        } else {
+            &payload.conversation
+        };
         crate::services::channel_thread_follow_service::validate_delivery(
             &state.db,
             &actor,
             &payload.origin,
-            &payload.conversation,
+            follow_conversation,
         )
         .await?;
     }
@@ -358,18 +434,28 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
         state,
         &actor,
         start,
-        Pool::Channel { owner: &actor },
+        if addon {
+            Pool::ChannelGuest { owner: &actor }
+        } else {
+            Pool::Channel { owner: &actor }
+        },
     ))
     .await?
     {
-        Started::Turn { receiver, .. } => Ok(Some(Inbound::Turn(receiver))),
+        Started::Turn {
+            conversation,
+            receiver,
+        } => Ok(Some(Inbound::Turn(InboundTurn::new(
+            &conversation,
+            receiver,
+        )))),
         Started::Busy | Started::PoolFull => Ok(None),
     }
 }
 
 pub(crate) async fn sweep(state: &AppState) -> AppResult<()> {
     let events:Vec<bson::Document> = state.db.collection(EVENTS)
-        .find(doc!{"status":"queued","turn_id":bson::Bson::Null,"guest_setup_deadline":{"$exists":true},"guest_setup_payload":{"$exists":true}})
+        .find(doc!{"status":"queued","turn_id":bson::Bson::Null,"guest_setup_deadline":{"$exists":true},"$or":[{"guest_setup_payload":{"$exists":true}},{"channel_guest_setup_payload":{"$exists":true}}]})
         .projection(doc!{"_id":1}).sort(doc!{"created_at":1}).limit(32).await?.try_collect().await?;
     for event in events {
         let Some(_claim) = state.shutdown.background() else {

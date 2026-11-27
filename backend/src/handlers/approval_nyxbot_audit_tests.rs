@@ -188,7 +188,8 @@ async fn nyxbot_policy_request_commands() {
         "APPROVAL_REQUEST change=NyxBot count={} {commands:?}",
         commands.len()
     );
-    assert_eq!(commands.len(), 17);
+    // Auto-allow receipts fence the owner, conversation and captured input before commit.
+    assert_eq!(commands.len(), 23);
     let upsert = commands
         .iter()
         .position(|(cmd, coll)| cmd == "findAndModify" && coll == CONFIGS)

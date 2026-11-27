@@ -4,21 +4,29 @@ import { ApiError } from "@/lib/api-client";
 // Keep the manually selected demo engine across chat navigation and reloads.
 const MOCK_MODEL_CONTROLS_STORAGE = "nyxid.mock-model-controls";
 const MOCK_NYXBOT_STORAGE = "nyxid.mock-nyxbot";
+const MOCK_AVATARS_STORAGE = "nyxid.mock-avatars";
 if (import.meta.env.DEV && typeof window !== "undefined") {
   const modelControls = new URLSearchParams(window.location.search).get("modelControls");
   if (modelControls === "1" || modelControls === "0") {
     sessionStorage.setItem(MOCK_MODEL_CONTROLS_STORAGE, modelControls);
+  }
+  const avatars = new URLSearchParams(window.location.search).get("avatars");
+  if (avatars === "1" || avatars === "0") {
+    sessionStorage.setItem(MOCK_AVATARS_STORAGE, avatars);
   }
   const selection = new URLSearchParams(window.location.search).get("nyxbot");
   if (selection === "1" || selection === "0") {
     sessionStorage.setItem(MOCK_NYXBOT_STORAGE, selection);
   }
 }
-const mockNyxbotEnabled =
-  globalThis.__nyxidAssistantHttpFaults?.nyxagentEnabled ??
-  (import.meta.env.DEV &&
-    typeof window !== "undefined" &&
-    sessionStorage.getItem(MOCK_NYXBOT_STORAGE) === "1");
+const nyxbotPreview = import.meta.env.DEV && typeof window !== "undefined" &&
+  sessionStorage.getItem(MOCK_NYXBOT_STORAGE) === "1";
+const mockNyxbotEnabled = globalThis.__nyxidAssistantHttpFaults?.nyxagentEnabled ?? nyxbotPreview;
+const mockNotificationsEnabled = globalThis.__nyxidAssistantHttpFaults?.notificationsEnabled ?? nyxbotPreview;
+
+const mockAvatarsEnabled =
+  import.meta.env.DEV && typeof window !== "undefined" &&
+  sessionStorage.getItem(MOCK_AVATARS_STORAGE) === "1";
 
 const mockModelControlsEnabled =
   globalThis.__nyxidAssistantHttpFaults?.modelControlsEnabled ??
@@ -42,6 +50,8 @@ const MOCK_USER = {
       "experimental:ai-assistant",
       ...(mockModelControlsEnabled ? ["assistant:model-controls"] : []),
       ...(mockNyxbotEnabled ? ["assistant:nyxagent-engine"] : []),
+      ...(mockNotificationsEnabled ? ["assistant:notifications"] : []),
+      ...(mockAvatarsEnabled ? ["assistant:avatars"] : []),
       ...(globalThis.__nyxidAssistantHttpFaults?.voiceEnabled ? ["assistant:voice"] : []),
     ],
   },
@@ -1068,10 +1078,11 @@ const MOCK_SESSIONS = [
 
 // ── Push Devices ──
 const MOCK_PUSH_DEVICES = {
+  push_enabled: true,
   devices: [
     {
-      id: "dev-0001",
-      platform: "ios",
+      device_id: "dev-0001",
+      platform: "apns",
       device_name: "iPhone 15 Pro",
       registered_at: "2026-04-01T09:00:00Z",
       last_used_at: "2026-05-06T14:00:00Z",

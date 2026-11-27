@@ -18,6 +18,15 @@ pub async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
             IndexModel::builder()
                 .keys(doc! {"user_id": 1, "source_id": 1})
                 .build(),
+            // Non-sparse: historical plans omit the bot parent. Support the
+            // exact owner/null-parent page without scanning modern plans.
+            IndexModel::builder()
+                .keys(doc! {"user_id": 1, "channel_bot_id": 1, "_id": 1})
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"channel_bot_id": 1})
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
         ])
         .await?;
     Ok(())
@@ -30,6 +39,7 @@ pub async fn load(db: &Database, key: &str) -> AppResult<Option<ChannelTextDeliv
         .await?)
 }
 
+#[cfg(test)]
 pub async fn begin(
     db: &Database,
     key: &str,
@@ -38,7 +48,43 @@ pub async fn begin(
     fingerprint: &str,
     count: usize,
 ) -> AppResult<ChannelTextDelivery> {
-    begin_versioned(db, key, owner, source, fingerprint, count, None, None).await
+    begin_versioned(db, key, owner, source, fingerprint, count, None, None, None).await
+}
+
+pub(crate) async fn begin_bound(
+    db: &Database,
+    key: &str,
+    bot: &crate::models::channel_bot::ChannelBot,
+    source: &str,
+    fingerprint: &str,
+    count: usize,
+) -> AppResult<ChannelTextDelivery> {
+    begin_parented(db, key, &bot.user_id, source, fingerprint, count, bot).await
+}
+
+/// Native transports historically journal under the linking person's owner.
+/// Preserve that identity while recording the independently verified bot parent.
+pub(crate) async fn begin_parented(
+    db: &Database,
+    key: &str,
+    owner: &str,
+    source: &str,
+    fingerprint: &str,
+    count: usize,
+    bot: &crate::models::channel_bot::ChannelBot,
+) -> AppResult<ChannelTextDelivery> {
+    begin_versioned(
+        db,
+        key,
+        owner,
+        source,
+        fingerprint,
+        count,
+        None,
+        None,
+        Some(bot),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -51,15 +97,28 @@ async fn begin_versioned(
     count: usize,
     notice: Option<crate::models::channel_text_delivery::TextDeliveryNotice>,
     renderer_version: Option<u32>,
+    bound_bot: Option<&crate::models::channel_bot::ChannelBot>,
 ) -> AppResult<ChannelTextDelivery> {
     if count == 0 || count > super::channel_reply_delivery::MAX_REPLY_PARTS {
         return Err(AppError::ValidationError("Invalid multipart plan".into()));
     }
     let record = ChannelTextDelivery {
+        meta_grant: bound_bot
+            .filter(|bot| super::channel_adapters::meta::is_meta(&bot.platform))
+            .and_then(|bot| {
+                bot.meta_binding
+                    .as_ref()
+                    .map(|binding| crate::models::channel_meta::GrantRef {
+                        bot_id: bot.id.clone(),
+                        grant_id: binding.grant_id.clone(),
+                        generation: binding.generation,
+                    })
+            }),
         id: uuid::Uuid::new_v4().to_string(),
         logical_key: key.into(),
         user_id: owner.into(),
         source_id: source.into(),
+        channel_bot_id: bound_bot.map(|bot| bot.id.clone()),
         fingerprint: fingerprint.into(),
         renderer_version,
         notice,
@@ -77,6 +136,80 @@ async fn begin_versioned(
         ],
         created_at: chrono::Utc::now(),
     };
+    if let Some(bot) = bound_bot.filter(|bot| super::channel_adapters::meta::is_meta(&bot.platform))
+    {
+        #[cfg(test)]
+        super::durable_wake_tests::after("meta_text_plan_before_fence").await;
+        return super::transaction_service::run_db_only(
+            db,
+            &(db, bot, &record),
+            |tx, &(db, bot, record)| {
+                Box::pin(async move {
+                    super::channel_relay_service::fence_meta_observation(
+                        db, tx, &bot.id, &bot.platform, true,
+                    )
+                    .await?;
+                    if db
+                        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+                        .find_one(doc! {"_id": &bot.id, "user_id": &bot.user_id,"meta_binding.generation":bot.meta_binding.as_ref().map(|binding|binding.generation)})
+                        .session(&mut *tx)
+                        .await?
+                        .is_none()
+                    {
+                        return Err(AppError::Conflict("Inbox ownership changed".into()));
+                    }
+                    super::channel_meta_service::scopes::fence_current(db,tx,bot).await?;
+                    let source=db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME).find_one(doc! {
+                        "_id":&record.source_id,"channel_bot_id":&bot.id,"user_id":&record.user_id,"platform":&bot.platform,"direction":"inbound"
+                    }).session(&mut *tx).await?.ok_or_else(||AppError::Conflict("Saved reply source attribution is unavailable".into()))?;
+                    let original=super::channel_meta_service::scopes::source_document_in_session(db,tx,&source).await?;
+                    if original.as_ref()!=record.meta_grant.as_ref() {
+                        return Err(AppError::Conflict("Saved reply belongs to another inbox grant".into()));
+                    }
+                    db.collection::<ChannelTextDelivery>(COLLECTION_NAME)
+                        .update_one(
+                            doc! {"logical_key": &record.logical_key},
+                            doc! {"$setOnInsert": bson::to_document(record).map_err(|_| unconfirmed())?},
+                        )
+                        .upsert(true)
+                        .session(&mut *tx)
+                        .await?;
+                    let stored = db
+                        .collection::<ChannelTextDelivery>(COLLECTION_NAME)
+                        .find_one(doc! {"logical_key": &record.logical_key})
+                        .session(&mut *tx)
+                        .await?
+                        .ok_or_else(unconfirmed)?;
+                    validate_plan(&stored, record)?;
+                    // A historical plan may join this grant only through its
+                    // exact admitted source, never through the current bot alone.
+                    if stored.meta_grant.is_none() {
+                        if stored.id != record.id && original.as_ref()!=record.meta_grant.as_ref() {
+                            return Err(AppError::Conflict("Multipart grant attribution needs repair".into()));
+                        }
+                        db.collection::<ChannelTextDelivery>(COLLECTION_NAME).update_one(
+                            doc! {"_id":&stored.id,"meta_grant":null},
+                            doc! {"$set":{"meta_grant":bson::to_bson(&record.meta_grant).map_err(|_|unconfirmed())?}}
+                        ).session(&mut *tx).await?;
+                    }
+                    if stored.channel_bot_id.is_none() {
+                        db.collection::<ChannelTextDelivery>(COLLECTION_NAME)
+                            .update_one(
+                                doc! {"_id": &stored.id, "channel_bot_id": null},
+                                doc! {"$set": {"channel_bot_id": &bot.id}},
+                            )
+                            .session(&mut *tx)
+                            .await?;
+                    }
+                    let mut stored = stored;
+                    stored.channel_bot_id = Some(bot.id.clone());
+                    stored.meta_grant = record.meta_grant.clone();
+                    Ok(stored)
+                })
+            },
+        )
+        .await;
+    }
     let inserted = db
         .collection::<ChannelTextDelivery>(COLLECTION_NAME)
         .update_one(
@@ -91,15 +224,47 @@ async fn begin_versioned(
     {
         return Err(error.into());
     }
-    let stored = load(db, key).await?.ok_or_else(unconfirmed)?;
-    if stored.fingerprint != fingerprint
-        || stored.parts.len() != count
-        || stored.user_id != owner
-        || stored.source_id != source
+    let mut stored = load(db, key).await?.ok_or_else(unconfirmed)?;
+    validate_plan(&stored, &record)?;
+    if let Some(bot) = bound_bot
+        && stored.channel_bot_id.is_none()
+    {
+        // Adopting an old non-Meta plan changes metadata only. Keep the
+        // original ordinary write path and never recreate a deleted receipt.
+        db.collection::<ChannelTextDelivery>(COLLECTION_NAME).update_one(
+            doc! {"_id": &stored.id, "user_id": owner, "source_id": source, "channel_bot_id": null},
+            doc! {"$set": {"channel_bot_id": &bot.id}},
+        ).await?;
+        stored = load(db, key).await?.ok_or_else(unconfirmed)?;
+        validate_plan(&stored, &record)?;
+        if stored.channel_bot_id.as_deref() != Some(bot.id.as_str()) {
+            return Err(AppError::Conflict(
+                "Multipart delivery parent changed".into(),
+            ));
+        }
+    }
+    Ok(stored)
+}
+
+fn validate_plan(stored: &ChannelTextDelivery, expected: &ChannelTextDelivery) -> AppResult<()> {
+    if stored
+        .meta_grant
+        .as_ref()
+        .is_some_and(|grant| expected.meta_grant.as_ref() != Some(grant))
+        || stored.fingerprint != expected.fingerprint
+        || stored.parts.len() != expected.parts.len()
+        || stored.user_id != expected.user_id
+        || stored.source_id != expected.source_id
+        || stored.channel_bot_id.as_ref().is_some_and(|id| {
+            expected
+                .channel_bot_id
+                .as_ref()
+                .is_some_and(|expected| id != expected)
+        })
     {
         return Err(AppError::Conflict("Multipart delivery plan changed".into()));
     }
-    Ok(stored)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -141,6 +306,7 @@ pub async fn assistant_plan(
             parts.len(),
             notice,
             version,
+            None,
         )
         .await
         {
@@ -171,14 +337,16 @@ pub async fn claim(db: &Database, row: &ChannelTextDelivery, index: usize) -> Ap
     for previous in 0..index {
         filter.insert(format!("parts.{previous}.state"), "sent");
     }
-    let changed = db
-        .collection::<ChannelTextDelivery>(COLLECTION_NAME)
-        .update_one(
-            filter,
-            doc! {"$set": {format!("parts.{index}.state"): "sending",
-            format!("parts.{index}.attempt_id"): &attempt}},
-        )
-        .await?;
+    let changed = super::channel_meta_service::scopes::update_record(
+        db,
+        row.meta_grant.as_ref(),
+        true,
+        COLLECTION_NAME,
+        filter,
+        doc! {"$set": {format!("parts.{index}.state"): "sending",
+        format!("parts.{index}.attempt_id"): &attempt}},
+    )
+    .await?;
     if changed.matched_count == 1 {
         #[cfg(test)]
         super::durable_wake_tests::after("text_part_prepared").await;
@@ -228,8 +396,8 @@ pub async fn finish(
             {format!("parts.{index}.state"):"pending",format!("parts.{index}.preparation.version"):1}
         ]));
     }
-    let changed = db.collection::<ChannelTextDelivery>(COLLECTION_NAME).update_one(
-        filter,
+    let changed = super::channel_meta_service::scopes::update_record(
+        db,row.meta_grant.as_ref(),false,COLLECTION_NAME,filter,
         doc! {"$set": {format!("parts.{index}.state"): bson::to_bson(&state).map_err(|_| unconfirmed())?,
             format!("parts.{index}.platform_message_id"): platform_id,
             format!("parts.{index}.outbound_message_id"): outbound_id},
@@ -317,8 +485,13 @@ mod tests {
         version: Option<u32>,
         platform: &str,
     ) -> AppResult<(Vec<super::super::channel_platform::OutboundReply>, String)> {
+        let text = if platform == "slack" {
+            format!(r"\*literal\* {}", "Slack text. ".repeat(7_100))
+        } else {
+            "A literal (value). https://example.test/a-b?x=1&y=2\n\n".repeat(250)
+        };
         let parts = super::super::channel_reply_plan::recorded_assistant_parts(
-            &"A literal (value). https://example.test/a-b?x=1&y=2\n\n".repeat(250),
+            &text,
             platform,
             "https://nyxid.test/thread",
             version,
@@ -328,17 +501,110 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renderer_versions_resume_only_the_pending_suffix_and_old_workers_refuse_v2() {
+    async fn non_meta_saved_results_record_and_adopt_bot_parents_without_a_transaction_or_losing_receipts()
+     {
+        let (state, _, _server, mut bot) =
+            crate::services::channel_adapters::meta::tests::fixture("instagram").await;
+        bot.platform = "slack".into();
+        bot.meta_binding = None;
+        state
+            .db
+            .collection::<crate::models::channel_bot::ChannelBot>(
+                crate::models::channel_bot::COLLECTION_NAME,
+            )
+            .replace_one(doc! {"_id": &bot.id}, &bot)
+            .await
+            .unwrap();
+        let (db, commands) = super::super::durable_wake_tests::monitored(&state.db).await;
+        let key = format!("saved-result:{}:{}", uuid::Uuid::new_v4(), "d".repeat(64));
+        let fresh = begin_bound(&db, &key, &bot, "source", "hash", 1)
+            .await
+            .unwrap();
+        assert_eq!(fresh.channel_bot_id.as_deref(), Some(bot.id.as_str()));
+        let PartClaim::Send(attempt) = claim(&db, &fresh, 0).await.unwrap() else {
+            panic!("new part");
+        };
+        finish(
+            &db,
+            &fresh,
+            0,
+            &attempt,
+            TextPartState::Sent,
+            Some("slack-provider-id"),
+            Some("outbound"),
+        )
+        .await
+        .unwrap();
+        let resumed = begin_bound(&db, &key, &bot, "source", "hash", 1)
+            .await
+            .unwrap();
+        assert!(
+            matches!(claim(&db, &resumed, 0).await.unwrap(), PartClaim::Sent(part)
+            if part.platform_message_id.as_deref() == Some("slack-provider-id"))
+        );
+        begin(
+            &db,
+            "legacy",
+            &bot.user_id,
+            "legacy-source",
+            "legacy-hash",
+            1,
+        )
+        .await
+        .unwrap();
+        let adopted = begin_bound(&db, "legacy", &bot, "legacy-source", "legacy-hash", 1)
+            .await
+            .unwrap();
+        assert_eq!(adopted.channel_bot_id.as_deref(), Some(bot.id.as_str()));
+        let transport_person = uuid::Uuid::new_v4().to_string();
+        let native = begin_parented(
+            &db,
+            "native-saved-result",
+            &transport_person,
+            "native-event",
+            "native-hash",
+            1,
+            &bot,
+        )
+        .await
+        .unwrap();
+        assert_eq!(native.user_id, transport_person);
+        assert_eq!(native.channel_bot_id.as_deref(), Some(bot.id.as_str()));
+        let observed = super::super::durable_wake_tests::take(&commands);
+        assert!(
+            !observed
+                .keys()
+                .any(|command| command.starts_with("commitTransaction:")
+                    || command.starts_with("abortTransaction:"))
+        );
+    }
+
+    #[tokio::test]
+    async fn renderer_versions_resume_only_the_pending_suffix_and_old_workers_refuse_new_plans() {
         let db = crate::test_utils::connect_transaction_test_database("text_renderer_resume").await;
         ensure_indexes(&db).await.unwrap();
-        for platform in ["discord", "whatsapp"] {
-            for version in [None, Some(2)] {
+        for (platform, current) in [("discord", 2), ("whatsapp", 2), ("slack", 3)] {
+            for version in [None, Some(1), Some(current)] {
                 let key = format!("{platform}-{version:?}");
                 let (parts, fingerprint) = rendered(version, platform).unwrap();
                 let row = if version.is_none() {
                     begin(&db, &key, "owner", "source", &fingerprint, parts.len())
                         .await
                         .unwrap()
+                } else if version == Some(1) {
+                    begin_versioned(
+                        &db,
+                        &key,
+                        "owner",
+                        "source",
+                        &fingerprint,
+                        parts.len(),
+                        None,
+                        version,
+                        None,
+                    )
+                    .await
+                    .unwrap()
                 } else {
                     assistant_plan(&db, &key, "owner", "source", platform, None, |v, _| {
                         rendered(v, platform)
@@ -348,6 +614,16 @@ mod tests {
                     .0
                 };
                 assert_eq!(row.renderer_version, version);
+                if platform == "slack" {
+                    assert!(parts[0].text.as_deref().unwrap().starts_with("*literal*"));
+                    assert_eq!(
+                        parts[0]
+                            .metadata
+                            .as_ref()
+                            .is_some_and(|meta| meta["blocks"].is_array()),
+                        version == Some(current)
+                    );
+                }
                 let PartClaim::Send(attempt) = claim(&db, &row, 0).await.unwrap() else {
                     panic!("pending");
                 };
@@ -374,10 +650,14 @@ mod tests {
                     super::super::channel_reply_plan::fingerprint(&resumed_parts),
                     fingerprint
                 );
+                if platform == "slack" {
+                    assert_eq!(resumed_parts[0].text, parts[0].text);
+                    assert_eq!(resumed_parts[0].metadata, parts[0].metadata);
+                }
                 assert!(
                     matches!(claim(&db, &resumed, 0).await.unwrap(), PartClaim::Sent(part) if part.platform_message_id.as_deref() == Some("accepted-prefix"))
                 );
-                if version.is_some() {
+                if version == Some(current) {
                     let (old_parts, old_fingerprint) = rendered(None, platform).unwrap();
                     assert!(matches!(
                         begin(
@@ -432,6 +712,9 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                assert!(
+                    matches!(claim(&db, &resumed, 1).await.unwrap(), PartClaim::Sent(part) if part.platform_message_id.as_deref() == Some("accepted-suffix"))
+                );
                 let raw = db
                     .collection::<bson::Document>(COLLECTION_NAME)
                     .find_one(doc! {"_id":&row.id})
@@ -439,9 +722,110 @@ mod tests {
                     .unwrap()
                     .unwrap();
                 assert_eq!(raw.contains_key("renderer_version"), version.is_some());
-                assert!(!raw.contains_key("text") && !raw.contains_key("body"));
+                assert!(
+                    !raw.contains_key("text")
+                        && !raw.contains_key("body")
+                        && !raw.contains_key("blocks")
+                );
+                if platform == "slack" {
+                    assert!(!raw.to_string().contains("literal"));
+                }
             }
         }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn renderer_slack_fallback_records_only_its_reason_under_the_part_claim() {
+        use crate::services::channel_adapters::slack::{SlackAdapter, with_planned_text_part};
+        use crate::services::channel_platform::PlatformAdapter;
+        use serde_json::json;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_json, path},
+        };
+
+        let db = crate::test_utils::connect_transaction_test_database("text_renderer_slack").await;
+        ensure_indexes(&db).await.unwrap();
+        let (row, parts) = assistant_plan(
+            &db,
+            "slack-fallback",
+            "owner",
+            "source",
+            "slack",
+            None,
+            |version, _| {
+                let parts = super::super::channel_reply_plan::recorded_assistant_parts(
+                    r"**\*\***",
+                    "slack",
+                    "",
+                    version,
+                )?;
+                let hash = super::super::channel_reply_plan::fingerprint(&parts);
+                Ok((parts, hash))
+            },
+        )
+        .await
+        .unwrap();
+        let PartClaim::Send(attempt) = claim(&db, &row, 0).await.unwrap() else {
+            panic!("expected a pending part");
+        };
+        let server = MockServer::start().await;
+        let adapter = SlackAdapter::media_test_adapter(&server.uri());
+        let mut rich = json!({"channel":"C123","text":"**","mrkdwn":false});
+        rich["blocks"] = parts[0].metadata.as_ref().unwrap()["blocks"].clone();
+        for (body, response) in [
+            (rich, json!({"ok":false,"error":"invalid_blocks"})),
+            (
+                json!({"channel":"C123","text":"**","mrkdwn":false}),
+                json!({"ok":true,"ts":"123.456"}),
+            ),
+        ] {
+            Mock::given(path("/chat.postMessage"))
+                .and(body_json(body))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let receipt = formatting_receipt(&row, 0, &attempt);
+        let http = reqwest::Client::new();
+        let credentials = "fixture".into();
+        let id = super::super::telegram_formatting::scope(
+            &db,
+            receipt,
+            None,
+            with_planned_text_part(
+                true,
+                adapter.send_reply(&http, &credentials, "C123", &parts[0]),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let stored = load(&db, &row.logical_key).await.unwrap().unwrap();
+        assert_eq!(stored.parts[0].state, TextPartState::Sending);
+        assert_eq!(
+            stored.parts[0].formatting_fallback.as_deref(),
+            Some("slack_formatting_fallback")
+        );
+        assert!(claim(&db, &stored, 0).await.is_err());
+        finish(&db, &row, 0, &attempt, TextPartState::Sent, Some(&id), None)
+            .await
+            .unwrap();
+        assert!(matches!(
+            claim(&db, &stored, 0).await.unwrap(),
+            PartClaim::Sent(_)
+        ));
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        server.verify().await;
+        let raw = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! {"_id":&row.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!raw.to_string().contains("rich_text") && !raw.to_string().contains("**"));
         db.drop().await.unwrap();
     }
 
@@ -501,7 +885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renderer_new_plans_converge_without_changing_slack_or_telegram() {
+    async fn renderer_new_plans_converge_and_keep_the_telegram_fingerprint() {
         let db = crate::test_utils::connect_transaction_test_database("text_renderer_new").await;
         ensure_indexes(&db).await.unwrap();
         for platform in ["discord", "whatsapp", "slack", "telegram"] {
@@ -534,7 +918,7 @@ mod tests {
                 .await
                 .is_err()
             );
-            if matches!(platform, "slack" | "telegram") {
+            if platform == "telegram" {
                 assert_eq!(a.fingerprint, rendered(None, platform).unwrap().1);
             }
         }
@@ -682,7 +1066,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!raw.contains_key("text") && !raw.contains_key("body"));
+        assert!(
+            !raw.contains_key("text") && !raw.contains_key("body") && !raw.contains_key("blocks")
+        );
         db.drop().await.unwrap();
     }
 }

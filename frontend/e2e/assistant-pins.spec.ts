@@ -83,7 +83,7 @@ async function seedParentChatTopics(page: Page) {
   const nav = await showChats(page);
   const header = nav.getByRole("button", { name: "Engineering group on Telegram, 4 threads", exact: true });
   if (await header.getAttribute("aria-expanded") === "false") await header.click();
-  return { header, group: nav.getByRole("region", { name: "From chat apps", exact: true }) };
+  return { header, group: nav.getByRole("region", { name: "Connected bot chats", exact: true }) };
 }
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
@@ -121,7 +121,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     ]);
     await page.reload();
     const nav = await showChats(page);
-    group = nav.getByRole("region", { name: "From chat apps", exact: true });
+    group = nav.getByRole("region", { name: "Connected bot chats", exact: true });
     await expectTopicOrder(group, [
       ...pins, "Engineering topic 0", "Engineering topic 1", "Support topic 0", "Support topic 1",
     ]);

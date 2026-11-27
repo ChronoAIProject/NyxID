@@ -72,6 +72,8 @@ function setup({
   const calls: LoginInput[] = [];
   const sessions: Session[] = [];
   const socialUrls: string[] = [];
+  let openSocial: () => Promise<{ type: "success"; url: string } | { type: "cancel" }> =
+    async () => ({ type: "cancel" });
   const registrationUrls: string[] = [];
   const navigations: string[] = [];
   const waitlistUrls: string[] = [];
@@ -93,6 +95,12 @@ function setup({
   const harness = hookHarness<Element>({
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "Fragment" },
     "../../i18n/LanguageProvider": { useAppLanguage: () => ({ language: appLocale(), t: translateApp }) },
+    "expo-crypto": {
+      getRandomBytesAsync: async (length: number) => new Uint8Array(length),
+      digestStringAsync: async () => "fixture-challenge",
+      CryptoDigestAlgorithm: { SHA256: "SHA-256" },
+      CryptoEncoding: { BASE64: "base64" },
+    },
     "expo-web-browser": {
       openBrowserAsync: async (url: string) => {
         registrationUrls.push(url);
@@ -100,7 +108,7 @@ function setup({
       },
       openAuthSessionAsync: async (url: string) => {
         socialUrls.push(url);
-        return { type: "cancel" };
+        return openSocial();
       },
     },
     "@react-navigation/native": { useIsFocused: () => true },
@@ -270,6 +278,7 @@ function setup({
     showKeyboard: () => { keyboardVisible = true; },
     sessions,
     socialUrls,
+    setOpenSocial: (handler: typeof openSocial) => { openSocial = handler; },
     registrationUrls,
     waitlistUrls,
     navigations,
@@ -308,7 +317,8 @@ for (const platform of ["ios", "android"] as const) {
     assert.ok(scroller);
     assert.equal(
       scroller.props.keyboardDismissMode,
-      platform === "ios" ? "interactive" : "on-drag",
+      platform === "ios" ? "interactive" : "none",
+      "dragging the Android form must keep the IME open",
     );
     assert.equal(scroller.props.keyboardShouldPersistTaps, "handled");
     assert.ok(
@@ -540,9 +550,12 @@ test("Create account opens the configured registration page only when registrati
 test("registration-disabled social sign-in still verifies MFA, supports recovery and keeps legal links", async (t) => {
   const screen = setup({ emailEnabled: false, providers: ["google"] });
   t.after(screen.harness.unmount);
-  screen.openUrl(
-    "nyxid://auth/social/callback#status=mfa_required&provider=google&mfa_token=synthetic-challenge",
-  );
+  const callback = "nyxid://auth/social/callback#status=mfa_required&provider=google&mfa_token=synthetic-challenge";
+  screen.openUrl(callback);
+  assert.doesNotMatch(textContent(screen.harness.value()), /Verify your Google sign-in/);
+  screen.setOpenSocial(async () => ({ type: "success", url: callback }));
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
   assert.match(
     textContent(screen.harness.value()),
     /Verify your Google sign-in/,
@@ -586,12 +599,15 @@ test("registration-disabled social sign-in still verifies MFA, supports recovery
   assert.deepEqual(screen.navigations, ["TermsOfService", "PrivacyPolicy"]);
 });
 
-test("registration-disabled configuration preserves provider error mapping and email login", (t) => {
+test("registration-disabled configuration preserves provider error mapping and email login", async (t) => {
   const screen = setup({ emailEnabled: false, providers: ["github"] });
   t.after(screen.harness.unmount);
-  screen.openUrl(
-    "nyxid://auth/social/callback?status=error&provider=github&error=social_auth_conflict",
-  );
+  screen.setOpenSocial(async () => ({
+    type: "success",
+    url: "nyxid://auth/social/callback?status=error&provider=github&error=social_auth_conflict",
+  }));
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
   assert.match(
     textContent(screen.harness.value()),
     /This email is linked to another login method\./,
@@ -877,6 +893,7 @@ test("registration and waitlist callbacks resolve the domain after import and at
     },
   );
   const screen = setup({
+    providers: ["google"],
     getFrontendUrl: domains.getFrontendUrl,
     beforeMount: () => domains.selectNewDomains(true),
   });
@@ -887,9 +904,12 @@ test("registration and waitlist callbacks resolve the domain after import and at
   registration.props.onPress();
   await screen.harness.settle();
   assert.deepEqual(screen.registrationUrls, ["https://nyxid.ai/register"]);
-  screen.openUrl(
-    "nyxid://auth/social/callback?status=error&error=social_auth_registration_closed",
-  );
+  screen.setOpenSocial(async () => ({
+    type: "success",
+    url: "nyxid://auth/social/callback?status=error&error=social_auth_registration_closed",
+  }));
+  screen.social()[0]!.props.onPress();
+  await screen.harness.settle();
   const waitlist = elements(screen.harness.value()).find(
     (element) =>
       element.type === "Text" && textContent(element) === "Join the waitlist",

@@ -1,6 +1,9 @@
 import { useCardTranslation } from "@/components/assistant/card-language";
 import type { translateUi as translate } from "@/i18n/use-ui-translation";
 import { ExecutionPermissionCard } from "./execution-permission-card";
+import { usePinnedDecisionCard } from "../decision-card-presentation";
+import { DecisionCardActions } from "../decision-card-actions";
+import { DecisionReview } from "../decision-review";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { STATUS_CARD_MAX_W } from "@/lib/assistant/banner";
 import {
@@ -126,12 +129,13 @@ function DecidedIcon({ decision }: { readonly decision: ApprovalDecision }) {
 
 function DecidedCard({ block, onRequestAgain, disabled }: { readonly block: ApprovalCardContentBlock; readonly onRequestAgain?: () => void; readonly disabled?: boolean }) {
   const { t: translateUi, language } = useCardTranslation();
+  const pinned = usePinnedDecisionCard();
   const decision = block.decision;
   if (decision === null) return null;
   const style = DECIDED_STYLE[decision];
 
   return (
-    <section lang={language} className={`${STATUS_CARD_MAX_W} rounded-xl border p-4 ${style.container}`}>
+    <section lang={language} className={pinned ? "p-4" : `${STATUS_CARD_MAX_W} rounded-xl border p-4 ${style.container}`}>
       <div className="flex flex-wrap items-center gap-2 type-body-strong text-foreground">
         <DecidedIcon decision={decision} />
         <span>{translateUi(style.title)}</span>
@@ -162,9 +166,10 @@ function SubmittedCard({
   readonly block: ApprovalCardContentBlock;
 }) {
   const { t: translateUi, language } = useCardTranslation();
+  const pinned = usePinnedDecisionCard();
   if (!block.decision_submission) return null;
   return (
-    <section lang={language} className={`${STATUS_CARD_MAX_W} rounded-xl border border-warning/30 bg-warning/[0.06] p-4`}>
+    <section lang={language} className={pinned ? "p-4" : `${STATUS_CARD_MAX_W} rounded-xl border border-warning/30 bg-warning/[0.06] p-4`}>
       <div className="flex items-center gap-2 type-body-strong text-foreground">
         <Loader2 className="h-4 w-4 animate-spin text-warning" />{translateUi("Decision sent")}</div>
       <p className="mt-2 text-14 text-muted-foreground">
@@ -191,6 +196,7 @@ function LegacyApprovalCard({
   readonly onDecide: (approved: boolean) => Promise<void> | void;
 }) {
   const { t: translateUi, language } = useCardTranslation();
+  const pinned = usePinnedDecisionCard();
   const [pendingAction, setPendingAction] = useState<"approve" | "deny" | null>(
     null,
   );
@@ -256,8 +262,7 @@ function LegacyApprovalCard({
   const urgent = !expired && remainingMs < URGENT_THRESHOLD_MS;
   const busy = pendingAction !== null;
 
-  return (
-    <section lang={language} className={`${STATUS_CARD_MAX_W} overflow-hidden rounded-xl border border-border bg-card shadow-sm`}>
+  const content = <>
       <div className="flex items-start gap-3 border-b border-border px-4 py-3.5">
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-nyx-secondary-400/30 bg-nyx-secondary-400/10">
           <ShieldAlert className="h-4 w-4 text-nyx-secondary-400" />
@@ -296,7 +301,8 @@ function LegacyApprovalCard({
         )}
       </div>
 
-      <div className="flex flex-wrap items-center gap-2 border-t border-border bg-muted px-4 py-3">
+  </>;
+  const actions = <div className={pinned ? "flex flex-wrap items-center gap-2" : "flex flex-wrap items-center gap-2 border-t border-border bg-muted px-4 py-3"}>
         <button
           type="button"
           disabled={busy || disabled || expired}
@@ -320,13 +326,20 @@ function LegacyApprovalCard({
             <X className="h-3 w-3 light:text-destructive" />
           )}{translateUi("Deny")}</button>
         {!expired && <span className="ml-auto text-12 text-muted-foreground">{translateUi("Nothing is sent until you decide.")}</span>}
-      </div>
-    </section>
-  );
+      </div>;
+  if (pinned && (block.body.length > 160 || block.body.split("\n").length > 3)) {
+    return <DecisionReview title={translateUi("Approval required")} busy={busy || disabled} actions={actions} onDeny={() => void decide(false)}
+      summary={<p className="line-clamp-2 break-words">{block.body}</p>}
+    >{content}</DecisionReview>;
+  }
+  return <section lang={language} className={pinned ? "overflow-hidden" : `${STATUS_CARD_MAX_W} overflow-hidden rounded-xl border border-border bg-card shadow-sm`}>
+    {content}
+    <DecisionCardActions>{actions}</DecisionCardActions>
+  </section>;
 }
 
-export function ApprovalCard(props: Parameters<typeof LegacyApprovalCard>[0]) {
+export function ApprovalCard(props: Parameters<typeof LegacyApprovalCard>[0] & { readonly onExecutionChange?: () => void }) {
   return props.block.execution_proposal
-    ? <ExecutionPermissionCard requestId={props.block.approval_request_id} proposal={props.block.execution_proposal} disabled={props.disabled} />
+    ? <ExecutionPermissionCard requestId={props.block.approval_request_id} proposal={props.block.execution_proposal} disabled={props.disabled} onStateChange={props.onExecutionChange} />
     : <LegacyApprovalCard {...props} />;
 }

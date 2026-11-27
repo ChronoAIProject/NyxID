@@ -986,6 +986,33 @@ pub async fn refresh(
     ))
 }
 
+async fn require_verifier_attempt(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    namespace: &str,
+) -> AppResult<()> {
+    let ip = super::login_client_context::resolve_client_ip(headers, peer, state)?;
+    let db = crate::services::transaction_service::durable_database(&state.db);
+    let admission = crate::services::coordination_service::RateWindowStore::admit(
+        &db,
+        namespace,
+        &ip.to_string(),
+        5,
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
+    if admission.allowed {
+        return Ok(());
+    }
+    let delay = (admission.reset_at - chrono::Utc::now())
+        .num_milliseconds()
+        .max(1);
+    Err(AppError::RateLimitedWithRetry {
+        retry_after: (delay as u64).div_ceil(1000),
+    })
+}
+
 // --- Verify Email ---
 
 #[derive(Deserialize)]
@@ -1003,10 +1030,17 @@ pub struct VerifyEmailResponse {
 /// Verify a user's email address using the token sent during registration.
 pub async fn verify_email(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<VerifyEmailRequest>,
 ) -> AppResult<Json<VerifyEmailResponse>> {
-    let user_id = auth_service::verify_email(&state.db, &body.token).await?;
+    require_verifier_attempt(&state, &headers, peer, "verify_email_ip").await?;
+    let user_id = auth_service::verify_email(
+        &state.db,
+        &body.token,
+        state.config.auth_verification_legacy_cutoff_at,
+    )
+    .await?;
 
     // Telemetry: user.email_verified. Pre-auth path (token-gated), so
     // surface comes from the `X-NyxID-Client` header.
@@ -1085,8 +1119,11 @@ pub struct ResetPasswordResponse {
 /// Complete a password reset using the token and a new password.
 pub async fn reset_password(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<ResetPasswordRequest>,
 ) -> AppResult<Json<ResetPasswordResponse>> {
+    require_verifier_attempt(&state, &headers, peer, "reset_password_ip").await?;
     auth_service::reset_password(&state.db, &body.token, &body.new_password).await?;
 
     // TODO(telemetry): blocked — see TELEMETRY.md §6.5 (auth.password_reset_completed).

@@ -119,15 +119,15 @@ it("finishes the selected setup when a Home refresh removes its completed sugges
 });
 
 it.each([
-  { language: "en", checking: "Checking your connections…", choose: "Choose a provider to connect your account.", connect: "Connect Google Calendar", cancel: "Cancel", retry: "Try again", error: "Could not load connection options. Try again.", options: `${step.title} options` },
-  { language: "zh-CN", checking: "正在检查已连接的账户…", choose: "选择服务商以连接你的账户。", connect: "连接 Google Calendar", cancel: "取消", retry: "再试一次", error: "无法加载连接选项，请重试。", options: `${step.title}选项` },
-  { language: "zh-TW", checking: "正在檢查已連結的帳號…", choose: "選擇服務供應商以連結你的帳號。", connect: "連結 Google Calendar", cancel: "取消", retry: "再試一次", error: "無法載入連結選項，請重試。", options: `${step.title}選項` },
+  { language: "en", title: step.title, checking: "Checking your connections…", choose: "Choose a provider to connect your account.", connect: "Connect Google Calendar", cancel: "Cancel", retry: "Try again", error: "Could not load connection options. Try again.", options: `${step.title} options` },
+  { language: "zh-CN", title: "连接日历", checking: "正在检查已连接的账户…", choose: "选择服务商以连接你的账户。", connect: "连接 Google Calendar", cancel: "取消", retry: "再试一次", error: "无法加载连接选项，请重试。", options: "连接日历选项" },
+  { language: "zh-TW", title: "連接行事曆", checking: "正在檢查已連結的帳號…", choose: "選擇服務供應商以連結你的帳號。", connect: "連結 Google Calendar", cancel: "取消", retry: "再試一次", error: "無法載入連結選項，請重試。", options: "連接行事曆選項" },
 ])("localizes chooser controls, status and errors in $language", async (copy) => {
   await appI18n.changeLanguage(copy.language);
   let resolveSetup!: (value: { connected: boolean; choices: typeof choices; prompt: string }) => void;
   mocks.prepare.mockReturnValueOnce(new Promise((resolve) => { resolveSetup = resolve; }));
   render(<NextStepCards steps={[step]} onStart={vi.fn()} />);
-  await userEvent.click(screen.getByRole("button", { name: /Connect your calendar/ }));
+  await userEvent.click(screen.getByRole("button", { name: new RegExp(copy.title) }));
   expect(screen.getByText(copy.checking)).toBeTruthy();
   expect(screen.getByLabelText(copy.options)).toBeTruthy();
   await act(async () => resolveSetup({ connected: false, choices, prompt: ready.prompt }));

@@ -2,6 +2,7 @@ import { expect, test, type Page, type Locator } from "@playwright/test";
 import { mockDashboard } from "./managed-onboarding-fixtures";
 import {
   billingAllowance,
+  billingBenefitPreview,
   billingCatalog,
   billingGrant,
   billingRow,
@@ -11,39 +12,6 @@ import {
   billingExpandedAllowances,
   billingExpandedRows,
 } from "../src/test/billing-fixture";
-
-function benefitPreview(
-  allowances = [
-    "input_tokens",
-    "output_tokens",
-    "cache_read_tokens",
-    "cache_write_tokens",
-    "images",
-  ].map((metric) =>
-    billingAllowance(metric as Parameters<typeof billingAllowance>[0]),
-  ),
-  page = 1,
-) {
-  return {
-    summary: {
-      remaining: "2",
-      unreserved: "1.5",
-      held: "0.5",
-      pending_activation: "0",
-      pending_reclaim: "0",
-      expired_awaiting_cleanup: "0",
-      restricted: "0",
-      generated_at: "2026-10-01T00:00:00Z",
-    },
-    grants: [
-      { ...billingGrant({ expires_at: null }), available: "1.5", held: "0.5" },
-    ],
-    allowances,
-    total_grants: 1,
-    page,
-    per_page: 50,
-  };
-}
 
 async function billingApi(page: Page) {
   await mockDashboard(page);
@@ -78,7 +46,7 @@ async function billingApi(page: Page) {
     route.fulfill({ json: billingWallet() }),
   );
   await page.route("**/api/v1/billing/benefits?**", (route) =>
-    route.fulfill({ json: benefitPreview() }),
+    route.fulfill({ json: billingBenefitPreview() }),
   );
   await page.route("**/api/v1/billing/grants", (route) =>
     route.fulfill({
@@ -175,7 +143,7 @@ for (const width of [1440, 768, 390, 320]) {
       route.fulfill({ json: billingUsage(billingExpandedRows()) }),
     );
     await page.route("**/api/v1/billing/benefits?**", (route) =>
-      route.fulfill({ json: benefitPreview(billingExpandedAllowances()) }),
+      route.fulfill({ json: billingBenefitPreview(billingExpandedAllowances()) }),
     );
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -708,7 +676,7 @@ for (const width of [1440, 768, 390, 320]) {
   });
 }
 
-test("top-up and receipt buttons use the real API actions", async ({
+test("top-up and receipt buttons use the billing API", async ({
   page,
   context,
 }) => {
@@ -719,13 +687,14 @@ test("top-up and receipt buttons use the real API actions", async ({
   const checkouts: Record<string, unknown>[] = [];
   await page.route("**/api/v1/billing/topup", async (route) => {
     expect(route.request().method()).toBe("POST");
-    checkouts.push(route.request().postDataJSON());
+    const request = route.request().postDataJSON();
+    checkouts.push(request);
     await route.fulfill({
       json: {
         owner_id: "test-user",
         checkout_url: "https://billing.example.test/checkout",
-        amount_credits: 100,
-        idempotency_key: checkouts[0]!.idempotency_key,
+        amount_credits: request.amount_credits,
+        idempotency_key: request.idempotency_key,
         reused: false,
         status: "checkout_created",
       },
@@ -743,10 +712,43 @@ test("top-up and receipt buttons use the real API actions", async ({
   await expect(receipt).toHaveURL("https://billing.example.test/receipt");
   await receipt.close();
   await page.getByRole("button", { name: "Add credits" }).click();
-  await page.getByRole("button", { name: "Continue to payment" }).click();
+  const dialog = page.getByRole("dialog", { name: "Add credits" });
+  const input = dialog.getByRole("spinbutton");
+  const continueButton = dialog.getByRole("button", { name: "Continue to payment" });
+  await expect(input).toHaveValue("20");
+  await expect(dialog.getByRole("button", { name: "US$20", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.locator("#topup-total")).toHaveText("20 credits · Subtotal: USD 20.00");
+  await input.fill("19");
+  await expect(dialog.locator("#topup-total")).toHaveText("19 credits · Subtotal: USD 19.00");
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("button", { name: "Add credits" }).click();
+  await expect(input).toHaveValue("20");
+  await expect(dialog.getByRole("button", { name: "US$20", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.locator("#topup-total")).toHaveText("20 credits · Subtotal: USD 20.00");
+  const presets = dialog.getByRole("button", { name: /^US\$(20|50|100|500)$/ });
+  await expect(presets).toHaveText(["US$20", "US$50", "US$100", "US$500"]);
+  for (const amount of ["20", "50", "100", "500"]) {
+    await presets.filter({ hasText: new RegExp(`^US\\$${amount}$`) }).click();
+    await expect(input).toHaveValue(amount);
+  }
+  await input.fill("9");
+  await expect(continueButton).toBeDisabled();
+  await input.fill("10");
+  await expect(continueButton).toBeEnabled();
+  await input.fill("37");
+  await expect(continueButton).toBeEnabled();
+  await expect(dialog.locator("#topup-total")).toHaveText("37 credits · Subtotal: USD 37.00");
+  await input.fill("10000000");
+  await expect(continueButton).toBeEnabled();
+  await input.fill("10000001");
+  await expect(continueButton).toBeDisabled();
+  await input.fill("9223372036854775808");
+  await expect(continueButton).toBeDisabled();
+  await input.fill("20");
+  await continueButton.click();
   await expect(page).toHaveURL("https://billing.example.test/checkout");
   expect(checkouts).toHaveLength(1);
-  expect(checkouts[0]).toMatchObject({ amount_credits: 100 });
+  expect(checkouts[0]).toMatchObject({ amount_credits: 20 });
   expect(checkouts[0]!.idempotency_key).toMatch(/^[\da-f-]{36}$/);
 });
 
@@ -815,7 +817,7 @@ for (const width of [1440, 390]) {
       const pageNumber = Number(
         new URL(route.request().url()).searchParams.get("page"),
       );
-      const data = benefitPreview();
+      const data = billingBenefitPreview();
       data.total_grants = 51;
       data.page = pageNumber;
       data.grants[0]!.id = `grant-${pageNumber}`;
@@ -855,7 +857,7 @@ test("singular benefit amounts and grant history read correctly on mobile", asyn
   await page.route("**/api/v1/billing/wallet", (route) =>
     route.fulfill({ json: { ...billingWallet(), available: "0" } }),
   );
-  const data = benefitPreview();
+  const data = billingBenefitPreview();
   data.summary.unreserved = "1";
   data.grants[0]!.available = "1";
   data.grants[0]!.amount = "1";
@@ -916,7 +918,7 @@ for (const theme of ["light", "dark"] as const) {
       }),
     );
     await page.route("**/api/v1/billing/benefits?**", (route) =>
-      route.fulfill({ json: benefitPreview(billingExpandedAllowances()) }),
+      route.fulfill({ json: billingBenefitPreview(billingExpandedAllowances()) }),
     );
     await page.goto("/billing");
     const benefits = page.getByLabel("Current available benefits", {

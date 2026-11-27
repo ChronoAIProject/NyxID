@@ -157,7 +157,7 @@ async fn execute_public_proxy(
     Ok(sanitized)
 }
 
-fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTarget {
+pub(super) fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTarget {
     service.auth_method = "none".to_string();
     service.auth_key_name = String::new();
     service.identity_propagation_mode = "none".to_string();

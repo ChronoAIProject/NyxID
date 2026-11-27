@@ -963,6 +963,7 @@ async fn shared_agent_live_acl_role_and_billing_matrix() {
         Some("A shared research specialist"),
         team::AgentStyle {
             display_name: Some("Research"),
+            avatar: None,
             persona: Some("Explain sources clearly"),
             voice_instructions: None,
         },
@@ -1336,6 +1337,268 @@ async fn shared_agent_private_threads_notes_and_retained_history() {
         0
     );
     f.state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_activity_for_shared_agent_uses_only_the_recipients_threads() {
+    let f = Fixture::new("avatar_activity_shared").await;
+    let agent = publish(&f, false).await;
+    let state = &f.state;
+    let mut expected = Vec::new();
+    let rows = state
+        .db
+        .collection::<Document>(crate::models::assistant_conversation::COLLECTION_NAME);
+    for (actor, stop_requested) in [(&f.admin, true), (&f.outsider, false), (&f.member, false)] {
+        let thread = team::home_thread_for(&state.db, &state.encryption_keys, actor, &agent)
+            .await
+            .unwrap();
+        rows.update_one(
+            doc! {"_id": &thread.id, "user_id": actor},
+            doc! {"$set": {"active_turn": {
+                "turn_id": Uuid::new_v4().to_string(),
+                "started_at": mongodb::bson::DateTime::now(),
+                "stop_requested": stop_requested,
+            }}},
+        )
+        .await
+        .unwrap();
+        if actor != &f.admin {
+            expected.push((actor, thread.id));
+        }
+    }
+    for (actor, thread_id) in expected {
+        let summaries = sharing::summaries(&state.db, actor).await.unwrap();
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.id == agent.id)
+            .unwrap();
+        let expected = json!([{"conversation_id": thread_id, "state": "thinking"}]);
+        assert_eq!(summary.status, "running");
+        assert_eq!(serde_json::to_value(&summary.activity).unwrap(), expected);
+        let snapshot = team::live_agent_activity(&state.db, actor).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&snapshot[&agent.id]).unwrap(),
+            expected
+        );
+    }
+    state
+        .db
+        .collection::<Document>(crate::models::assistant_sharing::SHARES_COLLECTION_NAME)
+        .delete_many(doc! {"agent_id": &agent.id})
+        .await
+        .unwrap();
+    assert!(rows.find_one(doc! {"agent_id": &agent.id, "user_id": &f.outsider, "active_turn.turn_id": {"$exists": true}})
+        .await.unwrap().is_some());
+    let retained = sharing::summaries(&state.db, &f.outsider).await.unwrap();
+    let retained = retained.iter().find(|row| row.id == agent.id).unwrap();
+    assert_eq!(retained.status, "idle");
+    assert!(retained.activity.is_empty());
+    assert!(
+        team::live_agent_activity(&state.db, &f.outsider)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    f.readiness.abort();
+    state.db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn assistant_activity_roster_and_snapshot_agree_across_agent_and_thread_types() {
+    use crate::handlers::assistant_team::{self, AgentsQuery};
+    use crate::models::assistant_conversation::{AssistantConversation, COLLECTION_NAME};
+    use crate::test_utils::test_auth_user;
+    use axum::{
+        Json,
+        extract::{Query, State},
+    };
+    use futures::TryStreamExt;
+
+    let f = Fixture::new("activity_roster_parity").await;
+    let state = &f.state;
+    let actor = &f.member;
+    let (personal, personal_home) = team::create_specialist(
+        &state.db,
+        &state.encryption_keys,
+        actor,
+        f.request("personal-activity"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (org, _) = f.create().await;
+    let org_home = team::home_thread_for(&state.db, &state.encryption_keys, actor, &org)
+        .await
+        .unwrap();
+    let shared = publish(&f, false).await;
+    let shared_home = team::home_thread_for(&state.db, &state.encryption_keys, actor, &shared)
+        .await
+        .unwrap();
+    let rows = state.db.collection::<Document>(COLLECTION_NAME);
+
+    for (home, extensions) in [
+        (
+            &personal_home,
+            vec![("personal-crew", doc! {"group_id": "crew"})],
+        ),
+        (&org_home, vec![]),
+        (
+            &shared_home,
+            vec![
+                ("shared-crew", doc! {"group_id": "crew"}),
+                (
+                    "shared-voice",
+                    doc! {"voice_parent_conversation_id": &shared_home.id},
+                ),
+                ("shared-automation", doc! {"automation_thread": true}),
+                (
+                    "shared-channel",
+                    doc! {"channel": {"nyxbot_channel_id": "ch", "partition": "chat", "platform": "telegram"}},
+                ),
+            ],
+        ),
+    ] {
+        rows.update_one(
+            doc! {"_id": &home.id},
+            doc! {"$set": {"active_turn": {
+                "turn_id": Uuid::new_v4().to_string(), "started_at": mongodb::bson::DateTime::now()
+            }}},
+        )
+        .await
+        .unwrap();
+        let original = rows
+            .find_one(doc! {"_id": &home.id})
+            .await
+            .unwrap()
+            .unwrap();
+        for (suffix, changes) in extensions {
+            let mut thread = original.clone();
+            thread.insert("_id", format!("nyxa-{suffix}"));
+            thread.extend(changes);
+            rows.insert_one(thread).await.unwrap();
+        }
+    }
+    // Mongo's null/$ne matching also accepts a missing legacy field.
+    rows.update_one(
+        doc! {"_id": &shared_home.id},
+        doc! {"$unset": {
+            "automation_thread": "", "voice_parent_conversation_id": ""
+        }},
+    )
+    .await
+    .unwrap();
+    let typed = state
+        .db
+        .collection::<AssistantConversation>(COLLECTION_NAME);
+    let shared_thread_ids = |rows: Vec<AssistantConversation>| {
+        rows.into_iter()
+            .map(|row| row.id)
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let mongo = shared_thread_ids(
+        typed
+            .find(sharing::shared_roster_thread_filter(actor))
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap(),
+    );
+    let memory = shared_thread_ids(
+        typed
+            .find(doc! {"user_id": actor})
+            .await
+            .unwrap()
+            .try_filter(|row| std::future::ready(sharing::is_shared_roster_thread(row)))
+            .try_collect()
+            .await
+            .unwrap(),
+    );
+    assert_eq!(mongo, memory);
+    assert_eq!(
+        mongo,
+        std::collections::BTreeSet::from([shared_home.id.clone()])
+    );
+
+    let Json(roster) = assistant_team::list_agents(
+        State(state.clone()),
+        test_auth_user(actor),
+        Query(AgentsQuery::default()),
+    )
+    .await
+    .unwrap();
+    let snapshot = team::live_agent_activity(&state.db, actor).await.unwrap();
+    assert_eq!(snapshot.len(), 3);
+    for (agent, expected) in [
+        (
+            &personal,
+            vec![personal_home.id.as_str(), "nyxa-personal-crew"],
+        ),
+        (&org, vec![org_home.id.as_str()]),
+        (&shared, vec![shared_home.id.as_str()]),
+    ] {
+        let row = roster["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == agent.id)
+            .unwrap();
+        let mut activity = row["activity"].as_array().unwrap().clone();
+        activity.sort_by(|a, b| {
+            a["conversation_id"]
+                .as_str()
+                .cmp(&b["conversation_id"].as_str())
+        });
+        let mut endpoint = serde_json::to_value(&snapshot[&agent.id])
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .clone();
+        endpoint.sort_by(|a, b| {
+            a["conversation_id"]
+                .as_str()
+                .cmp(&b["conversation_id"].as_str())
+        });
+        let ids = endpoint
+            .iter()
+            .map(|row| row["conversation_id"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            ids,
+            expected
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert_eq!(activity, endpoint);
+        assert_eq!(row["status"], "running");
+    }
+
+    let home = crate::services::assistant_authority_tests::new_orchestrator(
+        state,
+        actor,
+        "List specialists",
+    )
+    .await;
+    let chat = super::assistant_acknowledgement_service::for_key(
+        &state.db,
+        actor,
+        Some(&home.credential_api_key_id),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (listed, error) =
+        assistant_team::execute_tool(state, &chat, "nyxid__list_subagents", &json!({})).await;
+    assert!(!error, "{listed}");
+    let list = listed["subagents"].as_array().unwrap();
+    for (agent, maintain) in [(&personal, true), (&shared, false)] {
+        let row = list.iter().find(|row| row["id"] == agent.id).unwrap();
+        assert_eq!(row["can_maintain"], maintain);
+        assert!(row.get("activity").is_none(), "{row}");
+        assert_eq!(row["status"], "running");
+    }
+    f.readiness.abort();
+    state.db.drop().await.unwrap();
 }
 
 #[tokio::test]
@@ -2860,5 +3123,161 @@ async fn shared_memory_concurrent_remember_retries_aborted_transactions_without_
                 .unwrap_err();
         assert_eq!(error.response_body().details.unwrap()["reason"], expected);
     }
+    f.state.db.drop().await.unwrap();
+}
+
+/// Avatar edits share the profile authority: owners, org maintainers (Admins
+/// and Members) and shared managers may restyle; shared users and org Viewers
+/// may not. Audits record only that the avatar changed.
+#[tokio::test]
+async fn avatar_edits_follow_profile_authority_and_audit_metadata_only() {
+    use crate::errors::AppError;
+    use crate::models::assistant_avatar::Avatar;
+    let f = Fixture::new("shared_agent_avatar").await;
+    let agent = publish(&f, true).await;
+    let avatar = Avatar {
+        template: "face-v1".into(),
+        choices: std::collections::BTreeMap::from([
+            ("eyes".into(), "visor".into()),
+            ("palette".into(), "core-ocean".into()),
+        ]),
+    };
+    let style = |avatar| team::AgentStyle {
+        avatar: Some(avatar),
+        ..Default::default()
+    };
+    // The acting person's rollout decides.
+    assert!(matches!(
+        team::update_agent(
+            &f.state.db,
+            &f.outsider,
+            &agent.id,
+            None,
+            None,
+            style(Some(&avatar))
+        )
+        .await,
+        Err(AppError::Forbidden(_))
+    ));
+    flags::set_platform_override(
+        &f.state.db,
+        flags::ASSISTANT_AVATARS_FLAG_KEY,
+        &flags::FlagTarget::Global,
+        true,
+        &f.admin,
+    )
+    .await
+    .unwrap();
+    // A shared manager may edit the profile, including the avatar.
+    let edited = team::update_agent(
+        &f.state.db,
+        &f.outsider,
+        &agent.id,
+        None,
+        None,
+        style(Some(&avatar)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited.avatar.as_ref(), Some(&avatar));
+    // A shared user may not.
+    assert!(
+        team::update_agent(&f.state.db, &f.member, &agent.id, None, None, style(None))
+            .await
+            .is_err()
+    );
+    // The recipient's shared roster projects it.
+    let roster = sharing::summaries(&f.state.db, &f.outsider).await.unwrap();
+    let row = roster.iter().find(|row| row.id == agent.id).unwrap();
+    assert_eq!(
+        row.avatar
+            .as_ref()
+            .map(|a| a.choices.get("eyes").map(String::as_str).unwrap_or("")),
+        Some("visor")
+    );
+    let audits = f
+        .state
+        .db
+        .collection::<Document>(crate::models::audit_log::COLLECTION_NAME);
+    let audit = audits
+        .find_one(doc! {"event_type": "assistant_sharing_changed",
+        "event_data.agent_id": &agent.id, "event_data.change_kind": "avatar"})
+        .await
+        .unwrap()
+        .expect("avatar edit audited");
+    let data = audit.get_document("event_data").unwrap();
+    for id in ["fangs", "visor", "headphones", "sky", "night"] {
+        assert!(
+            !format!("{data:?}").contains(id),
+            "audit must not carry avatar ids"
+        );
+    }
+    // Organization specialists.
+    let (org_agent, _) = f.create().await;
+    let edited = team::update_agent(
+        &f.state.db,
+        &f.admin,
+        &org_agent.id,
+        None,
+        None,
+        style(Some(&avatar)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(edited.avatar.as_ref(), Some(&avatar));
+    assert!(
+        audits
+            .find_one(doc! {"event_type": "assistant_org_agent_changed",
+            "event_data.agent_id": &org_agent.id, "event_data.change_kind": "avatar"})
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Org Members maintain too (like display names); Viewers cannot.
+    team::update_agent(
+        &f.state.db,
+        &f.member,
+        &org_agent.id,
+        None,
+        None,
+        style(Some(&avatar)),
+    )
+    .await
+    .unwrap();
+    assert!(
+        team::update_agent(
+            &f.state.db,
+            &f.viewer,
+            &org_agent.id,
+            None,
+            None,
+            style(None)
+        )
+        .await
+        .is_err()
+    );
+    // A combined edit is still a profile edit.
+    team::update_agent(
+        &f.state.db,
+        &f.admin,
+        &org_agent.id,
+        None,
+        None,
+        team::AgentStyle {
+            display_name: Some("Styled"),
+            avatar: Some(None),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        audits
+            .find_one(doc! {"event_type": "assistant_org_agent_changed",
+            "event_data.agent_id": &org_agent.id, "event_data.change_kind": "profile"})
+            .await
+            .unwrap()
+            .is_some()
+    );
     f.state.db.drop().await.unwrap();
 }

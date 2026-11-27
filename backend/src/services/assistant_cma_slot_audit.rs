@@ -113,20 +113,3 @@ fn duplicate(error: &mongodb::error::Error) -> bool {
     matches!(error.kind.as_ref(), ErrorKind::Write(WriteFailure::WriteError(e)) if e.code == 11000)
         || matches!(error.kind.as_ref(), ErrorKind::Command(e) if e.code == 11000)
 }
-
-/// Only the exceptional unique-slot insertion race lacks a loaded winner.
-/// Bound that diagnostic lookup before reading; steady occupied admission
-/// always passes its already-loaded reservation to record().
-pub(super) async fn record_race(db: &Database, owner: &str) -> AppResult<()> {
-    if !CACHE.claim(format!("{}:race:{owner}", db.name())) {
-        return Ok(());
-    }
-    if let Some(row) = db
-        .collection::<AssistantCmaSandbox>(crate::models::assistant_cma_sandbox::COLLECTION_NAME)
-        .find_one(doc! {"user_id":owner,"occupies_account_slot":true})
-        .await?
-    {
-        record(db, &row).await?;
-    }
-    Ok(())
-}

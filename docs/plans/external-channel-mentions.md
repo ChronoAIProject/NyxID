@@ -1,5 +1,7 @@
 # Exact mentions from external channels
 
+> **Status:** Historical — implementation plan for a shipped feature. Current spec: [Native channel mention admission](../ARCHITECTURE.md#native-channel-mention-admission).
+
 ## Behavior
 
 An authenticated Telegram or Lark/Feishu group message that exactly addresses a connected native bot reaches that bot's live linked NyxBot or specialist, including a per-chat agent override. Admitted participants do not need personal OAuth merely to address it. Delivered bot-authored mentions execute as bounded guest turns.

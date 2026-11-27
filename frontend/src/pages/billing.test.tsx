@@ -45,8 +45,8 @@ const MEMBER_ORG = "33333333-3333-4333-8333-333333333333";
 vi.mock("@/hooks/use-orgs", () => ({ useOrgs: mocks.orgs }));
 vi.mock("@/stores/auth-store", () => ({
   useAuthStore: Object.assign(
-    (select: (state: { user: { id: string } }) => unknown) =>
-      select({ user: { id: ACTOR } }),
+    (select: (state: { user: { id: string; capabilities: { billing_available: boolean } } }) => unknown) =>
+      select({ user: { id: ACTOR, capabilities: { billing_available: true } } }),
     { getState: () => ({ user: { id: ACTOR } }) },
   ),
 }));
@@ -297,7 +297,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     );
     await waitFor(() =>
       expect(mocks.topup).toHaveBeenCalledWith(
-        expect.objectContaining({ owner_id: ORG }),
+        expect.objectContaining({ owner_id: ORG, amount_credits: 20 }),
       ),
     );
     expect(mocks.openExternal).toHaveBeenCalledWith(
@@ -308,6 +308,24 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
         ? { to: "/assistant", search: { panel: "billing", panelOwnerId: ORG } }
         : { to: "/billing", search: { ownerId: ORG } },
     );
+  });
+  it("keeps a failed checkout amount editable and submits the corrected quantity", async () => {
+    mocks.topup.mockRejectedValueOnce(new Error("Minimum credit purchase is 10 credits"));
+    mocks.topup.mockResolvedValue({ checkout_url: "https://pay.example/checkout" });
+    await renderPage("/billing?tab=billing&action=topup");
+    const input = await screen.findByRole("spinbutton", { name: "Or enter credits" });
+    await user.clear(input);
+    await user.type(input, "37");
+    await user.click(screen.getByRole("button", { name: "Continue to payment" }));
+    await waitFor(() => expect(mocks.topup).toHaveBeenCalledTimes(1));
+    expect(input).toHaveValue(37);
+    expect(input).toBeEnabled();
+    expect(mocks.openExternal).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "US$50" }));
+    await user.click(screen.getByRole("button", { name: "Continue to payment" }));
+    await waitFor(() => expect(mocks.topup).toHaveBeenLastCalledWith(
+      expect.objectContaining({ amount_credits: 50 }),
+    ));
   });
   it("resumes an org top-up with the same checkout return context", async () => {
     mocks.history.mockReturnValue(
@@ -952,7 +970,7 @@ describe.each(PAGE_ROUTES)("BillingPage at %s", (route) => {
     await user.click(screen.getByRole("tab", { name: "Billing" }));
     expect(screen.getByText("Failed to load top-up history.")).toBeVisible();
     expect(screen.queryByText("No top-ups yet.")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add credits" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Add credits" })).toBeEnabled();
   });
   it("keeps wallet provisioning connected to its real mutation", async () => {
     mocks.wallet.mockReturnValue(

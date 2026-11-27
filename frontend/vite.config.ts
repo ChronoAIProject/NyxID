@@ -9,7 +9,6 @@ import https from "node:https"
 import { allDocPages } from "./src/features/docs/manifest"
 import { routingPreview } from "./dev/routing-preview"
 import { multilingualPreview } from "./dev/multilingual-preview"
-import { templateSignInPreview } from "./dev/template-sign-in-preview"
 import { machineSeccomp } from "./scripts/machine-seccomp"
 import { buildVersion } from "./scripts/build-version"
 import { buildLegalMarkdown, buildRobots, buildSitemap } from "./scripts/public-origin.mjs"
@@ -269,7 +268,6 @@ const APP_VERSION = JSON.parse(fs.readFileSync(path.resolve(__dirname, "package.
 
 export default defineConfig({
   plugins: [
-    ...(process.env.NYXID_TEMPLATE_PREVIEW === "1" ? [templateSignInPreview()] : []),
     ...(process.env.NYXID_MULTILINGUAL_PREVIEW === "1" ? [multilingualPreview()] : []),
     ...(process.env.NYXID_ROUTING_PREVIEW === "1" ? [routingPreview(backendUrl, expectedOrigin)] : []),
     telegramClaimReferrer(), react(), tailwindcss(), docsSync(), machineSeccomp(__dirname),

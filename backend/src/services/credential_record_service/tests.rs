@@ -440,3 +440,38 @@ async fn startup_migration_skips_accepted_owner_without_starving_active_owner() 
     );
     db.drop().await.unwrap();
 }
+
+#[tokio::test]
+async fn historical_credentials_validate_record_identity_only_on_the_contextual_branch() {
+    let mut keys = crate::test_utils::test_encryption_keys();
+    keys.set_contextual_record_writes(false);
+    let field = "access_token_encrypted";
+    let empty_versions = BTreeMap::new();
+    let legacy = CredentialRecord::captured_key("", "", &empty_versions);
+    let ciphertext = encrypt(&keys, "user_api_keys", "", "", field, b"fixture")
+        .await
+        .unwrap();
+    assert_eq!(
+        legacy
+            .decrypt(&keys, field, &ciphertext)
+            .await
+            .unwrap()
+            .as_slice(),
+        b"fixture"
+    );
+    keys.set_contextual_record_writes(true);
+    assert!(
+        encrypt(&keys, "user_api_keys", "", "", field, b"fixture")
+            .await
+            .is_err()
+    );
+    keys.set_allow_legacy_record_reads(false);
+    assert_eq!(
+        legacy
+            .decrypt(&keys, field, &ciphertext)
+            .await
+            .unwrap_err()
+            .to_string(),
+        invalid().to_string()
+    );
+}

@@ -770,6 +770,52 @@ async fn discarded_attempt_replaces_browser_block_before_retry_and_settlement() 
     state.db.drop().await.unwrap();
 }
 
+#[tokio::test]
+async fn citation_markers_are_removed_from_the_settled_reply_and_checkpoint() {
+    let text = "答案 \u{e200}cite\u{e202}turn652437view1\u{e202}turn652437view2\u{e201}。";
+    let terminal = json!({"type":"response.completed", "sequence_number":1, "response":{
+        "id":RESPONSE, "conversation":{"id":SESSION}, "status":"completed",
+        "output":[{"type":"message","role":"assistant","phase":"final_answer",
+            "content":[{"type":"output_text","text":text,"annotations":[]}]}]
+    }});
+    let (state, _, server) = setup_stream(
+        "nyxa_citations",
+        Duration::ZERO,
+        vec![Frame::Created, Frame::Data(terminal)],
+    )
+    .await;
+    let reply = turns(
+        State(state.clone()),
+        test_auth_user(OWNER),
+        turn_request(None),
+    )
+    .await
+    .unwrap();
+    let events = drain(reply).await;
+    let block = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|data| serde_json::from_str::<Value>(data).unwrap())
+        .find(|event| event["event"] == "block.completed")
+        .unwrap();
+    assert_eq!(block["block"]["text"], "答案。");
+
+    let row = settled(&state).await;
+    let messages = engine::messages(&state.db, OWNER, &row.id, 10, None)
+        .await
+        .unwrap();
+    let reply = messages.last().unwrap();
+    assert_eq!(reply.status, "completed");
+    assert_eq!(reply.text, "答案。");
+    let checkpoint = engine::checkpoint(&state.db, OWNER, &row.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.output.as_deref(), Some("答案。"));
+    server.abort();
+    state.db.drop().await.unwrap();
+}
+
 /// Short execution bounds for this test's thread (current-thread runtime).
 fn short_bounds() {
     TEST_STREAM_BOUNDS.with(|bounds| {
@@ -1787,6 +1833,11 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
         ("POST", "turns".into()),
         ("GET", "models".into()),
         ("GET", format!("agents/{id}/guest-readiness")),
+        ("GET", format!("agents/{id}/guest-conversations")),
+        (
+            "GET",
+            "guest-conversations/org-guest-11111111111111111111111111111111".into(),
+        ),
     ];
     assert!(routes.iter().any(|(_, path)| path.ends_with("/context")));
     assert!(
@@ -1853,6 +1904,84 @@ async fn all_routes_are_human_only_flag_gated_and_owner_scoped() {
         .unwrap(),
         0
     );
+}
+
+#[tokio::test]
+async fn hosted_guest_conversations_are_private_to_the_channel() {
+    let (state, _, server) = setup(None, Duration::ZERO).await;
+    let ordinary = engine::begin_turn(
+        &state.db,
+        OWNER,
+        &engine::TurnRequest {
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: Vec::new(),
+            agent_id: None,
+            conversation_id: None,
+            text: "Ordinary message".into(),
+            model: None,
+            access_mode: None,
+        },
+        &state.encryption_keys,
+    )
+    .await
+    .unwrap();
+    let mut hosted = ordinary.clone();
+    hosted.id = "nyxag-11111111111111111111111111111111".into();
+    hosted.active_turn = None;
+    state
+        .db
+        .collection::<AssistantConversation>(crate::models::assistant_conversation::COLLECTION_NAME)
+        .insert_one(&hosted)
+        .await
+        .unwrap();
+
+    assert!(engine::get(&state.db, OWNER, &hosted.id).await.is_ok());
+    let auth = test_auth_user(OWNER);
+    let Json(index) = list(
+        State(state.clone()),
+        auth.clone(),
+        Query(PageQuery::default()),
+    )
+    .await
+    .unwrap();
+    assert!(index.conversations.iter().any(|row| row.id == ordinary.id));
+    assert!(index.conversations.iter().all(|row| row.id != hosted.id));
+
+    let Json(page) = history(
+        State(state.clone()),
+        auth.clone(),
+        Path(ordinary.id.clone()),
+        Query(HistoryQuery::default()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.conversation.id, ordinary.id);
+    assert_eq!(page.messages.len(), 1);
+    assert!(matches!(
+        history(
+            State(state.clone()),
+            auth.clone(),
+            Path(hosted.id.clone()),
+            Query(HistoryQuery::default()),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        context(State(state.clone()), auth.clone(), Path(hosted.id.clone())).await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(matches!(
+        attachment(
+            State(state),
+            auth,
+            Path((hosted.id, Uuid::new_v4().to_string())),
+        )
+        .await,
+        Err(AppError::NotFound(_))
+    ));
+    server.abort();
 }
 
 #[tokio::test]
@@ -2942,6 +3071,7 @@ async fn approval_wait_2705_history_surfaces_every_linked_proxy_card() {
             .await
             .unwrap();
     let request = |label: &str, status: &str, minutes: i64| ApprovalRequest {
+        org_policy: None,
         activity_outcome: None,
         activity_execution: None,
         execution_proposal: None,
@@ -3076,6 +3206,9 @@ async fn cards_decided_during_a_turn_are_reported_to_the_next_turn_exactly_once(
         .unwrap()
         .unwrap();
     let ack = |kind: &str, status: &str, decided: Option<DateTime<Utc>>| AssistantAcknowledgement {
+        meta_contexts: Vec::new(),
+        org_maintenance_targets: Default::default(),
+        org_maintain_revision: 0,
         activity_execution: None,
         automation_work: None,
         execution_task: None,
@@ -4883,6 +5016,7 @@ fn activity_response_failure_contract_omits_absent_http_status() {
         ("internal", None),
     ] {
         let response: ActivityResponse = TurnActivity {
+            memory_recovery: None,
             decision: None,
             retry_identity: None,
             digest: None,

@@ -1,4 +1,5 @@
 import { validateCliAuthUrl } from "@/pages/cli-auth.helpers";
+import { ChannelMetaCallbackPage } from "@/pages/channel-meta-callback";
 import { PlatformModelsPage } from "@/pages/platform-models";
 import { AdminPlatformModelsPage, AdminPlatformModelDetailPage } from "@/pages/admin-platform-models";
 import { CmaSessionProvider } from "@/components/assistant/cma-session-provider";
@@ -17,6 +18,7 @@ import {
   parseMachineDesktopSearch,
 } from "@/lib/machine-search";
 import { ChannelConnectLinkPage } from "@/pages/channel-connect-link";
+import { ConnectorContinuationPage } from "@/pages/connector-continuation";
 import { AdminOwnershipPage } from "@/pages/admin-ownership";
 import { normalizeAdminUsageSearch } from "@/schemas/admin-usage";
 import { preserveTelegramClaimForLogin } from "@/lib/telegram-claim-handoff";
@@ -58,8 +60,6 @@ import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { validateSettingsSearch, withAccountPanelSearch } from "@/lib/assistant/account-panel-search";
 import { parseAssistantSearch } from "@/lib/assistant/search";
-import { parseSkillGallerySearch } from "@/lib/assistant/skill-templates";
-import { discardUnrelatedSkillSetup } from "@/lib/assistant/skill-template-handoff";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
@@ -77,8 +77,7 @@ import {
   PlatformSetupDetailPage,
   AdminPlatformBotsPage,
   LandingPage,
-  TestingPage,
-  SkillTemplateWelcomePage,
+  ActivityPage,
   NyxbotOnboardingPage,
   AiSetupPage,
   LoginPage,
@@ -119,7 +118,6 @@ import {
   PrivacyPage,
   TermsPage,
   DataDeletionPage,
-  NotificationSettingsPage,
   ApprovalHistoryPage,
   ApprovalGrantsPage,
   NodesPage,
@@ -189,7 +187,6 @@ const authLayout = createRoute({
   id: "auth",
   getParentRoute: () => rootRoute,
   beforeLoad: ({ location }) => {
-    discardUnrelatedSkillSetup(location.pathname, location.searchStr);
     const { isAuthenticated, isLoading, user } = useAuthStore.getState();
     if (isAuthenticated && !isLoading) {
       const params = new URLSearchParams(location.searchStr);
@@ -231,26 +228,18 @@ const loginRoute = createRoute({
   component: LoginPage,
 });
 
+const activityRoute = createRoute({
+  path: "/activity",
+  getParentRoute: () => rootRoute,
+  component: ActivityPage,
+});
+
 const nyxbotOnboardingRoute = createRoute({
   path: "/nyxbot/onboarding",
   getParentRoute: () => rootRoute,
   validateSearch: (search: Record<string, unknown>) =>
     nyxbotSearchSchema.parse(search),
   component: NyxbotOnboardingPage,
-});
-
-const testingRoute = createRoute({
-  path: "/testing",
-  getParentRoute: () => rootRoute,
-  validateSearch: parseSkillGallerySearch,
-  component: TestingPage,
-});
-
-const skillTemplateWelcomeRoute = createRoute({
-  path: "welcome",
-  getParentRoute: () => testingRoute,
-  validateSearch: parseSkillGallerySearch,
-  component: SkillTemplateWelcomePage,
 });
 
 const registerRoute = createRoute({
@@ -303,6 +292,12 @@ const oauthLaunchingRoute = createRoute({
   path: "/oauth-launching",
   getParentRoute: () => rootRoute,
   component: OAuthLaunchingPage,
+});
+
+const connectorContinuationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/connector-continuation/$id",
+  component: ConnectorContinuationPage,
 });
 
 export const oauthCompleteRoute = createRoute({
@@ -858,7 +853,9 @@ const designSystemRoute = createRoute({
 const notificationSettingsRoute = createRoute({
   path: "/approvals/settings",
   getParentRoute: () => dashboardLayout,
-  component: NotificationSettingsPage,
+  beforeLoad: () => {
+    throw redirect({ to: "/settings", search: { tab: "notifications" }, replace: true });
+  },
 });
 
 const approvalHistoryRoute = createRoute({
@@ -1038,6 +1035,12 @@ export const channelBotSetupRoute = createRoute({
   beforeLoad: standaloneAuthBeforeLoad,
   validateSearch: parseChannelBotSetupPageSearch,
   component: ChannelBotSetupPage,
+});
+
+const channelMetaCallbackRoute = createRoute({
+  path: "/channel-bots/meta-callback/$platform",
+  getParentRoute: () => rootRoute,
+  component: ChannelMetaCallbackPage,
 });
 
 const channelBotDetailRoute = createRoute({
@@ -1335,13 +1338,14 @@ const routeTree = rootRoute.addChildren([
   platformBindingReviewRoute,
   platformPersonalLinkRoute,
   landingRoute,
-  testingRoute.addChildren([skillTemplateWelcomeRoute]),
+  activityRoute,
   nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
   ...(oauthConsentPreviewRoute ? [oauthConsentPreviewRoute] : []),
   oauthLaunchingRoute,
   oauthCompleteRoute,
+  connectorContinuationRoute,
   oauthErrorRoute,
   privacyRoute,
   termsRoute,
@@ -1357,6 +1361,7 @@ const routeTree = rootRoute.addChildren([
   loginCodeRoute,
   loginAgentKeyRoute,
   channelBotSetupRoute,
+  channelMetaCallbackRoute,
   connectLinkRoute,
   channelConnectLinkRoute,
   connectLinkReturnRoute,

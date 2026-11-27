@@ -198,6 +198,7 @@ export interface ChannelConversationItem {
   readonly agent_api_key_id: string;
   readonly default_agent: boolean;
   readonly allow_agent_initiated: boolean;
+  readonly guest_access_state?: string;
   readonly capabilities: OutboundCapabilities;
   readonly is_active: boolean;
   readonly last_message_at: string | null;
@@ -218,6 +219,7 @@ export interface CreateChannelConversationRequest {
   readonly platform_sender_id?: string;
   readonly default_agent?: boolean;
   readonly allow_agent_initiated?: boolean;
+  readonly dedicate_agent_key_for_guest_access?: boolean;
   /** Create this conversation under the given org (caller must be admin). */
   readonly target_org_id?: string;
 }
@@ -239,6 +241,7 @@ export interface UpdateChannelConversationRequest {
   readonly agent_api_key_id?: string;
   readonly default_agent?: boolean;
   readonly allow_agent_initiated?: boolean;
+  readonly dedicate_agent_key_for_guest_access?: boolean;
   readonly is_active?: boolean;
 }
 

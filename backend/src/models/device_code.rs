@@ -38,6 +38,8 @@ pub struct DeviceCode {
     pub approved_org_id: Option<String>,
     pub issued_api_key_id: Option<String>,
     pub issued_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_context_version: Option<u8>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub delivery_api_key_encrypted: Option<Vec<u8>>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -145,6 +147,7 @@ mod tests {
             approved_org_id: None,
             issued_api_key_id: None,
             issued_node_id: None,
+            delivery_context_version: None,
             delivery_api_key_encrypted: None,
             delivery_refresh_token_encrypted: None,
             refresh_token_hash: None,

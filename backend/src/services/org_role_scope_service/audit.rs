@@ -105,6 +105,15 @@ async fn set_in_session(
         }
         row.id = previous.id;
     }
+    if row.role == OrgRole::Admin {
+        db.collection::<bson::Document>(crate::models::user::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id":&row.org_user_id},
+                doc! {"$inc":{"approval_decision_fence":1_i64}},
+            )
+            .session(&mut *tx)
+            .await?;
+    }
     let intent = set_intent(actor, &row)?;
     security_effect_service::enqueue_in_session(db, tx, &[intent]).await?;
     Ok(row)

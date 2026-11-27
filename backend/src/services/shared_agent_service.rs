@@ -14,6 +14,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         assistant_agent::{AssistantAgent, GuestAccess, MemoryNote},
+        assistant_conversation::AssistantConversation,
         assistant_sharing::{
             self as model, AgentShare, AgentSharing, PrivateNotes, ShareRole, ShareSubject,
         },
@@ -1648,24 +1649,101 @@ pub async fn edit_private_note(
     Ok(id)
 }
 
+enum SharedThreadCondition {
+    True,
+    Absent,
+    NotTrue,
+}
+
+type SharedThreadField = (
+    &'static str,
+    SharedThreadCondition,
+    fn(&AssistantConversation) -> bool,
+);
+
+// Shared roster summaries use the recipient's ordinary chat threads.
+const SHARED_ROSTER_THREAD_FIELDS: [SharedThreadField; 6] = [
+    ("shared_agent_thread", SharedThreadCondition::True, |row| {
+        row.shared_agent_thread
+    }),
+    ("collaboration", SharedThreadCondition::Absent, |row| {
+        row.collaboration.is_none()
+    }),
+    ("group_id", SharedThreadCondition::Absent, |row| {
+        row.group_id.is_none()
+    }),
+    ("channel", SharedThreadCondition::Absent, |row| {
+        row.channel.is_none()
+    }),
+    ("automation_thread", SharedThreadCondition::NotTrue, |row| {
+        !row.automation_thread
+    }),
+    (
+        "voice_parent_conversation_id",
+        SharedThreadCondition::Absent,
+        |row| row.voice_parent_conversation_id.is_none(),
+    ),
+];
+
+pub(crate) fn shared_roster_thread_filter(actor: &str) -> bson::Document {
+    let mut filter = doc! {"user_id": actor};
+    for (field, condition, _) in SHARED_ROSTER_THREAD_FIELDS {
+        let condition = match condition {
+            SharedThreadCondition::True => bson::Bson::Boolean(true),
+            SharedThreadCondition::NotTrue => bson::Bson::Document(doc! {"$ne": true}),
+            SharedThreadCondition::Absent => bson::Bson::Null,
+        };
+        filter.insert(field, condition);
+    }
+    filter
+}
+
+pub(crate) fn is_shared_roster_thread(row: &AssistantConversation) -> bool {
+    SHARED_ROSTER_THREAD_FIELDS
+        .iter()
+        .all(|(_, _, matches)| matches(row))
+}
+
 /// Human/tool discovery is explicit; ordinary personal turn roster construction
 /// does not call this loader and retains its original read budget.
 pub async fn summaries(
     db: &Database,
     actor: &str,
 ) -> AppResult<Vec<super::assistant_team_service::AgentSummary>> {
-    use crate::models::assistant_conversation::AssistantConversation;
+    summaries_with_activity(db, actor, None).await
+}
+
+pub(crate) async fn summaries_with_activity(
+    db: &Database,
+    actor: &str,
+    snapshot: Option<&super::assistant_team_service::AgentActivitySnapshot>,
+) -> AppResult<Vec<super::assistant_team_service::AgentSummary>> {
+    use super::assistant_activity::ThreadActivity;
     let batch = load(db, actor, None).await?;
     let threads: Vec<AssistantConversation> = db
         .collection(crate::models::assistant_conversation::COLLECTION_NAME)
-        .find(
-            doc! {"user_id": actor, "shared_agent_thread": true, "collaboration": null, "group_id": null, "channel": null,
-            "automation_thread": {"$ne": true}, "voice_parent_conversation_id": null},
-        )
+        .find(shared_roster_thread_filter(actor))
         .sort(doc! {"created_at": 1})
         .await?
         .try_collect()
         .await?;
+    let now = Utc::now();
+    let mut activity_by_agent = BTreeMap::<_, Vec<_>>::new();
+    for (agent_id, activity) in threads
+        .iter()
+        .filter(|_| snapshot.is_none())
+        .filter_map(|thread| {
+            let id = thread.agent_id.as_deref()?;
+            Some((id, ThreadActivity::from_conversation(thread, now)?))
+        })
+        .filter(|(id, _)| batch.agents.contains_key(*id))
+        .take(super::assistant_team_service::AGENT_ACTIVITY_LIMIT as usize)
+    {
+        activity_by_agent
+            .entry(agent_id)
+            .or_default()
+            .push(activity);
+    }
     let mut result = Vec::new();
     for access in batch.agents.into_values() {
         let a = access.agent();
@@ -1674,6 +1752,17 @@ pub async fn summaries(
             .find(|r| r.agent_id.as_deref() == Some(&a.id));
         let public_model =
             super::assistant_platform_model::public_selection(db, actor, &a.model).await?;
+        let (activity, running) = match snapshot {
+            Some(snapshot) => snapshot.get(&a.id).map_or_else(
+                || (Vec::new(), false),
+                |entry| (entry.threads.clone(), entry.running),
+            ),
+            None => {
+                let activity = activity_by_agent.remove(a.id.as_str()).unwrap_or_default();
+                let running = !activity.is_empty();
+                (activity, running)
+            }
+        };
         result.push(super::assistant_team_service::AgentSummary {
             share_role: Some(access.role()),
             owner_id: a.user_id.clone(),
@@ -1681,6 +1770,7 @@ pub async fn summaries(
             owner_slug: None,
             owner_kind: "person",
             org_role: None,
+            can_govern: false,
             can_maintain: false,
             can_use: true,
             machines: Vec::new(),
@@ -1690,17 +1780,12 @@ pub async fn summaries(
             guest_access: BTreeMap::new(),
             pending_requests: Vec::new(),
             last_reply: None,
-            status: if threads.iter().any(|r| {
-                r.agent_id.as_deref() == Some(&a.id)
-                    && super::assistant_nyxagent::live_turn(r, Utc::now()).is_some()
-            }) {
-                "running"
-            } else {
-                "idle"
-            },
+            status: if running { "running" } else { "idle" },
+            activity,
             kind: a.kind,
             name: a.name.clone(),
             display_name: a.display_name.clone(),
+            avatar: super::assistant_avatar_service::view(a.avatar.as_ref()),
             persona: a.persona.clone(),
             voice_instructions: a.voice_instructions.clone(),
             description: a.description.clone(),
@@ -1729,11 +1814,12 @@ pub async fn summaries(
             super::assistant_platform_model::public_selection(db, actor, &thread.model).await?;
         result.push(super::assistant_team_service::AgentSummary {
             id: id.into(), share_role: Some(ShareRole::User), owner_id: thread.agent_owner_id.clone().unwrap_or_default(),
-            owner_name: None, owner_slug: None, owner_kind: "person", org_role: None, can_use: false, can_maintain: false,
+            owner_name: None, owner_slug: None, owner_kind: "person", org_role: None, can_use: false, can_govern: false, can_maintain: false,
             machines: Vec::new(), logins: Vec::new(), services: Vec::new(), account_read: false,
             guest_access: BTreeMap::new(), pending_requests: Vec::new(), last_reply: None, status: "idle",
+            activity: Vec::new(),
             kind: crate::models::assistant_agent::AgentKind::Specialist, name: "Shared agent".into(),
-            display_name: Some("Shared agent · access ended".into()), persona: None, voice_instructions: None, specialty: None,
+            display_name: Some("Shared agent · access ended".into()), avatar: None, persona: None, voice_instructions: None, specialty: None,
             description: "Your retained chats remain private and readable. Ask the owner to share this agent again to continue.".into(),
             created_by: "user".into(), model: public_model.clone(),
             model_unavailable: thread.model.starts_with("nyxid/") && public_model.is_empty(), access_mode_override: None, channel_checking_notice: false,

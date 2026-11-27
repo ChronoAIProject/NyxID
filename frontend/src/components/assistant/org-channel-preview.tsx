@@ -19,9 +19,11 @@ export function OrgChannelDisclosure({ preview }: { readonly preview: OrgChannel
   return <div className="space-y-3 type-secondary">
     <p>{translateUi(preview.description)}</p>
     <p>{translateUi("Guests cannot use account tools, approvals, nodes, machines, saved logins or private memory.")}</p>
-    <p>{translateUi("Guests can use")}</p>
-    <GuestServices services={preview.effective_guest_services} />
-    <GuestReadiness readiness={preview.audience_readiness.guest_readiness} />
+    {preview.guest_enabled && <>
+      <p>{translateUi("Guests can use")}</p>
+      <GuestServices services={preview.effective_guest_services} />
+    </>}
+    <GuestReadiness readiness={preview.audience_readiness.guest_readiness} billingOwner="organization" />
     <AudienceReadiness configuration={preview.audience_readiness.configuration} />
     {preview.health ? <p role="status">{translateUi(preview.health.text)}</p> : null}
   </div>;

@@ -156,7 +156,7 @@ export function NotificationSetupCard() {
                   ? translateUi("Writes and destructive operations require approval; reads and stateless model inference can proceed. ")
                   : translateUi("AI agents must request your approval before accessing services. ")}
                 <Link
-                  to="/approvals/settings"
+                  to="/settings" search={{ tab: "notifications" }}
                   className="text-primary-text hover:underline"
                 >{translateUi("Manage settings")}</Link>
               </p>

@@ -84,7 +84,7 @@ pub async fn attempt(
     row: &AssistantConversation,
     request_key: &str,
     capacity_deadline: DateTime<Utc>,
-    input: Option<bson::Binary>,
+    input: Option<super::assistant_nyxagent_runtime::window_record::SealedInput>,
     channel_retry_session: Option<&Option<String>>,
 ) -> AppResult<u32> {
     let mut update = doc! {"$inc": {"active_turn.engine_attempts": 1}};
@@ -103,7 +103,8 @@ pub async fn attempt(
             refusal: None,
             accepted: false,
             next_continuation: None,
-            input,
+            input_context_version: input.as_ref().and_then(|s| s.version),
+            input: input.map(|s| s.ciphertext),
             key: request_key.to_owned(),
             terminal: false,
             capacity_deadline,

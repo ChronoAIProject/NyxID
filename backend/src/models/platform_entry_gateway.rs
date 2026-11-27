@@ -28,6 +28,8 @@ pub struct PlatformEntryGateway {
     pub creation_fingerprint: String,
     #[serde(with = "crate::models::bson_bytes::required")]
     pub request_ciphertext: Vec<u8>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     /// prepared, active or retired; no ordinary transport fallback state.
     pub state: String,
     pub revision: i64,

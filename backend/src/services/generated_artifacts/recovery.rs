@@ -204,6 +204,10 @@ async fn run(
                 .find_one(doc! {"_id":&message,"user_id":&user,"conversation_id":&conversation,
                     "role":"assistant","turn_id":&delivery.event_turn_id})
                 .session(&mut *session).await?.ok_or_else(missing)?;
+            super::super::channel_meta_service::scopes::fence_assistant_turn(&database,session,
+                &user,&conversation,&delivery.originating_turn_id).await?;
+            super::super::channel_meta_service::scopes::fence_assistant_turn(&database,session,
+                &user,&conversation,&delivery.event_turn_id).await?;
             if source.origin != Some(TurnOrigin::Event) || !matches!(source.status.as_str(), "completed" | "failed" | "stopped") {
                 return Err(invalid());
             }

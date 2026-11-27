@@ -258,7 +258,7 @@ pub async fn preview_policy(
     id: &str,
     enabled: Option<bool>,
 ) -> AppResult<bool> {
-    let row = super::assistant_nyxagent::get(db, actor, id).await?;
+    let row = super::assistant_nyxagent::get_public(db, actor, id).await?;
     if row.group_id.is_some() || row.guest_turn {
         return Err(AppError::Forbidden(
             "Machine excerpts are available only in private owner threads".into(),
@@ -472,6 +472,12 @@ pub struct ActivityAgent {
     pub id: String,
     pub name: String,
     pub display_name: Option<String>,
+    /// Read from the agent row; serialized as the client avatar view.
+    #[serde(
+        default,
+        serialize_with = "super::assistant_avatar_service::serialize_view"
+    )]
+    pub avatar: Option<crate::models::assistant_avatar::Avatar>,
     pub kind: crate::models::assistant_agent::AgentKind,
 }
 
@@ -494,7 +500,7 @@ pub async fn activity_agents(
     Ok(db
         .collection(crate::models::assistant_agent::COLLECTION_NAME)
         .find(doc! {"$or":scopes})
-        .projection(doc! {"_id":1,"name":1,"display_name":1,"kind":1})
+        .projection(doc! {"_id":1,"name":1,"display_name":1,"avatar":1,"kind":1})
         .sort(doc! {"name":1,"_id":1})
         .limit(500)
         .max_time(std::time::Duration::from_secs(3))

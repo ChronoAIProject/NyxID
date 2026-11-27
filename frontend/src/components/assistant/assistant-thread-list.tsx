@@ -2,13 +2,35 @@ import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, MessageSquare, Plus, Search, Settings2, X } from "lucide-react";
 import { useUiTranslation, translateUi } from "@/i18n/use-ui-translation";
 import { AgentAvatar } from "./nyxbot-agent-avatar";
-import { agentTitle, channelPlatformName, splitChannelThreads } from "@/lib/assistant/nyxbot-labels";
-import { channelSourceTitle, conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
+import { ChannelPlatformGlyph } from "@/components/shared/channel-platform-glyph";
+import { agentTitle, splitChannelThreads } from "@/lib/assistant/nyxbot-labels";
+import { channelSourceTitle, conversationChannelCounts, conversationChannelName, conversationDisplayTitle } from "@/lib/assistant/channel-thread-presentation";
 import { ChannelSourceThreads } from "./channel-source-threads";
 import type { SidebarAgents } from "./assistant-sidebar";
 import type { Conversation } from "@/types/assistant";
 import { usePinnedConversationIds } from "@/hooks/use-conversation-pins";
 import { pinnedConversationsFirst } from "@/stores/assistant-pins-store";
+
+export function ThreadChannelSummary({ threads }: { readonly threads: readonly Conversation[] }) {
+  useUiTranslation();
+  const channels = conversationChannelCounts(threads);
+  if (!channels.length) return null;
+  return (
+    <div aria-label={translateUi("Thread channels")} className="mt-3 flex flex-wrap items-center gap-2 type-secondary text-text-tertiary">
+      <span className="shrink-0">{translateUi("Channels")}:</span>
+      {channels.map(({ platform, name, count }) => {
+        const label = translateUi("{{channel}} ({{count}})", { channel: name, count });
+        return (
+          <span key={platform} role="img" aria-label={label} title={label}
+            className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full bg-overlay px-2 py-0.5">
+            <ChannelPlatformGlyph platform={platform} className="size-4 shrink-0" />
+            <span aria-hidden="true" className="tabular-nums">{count}</span>
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 function threadPeriod(thread: Conversation): string {
   const updated = new Date(thread.last_message_at);
@@ -49,9 +71,10 @@ export function AssistantThreadList({
   if (!agent) return null;
   const name = agentTitle(agent);
   const search = query.trim().toLocaleLowerCase();
-  const filtered = model.threads.filter((thread) =>
+  const availableThreads = agent.can_use === false ? model.threads.filter((thread) => thread.read_only) : model.threads;
+  const filtered = availableThreads.filter((thread) =>
     [thread.title, conversationDisplayTitle(thread), thread.channel?.chat_title, thread.channel?.parent_title,
-      thread.channel?.bot_label, thread.channel ? channelPlatformName(thread.channel.platform) : undefined,
+      thread.channel?.bot_label, conversationChannelName(thread),
       thread.channel ? channelSourceTitle(thread.channel) : undefined, thread.platform_thread?.platform]
       .some((value) => value?.toLocaleLowerCase().includes(search)),
   );
@@ -82,7 +105,7 @@ export function AssistantThreadList({
           <div className="min-w-0 flex-1">
             <h2 className="truncate type-card-title text-foreground">{name}</h2>
             <p className="mt-0.5 text-12 text-text-tertiary">
-              {translateUi("{{count}} threads", { count: model.threads.length })}
+              {translateUi("{{count}} threads", { count: availableThreads.length })}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -100,6 +123,7 @@ export function AssistantThreadList({
             </button> : null}
           </div>
         </div>
+        <ThreadChannelSummary threads={availableThreads} />
         <div className="mt-3 flex items-center justify-between gap-2">
           <span className="type-group-label text-text-tertiary">{translateUi("Threads")}</span>
           {canChat ? (
@@ -126,24 +150,47 @@ export function AssistantThreadList({
       <nav aria-label={translateUi("Threads with {{value1}}", { value1: name })}
         data-scroll-fade="" className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain px-2 pb-4">
         {notice}
-        {own.length && bots.length ? <h3 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi("Direct chats")}</h3> : null}
-        {[...periods].map(([period, threads]) => (
-          <section key={period} aria-label={translateUi(period)} className="mb-4">
-            <h3 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi(period)}</h3>
-            <div className="space-y-1">{threads.map(renderThread)}</div>
+        {model.guestThreadsError ? <p role="alert" className="px-2 py-1 type-secondary text-destructive">
+          {translateUi("Could not load guest conversations.")}
+        </p> : null}
+        {own.length ? (
+          <section aria-label={translateUi("Personal conversations")} className="mb-5">
+            <div className="px-2 pb-3 pt-1">
+              <h3 className="type-row-title text-foreground">{translateUi("Personal conversations")}</h3>
+              <p className="mt-1 type-secondary text-text-tertiary">
+                {translateUi("Private chats here or through a personal channel connection.")}
+              </p>
+            </div>
+            {[...periods].map(([period, threads]) => (
+              <section key={period} aria-label={translateUi(period)} className="mb-4 last:mb-0">
+                <h4 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi(period)}</h4>
+                <div className="space-y-1">{threads.map(renderThread)}</div>
+              </section>
+            ))}
           </section>
-        ))}
+        ) : null}
         {bots.length ? (
-          <section aria-label={translateUi("From chat apps")} className="mb-4">
-            <h3 className="px-2 pb-2 pt-1 type-group-label text-text-tertiary">{translateUi("From chat apps")}</h3>
+          <section aria-label={translateUi("Connected bot chats")} className="mb-4">
+            <div className="px-2 pb-2 pt-1">
+              <h3 className="type-row-title text-foreground">{translateUi("Connected bot chats")}</h3>
+              <p className="mt-1 type-secondary text-text-tertiary">
+                {translateUi("Conversations from linked bots, grouped by source chat.")}
+              </p>
+            </div>
             {bots.map((bot) => <ChannelSourceThreads key={bot.key} bot={bot} searching={Boolean(search)}
               activeId={activeThreadId} unreadIds={model.unreadThreadIds} renderThread={renderThread} />)}
+            {model.onMoreGuestThreads ? (
+              <button type="button" disabled={model.loadingGuestThreads} onClick={model.onMoreGuestThreads}
+                className="w-full rounded-lg px-3 py-2 text-left type-secondary text-text-tertiary hover:bg-overlay">
+                {translateUi("Load more guest conversations")}
+              </button>
+            ) : null}
           </section>
         ) : null}
         {!filtered.length ? (
           <div role="status" className="flex flex-col items-center gap-3 px-4 py-10 text-center text-13 text-text-tertiary">
             <MessageSquare aria-hidden="true" className="h-6 w-6 opacity-50" />
-            <p>{model.threadsLoading ? translateUi("Loading threads...")
+            <p>{agent.can_use === false ? translateUi("Chat access is restricted.") : model.threadsLoading ? translateUi("Loading threads...")
               : search ? translateUi("No matching threads") : translateUi("No threads yet")}</p>
           </div>
         ) : null}

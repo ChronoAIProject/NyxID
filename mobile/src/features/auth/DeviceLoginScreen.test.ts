@@ -442,3 +442,93 @@ test("a local request cannot claim the trusted staging environment through reque
   assert.equal(nodes.some((node) => node.props.label === "Approve staging account session"), false);
   env.harness.unmount();
 });
+
+test("review groups client and request details before actions and disclosures never decide a request", async (t) => {
+  const env = setup({ userCode: "ABCD-EFGH", previewRequest: async () => ({
+    ...pendingPreview("Browser request"),
+    client_app: "Chrome 127",
+    client_platform: "macOS",
+    client_timezone: "UTC",
+    client_screen_width: 1440,
+    client_screen_height: 900,
+    client_device_pixel_ratio: null,
+    client_hardware_concurrency: 8,
+    client_device_memory: 16,
+    client_user_agent: "Example browser user agent",
+  }) });
+  t.after(() => env.harness.unmount());
+  await env.harness.settle();
+  let nodes = elements(env.harness.value());
+  const approve = nodes.findIndex((node) => node.props.label === "Approve full account session");
+  const disclosure = nodes.findIndex((node) => node.props.accessibilityLabel === "Show more details");
+  assert.ok(disclosure >= 0 && approve > disclosure);
+  assert.ok(nodes.some((node) => node.props.label === "Reject"));
+  assert.ok(nodes.some((node) => node.props.children === "ABCD-EFGH"));
+  assert.ok(nodes.some((node) => node.props.children === "Expires in"));
+  assert.ok(nodes.some((node) => node.props.children === "Chrome 127 · macOS"));
+  assert.ok(nodes.some((node) => node.props.children === "Requested"));
+  assert.ok(nodes.some((node) => node.props.children === "Timezone"));
+  for (const label of ["Platform", "Screen", "Processor", "Memory", "Raw user agent"]) {
+    assert.equal(nodes.some((node) => node.props.children === label), false);
+  }
+  nodes[disclosure]!.props.onPress();
+  env.harness.flush();
+  nodes = elements(env.harness.value());
+  assert.ok(nodes.some((node) => node.props.children === "1440 x 900 CSS px"));
+  assert.ok(nodes.some((node) => node.props.children === "16 GB"));
+  const expanded = nodes.find((node) => node.props.accessibilityLabel === "Hide more details")!;
+  assert.equal(expanded.props.accessibilityState.expanded, true);
+  nodes.find((node) => node.props.accessibilityLabel === "Show raw user agent")!.props.onPress();
+  env.harness.flush();
+  assert.ok(elements(env.harness.value()).some((node) => node.props.children === "Example browser user agent"));
+  expanded.props.onPress();
+  env.harness.flush();
+  assert.equal(elements(env.harness.value()).some((node) => node.props.children === "Example browser user agent"), false);
+  assert.deepEqual(env.decisions, []);
+});
+
+test("collapsed review retains origin, timezone and unverified-requester warnings before approval", async (t) => {
+  const env = setup({ userCode: "ABCD-EFGH", previewRequest: async () => ({
+    ...pendingPreview("Browser request"),
+    initiating_origin_status: "mismatched", initiating_origin: "https://another.example",
+    client_timezone: "UTC", client_timezone_matches_ip: false,
+    client_ip_attribution: "unverified", client_ip: "198.51.100.23",
+  }) });
+  t.after(() => env.harness.unmount());
+  await env.harness.settle();
+  const nodes = elements(env.harness.value());
+  const approve = nodes.findIndex((node) => node.props.label === "Approve full account session");
+  for (const value of ["another.example", "Not verified", "Timezone"]) {
+    const index = nodes.findIndex((node) => node.props.children === value);
+    assert.ok(index >= 0 && index < approve, value);
+  }
+  assert.ok(nodes.some((node) => typeof node.props.children === "string" && node.props.children.includes("IP location")));
+  assert.ok(nodes.some((node) => node.props.children === "Reject if anything looks unfamiliar."));
+  assert.ok(nodes.some((node) => node.props.children === "A full account session grants account, service, credential, and organization access."));
+  assert.deepEqual(env.decisions, []);
+});
+
+test("a replacement request starts compact and clears the previous raw-user-agent disclosure", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const env = setup({ userCode: "ABCD-EFGH", previewRequest: async (code) => ({
+    ...pendingPreview(code), client_user_agent: "Example browser user agent",
+  }) });
+  t.after(() => env.harness.unmount());
+  await env.harness.settle();
+  elements(env.harness.value()).find((node) => node.props.accessibilityLabel === "Show more details")!.props.onPress();
+  env.harness.flush();
+  elements(env.harness.value()).find((node) => node.props.accessibilityLabel === "Show raw user agent")!.props.onPress();
+  env.harness.flush();
+  now += 1000;
+  env.setCode("JKMN-PQRS");
+  await env.harness.settle();
+  let nodes = elements(env.harness.value());
+  assert.ok(nodes.some((node) => node.props.children === "JKMN-PQRS"));
+  assert.equal(nodes.some((node) => node.props.children === "Example browser user agent"), false);
+  nodes.find((node) => node.props.accessibilityLabel === "Show more details")!.props.onPress();
+  env.harness.flush();
+  nodes = elements(env.harness.value());
+  assert.ok(nodes.some((node) => node.props.accessibilityLabel === "Show raw user agent"));
+  assert.deepEqual(env.decisions, []);
+});

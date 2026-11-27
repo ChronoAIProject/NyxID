@@ -2,7 +2,6 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { beforeEach, expect, it, vi } from "vitest";
-import { useIntroReplay } from "@/hooks/use-assistant-onboarding";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { AssistantLearnPage } from "./assistant-learn";
 
@@ -14,14 +13,14 @@ const { navigate, useFeature } = vi.hoisted(() => ({
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...await importOriginal<typeof import("@tanstack/react-router")>(),
   useNavigate: () => navigate,
-  Link: ({ to, ...rest }: ComponentProps<"a"> & { to: string }) => <a href={to} {...rest} />,
+  Link: ({ to, search, ...rest }: ComponentProps<"a"> & { to: string; search?: { tour?: boolean } }) => <a href={search?.tour ? to + "?tour=true" : to} {...rest} />,
 }));
+vi.mock("@/hooks/use-agent-skills", () => ({ useAttachTemplateSkill: () => vi.fn(), useSkillPreview: () => ({}) }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature }));
 
 beforeEach(() => {
   navigate.mockClear();
   useFeature.mockImplementation((flag) => flag === FEATURE_FLAG.NYXAGENT_ENGINE);
-  useIntroReplay.getState().consume();
 });
 
 it("shows all seven tasks by category, with their required inputs and results, when skill runs are off", () => {
@@ -35,12 +34,12 @@ it("shows all seven tasks by category, with their required inputs and results, w
   }
   const operations = within(browse.getByRole("region", { name: "Operations" }));
   expect(operations.getByRole("heading", { name: "Explain weekly budget changes" })).toBeVisible();
-  expect(operations.getByText("Weekly budget, actual spend, and reporting threshold")).toBeVisible();
-  expect(operations.getByText(/highlight material differences/)).toBeVisible();
+  expect(operations.getByText("Reporting period · Budget and actuals · Material variances")).toBeVisible();
+  expect(operations.getByText(/Variance table/)).toBeVisible();
   const engineering = within(browse.getByRole("region", { name: "Engineering" }));
   expect(engineering.getByRole("heading", { name: "Assess release readiness" })).toBeVisible();
-  expect(engineering.getByText(/Release scope, test results/)).toBeVisible();
-  expect(engineering.getByText(/for a go\/no-go review/)).toBeVisible();
+  expect(engineering.getByText(/Release scope · Readiness evidence/)).toBeVisible();
+  expect(engineering.getByText(/Go\/no-go recommendation/)).toBeVisible();
 });
 
 it("previews from the keyboard and returns focus to the exact trigger on Escape", async () => {
@@ -57,12 +56,9 @@ it("previews from the keyboard and returns focus to the exact trigger on Escape"
   expect(navigate).not.toHaveBeenCalled();
 });
 
-it("replays the existing intro on the assistant home and links to the public usage guides", async () => {
-  const user = userEvent.setup();
+it("links to the workspace tour and public setup guides", () => {
   render(<AssistantLearnPage />);
   const section = within(screen.getByRole("region", { name: "Getting started" }));
   expect(section.getByRole("link", { name: /Usage guides/ })).toHaveAttribute("href", "/docs");
-  await user.click(section.getByRole("button", { name: /Replay intro/ }));
-  expect(useIntroReplay.getState().pending).toBe(true);
-  expect(navigate).toHaveBeenCalledWith({ to: "/assistant", search: {} });
+  expect(section.getByRole("link", { name: /Workspace tour/ })).toHaveAttribute("href", "/assistant?tour=true");
 });

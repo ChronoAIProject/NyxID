@@ -1,3 +1,4 @@
+import { panelDragAccessibility } from "./panel-drag-accessibility";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
@@ -435,25 +436,7 @@ export function AnalyticsCanvas({
               view.panels.findIndex((p) => p.id === over.id),
             );
         }}
-        accessibility={{
-          screenReaderInstructions: {
-            draggable:
-              "Press Space to pick up a panel, arrow keys to move it, Space to drop, or Escape to cancel.",
-          },
-          announcements: {
-            onDragStart: ({ active }) =>
-              `Picked up ${view.panels.find((p) => p.id === active.id)?.title ?? "panel"}.`,
-            onDragOver: ({ over }) =>
-              over
-                ? `Over position ${view.panels.findIndex((p) => p.id === over.id) + 1} of ${view.panels.length}.`
-                : "Outside the panel grid.",
-            onDragEnd: ({ over }) =>
-              over
-                ? `Dropped at position ${view.panels.findIndex((p) => p.id === over.id) + 1}.`
-                : "Move cancelled.",
-            onDragCancel: () => "Move cancelled.",
-          },
-        }}
+        accessibility={panelDragAccessibility(view.panels)}
       >
         <SortableContext
           items={view.panels.map((p) => p.id)}

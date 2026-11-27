@@ -34,3 +34,33 @@ test("private, streaming and crew reply cards are separated from prose without a
     h.unmount();
   }
 });
+
+test("reply body emits the text marker at layout commit only when it renders markdown", () => {
+  const h = hookHarness<any>({
+    "react/jsx-runtime": {
+      jsx: (type: unknown, props: unknown) => ({ type, props }),
+      jsxs: (type: unknown, props: unknown) => ({ type, props }),
+    },
+    "react-native": { View: "View" },
+    "./AssistantMarkdownBody": { AssistantMarkdownBody: "Markdown" },
+  });
+  const Body = (
+    h.load(fileURLToPath(new URL("./AssistantReplyBody.tsx", import.meta.url)))
+      .AssistantReplyBody as any
+  ).type;
+  let commits = 0;
+  const onTextCommit = () => {
+    commits++;
+  };
+  const empty = Body({ text: "", activity: "Receipt", onTextCommit });
+  assert.equal(empty.props.children.filter(Boolean).length, 1);
+  const rendered = Body({ text: "Hello", onTextCommit });
+  const [markdown, marker] = rendered.props.children.filter(Boolean);
+  assert.equal(markdown.type, "Markdown");
+  assert.equal(commits, 0);
+  h.mount(() => marker.type(marker.props));
+  assert.equal(commits, 1);
+  h.render();
+  assert.equal(commits, 1);
+  h.unmount();
+});

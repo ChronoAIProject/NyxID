@@ -1375,6 +1375,14 @@ controls. The full transcript/cards remain available without ending the call.
 End voice and Stop task are distinct labelled controls. Results interrupt only
 at a natural pause; an important card also remains visually discoverable.
 
+Native private calls keep compact controls and use the main chat as their only
+transcript. The original mint-and-blush composer halo surrounds those controls
+and any enabled avatar banner. Its listening and speaking phases follow actual
+input acceptance and playback; queued/running tasks drive its thinking phase.
+Retained captions never imply audio activity. End, recovery and inactive calls
+return the halo to rest; Reduce Motion keeps a still glow. This decoration does
+not own or remount media, change next-call preferences, or alter bounded cleanup.
+
 The full panel has separate **You** and **Assistant** caption regions and a live
 elapsed timer. Speaker mute controls local playback only; microphone mute is a
 separate control and neither ends billing. Minimize keeps the same media session
@@ -2141,11 +2149,18 @@ deadline to avoid double-paid sessions. Closing this crash window requires a
 recoverable provider identity recorded before create, such as a provider-supported
 idempotency key or handle that can be looked up or closed.
 
+The `dev` and `prod` native app builds on iOS and Android use
+`react-native-webrtc` for OpenAI (`openai_live`). When the runtime lacks
+`WebRTCModule`, the app displays the localized “Voice audio is not supported by
+this app runtime.” message before sending a Start request or opening a control
+connection. Native OpenAI calls do not fall back to a WebView. Grok
+(`xai_realtime`) uses the local PCM WebView for capture and playback on both platforms.
+
 Connected iOS native WebRTC (`openai_live`) calls retain their session, audio and
 transcript in the background with the `audio` UIBackgroundMode.
 [useNativeVoice.ts](../../mobile/src/features/assistant/voice/useNativeVoice.ts)
 resyncs on foreground; only definitive server state ends the call. Errors,
-timeouts and stale revisions are inconclusive. Android, WebView/Grok and
+timeouts and stale revisions are inconclusive. Android, Grok and
 still-connecting calls end with a specific localized reason. In
 [AssistantVoiceClient.ts](../../mobile/src/features/assistant/voice/AssistantVoiceClient.ts),
 End is sent before media teardown. A dispatched start POST keeps its own deadline

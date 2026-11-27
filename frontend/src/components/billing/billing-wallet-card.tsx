@@ -7,7 +7,14 @@ import { Label } from "@/components/ui/label";
 import { formatExactCredits, legacyCredits, hasCredits } from "@/lib/credits";
 import { useState } from "react";
 import { ExternalLink, Plus } from "lucide-react";
-import type { BillingWalletResponse } from "@/schemas/billing";
+import {
+  DEFAULT_TOP_UP_CREDITS,
+  MAX_TOP_UP_CREDITS,
+  MIN_TOP_UP_CREDITS,
+  TOP_UP_PRESETS_USD,
+  topUpAmountSchema,
+  type BillingWalletResponse,
+} from "@/schemas/billing";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import {
@@ -26,9 +33,6 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-
-const DEFAULT_TOP_UP_CREDITS = 100;
-const TOP_UP_PRESETS = [100, 500, 1_000, 5_000] as const;
 
 interface BillingWalletActionsProps {
   readonly wallet: BillingWalletResponse | undefined;
@@ -204,10 +208,6 @@ function AddCreditsDialog({
     setUncontrolledOpen(next);
     onOpenChange?.(next);
   };
-  const [credits, setCredits] = useState(String(DEFAULT_TOP_UP_CREDITS));
-  const amount = Number(credits);
-  const amountValid =
-    Number.isInteger(amount) && amount > 0 && amount <= 10_000_000;
   const trigger = (
     <Button variant="primary" disabled={!billingReady || pending}>
       <ButtonIcon variant="primary">
@@ -230,65 +230,93 @@ function AddCreditsDialog({
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>{trigger}</DialogTrigger>
       <DialogContent className="sm:max-w-[420px]">
-        <DialogHeader>
-          <DialogTitle>{translateUi("Add credits")}</DialogTitle>
-          <DialogDescription>{translateUi("1 credit = 1 USD. Purchased credits expire one year after payment.")}</DialogDescription>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <span className="type-row-title">{translateUi("Amount")}</span>
-            <div className="flex flex-wrap gap-2">
-              {TOP_UP_PRESETS.map((preset) => (
-                <Button
-                  key={preset}
-                  variant={amount === preset ? "secondary" : "outline"}
-                  size="sm"
-                  disabled={pending}
-                  onClick={() => setCredits(String(preset))}
-                >
-                  {formatNumber(preset)}
-                </Button>
-              ))}
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="topup-credits">{translateUi("Or enter an amount")}</Label>
-            <div className="flex items-center gap-3">
-              <Input
-                id="topup-credits"
-                type="number"
-                min={1}
-                max={10_000_000}
-                step={1}
-                value={credits}
-                onChange={(event) => setCredits(event.target.value)}
-                disabled={pending}
-                aria-describedby="topup-total"
-              />
-              <span
-                id="topup-total"
-                className="min-w-0 break-all type-body tabular-nums text-muted-foreground"
-              >
-                {formatUsd(amount)}
-              </span>
-            </div>
-          </div>
-          <p className="type-secondary text-muted-foreground">{translateUi("We'll hand you to Stripe to pay, then bring you back here. Credits land once the payment clears.")}</p>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => setOpen(false)}>{translateUi("Cancel")}</Button>
-          <Button
-            variant="primary"
-            disabled={!billingReady || !amountValid || pending}
-            isLoading={pending}
-            onClick={() => void onTopUp(amount)}
-          >
-            <ButtonIcon variant="primary">
-              <ExternalLink className="h-3 w-3" />
-            </ButtonIcon>{translateUi("Continue to payment")}</Button>
-        </DialogFooter>
+        <AddCreditsForm
+          pending={pending}
+          onTopUp={onTopUp}
+          onCancel={() => setOpen(false)}
+        />
       </DialogContent>
     </Dialog>
+  );
+}
+
+// DialogContent mounts the form on each opening, including controlled opens.
+// Submission failures keep it mounted so the amount stays editable.
+function AddCreditsForm({
+  pending,
+  onTopUp,
+  onCancel,
+}: {
+  readonly pending: boolean;
+  readonly onTopUp: (amountCredits: number) => Promise<void>;
+  readonly onCancel: () => void;
+}) {
+  useUiTranslation();
+  const [credits, setCredits] = useState(String(DEFAULT_TOP_UP_CREDITS));
+  const amount = Number(credits);
+  const amountValid = topUpAmountSchema.safeParse(amount).success;
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>{translateUi("Add credits")}</DialogTitle>
+        <DialogDescription>{translateUi("1 credit = 1 USD. Minimum purchase: {{minimum}} credits. Purchased credits expire one year after payment.", { minimum: formatNumber(MIN_TOP_UP_CREDITS) })}</DialogDescription>
+      </DialogHeader>
+      <div className="space-y-4">
+        <div className="space-y-2">
+          <span className="type-row-title">{translateUi("Amount")}</span>
+          <div className="flex flex-wrap gap-2">
+            {TOP_UP_PRESETS_USD.map((preset) => (
+              <Button
+                key={preset}
+                variant={amount === preset ? "secondary" : "outline"}
+                aria-pressed={amount === preset}
+                size="sm"
+                disabled={pending}
+                onClick={() => setCredits(String(preset))}
+              >
+                {translateUi("US${{amount}}", { amount: formatNumber(preset) })}
+              </Button>
+            ))}
+          </div>
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="topup-credits">{translateUi("Or enter credits")}</Label>
+          <Input
+            id="topup-credits"
+            type="number"
+            min={MIN_TOP_UP_CREDITS}
+            max={MAX_TOP_UP_CREDITS}
+            step={1}
+            value={credits}
+            onChange={(event) => setCredits(event.target.value)}
+            disabled={pending}
+            aria-describedby="topup-total"
+          />
+          <p
+            id="topup-total"
+            className="min-w-0 break-all type-body tabular-nums text-muted-foreground"
+          >
+            {amountValid ? translateUi("{{quantity}} credits · Subtotal: {{amount}}", {
+              quantity: formatNumber(amount),
+              amount: formatUsd(amount),
+            }) : "—"}
+          </p>
+        </div>
+        <p className="type-secondary text-muted-foreground">{translateUi("We'll hand you to Stripe to pay, then bring you back here. Credits land once the payment clears.")}</p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" onClick={onCancel}>{translateUi("Cancel")}</Button>
+        <Button
+          variant="primary"
+          disabled={!amountValid || pending}
+          isLoading={pending}
+          onClick={() => void onTopUp(amount)}
+        >
+          <ButtonIcon variant="primary">
+            <ExternalLink className="h-3 w-3" />
+          </ButtonIcon>{translateUi("Continue to payment")}</Button>
+      </DialogFooter>
+    </>
   );
 }
 
@@ -328,6 +356,7 @@ function formatUsd(credits: number): string {
   return new Intl.NumberFormat(getFormattingLocale(), {
     style: "currency",
     currency: "USD",
+    currencyDisplay: "code",
   }).format(credits);
 }
 

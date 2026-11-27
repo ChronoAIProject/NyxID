@@ -62,7 +62,7 @@ export function useSetAgentSkills(id: string) {
   });
 }
 
-/** An explicit gallery start may append a pin or reuse an exact enabled one. */
+/** An explicit template confirmation may append a pin or reuse an exact enabled one. */
 export function useAttachTemplateSkill() {
   const client = useQueryClient();
   const owner = useAuthStore((state) => state.user?.id);
@@ -70,8 +70,7 @@ export function useAttachTemplateSkill() {
     agentId: string,
     reference: AgentSkill,
     authorityGuard: () => void,
-    attach = true,
-  ): Promise<"ready" | "disabled" | "different" | "full" | "missing"> => {
+  ): Promise<"ready" | "disabled" | "different" | "full"> => {
     const current = await readAgentSkills(agentId, authorityGuard);
     const existing = current.skills.find((skill) => skill.skill_id === reference.skill_id);
     if (existing) {
@@ -80,7 +79,6 @@ export function useAttachTemplateSkill() {
       if (!sameSkillPin(existing, reference) || !sameDependencies) return "different";
       return existing.disabled ? "disabled" : "ready";
     }
-    if (!attach) return "missing";
     if (current.skills.length >= 16) return "full";
     await writeAgentSkills(agentId, {
       expected_revision: current.revision,
@@ -169,11 +167,11 @@ export function useSkillVersions(id: string | undefined, page = 1) {
     enabled: Boolean(owner && id),
   });
 }
-export function useSkillPreview(id: string | undefined, version: string) {
+export function useSkillPreview(id: string | undefined, version: string, enabled = true) {
   const owner = useAuthStore((s) => s.user?.id);
   return useQuery({
     ...skillPreviewQuery(owner, id, version),
-    enabled: Boolean(owner && id && version),
+    enabled: enabled && Boolean(owner && id && version),
   });
 }
 

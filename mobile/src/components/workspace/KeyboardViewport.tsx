@@ -13,6 +13,7 @@ import {
   StyleSheet,
   View,
 } from "react-native";
+import { requireOptionalNativeModule } from "expo";
 import { observeKeyboardFrames } from "./keyboardFrameEvents";
 import {
   useSafeAreaFrame,
@@ -20,6 +21,10 @@ import {
 } from "react-native-safe-area-context";
 import { useWorkspaceSheet } from "../../app/WorkspaceHeader";
 import { keyboardOverlap, type KeyboardFrame } from "./keyboardOverlap";
+
+const windowInsets = Platform.OS === "android"
+  ? requireOptionalNativeModule<{ contentBottom(): number | null }>("NyxWindowInsets")
+  : null;
 
 export type KeyboardViewportFrame = { y: number; height: number };
 
@@ -85,6 +90,7 @@ export function KeyboardViewport({
       // shortens Dimensions.window. Validate against the matching screen.
       windowHeight: () =>
         Dimensions.get(Platform.OS === "android" ? "screen" : "window").height,
+      androidContentBottom: windowInsets ? () => windowInsets.contentBottom() : undefined,
       afterLayout: requestAnimationFrame,
       cancelLayout: cancelAnimationFrame,
       onFrame: (frame, event) => {

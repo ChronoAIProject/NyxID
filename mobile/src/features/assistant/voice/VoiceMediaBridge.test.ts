@@ -9,9 +9,10 @@ import {
   type VoiceMediaAdapter,
   type VoiceMediaEvent,
 } from "./AssistantVoiceClient";
-import type { VoicePreferences, VoiceSession } from "./voiceContracts";
+import type { VoicePreferences, VoiceProtocol, VoiceSession } from "./voiceContracts";
 import * as documentModule from "./voiceMediaDocument";
 import { systemStatusActivityActive } from "../../../lib/systemStatusActivity";
+import { setAppTranslationLanguage } from "../../../i18n/appTranslation";
 
 type Media = VoiceMediaAdapter & {
   readonly usesNativeMedia: boolean;
@@ -19,7 +20,10 @@ type Media = VoiceMediaAdapter & {
   receive(raw: string): void;
 };
 
-function fixture() {
+function fixture(
+  platform: "android" | "ios" = "android",
+  missingWebRTC = false,
+) {
   const listeners = new Set<(event: VoiceMediaEvent) => void>();
   const state = {
     closed: 0,
@@ -60,16 +64,27 @@ function fixture() {
     },
   };
   const harness = hookHarness<unknown>({
-    "react-native": { StyleSheet: { create: (value: unknown) => value } },
+    "react-native": {
+      Platform: { OS: platform },
+      NativeModules: {},
+      StyleSheet: { create: (value: unknown) => value },
+    },
     "react-native-webview": { WebView: "WebView" },
     "./voiceMediaDocument": documentModule,
-    "./createNativeOpenAIMedia": { createNativeOpenAIMedia: () => native },
   });
+  harness.mock(
+    "./createNativeOpenAIMedia",
+    missingWebRTC
+      ? harness.load(
+          fileURLToPath(new URL("./createNativeOpenAIMedia.ts", import.meta.url)),
+        )
+      : { createNativeOpenAIMedia: () => native },
+  );
   const module = harness.load(
     fileURLToPath(new URL("./VoiceMediaBridge.tsx", import.meta.url)),
   ) as {
     NativeVoiceMedia: new (factory?: (() => VoiceMediaAdapter) | null) => Media;
-    VoiceMediaBridge(props: { media: Media; origin: string }): unknown;
+    VoiceMediaBridge(props: { media: Media; protocol: VoiceProtocol; origin: string }): unknown;
   };
   const media = new module.NativeVoiceMedia();
   return { state, native, listeners, harness, module, media };
@@ -113,6 +128,7 @@ for (const settlement of ["terminal", "deadline"] as const) {
     f.harness.mount(() =>
       f.module.VoiceMediaBridge({
         media: f.media,
+        protocol: "openai_live",
         origin: "https://nyx.example",
       }),
     );
@@ -239,21 +255,70 @@ for (const settlement of ["terminal", "deadline"] as const) {
   });
 }
 
-test("ordinary native Bridge unmount still releases capture immediately", async () => {
-  const f = fixture();
-  f.harness.mount(() =>
-    f.module.VoiceMediaBridge({
+for (const platform of ["android", "ios"] as const) {
+  test(`${platform} OpenAI startup reports the localized unsupported runtime without network or a WebView`, async (t) => {
+    setAppTranslationLanguage("zh-CN");
+    const f = fixture(platform, true);
+    t.after(() => {
+      f.harness.unmount();
+      setAppTranslationLanguage("en");
+    });
+    assert.equal(
+      f.harness.mount(() =>
+        f.module.VoiceMediaBridge({
+          media: f.media,
+          protocol: "openai_live",
+          origin: "https://nyx.example",
+        }),
+      ),
+      null,
+    );
+    const requests: string[] = [];
+    const unexpectedRequest = (operation: string) => async () => {
+      requests.push(operation);
+      throw new Error("Unexpected network request");
+    };
+    const errors: string[] = [];
+    const client = new AssistantVoiceClient({
+      conversationId: `nyxa-${"a".repeat(32)}`,
       media: f.media,
-      origin: "https://nyx.example",
-    }),
-  );
-  await f.media.prepare("openai_live", new AbortController().signal);
-  f.media.setInput(true);
-  f.harness.unmount();
-  assert.equal(f.state.closed, 1);
-  assert.equal(f.state.input, false);
-  assert.equal(f.media.usesNativeMedia, false);
-});
+      api: {
+        start: unexpectedRequest("start"),
+        active: unexpectedRequest("active"),
+        accountActive: unexpectedRequest("accountActive"),
+        status: unexpectedRequest("status"),
+        control: unexpectedRequest("control"),
+        cancelRequest: unexpectedRequest("cancelRequest"),
+      },
+      createSocket: unexpectedRequest("socket"),
+      onSnapshot: () => {},
+      onError: (message) => errors.push(message),
+    });
+    await client.start(preferences);
+    assert.deepEqual(errors, ["此应用运行环境不支持语音音频。"]);
+    assert.deepEqual(requests, []);
+    assert.equal(client.isClosed, true);
+    assert.equal(f.harness.render(), null);
+  });
+
+  test(`${platform} OpenAI calls mount no WebView and release native capture on unmount`, async () => {
+    const f = fixture(platform);
+    const view = f.harness.mount(() =>
+      f.module.VoiceMediaBridge({
+        media: f.media,
+        protocol: "openai_live",
+        origin: "https://nyx.example",
+      }),
+    );
+    assert.equal(view, null);
+    await f.media.prepare("openai_live", new AbortController().signal);
+    f.media.setInput(true);
+    f.harness.unmount();
+    assert.equal(f.state.closed, 1);
+    assert.equal(f.state.input, false);
+    assert.equal(f.media.usesNativeMedia, false);
+  });
+}
 
 test("beginEndDrain never exempts a WebView engine from disconnect cleanup", async () => {
   const f = fixture();
@@ -288,7 +353,7 @@ test("beginEndDrain never exempts a WebView engine from disconnect cleanup", asy
 });
 
 test("Chinese presentation preserves the engine error whitelist and command protocol", async () => {
-  const { setAppTranslationLanguage, translateApp } = await import(
+  const { translateApp } = await import(
     "../../../i18n/appTranslation"
   );
   const f = fixture();

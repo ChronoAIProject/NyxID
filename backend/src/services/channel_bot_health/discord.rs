@@ -1,4 +1,4 @@
-//! Read-only intake evidence. Selection is never connection or delivery proof.
+//! Intake evidence sampled by the native status sweep and projected by health reads.
 use std::collections::{HashMap, HashSet};
 
 use bson::{Document, doc};
@@ -18,6 +18,7 @@ pub const RELAY_STOPPED: &str = "discord_relay_stopped";
 pub const RELAY_BLOCKED: &str = "discord_relay_blocked";
 pub const RELAY_UNCONFIRMED: &str = "discord_relay_unconfirmed";
 pub const NATIVE_UNCONFIRMED: &str = "discord_native_intake_unconfirmed";
+pub const NATIVE_CONNECTION_DOWN: &str = "discord_native_connection_down";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Intake {
@@ -29,6 +30,38 @@ pub struct Intake {
     pub last_inbound_at: Option<String>,
 }
 
+fn connection_down_intake(channel: Option<&NyxbotChannel>) -> Intake {
+    let mut intake = native_intake(channel);
+    intake.state = "connection_down".into();
+    intake.code = Some(NATIVE_CONNECTION_DOWN);
+    intake
+}
+
+fn native_intake(channel: Option<&NyxbotChannel>) -> Intake {
+    let evidence = channel.and_then(|c| {
+        c.gateway_intake
+            .as_ref()
+            .filter(|i| Some(&i.binding_id) == c.binding_id.as_ref())
+    });
+    let last = evidence.and_then(|i| {
+        i.last_inbound_at
+            .filter(|at| i.handed_over_at.is_none_or(|handover| *at >= handover))
+    });
+    Intake {
+        receiving_side: "native_gateway",
+        state: if last.is_some() {
+            "event_observed"
+        } else {
+            "unconfirmed"
+        }
+        .into(),
+        code: last.is_none().then_some(NATIVE_UNCONFIRMED),
+        block_reason: None,
+        handed_over_at: evidence.and_then(|i| i.handed_over_at.map(|at| at.to_rfc3339())),
+        last_inbound_at: last.map(|at| at.to_rfc3339()),
+    }
+}
+
 pub(super) fn project(
     bot: &ChannelBot,
     channel: Option<&NyxbotChannel>,
@@ -36,28 +69,19 @@ pub(super) fn project(
     live_lease: bool,
 ) -> Intake {
     if native(channel) {
-        let evidence = channel.and_then(|c| {
-            c.gateway_intake
-                .as_ref()
-                .filter(|i| Some(&i.binding_id) == c.binding_id.as_ref())
+        let down = channel.is_some_and(|row| {
+            crate::services::nyxbot_gateway_source::ready(row)
+                && row.gateway_discord_connection.as_ref().is_some_and(|saved| {
+                    row.binding_id.as_ref() == Some(&saved.binding_id)
+                        && row.gateway_channel_id.as_ref() == Some(&saved.gateway_channel_id)
+                        && matches!(&row.gateway_source, Some(GatewaySource::Discord { bot_id }) if bot_id == &saved.bot_id && bot_id == &bot.platform_bot_id)
+                        && saved.down
+                })
         });
-        let last = evidence.and_then(|i| {
-            i.last_inbound_at
-                .filter(|at| i.handed_over_at.is_none_or(|handover| *at >= handover))
-        });
-        return Intake {
-            receiving_side: "native_gateway",
-            state: if last.is_some() {
-                "event_observed"
-            } else {
-                "unconfirmed"
-            }
-            .into(),
-            code: last.is_none().then_some(NATIVE_UNCONFIRMED),
-            block_reason: None,
-            handed_over_at: evidence.and_then(|i| i.handed_over_at.map(|at| at.to_rfc3339())),
-            last_inbound_at: last.map(|t| t.to_rfc3339()),
-        };
+        if down {
+            return connection_down_intake(channel);
+        }
+        return native_intake(channel);
     }
     let state = bot
         .diagnostics
@@ -342,6 +366,10 @@ pub fn advice(intake: &Intake) -> Option<super::Recommendation> {
             "verify",
             "Discord relay intake is not confirmed connected. Check the reported state, bot token, Message Content Intent and channel permissions. A stale connected report is not live connection proof.",
         ),
+        NATIVE_CONNECTION_DOWN => (
+            "contact_admin",
+            "The Agent Event Gateway reports that its native Discord connection is down or stale. Ask an administrator to check CMA native intake and restore the connection. NyxID retains this channel’s native assignment.",
+        ),
         NATIVE_UNCONFIRMED => (
             "contact_admin",
             "Intake is assigned to the native Agent Event Gateway, but no authenticated event is confirmed for this hand-over. Gateway selection does not confirm connection health. Send a message and ask an administrator to check CMA native intake; NyxID has not switched this bot back to relay.",
@@ -351,9 +379,14 @@ pub fn advice(intake: &Intake) -> Option<super::Recommendation> {
     Some(super::advice(action, text.into()))
 }
 
+pub const INTAKE_CODES: &[&str] = &[
+    RELAY_STOPPED,
+    RELAY_BLOCKED,
+    RELAY_UNCONFIRMED,
+    NATIVE_UNCONFIRMED,
+    NATIVE_CONNECTION_DOWN,
+];
+
 pub fn is_intake_code(code: &str) -> bool {
-    matches!(
-        code,
-        RELAY_STOPPED | RELAY_BLOCKED | RELAY_UNCONFIRMED | NATIVE_UNCONFIRMED
-    )
+    INTAKE_CODES.contains(&code)
 }

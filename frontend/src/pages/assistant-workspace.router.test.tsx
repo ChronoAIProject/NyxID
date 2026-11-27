@@ -467,7 +467,7 @@ it.each(["Control", "Meta", "Shift", "Alt"])("keeps the drawer on %s-modified St
   expect(router.state.location.pathname).toBe("/assistant/plugins");
 });
 
-it("lets the menu consume Escape before the drawer and hands NyxBot focus to the account button", async () => {
+it("lets the menu consume Escape before the drawer and returns Settings focus to the account button", async () => {
   await open("/assistant/plugins");
   await drawerAccountMenu();
   await userEvent.keyboard("{Escape}");
@@ -476,8 +476,8 @@ it("lets the menu consume Escape before the drawer and hands NyxBot focus to the
   const trigger = within(screen.getAllByTestId("sidebar-nyxagent")[1]!).getByRole("button", { name: "Account menu" });
   await waitFor(() => expect(trigger).toHaveFocus());
   await userEvent.click(trigger);
-  await userEvent.click(screen.getByRole("menuitem", { name: "NyxBot settings" }));
-  expect(await screen.findByRole("dialog", { name: "NyxBot settings" })).toBeVisible();
+  await userEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+  expect(await screen.findByRole("dialog", { name: "Account Settings" })).toBeVisible();
   expect(screen.queryByRole("button", { name: "Close chats", hidden: true })).not.toBeInTheDocument();
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(screen.getByRole("button", { name: "Account menu" })).toHaveFocus());
@@ -490,14 +490,19 @@ it.each(["/assistant?panel=settings&panelTab=display", "/assistant?panel=billing
   await waitFor(() => expect(screen.queryByRole("button", { name: "Close chats", hidden: true })).not.toBeInTheDocument());
 });
 
-it.each([true, false])("gates the account menu and keeps Studio destinations and logout (engine %s)", async (nyxagent) => {
+it.each([true, false])("shows the same account actions with NyxAgent enabled or disabled (%s)", async (nyxagent) => {
   setEngine(nyxagent);
   await open("/assistant/plugins");
   await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
-  expect(screen.queryByRole("menuitem", { name: "NyxBot settings" }) !== null).toBe(nyxagent);
-  expect(screen.getByRole("menuitem", { name: "Notification settings (opens in Studio)" })).toHaveAttribute("href", "/approvals/settings");
+  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    "Settings", "Billing", "Usage", "Open Studio", "Log out",
+  ]);
   expect(screen.getByRole("menuitem", { name: "Open Studio" })).toHaveAttribute("href", "/dashboard");
-  await userEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
+});
+
+it("can log out from the Settings profile", async () => {
+  await open("/assistant?panel=settings");
+  await userEvent.click(await screen.findByRole("button", { name: "Log out" }));
   expect(state.logout).toHaveBeenCalledOnce();
 });
 
@@ -518,8 +523,8 @@ it("restores focus to the account menu after closing", async () => {
   const router = await open("/assistant/plugins");
   const trigger = screen.getByRole("button", { name: "Account menu" });
   await userEvent.click(trigger);
-  await userEvent.click(screen.getByRole("menuitem", { name: "NyxBot settings" }));
-  const dialog = await screen.findByRole("dialog", { name: "NyxBot settings" });
+  await userEvent.click(screen.getByRole("menuitem", { name: "Settings" }));
+  const dialog = await screen.findByRole("dialog", { name: "Account Settings" });
   expect(screen.getByRole("button", { name: "Account menu", hidden: true })).toHaveClass("bg-overlay-strong");
   expect(router.state.location.pathname).toBe("/assistant/plugins");
   expect(document.title).toBe("nyxid - Plugins");

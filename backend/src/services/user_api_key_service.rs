@@ -2999,6 +2999,8 @@ mod tests {
     ) -> OAuthState {
         let now = Utc::now();
         OAuthState {
+            launch_proof_hash: None,
+            pending_callback: None,
             history_context: crate::services::service_history::context::current(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: actor_id.to_string(),

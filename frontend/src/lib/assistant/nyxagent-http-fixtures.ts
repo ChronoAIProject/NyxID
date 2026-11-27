@@ -1,4 +1,6 @@
 import type { AssistantHttpMockHandler } from "@/lib/assistant/assistant-http";
+import type { NotificationReadRequest } from "@/schemas/assistant-notifications";
+import { isValidAvatar, type AvatarConfig } from "@/lib/assistant/agent-avatar-model";
 import { mentionedNames } from "@/lib/assistant/nyxbot-mentions";
 import { createMockConnectReply, mockCreatedBotCount } from "@/lib/assistant/mock-setup-journeys";
 import {
@@ -68,6 +70,8 @@ interface AgentRecord {
   name: string;
   /** Optional in sessions persisted before display names existed. */
   display_name?: string | null;
+  /** Dev fixture: the chosen avatar (absent derives the default). */
+  avatar?: AvatarConfig | null;
   persona?: string | null;
   description: string;
   created_by: "user" | "nyxbot";
@@ -125,6 +129,7 @@ interface State {
   channels: NyxAgentChannelAgent[];
   chats?: NyxAgentChannelChat[];
   groups?: GroupRecord[];
+  briefingRead?: boolean;
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -212,6 +217,7 @@ export class NyxAgentHttpFixtures {
   private channels: NyxAgentChannelAgent[] = [];
   private chats: NyxAgentChannelChat[] = [];
   private groups: GroupRecord[] = [];
+  private briefingRead = false;
 
   constructor() {
     try {
@@ -223,6 +229,7 @@ export class NyxAgentHttpFixtures {
         this.channels = state.channels;
         this.chats = state.chats ?? [];
         this.groups = state.groups ?? [];
+        this.briefingRead = state.briefingRead ?? false;
       }
     } catch {
       this.rows.clear();
@@ -299,6 +306,7 @@ export class NyxAgentHttpFixtures {
       channels: this.channels,
       chats: this.chats,
       groups: this.groups,
+      briefingRead: this.briefingRead,
     };
     sessionStorage.setItem(STORAGE, JSON.stringify(state));
   }
@@ -336,11 +344,14 @@ export class NyxAgentHttpFixtures {
     const agent = this.agentOf(row);
     return {
       ...row.history.conversation,
+      handoff_eligible: agent.kind === "specialist" && !row.history.conversation.channel && !agent.destroyed_at,
       role: agent.kind === "specialist" ? "subagent" : "orchestrator",
       agent: {
         id: agent.id,
         kind: agent.kind,
         name: agent.name,
+        display_name: agent.display_name ?? null,
+        avatar: agent.avatar ?? null,
         destroyed: Boolean(agent.destroyed_at),
       },
       pending_acknowledgements: this.pending(row),
@@ -375,6 +386,7 @@ export class NyxAgentHttpFixtures {
       kind: agent.kind,
       name: agent.name,
       display_name: agent.display_name ?? null,
+      avatar: agent.avatar ?? null,
       persona: agent.persona ?? null,
       description: agent.description,
       specialty: null,
@@ -725,7 +737,11 @@ export class NyxAgentHttpFixtures {
         description?: string;
         display_name?: string;
         persona?: string;
+        avatar?: AvatarConfig | null;
       };
+      if (update.avatar !== undefined && update.avatar !== null && !isValidAvatar(update.avatar)) {
+        return failure(400, "Choose every avatar part and colour from the avatar catalogue");
+      }
       const style = this.styleRefusal(update);
       if (style) return style;
       if (update.name !== undefined && update.name !== agent.name) {
@@ -738,6 +754,7 @@ export class NyxAgentHttpFixtures {
       // An empty string clears these.
       if (update.display_name !== undefined) agent.display_name = update.display_name.trim() || null;
       if (update.persona !== undefined) agent.persona = update.persona.trim() || null;
+      if (update.avatar !== undefined) agent.avatar = update.avatar;
       this.save();
       return json({
         id: agent.id,
@@ -745,6 +762,7 @@ export class NyxAgentHttpFixtures {
         description: agent.description,
         display_name: agent.display_name ?? null,
         persona: agent.persona ?? null,
+        avatar: agent.avatar ?? null,
       });
     }
     if (method === "DELETE") {
@@ -1028,6 +1046,7 @@ export class NyxAgentHttpFixtures {
       members: members.map((agent) => ({
         id: agent.id,
         name: this.memberName(agent),
+        avatar: agent.avatar ?? null,
         kind: agent.kind,
         destroyed: Boolean(agent.destroyed_at),
         working: working.includes(agent.id),
@@ -1050,7 +1069,7 @@ export class NyxAgentHttpFixtures {
       id: crypto.randomUUID(),
       seq: (group.messages.at(-1)?.seq ?? 0) + 1,
       role,
-      agent: agent ? { id: agent.id, name: this.memberName(agent), kind: agent.kind } : null,
+      agent: agent ? { id: agent.id, name: this.memberName(agent), avatar: agent.avatar ?? null, kind: agent.kind } : null,
       text,
       created_at: new Date().toISOString(),
     };
@@ -1339,11 +1358,59 @@ export class NyxAgentHttpFixtures {
     return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
   }
 
+  /** The seeded Telegram briefing also appears in the preview account's activity feed. */
+  private notifications(url: URL, init: RequestInit) {
+    const briefing = [...this.rows.values()].find(
+      row => row.history.conversation.title === NYXAGENT_FIXTURE_CHANNEL_THREAD,
+    );
+    const thread = briefing?.history.conversation;
+    const unread = thread && !this.briefingRead ? 1 : 0;
+    if (url.pathname.endsWith("/summary")) {
+      return json({
+        unread_count: unread,
+        needs_decision_count: 0,
+        by_kind: { chat_update: unread },
+        by_source: thread && unread ? [{ source_type: "conversation", id: thread.id, unread }] : [],
+      });
+    }
+    if (url.pathname.endsWith("/read") && init.method === "POST") {
+      const scope = JSON.parse(String(init.body)) as NotificationReadRequest;
+      const matches = thread && (
+        ("all" in scope && thread.created_at <= scope.before) ||
+        ("ids" in scope && scope.ids.includes(thread.id)) ||
+        ("source" in scope && scope.source.type === "conversation" && scope.source.id === thread.id)
+      );
+      if (matches) {
+        this.briefingRead = true;
+        this.save();
+      }
+      return new Response(null, { status: 204 });
+    }
+    const kinds = url.searchParams.get("kind")?.split(",");
+    const visible = (!kinds || kinds.includes("chat_update")) && (url.searchParams.get("unread_only") !== "true" || unread);
+    const items = thread && visible ? [{
+      id: thread.id,
+      kind: "chat_update",
+      source: { type: "conversation", id: thread.id, conversation_id: thread.id, label: thread.title },
+      title: thread.title,
+      preview: "Your morning calendar briefing is ready.",
+      platform: "telegram",
+      url: `/assistant?c=${thread.id}`,
+      read: this.briefingRead,
+      created_at: thread.created_at,
+      updated_at: thread.created_at,
+    }] : [];
+    return json({ as_of: new Date().toISOString(), next_cursor: null, items });
+  }
+
   readonly handler: AssistantHttpMockHandler = async ({ endpoint, init }) => {
     if (!endpoint.startsWith(ROOT)) return undefined;
     this.tick();
     const url = new URL(endpoint, window.location.origin);
     const method = init.method ?? "GET";
+    if (url.pathname === `${ROOT}/notifications` || url.pathname === `${ROOT}/notifications/summary` || url.pathname === `${ROOT}/notifications/read`) {
+      return this.notifications(url, init);
+    }
     if (url.pathname === `${ROOT}/live`) {
       return globalThis.__nyxidAssistantHttpFaults?.nyxagentLive
         ? this.live()

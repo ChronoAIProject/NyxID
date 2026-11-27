@@ -13,10 +13,13 @@ import {
   notificationTarget,
   notificationTime,
   notificationSentence,
+  notificationPreview,
   notificationTitle,
+  notificationMatchesSearch,
   unreadForSource,
 } from "./notificationPresentation";
 import { notificationSchema } from "./notificationContracts";
+import { setAppTranslationLanguage } from "../../i18n/appTranslation";
 
 const C = `nyxa-${"a".repeat(32)}`;
 const G = `nyxg-${"b".repeat(32)}`;
@@ -30,6 +33,37 @@ const row = (overrides: Record<string, unknown>) =>
     updated_at: "2026-11-10T08:05:00Z",
     ...overrides,
   });
+
+test("unread accessibility copy follows the app language and preserves notification content", () => {
+  const notification = row({ title: "My English report", preview: "Alice's original text", read: false });
+  const now = Date.parse("2026-11-10T08:10:00Z");
+  try {
+    for (const [language, suffix] of [["zh-CN", "未读"], ["zh-TW", "未讀"], ["en", "unread"]] as const) {
+      setAppTranslationLanguage(language);
+      const label = notificationAccessibilityLabel(notification, now);
+      assert.ok(label.startsWith("My English report, Alice's original text, "));
+      assert.ok(label.endsWith(", " + suffix));
+    }
+    assert.ok(!notificationAccessibilityLabel({ ...notification, read: true }, now).endsWith(", unread"));
+  } finally {
+    setAppTranslationLanguage("en");
+  }
+});
+
+test("search matches visible identities, source, platform and message words regardless of case or full-width input", () => {
+  const item = row({
+    title: "Daily report",
+    preview: "Bookings verified through December",
+    actor: { type: "agent", name: "jolly-a2", display_name: "Jolly A2", kind: "specialist" },
+    source: { type: "conversation", id: C, label: "Front desk" },
+    participants: [{ type: "person", name: "Calvin Tan" }],
+    platform: "lark",
+  });
+  for (const query of ["", " \n ", "daily", "BOOKINGS december", "Jolly verified", "ＪＯＬＬＹ", "front desk", "calvin", "lark"])
+    assert.equal(notificationMatchesSearch(item, query), true, query);
+  assert.equal(notificationMatchesSearch(item, "jolly missing"), false);
+  assert.equal(notificationMatchesSearch(item, C), false, "internal ids are not searchable copy");
+});
 
 test("badge caps at 99+, count chips start at two and labels read naturally", () => {
   assert.equal(notificationBadge(0), "");
@@ -202,4 +236,26 @@ test("automation sub-cases have client-owned action phrases and missing agents u
     assert.equal(notificationSentence(make(extra)).text, `Digest ${action}`);
   }
   assert.equal(notificationSentence(make({ kind: "agent_update", actor: { type: "system", name: "NyxID" } })).text, "NyxID replied in Launch");
+});
+
+test("completed automation results localize the action and omit only empty-result previews", (t) => {
+  t.after(() => setAppTranslationLanguage("en"));
+  const item = row({ kind: "automation_result", actor: { type: "automation", name: "顾客订单通知" } });
+  for (const [language, action] of [["zh-CN", "已完成"], ["zh-TW", "已完成"], ["en", "finished"]] as const) {
+    setAppTranslationLanguage(language);
+    assert.equal(notificationSentence(item).text, "顾客订单通知 " + action);
+    for (const preview of ["无（建设中，未发送）", "  "]) {
+      const empty = { ...item, preview };
+      assert.equal(notificationPreview(empty), "");
+      assert.ok(!notificationAccessibilityLabel(empty).includes("建设中"));
+      assert.equal(notificationMatchesSearch(empty, "建设中"), false);
+    }
+    const completed = { ...item, preview: "Completed." };
+    assert.equal(notificationPreview(completed), "Completed.");
+    assert.ok(notificationAccessibilityLabel(completed).includes("Completed."));
+    assert.equal(notificationMatchesSearch(completed, "completed."), true);
+    const text = "顾客备注：无（建设中，未发送）";
+    assert.equal(notificationPreview({ ...item, preview: text }), text);
+    assert.equal(notificationPreview({ ...item, kind: "chat_update", preview: "Completed." }), "Completed.");
+  }
 });

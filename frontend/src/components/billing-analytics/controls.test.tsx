@@ -1,12 +1,13 @@
 import { useState } from "react";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import { EMPTY_FILTERS } from "@/lib/usage-analytics";
-import type { AnalyticsFilters } from "@/schemas/usage-analytics";
-import { FilterBar, type SampleOptions } from "./controls";
+import type { AnalyticsFilters, AnalyticsPanel } from "@/schemas/usage-analytics";
+import { FilterBar, PanelControls, type SampleOptions } from "./controls";
 import { api } from "@/lib/api-client";
+import { appI18n } from "@/i18n";
 
 const services = Array.from({ length: 22 }, (_, index) => ({
   id: `svc-${index}`,
@@ -42,6 +43,49 @@ function renderBar(initial: Partial<AnalyticsFilters> = {}) {
 }
 
 const picker = () => within(screen.getByRole("dialog"));
+
+it("translates analytics choices without changing a custom panel title or selected values", async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn();
+  const panel: AnalyticsPanel = {
+    id: "panel", title: "My English report", measure: "cost", metric: "requests",
+    chart: "line", breakdown: "service", top: 0, wide: false,
+  };
+  const view = render(<PanelControls panel={panel} onChange={onChange} />);
+  try {
+    await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+    expect(screen.getByRole("textbox")).toHaveValue("My English report");
+    expect(screen.getByRole("combobox", { name: "图表类型" })).toHaveTextContent("折线图");
+    expect(screen.getByRole("combobox", { name: "数据表" })).toHaveTextContent("始终展开");
+    expect(screen.getByRole("combobox", { name: "显示" })).toHaveTextContent("合计");
+    await user.click(screen.getByRole("combobox", { name: "图表类型" }));
+    await user.click(screen.getByRole("option", { name: "柱状图" }));
+    expect(onChange).toHaveBeenLastCalledWith({ ...panel, chart: "bar" });
+    await act(async () => { await appI18n.changeLanguage("en"); });
+    expect(screen.getByRole("combobox", { name: "Chart type" })).toHaveTextContent("Line");
+    expect(screen.getByRole("textbox")).toHaveValue("My English report");
+  } finally {
+    view.unmount();
+    await appI18n.changeLanguage("en");
+  }
+});
+
+it("translates time-range choices and still submits the protocol period", async () => {
+  const user = userEvent.setup();
+  try {
+    await act(async () => { await appI18n.changeLanguage("zh-CN"); });
+    const onChange = renderBar();
+    const range = screen.getByRole("combobox", { name: "时间范围" });
+    expect(range).toHaveTextContent("最近 7 天");
+    await user.click(range);
+    await user.click(screen.getByRole("option", { name: "自定义范围" }));
+    expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ period: "custom" }));
+    await act(async () => { await appI18n.changeLanguage("en"); });
+    expect(screen.getByRole("combobox", { name: "Time range" })).toHaveTextContent("Custom range");
+  } finally {
+    await act(async () => { await appI18n.changeLanguage("en"); });
+  }
+});
 
 describe("admin usage FilterBar picker", () => {
   it("loads and caches every dropdown before any is opened", async () => {

@@ -28,7 +28,6 @@ import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantEngineSidebar } from "@/components/assistant/assistant-engine-sidebar";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import { PluginsView } from "@/components/assistant/plugins-view";
-import { SkillTemplateChat } from "@/components/assistant/skill-template-chat";
 import { useAssistantChat } from "@/hooks/use-assistant-chat";
 import { useDirectAssistantChat } from "@/hooks/use-assistant-direct";
 import { useFeature } from "@/hooks/use-feature-flag";
@@ -39,9 +38,7 @@ import {
 import { directAssistantTransport } from "@/lib/assistant/direct-transport";
 import { nyxAgentTransport } from "@/lib/assistant/nyxagent-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
-import { findSkillTemplate } from "@/lib/assistant/skill-templates";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
-import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
 
 const AssistantLearnPage = lazy(() => import("./assistant-learn").then((module) => ({ default: module.AssistantLearnPage })));
@@ -331,10 +328,14 @@ function AssistantContent({
   useUiTranslation();
   const directEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
-  const owner = useAuthStore((state) => state.user?.id);
-  const search = useRouterState({
+  const selectedConversationId = useRouterState({
     select: (state) =>
-      parseAssistantSearch(state.location.search as Record<string, unknown>),
+      parseAssistantSearch(state.location.search as Record<string, unknown>).c,
+  });
+  const drafting = useRouterState({
+    select: (state) =>
+      parseAssistantSearch(state.location.search as Record<string, unknown>)
+        .draft === true,
   });
 
   if (view !== "chat") {
@@ -353,13 +354,6 @@ function AssistantContent({
       workspace
     );
   }
-  const template = findSkillTemplate(search.skill);
-  if (template) {
-    const chat = <SkillTemplateChat key={`${owner}:${template.slug}:${search.skillSetup}:${nyxagentEnabled}`} template={template} available={nyxagentEnabled} setupId={search.skillSetup} />;
-    return AssistantHttpFixtureBoundary && fixtureMode() ? (
-      <Suspense fallback={null}><AssistantHttpFixtureBoundary>{chat}</AssistantHttpFixtureBoundary></Suspense>
-    ) : chat;
-  }
   if (AssistantHttpFixturePage && fixtureMode()) {
     return (
       <Suspense fallback={null}>
@@ -370,8 +364,8 @@ function AssistantContent({
   const surface = assistantChatSurface({
       nyxagentEnabled,
       directEnabled,
-      drafting: search.draft === true,
-      selectedConversationId: search.c,
+      drafting,
+      selectedConversationId,
     });
   if (surface === "nyxagent") return <NyxAgentAssistantChatPage />;
   if (surface === "direct") {

@@ -26,6 +26,7 @@ struct GatewayHarness {
     records: Arc<Mutex<HashMap<String, Value>>>,
     commands: Arc<Mutex<Vec<Value>>>,
     posts: Arc<AtomicUsize>,
+    gateway_requests: Arc<AtomicUsize>,
     binding_puts: Arc<AtomicUsize>,
     mode: Arc<AtomicUsize>,
     received: Arc<Mutex<Vec<Zeroizing<Vec<u8>>>>>,
@@ -160,6 +161,7 @@ async fn create(
     headers: HeaderMap,
     body: Bytes,
 ) -> axum::response::Response {
+    h.gateway_requests.fetch_add(1, Ordering::SeqCst);
     match h.mode.load(Ordering::SeqCst) {
         4 => return axum::response::Redirect::temporary("/credential-leak").into_response(),
         5 => return "x".repeat(64 * 1024 + 1).into_response(),
@@ -233,6 +235,7 @@ async fn retained(
     State(h): State<GatewayHarness>,
     Path(id): Path<String>,
 ) -> (StatusCode, Json<Value>) {
+    h.gateway_requests.fetch_add(1, Ordering::SeqCst);
     h.records
         .lock()
         .unwrap()
@@ -268,6 +271,14 @@ pub(crate) struct SetupFixture {
     server: tokio::task::JoinHandle<()>,
 }
 impl SetupFixture {
+    async fn compatible_writer(mode: usize) -> Self {
+        let mut fixture = Self::new(mode).await;
+        let mut keys = crate::test_utils::test_encryption_keys();
+        keys.set_contextual_record_writes(false);
+        fixture.harness.state.encryption_keys = Arc::new(keys);
+        fixture
+    }
+
     pub(crate) fn state(&self) -> &AppState {
         &self.harness.state
     }
@@ -352,12 +363,24 @@ impl SetupFixture {
             .insert_one(service)
             .await
             .unwrap();
+        Self::serve(listener, state, bot, funding, mode)
+    }
+
+    fn serve(
+        listener: tokio::net::TcpListener,
+        state: AppState,
+        bot: crate::models::channel_bot::ChannelBot,
+        funding: String,
+        mode: usize,
+    ) -> Self {
+        let base = format!("http://{}", listener.local_addr().unwrap());
         let harness = GatewayHarness {
             state,
             base: base.clone(),
             records: Arc::default(),
             commands: Arc::default(),
             posts: Arc::new(AtomicUsize::new(0)),
+            gateway_requests: Arc::default(),
             binding_puts: Arc::new(AtomicUsize::new(0)),
             mode: Arc::new(AtomicUsize::new(mode)),
             received: Arc::default(),
@@ -507,7 +530,7 @@ fn reviewed_gateway_update_tolerates_real_command_and_key_touches_and_recovers_s
                 enable_personal_as, execute_command,
             };
             use crate::services::platform_manager_command_service::PersonalCommandKind;
-            let f = SetupFixture::new(0).await;
+            let f = SetupFixture::compatible_writer(0).await;
             let NativeConversionOutcome::Converted(first) = f.convert(None).await.unwrap() else {
                 panic!("initial gateway")
             };
@@ -561,6 +584,9 @@ fn reviewed_gateway_update_tolerates_real_command_and_key_touches_and_recovers_s
                     .unwrap(),
                 review
             );
+            let rows = f.state().db.collection::<Document>(GATEWAYS);
+            let id = doc! {"_id": &old.id};
+            let active_source = rows.find_one(id.clone()).await.unwrap().unwrap();
             // An observed setup with a recent deadline is complete and may be updated.
             with_transport_for_test(
                 f.transport.clone(),
@@ -576,6 +602,24 @@ fn reviewed_gateway_update_tolerates_real_command_and_key_touches_and_recovers_s
             )
             .await
             .unwrap();
+            let keys = crate::test_utils::test_encryption_keys();
+            assert!(
+                !migrate_request(&f.state().db, &keys, &active_source)
+                    .await
+                    .unwrap()
+            );
+            let retired = rows.find_one(id.clone()).await.unwrap().unwrap();
+            assert_eq!(retired.get_str("state"), Ok("retired"));
+            assert!(
+                migrate_request(&f.state().db, &keys, &retired)
+                    .await
+                    .unwrap()
+            );
+            let migrated = rows.find_one(id).await.unwrap().unwrap();
+            verify_request(&keys, &migrated).await.unwrap();
+            assert_eq!(migrated.get("revision"), retired.get("revision"));
+            assert_eq!(migrated.get_str("state"), Ok("retired"));
+            assert_eq!(f.harness.posts.load(Ordering::SeqCst), 1);
             let stopped = crate::services::platform_bot_runtime_control_service::get(
                 &f.state().db,
                 &first.id,
@@ -975,7 +1019,7 @@ fn native_gateway_reserved_record_requires_exact_review_and_reuses_request_once(
     crate::test_utils::run_native_journey_test(
         "native_gateway_reserved_record_requires_exact_review_and_reuses_request_once",
         || async {
-            let f = SetupFixture::new(2).await;
+            let f = SetupFixture::compatible_writer(2).await;
             assert!(f.convert(None).await.is_err());
             let before = f
                 .state()
@@ -1014,6 +1058,22 @@ fn native_gateway_reserved_record_requires_exact_review_and_reuses_request_once(
                 NativeConversionOutcome::GatewayRecovery(_)
             ));
             assert_eq!(f.harness.posts.load(Ordering::SeqCst), 1);
+            let keys = crate::test_utils::test_encryption_keys();
+            let rows = f.state().db.collection::<Document>(GATEWAYS);
+            let id = doc! {"_id": &before.id};
+            let retained = rows.find_one(id.clone()).await.unwrap().unwrap();
+            let gateway_requests = f.harness.gateway_requests.load(Ordering::SeqCst);
+            assert!(
+                migrate_request(&f.state().db, &keys, &retained)
+                    .await
+                    .unwrap()
+            );
+            let rewrapped = rows.find_one(id).await.unwrap().unwrap();
+            verify_request(&keys, &rewrapped).await.unwrap();
+            assert_eq!(
+                f.harness.gateway_requests.load(Ordering::SeqCst),
+                gateway_requests
+            );
             f.harness.mode.store(0, Ordering::SeqCst);
             let (first, second) = tokio::join!(f.convert(Some(&review)), f.convert(Some(&review)));
             assert!(
@@ -1037,7 +1097,10 @@ fn native_gateway_reserved_record_requires_exact_review_and_reuses_request_once(
             assert_eq!(after.state, "active");
             assert_eq!(after.setup_state, "observed");
             assert_ne!(after.setup_attempt_id, before.setup_attempt_id);
-            assert_eq!(after.request_ciphertext, before.request_ciphertext);
+            assert!(after.request_ciphertext != before.request_ciphertext);
+            assert!(
+                rewrapped.get_binary_generic(REQUEST_FIELD).unwrap() == &after.request_ciphertext
+            );
             assert_eq!(after.request_hash, before.request_hash);
             assert_eq!(after.provider_api_key_id, before.provider_api_key_id);
             assert_eq!(after.route_api_key_id, before.route_api_key_id);
@@ -1106,4 +1169,81 @@ fn gateway_setup_refuses_redirects_and_advertised_or_chunked_oversize() {
             }
         },
     );
+}
+
+#[path = "platform_entry_gateway_mixed_tests.rs"]
+mod mixed;
+
+#[test]
+fn gateway_setup_rejects_hash_and_context_swaps_before_replay() {
+    crate::test_utils::run_native_journey_test("gateway_setup_replay_rejection", || async {
+        let f = SetupFixture::new(2).await;
+        assert!(f.convert(None).await.is_err());
+        let keys = &f.state().encryption_keys;
+        let rows = f.state().db.collection::<Document>(GATEWAYS);
+        let original = rows.find_one(doc! {}).await.unwrap().unwrap();
+        let transport = stored_transport(&original).unwrap();
+        let bytes = setup_bytes(keys, &transport).await.unwrap();
+        let mut cases = vec![(
+            transport.request_ciphertext.clone(),
+            sha256(b"different fixture bytes"),
+        )];
+        for (collection, id, owner, field) in [
+            (
+                GATEWAYS,
+                "other-row",
+                transport.credential_owner_id.as_str(),
+                REQUEST_FIELD,
+            ),
+            (
+                GATEWAYS,
+                transport.id.as_str(),
+                "other-owner",
+                REQUEST_FIELD,
+            ),
+            (
+                GATEWAYS,
+                transport.id.as_str(),
+                transport.credential_owner_id.as_str(),
+                "other_field",
+            ),
+            (
+                "assistant_cma_creations",
+                transport.id.as_str(),
+                transport.credential_owner_id.as_str(),
+                REQUEST_FIELD,
+            ),
+        ] {
+            let swapped = record_field::encrypt(keys, collection, id, owner, field, &bytes)
+                .await
+                .unwrap();
+            cases.push((swapped, transport.request_hash.clone()));
+        }
+        let expiry = bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(180));
+        for (ciphertext, hash) in cases {
+            rows.update_one(doc! {"_id": &transport.id}, doc! {"$set": {
+                "request_ciphertext": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: ciphertext},
+                "request_hash": hash,
+                "setup_dispatch_deadline": expiry,
+            }}).await.unwrap();
+            let NativeConversionOutcome::GatewayRecovery(review) = f.convert(None).await.unwrap()
+            else {
+                panic!("expected review of the retained attempt")
+            };
+            let row = rows.find_one(doc! {}).await.unwrap().unwrap();
+            let calls = f.harness.gateway_requests.load(Ordering::SeqCst);
+            assert!(verify_request(keys, &row).await.is_err());
+            assert!(migrate_request(&f.state().db, keys, &row).await.is_err());
+            assert!(rows.find_one(doc! {}).await.unwrap().unwrap() == row);
+            assert_eq!(f.harness.gateway_requests.load(Ordering::SeqCst), calls);
+            assert!(f.convert(Some(&review)).await.is_err());
+            let winner = rows.find_one(doc! {}).await.unwrap().unwrap();
+            assert_ne!(
+                winner.get_str("setup_attempt_id").unwrap(),
+                review.attempt_id
+            );
+            assert_eq!(f.harness.posts.load(Ordering::SeqCst), 1);
+        }
+        f.close().await;
+    });
 }

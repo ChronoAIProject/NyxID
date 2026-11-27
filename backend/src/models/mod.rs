@@ -34,6 +34,10 @@ pub mod channel_bot;
 pub mod channel_connect_link;
 pub mod channel_conversation;
 pub mod channel_event_log;
+pub mod channel_guest_access;
+pub mod channel_guest_personal_record;
+pub mod channel_guest_policy;
+pub(crate) mod channel_guest_setup;
 pub mod channel_message;
 pub mod channel_reply_delivery;
 pub mod channel_send_claim;
@@ -286,6 +290,7 @@ pub mod execution_permission_channel;
 
 pub mod assistant_tool_result;
 
+pub mod assistant_avatar;
 pub mod channel_turn_preparation;
 
 pub mod gateway_reply;
@@ -294,4 +299,5 @@ pub mod client_error_report;
 
 pub mod client_release_registry;
 
+pub mod channel_meta;
 pub mod nyxbot_response_read;

@@ -299,6 +299,13 @@ async fn update_membership_in_session(
         .ok_or_else(|| AppError::NotFound("Active membership not found".into()))?;
     org_membership_authority::fence_org(db, &current.org_user_id, &mut *transaction).await?;
     if role.is_some_and(|role| role != OrgRole::Admin) && current.role == OrgRole::Admin {
+        crate::services::org_service_approvers::prune(
+            db,
+            &current.org_user_id,
+            &current.member_user_id,
+            transaction,
+        )
+        .await?;
         org_membership_authority::ensure_other_admin(
             db,
             &current.org_user_id,
@@ -323,6 +330,13 @@ async fn update_membership_in_session(
         .await?;
     }
     if role.is_some_and(|r| !r.can_proxy()) {
+        crate::services::org_agent_service::prune_member(
+            db,
+            transaction,
+            &current.org_user_id,
+            &current.member_user_id,
+        )
+        .await?;
         org_channel_service::lifecycle::revoke_member_in_session(
             db,
             &mut *transaction,
@@ -434,6 +448,10 @@ async fn revoke_membership_in_session(
             "Membership changed; reload before removal".into(),
         ));
     }
+    crate::services::org_service_approvers::prune(db, org_user_id, member_user_id, transaction)
+        .await?;
+    crate::services::org_agent_service::prune_member(db, transaction, org_user_id, member_user_id)
+        .await?;
     org_channel_service::lifecycle::revoke_member_in_session(
         db,
         &mut *transaction,

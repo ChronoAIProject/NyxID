@@ -61,6 +61,7 @@ async fn queue(f: &Fixture, event: &NyxbotEvent, question: &str) -> bool {
         f.event.conversation_id.as_deref().unwrap(),
         work(event, question),
         None,
+        false,
     )
     .await
     .unwrap()
@@ -96,14 +97,16 @@ async fn accepted_queued_sources_mint_original_targets_without_a_turn_or_budget(
         let saved = record(&f, &event.id).await;
         assert_eq!(saved.status, "queued");
         assert!(saved.turn_id.is_none());
-        let d = saved.delivery.unwrap();
+        let d = saved.delivery.as_ref().unwrap();
         assert!(d.checked_at > event.created_at);
-        let plain = f
-            .state
-            .encryption_keys
-            .decrypt(d.target_ciphertext.as_ref().unwrap())
-            .await
-            .unwrap();
+        let plain = event_record::delivery_target(
+            &f.state.encryption_keys,
+            &saved,
+            d,
+            d.target_ciphertext.as_ref().unwrap(),
+        )
+        .await
+        .unwrap();
         assert!(std::str::from_utf8(&plain).unwrap().contains(target));
     }
     assert!(sends(&f).await.is_empty());
@@ -193,7 +196,8 @@ async fn queue_transaction_rolls_back_source_acceptance_when_conversation_write_
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
             work(&event, "question"),
-            None
+            None,
+            false
         )
         .await
         .is_err()
@@ -319,7 +323,8 @@ async fn every_coalesced_destination_is_revalidated_and_recipient_limit_is_atomi
             OWNER,
             f.event.conversation_id.as_deref().unwrap(),
             work(&invalid, "another question"),
-            None
+            None,
+            false
         )
         .await
         .is_err()
@@ -348,7 +353,10 @@ async fn successful_blank_stream_and_detached_duplicate_destinations_are_termina
         f.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        rx,
+        InboundTurn {
+            receiver: rx,
+            hosted_reply: None,
+        },
         Utc::now(),
     );
     let body = body_text(response).await;
@@ -542,6 +550,7 @@ async fn specialist_owner_private_home_keeps_its_original_delivery_authority() {
         &home.id,
         work(&event, "specialist question"),
         None,
+        false,
     )
     .await
     .unwrap();
@@ -855,6 +864,7 @@ async fn personal_channel_repeat_joins_owner_app_turn_without_another_execution(
         &home.id,
         repeat,
         None,
+        false,
     )))
     .await;
     assert!(accepted.unwrap());
@@ -1044,7 +1054,8 @@ async fn original_route_revocation_prunes_only_that_source_before_event_executio
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 media_work,
-                None
+                None,
+                false
             )
             .await
             .unwrap()
@@ -1389,7 +1400,9 @@ fn verified_context(
     event: &NyxbotEvent,
 ) -> crate::models::assistant_conversation::ChannelTurnContext {
     crate::models::assistant_conversation::ChannelTurnContext {
+        meta_grant: None,
         text_completeness: None,
+        channel_guest: None,
         org_origin: None,
         source_event_id: event.id.clone(),
         channel_id: channel.id.clone(),
@@ -1441,7 +1454,8 @@ async fn identity_2187_coalesced_bot_sources_are_scoped_and_pruned_before_runtim
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 event,
-                None
+                None,
+                false
             )
             .await
             .unwrap()
@@ -1543,7 +1557,8 @@ async fn identity_2187_later_queued_source_lookup_error_fails_before_model_input
                 OWNER,
                 f.event.conversation_id.as_deref().unwrap(),
                 event,
-                None
+                None,
+                false
             )
             .await
             .unwrap()

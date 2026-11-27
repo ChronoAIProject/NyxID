@@ -49,8 +49,8 @@ function toolbar(compact: boolean | undefined, widths: number[][]) {
   const { ChatComposerToolbar } = load();
   const element = ChatComposerToolbar({
     attach: { label: "Attach", onPress() {} },
-    mention: null,
-    settings: { type: "ModeChip", props: {} },
+    mention: { type: "MentionButton", props: {} },
+    settings: { type: "ComposerSettings", props: { hideTrigger: compact } },
     dictation: { active: false, phase: "idle" },
     dictationDisabled: false,
     layout:
@@ -67,7 +67,7 @@ function toolbar(compact: boolean | undefined, widths: number[][]) {
   return (element.type as (p: any) => E)(element.props);
 }
 
-test("an idle one-row composer overlays the same toolbar without the mode chip", () => {
+test("an idle composer hides mentions while retaining settings and held dictation controls", () => {
   const widths: number[][] = [];
   const twoRow = toolbar(false, widths);
   const oneRow = toolbar(true, widths);
@@ -79,13 +79,13 @@ test("an idle one-row composer overlays the same toolbar without the mode chip",
   // press still receives its release when the layout changes.
   assert.deepEqual(shape(twoRow), [
     "chat-composer-leading",
-    "ModeChip",
+    "ComposerSettings",
     "View",
     "chat-composer-trailing",
   ]);
   assert.deepEqual(shape(oneRow), [
     "chat-composer-leading",
-    null,
+    "ComposerSettings",
     "View",
     "chat-composer-trailing",
   ]);
@@ -98,6 +98,9 @@ test("an idle one-row composer overlays the same toolbar without the mode chip",
   const spacer = [oneRow.props.children].flat()[2] as E;
   assert.equal(spacer.props.pointerEvents, "none");
   const leading = nodes(oneRow).find((n) => n.props.testID === "chat-composer-leading")!;
+  assert.ok(nodes(twoRow).some((n) => n.type === "MentionButton"));
+  assert.equal(nodes(oneRow).some((n) => n.type === "MentionButton"), false);
+  assert.equal(nodes(oneRow).find((n) => n.type === "ComposerSettings")!.props.hideTrigger, true);
   const trailing = nodes(oneRow).find((n) => n.props.testID === "chat-composer-trailing")!;
   assert.deepEqual(
     nodes(trailing).map((n) => n.type).filter((t) => t === "DictationButton" || t === "SendButton"),
@@ -111,7 +114,7 @@ test("an idle one-row composer overlays the same toolbar without the mode chip",
 test("without a layout the toolbar keeps today's two-row composer", () => {
   const root = toolbar(undefined, []);
   assert.equal(root.props.pointerEvents, "auto");
-  assert.ok([root.props.children].flat().some((c: any) => c?.type === "ModeChip"));
+  assert.ok([root.props.children].flat().some((c: any) => c?.type === "ComposerSettings"));
 });
 
 test("touches on the composer pill mark themselves, so tapping send, attach or the text never blurs it", async () => {

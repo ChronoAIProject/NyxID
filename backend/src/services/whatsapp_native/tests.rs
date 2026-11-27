@@ -21,6 +21,7 @@ pub(super) fn config() -> NativeWhatsapp {
         phone_number_id: "333".into(),
         dedicated_app: true,
         native_verify_token_encrypted: None,
+        secret_context_versions: Default::default(),
         revision: 1,
         updated_at: Utc::now(),
         callback: CallbackState {
@@ -245,4 +246,64 @@ async fn settings_use_revision_fence_preserve_relay_and_block_changes_during_cut
     moved.ownership_version += 1;
     assert!(load(&db, &moved).await.unwrap().is_none());
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_native_token_installers_and_stale_callback_preserve_one_winner() {
+    let db = crate::test_utils::connect_transaction_test_database("wa_install_race").await;
+    let bot = bot();
+    let bots = db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME);
+    let id = doc! {"_id":&bot.id};
+    bots.insert_one(bson::to_document(&bot).unwrap())
+        .await
+        .unwrap();
+    let config = configure(&db, &bot, "111", "222", true, 0).await.unwrap();
+    let keys = crate::test_utils::test_encryption_keys();
+    let (a, b) = tokio::join!(
+        native_verify_token(&db, &keys, &config),
+        native_verify_token(&db, &keys, &config)
+    );
+    let first = a.unwrap();
+    assert!(first.as_str() == b.unwrap().as_str());
+    let parent = bots.find_one(id.clone()).await.unwrap().unwrap();
+    assert_eq!(parent.get_i64("native_enrollment_fence"), Ok(2));
+    assert_eq!(parent.get_str("webhook_secret_hash"), Ok("relay-hash-only"));
+    let rows = db.collection::<bson::Document>(COLLECTION_NAME);
+    let installed = rows.find_one(id.clone()).await.unwrap().unwrap();
+    assert!(
+        first.as_str()
+            == native_verify_token(&db, &keys, &config)
+                .await
+                .unwrap()
+                .as_str()
+    );
+    assert!(rows.find_one(id.clone()).await.unwrap().unwrap() == installed);
+    assert!(bots.find_one(id.clone()).await.unwrap().unwrap() == parent);
+
+    let mut callback = config.clone();
+    callback.callback.phase = CallbackPhase::Gateway;
+    callback.revision += 1;
+    rows.update_one(id.clone(), callback_update(&callback).unwrap())
+        .await
+        .unwrap();
+    assert!(native_verify_token(&db, &keys, &config).await.is_err());
+    let current = load(&db, &bot).await.unwrap().unwrap();
+    assert!(
+        first.as_str()
+            == native_verify_token(&db, &keys, &current)
+                .await
+                .unwrap()
+                .as_str()
+    );
+    begin_restore(&db, &bot).await.unwrap();
+    let after = rows.find_one(id.clone()).await.unwrap().unwrap();
+    for name in [token_record::FIELD, "secret_context_versions"] {
+        assert!(after.get(name) == installed.get(name));
+    }
+    let restored = load(&db, &bot).await.unwrap().unwrap();
+    bots.update_one(id.clone(), doc! {"$set":{"is_active":false}})
+        .await
+        .unwrap();
+    assert!(native_verify_token(&db, &keys, &restored).await.is_err());
+    assert!(rows.find_one(id).await.unwrap().unwrap() == after);
 }

@@ -76,6 +76,7 @@ export function NotificationRow({
       id: actor.id!,
       name: actor.name,
       display_name: actor.display_name,
+      avatar: actor.avatar,
       kind: actor.kind ?? ("unknown" as const),
     }));
   const Fallback =
@@ -112,6 +113,7 @@ export function NotificationRow({
                 id: item.actor.id ?? item.source.agent_id ?? item.actor.name,
                 name: item.actor.name,
                 display_name: item.actor.display_name,
+                avatar: item.actor.avatar,
                 kind: item.actor.kind ?? "unknown",
               }}
               size="lg"

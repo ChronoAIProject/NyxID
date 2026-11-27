@@ -1,3 +1,4 @@
+import { onboardingText } from "../../../../../shared/onboardingCopy";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import {
@@ -29,7 +30,9 @@ import { LiveReplay } from "./live-replay";
 
 /** The screens after the greeting; the progress bar counts these. */
 const STEPS = ["interests", "chief", "specialists", "control", "next"] as const;
-type Step = "welcome" | (typeof STEPS)[number];
+const FLOW = ["welcome", ...STEPS] as const;
+type Step = (typeof FLOW)[number];
+const LAST = FLOW.length - 1;
 /** Leaving pills fade out before the shared ones move. */
 const PILL_EXIT_MS = 140;
 
@@ -46,14 +49,12 @@ function reducedMotion() {
 export function FirstRunIntro({
   open,
   state,
-  entryPoint,
   onOpenChange,
   onStart,
   onTour,
 }: {
   readonly open: boolean;
   readonly state: AssistantOnboarding;
-  readonly entryPoint: "first_run" | "account_menu";
   readonly onOpenChange: (open: boolean) => void;
   /** Close the intro and send the step's prompt to NyxBot. */
   readonly onStart: (step: NextStep) => void;
@@ -63,9 +64,6 @@ export function FirstRunIntro({
   useUiTranslation();
   const save = useSaveOnboarding();
   const firstName = useAuthStore((auth) => auth.user?.display_name?.trim().split(/\s+/)[0]);
-  // Only a first-timer is greeted; a replay starts at the questions.
-  const flow: readonly Step[] = entryPoint === "first_run" ? ["welcome", ...STEPS] : STEPS;
-  const LAST = flow.length - 1;
   const [index, setIndex] = useState(0);
   const [topics, setTopics] = useState<readonly string[]>(() => state.profile?.topics ?? []);
   const [workStyle, setWorkStyle] = useState<string | null>(() => state.profile?.work_style ?? null);
@@ -79,7 +77,7 @@ export function FirstRunIntro({
   const openedAt = useRef(0);
   const body = useRef<HTMLDivElement>(null);
   const moved = useRef(false);
-  const step: Step = flow[index] ?? "interests";
+  const step: Step = FLOW[index] ?? "interests";
 
   useEffect(() => {
     if (!open) return;
@@ -90,7 +88,7 @@ export function FirstRunIntro({
     setTopics(state.profile?.topics ?? []);
     setWorkStyle(state.profile?.work_style ?? null);
     setAudience(state.profile?.work_style ?? "solo");
-    void capture({ name: "ui.dialog_opened", props: { dialog_id: "nyxbot_intro", entry_point: entryPoint } });
+    void capture({ name: "ui.dialog_opened", props: { dialog_id: "nyxbot_intro", entry_point: "first_run" } });
     // Only a fresh open resets the intro; later state refreshes keep progress.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -142,13 +140,13 @@ export function FirstRunIntro({
     if (index >= LAST) return;
     void capture({
       name: "ui.dialog_step_completed",
-      props: { dialog_id: "nyxbot_intro", step: index, total_steps: flow.length },
+      props: { dialog_id: "nyxbot_intro", step: index, total_steps: FLOW.length },
     });
     goTo(index + 1);
   }
 
   function back() {
-    if (index > 0 && flow[index - 1] !== "welcome") goTo(index - 1);
+    if (index > 0 && FLOW[index - 1] !== "welcome") goTo(index - 1);
   }
 
   function start(nextStep: NextStep) {
@@ -222,7 +220,7 @@ export function FirstRunIntro({
           {step === "welcome" ? null : (
             <Progress
               index={(STEPS as readonly string[]).indexOf(step)}
-              onSelect={(position) => goTo(flow.indexOf(STEPS[position] ?? "interests"))}
+              onSelect={(position) => goTo(FLOW.indexOf(STEPS[position] ?? "interests"))}
             />
           )}
           <div
@@ -268,8 +266,8 @@ export function FirstRunIntro({
                 />
                 <Points
                   items={[
-                    "Chat here, on your phone, or in Telegram, Slack and other chat apps.",
-                    "It uses only the services you connect, through NyxID.",
+                    translateUi("Chat here, on your phone, or in Telegram, Slack and other chat apps."),
+                    translateUi("It uses only the services you connect, through NyxID."),
                   ]}
                 />
               </StepHeading>
@@ -284,8 +282,8 @@ export function FirstRunIntro({
                 />
                 <Points
                   items={[
-                    "A role and scope you set: only the services and access you grant.",
-                    "Chat with one directly, ask NyxBot to delegate, or put several in a crew.",
+                    translateUi("A role and scope you set: only the services and access you grant."),
+                    translateUi("Chat with one directly, ask NyxBot to delegate, or put several in a crew."),
                   ]}
                 />
               </StepHeading>
@@ -315,7 +313,7 @@ export function FirstRunIntro({
               <Button variant="ghost" size="sm" onClick={skip}>{translateUi("Skip intro")}</Button>
             ) : null}
             <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
-              {index > 0 && index < LAST && flow[index - 1] !== "welcome" ? (
+              {index > 0 && index < LAST && FLOW[index - 1] !== "welcome" ? (
                 <Button variant="outline" size="sm" onClick={back}>{translateUi("Back")}</Button>
               ) : null}
               {index < LAST ? (
@@ -351,9 +349,9 @@ function Welcome({
 }) {
   useUiTranslation();
   const points = [
-    { icon: Sparkles, text: "A chief of staff that works across your apps" },
-    { icon: UsersRound, text: "Specialists with one job each, under your rules" },
-    { icon: ShieldCheck, text: "Nothing sensitive happens without your say-so" },
+    { icon: Sparkles, text: translateUi("A chief of staff that works across your apps") },
+    { icon: UsersRound, text: translateUi("Specialists with one job each, under your rules") },
+    { icon: ShieldCheck, text: translateUi("Nothing sensitive happens without your say-so") },
   ];
   return (
     <div className="flex min-h-full flex-col items-center justify-center gap-6 py-10 text-center md:py-16">
@@ -418,8 +416,8 @@ function Progress({
         <button
           key={step}
           type="button"
-          title={STEP_LABELS[step]}
-          aria-label={translateUi("Step {{value1}} of {{value2}}: {{value3}}", { value1: position + 1, value2: STEPS.length, value3: STEP_LABELS[step] })}
+          title={translateUi(STEP_LABELS[step])}
+          aria-label={translateUi("Step {{value1}} of {{value2}}: {{value3}}", { value1: position + 1, value2: STEPS.length, value3: translateUi(STEP_LABELS[step]) })}
           aria-current={position === index ? "step" : undefined}
           onClick={() => onSelect(position)}
           data-icon-button=""
@@ -502,7 +500,7 @@ function ChoiceGrid({
   readonly onToggle: (id: string) => void;
   readonly multi?: boolean;
 }) {
-  useUiTranslation();
+  const { i18n } = useUiTranslation();
   const visible = shown ? choices.filter((choice) => shown.has(choice.id)) : choices;
   const nodes = useRef(new Map<string, HTMLElement>());
   const places = useRef(new Map<string, { x: number; y: number }>());
@@ -555,7 +553,7 @@ function ChoiceGrid({
               )}
             >
               <ChoiceIcon name={choice.icon} active={active} />
-              <span className="min-w-0 break-words">{choice.label}</span>
+              <span className="min-w-0 break-words">{onboardingText(i18n.resolvedLanguage, choice.label)}</span>
               {active ? <Check aria-hidden="true" className="size-3" /> : null}
             </button>
           </span>

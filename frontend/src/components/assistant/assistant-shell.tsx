@@ -44,6 +44,7 @@ interface AssistantShellProps {
   /** Preview cards docked beside chat on wide screens. */
   readonly aside?: ReactNode;
   readonly cmaOperations?: readonly CmaOperation[];
+  readonly cmaConversationId?: string;
   /** Share of the content area `aside` takes, in percent. */
   readonly asidePercent?: number;
   /** Set by dragging (or keying) the divider between the content and `aside`. */
@@ -54,7 +55,7 @@ interface AssistantShellProps {
 export function AssistantShell(props: AssistantShellProps) {
   useUiTranslation();
   return (
-    <CmaSessionObserver operations={props.cmaOperations}>
+    <CmaSessionObserver operations={props.cmaOperations} conversationId={props.cmaConversationId}>
       {(cmaCards) => <AssistantShellLayout {...props} cmaCards={cmaCards} />}
     </CmaSessionObserver>
   );
@@ -294,6 +295,7 @@ function AssistantShellLayout({
                 <div className="flex min-h-[max(3.25rem,calc(1.5rem+var(--spacing)*6))] shrink-0 flex-wrap items-center justify-between gap-1 border-b border-border/60 px-4 py-1">
                   <NyxidLogo className="mr-auto h-5 w-auto" />
                   <div data-header-actions="" className="-ml-1.5 flex shrink-0 flex-nowrap items-center gap-1">
+                    <NotificationsBell />
                     <AssistantSearchButton onOpen={openSearch} />
                     <button
                       type="button"

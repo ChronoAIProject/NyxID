@@ -1,3 +1,4 @@
+import { recordCreatedAvatar } from "../../../../shared/agent-avatars/created";
 import { z } from "zod";
 import { orgChannelPreviewSchema } from "@/schemas/org-specialist-channel";
 import { publicModelListSchema } from "@/schemas/platform-models";
@@ -7,6 +8,7 @@ import {
   nyxAgentChannelThreadListSchema,
   nyxAgentChannelThreadStoppedSchema,
   assistantAgentCreatedSchema,
+  assistantAgentActivitySchema,
   assistantAgentDestroyedSchema,
   assistantAgentDetailSchema,
   assistantAgentListSchema,
@@ -48,6 +50,11 @@ export const nyxBotApi = {
       await assistantJson(`${ROOT}/agents?include_destroyed=${String(includeDestroyed)}`, { authorityGuard }),
     );
   },
+  async activity(signal?: AbortSignal) {
+    return assistantAgentActivitySchema.parse(
+      await assistantJson(`${ROOT}/agents/activity`, { signal, reportErrors: false }),
+    );
+  },
   async agent(id: string) {
     return assistantAgentDetailSchema.parse(await assistantJson(agentPath(id)));
   },
@@ -57,7 +64,7 @@ export const nyxBotApi = {
   },
   /** Blank display name and persona are left out (the agent has none). */
   async createAgent({ display_name, persona, ...body }: AssistantAgentCreate) {
-    return assistantAgentCreatedSchema.parse(
+    const created = assistantAgentCreatedSchema.parse(
       await assistantJson(`${ROOT}/agents`, {
         method: "POST",
         body: {
@@ -67,10 +74,12 @@ export const nyxBotApi = {
         },
       }),
     );
+    recordCreatedAvatar(created.id);
+    return created;
   },
   /** An empty `display_name` or `persona` clears it. */
-  async updateAgent(id: string, body: AssistantAgentUpdate) {
-    await assistantJson(agentPath(id), { method: "PATCH", body });
+  async updateAgent(id: string, body: AssistantAgentUpdate, authorityGuard?: () => void) {
+    await assistantJson(agentPath(id), { method: "PATCH", body, authorityGuard });
   },
   /** Replaces a specialist's grants. */
   async setGrants(id: string, body: AssistantAgentGrantsRequest, authorityGuard?: () => void) {

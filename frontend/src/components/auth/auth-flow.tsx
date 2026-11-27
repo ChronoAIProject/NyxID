@@ -29,7 +29,6 @@ import { Mail } from "lucide-react";
 import { usePublicConfig } from "@/hooks/use-public-config";
 import { AUTH_PROVIDER_ICONS } from "@/components/auth/provider-icons";
 import { LoginMethods } from "@/components/auth/login-methods";
-import { beginSkillSetupSso } from "@/lib/assistant/skill-template-handoff";
 import { LoginProviderRow } from "@/components/auth/login-provider-row";
 
 // ---------------------------------------------------------------------------
@@ -280,7 +279,6 @@ export function AuthFlow({
     if (code) params.set("invite_code", code);
     const qs = params.toString();
     const url = `${window.location.origin}/api/v1/auth/social/${encodeURIComponent(providerId)}${qs ? `?${qs}` : ""}`;
-    beginSkillSetupSso(returnTo);
     void openExternal(url);
   }
 
@@ -323,7 +321,6 @@ export function AuthFlow({
               const params = new URLSearchParams();
               if (returnTo) params.set("return_to", returnTo);
               const qs = params.toString();
-              beginSkillSetupSso(returnTo);
               void openExternal(`${window.location.origin}/api/v1/auth/social/${provider}${qs ? `?${qs}` : ""}`);
             }}
           >

@@ -10,6 +10,12 @@ pub const COLLECTION_NAME: &str = "assistant_checkpoints";
 /// arguments or tool results.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantCheckpoint {
+    /// Exact content derivation on this original checkpoint. Absent legacy
+    /// fields cannot certify a mixed provider history after its joins expire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_turn_ids: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal_turn_id: Option<String>,
     #[serde(rename = "_id")]
     pub conversation_id: String,
     pub user_id: String,
@@ -75,6 +81,8 @@ mod tests {
         let debug = format!(
             "{:?}",
             AssistantCheckpoint {
+                source_turn_ids: None,
+                goal_turn_id: None,
                 conversation_id: "conversation".into(),
                 user_id: "user".into(),
                 turn_id: "turn".into(),

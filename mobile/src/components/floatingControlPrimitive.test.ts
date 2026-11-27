@@ -146,9 +146,12 @@ test("every other workspace bar floats the chat bar's glass controls: Menu/Back,
     "features/assistant/AssistantScreen.tsx":
       /<ChatHeaderActions[\s\S]*<ChatIdentity\s+compact=\{quickRail\}\s+floating/,
     "features/groups/GroupChatScreen.tsx": /<CrewHeaderActions/,
+    "features/notifications/NotificationsScreen.tsx":
+      /<WorkspaceHeaderVisibility>\s*<FloatingButton[\s\S]*?<Settings2/,
     // Edit pages' Save, in the workspace and in the Settings sheet.
     "features/assistant/AssistantDetailsScreen.tsx": /<SettingsHeaderButton/,
     "features/agents/AgentProfileEditScreen.tsx": /<SettingsHeaderButton/,
+    "features/agents/AgentAvatarEditScreen.tsx": /<SettingsHeaderButton/,
     "components/settings/SettingsList.tsx":
       /headerRight: \(\) => \(\s*<SettingsHeaderButton/,
   };

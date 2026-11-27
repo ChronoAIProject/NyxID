@@ -208,7 +208,10 @@ pub(crate) fn record_reply<'a>(
             "status":{"$in":["running","resuming"]},
         };
         let Some((kind, selected, text)) = notice else {
-            let update = doc! {"$set": fields, "$unset": {"event_context_ciphertext": ""}};
+            let update = doc! {"$set": fields, "$unset": {
+                "event_context_ciphertext": "",
+                "event_context_version": "",
+            }};
             let changed = db
                 .collection::<Document>(EVENTS)
                 .update_one(filter, update)
@@ -272,7 +275,7 @@ pub(crate) fn record_reply<'a>(
                             filter.clone(),
                             vec![
                                 doc! {"$set":set.clone()},
-                                doc! {"$unset":"event_context_ciphertext"},
+                                doc! {"$unset":["event_context_ciphertext","event_context_version"]},
                             ],
                         )
                         .session(&mut *tx)
@@ -333,7 +336,7 @@ pub struct View {
     pub terminal: bool,
     pub admitted: bool,
     pub retryable: bool,
-    pub reply_ciphertext: Option<Vec<u8>>,
+    pub reply: Option<(String, ReplyPayload)>,
     pub notice_digest: Option<String>,
 }
 
@@ -536,7 +539,7 @@ async fn view_mode(
         payload.finish(None, false);
         recovery::suppress_output(&mut payload);
     }
-    let reply_ciphertext =
+    let selected_reply =
         if !suppress && event.turn_id.is_none() && terminal && raw.contains_key("response_reply") {
             let reply: ReplyPayload =
                 bson::from_bson(raw.get("response_reply").cloned().expect("checked reply"))
@@ -544,7 +547,7 @@ async fn view_mode(
             if reply.version != 1 {
                 return Err(AppError::Internal("Response reply unavailable".into()));
             }
-            (reply.response_id == id).then_some(reply.ciphertext)
+            (reply.response_id == id).then_some((event.id, reply))
         } else {
             None
         };
@@ -554,7 +557,7 @@ async fn view_mode(
         admitted: mapping.thread_reply.is_some()
             && (event.turn_id.is_some() || event.status == "queued" || terminal),
         retryable: event.status == "retryable",
-        reply_ciphertext,
+        reply: selected_reply,
         notice_digest: notice.map(|n| n.text_sha256),
     }))
 }

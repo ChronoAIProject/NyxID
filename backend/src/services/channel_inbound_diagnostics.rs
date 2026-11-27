@@ -44,6 +44,7 @@ pub(crate) enum Outcome {
     AgentSilent,
     ReplySent,
     ReplyUnconfirmed,
+    MetaControlUnavailable,
 }
 
 impl Outcome {
@@ -88,6 +89,7 @@ impl Outcome {
             Self::AgentSilent => "x_agent_silent",
             Self::ReplySent => "x_reply_sent",
             Self::ReplyUnconfirmed => "x_reply_unconfirmed",
+            Self::MetaControlUnavailable => "x_meta_control_unavailable",
         }
     }
 
@@ -116,7 +118,7 @@ impl Outcome {
 
 /// Authentication proves receipt, even when parsing or billing later refuses.
 pub(crate) async fn authenticated(db: &mongodb::Database, bot: &ChannelBot) {
-    if bot.platform != "x" {
+    if bot.platform != "x" && !super::channel_adapters::meta::is_meta(&bot.platform) {
         return;
     }
     if db.collection::<Document>(COLLECTION_NAME).update_one(
@@ -184,10 +186,14 @@ pub(crate) async fn record(db: &mongodb::Database, bot: &ChannelBot, outcome: Ou
     if bot.platform == "whatsapp" {
         return whatsapp_outcome(db, &bot.id, &bot.user_id, outcome).await;
     }
-    if bot.platform != "x" {
+    if bot.platform != "x" && !super::channel_adapters::meta::is_meta(&bot.platform) {
         return;
     }
-    let code = outcome.code();
+    let code = if super::channel_adapters::meta::is_meta(&bot.platform) {
+        outcome.code().strip_prefix("x_").unwrap_or(outcome.code())
+    } else {
+        outcome.code()
+    };
     let result = write_counter(
         db,
         &bot.id,
@@ -544,6 +550,7 @@ pub(crate) fn recommendation(code: &str) -> Option<super::channel_bot_health::Re
     Some(super::channel_bot_health::Recommendation {
         action,
         text: text.into(),
+        cause: None,
     })
 }
 

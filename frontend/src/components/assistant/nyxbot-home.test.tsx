@@ -4,9 +4,13 @@ import { useState, type ComponentProps } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AssistantAgent } from "@/schemas/assistant-nyxagent";
+import { useAuthStore } from "@/stores/auth-store";
 import { AwayList, NyxBotHome } from "./nyxbot-home";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  useAuthStore.setState({ user: null });
+});
 
 const at = (minute: number) => `2026-09-29T10:${String(minute).padStart(2, "0")}:00Z`;
 
@@ -305,4 +309,26 @@ it("has no restore row without recommendations", () => {
   home({ suggestionsHidden: true, nextSteps: [] });
   expect(screen.queryByRole("button", { name: "Show suggestions" })).not.toBeInTheDocument();
   expect(screen.queryByText("Suggestions are hidden.")).not.toBeInTheDocument();
+});
+
+it("keeps the greeting at rest and presents aggregate activity on static roster avatars", () => {
+  useAuthStore.setState({ user: { capabilities: { enabled_features: ["assistant:avatars"] } } as never });
+  const personal = { ...specialist(1), kind: "nyxbot" as const, name: "NyxBot", activity: [
+    { conversation_id: "a", state: "waiting" as const },
+  ] };
+  const working = { ...specialist(2), status: "running" as const, activity: [
+    { conversation_id: "b", state: "working" as const },
+  ] };
+  const { container } = render(
+    <QueryClientProvider client={new QueryClient()}>
+      <NyxBotHome userName="Reader" agents={[personal, working]} agentsLoading={false}
+        groups={[]} bottomInset={0} onChat={vi.fn()} onOpenConversation={vi.fn()}
+        onOpenGroup={vi.fn()} onNewGroup={vi.fn()} onNewAgent={vi.fn()} onManageMemory={vi.fn()} />
+    </QueryClientProvider>,
+  );
+  expect(container.querySelector('header [data-avatar-activity]')).not.toBeInTheDocument();
+  expect(container.querySelector('header [data-avatar-state="idle"]')).toBeInTheDocument();
+  expect(container.querySelector('li [data-avatar-activity="working"]')).toBeInTheDocument();
+  expect(screen.getByText("Running")).toBeVisible();
+  expect(container.querySelector('li [data-avatar-renderer]')).not.toBeInTheDocument();
 });

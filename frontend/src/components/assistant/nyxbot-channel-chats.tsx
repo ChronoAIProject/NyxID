@@ -13,6 +13,7 @@ import { GuestReadiness } from "./guest-readiness";
 import { botAudienceDescription } from "@/lib/assistant/bot-audience";
 import { ChannelThreads } from "./nyxbot-channel-threads";
 import { useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { Megaphone, User, Users } from "lucide-react";
 import {
   Select,
@@ -189,6 +190,11 @@ function ChatRow({
           </>
         }
       >
+        {chat.guest_conversation_id ? (
+          <GroupedRow asChild interactive>
+            <Link to="/assistant" search={{ c: chat.guest_conversation_id }}>{translateUi("Guest conversation")}</Link>
+          </GroupedRow>
+        ) : null}
         {group ? (
           <>
             <GroupedRow

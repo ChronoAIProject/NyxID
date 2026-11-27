@@ -302,6 +302,7 @@ mod tests {
             catalog_base_url: "http://localhost:3001".into(),
             actor: actor.clone(),
             first_party_human: true,
+            privileged_mfa_denied: false,
             admin_required: true,
         }
     }

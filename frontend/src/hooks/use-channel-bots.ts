@@ -112,7 +112,7 @@ export function useResubscribeChannelBot() {
 // Mutations
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function useCreateChannelBot() {
+export function useCreateChannelBot(authorityGuard?: () => void) {
   const link = useChannelConnectLinkContext();
   const queryClient = useQueryClient();
 
@@ -121,12 +121,10 @@ export function useCreateChannelBot() {
     mutationFn: async (
       data: CreateChannelBotRequest,
     ): Promise<CreateChannelBotResponse> => {
-      return link
-        ? api.post<CreateChannelBotResponse>(
-            "/channel-connect-links/complete",
-            { ...data, token: link.token },
-          )
-        : api.post<CreateChannelBotResponse>("/channel-bots", data);
+      authorityGuard?.();
+      const endpoint = link ? "/channel-connect-links/complete" : "/channel-bots";
+      const request = link ? { ...data, token: link.token } : data;
+      return authorityGuard ? api.post<CreateChannelBotResponse>(endpoint, request, { authorityGuard }) : api.post<CreateChannelBotResponse>(endpoint, request);
     },
     onSettled: () => {
       // Registration can save a bot before webhook setup fails.
@@ -146,14 +144,19 @@ export function useTelegramBotProfile() {
   });
 }
 
+interface DeleteChannelBotResult {
+  webhook_cleanup?: string;
+  local_delivery_stopped?: boolean;
+}
+
 export function useDeleteChannelBot() {
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (
       id: string,
-    ): Promise<{ webhook_cleanup?: string } | undefined> => {
-      return api.delete<{ webhook_cleanup?: string } | undefined>(
+    ): Promise<DeleteChannelBotResult | undefined> => {
+      return api.delete<DeleteChannelBotResult | undefined>(
         `/channel-bots/${id}`,
       );
     },

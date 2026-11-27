@@ -45,6 +45,9 @@ pub struct ChannelBotSubscriptionState {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChannelBotDiagnostics {
+    /// Sticky source-deduplication hint, committed with the first guest relay.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) guest_relay_work_present: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_inbound_outcome: Option<ChannelInboundOutcome>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -108,6 +111,12 @@ pub enum XChannelEvent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelBot {
+    #[serde(default)]
+    pub meta_binding: Option<MetaCredentialBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_continuity: Option<CredentialContinuity>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secret_context_versions: std::collections::BTreeMap<String, u8>,
     /// Additional Telegram manager webhook identity. Legacy default has no suffix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manager_instance: Option<i64>,
@@ -124,6 +133,12 @@ pub struct ChannelBot {
     /// Monotonic ownership generation; operational status updates do not change it.
     #[serde(default)]
     pub ownership_version: i64,
+    /// Saved per-installation preference. Missing on bots predating guest access.
+    #[serde(default)]
+    pub guest_access_v1: bool,
+    /// Fences the saved preference and guest work across ownership changes.
+    #[serde(default)]
+    pub guest_access_v1_revision: i64,
     /// Platform identifier: "telegram", "discord", "lark", "feishu", "slack", "whatsapp"
     pub platform: String,
     pub label: String,
@@ -197,8 +212,67 @@ pub struct ChannelBot {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialContinuity {
+    pub version: u8,
+    pub generations: std::collections::BTreeMap<String, String>,
+    pub pins: std::collections::BTreeMap<String, RetainedCredentialPin>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub shared_producers: std::collections::BTreeMap<String, String>,
+    pub authentication: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedCredentialPin {
+    pub dependencies: String,
+    pub value: String,
+}
+
 fn default_credential_source() -> String {
     "user".to_string()
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MetaCredentialBinding {
+    /// Operator-controlled delivery hold. Grant repair and token rotation
+    /// must preserve it until an explicit resume operation clears it.
+    #[serde(default)]
+    pub operator_suspended: bool,
+    /// Provider grant health is independent from an operator delivery hold.
+    /// A held bot may retain `subscription = suspended` while still requiring
+    /// fresh consent before resume.
+    #[serde(default)]
+    pub grant_reconnect_required: bool,
+    #[serde(default)]
+    pub provider_revoked: bool,
+    /// A deletion request is a data-erasure instruction, not proof that Meta
+    /// has revoked or removed the asset subscription.
+    #[serde(default)]
+    pub erasure_requested: bool,
+    #[serde(default)]
+    pub grant_id: String,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub authorized_at: Option<DateTime<Utc>>,
+    /// Provider events must postdate installation of this credential. The
+    /// earlier consent-start time remains the revocation boundary.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub events_since: Option<DateTime<Utc>>,
+    pub generation: i64,
+    /// First delivery generation of this consent; operational holds keep it.
+    #[serde(default)]
+    pub grant_start_generation: i64,
+    pub token_fingerprint: String,
+    pub grant_actor_id: String,
+    pub grant_subject_id: String,
+    pub app_id: String,
+    pub exclusive_routing_verified: bool,
+    pub subscription: String,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub next_reconcile_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -363,11 +437,15 @@ mod tests {
 
     fn make_channel_bot() -> ChannelBot {
         ChannelBot {
+            meta_binding: None,
+            credential_continuity: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
+            guest_access_v1: false,
+            guest_access_v1_revision: 0,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),
@@ -381,6 +459,7 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

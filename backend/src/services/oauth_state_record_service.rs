@@ -1,6 +1,7 @@
 //! Encoded OAuth-state fields share one trusted identity across live reads,
 //! migration and readiness. Legacy hex remains encrypted during reader staging;
 //! contextual fields carry an explicit prefix and never fall back after failure.
+use crate::crypto::record_field;
 use crate::{
     crypto::aes::{EncryptionKeys, RecordContext},
     errors::{AppError, AppResult},
@@ -62,19 +63,16 @@ pub(crate) async fn encrypt(
 ) -> AppResult<String> {
     validate(plaintext)?;
     let path = path(state, field);
+    if !FIELDS.contains(&field) {
+        return Err(invalid());
+    }
+    let bytes =
+        record_field::encrypt_with_context(keys, plaintext, || context(state, &path)).await?;
+    let encoded = hex::encode(bytes);
     if keys.contextual_record_writes() {
-        Ok(format!(
-            "{PREFIX}{}",
-            hex::encode(
-                keys.encrypt_record(plaintext, &context(state, &path)?)
-                    .await?
-            )
-        ))
+        Ok(format!("{PREFIX}{encoded}"))
     } else {
-        if !FIELDS.contains(&field) {
-            return Err(invalid());
-        }
-        Ok(hex::encode(keys.encrypt(plaintext).await?))
+        Ok(encoded)
     }
 }
 fn validate(bytes: &[u8]) -> AppResult<()> {
@@ -90,17 +88,20 @@ pub(crate) async fn decrypt(
     encoded: &str,
 ) -> AppResult<Zeroizing<String>> {
     let path = path(state, field);
-    let bytes = if let Some(value) = encoded.strip_prefix(PREFIX) {
-        let ciphertext = hex::decode(value).map_err(|_| invalid())?;
-        keys.decrypt_record(&ciphertext, &context(state, &path)?)
-            .await?
-    } else {
-        if !FIELDS.contains(&field) || !keys.allow_legacy_record_reads() {
-            return Err(invalid());
-        }
-        let ciphertext = hex::decode(encoded).map_err(|_| invalid())?;
-        keys.decrypt(&ciphertext).await?
+    let (version, value) = match encoded.strip_prefix(PREFIX) {
+        Some(value) => (Some(3), value),
+        None if FIELDS.contains(&field) && keys.allow_legacy_record_reads() => (None, encoded),
+        None => return Err(invalid()),
     };
+    let ciphertext = hex::decode(value).map_err(|_| invalid())?;
+    let bytes = record_field::decrypt_with_context(
+        keys,
+        &ciphertext,
+        version,
+        || context(state, &path),
+        invalid,
+    )
+    .await?;
     validate(&bytes)?;
     Ok(Zeroizing::new(
         std::str::from_utf8(&bytes)

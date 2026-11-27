@@ -1,6 +1,4 @@
 import { withAccountPanelSearch, type AccountPanelSearch } from "./account-panel-search";
-import { findSkillTemplate, type SkillTemplate } from "./skill-templates";
-import { isSkillSetupId } from "./skill-template-handoff";
 
 /**
  * The `/assistant` search contract, in one place: the router validates with
@@ -21,7 +19,6 @@ import { isSkillSetupId } from "./skill-template-handoff";
  *   and Back closes it; an inaccessible or destroyed agent shows an explicit
  *   no-access state instead of falling back to NyxBot.
  * - `mock` preserves the dev-only HTTP fixture boundary across router writes.
- * - `skill` opens a curated starter in a fresh personal NyxBot chat.
  *
  * `draft` is accepted as a boolean and as the string "true": the router's
  * search parser hands back a real boolean for its own round-tripped links,
@@ -41,14 +38,14 @@ export interface AssistantSearch extends AccountPanelSearch {
   readonly card?: string;
   readonly proposal?: string;
   readonly draft?: boolean;
+  readonly tour?: true;
+  readonly learnDraft?: string;
   readonly agent?: string;
   readonly details?: AgentDetailsTab;
   /** Focus one connection in the agent Channels tab. */
   readonly connection?: string;
   readonly g?: string;
   readonly mock?: 1;
-  readonly skill?: SkillTemplate["slug"];
-  readonly skillSetup?: string;
 }
 
 function agentDetailsTab(value: unknown): AgentDetailsTab | undefined {
@@ -58,12 +55,7 @@ function agentDetailsTab(value: unknown): AgentDetailsTab | undefined {
 function parseChatSearch(
   search: Record<string, unknown>,
 ): Omit<AssistantSearch, keyof AccountPanelSearch> {
-  const hasOtherTarget = ["c", "draft", "agent", "g", "card", "proposal", "details", "connection", "panel"]
-    .some((key) => search[key] !== undefined);
-  const template = hasOtherTarget ? undefined : findSkillTemplate(search.skill);
   return {
-    ...(template ? { skill: template.slug } : {}),
-    ...(template && isSkillSetupId(search.skillSetup) ? { skillSetup: search.skillSetup } : {}),
     ...(typeof search.c === "string" ? { c: search.c } : {}),
     ...(typeof search.card === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(search.card)
       ? { card: search.card }
@@ -73,6 +65,10 @@ function parseChatSearch(
     ...(search.draft === true || search.draft === "true"
       ? { draft: true }
       : {}),
+    ...(search.tour === true || search.tour === "true" ? { tour: true as const } : {}),
+    ...((search.draft === true || search.draft === "true") && typeof search.learnDraft === "string" &&
+      /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(search.learnDraft)
+      ? { learnDraft: search.learnDraft } : {}),
     ...(typeof search.agent === "string" && search.agent
       ? { agent: search.agent }
       : {}),

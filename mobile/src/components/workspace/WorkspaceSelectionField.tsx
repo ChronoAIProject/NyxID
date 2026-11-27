@@ -1,3 +1,4 @@
+import { searchFieldContent, searchFieldInput } from "./searchFieldStyles";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useNativeSheetDismiss } from "./useNativeSheetDismiss";
@@ -520,23 +521,8 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   toolbar: { paddingHorizontal: 20, paddingTop: 16, gap: 12 },
-  searchBox: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingLeft: 12,
-  },
-  searchInput: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 44,
-    paddingVertical: 8,
-    paddingRight: 8,
-    fontFamily: fonts.bodyRegular,
-    fontSize: 14,
-  },
+  searchBox: { ...searchFieldContent, borderWidth: 1, borderRadius: 8 },
+  searchInput: searchFieldInput,
   tabs: { flexDirection: "row", gap: 8 },
   tab: {
     minHeight: 44,

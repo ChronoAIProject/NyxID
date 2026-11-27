@@ -4280,6 +4280,7 @@ mod tests {
     use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
     use crate::models::ssh_auth_mode::SshAuthMode;
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+    use crate::services::oauth_broker_record_service;
     use crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
     use crate::test_utils::{
         connect_test_database, test_app_state, test_app_state_with_config, test_membership,
@@ -4485,6 +4486,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
@@ -4552,13 +4554,17 @@ mod tests {
             .expect("insert refresh token");
 
         let binding_hash = hash_binding_id(raw_binding_id);
-        let refresh_token_encrypted = state
-            .encryption_keys
-            .encrypt_with_aad(refresh_jwt.as_bytes(), binding_hash.as_bytes())
-            .await
-            .expect("encrypt binding refresh token");
+        let refresh_token_encrypted = oauth_broker_record_service::encrypt(
+            &state.encryption_keys,
+            &binding_hash,
+            user_id,
+            client_id,
+            refresh_jwt.as_bytes(),
+        )
+        .await
+        .expect("encrypt binding refresh token");
         let binding = OauthBrokerBinding {
-            secret_context_versions: Default::default(),
+            secret_context_versions: oauth_broker_record_service::versions(&state.encryption_keys),
             id: binding_hash,
             client_id: client_id.to_string(),
             user_id: user_id.to_string(),
@@ -7451,6 +7457,7 @@ mod tests {
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: None,
                 created_at: now,
@@ -7874,6 +7881,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("dev".to_string()),
             created_at: Utc::now(),

@@ -1,7 +1,6 @@
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link } from "@tanstack/react-router";
 import { ArrowDown, ArrowRight, BookOpen, Compass } from "lucide-react";
 import { LearnTemplatePreview } from "@/components/assistant/learn-template-preview";
-import { useIntroReplay } from "@/hooks/use-assistant-onboarding";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { findSkillTemplate, SKILL_TEMPLATES, type SkillTemplate } from "@/lib/assistant/skill-templates";
@@ -22,11 +21,11 @@ function TemplateDetails({ template }: { readonly template: SkillTemplate }) {
     <dl className="grid content-start gap-3 type-body">
       <div>
         <dt className="type-secondary-strong text-foreground">{t("What to supply")}</dt>
-        <dd className="text-muted-foreground">{template.input()}</dd>
+        <dd className="text-muted-foreground">{template.inputs().map(([label]) => label).join(" · ")}</dd>
       </div>
       <div>
         <dt className="type-secondary-strong text-foreground">{t("What you’ll get")}</dt>
-        <dd className="text-muted-foreground">{template.description()}</dd>
+        <dd className="text-muted-foreground">{template.output()}</dd>
       </div>
     </dl>
   );
@@ -34,8 +33,6 @@ function TemplateDetails({ template }: { readonly template: SkillTemplate }) {
 
 export function AssistantLearnPage() {
   const { t } = useUiTranslation();
-  const navigate = useNavigate();
-  const replayIntro = useIntroReplay((state) => state.replay);
   const nyxagentEnabled = useFeature(FEATURE_FLAG.NYXAGENT_ENGINE);
   const labels = {
     research: t("Research"),
@@ -64,21 +61,14 @@ export function AssistantLearnPage() {
         <h2 id="learn-getting-started" className="type-section-heading">{t("Getting started")}</h2>
         <div className="grid gap-3 sm:grid-cols-2">
           {nyxagentEnabled && (
-            <button
-              type="button"
-              className={resourceClass}
-              onClick={() => {
-                replayIntro();
-                void navigate({ to: "/assistant", search: {} });
-              }}
-            >
+            <Link to="/assistant" search={{ tour: true }} className={resourceClass}>
               <Compass aria-hidden="true" className="size-5 shrink-0 text-text-tertiary" />
               <span className="min-w-0 flex-1">
-                <span className="block type-card-title">{t("Replay intro")}</span>
-                <span className="mt-1 block type-body text-muted-foreground">{t("Replay the NyxBot intro to find recommended next steps and take the workspace tour.")}</span>
+                <span className="block type-card-title">{t("Workspace tour")}</span>
+                <span className="mt-1 block type-body text-muted-foreground">{t("Explore the NyxBot composer, agents and workspace tools.")}</span>
               </span>
               <ArrowRight aria-hidden="true" className="size-4 shrink-0 text-text-tertiary" />
-            </button>
+            </Link>
           )}
           <Link to="/docs" className={resourceClass}>
             <BookOpen aria-hidden="true" className="size-5 shrink-0 text-text-tertiary" />

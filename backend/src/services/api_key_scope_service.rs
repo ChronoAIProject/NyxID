@@ -13,7 +13,7 @@ use crate::models::node_service_binding::{
     COLLECTION_NAME as NODE_SERVICE_BINDINGS, NodeServiceBinding,
 };
 use crate::models::org_membership::{
-    COLLECTION_NAME as ORG_MEMBERSHIPS, MemberScopeSource, OrgMembership, OrgRole,
+    COLLECTION_NAME as ORG_MEMBERSHIPS, MemberScopeSource, OrgMembership,
 };
 use crate::models::org_role_scope::{COLLECTION_NAME as ORG_ROLE_SCOPES, OrgRoleScope};
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
@@ -316,22 +316,95 @@ async fn resolve_owner_access_with_session(
             .and_then(|scope| scope.allowed_service_ids),
     };
 
-    Ok(match membership.role {
-        OrgRole::Admin => OwnerAccess::AsOrgAdmin {
-            org_user_id: owner.id,
-            membership_id: membership.id,
-            allowed_service_ids: effective_scope,
-        },
-        OrgRole::Member | OrgRole::Viewer => OwnerAccess::AsOrgMember {
-            org_user_id: owner.id,
-            membership_id: membership.id,
-            role: membership.role,
-            allowed_service_ids: effective_scope,
-        },
-    })
+    Ok(org_service::access_for_membership(
+        membership,
+        effective_scope,
+    ))
 }
 
-fn actor_can_scope_service(access: &OwnerAccess, service_id: &str) -> bool {
+/// One snapshot of access to the active owners of the requested service rows.
+pub(super) async fn active_service_owner_access_in_session(
+    db: &mongodb::Database,
+    actor: &str,
+    owners: &BTreeSet<&str>,
+    session: &mut ClientSession,
+) -> AppResult<BTreeMap<String, OwnerAccess>> {
+    let mut access = BTreeMap::new();
+    if owners.contains(actor) {
+        access.insert(actor.to_owned(), OwnerAccess::Direct);
+    }
+    let foreign: Vec<_> = owners.iter().copied().filter(|id| *id != actor).collect();
+    if foreign.is_empty() {
+        return Ok(access);
+    }
+    let mut cursor = db
+        .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+        .find(doc! {"member_user_id": actor, "org_user_id": {"$in": foreign}, "revoked_at": null})
+        .session(&mut *session)
+        .await?;
+    let memberships: Vec<OrgMembership> = cursor.stream(&mut *session).try_collect().await?;
+    if memberships.is_empty() {
+        return Ok(access);
+    }
+    let org_ids: Vec<_> = memberships
+        .iter()
+        .map(|m| m.org_user_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut cursor = db
+        .collection::<User>(USERS)
+        .find(doc! {"_id": {"$in": org_ids}, "is_active": true, "user_type": "org"})
+        .session(&mut *session)
+        .await?;
+    let active: BTreeSet<String> = cursor
+        .stream(&mut *session)
+        .map_ok(|org| org.id)
+        .try_collect()
+        .await?;
+    let inherit: Vec<_> = memberships
+        .iter()
+        .filter(|m| m.scope_source == MemberScopeSource::Inherit && active.contains(&m.org_user_id))
+        .map(|m| m.org_user_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let mut scopes = BTreeMap::new();
+    if !inherit.is_empty() {
+        let mut cursor = db
+            .collection::<OrgRoleScope>(ORG_ROLE_SCOPES)
+            .find(doc! {"org_user_id": {"$in": inherit}})
+            .session(&mut *session)
+            .await?;
+        scopes = cursor
+            .stream(&mut *session)
+            .map_ok(|scope| {
+                (
+                    (scope.org_user_id, scope.role.as_str()),
+                    scope.allowed_service_ids,
+                )
+            })
+            .try_collect()
+            .await?;
+    }
+    for membership in memberships
+        .into_iter()
+        .filter(|m| active.contains(&m.org_user_id))
+    {
+        let org = membership.org_user_id.clone();
+        let scope = match membership.scope_source {
+            MemberScopeSource::Override => membership.allowed_service_ids.clone(),
+            MemberScopeSource::Inherit => scopes
+                .get(&(org.clone(), membership.role.as_str()))
+                .cloned()
+                .flatten(),
+        };
+        access.insert(org, org_service::access_for_membership(membership, scope));
+    }
+    Ok(access)
+}
+
+pub(super) fn actor_can_scope_service(access: &OwnerAccess, service_id: &str) -> bool {
     let role_allows = match access {
         OwnerAccess::Direct | OwnerAccess::AsOrgAdmin { .. } => true,
         OwnerAccess::AsOrgMember { role, .. } => role.can_proxy(),

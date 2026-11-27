@@ -96,6 +96,7 @@ impl Fixture {
         db.collection("service_approval_configs")
             .insert_one(
                 crate::models::service_approval_config::ServiceApprovalConfig {
+                    approvers: Default::default(),
                     id: Uuid::new_v4().to_string(),
                     user_id: owner.clone(),
                     service_id: catalog.clone(),

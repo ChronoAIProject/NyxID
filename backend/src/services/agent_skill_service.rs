@@ -295,6 +295,72 @@ impl OrnnOutcome {
     }
 }
 
+/// Build only the literal version lookup supported by Ornn's id-or-name route.
+pub(crate) fn publication_version_path(name: &str, version: &str) -> Option<String> {
+    let (major, minor) = version.split_once('.')?;
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        || [major, minor]
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    Some(format!("/api/v1/skills/{name}?version={version}"))
+}
+
+type DispatchTransition = futures::future::BoxFuture<'static, AppResult<()>>;
+
+#[derive(Clone)]
+pub struct PublicationDispatch(std::sync::Arc<PublicationAttempt>);
+
+struct PublicationAttempt {
+    transition: std::sync::Mutex<Option<DispatchTransition>>,
+    may_have_sent: std::sync::atomic::AtomicBool,
+}
+
+impl PublicationDispatch {
+    pub(super) fn new(transition: DispatchTransition) -> Self {
+        Self(std::sync::Arc::new(PublicationAttempt {
+            transition: std::sync::Mutex::new(Some(transition)),
+            may_have_sent: false.into(),
+        }))
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test() -> Self {
+        Self::new(Box::pin(async { Ok(()) }))
+    }
+
+    pub(crate) async fn begin(&self) -> AppResult<()> {
+        let transition = self
+            .0
+            .transition
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .ok_or_else(|| AppError::Conflict("Publication attempt ended".into()))?;
+        transition.await
+    }
+
+    pub(crate) fn transport_attempt(&self, may_have_sent: bool) {
+        self.0
+            .may_have_sent
+            .store(may_have_sent, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Read only once the proxy task has stopped. A process crash instead
+    /// leaves the durable started marker in force for read-only reconciliation.
+    pub(crate) fn may_have_sent(&self) -> bool {
+        self.0
+            .may_have_sent
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 #[async_trait::async_trait]
 pub trait OrnnReader: Sync {
     /// Must use the acting person's live identity, never a shared master credential.
@@ -325,6 +391,36 @@ pub trait OrnnReader: Sync {
         }
     }
 
+    async fn version_by_name(&self, name: &str, version: &str, as_owner: bool) -> OrnnOutcome {
+        let Some(path) = publication_version_path(name, version) else {
+            return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::InvalidPath);
+        };
+        if as_owner {
+            self.classified_as_owner(http::Method::GET, &path, Vec::new())
+                .await
+        } else {
+            self.classified(http::Method::GET, &path, Vec::new()).await
+        }
+    }
+
+    async fn publish(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+        dispatch: PublicationDispatch,
+        as_owner: bool,
+    ) -> OrnnOutcome {
+        if let Err(error) = dispatch.begin().await {
+            return OrnnOutcome::LocalError(error);
+        }
+        if as_owner {
+            self.classified_as_owner(method, path, body).await
+        } else {
+            self.classified(method, path, body).await
+        }
+    }
+
     /// Owner-authorized publication uses the injected transport with the
     /// acting person's identity, without the conversation's restricted key.
     async fn classified_as_owner(
@@ -345,6 +441,21 @@ impl<R: OrnnReader> OrnnReader for OwnerPublicationReader<'_, R> {
         self.classified(http::Method::GET, path, Vec::new())
             .await
             .into_app_result()
+    }
+
+    async fn version_by_name(&self, name: &str, version: &str, _as_owner: bool) -> OrnnOutcome {
+        self.0.version_by_name(name, version, true).await
+    }
+
+    async fn publish(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: Vec<u8>,
+        dispatch: PublicationDispatch,
+        _as_owner: bool,
+    ) -> OrnnOutcome {
+        self.0.publish(method, path, body, dispatch, true).await
     }
 
     async fn classified(&self, method: http::Method, path: &str, body: Vec<u8>) -> OrnnOutcome {
@@ -1223,9 +1334,7 @@ pub async fn set(
     } else {
         vec![doc! {"skills_revision": selection.expected_revision}]
     };
-    let result = db
-        .collection::<AssistantAgent>(COLLECTION_NAME)
-        .update_one(
+    let result = super::org_agent_service::update_maintained(db,owner,&agent,
             doc! {"_id": id, "user_id": &agent.user_id, "destroyed_at": bson::Bson::Null, "$or": revisions},
             doc! {"$set": {
                 "skills": bson::to_bson(&selection.skills).map_err(|_| invalid("Invalid skills"))?,
@@ -1235,7 +1344,7 @@ pub async fn set(
             }},
         )
         .await?;
-    if result.matched_count != 1 {
+    if result.is_none() {
         return Err(AppError::Conflict(
             "Skills changed; reload the current revision".into(),
         ));

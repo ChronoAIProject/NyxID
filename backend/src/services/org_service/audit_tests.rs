@@ -376,13 +376,36 @@ async fn org_audit_request_command_counts() {
         // and Join each fence the issuer and read the active admin membership.
         let expected = match action {
             Action::Add => 20,
-            Action::Update => 18,
-            Action::Revoke => 14,
+            Action::Update => 19,
+            Action::Revoke => 16,
             Action::Issue => 10,
             Action::Cancel => 6,
             Action::Join => 19,
         };
         assert_eq!(commands.len(), expected, "{action:?}");
+        let policy_commands: Vec<_> = commands
+            .iter()
+            .filter(|(_, collection)| {
+                collection == crate::models::service_approval_config::COLLECTION_NAME
+            })
+            .map(|(command, _)| command.as_str())
+            .collect();
+        if matches!(action, Action::Revoke) {
+            assert_eq!(policy_commands, ["update"]);
+        } else {
+            assert!(policy_commands.is_empty());
+        }
+        let specialist_commands: Vec<_> = commands
+            .iter()
+            .filter(|(_, collection)| collection == crate::models::assistant_agent::COLLECTION_NAME)
+            .map(|(command, _)| command.as_str())
+            .collect();
+        if matches!(action, Action::Update | Action::Revoke) {
+            // The demotion and removal each prune explicit specialist selections in one write.
+            assert_eq!(specialist_commands, ["update"], "{action:?}");
+        } else {
+            assert!(specialist_commands.is_empty(), "{action:?}");
+        }
         assert_eq!(
             commands
                 .iter()

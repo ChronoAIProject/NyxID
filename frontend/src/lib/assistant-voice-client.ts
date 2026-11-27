@@ -64,6 +64,7 @@ export class AssistantVoiceClient {
   private onActivity: (activity: AudioActivity) => void;
   private onConflict: (session: VoiceSession | null) => void;
   private onStatus: (status: VoiceConnectionStatus) => void;
+  private readonly onInputGate: (enabled: boolean) => void;
   constructor(
     thread: string,
     onSnapshot: (value: VoiceSnapshot) => void,
@@ -72,6 +73,7 @@ export class AssistantVoiceClient {
     onConflict: (session: VoiceSession | null) => void = () => {},
     privateActivity: (activity: AudioActivity) => void = () => {},
     onStatus: (status: VoiceConnectionStatus) => void = () => {},
+    onInputGate: (enabled: boolean) => void = () => {},
   ) {
     this.thread = thread;
     this.onSnapshot = onSnapshot;
@@ -80,6 +82,7 @@ export class AssistantVoiceClient {
     this.onConflict = onConflict;
     this.onActivity = privateActivity;
     this.onStatus = onStatus;
+    this.onInputGate = onInputGate;
   }
   private setStatus(status: VoiceConnectionStatus) {
     if (this.closed || this.connectionStatus === status) return;
@@ -551,6 +554,7 @@ export class AssistantVoiceClient {
       t.enabled = enabled;
     });
     this.grok?.capture(!!enabled);
+    this.onInputGate(!!enabled);
   }
   hold(pressed: boolean) {
     if (this.closed || this.held === pressed) return;
@@ -618,6 +622,7 @@ export class AssistantVoiceClient {
   }
   async end() {
     this.closed = true;
+    this.onInputGate(false);
     this.abort.abort();
     this.preparation?.close();
     if (!this.preparation) {
@@ -651,6 +656,7 @@ export class AssistantVoiceClient {
   private dispose() {
     this.onClosed();
     this.closed = true;
+    this.onInputGate(false);
     this.abort.abort();
     this.preparation?.close();
     if (!this.preparation) {

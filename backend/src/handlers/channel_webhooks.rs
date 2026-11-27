@@ -281,6 +281,13 @@ pub(crate) async fn channel_webhook_with_producers(
             {
                 Ok(response) => webhook_response(response, empty_ack_is_text),
                 Err(e) => {
+                    if matches!(
+                        e.downcast_ref::<crate::errors::AppError>(),
+                        Some(crate::errors::AppError::SecurityReadinessUnavailable)
+                    ) {
+                        return (StatusCode::SERVICE_UNAVAILABLE, [("retry-after", "1")])
+                            .into_response();
+                    }
                     tracing::warn!(bot_id = %bot_id, platform = %platform, error_code = ?e.downcast_ref::<crate::errors::AppError>().map(|error| error.error_code()), "channel webhook processing failed (suppressed)");
                     webhook_response(None, empty_ack_is_text)
                 }
@@ -375,6 +382,67 @@ pub(super) async fn dispatch_platform_webhook(
     body: &[u8],
 ) -> crate::errors::AppResult<()> {
     dispatch_platform_webhook_with_producers(state, platform, headers, body, None).await
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct SharedDispatchPauseHandle {
+    pub(crate) bot_id: String,
+    pub(crate) reached: std::sync::Arc<tokio::sync::Notify>,
+    pub(crate) release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static SHARED_DISPATCH_PAUSE: SharedDispatchPauseHandle;
+}
+
+#[cfg(test)]
+pub(crate) fn new_shared_dispatch_pause(bot_id: &str) -> SharedDispatchPauseHandle {
+    SharedDispatchPauseHandle {
+        bot_id: bot_id.to_owned(),
+        reached: std::sync::Arc::new(tokio::sync::Notify::new()),
+        release: std::sync::Arc::new(tokio::sync::Notify::new()),
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn dispatch_platform_webhook_with_pause(
+    state: &AppState,
+    platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    pause: SharedDispatchPauseHandle,
+) -> crate::errors::AppResult<()> {
+    SHARED_DISPATCH_PAUSE
+        .scope(
+            pause,
+            dispatch_platform_webhook_with_producers(state, platform, headers, body, None),
+        )
+        .await
+}
+
+#[cfg(test)]
+async fn pause_shared_dispatch_after_lookup(bot_id: &str) {
+    let handle = SHARED_DISPATCH_PAUSE.try_with(Clone::clone).ok();
+    let Some(handle) = handle.filter(|handle| handle.bot_id == bot_id) else {
+        return;
+    };
+    handle.reached.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        handle.release.notified(),
+    )
+    .await
+    .expect("the test must release dispatch after resuming the inbox");
+}
+
+fn meta_delivery_hold_observed(bot: &crate::models::channel_bot::ChannelBot) -> bool {
+    crate::services::channel_adapters::meta::is_meta(&bot.platform)
+        && (bot.status == "suspended"
+            || bot.meta_binding.as_ref().is_some_and(|binding| {
+                binding.operator_suspended || binding.subscription == "suspended"
+            }))
 }
 
 pub(crate) async fn dispatch_platform_webhook_with_producers(
@@ -479,18 +547,33 @@ pub(crate) async fn dispatch_platform_webhook_with_producers(
             );
             continue;
         };
-        // Reuse per-bot verification and phone filtering for managed credentials.
-        if handle_webhook_inner_with_producers(
-            state,
-            &bot.id,
-            platform,
-            headers,
-            body,
-            producers.clone(),
-        )
-        .await
-        .is_err()
-        {
+        #[cfg(test)]
+        pause_shared_dispatch_after_lookup(&bot.id).await;
+        let observed_meta_hold = meta_delivery_hold_observed(&bot);
+        // Keep a hold seen at lookup so a concurrent resume cannot admit DMs from this batch.
+        let result = if observed_meta_hold {
+            handle_webhook_inner_with_producers_and_bot(
+                state,
+                &bot.id,
+                platform,
+                headers,
+                body,
+                producers.clone(),
+                Some(bot.clone()),
+            )
+            .await
+        } else {
+            handle_webhook_inner_with_producers(
+                state,
+                &bot.id,
+                platform,
+                headers,
+                body,
+                producers.clone(),
+            )
+            .await
+        };
+        if result.is_err() {
             tracing::warn!(platform, bot_id = %bot.id, "platform webhook bot processing failed");
         }
     }
@@ -577,6 +660,27 @@ pub(crate) async fn handle_webhook_inner_with_producers(
     body: &[u8],
     producers: Option<ManagerProducers>,
 ) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
+    handle_webhook_inner_with_producers_and_bot(
+        state,
+        bot_id,
+        expected_platform,
+        headers,
+        body,
+        producers,
+        None,
+    )
+    .await
+}
+
+async fn handle_webhook_inner_with_producers_and_bot(
+    state: &AppState,
+    bot_id: &str,
+    expected_platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+    producers: Option<ManagerProducers>,
+    looked_up_bot: Option<crate::models::channel_bot::ChannelBot>,
+) -> Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
     let intercepted = crate::services::platform_entry_ingress_service::intercept(
         state,
         bot_id,
@@ -610,12 +714,13 @@ pub(crate) async fn handle_webhook_inner_with_producers(
             return Ok(response);
         }
     }
-    handle_webhook_inner_with_deps(
+    handle_webhook_inner_with_deps_and_bot(
         WebhookHandlerDeps::from(state),
         bot_id,
         expected_platform,
         headers,
         body,
+        looked_up_bot,
     )
     .await
 }
@@ -653,12 +758,24 @@ async fn diagnose_x_refusal(
 
 type WebhookResult = Result<Option<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>>;
 
+#[cfg(test)]
 fn handle_webhook_inner_with_deps<'a>(
     state: WebhookHandlerDeps<'a>,
     bot_id: &'a str,
     expected_platform: &'a str,
     headers: &'a HeaderMap,
     body: &'a [u8],
+) -> futures::future::BoxFuture<'a, WebhookResult> {
+    handle_webhook_inner_with_deps_and_bot(state, bot_id, expected_platform, headers, body, None)
+}
+
+fn handle_webhook_inner_with_deps_and_bot<'a>(
+    state: WebhookHandlerDeps<'a>,
+    bot_id: &'a str,
+    expected_platform: &'a str,
+    headers: &'a HeaderMap,
+    body: &'a [u8],
+    looked_up_bot: Option<crate::models::channel_bot::ChannelBot>,
 ) -> futures::future::BoxFuture<'a, WebhookResult> {
     // Construct the large dispatch future outside caller poll frames, including
     // concurrent deliveries. Signature verification and admission stay inside.
@@ -668,6 +785,7 @@ fn handle_webhook_inner_with_deps<'a>(
         expected_platform,
         headers,
         body,
+        looked_up_bot,
     ))
 }
 
@@ -677,14 +795,18 @@ async fn handle_webhook_inner_impl(
     expected_platform: &str,
     headers: &HeaderMap,
     body: &[u8],
+    looked_up_bot: Option<crate::models::channel_bot::ChannelBot>,
 ) -> WebhookResult {
     // Look up the bot
-    let bot = match channel_bot_service::get_bot(state.db, bot_id).await {
-        Ok(b) => b,
-        Err(_) => {
-            tracing::debug!(bot_id = %bot_id, "webhook for unknown bot");
-            return Ok(None);
-        }
+    let bot = match looked_up_bot {
+        Some(bot) => bot,
+        None => match channel_bot_service::get_bot(state.db, bot_id).await {
+            Ok(b) => b,
+            Err(_) => {
+                tracing::debug!(bot_id = %bot_id, "webhook for unknown bot");
+                return Ok(None);
+            }
+        },
     };
 
     // Verify the bot platform matches the webhook route
@@ -720,7 +842,8 @@ async fn handle_webhook_inner_impl(
     // Allow pending_webhook bots through to verification -- they'll be promoted
     // after signature verification succeeds (not before).
     let is_pending_webhook = bot.status == "pending_webhook";
-    if !is_pending_webhook && bot.status != "active" {
+    let meta_control_hold = meta_delivery_hold_observed(&bot);
+    if !is_pending_webhook && bot.status != "active" && !meta_control_hold {
         diagnose_x_refusal(state, &bot, headers, body, Outcome::BotInactive).await;
         tracing::debug!(bot_id = %bot_id, status = %bot.status, "webhook for non-active bot");
         return Ok(None);
@@ -740,7 +863,9 @@ async fn handle_webhook_inner_impl(
         .cloned()
         .unwrap_or_else(|| std::sync::Arc::from(adapter));
 
-    let snapshot = if adapter.records_verification_result() {
+    let snapshot_required = adapter.records_verification_result()
+        || crate::services::channel_adapters::meta::is_meta(&bot.platform);
+    let snapshot = if snapshot_required {
         crate::services::channel_verification_service::CredentialSnapshot::load(
             state.db,
             adapter.as_ref(),
@@ -750,7 +875,7 @@ async fn handle_webhook_inner_impl(
     } else {
         crate::services::channel_verification_service::CredentialSnapshot::local(&bot)
     };
-    let verify_secrets = if adapter.records_verification_result() {
+    let verify_secrets = if snapshot_required {
         snapshot
             .secrets(state.encryption_keys, adapter.as_ref())
             .await
@@ -796,6 +921,15 @@ async fn handle_webhook_inner_impl(
         }
     };
 
+    adapter
+        .apply_webhook_state(state.db, &bot, &prepared.body, &snapshot)
+        .await?;
+    // Held Meta installations still project authenticated control evidence,
+    // but their ordinary DMs must never enter relay admission. This check is
+    // deliberately after signature, app, asset and control-state processing.
+    if meta_control_hold {
+        return Ok(None);
+    }
     if let Some(challenge_response) = prepared.challenge_response {
         // This proves only callback reachability with the current verification
         // secrets. It is not a message, a route check, or member verification.
@@ -936,7 +1070,9 @@ async fn handle_webhook_inner_impl(
             return Err(Box::new(error));
         }
     };
-
+    if crate::services::channel_adapters::meta::is_meta(&bot.platform) && messages.is_empty() {
+        inbound_diagnostics::record(state.db, &bot, Outcome::EmptyBatch).await;
+    }
     if bot.platform == "x" {
         let outcomes = crate::services::channel_adapters::x::filtered_webhook_outcomes(
             &prepared.body,
@@ -1774,6 +1910,8 @@ mod tests {
             instance_name: "test-backend".to_string(),
             automation_continuation_v2_enabled: false,
             security_rollout: Default::default(),
+            admin_mfa_enforcement: Default::default(),
+            auth_verification_legacy_cutoff_at: None,
             internal_bind_addr: "127.0.0.1:3002".to_string(),
             internal_advertise_url: "http://127.0.0.1:3002".to_string(),
             internal_dispatch_hmac_key: None,
@@ -2041,11 +2179,14 @@ mod tests {
         let verification_token_encrypted = encryption_keys.encrypt(b"verify_token").await.unwrap();
 
         let bot = crate::models::channel_bot::ChannelBot {
+            meta_binding: None,
             manager_instance: None,
             diagnostics: Default::default(),
             x_events: None,
             last_verification: None,
             ownership_version: 0,
+            guest_access_v1: false,
+            guest_access_v1_revision: 0,
             id: bot_id.clone(),
             user_id: user_id.clone(),
             platform: platform.to_string(),
@@ -2059,6 +2200,8 @@ mod tests {
             poll_error_count: 0,
             last_poll_notice: None,
             error: None,
+            credential_continuity: None,
+            secret_context_versions: Default::default(),
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

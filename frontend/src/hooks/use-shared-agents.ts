@@ -38,9 +38,9 @@ export function useSaveSharedNotes(id: string, kind: "private-notes" | "shared-m
     onSuccess: () => client.invalidateQueries({ queryKey: key(user, id) }) });
 }
 
-export function useSharedConsents(id: string) {
+export function useSharedConsents(id: string, enabled = true) {
   const user = useAuthStore((s) => s.user?.id);
-  return useQuery({ queryKey: key(user, id, "consents"),
+  return useQuery({ queryKey: key(user, id, "consents"), enabled: enabled && Boolean(user && id),
     queryFn: async () => sharedConsentsSchema.parse(await assistantJson(`${agentPath(id)}/consents`)),
     refetchInterval: 3000, retry: false });
 }

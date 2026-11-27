@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { agentAvatarFieldSchema } from "./agent-avatar";
 
 /**
  * NyxBot Notifications: the per-person feed of automation results and chat
@@ -50,6 +51,7 @@ export const notificationActorSchema = z.object({
   id: z.string().nullable().optional(),
   name: z.string(),
   display_name: z.string().nullable().optional(),
+  avatar: agentAvatarFieldSchema,
   kind: z.enum(["nyxbot", "specialist"]).nullable().optional(),
 });
 export type NotificationActor = z.infer<typeof notificationActorSchema>;

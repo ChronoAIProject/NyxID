@@ -1,5 +1,4 @@
-import { useContext } from "react";
-import { WorkspaceCornerSensorContext } from "./WorkspaceLayoutContext";
+import { searchFieldContent, searchFieldInput } from "./searchFieldStyles";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -143,14 +142,11 @@ function BrowseSearchField({
   const { colors } = useTheme();
   const { fontScale } = useWindowDimensions();
   const [textWidth, setTextWidth] = useState<number>();
-  const cornerWindow = useContext(WorkspaceCornerSensorContext);
-  const placeholder = cornerWindow
-    ? fittingPlaceholder(
+  const placeholder = fittingPlaceholder(
     placeholders,
     textWidth,
     SEARCH_FIELD.fontSize * fontScale,
-  )
-    : placeholders[0];
+  );
   return (
     <View
       style={[
@@ -543,24 +539,8 @@ const styles = StyleSheet.create({
   fill: { flex: 1 },
   list: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 40 },
   toolbar: { paddingHorizontal: 16, paddingTop: 12, gap: 10 },
-  search: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingLeft: SEARCH_FIELD.paddingLeft,
-    borderRadius: 12,
-    borderWidth: SEARCH_FIELD.border,
-    gap: SEARCH_FIELD.gap,
-    minHeight: 48,
-  },
-  input: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 48,
-    fontFamily: fonts.bodyRegular,
-    fontSize: SEARCH_FIELD.fontSize,
-    paddingVertical: 10,
-    paddingRight: SEARCH_FIELD.textPaddingRight,
-  },
+  search: { ...searchFieldContent, borderRadius: 12, borderWidth: SEARCH_FIELD.border },
+  input: searchFieldInput,
   clear: {
     width: 44,
     height: 44,

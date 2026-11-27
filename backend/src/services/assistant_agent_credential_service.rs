@@ -44,6 +44,7 @@ pub enum KeyAuthority {
         AgentGrants,
         crate::models::agent_operation_scope::OperationScopes,
         String,
+        i64,
     ),
 }
 
@@ -63,7 +64,16 @@ impl KeyAuthority {
                 agent.grants.clone(),
                 agent.operation_scopes.clone(),
                 agent.user_id.clone(),
+                agent.org_use_revision,
             ),
+        }
+    }
+
+    pub(crate) fn org_use_revision(&self) -> i64 {
+        match self {
+            Self::Subagent(_, _, _, revision) => *revision,
+            Self::Collaboration(inner, _) => inner.org_use_revision(),
+            _ => 0,
         }
     }
 
@@ -103,7 +113,7 @@ impl KeyAuthority {
                 "allow_auto_connected_services": true,
                 "scopes": format!("{ASSISTANT_SCOPES} {ASSISTANT_ACCOUNT_SCOPE}"),
             },
-            Self::Subagent(grants, scopes, owner) => doc! {
+            Self::Subagent(grants, scopes, owner, _) => doc! {
                 "assistant_agent_owner_id": owner,
                 "assistant_operation_scopes": bson::to_bson(scopes).expect("operation scope serialization"),
                 "allow_all_services": false,
@@ -152,7 +162,18 @@ pub async fn authority_in_session(
     conversation: &AssistantConversation,
     session: &mut ClientSession,
 ) -> AppResult<KeyAuthority> {
-    Box::pin(authority_with_access(db, conversation, session, None)).await
+    let current = Box::pin(authority_with_access(
+        db,
+        conversation,
+        session,
+        None,
+        false,
+    ))
+    .await?;
+    if current.org_use_revision() != conversation.org_use_revision {
+        return Err(AppError::Forbidden("Specialist use access changed".into()));
+    }
+    Ok(current)
 }
 
 pub(crate) async fn authority_with_access(
@@ -160,6 +181,7 @@ pub(crate) async fn authority_with_access(
     conversation: &AssistantConversation,
     session: &mut ClientSession,
     snapshot: Option<&std::sync::Arc<super::org_agent_service::RequestAccess>>,
+    turn_admission: bool,
 ) -> AppResult<KeyAuthority> {
     if !conversation.credential_api_key_id.is_empty() {
         require_ordinary_key(
@@ -229,7 +251,7 @@ pub(crate) async fn authority_with_access(
     }
     if agent.user_id != conversation.user_id && conversation.group_id.is_some() {
         let access = match snapshot {
-            Some(access) if access.matches(&conversation.user_id, &agent.user_id) => access.clone(),
+            Some(access) if access.permits_agent(&conversation.user_id, &agent) => access.clone(),
             Some(_) => return Err(super::org_group_service::missing()),
             None => super::org_agent_service::resolve_key_access(
                 db,
@@ -254,7 +276,7 @@ pub(crate) async fn authority_with_access(
             }
         }
     } else if let Some(access) = snapshot {
-        if !access.matches(&conversation.user_id, &agent.user_id) {
+        if !access.permits_agent(&conversation.user_id, &agent) {
             return Err(super::org_group_service::missing());
         }
     } else {
@@ -300,12 +322,20 @@ pub(crate) async fn authority_with_access(
     // rotated key never carries authority the agent no longer has.
     let mut live = filter;
     live.insert("destroyed_at", bson::Bson::Null);
-    let agent = agents
-        .find_one_and_update(live, doc! {"$inc": {"thread_fence": 1}})
-        .return_document(mongodb::options::ReturnDocument::After)
-        .session(&mut *session)
-        .await?
-        .ok_or_else(destroyed)?;
+    let member_admission = turn_admission
+        && super::org_agent_service::ordinary_member_org(conversation).is_some()
+        && !snapshot.is_some_and(|access| access.channel().is_some() || access.shared().is_some());
+    let agent = if member_admission {
+        // Existing keys contend on their own key row with a destroy or grant change.
+        // Admission fences a replacement key on the specialist before commit.
+        agent
+    } else {
+        agents
+            .find_one_and_update(live, doc! {"$inc": {"thread_fence": 1}})
+            .session(&mut *session)
+            .await?
+            .ok_or_else(destroyed)?
+    };
     if let Some(shared) = snapshot.and_then(|a| a.shared()) {
         let mut grants = agent.grants.clone();
         grants.account_read = false;
@@ -333,6 +363,26 @@ pub(crate) async fn authority_with_access(
             grants,
             agent.operation_scopes.clone(),
             agent.user_id.clone(),
+        ));
+    }
+    if agent.user_id != conversation.user_id
+        && !snapshot.is_some_and(|s| s.channel().is_some())
+        && !Box::pin(super::org_agent_service::member_rights_in_session(
+            db,
+            session,
+            &conversation.user_id,
+            &agent,
+            if turn_admission {
+                super::org_agent_service::MemberFence::Member
+            } else {
+                super::org_agent_service::MemberFence::MemberAndOrg
+            },
+        ))
+        .await?
+        .can_use
+    {
+        return Err(AppError::Forbidden(
+            "Specialist use access is required".into(),
         ));
     }
     Ok(KeyAuthority::for_agent(&agent))

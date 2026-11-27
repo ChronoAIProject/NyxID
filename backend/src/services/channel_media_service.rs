@@ -94,6 +94,7 @@ pub async fn media_client(
             return Err(fetch_failed());
         }
         super::proxy_destination::http::for_url(None, "", &parsed, true)
+            .map_err(AppError::from)
             .and_then(|clients| clients.media())
             .map_err(|_| fetch_failed())
     })

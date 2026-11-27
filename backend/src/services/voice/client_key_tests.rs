@@ -761,6 +761,7 @@ async fn voice_connection_preserves_catalog_operations_without_service_approval(
             false,
             false,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -934,6 +935,20 @@ async fn voice_discovery_and_start_admission_need_only_live_exact_grants() {
             .unwrap();
         assert_eq!(discovery["agents"].as_array().unwrap().len(), 1);
         assert_eq!(discovery["agents"][0]["service_id"], service);
+        // Voice clients draw the same avatar (or derive it from id and kind).
+        assert!(discovery["agents"][0]["avatar"].is_null());
+        assert!(discovery["agents"][0]["kind"].is_string());
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_agent::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": discovery["agents"][0]["agent_id"].as_str().unwrap()},
+                doc! {"$set": {"avatar": {"template":"face-v1","choices":{"head":"round","eyes":"dots","palette":"core-mint"}}}},
+            )
+            .await
+            .unwrap();
+        let restyled = super::application::agents(&f.state, &a, None).await.unwrap();
+        assert_eq!(restyled["agents"][0]["avatar"]["choices"]["head"], "round");
         let binding = keys::authorize(&f.state.db, &a, &f.row.id).await.unwrap();
         let call = session::admit_for_client_key(
             &f.state.db,

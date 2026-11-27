@@ -147,6 +147,13 @@ export function mockSetupResponse(
   method: string,
   body?: unknown,
 ): unknown {
+  if (method === "GET" && path === "/channel-bots/telegram-new") {
+    return { available: true, manager_username: "nyxid_demo_bot", request: null };
+  }
+  if (method === "GET" && /^\/channel-bots\/[^/]+$/.test(path)) {
+    const created = state().bots.find((bot) => path === `/channel-bots/${bot.id}`);
+    if (created) return created;
+  }
   const request = (body && typeof body === "object" ? body : {}) as Record<
     string,
     unknown

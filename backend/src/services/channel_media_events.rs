@@ -254,6 +254,34 @@ pub async fn insert_response_event(
     event: &NyxbotEvent,
     response: Option<&crate::models::nyxbot_response_read::ResponseRead>,
 ) -> mongodb::error::Result<()> {
+    insert_response_event_inner(db, event, response, None).await
+}
+
+pub(crate) async fn insert_meta_response_event(
+    db: &Database,
+    event: &NyxbotEvent,
+    response: Option<&crate::models::nyxbot_response_read::ResponseRead>,
+    bot: &str,
+) -> mongodb::error::Result<()> {
+    let source = event.relay_message_id.as_deref().ok_or_else(|| {
+        mongodb::error::Error::custom(super::channel_meta_service::grants::incomplete())
+    })?;
+    insert_response_event_inner(db, event, response, Some((bot, source))).await
+}
+pub(crate) async fn insert_meta_anchored_event(
+    db: &Database,
+    event: &NyxbotEvent,
+    bot: &str,
+    source: &str,
+) -> mongodb::error::Result<()> {
+    insert_response_event_inner(db, event, None, Some((bot, source))).await
+}
+async fn insert_response_event_inner(
+    db: &Database,
+    event: &NyxbotEvent,
+    response: Option<&crate::models::nyxbot_response_read::ResponseRead>,
+    meta_bot: Option<(&str, &str)>,
+) -> mongodb::error::Result<()> {
     let mut document = bson::to_document(event).map_err(mongodb::error::Error::custom)?;
     if let Some(response) = response {
         document.insert(
@@ -261,7 +289,7 @@ pub async fn insert_response_event(
             bson::to_bson(response).map_err(mongodb::error::Error::custom)?,
         );
     }
-    if event.media.is_none() {
+    if event.media.is_none() && meta_bot.is_none() {
         db.collection::<bson::Document>(EVENTS)
             .insert_one(&document)
             .await?;
@@ -270,12 +298,33 @@ pub async fn insert_response_event(
     let mut session = db.client().start_session().await?;
     let db = db.clone();
     let event = event.clone();
+    let meta_bot = meta_bot.map(|(bot, source)| (bot.to_owned(), source.to_owned()));
     session
         .start_transaction()
         .write_concern(mongodb::options::WriteConcern::majority())
         .and_run2(async move |session| {
             let result: AppResult<()> = async {
                 super::erasure_admission::fence_in_session(&db, &event.user_id, session).await?;
+                if let Some((bot, source)) = &meta_bot {
+                    let grant = super::channel_meta_service::scopes::source_in_session(
+                        &db, session, source,
+                    )
+                    .await?
+                    .ok_or_else(super::channel_meta_service::grants::incomplete)?;
+                    if grant.bot_id != *bot {
+                        return Err(super::channel_meta_service::grants::incomplete());
+                    }
+                    super::channel_meta_service::scopes::fence_reference(
+                        &db, session, &grant, true,
+                    )
+                    .await?;
+                    document.insert(
+                        "meta_grant",
+                        bson::to_bson(&grant)
+                            .map_err(|_| super::channel_meta_service::grants::incomplete())?,
+                    );
+                    document.insert("channel_bot_id", bot);
+                }
                 db.collection::<bson::Document>(EVENTS)
                     .insert_one(&document)
                     .session(session)
@@ -405,7 +454,10 @@ pub async fn sweep(db: &Database) -> AppResult<u64> {
             .update_one(
                 exact,
                 doc! {"$set":{"media.interrupted":true,"status":"interrupted"},
-                "$unset":{"event_context_ciphertext":""}},
+                "$unset": {
+                    "event_context_ciphertext": "",
+                    "event_context_version": "",
+                }},
             )
             .await?
             .modified_count;
@@ -471,7 +523,10 @@ pub async fn note_in_session(
             exact.insert("_id", doc! {"$in":ids});
             noted |= rows
                 .update_many(exact, doc! {"$set":{"media.noted":true,"media.interrupted":true,"status":"interrupted"},
-                    "$unset":{"event_context_ciphertext":""}})
+                    "$unset": {
+                        "event_context_ciphertext": "",
+                        "event_context_version": "",
+                    }})
                 .session(&mut *session)
                 .await?
                 .modified_count

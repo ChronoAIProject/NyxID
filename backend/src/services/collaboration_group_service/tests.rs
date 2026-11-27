@@ -3878,6 +3878,7 @@ async fn execution_proposal_shared_private_and_group_resume_keep_requester_and_p
             .collection("service_approval_configs")
             .insert_one(
                 crate::models::service_approval_config::ServiceApprovalConfig {
+                    approvers: Default::default(),
                     id: Uuid::new_v4().to_string(),
                     user_id: f.member.clone(),
                     service_id: catalog.id.clone(),

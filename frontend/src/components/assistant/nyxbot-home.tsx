@@ -4,6 +4,8 @@ import { agentOwnerSections } from "@/lib/assistant/nyxbot-labels";
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { MessageSquare, NotebookPen, Plus } from "lucide-react";
 import { AgentAvatar, AgentAvatarStack } from "@/components/assistant/nyxbot-agent-avatar";
+import { rosterMoodFor, type AgentActivityMood } from "@/hooks/use-agent-activity";
+import type { AgentRosterMood } from "../../../../shared/agent-avatars/activity";
 import { AgentStatusDot } from "@/components/assistant/nyxbot-agent-panels";
 import { Button } from "@/components/ui/button";
 import { nyxBotOf, useNyxBotAgent } from "@/hooks/use-nyxbot-agents";
@@ -91,7 +93,7 @@ function HomeListRow({
 }) {
   useUiTranslation();
   return (
-    <li className="flex items-start gap-3 px-4 py-3">
+    <li className="flex items-start gap-4 px-4 py-4">
       {lead}
       <div className="min-w-0 flex-1 space-y-0.5">
         <div className="flex items-center gap-2 text-14">{title}</div>
@@ -152,7 +154,7 @@ export function AwayList({
       {items.slice(0, shown).map((item) => (
         <HomeListRow
           key={item.key}
-          lead={<AgentAvatar agent={item.agent} size="lg" />}
+          lead={<AgentAvatar agent={item.agent} size="xl" />}
           title={
             <>
               <span className="font-medium text-foreground">{agentTitle(item.agent)}</span>
@@ -244,18 +246,20 @@ function MemoryPreview({
 
 function RosterCard({
   agent,
+  mood,
   onChat,
 }: {
   readonly agent: AssistantAgent;
+  readonly mood: AgentRosterMood;
   readonly onChat: (agent: AssistantAgent) => void;
 }) {
   useUiTranslation();
   const nyxbot = agent.kind === "nyxbot";
   const handle = agentHandle(agent);
   return (
-    <li className="flex flex-col gap-3 rounded-xl border border-border/50 bg-card p-4">
-      <div className="flex items-start gap-3">
-        <AgentAvatar agent={agent} size="lg" />
+    <li className="flex flex-col gap-4 rounded-xl border border-border/50 bg-card p-5">
+      <div className="flex items-center gap-4">
+        <AgentAvatar agent={agent} size="2xl" mood={mood} />
         <div className="min-w-0 flex-1">
           <p className="flex min-w-0 items-baseline gap-1.5">
             <span className="truncate type-card-title text-foreground">
@@ -351,6 +355,7 @@ function GroupCard({
 export function NyxBotHome({
   userName,
   agents,
+  activityMood = rosterMoodFor,
   agentsLoading,
   groups,
   bottomInset,
@@ -367,10 +372,10 @@ export function NyxBotHome({
   onStartNextStep,
   onHideNextSteps,
   onShowNextSteps,
-  onReplayIntro,
 }: {
   readonly userName: string | undefined;
   readonly agents: readonly AssistantAgent[];
+  readonly activityMood?: AgentActivityMood;
   readonly agentsLoading: boolean;
   readonly groups: readonly AssistantGroup[];
   readonly bottomInset: number;
@@ -389,7 +394,6 @@ export function NyxBotHome({
   /** Hides the whole section, leaving a direct restore control. */
   readonly onHideNextSteps?: () => void;
   readonly onShowNextSteps?: () => void;
-  readonly onReplayIntro?: () => void;
 }) {
   useUiTranslation();
   const [now] = useState(() => new Date());
@@ -465,8 +469,8 @@ export function NyxBotHome({
         className="mx-auto flex w-full max-w-[var(--chat-content-width,758px)] flex-col gap-8 pt-8"
         style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
       >
-        <header className="flex items-center gap-4">
-          <AgentAvatar agent={{ id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="lg" />
+        <header className="flex items-center gap-5 py-2">
+          <AgentAvatar agent={nyxbot ?? { id: "nyxbot", name: "NyxBot", kind: "nyxbot" }} size="3xl" animated mood="idle" />
           <div className="min-w-0 space-y-1">
             <h1
               className="type-compact-page-title text-foreground sm:type-page-title"
@@ -499,16 +503,9 @@ export function NyxBotHome({
           <Section
             id="nyxbot-home-next-steps"
             title={translateUi("Suggested for you")}
-            action={
-              <div className="flex items-center gap-1">
-                {onReplayIntro ? (
-                  <Button size="sm" variant="ghost" onClick={onReplayIntro}>{translateUi("Replay intro")}</Button>
-                ) : null}
-                {onHideNextSteps ? (
-                  <Button ref={hideButton} size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} aria-disabled={suggestionsPending} onClick={hideSuggestions}>{translateUi("Hide")}</Button>
-                ) : null}
-              </div>
-            }
+            action={onHideNextSteps ? (
+              <Button ref={hideButton} size="sm" variant="ghost" className={SUGGESTION_FOCUS_CLASS} aria-disabled={suggestionsPending} onClick={hideSuggestions}>{translateUi("Hide")}</Button>
+            ) : null}
           >
             <NextStepCards
               steps={nextSteps}
@@ -561,7 +558,7 @@ export function NyxBotHome({
                   </h3>
                   <ul className="grid gap-3 sm:grid-cols-2">
               {section.agents.map((agent) => (
-                <RosterCard key={agent.id} agent={agent} onChat={onChat} />
+                <RosterCard key={agent.id} agent={agent} mood={activityMood(agent)} onChat={onChat} />
               ))}
             </ul>
                 </section>

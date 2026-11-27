@@ -360,6 +360,8 @@ pub async fn persist(
             if manifest.expires_at <= Utc::now() || current.deadline <= Utc::now() {return Err(AppError::AssistantAttachmentExpired);}
             // Conversation write conflicts with owner deletion and cancellation.
             if database.collection::<Document>(CONVERSATIONS).update_one(doc!{"_id":&watch.conversation_id,"user_id":&watch.user_id},doc!{"$inc":{"async_operation_generation":1}}).session(&mut *session).await?.matched_count != 1 {return Err(missing());}
+            super::channel_meta_service::scopes::fence_assistant_turn(&database,session,
+                &watch.user_id,&watch.conversation_id,&watch.turn_id).await?;
             let mut committed_manifest = current.artifact_result.clone().unwrap_or_else(|| manifest.clone());
             if current.artifact_result.is_some() {
                 let existing = pending_rows_in_session(&database, session, &current, &committed_manifest, false).await?;
@@ -758,6 +760,22 @@ async fn materialize(
     if !admitted(w) {
         return Err(invalid());
     }
+    super::channel_meta_service::scopes::fence_assistant_turn(
+        db,
+        session,
+        &w.user_id,
+        &w.conversation_id,
+        &w.turn_id,
+    )
+    .await?;
+    super::channel_meta_service::scopes::fence_assistant_turn(
+        db,
+        session,
+        &w.user_id,
+        &w.conversation_id,
+        turn_id,
+    )
+    .await?;
     if !matches!(
         w.reason.as_deref(),
         Some("completed" | "operation_failed" | "result_expired")
@@ -1038,6 +1056,14 @@ pub async fn associate_in_session(
     if !admitted(&w) {
         return Err(invalid());
     }
+    super::channel_meta_service::scopes::fence_assistant_turn(
+        db,
+        session,
+        &w.user_id,
+        &w.conversation_id,
+        &w.turn_id,
+    )
+    .await?;
     let Some(manifest) = &w.artifact_result else {
         return Ok(());
     };

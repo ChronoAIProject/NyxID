@@ -1,73 +1,6 @@
 use super::*;
 use std::collections::HashSet;
 
-fn pending_sources() -> Vec<(&'static str, Document)> {
-    use crate::models::*;
-    let bytes = Bson::Binary(bson::Binary {
-        subtype: bson::spec::BinarySubtype::Generic,
-        bytes: vec![0xa5],
-    });
-    let grant = auth_device_code::AuthDeviceAgentKeyGrant {
-        api_key_id: "key".into(),
-        credential_id: "grant".into(),
-        key_was_created: true,
-        delivery_credential_encrypted: Some(vec![0xa5]),
-    };
-    let mut sources = vec![
-        (
-            mobile_social::MobileSocialDelivery::COLLECTION_NAME,
-            doc! {"ciphertext": &bytes},
-        ),
-        (
-            assistant_cma_sandbox::COLLECTION_NAME,
-            doc! {"request_ciphertext": &bytes},
-        ),
-        (
-            assistant_cma_creation::COLLECTION_NAME,
-            doc! {"request_ciphertext": &bytes},
-        ),
-        (
-            nyxbot_event_binding::COLLECTION_NAME,
-            doc! {"provider_key_ciphertext": &bytes, "producer_secret_ciphertext": &bytes},
-        ),
-        (
-            auth_device_code::V2_COLLECTION_NAME,
-            doc! {"agent_key_grant": bson::to_document(&grant).unwrap()},
-        ),
-        (
-            auth_device_code::V2_COLLECTION_NAME,
-            doc! {"delivery_access_token_encrypted": &bytes, "delivery_refresh_token_encrypted": &bytes},
-        ),
-        (
-            nyxbot_channel::EVENTS_COLLECTION_NAME,
-            doc! {"delivery": {"target_ciphertext": &bytes}, "event_context_ciphertext": &bytes, "guest_setup_payload": &bytes},
-        ),
-        (
-            nyxbot_channel::THREADS_COLLECTION_NAME,
-            doc! {"event_ref_ciphertext": &bytes},
-        ),
-        (
-            nyxbot_gateway_response::COLLECTION_NAME,
-            doc! {"payload_ciphertext": &bytes},
-        ),
-        (
-            channel_whatsapp_native::COLLECTION_NAME,
-            doc! {"native_verify_token_encrypted": &bytes},
-        ),
-        (
-            assistant_conversation::COLLECTION_NAME,
-            doc! {"active_turn": {"restart_admission": {"window": {"input": &bytes}}}},
-        ),
-    ];
-    for version in ["v1", "v2", "v3", "v4"] {
-        sources.push((
-            approval_request::COLLECTION_NAME,
-            doc! {"execution_proposal": {version: {"payload": &bytes, "result": &bytes}}},
-        ));
-    }
-    sources
-}
-
 #[test]
 fn previous_labels_match_the_ordered_base_registry() {
     use sha2::{Digest, Sha256};
@@ -76,6 +9,16 @@ fn previous_labels_match_the_ordered_base_registry() {
     assert_eq!(
         hex::encode(Sha256::digest(labels)),
         "2429aeaea43635d2e7418b096d9a8305888e4aea11a9bc8d5aa0ac864f5761e0"
+    );
+}
+
+#[test]
+fn reconciled_labels_match_the_2896_registry() {
+    use sha2::{Digest, Sha256};
+    let labels: Vec<_> = previous_labels::reconciled().collect();
+    assert_eq!(
+        hex::encode(Sha256::digest(serde_json::to_vec(&labels).unwrap())),
+        "9352caebc6856a8ae5f3ccb930dec0ae47ebb42ab5bd94339f06569c392ed674"
     );
 }
 
@@ -90,20 +33,20 @@ fn registered_paths_match_stored_material_and_the_documented_inventory() {
         .filter(|line| line.starts_with("| `"))
         .collect();
     assert_eq!(rows.len(), REGISTRY.len());
+    let collections: HashSet<_> = REGISTRY.iter().map(|e| e.collection).collect();
+    assert!(inventory.contains(&format!(
+        "{} entries for {} collections, with {} implemented adapters\nand 0 Pending entries.",
+        REGISTRY.len(),
+        collections.len(),
+        REGISTRY.len()
+    )));
     let mut unique = HashSet::new();
     for (entry, line) in REGISTRY.iter().zip(rows) {
         let cells: Vec<_> = line.trim_matches('|').split('|').map(str::trim).collect();
         assert_eq!(cells[0].trim_matches('`'), entry.collection);
         let fields: Vec<_> = cells[1].split(", ").map(|f| f.trim_matches('`')).collect();
         assert_eq!(fields, entry.fields);
-        assert_eq!(
-            cells[3],
-            if matches!(entry.adapter, Adapter::Pending) {
-                "Pending"
-            } else {
-                "Implemented"
-            }
-        );
+        assert_eq!(cells[3], "Implemented");
         for field in entry.fields {
             assert!(
                 unique.insert((entry.collection, *field)),
@@ -123,53 +66,25 @@ fn registered_paths_match_stored_material_and_the_documented_inventory() {
     assert!(!unique.contains(&("nyxbot_events", "event_ref_ciphertext")));
     assert!(!unique.contains(&("auth_device_codes_v2", "delivery_credential_encrypted")));
 
-    fn assert_binary_paths(
-        collection: &str,
-        doc: &Document,
-        prefix: &str,
-        fields: &HashSet<(&str, &str)>,
-    ) {
-        for (key, value) in doc {
-            let path = format!("{prefix}{key}");
-            match value {
-                Bson::Document(child) => {
-                    assert_binary_paths(collection, child, &format!("{path}."), fields)
-                }
-                Bson::Binary(_) => assert!(
-                    fields.contains(&(collection, path.as_str())),
-                    "{collection}.{path}"
-                ),
-                _ => {}
-            }
-        }
-    }
-    for (collection, source) in pending_sources() {
-        let entry = REGISTRY
-            .iter()
-            .find(|entry| entry.collection == collection)
-            .unwrap();
-        assert!(matches!(entry.adapter, Adapter::Pending));
-        assert!(has_material(entry, &source));
-        assert_binary_paths(collection, &source, "", &unique);
-        for field in entry.fields {
-            assert_eq!(
-                field_has_material(&source, field),
-                matches!(path(&source, field), Some(Bson::Binary(_)))
-            );
-            assert!(!field_has_material(&doc! {}, field));
-            let mut null = Bson::Null;
-            for component in field.split('.').rev() {
-                null = doc! {component: null}.into();
-            }
-            assert!(!field_has_material(null.as_document().unwrap(), field));
-            if let Some((_, leaf)) = field.rsplit_once('.') {
-                assert!(!field_has_material(
-                    &doc! {leaf: 1, "sibling": {leaf: 1}},
-                    field
-                ));
-            }
-        }
-    }
+    assert_eq!((REGISTRY.len(), collections.len()), (51, 49));
+}
+
+#[test]
+fn channel_guest_reply_inventory_classifies_only_sealed_thread_ids() {
+    let entry = REGISTRY
+        .iter()
+        .find(|entry| matches!(entry.adapter, Adapter::ChannelGuestReplyHandle))
+        .unwrap();
+    assert!(!has_material(entry, &doc! {}));
+    assert!(!has_material(entry, &doc! {"thread_id": "1234567890"}));
+    assert!(!has_material(
+        entry,
+        &doc! {"thread_id": "ordinary-guest-interaction.v3:thread"},
+    ));
+    assert!(has_material(
+        entry,
+        &doc! {"thread_id": "guest-interaction.v3:"},
+    ));
 }
 
 #[tokio::test]
@@ -182,13 +97,67 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
     let runs = db.collection::<Document>(RUNS);
     let original = runs.find_one(doc! {"_id":RUN_ID}).await.unwrap().unwrap();
     let live = registry_digest();
-    assert_ne!(live, previous_labels::DIGEST);
+    assert_eq!(
+        live,
+        "1df363937ded7ca109215e65e91c148cec0bafc8778f65b4b5c0d2f82821f1bd"
+    );
+    // Checkpoints read from earlier draft registries. Keep these input bytes
+    // independent of the production lookup so a mistyped digest fails here.
+    let historical_meta = [
+        "8d3f9c267aa1346a94a79c061d35cbf8c0e844fba6a1d9144869116dcab42369",
+        "4c651a86c5f4450b911a8052544564ca6659040d1cc429064a5fea1d2f0cb016",
+        "9a784b1659734c401dbb632bfda793658c1bd612819bef626a622bc87fb92189",
+        "dadee8cea3c5465d228d975ba5133278775891c5fbe31a537c972b2f9e0b92de",
+        "ff0de0b1e3eb99c878d1bb06cec2c12df0ff618999171e584e13517a0ca2e4ed",
+        "318c040e60d81d2b65df44fd6f94ce59bdafffebbd5b34860e80219891dd5241",
+        "efd95c721ac4c351ee513eeee27edc75bc7fbee3da56497080c7bfaa4e42cc96",
+        "0395aa4f3f1f25d653011ab735909a1c551f37fcfc3f50934b974b1189241a4a",
+        "bf6341a74abf17a8a1fe0f2b0425c6275553ed7d47824d9b869ae7008c6d0abe",
+    ];
+    let dev_thread_checkpoint = "5dfa37490ffad3c3a6cc3eb3fbe19ca6adf2c2291d78cc5d1c998a815055fb42";
+    let dev_learning_checkpoint =
+        "3ba8ae303803460a8c0deaf93a19c637feffce97fc25e4887e2a2f5b86d39f51";
+    let dev_gateway_checkpoint = "1d88cdb63f4b00b32616b0cb070acad44328105bbc9a1b7fd7f60959ef3f2d2d";
+    let reply_draft = "1c55ec996722c504e1e0fad8cc55a31a178a515945c322484f8e1115ad59c649";
+    let event_reply_checkpoint = "e14a5e14ec97244a2d0df86ec47fd2023ead5f11257b2887521c04095138e75c";
+    let event_writers_checkpoint =
+        "b1632ff0b29289fc5b9e88653fbce4769d3f778fbcfa4ed8494960ccf38d3ada";
+    let device_base = "3dccc8a1829fcd079496272ca807f3549396e93e611bb013f0a2ba9d1efa8513";
+    let node_device_base = "90d8a86835621035aac28bbb0e064ef45c90b76e3572949f4c41917c5ed9323a";
+    let native_reply_base = "c9160176c797bce8a685fbe1525b33093a611b56b2d9f0568523c478b3f57e50";
+    let mobile_social_base = "72058b48a651932bcd6db8e41c61501152380812f83bdcbdd31d1273a982126b";
+    let meta_consent_base = "72d9fc2dca536136c4a9a4ae34ee542299ec7c517cae2fa5f039912f2a95169d";
+    let before_channel_guest = "c526844b3d17aa7a1211f84b3e167ffa92c1e7fae23853506517fc966a0a8dae";
     for digest in [
+        Some(before_channel_guest),
+        Some(meta_consent_base),
+        Some(mobile_social_base),
+        Some(native_reply_base),
+        Some(node_device_base),
+        Some(device_base),
+        Some(event_writers_checkpoint),
+        Some(event_reply_checkpoint),
+        Some(reply_draft),
         Some(live.as_str()),
         Some(previous_labels::DIGEST),
+        Some(previous_labels::RECONCILED_DIGEST),
+        Some(previous_labels::OAUTH_WEBHOOK_DIGEST),
+        Some(previous_labels::CHANNEL_BOT_DIGEST),
+        Some(previous_labels::WHATSAPP_DIGEST),
+        Some(dev_thread_checkpoint),
+        Some(previous_labels::APPROVAL_PROPOSAL_DIGEST),
+        Some(previous_labels::REATTACH_WINDOW_DIGEST),
+        Some(dev_gateway_checkpoint),
+        Some(previous_labels::CMA_REQUEST_DIGEST),
+        Some(dev_learning_checkpoint),
+        Some(previous_labels::CHANNEL_KEY_DIGEST),
+        Some(previous_labels::EVENT_BINDING_DIGEST),
         Some("unknown"),
         None,
-    ] {
+    ]
+    .into_iter()
+    .chain(historical_meta.map(Some))
+    {
         let mut row = original.clone();
         row.extend(doc! {
             "entry": 30,
@@ -197,6 +166,7 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
             "unresolved": 1_i64,
             "field_outcomes": {
                 "21": {"0": {"verification_blocked": 7_i64}},
+                "29": {"3": {"authenticated_current": 11_i64}},
                 "30": {"0": {"authenticated_current": 2_i64}},
             },
         });
@@ -217,17 +187,87 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
                 .contains(&"registry_or_primary_provider_changed"),
             digest != Some(live.as_str())
         );
+        let includes_meta = digest.is_some_and(|v| {
+            v == live
+                || v == before_channel_guest
+                || v == device_base
+                || v == node_device_base
+                || v == meta_consent_base
+                || v == mobile_social_base
+                || v == native_reply_base
+                || v == event_writers_checkpoint
+                || v == event_reply_checkpoint
+                || historical_meta.contains(&v)
+        });
+        assert_eq!(
+            report
+                .field_outcomes
+                .iter()
+                .any(|field| field.collection == "channel_meta_oauth_sessions"
+                    && field.field == "assets_encrypted"),
+            includes_meta
+        );
+        assert_eq!(
+            report
+                .field_outcomes
+                .iter()
+                .any(|field| field.collection == "nyxbot_events"
+                    && field.field == "response_reply.ciphertext"
+                    && field.authenticated_current == 11),
+            digest == Some(live.as_str())
+                || digest == Some(before_channel_guest)
+                || digest == Some(node_device_base)
+                || digest == Some(meta_consent_base)
+                || digest == Some(mobile_social_base)
+                || digest == Some(native_reply_base)
+                || digest == Some(event_writers_checkpoint)
+                || digest == Some(event_reply_checkpoint)
+                || digest == Some(device_base)
+                || digest == Some(reply_draft)
+        );
+        assert_eq!(
+            report.field_outcomes.iter().any(|field| {
+                field.collection == "nyxbot_events" && field.field == "channel_guest_setup_payload"
+            }),
+            digest == Some(live.as_str()),
+        );
+        assert_eq!(
+            report.field_outcomes.iter().any(|field| {
+                field.collection == "channel_messages" && field.field == "thread_id"
+            }),
+            digest == Some(live.as_str()),
+        );
         let expected = match digest {
             Some(previous_labels::DIGEST) => Some((
                 "nyxbot_watches",
                 "target_ciphertext",
                 "delivery_credential_encrypted",
             )),
-            Some(value) if value == live => Some((
-                "mobile_social_deliveries",
-                "ciphertext",
-                "agent_key_grant.delivery_credential_encrypted",
-            )),
+            Some(value)
+                if includes_meta
+                    || value == reply_draft
+                    || value == dev_thread_checkpoint
+                    || value == dev_gateway_checkpoint
+                    || value == dev_learning_checkpoint
+                    || matches!(
+                        value,
+                        previous_labels::APPROVAL_PROPOSAL_DIGEST
+                            | previous_labels::REATTACH_WINDOW_DIGEST
+                            | previous_labels::CMA_REQUEST_DIGEST
+                            | previous_labels::CHANNEL_KEY_DIGEST
+                            | previous_labels::EVENT_BINDING_DIGEST
+                            | previous_labels::WHATSAPP_DIGEST
+                            | previous_labels::CHANNEL_BOT_DIGEST
+                            | previous_labels::OAUTH_WEBHOOK_DIGEST
+                            | previous_labels::RECONCILED_DIGEST
+                    ) =>
+            {
+                Some((
+                    "mobile_social_deliveries",
+                    "ciphertext",
+                    "agent_key_grant.delivery_credential_encrypted",
+                ))
+            }
             _ => None,
         };
         if let Some((collection, field, grant)) = expected {
@@ -301,58 +341,129 @@ async fn status_selects_the_generations_labels_and_keeps_the_live_digest_fence()
 }
 
 #[tokio::test]
-async fn pending_sources_are_reported_and_preserved_by_both_walk_modes() {
-    crate::test_utils::init_test_audit_chain_hmac_key();
-    let db = crate::test_utils::connect_test_database("registry_pending_walk")
-        .await
-        .unwrap();
+async fn status_preserves_2897_checkpoint_field_labels_without_advancing_the_old_registry() {
+    let db = crate::test_utils::connect_transaction_test_database("registry_2897_checkpoint").await;
     let keys = crate::test_utils::test_encryption_keys();
-    let mut sources = pending_sources();
-    for (index, (collection, source)) in sources.iter_mut().enumerate() {
-        let mut row = doc! {"_id": index.to_string()};
-        row.extend(std::mem::take(source));
-        *source = row;
-        db.collection::<Document>(collection)
-            .insert_one(&*source)
+    let generation = start(&db, &keys, Mode::Verify, None).await.unwrap();
+    let runs = db.collection::<Document>(RUNS);
+    // This is the exact live registry digest from dev commit 0fcb789bf, before
+    // Meta consent assets were appended. Its OAuth webhook adapter is already
+    // implemented; the older #2896 and original mappings remain independent.
+    runs.update_one(
+        doc! {"_id": RUN_ID},
+        doc! {"$set": {
+            "registry_digest": previous_labels::OAUTH_WEBHOOK_DIGEST,
+            "phase": "running", "entry": 32, "scanned": 17_i64, "rewritten": 4_i64,
+            "field_outcomes": {"32": {
+                "0": {"source_removed_observed": 11_i64},
+                "1": {"authenticated_current": 13_i64},
+            }},
+        }},
+    )
+    .await
+    .unwrap();
+    let checkpoint = runs.find_one(doc! {"_id": RUN_ID}).await.unwrap().unwrap();
+    let report = status(&db, &keys).await.unwrap().unwrap();
+    assert_eq!(report.collection, Some("oauth_clients"));
+    assert_eq!((report.scanned, report.rewritten), (17, 4));
+    assert!(
+        report
+            .field_outcomes
+            .iter()
+            .any(|field| field.collection == "oauth_clients"
+                && field.field == "revocation_webhook_secret_encrypted"
+                && field.source_removed_observed == 11)
+    );
+    assert!(
+        report
+            .field_outcomes
+            .iter()
+            .any(|field| field.collection == "oauth_clients"
+                && field.field == "connection_webhook_secret_encrypted"
+                && field.authenticated_current == 13)
+    );
+    assert!(
+        !report
+            .field_outcomes
+            .iter()
+            .any(|field| field.collection == "channel_meta_oauth_sessions")
+    );
+    assert!(
+        report
+            .blockers
+            .contains(&"registry_or_primary_provider_changed")
+    );
+    assert!(matches!(
+        advance(&db, &keys, &generation).await,
+        Err(AppError::Conflict(_))
+    ));
+    assert_eq!(
+        runs.find_one(doc! {"_id": RUN_ID}).await.unwrap().unwrap(),
+        checkpoint
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_signing_sources_stay_exact_and_report_a_blocked_finding_until_the_bot_is_gone() {
+    use bson::spec::BinarySubtype;
+    crate::test_utils::init_test_audit_chain_hmac_key();
+    let keys = crate::test_utils::test_encryption_keys();
+    for coll in ["provider_configs", "platform_credentials"] {
+        let db =
+            crate::test_utils::connect_transaction_test_database("channel_signing_guard").await;
+        let rows = db.collection::<Document>(coll);
+        let secret = bson::Binary {
+            subtype: BinarySubtype::Generic,
+            bytes: keys.encrypt(b"channel-test-secret").await.unwrap(),
+        };
+        let (source, platform, origin) = if coll == "provider_configs" {
+            (
+                doc! {"_id":"fixture-source","slug":"twitter","client_secret_encrypted":secret},
+                "x",
+                "connection",
+            )
+        } else {
+            (
+                doc! {"_id":"fixture-source","provider":"meta","secrets":{"app_secret":secret},"fields":{},"updated_by":"test","updated_at":bson::DateTime::now()},
+                "whatsapp",
+                "platform",
+            )
+        };
+        rows.insert_one(&source).await.unwrap();
+        let bots = db.collection::<Document>("channel_bots");
+        bots.insert_one(doc!{"_id":"fixture-bot","platform":platform,"credential_source":origin,"is_active":false}).await.unwrap();
+        let index = REGISTRY.iter().position(|e| e.collection == coll).unwrap();
+        let generation = start(&db, &keys, Mode::Migrate, None).await.unwrap();
+        db.collection::<Document>(RUNS)
+            .update_one(doc! {"_id":RUN_ID}, doc! {"$set":{"entry":index as i32}})
+            .await
+            .unwrap();
+        advance(&db, &keys, &generation).await.unwrap();
+        let blocked = list_findings(&db, None).await.unwrap();
+        assert_eq!(blocked.findings.len(), 1);
+        assert_eq!(blocked.findings[0].collection, coll);
+        assert_eq!(
+            blocked.findings[0].category,
+            "authentication_binding_or_lifecycle_unresolved"
+        );
+        assert_eq!(
+            rows.find_one(doc! {"_id":"fixture-source"}).await.unwrap(),
+            Some(source.clone())
+        );
+        bots.delete_one(doc! {"_id":"fixture-bot"}).await.unwrap();
+        assert!(
+            migrate(&REGISTRY[index], &db, &keys, &source)
+                .await
+                .unwrap()
+        );
+        let current = rows
+            .find_one(doc! {"_id":"fixture-source"})
+            .await
+            .unwrap()
+            .unwrap();
+        verify(&REGISTRY[index], &db, &keys, &current)
             .await
             .unwrap();
     }
-    for mode in [Mode::Verify, Mode::Migrate] {
-        let generation = start(&db, &keys, mode, None).await.unwrap();
-        let report = finish(&db, &keys, &generation).await;
-        assert_eq!(report.unresolved, sources.len() as i64);
-        assert_eq!(report.rewritten, 0);
-        for (collection, source) in &sources {
-            let stored = db
-                .collection::<Document>(collection)
-                .find_one(doc! {"_id":source.get_str("_id").unwrap()})
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                bson::to_vec(source).unwrap(),
-                bson::to_vec(&stored).unwrap()
-            );
-            let entry = REGISTRY
-                .iter()
-                .find(|e| e.collection == *collection)
-                .unwrap();
-            for field in entry
-                .fields
-                .iter()
-                .filter(|field| field_has_material(source, field))
-            {
-                assert!(
-                    report
-                        .field_outcomes
-                        .iter()
-                        .any(|f| f.collection == *collection
-                            && f.field == *field
-                            && f.verification_blocked > 0
-                            && f.authenticated_current == 0)
-                );
-            }
-        }
-    }
-    db.drop().await.unwrap();
 }

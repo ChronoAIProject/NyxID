@@ -9,6 +9,7 @@ const RECORD_DOMAIN: &[u8] = b"nyxid:record-envelope:v3\0";
 /// separately, so map keys, array identities and delimiter characters cannot
 /// alias another record, owner or field. Never derive this from caller-supplied
 /// ciphertext metadata.
+#[derive(Clone, Copy)]
 pub struct RecordContext<'a> {
     collection: &'a str,
     record_id: &'a str,

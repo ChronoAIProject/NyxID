@@ -50,8 +50,40 @@ fn invalid_request() -> AppError {
 fn stale() -> AppError {
     AppError::Conflict("cma_sandbox_generation_changed".into())
 }
-fn occupied() -> AppError {
-    AppError::Conflict("cma_sandbox_account_slot_occupied".into())
+const OCCUPIED: &str = "cma_sandbox_account_slot_occupied";
+
+pub(super) async fn occupied(
+    db: &Database,
+    row: &AssistantCmaSandbox,
+    message: &'static str,
+) -> AppError {
+    let _ = audit_occupied_slot(db, row).await;
+    let holding = occupied_holding(row);
+    let release_condition = match holding {
+        "live_sandbox" => {
+            "Use the existing sandbox's workspace, or retire it and wait for CMA to confirm retirement."
+        }
+        "retiring" => "Wait for CMA to confirm retirement of this sandbox.",
+        _ => {
+            "The slot releases when CMA confirms the original request created nothing, or when its sandbox is confirmed retired."
+        }
+    };
+    AppError::CmaSandboxSlotOccupied {
+        message,
+        details: Box::new(serde_json::json!({
+            "reservation_id": row.id, "holding": holding,
+            "created_at": row.created_at, "release_condition": release_condition,
+        })),
+    }
+}
+
+async fn occupied_after_race(db: &Database, owner: &str) -> AppResult<AssistantCmaSandbox> {
+    let winner = db
+        .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
+        .find_one(doc! {"user_id":owner, "occupies_account_slot":true})
+        .await?
+        .ok_or_else(stale)?;
+    Err(occupied(db, &winner, OCCUPIED).await)
 }
 
 pub(super) fn created_filter(owner_id: &str) -> Document {
@@ -61,6 +93,7 @@ pub(super) fn created_filter(owner_id: &str) -> Document {
 pub(super) async fn audit_occupied_slot(db: &Database, row: &AssistantCmaSandbox) -> AppResult<()> {
     super::assistant_cma_slot_audit::record(db, row).await
 }
+
 pub(super) fn occupied_holding(row: &AssistantCmaSandbox) -> &'static str {
     if row.retire_requested_at.is_some() || row.admission_state == SandboxAdmissionState::Retiring {
         "retiring"
@@ -315,8 +348,7 @@ pub async fn begin_creation(
         if row.idempotency_key.as_deref() == Some(idempotency_key) {
             return same_creation(row, &service_id, &normalized.hash);
         }
-        let _ = audit_occupied_slot(&db, &row).await;
-        return Err(occupied());
+        return Err(occupied(&db, &row, OCCUPIED).await);
     }
     let previous = db
         .collection::<AssistantCmaSandbox>(COLLECTION_NAME)
@@ -409,8 +441,7 @@ pub async fn begin_creation(
                 );
             }
             Err(error) if duplicate_app_key(&error) => {
-                let _ = super::assistant_cma_slot_audit::record_race(&db, owner_id).await;
-                return Err(occupied());
+                return occupied_after_race(&db, owner_id).await;
             }
             Err(error) => return Err(error),
         }
@@ -421,8 +452,7 @@ pub async fn begin_creation(
             if let Some(row) = creation_by_key(&db, owner_id, idempotency_key).await? {
                 same_creation(row, &service_id, &normalized.hash)
             } else {
-                let _ = super::assistant_cma_slot_audit::record_race(&db, owner_id).await;
-                Err(occupied())
+                occupied_after_race(&db, owner_id).await
             }
         }
         Err(error) => Err(error),
@@ -438,36 +468,20 @@ pub(super) async fn recover_creation_request(
 ) -> AppResult<Zeroizing<Vec<u8>>> {
     let row = get_owned(db, owner_id, id).await?;
     require_generation(&row, generation)?;
-    let version = match row.request_context_version {
-        None => None,
-        Some(3) => Some(3),
-        // The persisted marker is i32: never truncate unknown versions to u8.
-        Some(_) => {
-            return Err(AppError::Conflict(
-                "cma_creation_recovery_unavailable".into(),
-            ));
-        }
-    };
-    let field = ["request_ciphertext"];
-    let context = RecordContext::new(COLLECTION_NAME, &row.id, &row.user_id, &field)?;
-    let bytes = record_field::decrypt_context(
+    let context = RecordContext::new(
+        COLLECTION_NAME,
+        &row.id,
+        &row.user_id,
+        &["request_ciphertext"],
+    )?;
+    super::assistant_cma_request_record::open(
         keys,
         &context,
-        version,
-        row.request_ciphertext
-            .as_deref()
-            .ok_or_else(|| AppError::Conflict("cma_creation_recovery_unavailable".into()))?,
+        row.request_context_version,
+        row.request_ciphertext.as_deref(),
+        row.request_hash.as_deref(),
     )
-    .await?;
-    if bytes.len() > MAX_RECOVERY_BYTES {
-        return Err(invalid_request());
-    }
-    if prepare_creation_request(&bytes)?.hash != row.request_hash.as_deref().unwrap_or("") {
-        return Err(AppError::Conflict(
-            "cma_creation_recovery_unavailable".into(),
-        ));
-    }
-    Ok(bytes)
+    .await
 }
 
 pub async fn get_owned(db: &Database, owner_id: &str, id: &str) -> AppResult<AssistantCmaSandbox> {
@@ -607,11 +621,15 @@ async fn persist_observation(
     // Network I/O is not repeated. Reconcile only local observation/registration
     // contention; a changed immutable binding still fails closed.
     for _ in 0..3 {
+        let mut set = observation_set(&changed)?;
+        // A live observation can outlast a storage rewrap. Only a terminal
+        // observation clears retained bytes under this generation's fence.
+        if changed.admission_state != SandboxAdmissionState::Retired {
+            set.remove("request_ciphertext");
+            set.remove("request_context_version");
+        }
         if let Some(saved) = collection
-            .find_one_and_update(
-                observation_filter(&expected),
-                doc! {"$set": observation_set(&changed)?},
-            )
+            .find_one_and_update(observation_filter(&expected), doc! {"$set": set})
             .return_document(ReturnDocument::After)
             .await?
         {
@@ -637,8 +655,6 @@ async fn persist_observation(
                 changed.admission_state = SandboxAdmissionState::Retiring;
             }
             changed.submission_state = current.submission_state.clone();
-            changed.request_ciphertext = current.request_ciphertext.clone();
-            changed.request_context_version = current.request_context_version;
         }
         expected = current;
     }
@@ -2313,6 +2329,114 @@ mod tests {
         other.id = "different-sandbox".into();
         assert!(apply_observation(&mut row, &other, 1, Utc::now()).is_err());
         assert!(row.occupies_account_slot);
+    }
+
+    #[tokio::test]
+    async fn observation_after_crypto_rewrap_preserves_the_installed_request() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("cma_observation_rewrap").await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let mut before = fixture_row();
+        let body = br#"{"name":"unchanged observation"}"#;
+        before.request_hash = Some(prepare_creation_request(body).unwrap().hash);
+        before.request_ciphertext = Some(keys.encrypt(body).await.unwrap());
+        before.request_context_version = None;
+        let mut after = before.clone();
+        apply_observation(
+            &mut after,
+            &remote_sandbox(SandboxObservationState::Ready),
+            before.generation,
+            Utc::now(),
+        )
+        .unwrap();
+        let rows = db.collection::<Document>(COLLECTION_NAME);
+        let source = bson::to_document(&before).unwrap();
+        rows.insert_one(&source).await.unwrap();
+        assert!(
+            crate::services::assistant_cma_request_record::migrate(
+                &db,
+                &keys,
+                COLLECTION_NAME,
+                &source
+            )
+            .await
+            .unwrap()
+        );
+        let installed = rows
+            .find_one(doc! {"_id":&before.id})
+            .await
+            .unwrap()
+            .unwrap();
+        let observed = persist_observation(&db, &before, &after).await.unwrap();
+        assert_eq!(observed.request_context_version, Some(3));
+        assert_eq!(
+            observed.request_ciphertext.as_ref(),
+            installed.get_binary_generic("request_ciphertext").ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn live_observation_from_empty_snapshot_preserves_request_until_retirement() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("cma_observation_install").await;
+        let keys = crate::test_utils::test_encryption_keys();
+        let mut before = fixture_row();
+        before.request_ciphertext = None;
+        before.request_context_version = None;
+        let body = br#"{"name":"concurrent install"}"#;
+        before.request_hash = Some(prepare_creation_request(body).unwrap().hash);
+        let rows = db.collection::<Document>(COLLECTION_NAME);
+        rows.insert_one(bson::to_document(&before).unwrap())
+            .await
+            .unwrap();
+
+        let mut live = before.clone();
+        apply_observation(
+            &mut live,
+            &remote_sandbox(SandboxObservationState::Ready),
+            before.generation,
+            Utc::now(),
+        )
+        .unwrap();
+        let context = RecordContext::new(
+            COLLECTION_NAME,
+            &before.id,
+            &before.user_id,
+            &["request_ciphertext"],
+        )
+        .unwrap();
+        let bytes = keys.encrypt_record(body, &context).await.unwrap();
+        let installed = bson::Binary {
+            subtype: bson::spec::BinarySubtype::Generic,
+            bytes,
+        };
+        rows.update_one(
+            doc! {"_id": &before.id},
+            doc! {"$set": {
+                "request_ciphertext": installed.clone(),
+                "request_context_version": 3_i32,
+            }},
+        )
+        .await
+        .unwrap();
+        let observed = persist_observation(&db, &before, &live).await.unwrap();
+        assert_eq!(
+            observed.request_ciphertext.as_deref(),
+            Some(installed.bytes.as_slice())
+        );
+        assert_eq!(observed.request_context_version, Some(3));
+
+        let mut retired = observed.clone();
+        apply_observation(
+            &mut retired,
+            &remote_sandbox(SandboxObservationState::Retired),
+            observed.generation,
+            Utc::now(),
+        )
+        .unwrap();
+        let saved = persist_observation(&db, &observed, &retired).await.unwrap();
+        assert!(saved.request_ciphertext.is_none());
+        assert!(saved.request_context_version.is_none());
     }
 
     #[tokio::test]

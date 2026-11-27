@@ -227,16 +227,17 @@ impl AuthUser {
             return self.ensure_conversation_key_route_with_method(method, path);
         }
         if self.assistant_turn_fence.is_none()
-            || (!self
-                .assistant_turn_fence
-                .as_ref()
-                .is_some_and(|f| f.invocation_controlled)
-                && !crate::services::feature_flag_service::personal_flag_enabled(
-                    db,
-                    &self.user_id.to_string(),
-                    crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
-                )
-                .await?)
+            || (!self.assistant_turn_fence.as_ref().is_some_and(|f| {
+                f.invocation_controlled
+                    || crate::services::channel_guest_access::is_hosted_conversation(
+                        &f.conversation_id,
+                    )
+            }) && !crate::services::feature_flag_service::personal_flag_enabled(
+                db,
+                &self.user_id.to_string(),
+                crate::services::feature_flag_service::ASSISTANT_LIVE_TURN_GATE_FLAG_KEY,
+            )
+            .await?)
         {
             return Ok(());
         }
@@ -559,6 +560,19 @@ fn permission_key_execution_readback(api_key: &ApiKey, method: &Method, path: &s
             .is_some_and(|id| Uuid::parse_str(id).is_ok())
 }
 
+fn exact_channel_reply_path(method: &Method, path: &str) -> bool {
+    *method == Method::POST
+        && matches!(
+            path,
+            "/api/v1/channel-relay/reply"
+                | "/api/v1/channel-relay/reply/update"
+                | "/api/v1/channel-relay/reply/commonmark"
+                | "/api/v1/channel-relay/reply/update/commonmark"
+                | "/api/v1/channel-relay/thread-reply"
+                | "/api/v1/channel-relay/thread-reply/commonmark"
+        )
+}
+
 pub(crate) fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
     // Public activation remains unavailable; no generic route, scope, child
     // or feature flag may turn this purpose into ordinary execution authority.
@@ -692,7 +706,10 @@ fn is_delegated_native_path(path: &str) -> bool {
 /// never reach. Matching is segment-based so adjacent names such as
 /// `/nodesXYZ` and `/administer` remain ordinary default-allowed GET paths.
 fn delegated_read_denied_path(path: &str) -> bool {
-    if path == "/api/v1/llm/gateway/v1/assistant-model-context" {
+    if matches!(
+        path,
+        "/api/v1/llm/gateway/v1/assistant-model-context" | "/api/v1/orgs/ornn-channel-skill"
+    ) {
         return true;
     }
     let Some(segments) = api_v1_path_segments(path) else {
@@ -782,6 +799,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
     matches!(
         segments.as_slice(),
         ["providers", "callback"]
+            | ["providers", "callback", "continuation", ..]
             | ["providers", "codex-connection"]
             | ["providers", _, "callback"]
             | ["providers", _, "connect", "oauth"]
@@ -1375,7 +1393,9 @@ impl FromRequestParts<AppState> for AuthUser {
                             if !allow_api_key_fallback {
                                 return Err(jwt_err);
                             }
-                            match crate::services::key_service::validate_api_key(&state.db, token)
+                            match crate::services::key_service::validate_api_key_for_channel(
+                                &state.db, token, exact_channel_reply_path(&parts.method, request_path),
+                            )
                                 .await
                             {
                                 Ok((_api_user_id_str, api_key, credential_id)) => {
@@ -1875,7 +1895,9 @@ impl FromRequestParts<AppState> for AuthUser {
                     .map_err(|_| AppError::Unauthorized("Invalid API key header".to_string()))?;
 
                 let (_user_id_str, key, credential_id) =
-                    crate::services::key_service::validate_api_key(&state.db, api_key).await?;
+                    crate::services::key_service::validate_api_key_for_channel(
+                        &state.db, api_key, exact_channel_reply_path(&parts.method, request_path),
+                    ).await?;
                 let permission_readback = permission_key_execution_readback(&key, &parts.method, request_path);
                 if !permission_readback {ensure_api_key_purpose_route(&key, request_path)?;}
 
@@ -1985,20 +2007,28 @@ pub async fn ensure_relay_agent_key_active(
     db: &mongodb::Database,
     claims: &crate::crypto::jwt::Claims,
 ) -> Result<ApiKey, AppError> {
+    use crate::services::channel_guest_access::relay::RetainedRelayKey;
     let api_key_id = claims.relay_api_key_id.as_deref().ok_or_else(|| {
         AppError::Unauthorized("Relay token is missing its agent key binding".to_string())
     })?;
 
     let key = db
-        .collection::<ApiKey>(API_KEYS)
+        .collection::<RetainedRelayKey>(API_KEYS)
         .find_one(doc! { "_id": api_key_id, "is_active": true })
         .await
         .map_err(|e| AppError::Internal(format!("Relay agent key lookup failed: {e}")))?
         .ok_or_else(|| {
             AppError::Unauthorized("Relay token's agent key is inactive or revoked".to_string())
         })?;
-    crate::services::key_service::require_ordinary_purpose(key.purpose)?;
-    Ok(key)
+    crate::services::key_service::require_ordinary_purpose(key.key.purpose)?;
+    if crate::services::erasure_admission::is_erasure_accepted(db, &key.key.user_id).await? {
+        return Err(AppError::Unauthorized(
+            "Relay token's agent key is inactive or revoked".into(),
+        ));
+    }
+    key.require_relay_bearer(db, claims.relay_guest_assignment.as_deref())
+        .await?;
+    Ok(key.key)
 }
 
 /// Middleware that rejects relay access tokens from non-proxy endpoints.
@@ -2945,6 +2975,7 @@ mod tests {
             cnf: None,
             relay: None,
             relay_api_key_id: None,
+            relay_guest_assignment: None,
             relay_api_key_name: None,
             relay_allowed_service_ids: None,
             relay_allowed_node_ids: None,
@@ -3374,7 +3405,7 @@ mod tests {
                 .await
                 .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(json["platforms"].as_array().unwrap().len(), 10);
+            assert_eq!(json["platforms"].as_array().unwrap().len(), 12);
         }
         for token in [&delegated, &service] {
             let response = delegated_router_response(
@@ -3953,6 +3984,7 @@ mod tests {
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
                 connection_webhook_key_id: None,
+                secret_context_versions: Default::default(),
                 connection_webhook_enabled: false,
                 created_by: Some(actor_id.to_string()),
                 created_at: chrono::Utc::now(),

@@ -62,6 +62,7 @@ struct Mock {
     callbacks: Vec<Value>,
     replies: Vec<Value>,
     requests: Vec<(String, String)>,
+    revoked: bool,
     callback_status: u16,
     send_status: u16,
     send_body: Value,
@@ -78,6 +79,7 @@ impl Default for Mock {
             callbacks: vec![],
             replies: vec![],
             requests: vec![],
+            revoked: false,
             callback_status: 202,
             send_status: 200,
             send_body: json!({"status":"Ok", "id":"sent-1"}),
@@ -101,7 +103,7 @@ async fn mock_request(
             .unwrap()
             .into_response();
     }
-    if headers.get("authorization").and_then(|v| v.to_str().ok()) == Some("Bearer revoked") {
+    if mock.revoked {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if path == "/v1/account" {
@@ -220,6 +222,10 @@ impl Fixture {
     }
 
     async fn new() -> Self {
+        Self::with_writer(true).await
+    }
+
+    async fn with_writer(contextual: bool) -> Self {
         let db = crate::test_utils::connect_test_database("aurinko")
             .await
             .expect("Aurinko tests require NYXID_TEST_DATABASE_URL and a real MongoDB");
@@ -231,6 +237,8 @@ impl Fixture {
             [2u8; 32],
         ));
         let state = crate::test_utils::test_app_state(db.clone());
+        let mut writer_keys = crate::test_utils::test_encryption_keys();
+        writer_keys.set_contextual_record_writes(contextual);
         let mock = Arc::new(Mutex::new(Mock::default()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -255,7 +263,7 @@ impl Fixture {
         let created = bots::create_bot(
             &db,
             &state.config,
-            &state.encryption_keys,
+            &writer_keys,
             &state.http_client,
             &adapter,
             &owner,
@@ -726,6 +734,134 @@ async fn aurinko_partial_batch_retries_reuse_uuid_and_committed_messages_dedup()
 }
 
 #[tokio::test]
+async fn channel_guest_aurinko_retries_settle_only_proven_obsolete_receipts() {
+    use crate::models::feature_flag_override::COLLECTION_NAME as FLAGS;
+    use crate::services::{
+        channel_guest_access as guest,
+        feature_flag_service::{self as flags, FlagTarget},
+        security_readiness_service::ready_test_replica,
+    };
+
+    let fixture = Fixture::new().await;
+    let db = &fixture.state.db;
+    db.collection(crate::models::user::COLLECTION_NAME)
+        .insert_one(crate::test_utils::test_user(
+            &fixture.bot.user_id,
+            crate::models::user::UserType::Person,
+        ))
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &fixture.bot.id},
+            doc! {"$set":{"guest_access_v1":true,"guest_access_v1_revision":1_i64}},
+        )
+        .await
+        .unwrap();
+    crate::services::channel_routing_service::update_conversation_with_guest_key(
+        db,
+        &fixture.route.id,
+        &fixture.bot.user_id,
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+    )
+    .await
+    .unwrap();
+    guest::set_pilot(
+        db,
+        guest::PilotSelection {
+            fleet: false,
+            bot_ids: Some(vec![fixture.bot.id.clone()]),
+        },
+        &crate::services::audit_service::AuditActor {
+            user_id: fixture.bot.user_id.clone(),
+            api_key_id: None,
+            api_key_name: None,
+            ip_address: None,
+            user_agent: None,
+        },
+    )
+    .await
+    .unwrap();
+    ready_test_replica(db).await;
+    let flag = flags::set_platform_override(
+        db,
+        guest::FLAG,
+        &FlagTarget::Global,
+        true,
+        &fixture.bot.user_id,
+    )
+    .await
+    .unwrap();
+    let mut session = db.client().start_session().await.unwrap();
+    session.start_transaction().await.unwrap();
+    guest::update_activation_in_session(db, &mut session, true)
+        .await
+        .unwrap();
+    session.commit_transaction().await.unwrap();
+
+    fixture.mock.lock().await.callback_status = 500;
+    assert!(fixture.event(&["guest-retry"]).await.is_err());
+    assert_eq!(fixture.mock.lock().await.callbacks.len(), 1);
+    let original = fixture.original().await;
+    assert!(original.guest_relay.is_some());
+    let messages = db.collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME);
+    let read_receipt = || messages.find_one(doc! {"_id": &original.id});
+
+    db.collection::<bson::Document>(FLAGS)
+        .update_one(
+            doc! {"_id": &flag.id},
+            doc! {"$set":{"enabled":"unreadable"}},
+        )
+        .await
+        .unwrap();
+    assert!(fixture.event(&["guest-retry"]).await.is_err());
+    assert!(
+        !read_receipt()
+            .await
+            .unwrap()
+            .unwrap()
+            .contains_key("guest_relay_obsolete_at")
+    );
+    assert_eq!(fixture.mock.lock().await.callbacks.len(), 1);
+
+    flags::set_platform_override(
+        db,
+        guest::FLAG,
+        &FlagTarget::Global,
+        false,
+        &fixture.bot.user_id,
+    )
+    .await
+    .unwrap();
+    fixture.mock.lock().await.callback_status = 202;
+    fixture.event(&["guest-retry"]).await.unwrap();
+    assert!(
+        read_receipt()
+            .await
+            .unwrap()
+            .unwrap()
+            .get_datetime("guest_relay_obsolete_at")
+            .is_ok()
+    );
+    assert_eq!(fixture.mock.lock().await.callbacks.len(), 1);
+    fixture.event(&["guest-retry"]).await.unwrap();
+    assert_eq!(fixture.mock.lock().await.callbacks.len(), 1);
+
+    fixture.event(&["fresh-message"]).await.unwrap();
+    assert_eq!(fixture.mock.lock().await.callbacks.len(), 2);
+    assert!(
+        fixture.mock.lock().await.callbacks[1]
+            .get("guest_access_token")
+            .is_none()
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
 async fn aurinko_inflight_claim_is_retryable_and_concurrent_batches_forward_once() {
     let f = Fixture::new().await;
     let EventDedupClaimResult::Claimed(claim) = EventDedupStore::claim(
@@ -941,8 +1077,16 @@ async fn aurinko_registration_rotation_repair_delete_and_owner_fences() {
 #[tokio::test]
 async fn aurinko_failed_setup_delete_with_revoked_token_deactivates_locally() {
     let f = Fixture::new().await;
-    let encrypted = f.state.encryption_keys.encrypt(b"revoked").await.unwrap();
-    f.state.db.collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME).update_one(doc!{"_id":&f.bot.id},doc!{"$set":{"status":"failed","webhook_registered":false,"bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+    f.mock.lock().await.revoked = true;
+    f.state
+        .db
+        .collection::<ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id":&f.bot.id},
+            doc! {"$set":{"status":"failed","webhook_registered":false}},
+        )
+        .await
+        .unwrap();
     assert_eq!(
         bots::delete_bot(
             &f.state.db,
@@ -967,7 +1111,50 @@ async fn aurinko_failed_setup_delete_with_revoked_token_deactivates_locally() {
 
 #[tokio::test]
 async fn aurinko_repair_replaces_signal_subscription_and_recovers_unknown_creation() {
-    let f = Fixture::new().await;
+    let f = Fixture::with_writer(false).await;
+    let writes = f
+        .mock
+        .lock()
+        .await
+        .requests
+        .iter()
+        .filter(|(method, url)| method == "POST" && url.starts_with("/v1/subscriptions"))
+        .count();
+    let active = crate::test_utils::test_encryption_keys();
+    let source = f
+        .state
+        .db
+        .collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+        .find_one(doc! {"_id":&f.bot.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        crate::services::channel_bot_record::migrate(&f.state.db, &active, &source)
+            .await
+            .unwrap()
+    );
+    bots::verify_serialized_bot(
+        &f.state.db,
+        &f.state.encryption_keys,
+        &f.state.http_client,
+        &f.adapter,
+        &f.bot.id,
+        &f.bot.user_id,
+        &f.url,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.mock
+            .lock()
+            .await
+            .requests
+            .iter()
+            .filter(|(method, url)| method == "POST" && url.starts_with("/v1/subscriptions"))
+            .count(),
+        writes
+    );
     f.mock.lock().await.subscriptions[0]["detailLevel"] = json!("signal");
     bots::verify_serialized_bot(
         &f.state.db,

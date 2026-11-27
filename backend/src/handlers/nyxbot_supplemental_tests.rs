@@ -149,6 +149,48 @@ async fn audit_decisions(f: &Fixture) -> Vec<bson::Document> {
         .await
         .unwrap()
 }
+
+#[tokio::test]
+async fn supplemental_native_side_messages_lark_keeps_local_relay() {
+    Box::pin(async {
+        let (f, platform) = image_fixture("lark", "gateway").await;
+        assert!(f.channel.gateway_source.is_none());
+        Mock::given(method("POST"))
+            .and(path("/open-apis/im/v1/messages"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"code":0,"data":{"message_id":"sent"}})),
+            )
+            .expect(1)
+            .mount(&platform)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/events/cmaeg1.ev.original/side-messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"available":true})))
+            .expect(0)
+            .mount(&f.gateway)
+            .await;
+        let conversation = engine::get(
+            &f.state.db,
+            OWNER,
+            f.event.conversation_id.as_deref().unwrap(),
+        )
+        .await
+        .unwrap();
+        let origin = &f.event.delivery.as_ref().unwrap().origin;
+        deliver_to(&f.state, &conversation, origin, "Independent result", None).await;
+        platform.verify().await;
+        assert!(f.gateway.received_requests().await.unwrap().is_empty());
+        let audits = audit_decisions(&f).await;
+        assert_eq!(audits.len(), 1);
+        let data = audits[0].get_document("event_data").unwrap();
+        assert_eq!(data.get_str("egress"), Ok("local_relay"));
+        assert_eq!(data.get_str("outcome"), Ok("confirmed"));
+        f.state.db.drop().await.unwrap();
+    })
+    .await;
+}
+
 async fn notice(f: &Fixture, row: &AssistantConversation) {
     assert!(
         crate::handlers::assistant_nyxagent::send_checking_notice(
@@ -177,7 +219,10 @@ async fn live(f: &Fixture, failed: bool) -> String {
                 f.event.id.clone(),
                 "response".into(),
                 json!({"type":"response.created"}),
-                receiver,
+                InboundTurn {
+                    receiver,
+                    hosted_reply: None,
+                },
                 Utc::now(),
             )),
         )
@@ -576,7 +621,8 @@ async fn stored_recovery(f: &mut Fixture) -> String {
         terminal: true,
         answer_delivery: None,
         revision: 1,
-        payload_ciphertext: payload.seal(&f.state.encryption_keys).await.unwrap(),
+        payload_context_version: None,
+        payload_ciphertext: payload.seal_legacy(&f.state.encryption_keys).await.unwrap(),
         created_at: Utc::now(),
         expires_at: Utc::now() + ChronoDuration::hours(1),
     };
@@ -746,6 +792,40 @@ async fn supplemental_direct_and_relay_era_keep_identical_request_bytes() {
                 0
             );
             assert!(f.gateway.received_requests().await.unwrap().is_empty());
+            let legacy_chat = direct_post_turn_chat(&f, "124").await;
+            let mut fields = doc! {"deliver_also":[bson::to_bson(&legacy_chat).unwrap()]};
+            if transport == "gateway" {
+                fields.insert("channel", bson::Bson::Null);
+                fields.insert("reply_channel", bson::to_bson(origin).unwrap());
+            }
+            f.state
+                .db
+                .collection::<bson::Document>(CONVERSATIONS)
+                .update_one(doc! {"_id":&row.id}, doc! {"$set":fields})
+                .await
+                .unwrap();
+            let row =
+                settle_direct_post_turn(&f, TurnOrigin::Event, &[], "Useful answer", None).await;
+            let conversation = engine::get(&f.state.db, OWNER, &row.id).await.unwrap();
+            assert_eq!(
+                conversation.deliver_also.as_slice(),
+                std::slice::from_ref(&legacy_chat)
+            );
+            result_hook(&f, &row).await;
+            result_hook(&f, &row).await;
+            let requests = platform.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 3);
+            let body = requests[2].body_json::<Value>().unwrap();
+            assert_eq!(body["chat_id"], "123");
+            assert_eq!(body["text"], "Useful answer");
+            assert!(
+                audit_decisions(&f)
+                    .await
+                    .iter()
+                    .any(|audit| { result_reason(audit) == Some("already_claimed") })
+            );
+            let conversation = engine::get(&f.state.db, OWNER, &row.id).await.unwrap();
+            assert_eq!(conversation.deliver_also, [legacy_chat]);
             f.state.db.drop().await.unwrap();
         }
     })
@@ -930,11 +1010,11 @@ async fn supplemental_notice_preserves_recovered_failure_and_one_failure_deliver
         let id=stored_recovery(&mut f).await;
         let mut payload=crate::services::nyxbot_response_recovery::Payload::new(&id,"nyxbot-test",Default::default());
         payload.finish(None,true);
-        let cipher=payload.seal(&f.state.encryption_keys).await.unwrap();
+        let cipher=payload.seal_legacy(&f.state.encryption_keys).await.unwrap();
         f.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME).update_one(doc!{"response_id":&id},doc!{"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
         let (mut baseline_fixture,_,_)=Box::pin(notice_fixture()).await;
         let baseline_id=stored_recovery(&mut baseline_fixture).await;
-        let cipher=payload.seal(&baseline_fixture.state.encryption_keys).await.unwrap();
+        let cipher=payload.seal_legacy(&baseline_fixture.state.encryption_keys).await.unwrap();
         baseline_fixture.state.db.collection::<bson::Document>(crate::models::nyxbot_gateway_response::COLLECTION_NAME).update_one(doc!{"response_id":&baseline_id},doc!{"$set":{"payload_ciphertext":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:cipher}}}).await.unwrap();
         let baseline=recovery_bytes(&baseline_fixture,&baseline_id).await;
         assert!(baseline.0.contains("failed"));
@@ -1007,6 +1087,450 @@ async fn result_hook(f: &Fixture, row: &AssistantConversation) {
     .await;
 }
 
+async fn settle_direct_post_turn(
+    f: &Fixture,
+    origin: crate::models::assistant_conversation::TurnOrigin,
+    also: &[ChannelOrigin],
+    text: &str,
+    error: Option<engine::TurnError>,
+) -> AssistantConversation {
+    let conversation = f.event.conversation_id.as_deref().unwrap();
+    let turn_id = Uuid::new_v4().to_string();
+    let db = &f.state.db;
+    db.collection::<bson::Document>(CONVERSATIONS)
+        .update_one(
+            doc! {"_id":conversation},
+            doc! {"$set":{"active_turn":{
+                "turn_id":&turn_id,
+                "origin":bson::to_bson(&origin).unwrap(),
+                "started_at":bson::DateTime::now(),
+                "stop_requested":false,
+            }}},
+        )
+        .await
+        .unwrap();
+    let row = engine::get(db, OWNER, conversation).await.unwrap();
+    for origin in also {
+        assert!(
+            engine::also_deliver(db, OWNER, conversation, &turn_id, origin)
+                .await
+                .unwrap()
+        );
+    }
+    let code = error.as_ref().map(|error| error.code);
+    let result = engine::TurnResult {
+        text: text.into(),
+        session_id: None,
+        response_id: None,
+        error,
+    };
+    let reply_id = Uuid::new_v4().to_string();
+    let error = engine::finish_turn(db, &row, &row.credential_api_key_id, &reply_id, &result)
+        .await
+        .unwrap();
+    assert_eq!(error.as_ref().map(|error| error.code), code);
+    row
+}
+
+async fn direct_post_turn_chat(f: &Fixture, chat_id: &str) -> ChannelOrigin {
+    use crate::models::channel_message::COLLECTION_NAME as MESSAGES;
+    let db = &f.state.db;
+    let mut origin = f.event.delivery.as_ref().unwrap().origin.clone();
+    let mut chat = thread(f).await;
+    let messages = db.collection::<bson::Document>(MESSAGES);
+    let inbound_id = Uuid::new_v4().to_string();
+    let mut inbound = messages
+        .find_one(doc! {"_id":&f.event.relay_message_id})
+        .await
+        .unwrap()
+        .unwrap();
+    inbound.insert("_id", &inbound_id);
+    inbound.insert("platform_conversation_id", chat_id);
+    messages.insert_one(inbound).await.unwrap();
+    origin.partition = format!("private-{chat_id}");
+    chat.id = Uuid::new_v4().to_string();
+    chat.partition.clone_from(&origin.partition);
+    chat.platform_chat_id = Some(chat_id.into());
+    chat.last_message_id = Some(inbound_id.clone());
+    chat.last_relay_message_id = Some(inbound_id);
+    db.collection::<NyxbotThread>(THREADS)
+        .insert_one(chat)
+        .await
+        .unwrap();
+    origin
+}
+
+#[tokio::test]
+async fn post_turn_result_direct_repeat_sends_once() {
+    Box::pin(async {
+        use crate::models::assistant_conversation::TurnOrigin;
+        let (f, platform) = Box::pin(image_fixture("telegram", "direct")).await;
+        mock_platform(&platform, "confirmed").await;
+        let row = settle_direct_post_turn(&f, TurnOrigin::Event, &[], "Useful answer", None).await;
+        tokio::join!(
+            result_hook(&f, &row),
+            Box::pin(crate::handlers::assistant_team::after_turn(
+                &f.state,
+                &row,
+                "Uncommitted answer",
+                None,
+            )),
+        );
+
+        let requests = platform.received_requests().await.unwrap();
+        let audits = audit_decisions(&f).await;
+        f.state.db.drop().await.unwrap();
+        assert_eq!(requests.len(), 1, "requests: {requests:?}");
+        let body = requests[0].body_json::<Value>().unwrap();
+        assert_eq!(body["chat_id"], "123");
+        assert_eq!(body["text"], "Useful answer");
+        let turn_id = row.active_turn.as_ref().unwrap().turn_id.as_str();
+        assert_eq!(audits.len(), 2, "audits: {audits:?}");
+        assert!(audits.iter().all(|audit| {
+            audit.get_document("event_data").unwrap().get_str("turn_id") == Ok(turn_id)
+        }));
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|audit| result_reason(audit) == Some("already_claimed"))
+                .count(),
+            1
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn post_turn_result_meta_reply_keeps_grant_and_claims_destination_once() {
+    Box::pin(async {
+        use crate::models::assistant_conversation::ChannelTurnContext;
+        use crate::services::channel_adapters::meta::{self, tests};
+        use wiremock::matchers::method;
+
+        let (f, graph) = Box::pin(image_fixture("instagram", "direct")).await;
+        let db = &f.state.db;
+        let bot = tests::registered_bot(&f.state, OWNER, "instagram").await;
+        let route = f.channel.route_id.as_deref().unwrap();
+        let inbound = tests::inbound_for(
+            &f.state,
+            &bot,
+            route,
+            &f.channel.route_api_key_id,
+            "333",
+            "mid.settled-result",
+        )
+        .await;
+        tests::admit_original(&f.state, &inbound).await;
+        let chat = inbound.platform_conversation_id.as_deref().unwrap();
+        db.collection::<bson::Document>(CHANNELS)
+            .update_one(
+                doc! {"_id": &f.channel.id},
+                doc! {"$set": {"channel_bot_id": &bot.id}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .update_one(
+                doc! {"_id": route},
+                doc! {"$set": {"channel_bot_id": &bot.id, "platform_conversation_id": chat}},
+            )
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(THREADS)
+            .update_one(
+                doc! {"channel_id": &f.channel.id},
+                doc! {"$set": {
+                    "platform_chat_id": chat,
+                    "last_message_id": &inbound.id,
+                    "last_relay_message_id": &inbound.id,
+                }},
+            )
+            .await
+            .unwrap();
+
+        let grant = crate::services::channel_meta_service::scopes::reference(&bot).unwrap();
+        let origin = &f.event.delivery.as_ref().unwrap().origin;
+        let conversation = f.event.conversation_id.as_deref().unwrap();
+        let request: engine::TurnRequest = serde_json::from_value(json!({
+            "conversation_id": conversation, "text": "Summarize the verified inbox context"
+        }))
+        .unwrap();
+        let mut start = engine::TurnStart::from(&request);
+        // Seed trusted Meta provenance and add the same verified chat through
+        // the running-turn writer. Signed admission is covered by the Meta
+        // integration fixtures.
+        start.channel_context = Some(ChannelTurnContext {
+            channel_guest: None,
+            meta_grant: Some(grant.clone()),
+            text_completeness: None,
+            org_origin: None,
+            display_name: None,
+            conversation_label: None,
+            followed: false,
+            source_event_id: inbound.id.clone(),
+            channel_id: f.channel.id.clone(),
+            channel_bot_id: bot.id.clone(),
+            conversation_kind: "private".into(),
+            sender_kind: crate::models::channel_thread::ThreadSenderKind::Human,
+            guest: false,
+            original_message: true,
+        });
+        let row = engine::begin_turn(db, OWNER, start, &f.state.encryption_keys)
+            .await
+            .unwrap();
+        let turn = &row.active_turn.as_ref().unwrap().turn_id;
+        assert!(
+            engine::also_deliver(db, OWNER, conversation, turn, origin)
+                .await
+                .unwrap()
+        );
+        assert!(
+            engine::finish_turn(
+                db,
+                &row,
+                &row.credential_api_key_id,
+                &Uuid::new_v4().to_string(),
+                &engine::TurnResult {
+                    text: "Verified Meta result".into(),
+                    session_id: None,
+                    response_id: None,
+                    error: None,
+                },
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let saved = result_message(&f, &row).await;
+        assert_eq!(
+            saved.get("meta_grants"),
+            Some(&bson::to_bson(&[grant]).unwrap())
+        );
+        assert_eq!(
+            saved.get("post_turn_deliver_also"),
+            Some(&bson::to_bson(&[origin]).unwrap())
+        );
+
+        Mock::given(method("POST"))
+            .and(path("/v25.0/222/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"message_id": "sent"})))
+            .expect(1)
+            .mount(&graph)
+            .await;
+        meta::with_test_graph_base(graph.uri(), async {
+            result_hook(&f, &row).await;
+            result_hook(&f, &row).await;
+        })
+        .await;
+        let requests = graph.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        let sent = requests[0].body_json::<Value>().unwrap();
+        assert_eq!(sent["recipient"]["id"], "333");
+        assert_eq!(sent["message"]["text"], "Verified Meta result");
+        let audits = audit_decisions(&f).await;
+        assert_eq!(audits.len(), 2);
+        let decisions = audits
+            .iter()
+            .map(|audit| audit.get_document("event_data").unwrap())
+            .collect::<Vec<_>>();
+        assert!(decisions.iter().all(|audit| {
+            audit.get_str("turn_id") == Ok(turn.as_str())
+                && audit.get_str("purpose") == Ok("team_additional_result")
+        }));
+        assert!(
+            decisions
+                .iter()
+                .any(|audit| audit.get_str("outcome") == Ok("confirmed"))
+        );
+        assert_eq!(
+            audits
+                .iter()
+                .filter(|audit| result_reason(audit) == Some("already_claimed"))
+                .count(),
+            1
+        );
+        db.drop().await.unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn post_turn_result_older_hook_cannot_take_newer_additional_chat() {
+    Box::pin(check_post_turn_result_destinations(false)).await;
+}
+
+#[tokio::test]
+async fn post_turn_result_only_the_failed_turns_additional_chat_gets_a_notice() {
+    Box::pin(check_post_turn_result_destinations(true)).await;
+}
+
+async fn check_post_turn_result_destinations(newer_failed: bool) {
+    Box::pin(async {
+        use crate::models::assistant_conversation::TurnOrigin;
+        let (f, platform) = Box::pin(image_fixture("telegram", "direct")).await;
+        mock_platform(&platform, "confirmed").await;
+        f.state
+            .db
+            .collection::<bson::Document>(CONVERSATIONS)
+            .update_one(
+                doc! {"_id":&f.event.conversation_id},
+                doc! {"$unset":{"channel":""}},
+            )
+            .await
+            .unwrap();
+        let chat_a = direct_post_turn_chat(&f, "124").await;
+        let chat_b = direct_post_turn_chat(&f, "125").await;
+        let a = settle_direct_post_turn(&f, TurnOrigin::User, &[chat_a], "Answer A", None).await;
+        let b = settle_direct_post_turn(
+            &f,
+            TurnOrigin::User,
+            &[chat_b],
+            "Answer B",
+            newer_failed.then(|| engine::TurnError::internal("upstream_failed", "upstream")),
+        )
+        .await;
+
+        // A's hook reaches delivery after B has already committed settlement.
+        Box::pin(crate::handlers::assistant_team::after_turn(
+            &f.state, &a, "Answer A", None,
+        ))
+        .await;
+        for _ in 0..2 {
+            Box::pin(crate::handlers::assistant_team::after_turn(
+                &f.state, &b, "Answer B", None,
+            ))
+            .await;
+        }
+
+        let requests = platform.received_requests().await.unwrap();
+        let audits = audit_decisions(&f).await;
+        f.state.db.drop().await.unwrap();
+        let sent = requests
+            .iter()
+            .map(|request| {
+                let body = request.body_json::<Value>().unwrap();
+                (body["chat_id"].clone(), body["text"].clone())
+            })
+            .collect::<Vec<_>>();
+        let answer_b = if newer_failed {
+            "I couldn't finish answering that question. Please ask again."
+        } else {
+            "Answer B"
+        };
+        assert_eq!(
+            sent,
+            [
+                (json!("124"), json!("Answer A")),
+                (json!("125"), json!(answer_b))
+            ]
+        );
+        assert_eq!(audits.len(), 3, "audits: {audits:?}");
+        for row in [&a, &b] {
+            let turn = row.active_turn.as_ref().unwrap();
+            assert!(
+                audits.iter().any(|audit| {
+                    let data = audit.get_document("event_data").unwrap();
+                    data.get_str("turn_id") == Ok(turn.turn_id.as_str())
+                        && data.get_str("purpose") == Ok("team_additional_result")
+                        && data.get_str("outcome") == Ok("confirmed")
+                }),
+                "audits: {audits:?}"
+            );
+        }
+        let duplicate = audits
+            .iter()
+            .find(|audit| result_reason(audit) == Some("already_claimed"))
+            .unwrap();
+        assert_eq!(
+            duplicate
+                .get_document("event_data")
+                .unwrap()
+                .get_str("turn_id"),
+            Ok(b.active_turn.as_ref().unwrap().turn_id.as_str())
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn post_turn_result_direct_preparation_and_claim_error_leave_no_marker() {
+    Box::pin(async {
+        let (f, platform) = Box::pin(image_fixture("telegram", "direct")).await;
+        mock_platform(&platform, "confirmed").await;
+        let row = settle_direct_post_turn(&f, TurnOrigin::Event, &[], "Useful answer", None).await;
+        let db = &f.state.db;
+        let threads = db.collection::<bson::Document>(THREADS);
+        let chat = doc! {"channel_id":&f.channel.id};
+        threads
+            .update_one(
+                chat.clone(),
+                doc! {"$set":{"last_message_id":Uuid::new_v4().to_string()}},
+            )
+            .await
+            .unwrap();
+        result_hook(&f, &row).await;
+        threads
+            .update_one(
+                chat,
+                doc! {"$set":{"last_message_id":&f.event.relay_message_id}},
+            )
+            .await
+            .unwrap();
+        let collection = crate::models::assistant_message::COLLECTION_NAME;
+        db.run_command(doc! {
+            "collMod":collection,
+            "validator":{"supplemental_result_claims":{"$exists":false}},
+        })
+        .await
+        .unwrap();
+        result_hook(&f, &row).await;
+        assert!(platform.received_requests().await.unwrap().is_empty());
+        assert!(
+            !result_message(&f, &row)
+                .await
+                .contains_key("supplemental_result_claims")
+        );
+        let audits = audit_decisions(&f).await;
+        assert_eq!(audits.len(), 2);
+        for reason in ["authority_refused", "source_unavailable"] {
+            assert!(
+                audits
+                    .iter()
+                    .any(|audit| result_reason(audit) == Some(reason))
+            );
+        }
+
+        let origin = row.channel.as_ref().unwrap();
+        deliver_to_for(
+            &f.state,
+            &row,
+            origin,
+            "Progress",
+            None,
+            Purpose::MachineDesktopNotice,
+        )
+        .await;
+        assert!(
+            !result_message(&f, &row)
+                .await
+                .contains_key("supplemental_result_claims")
+        );
+        db.run_command(doc! {"collMod":collection,"validator":{}})
+            .await
+            .unwrap();
+        result_hook(&f, &row).await;
+        let requests = platform.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for (request, expected) in requests.iter().zip(["Progress", "Useful answer"]) {
+            let body = request.body_json::<Value>().unwrap();
+            assert_eq!(body["chat_id"], "123");
+            assert_eq!(body["text"], expected);
+        }
+        db.drop().await.unwrap();
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn private_chat_handoff_direct_anchor_is_saved_only() {
     let (mut fixture, _) = Box::pin(image_fixture("telegram", "direct")).await;
@@ -1058,7 +1582,10 @@ async fn private_chat_handoff_ordinary_subscriber_close_keeps_failure_copy() {
         fixture.event.id.clone(),
         "response".into(),
         json!({"type":"response.created"}),
-        closed(),
+        InboundTurn {
+            receiver: closed(),
+            hosted_reply: None,
+        },
         Utc::now(),
     ))
     .await;
@@ -1286,6 +1813,47 @@ async fn settlement_parity(wake: bool) {
                 .remove("total_ms"),
             Some(bson::Bson::Int64(duration))
         );
+        let saved_repeat_audit = doc! {
+            "event_type": "nyxbot_channel_supplemental_delivery",
+            "event_data.turn_id": &row.active_turn.as_ref().unwrap().turn_id,
+            "event_data.conversation_id": &row.id,
+            "event_data.purpose": "team_result",
+            "event_data.reason": "already_claimed",
+        };
+        let audit = db.collection::<bson::Document>(crate::models::audit_log::COLLECTION_NAME);
+        if enabled && wake {
+            let due_at = settled_at.as_datetime().unwrap();
+            messages
+                .update_one(
+                    doc! {"_id": &reply_id},
+                    doc! {"$set": {"handoff_delivery_due_at": bson::DateTime::from_chrono(Utc::now() + ChronoDuration::minutes(2)),
+                                    "handoff_delivery_lease": "deferred-worker"}},
+                )
+                .await
+                .unwrap();
+            Box::pin(crate::handlers::assistant_team::after_turn(
+                &fixture.state,
+                &row,
+                &result.text,
+                None,
+            ))
+            .await;
+            assert_eq!(platform.received_requests().await.unwrap().len(), 1);
+            assert_eq!(
+                audit
+                    .count_documents(saved_repeat_audit.clone())
+                    .await
+                    .unwrap(),
+                0
+            );
+            messages
+                .update_one(
+                    doc! {"_id": &reply_id},
+                    doc! {"$set": {"handoff_delivery_due_at": due_at}, "$unset": {"handoff_delivery_lease": ""}},
+                )
+                .await
+                .unwrap();
+        }
         Box::pin(crate::handlers::assistant_team::after_turn(
             &fixture.state,
             &row,
@@ -1300,6 +1868,17 @@ async fn settlement_parity(wake: bool) {
                 serde_json::from_slice::<Value>(&sends.last().unwrap().body).unwrap()["text"],
                 result.text
             );
+            if enabled {
+                Box::pin(crate::handlers::assistant_team::after_turn(
+                    &fixture.state,
+                    &row,
+                    &result.text,
+                    None,
+                ))
+                .await;
+                assert_eq!(platform.received_requests().await.unwrap().len(), 2);
+                assert_eq!(audit.count_documents(saved_repeat_audit).await.unwrap(), 1);
+            }
             sends.last().unwrap().body.clone()
         } else {
             assert!(
@@ -1661,7 +2240,15 @@ async fn repeated_result(concurrent: bool, also: bool) {
     let (f, platform, row) = Box::pin(result_fixture(ChronoDuration::minutes(30))).await;
     mock_platform(&platform, "confirmed").await;
     if also {
-        f.state.db.collection::<bson::Document>(CONVERSATIONS).update_one(doc! {"_id":&row.id},doc! {"$set":{"deliver_also":[bson::to_bson(row.channel.as_ref().unwrap()).unwrap()]}}).await.unwrap();
+        f.state
+            .db
+            .collection::<bson::Document>(crate::models::assistant_message::COLLECTION_NAME)
+            .update_one(
+                doc! {"conversation_id":&row.id,"turn_id":&row.active_turn.as_ref().unwrap().turn_id,"role":"assistant"},
+                doc! {"$set":{"post_turn_deliver_also":[bson::to_bson(row.channel.as_ref().unwrap()).unwrap()]}},
+            )
+            .await
+            .unwrap();
         result_hook(&f, &row).await;
     } else if concurrent {
         tokio::join!(result_hook(&f, &row), result_hook(&f, &row));
@@ -1994,3 +2581,6 @@ async fn supplemental_result_preparation_failure_does_not_claim() {
         f.state.db.drop().await.unwrap();
     }).await;
 }
+
+#[path = "nyxbot_thread_reference_tests.rs"]
+mod thread_reference_tests;

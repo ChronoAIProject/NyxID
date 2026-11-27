@@ -87,4 +87,6 @@ event accumulator, actor-state reducer, history decoders, and the typed actor's
 
 - [10 — Assistant uploads](10-uploads.md): owner document/image uploads, extraction, thread scope, image protocol compatibility and retention.
 - [11 — Realtime voice](11-voice.md): approved provider architecture, spoken confirmation, duration billing and rollout; Phase 2 implements the default-off foundations without media or voice UI.
+- [13 — Agent avatars](13-agent-avatars.md): the configurable face kit, honest process reactions, shared web/native rendering, voice ripple banners, deterministic export and the `assistant:avatars` rollout.
 - [12 — Automatic CMA session cards](12-cma-sessions.md): active sessions discovered automatically, minimise/maximise controls, read-only Agent events v2 observation, account ownership, reconnect behavior, and connection requirements.
+- [12 — Shared agents and multi-person groups](12-shared-agents-and-groups.md): sharing personal specialists with people or organizations, private recipient chats, and multi-person collaboration groups, behind the default-off `assistant:shared-agents` flag and fleet readiness.

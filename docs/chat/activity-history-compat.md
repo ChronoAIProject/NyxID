@@ -5,7 +5,7 @@ Activity failure metadata describes an individual step, not the validity of the 
 | Kind | Backend producer | Presentation |
 | --- | --- | --- |
 | `service_status` | `mcp_transport::service_tool_content` | Service HTTP error, optional status |
-| `tool_error` | `mcp_transport::rpc_success`, `tool_failure`, native memory diagnostics | Tool error; existing trusted memory reasons retained on web |
+| `tool_error` | `mcp_transport::rpc_success`, `tool_failure`, native memory and skill publication diagnostics | Tool error with fixed native reasons on web. Reviewed skill failures resolve through the linked proposal |
 | `refused` | `mcp_transport::rpc_error`, `tool_failure` | NyxID refused this call |
 | `internal` | `mcp_transport::rpc_error`, `tool_failure` | NyxID could not complete this call |
 | `resource_unavailable` | `mcp_transport` managed resource materialization | A required resource is unavailable |

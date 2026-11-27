@@ -86,9 +86,12 @@ accessibility descendants are hidden while management is open.
 
 Private user bubbles and compact crew/private headers follow the native
 reference while preserving real speaker attribution. Private, contextual and
-crew chats share one ChatGPT-style composer: a filled pill with full-width text
-above a toolbar containing "+" for attachments, optional mentions, dictation and a
-trailing send/stop circle. "+" offers Camera, Photos (the system photo library) and Files
+crew chats share one ChatGPT-style composer: an idle pill keeps attachments,
+the input, dictation and send/stop on one line. Focus or a draft whose trimmed
+length is positive expands the text above the toolbar, revealing optional
+mentions, permissions and crew recipients. Blurring an empty or whitespace-only
+draft restores the single line without remounting the native input.
+"+" offers Camera, Photos (the system photo library) and Files
 (the document browser). Camera permission is requested at use; denied access links
 to Settings, and unavailable cameras report a recoverable message. Captures reuse
 the same conversion, attachment limits and upload session. Unsupported photo formats such as HEIC are converted to
@@ -302,7 +305,9 @@ animation `none`, then waits for the new page to paint. The new content fades
 in (180ms) while the slab closes (300ms). Reduced motion skips both. Settings
 and quick actions preserve the expanded sidebar behind their animated sheet.
 Sheet owners wait for native dismissal before unmounting; the shell exposes
-sidebar accessibility only at its settled open endpoint.
+sidebar accessibility only at its settled open endpoint. On iOS, opening
+Notifications preserves the current content stack. Its Back button and native
+left-edge swipe return to the page that opened the inbox.
 
 Native reply layout uses 16pt between receipts/activity and prose, 12pt between
 ordinary Markdown blocks, 20pt before h1 and 16pt before other headings, and 8pt

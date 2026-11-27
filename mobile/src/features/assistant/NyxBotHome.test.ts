@@ -86,6 +86,9 @@ function setup(widePanel = false, panel = false, cornerWindow = false, width = 3
       AgentAvatar: "AgentAvatar",
       AgentAvatarStack: "AgentAvatarStack",
     },
+    "../../lib/avatars/agentAvatarsFlag": {
+      useAgentAvatarsEnabled: () => false,
+    },
     "react/jsx-runtime": {
       jsx: (type: unknown, props: unknown) => ({ type, props }),
       jsxs: (type: unknown, props: unknown) => ({ type, props }),

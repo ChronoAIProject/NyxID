@@ -34,8 +34,8 @@ vi.mock("@/hooks/use-assistant-workspace", () => ({
 }));
 
 const accountMocks = vi.hoisted(() => ({ navigate: vi.fn(), logout: vi.fn(), nyxagent: false, panel: undefined as string | undefined, open: vi.fn() }));
-vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => ({ current: { panel: accountMocks.panel }, prepareMenuOpen: (...args: unknown[]) => () => accountMocks.open(...args) }) }));
 vi.mock("@/hooks/use-auth", () => ({ useLogout: () => ({ mutateAsync: accountMocks.logout }) }));
+vi.mock("@/hooks/use-account-panel", () => ({ useAccountPanel: () => ({ current: { panel: accountMocks.panel }, prepareMenuOpen: (...args: unknown[]) => () => accountMocks.open(...args) }) }));
 vi.mock("@/hooks/use-feature-flag", () => ({ useFeature: (flag: FeatureFlag) => {
   const enabled = useAuthStore((state) => userHasFeature(state.user, flag));
   return flag === FEATURE_FLAG.ASSISTANT_WORKSPACE_PREVIEW ? enabled : accountMocks.nyxagent;
@@ -137,8 +137,6 @@ function seedDraft(ownerUserId: string, text: string) {
 }
 
 beforeEach(() => {
-  accountMocks.navigate.mockReset();
-  accountMocks.logout.mockReset();
   accountMocks.nyxagent = false;
   accountMocks.panel = undefined;
   accountMocks.open.mockReset();
@@ -624,6 +622,97 @@ describe("NyxBot agents in the sidebar", () => {
     return { ...handlers, onSelect, queryClient };
   }
 
+  it.each([false, true])(
+    "shows translated activity in the sidebar and rail (rail=%s)",
+    async (rail) => {
+      useAuthStore.setState({
+        user: {
+          ...USER,
+          capabilities: {
+            billing_available: true,
+            enabled_features: ["assistant:avatars"],
+          },
+        },
+      });
+      const researcher = {
+        ...agents[1]!,
+        pending_acknowledgements: 0,
+        activity: [
+          { conversation_id: "queued", state: "waiting" as const },
+          { conversation_id: "live", state: "drafting" as const },
+        ],
+      };
+      const { queryClient } = renderAgents(
+        { agents: [agents[0]!, researcher], selectedAgentId: researcher.id },
+        { rail },
+      );
+      const button = screen.getByRole("button", {
+        name: /researcher, specialist, Writing/,
+      });
+      const badge = button.querySelector('[data-avatar-activity="drafting"]');
+      expect(badge).toHaveAttribute("width", "12");
+      expect(badge).toHaveAttribute("aria-hidden", "true");
+      expect(button.querySelector(".bg-success")).toBeNull();
+      if (rail) {
+        await userEvent.click(button);
+        expect(
+          await screen.findByRole("button", { name: "New chat" }),
+        ).toBeVisible();
+        expect(
+          document.body.querySelectorAll('[data-avatar-activity="drafting"]'),
+        ).toHaveLength(2);
+      }
+      queryClient.clear();
+    },
+  );
+
+  it.each([false, true])(
+    "uses the resolved idle state for stale running dots (rail=%s)",
+    (rail) => {
+      useAuthStore.setState({
+        user: {
+          ...USER,
+          capabilities: {
+            billing_available: true,
+            enabled_features: ["assistant:avatars"],
+          },
+        },
+      });
+      renderAgents({ activityMood: () => "idle" }, { rail });
+      const button = screen.getByRole("button", {
+        name: "researcher, specialist, Idle, 2 pending requests",
+      });
+      expect(button.querySelector(".bg-success")).toBeNull();
+      expect(button.querySelector("[data-avatar-activity]")).toBeNull();
+      expect(Boolean(button.querySelector(".bg-muted-foreground"))).toBe(!rail);
+    },
+  );
+
+  it.each([
+    [1, "1 pending request"],
+    [2, "2 pending requests"],
+  ])(
+    "announces Waiting for approval with a plural-safe request count (%s)",
+    (count, phrase) => {
+      useAuthStore.setState({
+        user: {
+          ...USER,
+          capabilities: {
+            billing_available: true,
+            enabled_features: ["assistant:avatars"],
+          },
+        },
+      });
+      const researcher = { ...agents[1]!, pending_acknowledgements: count };
+      renderAgents({ agents: [researcher], activityMood: () => "approval" });
+      expect(
+        screen.getByRole("button", {
+          name: `researcher, specialist, Waiting for approval, ${phrase}`,
+        }),
+      ).toBeVisible();
+    },
+  );
+
   it.each(["pointer", "keyboard"])("keeps the channel Rename input focused after closing its menu with %s", async (interaction) => {
     const user = userEvent.setup();
     const row: Conversation = {
@@ -664,7 +753,8 @@ describe("NyxBot agents in the sidebar", () => {
     const sourceButton = screen.getByRole("button", { name: "Engineering on Lark, 2 threads" });
     expect(sourceButton).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText("Lark · Bot: NyxBot")).toBeVisible();
-    expect(screen.getByText("Direct chats")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Personal conversations" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Connected bot chats" })).toBeVisible();
     expect(screen.queryByText("Channel chat")).not.toBeInTheDocument();
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /^Thread · .*10:16:45/ }));
@@ -674,6 +764,26 @@ describe("NyxBot agents in the sidebar", () => {
     await user.type(screen.getByRole("searchbox", { name: "Search threads" }), "Engineering");
     expect(screen.queryByRole("button", { name: "Morning briefing" })).not.toBeInTheDocument();
     expect(sourceButton).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("groups read-only guest rows by source even when specialist use is restricted", async () => {
+    const source = { platform: "lark", channel_agent_id: "lark-bot", bot_label: "Support bot",
+      chat_kind: "group", chat_id: "support", chat_title: "Shared support" };
+    const first = { ...thread, id: `org-guest-${"a".repeat(32)}`, title: "Guest conversation",
+      read_only: true, channel: source };
+    const second = { ...first, id: `org-guest-${"b".repeat(32)}` };
+    const { onSelect, onNewThread } = renderAgents({
+      selectedAgentId: "agent-researcher",
+      agents: agents.map((row) => row.id === "agent-researcher" ? { ...row, owner_kind: "org", can_use: false } : row),
+      mobileThreadList: true,
+      threads: [first, second, thread],
+    });
+    expect(screen.getByRole("button", { name: "Shared support on Lark, 2 threads" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /Options for Guest conversation/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Morning briefing" })).not.toBeInTheDocument();
+    await userEvent.setup().click(screen.getAllByRole("button", { name: "Guest conversation" })[0]!);
+    expect(onSelect).toHaveBeenCalledWith(first.id);
+    expect(onNewThread).not.toHaveBeenCalled();
   });
 
   it("searches every matching source thread beyond the initial five-row limit", async () => {
@@ -1451,7 +1561,7 @@ describe("AssistantSidebar account menu", () => {
     expect(trigger).toHaveAttribute("data-keep-drawer-open", "");
     await userEvent.click(trigger);
     const menu = screen.getByRole("menu");
-    expect(within(menu).getByText("Reader")).toBeVisible();
+    expect(within(menu).queryByText("Reader")).not.toBeInTheDocument();
     expect(within(menu).getByText("reader@example.com")).toBeVisible();
     expect(
       within(menu).getByRole("menuitem", { name: "Settings" }),
@@ -1463,17 +1573,18 @@ describe("AssistantSidebar account menu", () => {
       expect(item).not.toHaveAttribute("href");
       expect(item).not.toHaveAttribute("search");
     }
-    expect(
-      within(menu).getByRole("menuitem", {
-        name: "Notification settings (opens in Studio)",
-      }),
-    ).toHaveAttribute("data-to", "/approvals/settings");
+    expect(within(menu).getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+      "Settings", "Billing", "Usage", "Open Studio", "Log out",
+    ]);
     expect(
       within(menu).getByRole("menuitem", { name: "Open Studio" }),
     ).toHaveAttribute("data-to", "/dashboard");
     expect(
       within(menu).queryByRole("menuitem", { name: "NyxBot settings" }),
     ).not.toBeInTheDocument();
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Log out" }));
+    expect(accountMocks.logout).toHaveBeenCalledOnce();
+    expect(accountMocks.navigate).toHaveBeenCalledWith({ to: "/login" });
   });
 
   it.each([false, undefined])(
@@ -1494,33 +1605,6 @@ describe("AssistantSidebar account menu", () => {
       ).not.toBeInTheDocument();
     },
   );
-
-  it("links to NyxBot settings only in NyxAgent mode", async () => {
-    accountMocks.nyxagent = true;
-    renderSidebar();
-    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "NyxBot settings" }));
-    await waitFor(() => expect(accountMocks.open).toHaveBeenCalledWith("nyxbot", {}, expect.any(HTMLButtonElement), expect.any(Function)));
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-  });
-
-  it("waits for logout before navigating to login", async () => {
-    let finish: (() => void) | undefined;
-    accountMocks.logout.mockReturnValue(
-      new Promise<void>((resolve) => {
-        finish = resolve;
-      }),
-    );
-    renderSidebar();
-    await userEvent.click(screen.getByRole("button", { name: "Account menu" }));
-    await userEvent.click(screen.getByRole("menuitem", { name: "Log out" }));
-    expect(accountMocks.logout).toHaveBeenCalledOnce();
-    expect(accountMocks.navigate).not.toHaveBeenCalled();
-    finish?.();
-    await waitFor(() =>
-      expect(accountMocks.navigate).toHaveBeenCalledWith({ to: "/login" }),
-    );
-  });
 
   it.each(["settings", "billing", "nyxbot"] as const)(
     "marks the user row active in %s",

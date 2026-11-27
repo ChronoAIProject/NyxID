@@ -1,4 +1,5 @@
 //! Owner-requested drafts, sharing L1 review, encryption and publication.
+use super::assistant_learning_record::Field;
 use super::{
     assistant_acknowledgement_service::{self as acks, ChatAuthority},
     assistant_agent_learning::{self as learning, GeneratedFile, GeneratedProposal},
@@ -29,8 +30,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub const TOOL_NAME: &str = "draft_agent_skill";
-pub const SPECIALIST_GUIDANCE: &str = "\nYour skills: Ornn skills hold your repeatable procedures, checklists, references and templates. To create or improve one, call nyxid__draft_agent_skill with your own agent ID (from nyxid__get_agent_skills); to improve, pass the attached skill as base_skill. Full access publishes immediately; otherwise the owner reviews one card; NyxID packages, validates, publishes privately to Ornn and pins it. Never package or publish skills through raw Ornn upload APIs, sandboxes or machines, and never ask anyone for a ZIP. Never include secrets. End your turn after drafting.";
-pub const GUIDANCE: &str = "\nAgents: description defines role/scope; persona defines tone/style; Ornn skills hold repeatable procedures, checklists, domain references, output templates and multi-step workflows. For uncovered procedures, use nyxid__draft_agent_skill only after search_agent_skills, preview_agent_skill and proposing suitable existing skills with set_agent_skills. Full access publishes immediately; other modes need one owner review card; NyxID packages, publishes and pins. Never package or publish skills through Ornn Playground, sandboxes, machines or raw Ornn upload APIs, and never ask anyone for a ZIP. Never include secrets. End your turn after drafting; the owner card publishes without a tool retry.";
+pub const SPECIALIST_GUIDANCE: &str = "\nYour skills: Ornn skills hold your repeatable procedures, checklists, references and templates. To create or improve one, call nyxid__draft_agent_skill with your own agent ID (from nyxid__get_agent_skills); to improve, pass the attached skill as base_skill. Full access publishes immediately; otherwise the owner reviews one card; NyxID packages, validates, publishes privately to Ornn and pins it. Never package or publish skills through raw Ornn upload APIs, sandboxes or machines, and never ask anyone for a ZIP. Never include secrets. Report failed or unconfirmed saves as incomplete setup and give only the reported reason. End your turn after drafting.";
+pub const GUIDANCE: &str = "\nAgents: description defines role/scope; persona defines tone/style; Ornn skills hold repeatable procedures, checklists, domain references, output templates and multi-step workflows. For uncovered procedures, use nyxid__draft_agent_skill only after search_agent_skills, preview_agent_skill and proposing suitable existing skills with set_agent_skills. Full access publishes immediately; other modes need one owner review card; NyxID packages, publishes and pins. Never package or publish skills through Ornn Playground, sandboxes, machines or raw Ornn upload APIs, and never ask anyone for a ZIP. Never include secrets. Report failed or unconfirmed saves as incomplete setup and give only the reported reason. End your turn after drafting; the owner card publishes without a tool retry.";
 
 /// No membership reads on the default-off or person-only rollout path.
 pub async fn enabled(db: &Database, actor: &str) -> AppResult<bool> {
@@ -390,9 +391,29 @@ pub async fn create(
     let fingerprint = hex::encode(mac.finalize().into_bytes());
     let scope_digest = hex::encode(Sha256::digest(&scope_bytes));
     let now = Utc::now();
+    let id = Uuid::new_v4().to_string();
+    let (body_encrypted, body_context_version) = Field::Body
+        .seal(
+            &state.encryption_keys,
+            &id,
+            &agent.user_id,
+            &agent.id,
+            &encoded,
+        )
+        .await?;
+    let (scope_encrypted, scope_context_version) = Field::Scope
+        .seal(
+            &state.encryption_keys,
+            &id,
+            &agent.user_id,
+            &agent.id,
+            &scope_bytes,
+        )
+        .await?;
     let candidate = AssistantAgentLearningProposal {
+        authoring_origin: None,
         source: ProposalSource::Authored,
-        id: Uuid::new_v4().to_string(),
+        id,
         agent_id: agent.id.clone(),
         owner_id: agent.user_id.clone(),
         run_id: String::new(),
@@ -406,10 +427,12 @@ pub async fn create(
         publication: None,
         failure_code: None,
         failure_rules: Vec::new(),
-        scope_encrypted: Some(state.encryption_keys.encrypt(&scope_bytes).await?),
+        scope_encrypted: Some(scope_encrypted),
+        scope_context_version,
         scope_digest: Some(scope_digest),
         evidence: Vec::new(),
-        body_encrypted: state.encryption_keys.encrypt(&encoded).await?,
+        body_encrypted,
+        body_context_version,
         body_bytes: encoded.len() as i64,
         created_at: now,
         updated_at: now,
@@ -451,6 +474,16 @@ pub async fn create(
     let binding = match binding {
         Ok(binding) => binding,
         Err(failure) => {
+            if body.base_skill.is_some()
+                && failure.code == Some(review::PublicationFailureCode::OrnnUnavailable)
+                && let Some(diagnostic) =
+                    crate::errors::skill_publication::SkillPublicationFailure::registry_unavailable(
+                        "source_skill_unavailable",
+                        failure.upstream_status,
+                    )
+            {
+                return Err(diagnostic.into());
+            }
             // Keep the reserved proposal retryable: another caller may be
             // preparing the same generation, or this worker may be retried.
             if body.base_skill.is_some()
@@ -472,7 +505,10 @@ pub async fn create(
         }
     };
     if automatic {
-        return publish_automatically(state, chat, &agent, id, &binding, reader).await;
+        return publish_automatically_from_origin(
+            state, chat, &agent, id, &binding, reader, None, true,
+        )
+        .await;
     }
     let card = claims::finalize(state, &reservation, &binding, chat.approval_options()).await?;
     // A recovered draft can retain a different review conversation. Link this
@@ -491,6 +527,9 @@ pub async fn create(
 
 #[path = "assistant_skill_authoring_claims.rs"]
 mod claims;
+pub(crate) mod erasure;
+pub use claims::renew;
+pub(crate) use claims::{fence_proposal_in_session, saved_origin};
 
 /// Ornn checks the exact package before the owner is asked to review it, so
 /// a refused format returns to the author as fixable rule identifiers. Only
@@ -680,7 +719,17 @@ async fn submit_owner_draft(
             ));
         }
         let now = Utc::now();
+        let (body_encrypted, body_context_version) = Field::Body
+            .seal(
+                &state.encryption_keys,
+                &id,
+                &agent.user_id,
+                &agent.id,
+                &encoded,
+            )
+            .await?;
         let row = AssistantAgentLearningProposal {
+            authoring_origin: None,
             source: ProposalSource::Authored,
             id: id.clone(),
             agent_id: agent.id.clone(),
@@ -697,9 +746,11 @@ async fn submit_owner_draft(
             failure_code: None,
             failure_rules: Vec::new(),
             scope_encrypted: None,
+            scope_context_version: None,
             scope_digest: None,
             evidence: Vec::new(),
-            body_encrypted: state.encryption_keys.encrypt(&encoded).await?,
+            body_encrypted,
+            body_context_version,
             body_bytes: encoded.len() as i64,
             created_at: now,
             updated_at: now,
@@ -748,25 +799,60 @@ async fn submit_owner_draft(
             return Err(failure.error);
         }
     };
+    // App Edit is independently authored, including when the home's latest
+    // input came from an inbox. Do not select that input as its source.
+    let app_origin = acks::RequestOrigin {
+        initiating_input_id: None,
+        meta_contexts: Vec::new(),
+        invocation_id: None,
+        creation_turn_id: None,
+        requested_turn_id: None,
+        voice_request_id: None,
+        trigger_run_id: None,
+        routing: Some(crate::models::assistant_acknowledgement::CardRouting::NotInvolved),
+    };
     if !chat.guest
         && acks::effective_access_mode(&state.db, chat).await?
             == crate::models::assistant_settings::AccessMode::Autopilot
     {
-        return publish_automatically(state, chat, &agent, &id, &binding, reader).await;
+        return publish_automatically_from_origin(
+            state,
+            chat,
+            &agent,
+            &id,
+            &binding,
+            reader,
+            Some(&app_origin),
+            false,
+        )
+        .await;
     }
-    let card = acks::request(
+    acks::expire(&state.db, &chat.user_id, &chat.conversation_id).await?;
+    let (card, activity) = super::transaction_service::run_db_only(
         &state.db,
-        chat,
-        acks::Request {
-            kind: "action",
-            service: None,
-            tool: Some(review::TOOL),
-            arguments: Some(&binding),
-            summary: CARD_SUMMARY,
-            platform: false,
+        &(&state.db, chat, &binding, &app_origin),
+        |session, &(db, chat, binding, origin)| {
+            Box::pin(acks::request_in_session(
+                db,
+                chat,
+                acks::Request {
+                    kind: "action",
+                    service: None,
+                    tool: Some(review::TOOL),
+                    arguments: Some(binding),
+                    summary: CARD_SUMMARY,
+                    platform: false,
+                },
+                Some(origin),
+                chat.approval_options(),
+                session,
+            ))
         },
     )
     .await?;
+    if let Some(activity) = activity {
+        activity.publish_after_commit();
+    }
     Ok(draft_result(state, &card, &id, &agent.id))
 }
 
@@ -780,6 +866,54 @@ pub async fn publish_automatically(
     binding: &Value,
     reader: &impl super::agent_skill_service::OrnnReader,
 ) -> AppResult<Value> {
+    publish_automatically_from_origin(state, chat, agent, id, binding, reader, None, false).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn renew_automatically(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    original_id: &str,
+    id: &str,
+    binding: &Value,
+    reader: &impl super::agent_skill_service::OrnnReader,
+) -> AppResult<Value> {
+    let origin = claims::prepare_automatic_renewal(&state.db, chat, original_id, binding).await?;
+    let mut source_chat = chat.clone();
+    source_chat.turn_id = origin.creation_turn_id.clone();
+    source_chat.invocation_id = origin.invocation_id.clone();
+    source_chat.automation_work = None;
+    source_chat.execution_task = None;
+    source_chat.report_to = origin
+        .routing
+        .as_ref()
+        .and_then(|routing| routing.report_to())
+        .map(str::to_owned);
+    publish_automatically_from_origin(
+        state,
+        &source_chat,
+        agent,
+        id,
+        binding,
+        reader,
+        Some(&origin),
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn publish_automatically_from_origin(
+    state: &AppState,
+    chat: &ChatAuthority,
+    agent: &crate::models::assistant_agent::AssistantAgent,
+    id: &str,
+    binding: &Value,
+    reader: &impl super::agent_skill_service::OrnnReader,
+    origin: Option<&acks::RequestOrigin>,
+    draft_tool: bool,
+) -> AppResult<Value> {
     let proposal = state
         .db
         .collection::<AssistantAgentLearningProposal>(PROPOSALS_COLLECTION_NAME)
@@ -792,6 +926,31 @@ pub async fn publish_automatically(
         .map(|p| p.name.as_str())
         .unwrap_or("authored skill")
         .to_owned();
+    // A Full-access retry can arrive in a different chat while reusing an
+    // existing draft. The publication caller and the content's source home
+    // are independently captured; receipts follow the original content.
+    let saved = proposal.authoring_origin.as_ref();
+    let saved_origin = saved.map(claims::origin);
+    let receipt_origin = origin.or(saved_origin.as_ref());
+    let mut receipt_chat = chat.clone();
+    if let Some(saved) = saved {
+        if saved.proposal_id != proposal.id {
+            return Err(AppError::Conflict("Skill draft changed".into()));
+        }
+        receipt_chat.conversation_id = saved.conversation_id.clone();
+        receipt_chat.api_key_id = saved.api_key_id.clone();
+    }
+    if let Some(origin) = receipt_origin {
+        receipt_chat.turn_id = origin.creation_turn_id.clone();
+        receipt_chat.invocation_id = origin.invocation_id.clone();
+        receipt_chat.automation_work = None;
+        receipt_chat.execution_task = None;
+        receipt_chat.report_to = origin
+            .routing
+            .as_ref()
+            .and_then(|routing| routing.report_to())
+            .map(str::to_owned);
+    }
     let mut result = Box::pin(review::approve_automatically(
         state,
         chat,
@@ -800,7 +959,14 @@ pub async fn publish_automatically(
         binding,
         &super::agent_skill_service::OwnerPublicationReader(reader),
     ))
-    .await?;
+    .await
+    .map_err(|error| {
+        if draft_tool {
+            error
+        } else {
+            error.with_legacy_skill_registry_error()
+        }
+    })?;
     let url = format!(
         "{}/assistant?agent={}&proposal={}",
         state.config.frontend_url.trim_end_matches('/'),
@@ -815,10 +981,11 @@ pub async fn publish_automatically(
     );
     // Full access bypasses every request to proceed, including reduced-scope
     // consent. Persist only its count; the linked preview decrypts the declaration.
-    if let Some(encrypted) = &proposal.scope_encrypted {
-        let scope: DraftScope =
-            serde_json::from_slice(&state.encryption_keys.decrypt(encrypted).await?)
-                .map_err(|_| AppError::Conflict("Skill draft changed".into()))?;
+    if let Some(bytes) =
+        super::assistant_learning_record::scope(&state.encryption_keys, &proposal).await?
+    {
+        let scope: DraftScope = serde_json::from_slice(&bytes)
+            .map_err(|_| AppError::Conflict("Skill draft changed".into()))?;
         if scope.status == "reduced" {
             summary.push_str(&format!(
                 "; Reduced scope: {} declared omission(s); separate consent bypassed by Full access",
@@ -826,9 +993,9 @@ pub async fn publish_automatically(
             ));
         }
     }
-    acks::record_auto_allowed_with_link(
+    acks::record_auto_allowed_with_origin(
         &state.db,
-        chat,
+        &receipt_chat,
         review::TOOL,
         binding,
         &acks::AutoAllowed {
@@ -838,6 +1005,7 @@ pub async fn publish_automatically(
         },
         &summary,
         Some(&url),
+        receipt_origin,
     )
     .await;
     result["proposal_id"] = id.into();
@@ -937,7 +1105,7 @@ pub async fn raise_review_card(
 
 #[cfg(test)]
 #[path = "assistant_skill_authoring_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 pub(crate) fn credential_shaped(value: &str) -> bool {
     validation::credential_position(value).is_some()

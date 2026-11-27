@@ -28,15 +28,6 @@ it.each(["/cli-auth?port=1e2", "/CLI-AUTH?port=%2080"])(
   },
 );
 
-it("registers the skill gallery as a public route", () => {
-  expect(router.getMatchedRoutes("/testing").foundRoute?.fullPath).toBe("/testing");
-  expect(isPublicPath("/testing")).toBe(true);
-  expect(router.getMatchedRoutes("/testing/welcome").foundRoute?.fullPath).toBe("/testing/welcome");
-  expect(isPublicPath("/testing/welcome")).toBe(true);
-  expect(isPublicPath("/testing/private")).toBe(false);
-  expect(isPublicPath("/assistant")).toBe(false);
-});
-
 it("captures a caught assistant route-loading error and deduplicates its rendering fallback", async () => {
   const route = Object.values(router.routesById).find((r) => r.fullPath === "/assistant");
   if (!route) throw new Error("assistant route is not registered");

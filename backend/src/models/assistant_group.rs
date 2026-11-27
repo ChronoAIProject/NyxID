@@ -17,6 +17,8 @@ pub const FOLLOWER_TTL_HOURS: i64 = 24;
 /// own key, grants and memory.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssistantGroup {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pending_org_use_revisions: std::collections::BTreeMap<String, i64>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -129,6 +131,8 @@ impl GroupFollower {
 /// when an agent hands work to another member.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupRequest {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub org_use_revisions: std::collections::BTreeMap<String, i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_task: Option<super::execution_permission::TaskAdmission>,
     #[serde(default)]
@@ -156,6 +160,8 @@ pub struct AutomationGroupRequest {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AutomationGroupDispatch {
+    #[serde(default)]
+    pub org_use_revision: i64,
     pub id: String,
     pub agent_id: String,
     pub state: String,

@@ -1,3 +1,4 @@
+import { searchFieldContent, searchFieldInput } from "./searchFieldStyles";
 import { useAppLanguage } from "../../i18n/LanguageProvider";
 import { translateApp } from "../../i18n/appTranslation";
 import { useReducedMotion } from "../../lib/accessibility/useReducedMotion";
@@ -243,7 +244,7 @@ export function WorkspaceChatBrowser<T extends { id: string }>({
                       ]}
                     >
                       <Search
-                        size={17}
+                        size={18}
                         color={colors.textMuted}
                         accessible={false}
                       />
@@ -459,25 +460,8 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 20,
   },
-  searchBox: {
-    flexGrow: 1,
-    flexBasis: 180,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    paddingLeft: 12,
-    paddingRight: 4,
-    borderRadius: 10,
-    minHeight: 44,
-  },
-  searchInput: {
-    flex: 1,
-    minWidth: 0,
-    minHeight: 44,
-    paddingVertical: 10,
-    fontFamily: fonts.bodyRegular,
-    fontSize: 16,
-  },
+  searchBox: { ...searchFieldContent, flexGrow: 1, flexBasis: 180, borderRadius: 10 },
+  searchInput: searchFieldInput,
   count: { fontFamily: fonts.body, fontSize: 12, lineHeight: 18 },
   list: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 24, gap: 4 },
   empty: { paddingHorizontal: 12, paddingVertical: 32, gap: 8 },

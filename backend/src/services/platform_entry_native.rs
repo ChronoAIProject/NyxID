@@ -34,6 +34,12 @@ struct AuthenticatedDiscordReply {
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
+pub(super) fn discord_interaction_time(event_id: &str) -> AppResult<chrono::DateTime<chrono::Utc>> {
+    let snowflake = event_id.parse::<u64>().map_err(|_| refused())?;
+    let millis = (snowflake >> 22) as i64 + 1_420_070_400_000;
+    chrono::DateTime::from_timestamp_millis(millis).ok_or_else(refused)
+}
+
 /// Discord requires signature rejection on the HTTP acknowledgement itself.
 /// No model, proof or delivery work runs before this bounded authentication.
 pub(crate) async fn authenticate_discord_ack(
@@ -132,7 +138,6 @@ impl AuthenticatedNativeBatch {
         if expires_at <= now {
             return Err(refused());
         }
-        let digest = super::platform_native_reply_service::binding_digest(receipt)?;
         #[derive(serde::Serialize)]
         struct ReplyMaterial<'a> {
             application_id: &'a str,
@@ -145,20 +150,12 @@ impl AuthenticatedNativeBatch {
             })
             .map_err(|_| refused())?,
         );
-        let ciphertext = keys
-            .encrypt_with_aad(&material, digest.as_bytes())
-            .await
-            .map_err(|_| refused())?;
-        Ok(Some(
-            crate::models::platform_native_reply_handle::NativeReplyHandle {
-                id: uuid::Uuid::new_v4().to_string(),
-                receipt_id: receipt.id.clone(),
-                binding_digest: digest,
-                ciphertext,
-                created_at: now,
-                expires_at,
-            },
-        ))
+        super::platform_native_reply_service::record::seal(
+            keys, receipt, now, expires_at, &material,
+        )
+        .await
+        .map(Some)
+        .map_err(|_| refused())
     }
 }
 
@@ -511,13 +508,7 @@ fn classify(
             }
             // Discord's snowflake binds the interaction creation time, so a
             // valid current signature cannot extend an old follow-up lifetime.
-            let snowflake = fact.event_id.parse::<u64>().map_err(|_| refused())?;
-            let created_ms = i64::try_from(snowflake >> 22)
-                .map_err(|_| refused())?
-                .checked_add(1_420_070_400_000)
-                .ok_or_else(refused)?;
-            let created_at =
-                chrono::DateTime::from_timestamp_millis(created_ms).ok_or_else(refused)?;
+            let created_at = discord_interaction_time(&fact.event_id)?;
             let now = chrono::DateTime::from_timestamp(now_seconds, 0).ok_or_else(refused)?;
             if created_at > now + chrono::Duration::seconds(5)
                 || created_at + chrono::Duration::minutes(14) <= now

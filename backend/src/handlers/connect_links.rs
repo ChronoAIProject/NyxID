@@ -489,7 +489,7 @@ pub async fn complete_connect_link(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<CompleteConnectLinkRequest>,
-) -> AppResult<Json<CompleteConnectLinkResponse>> {
+) -> AppResult<(HeaderMap, Json<CompleteConnectLinkResponse>)> {
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
     if !state
         .connect_link_complete_limiter
@@ -544,7 +544,7 @@ pub async fn complete_connect_link(
             };
             let mut response = completion_response(view, "completed")?;
             response.credential_verification = verification;
-            Ok(Json(response))
+            Ok((HeaderMap::new(), Json(response)))
         }
         connect_link_service::CompleteResult::OauthRequired {
             view,
@@ -578,8 +578,14 @@ pub async fn complete_connect_link(
             )
             .await?;
             let mut response = completion_response(view, "oauth_required")?;
+            let launch_headers = super::user_tokens::connector_launch_headers(
+                &state,
+                &auth_user,
+                &initiate_result.state_id,
+                &initiate_result.launch_proof,
+            )?;
             response.authorization_url = Some(initiate_result.authorization_url);
-            Ok(Json(response))
+            Ok((launch_headers, Json(response)))
         }
         connect_link_service::CompleteResult::DeviceCodeRequired {
             view,
@@ -623,14 +629,17 @@ pub async fn complete_connect_link(
                             &completed.link.id,
                         )
                         .await;
-                        Ok(Json(completion_response(completed, "completed")?))
+                        Ok((
+                            HeaderMap::new(),
+                            Json(completion_response(completed, "completed")?),
+                        ))
                     }
                     "pending" | "slow_down" => {
                         let mut response = completion_response(view, "device_code_required")?;
                         response.device_state = Some(device_state.to_string());
                         response.device_interval = poll.interval;
                         response.device_status = Some(poll.status);
-                        Ok(Json(response))
+                        Ok((HeaderMap::new(), Json(response)))
                     }
                     "expired" | "denied" => Err(AppError::BadRequest(format!(
                         "Provider device authorization {}",
@@ -660,7 +669,7 @@ pub async fn complete_connect_link(
             response.device_state = Some(device.state);
             response.device_interval = Some(device.interval);
             response.device_status = Some("pending".to_string());
-            Ok(Json(response))
+            Ok((HeaderMap::new(), Json(response)))
         }
     }
 }
@@ -1033,6 +1042,7 @@ mod tests {
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
             connection_webhook_key_id: None,
+            secret_context_versions: Default::default(),
             connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
@@ -1080,7 +1090,7 @@ mod tests {
             .next()
             .expect("raw token in connect URL")
             .to_string();
-        let Json(completed) = complete_connect_link(
+        let (_, Json(completed)) = complete_connect_link(
             State(state),
             test_auth_user(&actor_id),
             ConnectInfo("127.0.0.1:43129".parse().unwrap()),
@@ -1244,7 +1254,7 @@ mod tests {
         .await;
         assert!(matches!(denied, Err(AppError::ConnectLinkNotFound)));
 
-        let Json(completed) = complete_connect_link(
+        let (_, Json(completed)) = complete_connect_link(
             State(state.clone()),
             test_auth_user(&actor_id),
             ConnectInfo("127.0.0.1:43125".parse().unwrap()),

@@ -1,8 +1,8 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::IntoResponse,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,8 @@ use crate::handlers::channel_bots::hash_conversation_id;
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, channel_bot_service, channel_relay_service, channel_routing_service, org_service,
+    audit_service, channel_bot_service, channel_relay_service, channel_routing_service,
+    channel_source_result, org_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -32,6 +33,8 @@ pub struct CreateConversationRequest {
     #[serde(default)]
     pub platform: Option<String>,
     pub agent_api_key_id: String,
+    #[serde(default)]
+    pub dedicate_agent_key_for_guest_access: bool,
     #[serde(default)]
     pub platform_conversation_id: Option<String>,
     #[serde(default)]
@@ -53,6 +56,8 @@ pub struct CreateConversationRequest {
 pub struct UpdateConversationRequest {
     #[serde(default)]
     pub agent_api_key_id: Option<String>,
+    #[serde(default)]
+    pub dedicate_agent_key_for_guest_access: Option<bool>,
     #[serde(default)]
     pub default_agent: Option<bool>,
     #[serde(default)]
@@ -88,6 +93,8 @@ pub struct ConversationItem {
     pub agent_api_key_id: String,
     pub default_agent: bool,
     pub allow_agent_initiated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guest_access_state: Option<&'static str>,
     pub capabilities: crate::services::channel_platform::ChannelCapabilities,
     pub is_active: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -219,6 +226,7 @@ fn conversation_to_item(
         agent_api_key_id: conv.agent_api_key_id.clone(),
         default_agent: conv.default_agent,
         allow_agent_initiated: conv.allow_agent_initiated,
+        guest_access_state: None,
         capabilities: crate::services::channel_adapters::conversation_capabilities(
             &conv.platform,
             &conv.platform_conversation_id,
@@ -229,6 +237,22 @@ fn conversation_to_item(
         created_at: conv.created_at.to_rfc3339(),
         updated_at: conv.updated_at.to_rfc3339(),
     }
+}
+
+async fn guest_route_item(
+    state: &AppState,
+    conversation: &crate::models::channel_conversation::ChannelConversation,
+) -> ConversationItem {
+    let mut item = conversation_to_item(state, conversation);
+    if conversation.channel_bot_id.is_some() {
+        item.guest_access_state = Some(
+            match channel_routing_service::guest_access_state(&state.db, conversation).await {
+                Ok(status) => status,
+                Err(_) => "authority_unavailable",
+            },
+        );
+    }
+    item
 }
 
 // ---------------------------------------------------------------------------
@@ -252,7 +276,7 @@ pub async fn create_conversation(
     tele: TelemetryContext,
     Json(body): Json<CreateConversationRequest>,
 ) -> AppResult<(StatusCode, Json<ConversationItem>)> {
-    if body.allow_agent_initiated.is_some() {
+    if body.allow_agent_initiated.is_some() || body.dedicate_agent_key_for_guest_access {
         super::login_client_context::require_first_party_human(&auth_user)?;
     }
     let actor = auth_user.user_id.to_string();
@@ -278,6 +302,11 @@ pub async fn create_conversation(
     let is_device = matches!(body.platform.as_deref(), Some("device"));
 
     let conversation = if is_device {
+        if body.dedicate_agent_key_for_guest_access {
+            return Err(AppError::ValidationError(
+                "Device routes do not use guest access keys".into(),
+            ));
+        }
         create_device_conversation(&state, &owner_id, &body).await?
     } else {
         create_bot_conversation(&state, &owner_id, &body).await?
@@ -304,6 +333,7 @@ pub async fn create_conversation(
             "channel_bot_id": &body.channel_bot_id,
             "platform": &conversation.platform,
             "agent_api_key_id": &body.agent_api_key_id,
+            "dedicate_agent_key_for_guest_access": body.dedicate_agent_key_for_guest_access,
             "owner_user_id": &owner_id,
             "target_org_id": body.target_org_id,
         })),
@@ -311,7 +341,7 @@ pub async fn create_conversation(
 
     Ok((
         StatusCode::CREATED,
-        Json(conversation_to_item(&state, &conversation)),
+        Json(guest_route_item(&state, &conversation).await),
     ))
 }
 
@@ -379,7 +409,7 @@ async fn create_bot_conversation(
         ));
     }
 
-    channel_routing_service::create_conversation(
+    channel_routing_service::create_conversation_with_guest_key(
         &state.db,
         owner_id,
         Some(channel_bot_id),
@@ -390,6 +420,7 @@ async fn create_bot_conversation(
         &body.agent_api_key_id,
         default_agent,
         body.allow_agent_initiated.unwrap_or(false),
+        body.dedicate_agent_key_for_guest_access,
     )
     .await
 }
@@ -466,10 +497,10 @@ pub async fn list_conversations(
         channel_routing_service::list_conversations(&state.db, &owner_id, params.bot_id.as_deref())
             .await?;
     let total = conversations.len() as u64;
-    let items = conversations
-        .iter()
-        .map(|conv| conversation_to_item(&state, conv))
-        .collect();
+    let mut items = Vec::with_capacity(conversations.len());
+    for conversation in &conversations {
+        items.push(guest_route_item(&state, conversation).await);
+    }
     Ok(Json(ConversationListResponse {
         conversations: items,
         total,
@@ -485,7 +516,7 @@ pub async fn get_conversation(
     let actor = auth_user.user_id.to_string();
     let (_owner_id, conversation) =
         resolve_conversation_owner(&state, &actor, &conversation_id, false).await?;
-    Ok(Json(conversation_to_item(&state, &conversation)))
+    Ok(Json(guest_route_item(&state, &conversation).await))
 }
 
 /// PUT /api/v1/channel-conversations/{id}
@@ -495,7 +526,7 @@ pub async fn update_conversation(
     Path(conversation_id): Path<String>,
     Json(body): Json<UpdateConversationRequest>,
 ) -> AppResult<Json<ConversationItem>> {
-    if body.allow_agent_initiated.is_some() {
+    if body.allow_agent_initiated.is_some() || body.dedicate_agent_key_for_guest_access.is_some() {
         super::login_client_context::require_first_party_human(&auth_user)?;
     }
     let actor = auth_user.user_id.to_string();
@@ -514,7 +545,7 @@ pub async fn update_conversation(
         }
     }
 
-    let updated = channel_routing_service::update_conversation(
+    let updated = channel_routing_service::update_conversation_with_guest_key(
         &state.db,
         &conversation_id,
         &owner_id,
@@ -522,6 +553,7 @@ pub async fn update_conversation(
         body.default_agent,
         body.is_active,
         body.allow_agent_initiated,
+        body.dedicate_agent_key_for_guest_access,
     )
     .await?;
 
@@ -532,10 +564,11 @@ pub async fn update_conversation(
         Some(serde_json::json!({
             "conversation_id": &conversation_id,
             "owner_user_id": &owner_id,
+            "dedicate_agent_key_for_guest_access": body.dedicate_agent_key_for_guest_access,
         })),
     );
 
-    Ok(Json(conversation_to_item(&state, &updated)))
+    Ok(Json(guest_route_item(&state, &updated).await))
 }
 
 /// DELETE /api/v1/channel-conversations/{id}
@@ -586,6 +619,7 @@ pub struct ConversationMessagesQuery {
     pub page: u64,
     #[serde(default = "default_per_page")]
     pub per_page: u64,
+    pub source_event_id: Option<String>,
 }
 
 fn default_page() -> u64 {
@@ -630,13 +664,13 @@ pub struct ConversationMessagesResponse {
 
 /// GET /api/v1/channel-conversations/{id}/messages
 ///
-/// List messages for a conversation. Accessible by the bot owner (session auth).
+/// List messages or resolve an exact retained source under the conversation ACL.
 pub async fn list_conversation_messages(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(conversation_id): Path<String>,
     Query(params): Query<ConversationMessagesQuery>,
-) -> AppResult<Json<ConversationMessagesResponse>> {
+) -> AppResult<Response> {
     let actor = auth_user.user_id.to_string();
 
     // Resolve owner access on the conversation itself. Read-level access
@@ -644,6 +678,34 @@ pub async fn list_conversation_messages(
     // message metadata.
     let (owner_id, conversation) =
         resolve_conversation_owner(&state, &actor, &conversation_id, false).await?;
+
+    if let Some(alias) = params.source_event_id {
+        if alias.len() != 64
+            || !alias
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return Err(AppError::ValidationError("Invalid source event ID".into()));
+        }
+        let result = channel_source_result::lookup(&state.db, &conversation, &alias)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Source event not found".into()))?;
+        return Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(ConversationSourceResult {
+                source_event_id: alias,
+                inbound_message_id: result.inbound_message_id,
+                platform_message_id: result.platform_message_id,
+                sender_platform_id: result.sender_platform_id,
+                response_id: result.response_id,
+                turn_status: result.turn_status,
+                reply_status: result.reply_status,
+                reply_evidence: result.reply_evidence,
+                reply_kind: result.reply_kind,
+            }),
+        )
+            .into_response());
+    }
 
     let per_page = params.per_page.clamp(1, 100);
     let (messages, total) = channel_relay_service::list_messages(
@@ -689,8 +751,26 @@ pub async fn list_conversation_messages(
         total,
         page: params.page,
         per_page,
-    }))
+    })
+    .into_response())
 }
+
+#[derive(Serialize)]
+struct ConversationSourceResult {
+    source_event_id: String,
+    inbound_message_id: String,
+    platform_message_id: Option<String>,
+    sender_platform_id: Option<String>,
+    response_id: Option<String>,
+    turn_status: &'static str,
+    reply_status: &'static str,
+    reply_evidence: Option<&'static str>,
+    reply_kind: Option<&'static str>,
+}
+
+#[cfg(test)]
+#[path = "channel_conversation_source_tests.rs"]
+mod source_tests;
 
 #[cfg(test)]
 mod tests {

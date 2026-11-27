@@ -97,7 +97,10 @@ async fn check_cost(enabled: bool, fleet_ready: bool) {
     let _ = server.await;
     state.db.drop().await.unwrap();
     monitor.drop().await.unwrap();
-    assert_eq!((stream_commands, stop_commands), (127, 17));
+    // Provisioning the conversation's Agent Key inserts it through the personal
+    // erasure fence (find + upsert on personal_owner_write_fences, then a
+    // service_accounts lookup), added with #2859.
+    assert_eq!((stream_commands, stop_commands), (130, 17));
 }
 
 #[tokio::test]

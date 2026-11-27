@@ -1,4 +1,5 @@
 import { withAccountPanelSearch, validateSettingsSearch } from "@/lib/assistant/account-panel-search";
+import { appI18n } from "@/i18n";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -25,6 +26,7 @@ const { securityUser, mockDisable, toastSuccess, toastError } = vi.hoisted(() =>
 }));
 vi.mock("sonner", () => ({ toast: { success: toastSuccess, error: toastError } }));
 vi.mock("@/hooks/use-auth", () => ({
+  useLogout: () => ({ mutateAsync: vi.fn() }),
   useUser: () => ({ data: securityUser }),
   useMfaDisable: () => ({ mutateAsync: mockDisable }),
   useRevokeSession: () => ({ mutateAsync: vi.fn() }),
@@ -92,6 +94,13 @@ async function open(
     defaultOptions: { queries: { retry: false, staleTime: Infinity } },
   });
   client.setQueryData(["sessions"], []);
+  client.setQueryData(["notifications", "settings"], {
+    telegram_connected: false, telegram_enabled: false, push_enabled: true,
+    approval_required: true, approval_timeout_secs: 60, grant_expiry_days: 30,
+  });
+  client.setQueryData(["notifications", "devices"], { devices: [] });
+  client.setQueryData(["approvals", "service-configs", "personal"], { configs: [] });
+  client.setQueryData(["user-services"], []);
   render(
     <QueryClientProvider client={client}>
       <TooltipProvider>
@@ -115,7 +124,7 @@ async function saveSettings() {
 describe.each(["/settings", "/assistant"] as const)(
   "SettingsPage at %s",
   (route) => {
-    it("uses sibling groups across all six tabs with no nested cards or groups", async () => {
+    it("uses sibling groups for profile, security, sessions, MCP, display and privacy", async () => {
       await open(route);
       for (const label of ["Profile", "Security", "Sessions", "MCP", "Display", "Privacy"]) {
         await userEvent.click(screen.getByRole("tab", { name: label }));
@@ -170,6 +179,12 @@ describe.each(["/settings", "/assistant"] as const)(
       await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
       const review = screen.getByRole("dialog", { name: "Review changes" });
       expect(review).toHaveTextContent("Name: Reader → Updated Reader");
+      try {
+        await act(() => appI18n.changeLanguage("zh-CN").then(() => undefined));
+        expect(review).toHaveTextContent("名称: Reader → Updated Reader");
+      } finally {
+        await act(() => appI18n.changeLanguage("en").then(() => undefined));
+      }
       expect(review).not.toHaveTextContent(securityUser.email);
       await userEvent.click(within(review).getByRole("button", { name: "Save changes" }));
       await waitFor(() => expect(screen.queryByRole("region", { name: "Unsaved changes" })).not.toBeInTheDocument());
@@ -247,6 +262,14 @@ describe.each(["/settings", "/assistant"] as const)(
       await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
       const review = screen.getByRole("dialog", { name: "Review changes" });
       expect(review).toHaveTextContent("Password: Current password → Changed");
+      try {
+        await act(() => appI18n.changeLanguage("zh-CN").then(() => undefined));
+        expect(review).toHaveTextContent("密码: 当前密码 → 已更改");
+        expect(review).not.toHaveTextContent("Password");
+        expect(review).not.toHaveTextContent("short");
+      } finally {
+        await act(() => appI18n.changeLanguage("en").then(() => undefined));
+      }
       expect(review).not.toHaveTextContent("short");
       await userEvent.click(within(review).getByRole("button", { name: "Save changes" }));
       expect(await screen.findByText("Password must be at least 8 UTF-8 bytes")).toBeVisible();
@@ -624,6 +647,8 @@ describe.each(["/settings", "/assistant"] as const)(
           expect(
             screen.getByRole("link", { name: "Generate terminal login code" }),
           ).toHaveAttribute("href", "/login/code");
+        if (tab === "notifications")
+          expect(await screen.findByRole("switch", { name: "Mentions in groups" })).toBeVisible();
         if (tab === "privacy")
           expect(
             screen.getByRole("link", { name: "privacy policy" }),
