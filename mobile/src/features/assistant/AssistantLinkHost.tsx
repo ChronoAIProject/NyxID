@@ -46,21 +46,27 @@ import {
 export function AssistantLinkHost({
   scope,
   children,
+  onConnected,
 }: {
   scope: string;
   children: ReactNode;
+  onConnected?: () => void;
 }) {
   useAppLanguage();
   return (
-    <ScopedAssistantLinkHost scope={scope}>{children}</ScopedAssistantLinkHost>
+    <ScopedAssistantLinkHost scope={scope} onConnected={onConnected}>
+      {children}
+    </ScopedAssistantLinkHost>
   );
 }
 export function ScopedAssistantLinkHost({
   scope,
   children,
+  onConnected,
 }: {
   scope: string;
   children: ReactNode;
+  onConnected?: () => void;
 }) {
   useAppLanguage();
   const navigation = useNavigation();
@@ -255,6 +261,7 @@ export function ScopedAssistantLinkHost({
                   token={target.token}
                   active={availability.active}
                   onBusy={setBusy}
+                  onComplete={onConnected}
                 />
               ) : target ? (
                 <Card>

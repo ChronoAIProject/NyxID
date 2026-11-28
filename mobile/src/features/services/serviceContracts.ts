@@ -87,6 +87,8 @@ export const catalogEntrySchema = z.object({
   api_key_url: z.string().nullish(),
   documentation_url: z.string().nullish(),
   platform_key: z.object({ available: z.boolean() }).optional(),
+  // Plugins groups a provider by the presence of its catalog inference metadata.
+  inference: z.object({}).nullish(),
   token_exchange_credential_fields: z
     .array(
       z.object({

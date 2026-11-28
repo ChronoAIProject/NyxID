@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { translateApp } from "../i18n/appTranslation";
 import { LanguageSettingsScreen } from "../features/account/LanguageSettingsScreen";
 import { QuickAccessSettingsScreen } from "../features/quickAccess/QuickAccessSettingsScreen";
@@ -300,11 +301,19 @@ function AssistantRoute({ route }: WorkspaceScreenProps<"Assistant">) {
 
 function PluginsRoute({ route }: WorkspaceScreenProps<"Plugins">) {
   useAppLanguage();
+  const queryClient = useQueryClient();
   return (
-    <PluginsScreen
-      initialTab={route.params?.tab}
-      agentId={route.params?.agentId}
-    />
+    <AssistantLinkHost
+      scope={route.key}
+      onConnected={() => {
+        void queryClient.invalidateQueries({ queryKey: ["workspace", "services"] });
+      }}
+    >
+      <PluginsScreen
+        initialTab={route.params?.tab}
+        agentId={route.params?.agentId}
+      />
+    </AssistantLinkHost>
   );
 }
 

@@ -28,7 +28,10 @@ function elements(root: Element): Element[] {
     root.props.accessory,
   ];
   if (root.type === "SectionList") {
-    children.push(root.props.ListHeaderComponent);
+    children.push(
+      root.props.ListHeaderComponent,
+      root.props.ListFooterComponent,
+    );
     if (!root.props.sections.length)
       children.push(root.props.ListEmptyComponent);
     for (const section of root.props.sections)
@@ -196,7 +199,33 @@ function setup({
     setOptions: record("setOptions"),
   };
   const openChat = record("openChat");
+  const links = {
+    create: async (...args: unknown[]) => {
+      record("createLink")(...args);
+      return { connect_url: "https://web.test/connect/nyx_clk_demo" };
+    },
+  };
   const mocks: Record<string, unknown> = {
+    "expo-web-browser": {
+      openBrowserAsync: async (href: string) => record("openBrowser")(href),
+    },
+    "../assistant/AssistantLinkContext": {
+      AssistantLinkContext: {
+        value: (href: string) => {
+          record("openLink")(href);
+          return true;
+        },
+      },
+    },
+    "../../lib/env": {
+      firstPartyFrontendUrls: () => ["https://web.test"],
+      getFrontendUrl: () => "https://web.test",
+    },
+    "../../lib/auth/authEpoch": { getAuthEpoch: () => 1 },
+    "../../lib/api/connectLinksApi": { connectLinksApi: links },
+    "../../components/workspace/WorkspaceSelectionField": {
+      WorkspaceSelectionSheet: "WorkspaceSelectionSheet",
+    },
     "../../i18n/LanguageProvider": {
       useAppLanguage: () => {
         const renderedLanguage = currentLanguage;
@@ -246,7 +275,10 @@ function setup({
       },
     },
     "lucide-react-native": Object.fromEntries(
-      ["RefreshCw", "Search", "X"].map((name) => [name, name]),
+      ["ArrowRight", "Plus", "RefreshCw", "Search", "X"].map((name) => [
+        name,
+        name,
+      ]),
     ),
     "../../components/settings/SettingsList": {
       SettingsGroup: "SettingsGroup",
@@ -274,6 +306,7 @@ function setup({
     "../../theme/designTokens": designTokens,
     "../../theme/ThemeContext": { useTheme: () => ({ colors: {} }) },
     "../services/serviceContracts": {
+      validateBrowserUrl: (url: string) => url,
       connectionOwner: (connection: ServiceConnection) =>
         connection.credential_source?.type === "org" ? "Work" : "Personal",
     },
@@ -308,19 +341,24 @@ function setup({
       harness.render();
     },
     calls,
+    links,
     states,
     queries,
     all,
     back: () => back,
     list: () => find((item) => item.type === "SectionList").props,
     added: () =>
-      find((item) => item.type === "SectionList").props.sections.find(
-        (section: { key: string }) => section.key === "added",
-      ).data,
+      find((item) => item.type === "SectionList")
+        .props.sections.find(
+          (section: { key: string }) => section.key === "added",
+        )
+        ?.data.flat() ?? [],
     discover: () =>
-      find((item) => item.type === "SectionList").props.sections.find(
-        (section: { key: string }) => section.key === "discover",
-      ).data,
+      find((item) => item.type === "SectionList")
+        .props.sections.find(
+          (section: { key: string }) => section.key === "discover",
+        )
+        ?.data.flat() ?? [],
     texts: () => all().map(text).join("\n"),
     control: (label: string) =>
       find(
@@ -365,7 +403,7 @@ test("automatic credentials cannot enter the mobile management picker or counts"
   });
   try {
     assert.equal(env.added().length, 1);
-    assert.match(env.texts(), /Added · 1/);
+    assert.match(env.texts(), /Connected[\s\S]*Disabled · 1 connection/);
     assert.deepEqual(Array.from(env.added()[0].manageKeyIds), [dnsPersonal.id]);
     assert.equal(env.added()[0].disabled, true);
     env.connector("service:api-cloudflare");
@@ -384,7 +422,7 @@ test("automatic credentials cannot enter the mobile management picker or counts"
   }
 });
 
-test("Connectors is one list: Added first, then Discover with only available services, and no nested selector", () => {
+test("Connectors presents Connected, Models and Browse in one searchable catalog", () => {
   const env = setup();
   try {
     assert.equal(env.list().accessibilityLabel, "Connectors");
@@ -397,15 +435,16 @@ test("Connectors is one list: Added first, then Discover with only available ser
     );
     assert.deepEqual(names(env.added()), ["GitHub", "Cloudflare"]);
     assert.deepEqual(names(env.discover()), ["Slack"]);
-    assert.match(env.texts(), /Added · 2[\s\S]*Discover · 1/);
-    for (const title of ["Added · 2", "Discover · 1"]) {
-      const header = env.all().find((node) => node.props.accessibilityRole === "header" && text(node) === title);
-      assert.ok(header);
-      const style = Object.assign({}, ...[header.props.style].flat(Infinity));
-      assert.equal(style.textTransform, "uppercase");
-      assert.equal(style.fontSize, 12);
-      assert.equal(style.fontWeight, "500");
-      assert.equal(style.letterSpacing, 1.5);
+    assert.match(env.texts(), /Connected[\s\S]*Models[\s\S]*Browse/);
+    for (const title of ["Connected", "Models", "Browse"]) {
+      assert.ok(
+        env
+          .all()
+          .some(
+            (node) =>
+              node.props.accessibilityRole === "header" && text(node) === title,
+          ),
+      );
     }
     assert.deepEqual(
       env
@@ -426,33 +465,35 @@ test("Connectors is one list: Added first, then Discover with only available ser
 test("one search filters both Added and Discover and explains an empty section", () => {
   const env = setup();
   try {
-    env.control("Search connectors").props.onChangeText("DNS");
+    env.control("Search plugins").props.onChangeText("DNS");
     assert.deepEqual(names(env.added()), ["Cloudflare"]);
     assert.deepEqual(names(env.discover()), []);
-    assert.match(env.texts(), /No available connectors match this search\./);
-    env.control("Search connectors").props.onChangeText("slack");
+    assert.doesNotMatch(env.texts(), /Browse/);
+    env.control("Search plugins").props.onChangeText("slack");
     assert.deepEqual(names(env.added()), []);
     assert.deepEqual(names(env.discover()), ["Slack"]);
-    assert.match(env.texts(), /No added connectors match this search\./);
+    assert.doesNotMatch(env.texts(), /No connected services yet/);
+    env.control("Search plugins").props.onChangeText("unfindable");
+    assert.match(env.texts(), /No plugins match this search/);
     env.control("Clear connector search").props.onPress();
-    assert.equal(env.control("Search connectors").props.value, "");
+    assert.equal(env.control("Search plugins").props.value, "");
     assert.equal(env.added().length, 2);
   } finally {
     env.unmount();
   }
 });
 
-test("single connections, grouped connections, and catalog services retain their distinct routes", () => {
+test("single connections, grouped connections, and catalog services retain their distinct routes", async () => {
   const env = setup();
   try {
-    env.control("Manage GitHub, Enabled").props.onPress();
+    env.control("Manage GitHub, Connected · 1 connection").props.onPress();
     const single = env.calls.filter((call) => call.method === "push").at(-1)!;
     assert.equal(single.args[0], "ServiceSetup");
     assert.equal(
       (single.args[1] as { connectionId: string }).connectionId,
       personal.id,
     );
-    env.control("Manage Cloudflare, Enabled").props.onPress();
+    env.control("Manage Cloudflare, Connected · 2 connections").props.onPress();
     env.harness.flush();
     const groupPage = env.calls
       .filter((call) => call.method === "push")
@@ -470,15 +511,12 @@ test("single connections, grouped connections, and catalog services retain their
     env.connector();
     env.harness.flush();
     assert.equal(env.back().defaultRole, "menu");
-    env.control("Connect Slack, OAuth, available to add").props.onPress();
-    const available = env.calls
-      .filter((call) => call.method === "push")
-      .at(-1)!;
-    assert.equal(available.args[0], "ServiceSetup");
-    assert.equal(
-      (available.args[1] as { catalogSlug: string }).catalogSlug,
-      slack.slug,
-    );
+    env.control("Connect Slack, OAuth").props.onPress();
+    await env.harness.settle();
+    const create = env.calls.find((call) => call.method === "createLink")!;
+    assert.equal(create.args[0], slack.slug);
+    assert.equal((create.args[3] as { personal: boolean }).personal, false);
+    assert.ok(env.calls.some((call) => call.method === "openLink"));
   } finally {
     env.unmount();
   }
@@ -488,10 +526,7 @@ test("an empty Added library points at Discover without automatically connecting
   const env = setup({ connections: [] });
   try {
     assert.equal(env.added().length, 0);
-    assert.match(
-      env.texts(),
-      /No connectors added yet\. Add one from Discover below\./,
-    );
+    assert.match(env.texts(), /No connected services yet\./);
     assert.equal(env.discover().length, 3);
     assert.equal(
       env.calls.some((call) => call.method === "push"),
@@ -534,11 +569,68 @@ test("a failed connections read fails closed with absent or stale cached connect
   }
 });
 
+test("pending or failed keys keep the independent model provider picker available", () => {
+  for (const isError of [false, true]) {
+    const env = setup({
+      catalog: [{ ...slack, slug: "chrono-llm", name: "Demo model" }],
+    });
+    try {
+      Object.assign(env.states.plugins, {
+        data: undefined,
+        isPending: !isError,
+        isError,
+        error: isError ? new Error("Connections unavailable") : undefined,
+      });
+      env.harness.render();
+      const card = env.control("Add a model connection");
+      assert.equal(card.props.disabled, false);
+      card.props.onPress();
+      const sheet = env
+        .all()
+        .find((node) => node.type === "WorkspaceSelectionSheet");
+      assert.equal(sheet?.props.disabled, false);
+      assert.equal(sheet?.props.options[0].label, "Demo model");
+    } finally {
+      env.unmount();
+    }
+  }
+});
+
+test("a rejected connection link shows a visible error and the same card can retry", async () => {
+  const env = setup();
+  try {
+    const create = env.links.create;
+    env.links.create = async () => ({
+      connect_url: "https://other.test/connect/nyx_clk_demo",
+    });
+    env.control("Connect Slack, OAuth").props.onPress();
+    await env.harness.settle();
+    assert.equal(
+      env.all().find((node) => node.type === "Notice")?.props.message,
+      "Could not create connection link",
+    );
+    assert.equal(
+      env.calls.some((call) => call.method === "openLink"),
+      false,
+    );
+    env.links.create = create;
+    env.control("Connect Slack, OAuth").props.onPress();
+    await env.harness.settle();
+    assert.equal(
+      env.all().some((node) => node.type === "Notice"),
+      false,
+    );
+    assert.ok(env.calls.some((call) => call.method === "openLink"));
+  } finally {
+    env.unmount();
+  }
+});
+
 test("disabled services remain manageable in Added and never appear in Discover", () => {
   const env = setup({ connections: [{ ...personal, is_active: false }] });
   try {
     assert.equal(env.added()[0].status, "Disabled");
-    env.control("Manage GitHub, Disabled").props.onPress();
+    env.control("Manage GitHub, Disabled · 1 connection").props.onPress();
     assert.equal(env.calls.filter((call) => call.method === "push").length, 1);
     assert.equal(
       env.discover().some((item: { name: string }) => item.name === "GitHub"),
@@ -577,28 +669,88 @@ test("Skills switches to the agent-scoped manager and connector queries pause wh
   }
 });
 
-test("connector rows tag their state or sign-in method beside the name, never as a wrapping value", () => {
+test("cards show connector identity, state, count, catalog description and visible action", () => {
   const env = setup({
     connections: [personal, { ...dnsPersonal, status: "failed" }],
   });
   try {
-    const rows = () => env.all().filter((node) => node.type === "SettingsRow");
+    assert.ok(env.control("Manage GitHub, Connected · 1 connection"));
+    assert.ok(env.control("Manage Cloudflare, Needs attention · 1 connection"));
+    assert.ok(env.control("Connect Slack, OAuth"));
+    assert.match(env.texts(), /Issues and source code/);
+    assert.match(env.texts(), /Manage/);
+  } finally {
+    env.unmount();
+  }
+});
+
+test("model providers and organization connections start personal setup and custom endpoints enter advanced setup", async () => {
+  const model = { ...slack, slug: "chrono-llm", name: "Demo models" };
+  const env = setup({ catalog: [cloudflare, model], connections: [dnsWork] });
+  try {
+    env.control("Connect your own Cloudflare").props.onPress();
+    await env.harness.settle();
+    env.control("Search plugins").props.onChangeText(model.name);
+    env.control("Add a model connection").props.onPress();
+    const sheet = env
+      .all()
+      .find((node) => node.type === "WorkspaceSelectionSheet")!;
     assert.deepEqual(
-      rows().map((row) => [
-        row.props.label,
-        row.props.badge,
-        row.props.badgeTone,
-        row.props.value,
+      Array.from(sheet.props.options, (option: any) => option.label),
+      ["Demo models", "Custom OpenAI-compatible endpoint"],
+    );
+    sheet.props.onChange([model.slug]);
+    await env.harness.settle();
+    const requests = env.calls.filter((call) => call.method === "createLink");
+    assert.deepEqual(
+      requests.map((call) => [
+        call.args[0],
+        (call.args[3] as { personal: boolean }).personal,
       ]),
       [
-        ["GitHub", "Enabled", "default", undefined],
-        ["Cloudflare", "Needs attention", "danger", undefined],
-        ["Slack", "OAuth", "default", undefined],
+        [cloudflare.slug, true],
+        [model.slug, true],
       ],
     );
-    assert.equal(rows()[0]!.props.detailLines, 2);
+    sheet.props.onChange([sheet.props.options[1].value]);
+    await env.harness.settle();
     assert.equal(
-      env.calls.some((call) => call.method === "push"),
+      env.calls.find((call) => call.method === "openBrowser")?.args[0],
+      "https://web.test/keys?tab=services&action=add-service",
+    );
+  } finally {
+    env.unmount();
+  }
+});
+
+test("SSH uses advanced setup with its catalog slug and stale hosted link responses cannot open after leaving", async () => {
+  const env = setup({
+    catalog: [
+      slack,
+      { ...github, service_type: "ssh", slug: "shell", name: "Demo SSH" },
+    ],
+    connections: [],
+  });
+  try {
+    env.control("Advanced setup Demo SSH, SSH").props.onPress();
+    await env.harness.settle();
+    assert.equal(
+      env.calls.find((call) => call.method === "openBrowser")?.args[0],
+      "https://web.test/keys?tab=services&action=add-service&slug=shell",
+    );
+    let finish!: () => void;
+    env.links.create = async () => {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return { connect_url: "https://web.test/connect/nyx_clk_demo" };
+    };
+    env.control("Connect Slack, OAuth").props.onPress();
+    env.focused(false);
+    finish();
+    await env.harness.settle();
+    assert.equal(
+      env.calls.some((call) => call.method === "openLink"),
       false,
     );
   } finally {
@@ -707,7 +859,7 @@ test("offline connectors retain cached rows even when the missing catalog remain
       "Personal GitHub",
       "Personal Cloudflare",
     ]);
-    assert.ok(env.control("Search connectors"));
+    assert.ok(env.control("Search plugins"));
     assert.equal(
       env.all().some((row) => row.type === "SkeletonRows"),
       false,

@@ -10,11 +10,21 @@ import { requestJson } from "./http";
 
 export const connectLinksApi = {
   /** Mint a hosted connect link for a catalog service on the signed-in account. */
-  async create(serviceSlug: string, signal?: AbortSignal, scopes?: readonly string[]) {
+  async create(
+    serviceSlug: string,
+    signal?: AbortSignal,
+    scopes?: readonly string[],
+    marketplace?: { personal: boolean },
+  ) {
     return createConnectLinkResponseSchema.parse(
       await requestJson("/connect-links", {
         method: "POST",
-        body: { service_slug: serviceSlug, requested_by: "NyxBot chat", ...(scopes?.length ? { scopes } : {}) },
+        body: {
+          service_slug: serviceSlug,
+          ...(!marketplace ? { requested_by: "NyxBot chat" } : {}),
+          ...(marketplace?.personal ? { use_platform_key: false, assistant_personal: true } : {}),
+          ...(scopes?.length ? { scopes } : {}),
+        },
         signal,
       }),
     );
