@@ -15,6 +15,10 @@ For deployment-specific guidance on these variables, see [DEPLOYMENT.md](DEPLOYM
 | `NYXID_DEPLOYMENT_REVISION` | Exact release revision admitted by the enrolled key lifecycle. Enrolled startup and one-shot commands refuse when it is absent or differs from the recorded scope. | `release-2026-11-26` |
 | `ENCRYPTION_KEY` | 32-byte hex AES-256 key (64 hex chars); required for `local`, optional legacy/local fallback with KMS | Output of `openssl rand -hex 32` |
 
+## Initial admin setup
+
+`NYXID_ADMIN_SETUP_SECRET` enables one-time HTTP setup on an empty database. Generate a random value with `openssl rand -hex 32` and send it as the bearer token to `POST /api/v1/auth/setup`. An unset or blank value disables this endpoint in every environment. Remove the value from configuration after setup.
+
 ## Encryption
 
 | Variable | Default | Description |

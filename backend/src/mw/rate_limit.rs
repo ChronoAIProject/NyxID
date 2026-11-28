@@ -6,7 +6,6 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use mongodb::{Database, bson::doc};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, OnceLock};
@@ -1011,13 +1010,8 @@ pub async fn enforce_platform_user_limit(
     Ok(())
 }
 
-/// Per-device-code rate limiter keyed by Ed25519 public key bytes.
-///
-/// The device authorization endpoints need a much stricter bucket than the
-/// general API limiter because both user-code approval and poll verification
-/// are security-sensitive. This bucket is intentionally keyed by the factory
-/// public key rather than `device_code`, so leaking an opaque device code does
-/// not give an attacker a fresh rate-limit identity.
+/// Verified device sessions share a public-key bucket. Before the first
+/// successful signed poll, each server-issued device code has its own bucket.
 #[derive(Clone)]
 pub struct PerPubkeyRateLimiter {
     db: Option<Database>,
@@ -1798,14 +1792,11 @@ pub async fn device_code_rate_limit_middleware(
         .await
         .map_err(|_| AppError::BadRequest("Unable to read request body".to_string()))?;
 
-    if let Some(pubkey) = extract_device_pubkey_for_rate_limit(limiters.db.as_ref(), &bytes).await
-        && !limiters.per_pubkey.check_shared(&pubkey).await?
+    if parts.uri.path() == "/api/v1/devices/code/poll"
+        && let Some(bucket) = device_poll_bucket(limiters.db.as_ref(), &bytes).await?
+        && !limiters.per_pubkey.check_shared(&bucket).await?
     {
-        tracing::warn!(
-            path = %crate::mw::request_trace::route_label(&parts.extensions),
-            device_pubkey = %hex::encode(pubkey),
-            "Device-code per-pubkey rate limit exceeded"
-        );
+        tracing::warn!(path = %crate::mw::request_trace::route_label(&parts.extensions), "Device-code poll rate limit exceeded");
         return Err(AppError::DeviceCodeRateLimited);
     }
 
@@ -1841,32 +1832,31 @@ async fn enforce_device_code_ip_rate_limit(
     Ok(Some(client_ip))
 }
 
-async fn extract_device_pubkey_for_rate_limit(
+async fn device_poll_bucket(
     db: Option<&Database>,
     bytes: &[u8],
-) -> Option<[u8; 32]> {
-    if let Some(pubkey) = extract_device_pubkey_from_json(bytes) {
-        return Some(pubkey);
+) -> Result<Option<[u8; 32]>, AppError> {
+    use sha2::{Digest, Sha256};
+    #[derive(serde::Deserialize)]
+    struct PollKey {
+        device_code: String,
     }
-
-    let db = db?;
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let raw_device_code = value.get("device_code")?.as_str()?;
+    let (Some(db), Ok(input)) = (db, serde_json::from_slice::<PollKey>(bytes)) else {
+        return Ok(None);
+    };
     let row = db
         .collection::<DeviceCode>(DEVICE_CODES)
-        .find_one(doc! {
-            "device_code_hash": crate::crypto::token::hash_token(raw_device_code),
-        })
-        .await
-        .ok()??;
-    row.device_pubkey.try_into().ok()
-}
-
-fn extract_device_pubkey_from_json(bytes: &[u8]) -> Option<[u8; 32]> {
-    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
-    let raw = value.get("device_pubkey")?.as_str()?;
-    let decoded = BASE64_STANDARD.decode(raw).ok()?;
-    decoded.try_into().ok()
+        .find_one(
+            doc! {"device_code_hash": crate::crypto::token::hash_token(input.device_code.trim())},
+        )
+        .await?;
+    Ok(row.and_then(|row| {
+        if row.last_poll_timestamp.is_some() {
+            row.device_pubkey.try_into().ok()
+        } else {
+            Some(Sha256::digest(format!("nyxid:device-code:bucket:v1\0{}", row.id)).into())
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -2412,36 +2402,6 @@ mod tests {
     }
 
     #[test]
-    fn extracts_device_pubkey_from_base64_json() {
-        let pubkey = [9u8; 32];
-        let body = serde_json::json!({
-            "device_pubkey": BASE64_STANDARD.encode(pubkey),
-        });
-
-        assert_eq!(
-            extract_device_pubkey_from_json(&serde_json::to_vec(&body).unwrap()),
-            Some(pubkey)
-        );
-    }
-
-    #[test]
-    fn rejects_missing_or_wrong_length_device_pubkey_for_rate_limit_keying() {
-        let missing = serde_json::json!({ "hw_id": "esp32" });
-        let short = serde_json::json!({
-            "device_pubkey": BASE64_STANDARD.encode([1u8; 31]),
-        });
-
-        assert_eq!(
-            extract_device_pubkey_from_json(&serde_json::to_vec(&missing).unwrap()),
-            None
-        );
-        assert_eq!(
-            extract_device_pubkey_from_json(&serde_json::to_vec(&short).unwrap()),
-            None
-        );
-    }
-
-    #[test]
     fn per_channel_limiter_allows_up_to_burst() {
         let limiter = PerChannelEventLimiter::new(100, 3);
         assert!(limiter.check("conv-a"));
@@ -2861,7 +2821,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_code_middleware_rate_limits_db_derived_pubkey_when_body_omits_pubkey() {
+    async fn device_code_middleware_keys_on_issued_session_until_signature_proof() {
         let Some((db, device_code, signing_key)) =
             crate::services::device_code_service::tests_support::setup_pending_row(
                 "rate_limit_db_pubkey",
@@ -2883,6 +2843,29 @@ mod tests {
             signing_key.verifying_key().to_bytes().to_vec()
         );
 
+        let json = serde_json::to_vec(&serde_json::json!({"device_code": device_code.device_code, "device_pubkey": "ignored"})).unwrap();
+        let pubkey = signing_key.verifying_key().to_bytes();
+        assert_ne!(
+            device_poll_bucket(Some(&db), &json).await.unwrap(),
+            Some(pubkey)
+        );
+        assert_eq!(
+            device_poll_bucket(Some(&db), br#"{"device_pubkey":"ignored"}"#)
+                .await
+                .unwrap(),
+            None
+        );
+        db.collection::<DeviceCode>(DEVICE_CODES)
+            .update_one(
+                doc! {"_id": stored.id},
+                doc! {"$set":{"last_poll_timestamp": 1_i64}},
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            device_poll_bucket(Some(&db), &json).await.unwrap(),
+            Some(pubkey)
+        );
         let limiters = DeviceCodeRateLimiters {
             per_ip: Arc::new(PerIpRateLimiter::new(100, 60)),
             per_pubkey: Arc::new(PerPubkeyRateLimiter::new_with_rate(0.0, 1)),

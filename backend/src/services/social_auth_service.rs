@@ -874,6 +874,7 @@ mod tests {
             crash_reporting: Default::default(),
             port: 3001,
             shutdown_drain_timeout_secs: crate::config::DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_SECS,
+            admin_setup_secret_hash: None,
             auth_device_eight_char_codes: false,
             resource_request_proof_enabled: false,
             base_url: "http://localhost:3001".to_string(),

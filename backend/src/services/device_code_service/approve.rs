@@ -30,18 +30,37 @@ use super::{
 /// preserve the anti-shoulder-surfing value of 30-second rotation.
 pub async fn approve(
     db: &Database,
+    hmac_key: &[u8],
     encryption_keys: &EncryptionKeys,
     actor_user_id: &str,
     input: DeviceCodeApproveInput,
 ) -> AppResult<DeviceCodeApprove> {
     let now = Utc::now();
     let collection = db.collection::<DeviceCode>(DEVICE_CODES);
-    let source = db
-        .collection::<bson::Document>(DEVICE_CODES)
-        .find_one(doc! { "user_code_history.0.code": &input.user_code })
-        .await?
-        .ok_or(AppError::DeviceUserCodeInvalid)?;
-
+    use futures::TryStreamExt;
+    let documents = db.collection::<bson::Document>(DEVICE_CODES);
+    let lookup = doc! { "$or": [
+        {"user_code_history.0.code": super::rotation::lookup_hmac(hmac_key, &input.user_code), "user_code_history.0.display_nonce": {"$exists": true}},
+        {"user_code_history.0.code": &input.user_code, "user_code_history.0.display_nonce": {"$exists": false}},
+    ] };
+    let mut pending = lookup.clone();
+    pending.extend(
+        doc! {"status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
+    );
+    let mut matches = documents.find(pending).limit(2).await?;
+    let source = match matches.try_next().await? {
+        Some(row) if matches.try_next().await?.is_none() => row,
+        Some(_) => return Err(AppError::DeviceUserCodeInvalid),
+        None => {
+            // Retain the protocol's expired and already-delivered errors.
+            let old = collection
+                .find_one(lookup)
+                .await?
+                .ok_or(AppError::DeviceUserCodeInvalid)?;
+            ensure_row_approvable(&collection, &old, now).await?;
+            return Err(AppError::DeviceUserCodeInvalid);
+        }
+    };
     let mut approval_filter = crate::services::record_storage::source_predicate(
         &source,
         &["device_code_hash", "device_pubkey"],
@@ -161,6 +180,7 @@ pub async fn approve(
         update.insert("$unset", doc! {super::record::VERSION: ""});
     }
     approval_filter.extend(doc! {
+        "user_code_history.0.code": &row.user_code_history[0].code,
         "status": "pending",
         "expires_at": {"$gt": bson::DateTime::from_chrono(now)},
     });
@@ -322,6 +342,7 @@ mod tests {
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::services::device_code_service::DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD;
+    use crate::services::device_code_service::tests_support::hmac_key;
     use crate::services::device_code_service::tests_support::{setup_pending_row, sign_poll};
     use crate::services::device_code_service::{DeviceCodePoll, DeviceCodePollInput, poll};
     use crate::test_utils::{connect_test_database, test_encryption_keys, test_user};
@@ -847,10 +868,12 @@ mod tests {
         let current_code = "AAAA-BBBB-CCCC".to_string();
         let history = vec![
             UserCodeGen {
+                display_nonce: None,
                 code: current_code,
                 generated_at: now,
             },
             UserCodeGen {
+                display_nonce: None,
                 code: response.user_code.clone(),
                 generated_at: now - Duration::seconds(31),
             },
@@ -1068,12 +1091,12 @@ mod tests {
         input: DeviceCodeApproveInput,
     ) -> AppResult<DeviceCodeApprove> {
         let encryption_keys = test_encryption_keys();
-        approve(db, &encryption_keys, actor_user_id, input).await
+        approve(db, &hmac_key(), &encryption_keys, actor_user_id, input).await
     }
 
     async fn poll_for_test(db: &Database, input: DeviceCodePollInput) -> AppResult<DeviceCodePoll> {
         let encryption_keys = test_encryption_keys();
-        poll(db, &encryption_keys, input).await
+        poll(db, &hmac_key(), &encryption_keys, input).await
     }
 
     async fn insert_user_service(db: &Database, user_id: &str, slug: &str) -> UserService {

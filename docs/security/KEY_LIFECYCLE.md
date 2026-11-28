@@ -244,6 +244,72 @@ not occur. A restore can roll back the data and the evidence together. For an
 announced restore or import, a full admin advances the restore epoch, starts a
 fresh census and records restore-continuity evidence for the new scope.
 
+## Evaluating retirement
+
+Use a first-party human session or access token. Full admins and operators can
+read `GET /api/v1/admin/key-lifecycle/retirement`. Pass three query parameters.
+`generation` identifies the published census, `retiring` names A and `survivor`
+names the enrolled primary B. Use the opaque key references from lifecycle
+status. The evaluation covers the B/A to B-only transition. An additional
+slot, a different deployment or an incompatible reader policy blocks it.
+
+Read `as_of` as the MongoDB cluster time of the observed data. Evaluation
+authenticates the private manifest and linked receipts with B, recounts the
+report and checks source rows and their companions using B alone. The
+established Oracle outer v2 contract remains readable. The lifecycle revision,
+report revision and blockers accompany the result. An unreadable partition,
+unresolved row, legacy-reader dependency or positive A bucket requires a fresh
+valid proof. The four current administrator assertions must follow the baseline
+revision and cover the enrolled keys and restore epoch. Review open inventory,
+independent HMAC adoption, migration checkpoints, the native parent index and
+the readiness of every live writer generation. A plain stored header requires
+the legacy reader. A missing parent or a bad authentication tag leaves the row
+unresolved. The release checks the deployed logical key. Provider-internal key
+versions require provider-specific evidence.
+
+`POST /api/v1/admin/key-lifecycle/retirement` requires a full admin. This
+release answers a valid request with HTTP 409 and `isolated_load_gate_unmet`
+before it creates a decision marker or grants authority. The GET response
+always includes that blocker and `certification_enabled: false`. Keep both keys
+configured. NyxID cannot independently prove an unannounced restore or import.
+
+The transition request binds `target`, `report_revision` and the usual
+`recording` fields, including the initial `expected_revision`. The first
+`expected_step_revision` equals that initial revision. A retry keeps the same
+request ID, actor, target and step revision. Each committed step returns the
+revision for the next advance. The coordinator witnesses the decision marker,
+approval receipt, fresh consumption marker and consumption receipt in order on
+one change stream. At the first cut it checks every retained row with B. At
+later markers it reads the intervening journal pages, checks changed source
+rows and rescans families whose companion or clock inputs changed. Large dirty
+sets trigger a full rescan. A missing page, lost lease, expired proof or changed
+registry blocks the transition. An evidence or scope edit invalidates an
+unconsumed decision.
+Publication binds the consumed configuration to the deployment, restore epoch
+and registry. Survivor rejoin checks the durable publication even after census
+partitions expire. The published scope contains only B. A rollback binary must
+authenticate that publication, implement its registry and prove the exact
+surviving primary under strict reader and writer policy. Its independent HMAC
+file must match the database pin before initialization starts. Record withdrawal of
+pre-admission images and their live database sessions in the evidence register.
+Recovery that requires A uses an isolated restore epoch.
+
+Enrolled processes reserve initialization on the lifecycle singleton after
+read-only bootstrap admission and before the first startup write. The reservation
+covers index preparation and migration work through the last startup indexes,
+or through completion of a database-backed one-shot. A concurrent initialization
+invalidates a pending decision. A lost process leaves an open blocker. Withdraw
+the process and its database access before advancing the restore epoch and
+taking a fresh baseline.
+
+An independent database principal can execute DDL after the last change-stream
+marker without writing the lifecycle revision. The stream proves catalog
+continuity only through its witnessed cut. The database-credential inventory
+must account for access to collection and index commands as well as data
+writes. An unknown principal or an open privileged maintenance operation leaves
+the deployment ineligible. NyxID cannot independently establish that a database
+administrator has withdrawn an out-of-process privilege.
+
 ## Process admission and survivor-preserving writers
 
 Every server start and every database-using one-shot command performs a
@@ -258,7 +324,10 @@ principal on the same database and `NYXID_DEPLOYMENT_REVISION` to the recorded
 release label. Both principals need to inspect the replica-set and lifecycle
 collection identities. The bootstrap principal reads the proofs at the observed
 revision. The guard checks the database identity, restore blocker, release,
-contextual writer policy and ring before initialization can write.
+contextual writer policy and ring before initialization can write. For a
+published survivor the bootstrap identity also reads the pin in
+`security_hmac_keysets`, the ready marker in `platform_entry_migrations`
+and the index definitions on `platform_native_entry_receipts`.
 
 The writer inventory covers contextual record adapters, exact-source migration
 rewraps, native entry receipt and handle transactions, bulk restore or import,

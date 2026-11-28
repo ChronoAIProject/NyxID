@@ -20,6 +20,8 @@ pub enum DeviceCodeStatus {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserCodeGen {
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_nonce: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub generated_at: DateTime<Utc>,
 }
@@ -139,6 +141,7 @@ mod tests {
             hw_id: "esp32-p4-lab".to_string(),
             suggested_label: Some("Lab Camera".to_string()),
             user_code_history: vec![UserCodeGen {
+                display_nonce: None,
                 code: "ABCD-EFGH-JKLM".to_string(),
                 generated_at: now,
             }],

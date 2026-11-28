@@ -93,6 +93,8 @@ ABCDEFGHJKLMNPQRSTUVWXYZ23456789
 
 It is grouped as `XXXX-XXXX-XXXX`, excludes ambiguous `0/O/1/I`, and rotates every 30 seconds while pending. NyxID retains the newest 4 generations for device display continuity and audit context, but approval accepts only the newest generation to preserve the anti-shoulder-surfing property of rotation.
 
+Each replica advertises `devices:user-code-hmac-v1`. Until the readiness service records fleet support, new requests retain the existing storage format so earlier replicas can approve and poll them. After activation, each new generation stores a domain-separated HMAC of the display code and a random nonce. A signed poll supplies the device code needed to reproduce the display from the nonce. Approval hashes the normalized input and also accepts existing plaintext generations for their 15-minute binding window. Old binaries must not rejoin after activation while hashed enrollments are pending. A device can request a fresh enrollment after rollback.
+
 ### Signed polling
 
 Each poll request includes:
@@ -114,10 +116,10 @@ NyxID accepts timestamps within plus or minus 10 seconds and rejects exact times
 Device-code endpoints use the device-code rate-limit layer:
 
 - 5 requests per minute per source IP
-- 5 requests per minute per device public key where the public key is known
-- 3 consecutive invalid poll signatures locks the row for 1 hour
+- 5 polls per minute per server-issued enrollment until its first successful signed poll, then per proven public key
+- 3 consecutive invalid poll signatures lock the enrollment for 1 hour. Only failures on previously proven enrollments count toward a shared public-key lock.
 
-Behind a reverse proxy, set `TRUSTED_PROXY_IPS` to the proxy IPs that strip or overwrite client-supplied `X-Forwarded-For` and `X-Real-IP` headers. NyxID only uses forwarded headers for rate-limit keying when the TCP peer is in that allowlist; otherwise it keys on the peer IP, and if no peer is available it skips the IP bucket and relies on the per-public-key bucket.
+Behind a reverse proxy, set `TRUSTED_PROXY_IPS` to the proxy IPs that strip or overwrite client-supplied `X-Forwarded-For` and `X-Real-IP` headers. NyxID only uses forwarded headers for rate-limit keying when the TCP peer is in that allowlist; otherwise it keys on the peer IP, and if no peer is available it skips the IP bucket. Polls for an issued device code still use the enrollment or proven-key bucket.
 
 Lockout triggers device failure notifications. Bind success triggers a notification to the approving user.
 

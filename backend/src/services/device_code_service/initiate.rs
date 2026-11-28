@@ -4,9 +4,7 @@ use uuid::Uuid;
 
 use crate::crypto::device_code::{generate_device_code, generate_user_code};
 use crate::errors::{AppError, AppResult};
-use crate::models::device_code::{
-    COLLECTION_NAME as DEVICE_CODES, DeviceCode, DeviceCodeStatus, UserCodeGen,
-};
+use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode, DeviceCodeStatus};
 
 use super::{
     DEVICE_CODE_EXPIRES_IN_SECS, DEVICE_CODE_POLL_INTERVAL_SECS,
@@ -16,13 +14,21 @@ use super::{
 
 pub async fn initiate(
     db: &Database,
+    hmac_key: &[u8],
     input: DeviceCodeInitiateInput,
 ) -> AppResult<DeviceCodeInitiate> {
-    initiate_with_user_code_generator(db, input, generate_user_code).await
+    use crate::models::security_capability_activation::{COLLECTION_NAME, RECORD_KIND};
+    let active = crate::services::transaction_service::durable_database(db)
+        .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .find_one(mongodb::bson::doc! {"record_kind": RECORD_KIND, "capability": super::USER_CODE_READINESS})
+        .projection(mongodb::bson::doc! {"_id": 1}).await?.is_some();
+    initiate_with_user_code_generator(db, active.then_some(hmac_key), input, generate_user_code)
+        .await
 }
 
 async fn initiate_with_user_code_generator<F>(
     db: &Database,
+    hmac_key: Option<&[u8]>,
     input: DeviceCodeInitiateInput,
     mut user_code_generator: F,
 ) -> AppResult<DeviceCodeInitiate>
@@ -43,7 +49,12 @@ where
     for attempt in 0..=DEVICE_CODE_USER_CODE_WRITE_RETRIES {
         let now = Utc::now();
         let (device_code, device_code_hash) = generate_device_code();
-        let user_code = user_code_generator();
+        use super::rotation::CodeFormat;
+        let format = hmac_key.map_or(CodeFormat::Legacy, |key| CodeFormat::Hmac {
+            key,
+            device_code: &device_code,
+        });
+        let (user_code, generation) = format.generate(now, &mut user_code_generator);
         let (verification_uri, verification_uri_complete) =
             build_verification_uris(&frontend_url, &user_code)?;
 
@@ -53,10 +64,7 @@ where
             device_pubkey: device_pubkey.to_vec(),
             hw_id: hw_id.clone(),
             suggested_label: suggested_label.clone(),
-            user_code_history: vec![UserCodeGen {
-                code: user_code.clone(),
-                generated_at: now,
-            }],
+            user_code_history: vec![generation],
             status: DeviceCodeStatus::Pending,
             approved_by_user_id: None,
             approved_org_id: None,
@@ -123,6 +131,7 @@ mod tests {
         COLLECTION_NAME as DEVICE_PUBKEY_LOCKOUTS, DevicePubkeyLockout,
     };
     use crate::services::device_code_service::DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD;
+    use crate::services::device_code_service::tests_support::hmac_key;
     use crate::test_utils::connect_test_database;
     use mongodb::bson::doc;
     use sha2::{Digest, Sha256};
@@ -150,6 +159,7 @@ mod tests {
 
         let response = initiate(
             &db,
+            &hmac_key(),
             DeviceCodeInitiateInput {
                 device_pubkey: [11u8; 32],
                 hw_id: "esp32-p4-cam-1".to_string(),
@@ -194,6 +204,7 @@ mod tests {
 
         initiate_with_user_code_generator(
             &db,
+            None,
             DeviceCodeInitiateInput {
                 device_pubkey: [21u8; 32],
                 hw_id: "esp32-existing".to_string(),
@@ -208,6 +219,7 @@ mod tests {
         let mut calls = 0;
         let response = initiate_with_user_code_generator(
             &db,
+            None,
             DeviceCodeInitiateInput {
                 device_pubkey: [22u8; 32],
                 hw_id: "esp32-retry".to_string(),
@@ -259,6 +271,7 @@ mod tests {
 
         let error = initiate(
             &db,
+            &hmac_key(),
             DeviceCodeInitiateInput {
                 device_pubkey: pubkey,
                 hw_id: "esp32-locked".to_string(),

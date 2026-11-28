@@ -23,6 +23,29 @@ pub(super) struct Slot {
 }
 
 impl Slot {
+    pub(super) fn primary(&self) -> bool {
+        self.role == "primary"
+    }
+
+    pub(super) fn pinned(&self, config: &AppConfig) -> bool {
+        if self.kind != "aws-kms" {
+            return true;
+        }
+        // Enrollment resolves aliases for possession checks. Live AWS writers
+        // pass the configured selector to KMS on every wrap.
+        let selector = if self.primary() {
+            &config.aws_kms_key_arn
+        } else {
+            &config.aws_kms_key_arn_previous
+        };
+        selector.is_some() && *selector == self.resource
+    }
+
+    pub(super) fn strict_reader(mut self) -> EncryptionKeys {
+        self.keys.set_allow_legacy_record_reads(false);
+        self.keys
+    }
+
     fn new(
         role: &'static str,
         kind: &'static str,

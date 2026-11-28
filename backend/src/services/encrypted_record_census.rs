@@ -436,6 +436,8 @@ impl Census<'_> {
         },vec![doc! {"$set":{"claim":&claim,"lease_until":{"$add":["$$NOW",30_000]},"save_idle":{"$gte":[{"$subtract":["$$NOW","$checkpointed_at"]},60_000]}}}])
             .return_document(ReturnDocument::After).await?;
         let claimed = claimed.ok_or_else(|| refused("Census capture lease changed"))?;
+        #[cfg(test)]
+        crate::services::durable_wake_tests::after("capture_claimed").await;
         let next = self
             .collect_page(
                 old.token,
@@ -490,6 +492,8 @@ impl Census<'_> {
             }
         }
         transaction_service::commit(&mut tx).await?;
+        #[cfg(test)]
+        crate::services::durable_wake_tests::after("capture_checkpoint").await;
         Ok(batch.cut)
     }
 

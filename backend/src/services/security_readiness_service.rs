@@ -16,6 +16,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Runtime {
+    pub(crate) retirement_cohort: Option<String>,
     turn_restart_ready_until: Arc<Mutex<[Option<Instant>; 3]>>,
     pub identity: ReplicaIdentity,
     pub config: RolloutConfig,
@@ -36,6 +37,7 @@ impl Runtime {
         platform_policy_required: bool,
     ) -> Self {
         Self {
+            retirement_cohort: None,
             turn_restart_ready_until: Default::default(),
             identity,
             config,
@@ -140,6 +142,7 @@ use crate::{
 
 pub const PLATFORM_POLICY: &str = "platform:operation-policy";
 pub const CAPABILITIES: &[&str] = &[
+    super::device_code_service::USER_CODE_READINESS,
     super::billing::schedules::recipients::READINESS,
     super::assistant_wake_service::READINESS,
     TURN_HANDOFF,
@@ -285,6 +288,9 @@ pub async fn observe_with_automation(
     if automation_enabled {
         capabilities.push(AUTOMATION_COMPLETION);
     }
+    if local.retirement_cohort.is_some() {
+        capabilities.push(super::key_lifecycle::retirement::CAPABILITY);
+    }
     let observed = observe_for(db, local, &capabilities).await;
     let started = Instant::now();
     let mut deadlines = [None; 3];
@@ -371,7 +377,11 @@ async fn publish_observation(
     // Registration precedes serving. Preserve the database-time lower bound
     // on this generation's admission lifetime across every heartbeat. Old
     // generations without it remain unprovable for legacy usage recovery.
-    let fields = bson::to_document(&row).map_err(|_| AppError::SecurityReadinessUnavailable)?;
+    let mut fields = bson::to_document(&row).map_err(|_| AppError::SecurityReadinessUnavailable)?;
+    if let Some(cohort) = &local.retirement_cohort {
+        fields.insert("retirement_cohort", cohort);
+    }
+
     let mut set = bson::Document::new();
     for (key, value) in fields {
         if key != "_id" && key != "observed_at" {
@@ -949,7 +959,11 @@ async fn serving_report_for(
 }
 
 fn known_capability(capability: &str) -> bool {
-    CAPABILITIES.contains(&capability) || capability == AUTOMATION_COMPLETION
+    CAPABILITIES.contains(&capability)
+        || matches!(
+            capability,
+            AUTOMATION_COMPLETION | super::key_lifecycle::retirement::CAPABILITY
+        )
 }
 
 /// Execution requires a known capability; unknown contracts fail closed.
@@ -1075,6 +1089,15 @@ pub(crate) async fn ready_automation_test_replica(db: &Database) {
 }
 
 #[cfg(test)]
+pub(crate) async fn observe_retirement_test_replica(db: &Database, cohort: String) {
+    ready_test_replica(db).await;
+    stop_test_replica(db).await;
+    let mut local = runtime().unwrap().clone();
+    local.retirement_cohort = Some(cohort);
+    observe_with_automation(db, &local, false).await.unwrap();
+}
+
+#[cfg(test)]
 pub(crate) async fn controlled_ready_test_replica(db: &Database) -> tokio::task::JoinHandle<()> {
     ready_test_replica_inner(db, false, None).await
 }
@@ -1141,6 +1164,7 @@ async fn ready_test_replica_inner(
 ) -> tokio::task::JoinHandle<()> {
     stop_test_replica(db).await;
     let local = Runtime {
+        retirement_cohort: None,
         turn_restart_ready_until: Default::default(),
         identity: ReplicaIdentity {
             instance_name: "test-backend".into(),

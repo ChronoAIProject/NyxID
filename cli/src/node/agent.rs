@@ -1597,7 +1597,7 @@ fn format_secret_value(secret: String, secret_format: CredentialSecretFormat) ->
     }
 }
 
-fn prompt_secret(prompt: &str) -> Result<String> {
+pub(crate) fn prompt_secret(prompt: &str) -> Result<String> {
     let value = rpassword::prompt_password(format!("{prompt}: "))
         .map_err(|e| super::error::Error::Validation(format!("Failed to read secret: {e}")))?;
     read_secret_value(Some(value), prompt)

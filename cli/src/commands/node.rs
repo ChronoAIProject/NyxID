@@ -9,6 +9,32 @@ use crate::cli::{NodeCommands, NodeDaemonCommands, NodeDockerCommands, OutputFor
 use crate::node::machine::setup::{Separation, offer_shared_legacy};
 use crate::org_resolver::resolve_org_id;
 
+fn rekey_secret(
+    flag: &str,
+    literal: Option<String>,
+    file: Option<std::path::PathBuf>,
+    variable: Option<String>,
+) -> Result<zeroize::Zeroizing<String>> {
+    let value = if let Some(value) = literal {
+        eprintln!(
+            "Warning: --{flag} can expose the value in command history and process listings. Use --{flag}-file, --{flag}-env, or the hidden prompt."
+        );
+        value
+    } else if let Some(path) = file {
+        let mut value =
+            std::fs::read_to_string(path).with_context(|| format!("Cannot read --{flag}-file"))?;
+        value.truncate(value.trim_end_matches(['\r', '\n']).len());
+        value
+    } else if let Some(name) = variable {
+        std::env::var(name).map_err(|_| anyhow::anyhow!("Cannot read --{flag}-env variable"))?
+    } else {
+        crate::node::agent::prompt_secret(&format!("Replacement {flag}"))?
+    };
+    let value = zeroize::Zeroizing::new(value);
+    anyhow::ensure!(!value.trim().is_empty(), "Replacement {flag} is empty");
+    Ok(value)
+}
+
 pub async fn run(command: NodeCommands) -> Result<()> {
     match command {
         NodeCommands::ManagedPrepare(args) => crate::node::managed_runtime::prepare(args).await,
@@ -471,7 +497,7 @@ pub async fn run(command: NodeCommands) -> Result<()> {
                     eprintln!("New Token: {token}  (save this -- shown only once)");
                     eprintln!();
                     eprintln!("Update the node agent configuration:");
-                    eprintln!("  nyxid node rekey --auth-token {token} --signing-secret <HEX>");
+                    eprintln!("  nyxid node rekey");
                 }
             }
             Ok(())
@@ -518,13 +544,25 @@ pub async fn run(command: NodeCommands) -> Result<()> {
 
         NodeCommands::Rekey {
             auth_token,
+            auth_token_file,
+            auth_token_env,
             signing_secret,
+            signing_secret_file,
+            signing_secret_env,
             config,
             profile,
         } => {
             let effective_config = resolve_effective_config(config.as_deref(), profile.as_deref())?;
             crate::node::managed_runtime::require_self_hosted_mutation(
                 &crate::node::config::resolve_config_dir(effective_config.as_deref()),
+            )?;
+            let auth_token =
+                rekey_secret("auth-token", auth_token, auth_token_file, auth_token_env)?;
+            let signing_secret = rekey_secret(
+                "signing-secret",
+                signing_secret,
+                signing_secret_file,
+                signing_secret_env,
             )?;
             crate::node::agent::cmd_rekey(&auth_token, &signing_secret, effective_config.as_deref())
                 .map_err(anyhow::Error::from)
