@@ -108,9 +108,15 @@ async fn environmental_blockers_are_independent_of_release_certification() {
             .unwrap();
         assert!(reasons(&db, &f).await.contains("restore_required"));
         assert!(
-            step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease::Rehearsal)
-                .await
-                .is_err()
+            step(
+                &db,
+                &f.config,
+                &f.actor,
+                &f.request,
+                &CertifiedRelease::Rehearsal
+            )
+            .await
+            .is_err()
         );
     })
     .await;
@@ -171,11 +177,16 @@ async fn old_binary_cannot_admit_the_survivor_before_or_after_publication() {
         };
         probe(&db, false, false).await;
         for _ in 0..5 {
-            f.request.expected_step_revision =
-                step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease::Rehearsal)
-                    .await
-                    .unwrap()
-                    .revision;
+            f.request.expected_step_revision = step(
+                &db,
+                &f.config,
+                &f.actor,
+                &f.request,
+                &CertifiedRelease::Rehearsal,
+            )
+            .await
+            .unwrap()
+            .revision;
         }
         probe(&db, false, false).await;
         probe(&db, true, false).await;
@@ -314,9 +325,15 @@ async fn dated_nonzero_retiring_bucket_blocks_an_otherwise_current_decision() {
         f.request.expected_step_revision = revision;
         f.request.report_revision = result.report_revision.unwrap();
         assert!(
-            step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease::Rehearsal)
-                .await
-                .is_err()
+            step(
+                &db,
+                &f.config,
+                &f.actor,
+                &f.request,
+                &CertifiedRelease::Rehearsal
+            )
+            .await
+            .is_err()
         );
     })
     .await;

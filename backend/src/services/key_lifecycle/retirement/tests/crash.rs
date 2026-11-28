@@ -25,9 +25,15 @@ async fn coordinator_child() {
     let db = connect_transaction_test_database("rk_crash").await;
     let mut f = fixture(&db).await;
     for _ in 0..stage {
-        let result = step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease::Rehearsal)
-            .await
-            .unwrap();
+        let result = step(
+            &db,
+            &f.config,
+            &f.actor,
+            &f.request,
+            &CertifiedRelease::Rehearsal,
+        )
+        .await
+        .unwrap();
         f.request.expected_step_revision = result.revision;
     }
     let info = json!({"database":db.name(),"actor":f.actor.user_id,"hmac":f.config.hmac_keyset_path,"request":&f.request});
@@ -38,7 +44,13 @@ async fn coordinator_child() {
     .unwrap();
     resume_after(
         site,
-        step(&db, &f.config, &f.actor, &f.request, &CertifiedRelease::Rehearsal),
+        step(
+            &db,
+            &f.config,
+            &f.actor,
+            &f.request,
+            &CertifiedRelease::Rehearsal,
+        ),
         async {
             std::fs::write(directory.join("boundary"), site).unwrap();
             std::future::pending::<()>().await;

@@ -654,3 +654,6 @@ impl CensusRing {
         proof::verify(&self.deployment, &proof::slots(config).await?, &self.proofs).await
     }
 }
+
+#[cfg(test)]
+mod rollout_peer;
