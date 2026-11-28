@@ -1253,6 +1253,8 @@ impl Permit {
                 authoring: std::sync::atomic::AtomicBool::new(false),
                 generated_correlation: OnceLock::new(),
                 supervisor: OnceLock::new(),
+                supervisor_policy: OnceLock::new(),
+                optional_supervisor_write: std::sync::atomic::AtomicBool::new(false),
                 resume: None,
                 drain: OnceLock::new(),
                 authenticated_key: OnceLock::new(),
