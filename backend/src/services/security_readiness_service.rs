@@ -16,6 +16,7 @@ use std::{
 
 #[derive(Clone, Debug)]
 pub struct Runtime {
+    pub(crate) retirement_cohort: Option<String>,
     turn_restart_ready_until: Arc<Mutex<[Option<Instant>; 3]>>,
     pub identity: ReplicaIdentity,
     pub config: RolloutConfig,
@@ -36,6 +37,7 @@ impl Runtime {
         platform_policy_required: bool,
     ) -> Self {
         Self {
+            retirement_cohort: None,
             turn_restart_ready_until: Default::default(),
             identity,
             config,
@@ -285,6 +287,9 @@ pub async fn observe_with_automation(
     if automation_enabled {
         capabilities.push(AUTOMATION_COMPLETION);
     }
+    if local.retirement_cohort.is_some() {
+        capabilities.push(super::key_lifecycle::retirement::CAPABILITY);
+    }
     let observed = observe_for(db, local, &capabilities).await;
     let started = Instant::now();
     let mut deadlines = [None; 3];
@@ -371,7 +376,11 @@ async fn publish_observation(
     // Registration precedes serving. Preserve the database-time lower bound
     // on this generation's admission lifetime across every heartbeat. Old
     // generations without it remain unprovable for legacy usage recovery.
-    let fields = bson::to_document(&row).map_err(|_| AppError::SecurityReadinessUnavailable)?;
+    let mut fields = bson::to_document(&row).map_err(|_| AppError::SecurityReadinessUnavailable)?;
+    if let Some(cohort) = &local.retirement_cohort {
+        fields.insert("retirement_cohort", cohort);
+    }
+
     let mut set = bson::Document::new();
     for (key, value) in fields {
         if key != "_id" && key != "observed_at" {
@@ -949,7 +958,11 @@ async fn serving_report_for(
 }
 
 fn known_capability(capability: &str) -> bool {
-    CAPABILITIES.contains(&capability) || capability == AUTOMATION_COMPLETION
+    CAPABILITIES.contains(&capability)
+        || matches!(
+            capability,
+            AUTOMATION_COMPLETION | super::key_lifecycle::retirement::CAPABILITY
+        )
 }
 
 /// Execution requires a known capability; unknown contracts fail closed.
@@ -1141,6 +1154,7 @@ async fn ready_test_replica_inner(
 ) -> tokio::task::JoinHandle<()> {
     stop_test_replica(db).await;
     let local = Runtime {
+        retirement_cohort: None,
         turn_restart_ready_until: Default::default(),
         identity: ReplicaIdentity {
             instance_name: "test-backend".into(),

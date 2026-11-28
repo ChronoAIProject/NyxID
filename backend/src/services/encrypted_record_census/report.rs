@@ -21,11 +21,12 @@ use store::Store;
 
 mod counts;
 mod read;
+pub(in crate::services) mod retirement;
 mod scan;
 mod store;
 pub(crate) use read::{Page, Query, Status, families, findings, status};
 
-pub(super) const REPORTS: &str = "encrypted_record_census_reports";
+pub(in crate::services) const REPORTS: &str = "encrypted_record_census_reports";
 const ROWS: usize = 16;
 const DIRTY_LIMIT: usize = 32;
 
@@ -52,6 +53,8 @@ struct Walk {
 
 #[derive(Serialize, Deserialize)]
 struct Checkpoint {
+    #[serde(default)]
+    baseline_lifecycle_revision: Option<i64>,
     revision: i64,
     expires_at: bson::DateTime,
     scope: Scope,
@@ -151,7 +154,13 @@ pub(crate) async fn start(
     };
     let mut seed = vec![0; 32];
     rand::thread_rng().fill_bytes(&mut seed);
+    let baseline_lifecycle_revision = if ring.revision > 0 {
+        Some(key_lifecycle::retirement::revision_at(&db, start.time).await?)
+    } else {
+        None
+    };
     let state = Checkpoint {
+        baseline_lifecycle_revision,
         revision: 0,
         expires_at: *head.get_datetime("expires_at").map_err(|_| malformed())?,
         ring,
