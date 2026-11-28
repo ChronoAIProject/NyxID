@@ -316,7 +316,7 @@ impl EncryptionKeys {
     /// after use.
     ///
     /// Output: `0x02 || kek_id(1) || wrapped_dek_len(2 BE) || wrapped_dek(N) || data_nonce(12) || data_ciphertext || data_tag(16)`
-    pub async fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, AppError> {
+    pub(super) async fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>, AppError> {
         // Generate random 32-byte DEK
         let mut dek = Zeroizing::new([0u8; 32]);
         rand::thread_rng().fill_bytes(dek.as_mut());
@@ -362,7 +362,7 @@ impl EncryptionKeys {
     /// Used by the OAuth broker to bind each `refresh_token_encrypted` blob
     /// to its owning `binding_hash`, preventing ciphertext-substitution
     /// attacks from a database-write adversary.
-    pub async fn encrypt_with_aad(
+    pub(super) async fn encrypt_with_aad(
         &self,
         plaintext: &[u8],
         aad: &[u8],
@@ -418,14 +418,14 @@ impl EncryptionKeys {
     /// 3. Try v0 (raw `nonce || ciphertext || tag`) with current key
     /// 4. Try v0 with previous key
     /// 5. Return error if all fail
-    pub async fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
+    pub(super) async fn decrypt(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
         self.decrypt_with_aad(ciphertext, &[]).await
     }
 
     /// Like `decrypt` but verifies the ciphertext was produced with the same
     /// `aad`. Returns an error if AAD doesn't match (indistinguishable from
     /// any other tag failure to the caller -- by design).
-    pub async fn decrypt_with_aad(
+    pub(super) async fn decrypt_with_aad(
         &self,
         ciphertext: &[u8],
         aad: &[u8],
@@ -606,14 +606,18 @@ impl EncryptionKeys {
     /// Authenticates the data before returning, including when already wrapped
     /// with the current KEK. For an AAD-bound legacy field use
     /// `rewrap_with_aad` with its original binding.
-    pub async fn rewrap(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "Exercised by the unbound v2 codec tests")
+    )]
+    async fn rewrap(&self, ciphertext: &[u8]) -> Result<Vec<u8>, AppError> {
         self.rewrap_with_aad(ciphertext, &[]).await
     }
 
     /// Rewrap a legacy v2 envelope after authenticating its original AAD.
     /// This method does not change the field's binding contract or convert it
     /// to a contextual envelope; readiness requires successful authentication.
-    pub async fn rewrap_with_aad(
+    pub(super) async fn rewrap_with_aad(
         &self,
         ciphertext: &[u8],
         aad: &[u8],
@@ -773,7 +777,7 @@ fn decrypt_raw_with_aad(
 ///
 /// Returns: `nonce || ciphertext || tag` (all concatenated).
 #[cfg(test)]
-pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
+fn encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
     if key.len() != 32 {
         return Err(AppError::Internal(
             "AES key must be exactly 32 bytes".to_string(),
@@ -803,7 +807,7 @@ pub fn encrypt(plaintext: &[u8], key: &[u8]) -> Result<Vec<u8>, AppError> {
 ///
 /// Expects the input to be `nonce (12 bytes) || ciphertext || tag`.
 #[cfg(test)]
-pub fn decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
+fn decrypt(ciphertext: &[u8], key: &[u8]) -> Result<Zeroizing<Vec<u8>>, AppError> {
     if key.len() != 32 {
         return Err(AppError::Internal(
             "AES key must be exactly 32 bytes".to_string(),
