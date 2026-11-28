@@ -9,6 +9,9 @@ use mongodb::options::ReturnDocument;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::services::mcp_session_storage as storage;
+use crate::services::service_history::transaction::run_send;
+
 use crate::models::mcp_notification::{
     COLLECTION_NAME as MCP_NOTIFICATION_COLLECTION, McpSessionNotification,
 };
@@ -46,6 +49,12 @@ pub struct McpSessionRecord {
     pub notification_sequence: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::models::bson_datetime::optional"
+    )]
+    pub absolute_expires_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub last_active_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -187,30 +196,14 @@ impl McpSessionStore {
 
         let mut records = records;
         records.sort_by_key(|record| (record.created_at, record.id.clone()));
-        let mut orphaned_ids = Vec::new();
         let mut loaded = 0;
         for record in records {
-            // Only fallback sessions depend on a live login; the rest must
-            // present a live bearer anyway, so a restart keeps them.
             let login_alive =
                 !record.session_fallback_allowed || active_users.contains(&record.user_id);
-            if login_alive && self.ensure_recovered_slot(&record).await? {
-                self.hydrate(record);
+            if let Some(current) = storage::recover(db, &record.id, login_alive).await? {
+                self.hydrate(current);
                 loaded += 1;
-            } else {
-                orphaned_ids.push(record.id);
             }
-        }
-        if !orphaned_ids.is_empty() {
-            db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                .delete_many(doc! { "_id": { "$in": &orphaned_ids } })
-                .await?;
-            db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
-                .delete_many(doc! { "session_id": { "$in": &orphaned_ids } })
-                .await?;
-            db.collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
-                .delete_many(doc! { "session_id": { "$in": &orphaned_ids } })
-                .await?;
         }
         Ok(loaded)
     }
@@ -278,59 +271,55 @@ impl McpSessionStore {
             return Ok(true);
         };
 
-        let mut transaction = db.client().start_session().await?;
-        transaction.start_transaction().await?;
-        let updated = db
-            .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-            .find_one_and_update(
-                doc! {
-                    "_id": session_id,
-                    "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
-                },
-                doc! { "$set": {
-                    "last_active_at": bson::DateTime::from_chrono(now),
-                    "expires_at": bson::DateTime::from_chrono(expires_at),
-                }},
-            )
-            .return_document(ReturnDocument::After)
-            .session(&mut transaction)
-            .await?;
-        let Some(record) = updated else {
-            transaction.abort_transaction().await?;
-            self.evict(session_id);
-            return Ok(false);
-        };
-        db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
-            .update_one(
-                doc! { "session_id": session_id },
-                doc! { "$set": { "expires_at": bson::DateTime::from_chrono(expires_at) } },
-            )
-            .session(&mut transaction)
-            .await?;
-        transaction.commit_transaction().await?;
-        self.hydrate(record);
-        Ok(true)
+        let context = (db, session_id);
+        let record = run_send(db, &context, |tx, &(db, wire)| Box::pin(async move {
+            let Some(record) = storage::live_record(db, wire, Some(tx)).await? else {
+                return Ok(None);
+            };
+            let now = Utc::now();
+            let expires_at = now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64);
+            let expires_at = record.absolute_expires_at.map_or(expires_at, |end| end.min(expires_at));
+            let Some(updated) = db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                .find_one_and_update(
+                    doc! {"_id": &record.id, "expires_at": {"$gt": bson::DateTime::from_chrono(now)}},
+                    doc! {"$set": {"last_active_at": bson::DateTime::from_chrono(now),
+                                   "expires_at": bson::DateTime::from_chrono(expires_at)}},
+                ).return_document(ReturnDocument::After).session(&mut **tx).await? else {
+                    return Ok(None);
+                };
+            db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
+                .update_one(doc! {"session_id": &record.id},
+                    doc! {"$set": {"expires_at": bson::DateTime::from_chrono(expires_at)}})
+                .session(&mut **tx).await?;
+            Ok(Some(updated))
+        })).await?;
+        Ok(record.is_some_and(|record| {
+            self.hydrate(record);
+            true
+        }))
     }
 
     pub async fn remove(&self, session_id: &str) -> Result<(), mongodb::error::Error> {
         if let Some(db) = &self.db {
-            let mut transaction = db.client().start_session().await?;
-            transaction.start_transaction().await?;
-            db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                .delete_one(doc! { "_id": session_id })
-                .session(&mut transaction)
-                .await?;
-            db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
-                .delete_many(doc! { "session_id": session_id })
-                .session(&mut transaction)
-                .await?;
-            db.collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
-                .delete_many(doc! { "session_id": session_id })
-                .session(&mut transaction)
-                .await?;
-            transaction.commit_transaction().await?;
+            let context = (db, storage::keys_for_wire(session_id));
+            run_send(db, &context, |tx, (db, keys)| {
+                Box::pin(async move {
+                    db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                        .delete_many(doc! {"_id": {"$in": keys}})
+                        .session(&mut **tx)
+                        .await?;
+                    for name in [MCP_SESSION_SLOT_COLLECTION, MCP_NOTIFICATION_COLLECTION] {
+                        db.collection::<bson::Document>(name)
+                            .delete_many(doc! {"session_id": {"$in": keys}})
+                            .session(&mut **tx)
+                            .await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await?;
         }
-        self.evict(session_id);
+        self.evict_wire(session_id);
         Ok(())
     }
 
@@ -346,33 +335,37 @@ impl McpSessionStore {
         user_id: &str,
     ) -> Result<(), mongodb::error::Error> {
         if let Some(db) = &self.db {
-            let mut transaction = db.client().start_session().await?;
-            transaction.start_transaction().await?;
-            let mut cursor = db
-                .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                .find(doc! { "user_id": user_id, "session_fallback_allowed": true })
-                .session(&mut transaction)
-                .await?;
-            let ids: Vec<String> = cursor
-                .stream(&mut transaction)
-                .map_ok(|record| record.id)
-                .try_collect()
-                .await?;
-            if !ids.is_empty() {
-                db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                    .delete_many(doc! { "_id": { "$in": &ids } })
-                    .session(&mut transaction)
-                    .await?;
-                db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
-                    .delete_many(doc! { "session_id": { "$in": &ids } })
-                    .session(&mut transaction)
-                    .await?;
-                db.collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
-                    .delete_many(doc! { "session_id": { "$in": &ids } })
-                    .session(&mut transaction)
-                    .await?;
-            }
-            transaction.commit_transaction().await?;
+            let context = (db, user_id);
+            let ids = run_send(db, &context, |tx, &(db, user_id)| {
+                Box::pin(async move {
+                    let mut cursor = db
+                        .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                        .find(doc! { "user_id": user_id, "session_fallback_allowed": true })
+                        .session(&mut **tx)
+                        .await?;
+                    let ids: Vec<String> = cursor
+                        .stream(tx)
+                        .map_ok(|record| record.id)
+                        .try_collect()
+                        .await?;
+                    if !ids.is_empty() {
+                        db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                            .delete_many(doc! { "_id": { "$in": &ids } })
+                            .session(&mut **tx)
+                            .await?;
+                        db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
+                            .delete_many(doc! { "session_id": { "$in": &ids } })
+                            .session(&mut **tx)
+                            .await?;
+                        db.collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
+                            .delete_many(doc! { "session_id": { "$in": &ids } })
+                            .session(&mut **tx)
+                            .await?;
+                    }
+                    Ok(ids)
+                })
+            })
+            .await?;
             for id in &ids {
                 self.evict(id);
             }
@@ -437,100 +430,61 @@ impl McpSessionStore {
             return Ok(changed);
         };
 
-        let now = Utc::now();
-        let requested_service_ids = bson::to_bson(service_ids).expect("MCP service ids serialize");
-        let mut transaction = db.client().start_session().await?;
-        transaction.start_transaction().await?;
-        let before = db
-            .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-            .find_one_and_update(
-                doc! {
-                    "_id": session_id,
-                    "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
-                },
-                vec![doc! { "$set": {
-                    "activated_service_ids": {
-                        "$let": {
-                            "vars": {
-                                "existing": { "$ifNull": ["$activated_service_ids", []] },
-                            },
-                            "in": {
-                                "$reduce": {
-                                    "input": requested_service_ids,
-                                    "initialValue": "$$existing",
-                                    "in": {
-                                        "$cond": [
-                                            { "$or": [
-                                                { "$in": ["$$this", "$$value"] },
-                                                { "$gte": [
-                                                    { "$size": "$$value" },
-                                                    MAX_ACTIVATED_SERVICES as i64,
-                                                ] },
-                                            ] },
-                                            "$$value",
-                                            { "$concatArrays": ["$$value", ["$$this"]] },
-                                        ]
-                                    }
-                                }
-                            }
+        let context = (self, db, session_id, service_ids, notification);
+        let updated = run_send(
+            db,
+            &context,
+            |tx, (store, db, wire, service_ids, notification)| {
+                Box::pin(async move {
+                    let Some(existing) = storage::live_record(db, wire, Some(tx)).await? else {
+                        return Ok(None);
+                    };
+                    // The retrying transaction serializes this bounded merge with
+                    // activation on other replicas and with session migration.
+                    let mut activated = existing.activated_service_ids.clone();
+                    for id in *service_ids {
+                        if activated.len() >= MAX_ACTIVATED_SERVICES {
+                            break;
+                        }
+                        if !activated.contains(id) {
+                            activated.push(id.clone());
                         }
                     }
-                }}],
-            )
-            .return_document(ReturnDocument::Before)
-            .session(&mut transaction)
-            .await?;
-        let Some(before) = before else {
-            transaction.abort_transaction().await?;
-            self.evict(session_id);
+                    if activated == existing.activated_service_ids {
+                        return Ok(Some((existing, false)));
+                    }
+                    let mut update = doc! {"$set":{"activated_service_ids":activated}};
+                    if notification.is_some() {
+                        update.insert("$inc", doc! {"notification_sequence":1_i64});
+                    }
+                    let after = db
+                        .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                        .find_one_and_update(doc! {"_id": &existing.id}, update)
+                        .return_document(ReturnDocument::After)
+                        .session(&mut **tx)
+                        .await?
+                        .expect("live session in transaction");
+                    if let Some(payload) = notification {
+                        store
+                            .insert_notification_in_transaction(
+                                db,
+                                tx,
+                                &existing,
+                                after.notification_sequence,
+                                payload.clone(),
+                                Utc::now(),
+                            )
+                            .await?;
+                    }
+                    Ok(Some((after, true)))
+                })
+            },
+        )
+        .await?;
+        let Some((record, changed)) = updated else {
             return Ok(false);
         };
-        let after = db
-            .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-            .find_one(doc! { "_id": session_id })
-            .session(&mut transaction)
-            .await?
-            .expect("activation update returned a session");
-        let before_ids: HashSet<&str> = before
-            .activated_service_ids
-            .iter()
-            .map(String::as_str)
-            .collect();
-        let after_ids: HashSet<&str> = after
-            .activated_service_ids
-            .iter()
-            .map(String::as_str)
-            .collect();
-        let changed = service_ids
-            .iter()
-            .any(|id| !before_ids.contains(id.as_str()) && after_ids.contains(id.as_str()));
-
-        let after = if changed && let Some(payload) = notification {
-            let sequenced = db
-                .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                .find_one_and_update(
-                    doc! { "_id": session_id },
-                    doc! { "$inc": { "notification_sequence": 1_i64 } },
-                )
-                .return_document(ReturnDocument::After)
-                .session(&mut transaction)
-                .await?
-                .expect("activated session still exists in transaction");
-            self.insert_notification_in_transaction(
-                db,
-                &mut transaction,
-                session_id,
-                sequenced.notification_sequence,
-                payload,
-                now,
-            )
-            .await?;
-            sequenced
-        } else {
-            after
-        };
-        transaction.commit_transaction().await?;
-        self.hydrate(after);
+        self.hydrate(record);
         Ok(changed)
     }
 
@@ -564,38 +518,40 @@ impl McpSessionStore {
             return Ok(sender.try_send(payload).is_ok());
         };
 
-        let now = Utc::now();
-        let mut transaction = db.client().start_session().await?;
-        transaction.start_transaction().await?;
-        let session = db
-            .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-            .find_one_and_update(
-                doc! {
-                    "_id": session_id,
-                    "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
-                },
-                doc! { "$inc": { "notification_sequence": 1_i64 } },
-            )
-            .return_document(ReturnDocument::After)
-            .session(&mut transaction)
-            .await?;
-        let Some(session) = session else {
-            transaction.abort_transaction().await?;
-            self.evict(session_id);
-            return Ok(false);
-        };
-        self.insert_notification_in_transaction(
-            db,
-            &mut transaction,
-            session_id,
-            session.notification_sequence,
-            payload,
-            now,
-        )
+        let context = (self, db, session_id, payload);
+        let updated = run_send(db, &context, |tx, (store, db, wire, payload)| {
+            Box::pin(async move {
+                let Some(record) = storage::live_record(db, wire, Some(tx)).await? else {
+                    return Ok(None);
+                };
+                let updated = db
+                    .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                    .find_one_and_update(
+                        doc! {"_id": &record.id},
+                        doc! {"$inc": {"notification_sequence":1_i64}},
+                    )
+                    .return_document(ReturnDocument::After)
+                    .session(&mut **tx)
+                    .await?
+                    .expect("live session in snapshot");
+                store
+                    .insert_notification_in_transaction(
+                        db,
+                        tx,
+                        &record,
+                        updated.notification_sequence,
+                        payload.clone(),
+                        Utc::now(),
+                    )
+                    .await?;
+                Ok(Some(updated))
+            })
+        })
         .await?;
-        transaction.commit_transaction().await?;
-        self.hydrate(session);
-        Ok(true)
+        Ok(updated.is_some_and(|record| {
+            self.hydrate(record);
+            true
+        }))
     }
 
     pub async fn notifications_after(
@@ -617,7 +573,7 @@ impl McpSessionStore {
         let notifications = db
             .collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
             .find(doc! {
-                "session_id": session_id,
+                "session_id": {"$in": storage::keys_for_wire(session_id)},
                 "sequence": { "$gt": after_sequence },
                 "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) },
             })
@@ -633,6 +589,8 @@ impl McpSessionStore {
         &self,
         session_id: &str,
     ) -> Option<mpsc::Receiver<serde_json::Value>> {
+        let key = self.db.as_ref().map(|_| storage::hash(session_id));
+        let session_id = key.as_deref().unwrap_or(session_id);
         self.pending_receivers
             .write()
             .unwrap_or_else(|error| error.into_inner())
@@ -640,6 +598,8 @@ impl McpSessionStore {
     }
 
     pub fn set_notification_tx(&self, session_id: &str, tx: mpsc::Sender<serde_json::Value>) {
+        let key = self.db.as_ref().map(|_| storage::hash(session_id));
+        let session_id = key.as_deref().unwrap_or(session_id);
         if let Some(session) = self
             .sessions
             .write()
@@ -683,20 +643,14 @@ impl McpSessionStore {
         let Some(db) = &self.db else {
             return Ok(self.local_record(session_id));
         };
-        let record = db
-            .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-            .find_one(doc! {
-                "_id": session_id,
-                "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) },
-            })
-            .await?;
+        let record = storage::live_record(db, session_id, None).await?;
         match record {
             Some(record) => {
                 self.hydrate(record.clone());
                 Ok(Some(record))
             }
             None => {
-                self.evict(session_id);
+                self.evict_wire(session_id);
                 Ok(None)
             }
         }
@@ -706,7 +660,7 @@ impl McpSessionStore {
         &self,
         db: &mongodb::Database,
         transaction: &mut mongodb::ClientSession,
-        session_id: &str,
+        record: &McpSessionRecord,
         sequence: i64,
         payload: serde_json::Value,
         now: DateTime<Utc>,
@@ -714,10 +668,13 @@ impl McpSessionStore {
         let expires_at = now
             + chrono::Duration::from_std(self.notification_ttl)
                 .expect("validated MCP notification TTL fits chrono duration");
+        let expires_at = record
+            .absolute_expires_at
+            .map_or(expires_at, |end| end.min(expires_at));
         db.collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
             .insert_one(McpSessionNotification {
-                id: format!("{session_id}:{sequence}"),
-                session_id: session_id.to_string(),
+                id: format!("{}:{sequence}", record.id),
+                session_id: record.id.clone(),
                 sequence,
                 payload,
                 created_at: now,
@@ -726,70 +683,6 @@ impl McpSessionStore {
             .session(transaction)
             .await?;
         Ok(())
-    }
-
-    async fn ensure_recovered_slot(
-        &self,
-        record: &McpSessionRecord,
-    ) -> Result<bool, mongodb::error::Error> {
-        let Some(db) = &self.db else {
-            return Ok(true);
-        };
-        let slots = db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION);
-        if slots
-            .find_one(doc! { "session_id": &record.id })
-            .await?
-            .is_some()
-        {
-            slots
-                .update_one(
-                    doc! { "session_id": &record.id },
-                    doc! { "$set": {
-                        "expires_at": bson::DateTime::from_chrono(record.expires_at),
-                    }},
-                )
-                .await?;
-            return Ok(true);
-        }
-
-        let now = bson::DateTime::from_chrono(Utc::now());
-        for slot in 0..MAX_PER_USER_SESSIONS {
-            let slot_id = format!("{}:{slot}", record.user_id);
-            let result = slots
-                .find_one_and_update(
-                    doc! {
-                        "_id": &slot_id,
-                        "$or": [
-                            { "expires_at": { "$lte": now } },
-                            { "session_id": &record.id },
-                        ],
-                    },
-                    doc! { "$set": {
-                        "user_id": &record.user_id,
-                        "session_id": &record.id,
-                        "slot": slot as i32,
-                        "expires_at": bson::DateTime::from_chrono(record.expires_at),
-                    }},
-                )
-                .upsert(true)
-                .return_document(ReturnDocument::After)
-                .await;
-            match result {
-                Ok(Some(_)) => return Ok(true),
-                Ok(None) => continue,
-                Err(error) if is_duplicate_key_error(&error) => {
-                    if slots
-                        .find_one(doc! { "session_id": &record.id })
-                        .await?
-                        .is_some()
-                    {
-                        return Ok(true);
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(false)
     }
 
     pub(crate) fn create_in_memory(
@@ -847,7 +740,8 @@ impl McpSessionStore {
         Some(id)
     }
 
-    pub(crate) fn hydrate(&self, record: McpSessionRecord) {
+    pub(crate) fn hydrate(&self, mut record: McpSessionRecord) {
+        record.id = storage::cache_key(&record.id);
         let mut sessions = self
             .sessions
             .write()
@@ -904,12 +798,28 @@ impl McpSessionStore {
                 parent_session_id: session.parent_session_id.clone(),
                 notification_sequence: session.notification_sequence,
                 created_at: session.created_at,
+                absolute_expires_at: None,
                 last_active_at: session.last_active,
                 expires_at: session.expires_at,
             })
     }
 
+    fn evict_wire(&self, wire: &str) {
+        if self.db.is_some() {
+            self.evict(&storage::hash(wire));
+        } else {
+            self.evict(wire);
+        }
+    }
+
     pub(crate) fn evict(&self, session_id: &str) {
+        let key;
+        let session_id = if self.db.is_some() {
+            key = storage::cache_key(session_id);
+            &key
+        } else {
+            session_id
+        };
         self.sessions
             .write()
             .unwrap_or_else(|error| error.into_inner())
@@ -955,6 +865,7 @@ mod tests {
             parent_session_id: None,
             notification_sequence: 0,
             created_at: now,
+            absolute_expires_at: None,
             last_active_at: now,
             expires_at: now + chrono::Duration::hours(1),
         }

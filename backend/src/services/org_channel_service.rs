@@ -212,7 +212,7 @@ pub(crate) async fn link_target(
     if agent.user_id == actor {
         return Ok(None);
     }
-    require_target(db, actor, agent).await?;
+    let eligibility_revision = target_revision(db, actor, agent).await?;
     if bot.user_id != agent.user_id {
         return Err(AppError::ValidationError(
             "The bot and specialist must be owned by the same organization".into(),
@@ -224,6 +224,7 @@ pub(crate) async fn link_target(
         ));
     }
     Ok(Some(Binding {
+        eligibility_revision,
         version: 1,
         org_id: agent.user_id.clone(),
         revision: uuid::Uuid::new_v4().to_string(),
@@ -259,8 +260,12 @@ pub(crate) async fn require_target(
     actor: &str,
     agent: &AssistantAgent,
 ) -> AppResult<()> {
+    target_revision(db, actor, agent).await.map(|_| ())
+}
+
+async fn target_revision(db: &Database, actor: &str, agent: &AssistantAgent) -> AppResult<i64> {
     if agent.user_id == actor {
-        return Ok(());
+        return Ok(0);
     }
     if !super::feature_flag_service::personal_flag_enabled(db, actor, FLAG).await? {
         return Err(AppError::organization_agent_channels_disabled());
@@ -278,7 +283,7 @@ pub(crate) async fn require_target(
             "Choose an active organization specialist".into(),
         ));
     }
-    Ok(())
+    Ok(acl.eligibility_revision())
 }
 
 /// Authentication uses opaque platform IDs; no display name can link a person.
@@ -308,7 +313,7 @@ pub(crate) async fn sender(
         .collection::<SenderLink>(LINKS)
         .find_one(doc! {"channel_id":&row.id,"sender_hash":&hash})
         .await?;
-    let (actor, link_id, link_revision, admin, guest, org_use_revision) = match link {
+    let (actor, link_id, link_revision, admin, guest, member_use) = match link {
         Some(link) => {
             // A removed member is never silently downgraded to an org-paid guest.
             if !eligible || !link.active || link.binding_revision != binding.revision {
@@ -327,7 +332,9 @@ pub(crate) async fn sender(
             let acl = super::org_agent_service::access(db, &link.user_id, &binding.org_id).await?;
             let agent = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
                 .find_one(doc! {"_id":agent_id,"user_id":&binding.org_id,"kind":"specialist","destroyed_at":null}).await?.ok_or_else(denied)?;
-            if !super::org_agent_service::specialist_rights(&link.user_id, &agent, &acl).can_use {
+            if link.eligibility_revision != acl.eligibility_revision()
+                || !super::org_agent_service::specialist_rights(&link.user_id, &agent, &acl).can_use
+            {
                 return Err(denied());
             }
             let admin = matches!(acl, super::org_service::OwnerAccess::AsOrgAdmin { .. });
@@ -337,7 +344,7 @@ pub(crate) async fn sender(
                 Some(link.revision),
                 admin,
                 false,
-                agent.org_use_revision,
+                agent.member_use(acl.eligibility_revision()),
             )
         }
         None if binding.guests.enabled => {
@@ -351,13 +358,20 @@ pub(crate) async fn sender(
             {
                 return Err(denied());
             }
-            (binding.org_id.clone(), None, None, false, true, 0)
+            (
+                binding.org_id.clone(),
+                None,
+                None,
+                false,
+                true,
+                Default::default(),
+            )
         }
         None => return Err(denied()),
     };
     Ok((
         Execution {
-            org_use_revision,
+            member_use,
             version: 1,
             org_id: binding.org_id.clone(),
             revision: binding.revision.clone(),
@@ -371,6 +385,13 @@ pub(crate) async fn sender(
         },
         admin,
     ))
+}
+
+fn eligibility_revision(row: &Document) -> AppResult<i64> {
+    match row.get("eligibility_revision") {
+        None => Ok(0),
+        Some(value) => bson::from_bson(value.clone()).map_err(|_| denied()),
+    }
 }
 
 pub(crate) async fn live_doc(
@@ -514,7 +535,7 @@ fn check_audience<'a>(
             fence,
         )
         .await?;
-        live_doc(
+        let issuer = live_doc(
             db,
             session,
             "org_memberships",
@@ -523,6 +544,15 @@ fn check_audience<'a>(
             fence,
         )
         .await?;
+        if eligibility_revision(&issuer)?
+            != channel
+                .org_specialist
+                .as_ref()
+                .ok_or_else(denied)?
+                .eligibility_revision
+        {
+            return Err(denied());
+        }
         let status = match purpose {
             AudienceUse::Execution => bson::Bson::Document(doc! {"$ne":"suspended"}),
             AudienceUse::FixedNotice => bson::Bson::String("active".into()),
@@ -649,7 +679,7 @@ fn check_audience<'a>(
             .await?;
             let role = bson::from_bson(member.get("role").cloned().ok_or_else(denied)?)
                 .map_err(|_| denied())?;
-            if execution.org_use_revision != agent.org_use_revision
+            if execution.member_use != agent.member_use(eligibility_revision(&member)?)
                 || !super::org_agent_service::member_rights(actor, &agent, role).can_use
             {
                 return Err(denied());
@@ -1049,7 +1079,7 @@ pub(crate) async fn fence_binding_authority(
     .await?;
     for person in [actor, row.user_id.as_str()] {
         live_doc(db, tx, "users", doc! {"_id":person,"is_active":true}, true).await?;
-        live_doc(
+        let membership = live_doc(
             db,
             tx,
             "org_memberships",
@@ -1057,6 +1087,12 @@ pub(crate) async fn fence_binding_authority(
             true,
         )
         .await?;
+        if !maintenance
+            && person == row.user_id
+            && eligibility_revision(&membership)? != b.eligibility_revision
+        {
+            return Err(denied());
+        }
     }
     live_doc(
         db,

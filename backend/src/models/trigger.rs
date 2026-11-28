@@ -88,6 +88,8 @@ impl fmt::Debug for TriggerDelivery {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AssistantTargetOwner {
+    #[serde(default)]
+    pub eligibility_revision: i64,
     pub agent_id: String,
     pub owner_id: String,
 }

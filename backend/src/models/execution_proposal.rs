@@ -82,6 +82,9 @@ pub struct Proposal {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OwnerContinuation {
     pub version: u32,
+    /// Complete original decision wake. Absent historical proofs never release.
+    #[serde(default)]
+    pub batch: Option<Vec<String>>,
     #[serde(default)]
     pub blocked: bool,
     /// None is proven unreleased. A release is irreversible, even after a crash.

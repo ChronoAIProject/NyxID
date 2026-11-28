@@ -2823,19 +2823,24 @@ mod integration_tests {
             .await
             .unwrap();
         let mut metadata_rows = vec![metadata(&root)];
-        let bad_json = state
-            .encryption_keys
-            .encrypt(b"invalid json")
-            .await
-            .unwrap();
-        for (name, ciphertext) in [
-            ("bad-cipher.txt", vec![0, 1, 2]),
-            ("bad-json.txt", bad_json),
-        ] {
+        for name in ["bad-cipher.txt", "bad-json.txt"] {
             let mut broken = root.clone();
             broken.id = Uuid::new_v4().to_string();
             broken.label = name.into();
-            broken.text_encrypted = ciphertext;
+            broken.text_encrypted = if name == "bad-json.txt" {
+                crate::crypto::record_field::encrypt(
+                    &state.encryption_keys,
+                    COLLECTION_NAME,
+                    &broken.id,
+                    &broken.user_id,
+                    "text_encrypted",
+                    b"invalid json",
+                )
+                .await
+                .unwrap()
+            } else {
+                vec![0, 1, 2]
+            };
             metadata_rows.push(metadata(&broken));
             collection.insert_one(&broken).await.unwrap();
         }

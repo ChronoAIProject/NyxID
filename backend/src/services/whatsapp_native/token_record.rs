@@ -11,7 +11,7 @@ fn unavailable() -> AppError {
     refusal("native_whatsapp_verify_token_unavailable")
 }
 
-fn version(row: &NativeWhatsapp) -> AppResult<Option<u8>> {
+pub(in crate::services) fn version(row: &NativeWhatsapp) -> AppResult<Option<u8>> {
     if row.secret_context_versions.is_empty() {
         return Ok(None);
     }

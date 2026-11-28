@@ -14,7 +14,7 @@ async fn custom_binding(
         .db
         .collection::<NyxbotEventBinding>(EVENT_BINDINGS)
         .insert_one(NyxbotEventBinding {
-            org_use_revision: 0,
+            member_use: Default::default(),
             id: id.into(),
             user_id: OWNER.into(),
             agent_id: row.agent_id.clone().unwrap(),
@@ -337,6 +337,15 @@ mod mixed;
 
 #[tokio::test]
 async fn org_event_binding_setup_and_retirement_preserve_the_key_rewrap_winner() {
+    org_binding_outcomes(&["ready", "reject", "unbind", "revoke"]).await;
+}
+
+#[tokio::test]
+async fn eligibility_revision_checks_custom_event_binding() {
+    org_binding_outcomes(&["repromote"]).await;
+}
+
+async fn org_binding_outcomes(outcomes: &[&str]) {
     use crate::{
         models::{
             assistant_agent::{AgentKind, COLLECTION_NAME as AGENTS},
@@ -344,7 +353,7 @@ async fn org_event_binding_setup_and_retirement_preserve_the_key_rewrap_winner()
         },
         services::nyxbot_event_binding_service::{self as bindings, storage},
     };
-    for outcome in ["ready", "reject", "unbind", "revoke"] {
+    for &outcome in outcomes {
         let (mut state, _, upstream) = setup("event_binding_prep_race").await;
         let _upstream = tokio_util::task::AbortOnDropHandle::new(upstream);
         state.config.contextual_record_writes = false;
@@ -365,7 +374,7 @@ async fn org_event_binding_setup_and_retirement_preserve_the_key_rewrap_winner()
             .insert_one(crate::test_utils::test_membership(
                 &org,
                 OWNER,
-                OrgRole::Admin,
+                OrgRole::Member,
                 None,
             ))
             .await
@@ -425,7 +434,7 @@ async fn org_event_binding_setup_and_retirement_preserve_the_key_rewrap_winner()
         if outcome != "unbind" {
             assert_eq!(raw.get_str("unrelated_sibling"), Ok("kept"));
         }
-        if matches!(outcome, "ready" | "revoke") {
+        if matches!(outcome, "ready" | "revoke" | "repromote") {
             assert!(result.is_ok());
             Box::pin(bindings::authorize_provider(&state, &row))
                 .await
@@ -433,6 +442,32 @@ async fn org_event_binding_setup_and_retirement_preserve_the_key_rewrap_winner()
             storage::verify(&state.db, &keys, &raw).await.unwrap();
             let debug = format!("{row:?}");
             assert!(!debug.contains("ciphertext") && !debug.contains(&row.producer_key_id));
+            if outcome == "repromote" {
+                let membership =
+                    crate::services::org_service::get_active_membership(&state.db, &org, OWNER)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                for role in [OrgRole::Viewer, OrgRole::Member] {
+                    crate::services::org_service::update_membership(
+                        &state.db,
+                        &membership.id,
+                        Some(role),
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                }
+                assert!(bindings::authorize_provider(&state, &row).await.is_err());
+                remote.resume.notify_one();
+                let (fresh, _, _) = bindings::create(&state, OWNER, &agent.id, &dest, PARTITION)
+                    .await
+                    .unwrap();
+                assert_eq!(fresh.member_use.eligibility_revision, 1);
+                bindings::authorize_provider(&state, &fresh).await.unwrap();
+                continue;
+            }
             if outcome == "ready" {
                 let agents = state.db.collection::<bson::Document>(AGENTS);
                 agents

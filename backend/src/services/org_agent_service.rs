@@ -29,6 +29,7 @@ pub struct SpecialistRights {
     pub can_maintain: bool,
     pub can_govern: bool,
     maintain_revision: i64,
+    pub(crate) eligibility_revision: i64,
 }
 
 pub fn specialist_rights(
@@ -42,12 +43,16 @@ pub fn specialist_rights(
             can_maintain: true,
             can_govern: false,
             maintain_revision: 0,
+            eligibility_revision: 0,
         };
     }
     let Some(role) = role(access) else {
         return SpecialistRights::default();
     };
-    member_rights(actor, agent, role)
+    SpecialistRights {
+        eligibility_revision: access.eligibility_revision(),
+        ..member_rights(actor, agent, role)
+    }
 }
 
 /// Shared use audience predicate for complete agents and projected activity metadata.
@@ -72,6 +77,7 @@ pub fn member_rights(actor: &str, agent: &AssistantAgent, role: OrgRole) -> Spec
         can_use: member_can_use(actor, agent.kind, agent.org_user_ids.as_deref(), role),
         can_maintain: eligible && includes(&agent.org_maintainer_user_ids),
         maintain_revision: agent.org_maintain_revision,
+        eligibility_revision: 0,
         can_govern: role == OrgRole::Admin && !agent.is_nyxbot(),
     }
 }
@@ -195,8 +201,16 @@ pub async fn require_use(db: &Database, actor: &str, agent: &AssistantAgent) -> 
 }
 
 pub async fn require_maintain(db: &Database, actor: &str, agent: &AssistantAgent) -> AppResult<()> {
+    maintenance_revision(db, actor, agent).await.map(|_| ())
+}
+
+pub(crate) async fn maintenance_revision(
+    db: &Database,
+    actor: &str,
+    agent: &AssistantAgent,
+) -> AppResult<i64> {
     if actor == agent.user_id {
-        return Ok(());
+        return Ok(0);
     }
     let acl = Box::pin(access(db, actor, &agent.user_id)).await?;
     if !can_maintain(&acl) || agent.is_nyxbot() {
@@ -209,7 +223,7 @@ pub async fn require_maintain(db: &Database, actor: &str, agent: &AssistantAgent
             "Organization specialist maintenance access is required".into(),
         ));
     }
-    Ok(())
+    Ok(acl.eligibility_revision())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -247,7 +261,10 @@ pub(crate) async fn member_rights_in_session(
         doc! {"member_user_id":actor,"org_user_id":&agent.user_id,"revoked_at":null,"role":{"$in":["admin","member"]}},fence != MemberFence::ReadOnly).await?;
     let membership: crate::models::org_membership::OrgMembership = bson::from_document(membership)
         .map_err(|_| AppError::Forbidden("Membership unavailable".into()))?;
-    Ok(member_rights(actor, agent, membership.role))
+    Ok(SpecialistRights {
+        eligibility_revision: membership.eligibility_revision,
+        ..member_rights(actor, agent, membership.role)
+    })
 }
 
 /// Membership loss prunes explicit selections in the membership mutation's transaction.
@@ -293,7 +310,7 @@ pub(crate) async fn fence_member_use(
     org: &str,
     agent_id: &str,
     fence_policy: bool,
-) -> AppResult<i64> {
+) -> AppResult<crate::models::org_membership::MemberUse> {
     let agents = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME);
     let filter = live_specialist_filter(org, agent_id);
     let agent = if fence_policy {
@@ -305,15 +322,13 @@ pub(crate) async fn fence_member_use(
         agents.find_one(filter).session(&mut *tx).await?
     }
     .ok_or_else(super::org_group_service::missing)?;
-    if !member_rights_in_session(db, tx, actor, &agent, MemberFence::Member)
-        .await?
-        .can_use
-    {
+    let rights = member_rights_in_session(db, tx, actor, &agent, MemberFence::Member).await?;
+    if !rights.can_use {
         return Err(AppError::Forbidden(
             "Specialist use access is required".into(),
         ));
     }
-    Ok(agent.org_use_revision)
+    Ok(agent.member_use(rights.eligibility_revision))
 }
 
 pub(crate) fn ordinary_member_org(
@@ -335,7 +350,7 @@ pub(crate) async fn settlement_use_is_live(
     actor: &str,
     org: &str,
     agent_id: &str,
-    revision: i64,
+    revision: crate::models::org_membership::MemberUse,
 ) -> AppResult<bool> {
     let Some(agent) = db
         .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
@@ -345,11 +360,13 @@ pub(crate) async fn settlement_use_is_live(
     else {
         return Ok(false);
     };
-    if agent.org_use_revision != revision {
+    if agent.org_use_revision != revision.org_use_revision {
         return Ok(false);
     }
     match member_rights_in_session(db, tx, actor, &agent, MemberFence::ReadOnly).await {
-        Ok(rights) => Ok(rights.can_use),
+        Ok(rights) => {
+            Ok(rights.can_use && rights.eligibility_revision == revision.eligibility_revision)
+        }
         Err(AppError::Forbidden(_) | AppError::NotFound(_)) => Ok(false),
         Err(error) => Err(error),
     }
@@ -361,7 +378,7 @@ pub(crate) async fn use_revision_is_live(
     actor: &str,
     org: &str,
     agent: &str,
-    revision: i64,
+    revision: crate::models::org_membership::MemberUse,
 ) -> AppResult<bool> {
     match fence_member_use(db, tx, actor, org, agent, true).await {
         Ok(current) => Ok(current == revision),
@@ -419,7 +436,18 @@ pub(crate) async fn event_source_is_live(
             &legacy_owner
         }
     };
-    use_revision_is_live(db, tx, actor, org, id, event.source_org_use_revision).await
+    use_revision_is_live(
+        db,
+        tx,
+        actor,
+        org,
+        id,
+        crate::models::org_membership::MemberUse {
+            org_use_revision: event.source_org_use_revision,
+            eligibility_revision: event.source_eligibility_revision,
+        },
+    )
+    .await
 }
 
 pub(crate) fn fence_maintenance<'a>(
@@ -428,17 +456,21 @@ pub(crate) fn fence_maintenance<'a>(
     actor: &'a str,
     target: &'a AssistantAgent,
 ) -> futures::future::BoxFuture<'a, AppResult<()>> {
-    Box::pin(fence_maintenance_inner(db, tx, actor, target))
+    Box::pin(async move {
+        fence_maintenance_revision(db, tx, actor, target)
+            .await
+            .map(|_| ())
+    })
 }
 
-async fn fence_maintenance_inner(
+pub(crate) async fn fence_maintenance_revision(
     db: &Database,
     tx: &mut mongodb::ClientSession,
     actor: &str,
     target: &AssistantAgent,
-) -> AppResult<()> {
+) -> AppResult<i64> {
     if actor == target.user_id {
-        return Ok(());
+        return Ok(0);
     }
     let agent = db
         .collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
@@ -449,16 +481,13 @@ async fn fence_maintenance_inner(
         .session(&mut *tx)
         .await?
         .ok_or_else(|| AppError::NotFound("Specialist not found".into()))?;
-    if agent.org_maintain_revision != target.org_maintain_revision
-        || !member_rights_in_session(db, tx, actor, &agent, MemberFence::MemberAndOrg)
-            .await?
-            .can_maintain
-    {
+    let rights = member_rights_in_session(db, tx, actor, &agent, MemberFence::MemberAndOrg).await?;
+    if agent.org_maintain_revision != target.org_maintain_revision || !rights.can_maintain {
         return Err(AppError::Forbidden(
             "Specialist maintenance access changed".into(),
         ));
     }
-    Ok(())
+    Ok(rights.eligibility_revision)
 }
 
 /// Personal writes retain their existing single-document operation.
@@ -690,7 +719,9 @@ impl RequestAccess {
             OwnerAccess::Forbidden
         } else {
             let acl = access(db, &e.actor_id, &e.org_id).await?;
-            if !specialist_rights(&e.actor_id, channel.agent(), &acl).can_use {
+            if e.member_use != channel.agent().member_use(acl.eligibility_revision())
+                || !specialist_rights(&e.actor_id, channel.agent(), &acl).can_use
+            {
                 return Err(super::org_channel_service::denied());
             }
             acl
@@ -736,7 +767,7 @@ impl RequestAccess {
         self.check_conversation(row)?;
         if agent.id.as_str() != row.agent_id.as_deref().unwrap_or_default()
             || !self.permits_agent(&row.user_id, agent)
-            || agent.org_use_revision != row.org_use_revision
+            || agent.member_use(self.eligibility_revision()) != row.member_use
         {
             return Err(AppError::Forbidden("Specialist use access changed".into()));
         }
@@ -778,6 +809,10 @@ impl RequestAccess {
             .is_some_and(|(_, rights)| rights.can_maintain)
     }
 
+    pub(crate) fn eligibility_revision(&self) -> i64 {
+        self.acl.eligibility_revision()
+    }
+
     pub(crate) fn maintain_revision(&self) -> i64 {
         self.specialist
             .as_ref()
@@ -800,7 +835,7 @@ impl RequestAccess {
         let rights =
             member_rights_in_session(db, tx, &row.user_id, &agent, MemberFence::MemberAndOrg)
                 .await?;
-        if !rights.can_use || row.org_use_revision != agent.org_use_revision {
+        if !rights.can_use || row.member_use != agent.member_use(rights.eligibility_revision) {
             return Err(AppError::Forbidden("Specialist use access changed".into()));
         }
         Ok(std::sync::Arc::new(Self {
@@ -1038,9 +1073,11 @@ pub async fn resolve_credential_access(
             return Err(super::org_channel_service::denied());
         }
         let access = super::org_channel_service::conversation_access(db, row).await?;
-        if access.as_ref().and_then(|a| a.channel()).is_some_and(|c| {
-            !c.execution().guest && c.agent().org_use_revision != row.org_use_revision
-        }) {
+        if access
+            .as_ref()
+            .and_then(|a| a.channel())
+            .is_some_and(|c| !c.execution().guest && c.execution().member_use != row.member_use)
+        {
             return Err(super::org_channel_service::denied());
         }
         return Ok(access);
@@ -1054,10 +1091,11 @@ pub async fn resolve_credential_access(
     let agent = db.collection::<AssistantAgent>(crate::models::assistant_agent::COLLECTION_NAME)
         .find_one(doc! {"_id":row.agent_id.as_deref().ok_or_else(super::shared_agent_service::missing)?,"user_id":owner,"kind":"specialist"}).await?
         .ok_or_else(super::shared_agent_service::missing)?;
-    if agent.org_use_revision != row.org_use_revision {
+    let access = resolve_access(db, &key.user_id, Some(owner), Some(&agent), Some(&key.id)).await?;
+    if agent.member_use(access.as_ref().map_or(0, |a| a.eligibility_revision())) != row.member_use {
         return Err(AppError::Forbidden("Specialist use access changed".into()));
     }
-    resolve_access(db, &key.user_id, Some(owner), Some(&agent), Some(&key.id)).await
+    Ok(access)
 }
 
 async fn resolve_access(

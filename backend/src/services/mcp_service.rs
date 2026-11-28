@@ -11256,6 +11256,7 @@ mod tests {
             crate::services::org_service::OwnerAccess::AsOrgMember {
                 org_user_id: "org".into(),
                 membership_id: "membership".into(),
+                eligibility_revision: 0,
                 role: crate::models::org_membership::OrgRole::Member,
                 allowed_service_ids: None,
             },

@@ -184,6 +184,7 @@ pub mod managed_execution_service;
 pub mod mcp_approval;
 pub mod mcp_service;
 mod mcp_session_admission;
+pub(crate) mod mcp_session_storage;
 pub mod mfa_service;
 pub mod mobile_social_service;
 pub mod node_credential_delivery;

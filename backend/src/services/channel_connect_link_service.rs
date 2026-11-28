@@ -905,7 +905,7 @@ fn invalid_receiver() -> AppError {
     AppError::Internal("Channel receiver credential storage is invalid".into())
 }
 
-fn validate_receiver(link: &Link) -> AppResult<()> {
+pub(in crate::services) fn validate_receiver(link: &Link) -> AppResult<()> {
     if link.id.is_empty()
         || link.user_id.is_empty()
         || link

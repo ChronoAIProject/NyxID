@@ -236,20 +236,24 @@ async fn verify_session(
         }
     } else {
         let encoded = decrypt_session(keys, row, "upstream_binding_ciphertext").await?;
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Binding {
-            session_id: Option<Zeroizing<String>>,
-            response_id: Option<Zeroizing<String>>,
-        }
-        let binding: Binding = serde_json::from_str(&encoded).map_err(|_| invalid())?;
-        validate_binding_handles(
-            binding.session_id.as_ref().map(|s| s.as_str()),
-            binding.response_id.as_ref().map(|s| s.as_str()),
-        )?;
+        validate_encoded_binding(&encoded)?;
     }
     Ok(())
 }
+pub(super) fn validate_encoded_binding(encoded: &str) -> AppResult<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Binding {
+        session_id: Option<Zeroizing<String>>,
+        response_id: Option<Zeroizing<String>>,
+    }
+    let binding: Binding = serde_json::from_str(encoded).map_err(|_| invalid())?;
+    validate_binding_handles(
+        binding.session_id.as_ref().map(|s| s.as_str()),
+        binding.response_id.as_ref().map(|s| s.as_str()),
+    )
+}
+
 pub(crate) fn validate_binding_handles(
     session: Option<&str>,
     response: Option<&str>,

@@ -27,7 +27,11 @@ async fn fixture() -> Database {
 
 // CI starts mongod with zero retained snapshot history. Serialize the small
 // set of history-dependent tests and restore the server setting on unwind.
-async fn with_history(db: &Database, seconds: i32, body: impl Future<Output = ()>) {
+pub(in crate::services) async fn with_history(
+    db: &Database,
+    seconds: i32,
+    body: impl Future<Output = ()>,
+) {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _guard = LOCK.lock().await;
     with_parameter(db, "minSnapshotHistoryWindowInSeconds", seconds, body).await;

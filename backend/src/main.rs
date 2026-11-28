@@ -1708,6 +1708,21 @@ async fn server_run(cli: Cli) {
         }
     });
 
+    let migration_db = services::transaction_service::durable_database(&state.db);
+    services::shutdown::process().spawn_worker(async move {
+        let mut after = None;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        while let Some(_work) = services::shutdown::process().tick(&mut interval).await {
+            if services::mcp_session_storage::migrate_batch(&migration_db, &mut after)
+                .await
+                .is_err()
+            {
+                tracing::warn!("MCP session storage migration will retry");
+            }
+        }
+    });
+
     // Spawn background cleanup task for MCP session reaper.
     // Sessions live up to 30 days (extended on every request via touch()).
     // Reaper runs every 5 minutes to clean up sessions idle longer than 30 days.

@@ -352,12 +352,18 @@ safe status notices, and report attempted writes without verified readback;
 they do not select an arbitrary row for the specialist to read.
 Recovery after a terminal receipt or uncertain dispatch never resends the write:
 when independent readback is not verified, it reports that limitation explicitly.
-A stored failed HTTP response remains attributed as a failed attempt during
+A stored definite provider refusal remains attributed as a failed attempt during
 terminal recovery. Task-root and assigning-Event source proofs are independently
 bound and validated under the [retained-source contract](../EXECUTION_PERMISSIONS.md#verified-owner-channel-proposals-v4).
 An observation after uncertainty does not prove that this write caused the state.
-A provider non-2xx remains a rejected write attempt even when the HTTP exchange
-is complete or an independent read observes the requested value. A bounded
+A documented Feishu/Lark application refusal remains a rejected write attempt,
+including HTTP 200, even if an independent read observes the requested value.
+Transient or unrecognized application errors, HTTP 5xx, incomplete responses and
+transport uncertainty leave the attempt unconfirmed. A synchronous successful
+envelope must identify the exact selected record; HTTP 202 remains pending and
+unverified even with a success-shaped body. A fresh specialist read after such
+an uncertain attempt establishes observed state only and cannot attribute it to
+that attempt. A bounded
 rejection notice appears once in the specialist report, including early model
 or fallback errors, and survives coalesced receipts and terminal
 recovery; another occurrence's failed receipt cannot label a later write failed.
@@ -2300,7 +2306,12 @@ per-minute limit. Verified members retain existing access and billing rules.
 
 Binding metadata lives on `org_specialist`, sender verification in
 `org_channel_sender_links`; optional `org_execution` origins carry the exact
-actor/revision through queueing, thread follow, recovery and late delivery.
+actor and binding revision through queueing, thread follow, recovery and late
+delivery. For verified members the challenge, sender link and execution origin
+also capture the member's eligibility revision. Returning to Member or Admin
+requires a fresh confirmation and starts a new hidden group lane. Old queued
+messages, origin-bound deliveries and cards keep the revision captured before
+the change. A member can start new work in their private home with a new key.
 First-party human endpoints under `/assistant/nyxagent/channels/{id}` are
 `GET/PUT org-specialist`, `POST/DELETE member-link`,
 `GET member-link/{challenge}`, and `POST member-link/{challenge}/confirm`.

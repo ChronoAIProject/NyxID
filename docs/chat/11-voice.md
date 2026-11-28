@@ -44,6 +44,9 @@ Roll out behind the default-off, per-person `assistant:voice` runtime feature
 flag. No guests, group/member threads, channel-shared threads or automation
 threads in the initial voice surface. Personal NyxBot threads and the acting
 person's private specialist threads, including organization specialists, qualify.
+An organization call captures the acting person's membership eligibility revision.
+Call revalidation, hidden task admission and queued continuations require the same
+revision. A new call after promotion captures the new revision.
 This limits the audio surface, not what the agent can do through its existing
 tools. Channel and group work remains reachable through NyxBot's ordinary routing.
 

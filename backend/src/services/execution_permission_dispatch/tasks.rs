@@ -496,7 +496,7 @@ pub(crate) fn settle<'a>(
                 {"execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]}},
                 {"execution_proposal.v1.state":"completed",
                     "execution_proposal.v1.delivered_turn_id":null,
-                    "execution_proposal.v1.owner_continuation.version":1,
+                    "execution_proposal.v1.owner_continuation.version":{"$in":[1,2]},
                     "execution_proposal.v1.owner_continuation.blocked":{"$ne":true},
                     "execution_proposal.v1.owner_continuation.released_turn_id":null}
             ],
@@ -675,4 +675,42 @@ pub(crate) fn partition_events(
             });
     pending.extend(deferred);
     selected_events
+}
+
+/// Only a newly inserted root admitted under the complete observed v2 fleet
+/// can prove its dispatch history. Never backfill a preexisting task.
+pub(crate) async fn mark_effect_evidence(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+    message_id: &str,
+) -> AppResult<()> {
+    let Some(task) = row
+        .active_turn
+        .as_ref()
+        .and_then(|turn| turn.execution_task.as_ref())
+    else {
+        return Ok(());
+    };
+    if task.task.root_kind != TaskRootKind::Message || task.task.root_id != message_id {
+        return Ok(());
+    }
+    if !super::super::security_readiness_service::serving_report(
+        db,
+        proposals::continuation::READINESS,
+    )
+    .await?
+    .serving_ready
+    {
+        return Ok(());
+    }
+    db.collection::<Document>("assistant_messages")
+        .update_one(
+            doc! {"_id": message_id, "user_id": &row.user_id,
+            "conversation_id": &row.id, "execution_task.epoch": task.epoch},
+            doc! {"$set": {"execution_dispatch_evidence_version": 2}},
+        )
+        .session(session)
+        .await?;
+    Ok(())
 }

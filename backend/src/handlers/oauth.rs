@@ -17,8 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers::{extract_ip, extract_user_agent};
+use crate::handlers::admin_helpers::extract_user_agent;
 use crate::models::authorization_code::{ExternalSubjectRef, validate_external_subject_params};
+use crate::mw::rate_limit::AuditIp;
 // Keep both import surfaces: this handler resolves consent-scoped resources and
 // service-account principals in the OAuth endpoints.
 use crate::models::consent::{Consent, IncrementalConsent, ServiceAccessMode};
@@ -2471,12 +2472,13 @@ pub async fn pushed_authorization_request(
 /// instead of the application's internal `ErrorResponse` format, because
 /// standard OAuth/OIDC client libraries depend on the standard error shape.
 pub async fn token(
+    AuditIp(ip): AuditIp,
     State(state): State<AppState>,
     tele: TelemetryContext,
     headers: HeaderMap,
     Form(body): Form<TokenRequest>,
 ) -> Response {
-    match token_inner(&state, &tele, &headers, body).await {
+    match token_inner(ip, &state, &tele, &headers, body).await {
         Ok(json) => json.into_response(),
         Err(err) => oauth_error_response(err),
     }
@@ -2517,6 +2519,7 @@ fn refresh_token_grant_error(error: AppError) -> AppError {
 // `urn:ietf:params:oauth:grant-type:token-exchange`) do not emit
 // `OauthTokenIssued` in Part 2. Lift this once §6.5 is resolved.
 async fn token_inner(
+    ip: Option<String>,
     state: &AppState,
     tele: &TelemetryContext,
     headers: &HeaderMap,
@@ -2707,7 +2710,7 @@ async fn token_inner(
                             .as_ref()
                             .map(|external_subject| external_subject.platform.clone()),
                     })),
-                    crate::handlers::admin_helpers::extract_ip(headers),
+                    ip,
                     crate::handlers::admin_helpers::extract_user_agent(headers),
                     None,
                     None,
@@ -2913,7 +2916,7 @@ async fn token_inner(
                         "client_id": client_id,
                         "scope": &result.scope,
                     })),
-                    crate::handlers::admin_helpers::extract_ip(headers),
+                    ip,
                     crate::handlers::admin_helpers::extract_user_agent(headers),
                     None,
                     None,
@@ -3000,7 +3003,7 @@ async fn token_inner(
                             sender_constraint.as_ref(),
                         ),
                     })),
-                    crate::handlers::admin_helpers::extract_ip(headers),
+                    ip,
                     crate::handlers::admin_helpers::extract_user_agent(headers),
                     None,
                     None,
@@ -3057,7 +3060,7 @@ async fn token_inner(
                             "client_id": client_id,
                             "scope": &response.scope,
                         })),
-                        extract_ip(headers),
+                        ip,
                         extract_user_agent(headers),
                         None,
                         None,
@@ -3082,7 +3085,7 @@ async fn token_inner(
                         None,
                         "sa.auth_failed".to_string(),
                         Some(serde_json::json!({ "client_id": client_id })),
-                        extract_ip(headers),
+                        ip,
                         extract_user_agent(headers),
                         None,
                         None,
@@ -3586,6 +3589,7 @@ pub async fn get_binding(
 /// `/oauth/revoke` (RFC 7009) remains the standards-track alternative.
 /// Mutation storage failures propagate. This endpoint is the REST-style alias.
 pub async fn delete_binding(
+    AuditIp(ip): AuditIp,
     State(state): State<AppState>,
     headers: HeaderMap,
     axum::extract::Path(raw_binding_id): axum::extract::Path<String>,
@@ -3617,7 +3621,7 @@ pub async fn delete_binding(
         &client_id,
         &raw_binding_id,
         "client_revoked",
-        crate::handlers::admin_helpers::extract_ip(&headers).as_deref(),
+        ip.as_deref(),
         crate::handlers::admin_helpers::extract_user_agent(&headers).as_deref(),
     )
     .await?;
@@ -3630,6 +3634,7 @@ pub async fn delete_binding(
 /// RFC 7009 Token Revocation. Authenticates the calling client before
 /// revoking the token. Unknown/revoked tokens return 200; broker-binding mutation failures propagate.
 pub async fn revoke(
+    AuditIp(ip): AuditIp,
     State(state): State<AppState>,
     headers: HeaderMap,
     Form(body): Form<RevokeRequest>,
@@ -3673,7 +3678,7 @@ pub async fn revoke(
             &caller_client_id,
             &body.token,
             "client_revoked",
-            crate::handlers::admin_helpers::extract_ip(&headers).as_deref(),
+            ip.as_deref(),
             crate::handlers::admin_helpers::extract_user_agent(&headers).as_deref(),
         )
         .await?;
@@ -4328,7 +4333,7 @@ mod tests {
                     "client_id": client_id, "subject_token": subject,
                     "subject_token_type": "urn:ietf:params:oauth:token-type:id_token", "provider": "google"
                 })).unwrap();
-                let response = token_inner(&state, &tele, &HeaderMap::new(), request()).await.unwrap().0;
+                let response = token_inner(None,&state, &tele, &HeaderMap::new(), request()).await.unwrap().0;
                 assert!(!response.access_token.is_empty());
                 let event = tokio::time::timeout(std::time::Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
                 assert_eq!(event["event"], "auth.token_exchanged");
@@ -4353,7 +4358,7 @@ mod tests {
                 assert_eq!(data.get_str("mfa").unwrap(), if mfa {"skipped_mobile_rollout"} else {"not_required"});
                 assert!(data.get_str("session_id").is_ok());
                 // The same successful exchange cannot bypass pre-auth narrowing.
-                let pre_auth = token_inner(&state, &TelemetryContext::pre_auth(&HeaderMap::new()), &HeaderMap::new(), request()).await.unwrap().0;
+                let pre_auth = token_inner(None,&state, &TelemetryContext::pre_auth(&HeaderMap::new()), &HeaderMap::new(), request()).await.unwrap().0;
                 assert!(!pre_auth.access_token.is_empty());
                 assert!(tokio::time::timeout(std::time::Duration::from_millis(50), received.recv()).await.is_err());
             }
@@ -5924,6 +5929,7 @@ mod tests {
             }))
             .unwrap();
             token(
+                AuditIp(None),
                 State(self.state.clone()),
                 TelemetryContext::default(),
                 headers,
@@ -6073,6 +6079,7 @@ mod tests {
         insert_authorization_code(&db, code, client_id, &user_id, &scope).await;
 
         let Json(response) = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -6125,6 +6132,7 @@ mod tests {
         assert_eq!(refresh_count, 2);
 
         let Json(refreshed) = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -6155,6 +6163,7 @@ mod tests {
             .expect("rotated refresh_token returned");
 
         let Json(refreshed_again) = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -6183,6 +6192,7 @@ mod tests {
         assert!(refreshed_again.refresh_token.is_some());
 
         let Json(binding_exchange) = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -6343,6 +6353,7 @@ mod tests {
             .expect("authorization code");
 
         let Json(code_exchange) = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -6374,6 +6385,7 @@ mod tests {
         let binding_id = code_exchange.binding_id.expect("new binding id");
 
         let Json(binding_exchange) = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -6433,6 +6445,7 @@ mod tests {
         insert_authorization_code(&db, code, client_id, &user_id, &scope).await;
 
         let err = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -6502,6 +6515,7 @@ mod tests {
         headers.insert("dpop", proof.parse().expect("dpop header value"));
 
         let Json(response) = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &headers,
@@ -6612,6 +6626,7 @@ mod tests {
         .await;
 
         let Json(response) = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -6685,6 +6700,7 @@ mod tests {
         .await;
 
         let status = delete_binding(
+            AuditIp(None),
             State(state.clone()),
             HeaderMap::new(),
             Path(raw_binding_id.clone()),
@@ -6698,6 +6714,7 @@ mod tests {
         assert!(load_binding(&db, &raw_binding_id).await.revoked);
 
         let wrong_client_status = delete_binding(
+            AuditIp(None),
             State(state),
             HeaderMap::new(),
             Path(other_raw_binding_id.clone()),
@@ -6814,6 +6831,7 @@ mod tests {
         };
         let state = test_app_state(db);
         let err = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -6848,6 +6866,7 @@ mod tests {
         };
         let state = test_app_state(db);
         let err = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -6904,6 +6923,7 @@ mod tests {
         let mut request = refresh_grant_request(refresh_token);
         request.client_id = Some(client_id.into());
         let response = token(
+            AuditIp(None),
             State(state.clone()),
             TelemetryContext::default(),
             HeaderMap::new(),
@@ -7073,7 +7093,7 @@ mod tests {
             request.client_id = Some(client.into());
             request.client_secret = secret.map(|s| Zeroizing::new(s.to_owned()));
             assert!(matches!(
-                Box::pin(token_inner(&state, &tele, &headers, request)).await,
+                Box::pin(token_inner(None, &state, &tele, &headers, request)).await,
                 Err(AppError::AuthenticationFailed(_))
             ));
         }
@@ -7092,7 +7112,7 @@ mod tests {
                 request.client_secret = Some("test-secret".to_owned().into());
             }
             assert!(matches!(
-                Box::pin(token_inner(&state, &tele, &headers, request)).await,
+                Box::pin(token_inner(None, &state, &tele, &headers, request)).await,
                 Err(AppError::ExternalTokenInvalid(_))
             ));
         }
@@ -7172,7 +7192,7 @@ mod tests {
                             }
                             _ => {}
                         }
-                        let tokens = Box::pin(token_inner(&state, &tele, &headers, request))
+                        let tokens = Box::pin(token_inner(None, &state, &tele, &headers, request))
                             .await
                             .unwrap();
                         refresh = tokens.0.refresh_token.unwrap();
@@ -7204,6 +7224,7 @@ mod tests {
             .unwrap();
             let headers = HeaderMap::new();
             let missing = Box::pin(token_inner(
+                None,
                 &state,
                 &tele,
                 &headers,
@@ -7214,7 +7235,7 @@ mod tests {
             let mut wrong = refresh_grant_request(&refresh);
             wrong.client_id = Some("untrusted-input".into());
             assert!(matches!(
-                Box::pin(token_inner(&state, &tele, &headers, wrong)).await,
+                Box::pin(token_inner(None, &state, &tele, &headers, wrong)).await,
                 Err(AppError::ExternalTokenInvalid(_))
             ));
             let mut valid = refresh_grant_request(&refresh);
@@ -7222,7 +7243,7 @@ mod tests {
             if kind == "confidential" {
                 valid.client_secret = Some("configured-secret".to_owned().into());
             }
-            let renewed = Box::pin(token_inner(&state, &tele, &headers, valid))
+            let renewed = Box::pin(token_inner(None, &state, &tele, &headers, valid))
                 .await
                 .unwrap();
             assert!(renewed.0.refresh_token.is_some());
@@ -7274,7 +7295,7 @@ mod tests {
         let renew = || {
             let mut request = refresh_grant_request(&issued.refresh_token);
             request.client_id = Some(client.into());
-            token_inner(&state, &tele, &headers, request)
+            token_inner(None, &state, &tele, &headers, request)
         };
         let (first, second) = tokio::join!(Box::pin(renew()), Box::pin(renew()));
         let successor = first.unwrap().0.refresh_token.unwrap();
@@ -7323,7 +7344,7 @@ mod tests {
         ] {
             let mut request = refresh_grant_request(&refresh);
             request.client_id = supplied_id.map(str::to_owned);
-            let outcome = Box::pin(token_inner(&state, &tele, &headers, request)).await;
+            let outcome = Box::pin(token_inner(None, &state, &tele, &headers, request)).await;
             assert!(
                 matches!(outcome, Err(ref error) if error.oauth_error_code() == expected_error)
             );
@@ -7348,7 +7369,7 @@ mod tests {
         let mut request = refresh_grant_request(&refresh);
         request.client_id = Some(client.into());
         assert!(matches!(
-            Box::pin(token_inner(&state, &tele, &headers, request)).await,
+            Box::pin(token_inner(None, &state, &tele, &headers, request)).await,
             Err(AppError::ExternalTokenInvalid(_))
         ));
         assert!(
@@ -7397,6 +7418,7 @@ mod tests {
         };
         let state = test_app_state(db);
         let err = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -7540,6 +7562,7 @@ mod tests {
         };
         let state = test_app_state(db);
         let err = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -7574,6 +7597,7 @@ mod tests {
         };
         let state = test_app_state(db);
         let err = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -7608,6 +7632,7 @@ mod tests {
         };
         let state = test_app_state(db);
         let err = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),
@@ -7644,6 +7669,7 @@ mod tests {
         };
         let state = test_app_state(db);
         let err = token_inner(
+            None,
             &state,
             &TelemetryContext::default(),
             &HeaderMap::new(),

@@ -2803,6 +2803,11 @@ async fn execute_turn_inner(
         // Release only after model/context preparation, immediately before the
         // request can become a recoverable sealed model input. A survivor may
         // send that sealed input, so the release must precede sealing it.
+        // This identity check applies to every model attempt, including recovery
+        // after release. No successor may inherit the retained task's input.
+        if retained.is_some() && credential.api_key_id != row.credential_api_key_id {
+            return Err(TurnError::internal("cancelled", "permission_release"));
+        }
         if let Some(retained) = retained.filter(|_| !continuation_released) {
             #[cfg(test)]
             if super::execution_permission_dispatch::proposals::continuation::FAIL_BEFORE_RELEASE
@@ -2813,9 +2818,6 @@ async fn execute_turn_inner(
                     "assistant_unavailable",
                     "permission_release",
                 ));
-            }
-            if credential.api_key_id != row.credential_api_key_id {
-                return Err(TurnError::internal("cancelled", "permission_release"));
             }
             if !retained
                 .release(state, row, credential)
@@ -3170,6 +3172,9 @@ async fn execute_turn_inner(
                     events.notice();
                 }
                 RecoveryAction::ReplaceCredential => {
+                    if retained.is_some() {
+                        return Err(TurnError::internal("cancelled", "permission_release"));
+                    }
                     events.emit(
                         "turn.notice",
                         json!({"code": "retrying", "message": "Retrying…"}),

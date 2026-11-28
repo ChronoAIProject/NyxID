@@ -374,6 +374,7 @@ async fn admit_task(
         && crate::services::execution_permission_enrollment::live_enabled(db, &call.user_id, None)
             .await?;
     let request = VoiceRequest {
+        eligibility_revision: call.eligibility_revision,
         execution_enrolled,
         model_task,
         progress: None,

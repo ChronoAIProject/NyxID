@@ -34,6 +34,9 @@ const MAX_CANDIDATES: i64 = 256;
 #[cfg(test)]
 tokio::task_local! {
     pub(crate) static SUPERVISOR_POLICY_CLASSIFIED: Arc<dyn Fn(Database) -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
+    // Defensive branch coverage on corrected code, without crafting a request
+    // that selects an unsupported production transport.
+    pub(crate) static SUPERVISOR_LEGACY_TRANSPORT: Arc<std::sync::atomic::AtomicUsize>;
 }
 
 /// One authenticated HTTP/MCP call. Clones share its snapshot and decision;
@@ -286,7 +289,8 @@ impl RequestContext {
                 let scope = (drain.db.clone(), snapshot.clone());
                 super::transaction_service::run_db_only(&drain.db, &scope, |tx, (db, snapshot)| {
                     Box::pin(async move { snapshot.fence(db, tx).await })
-                }).await?;
+                })
+                .await?;
             }
             if self.permit().is_some() {
                 return Ok(());
@@ -868,6 +872,7 @@ pub(crate) fn prepare<'a>(
                 context,
                 chat,
                 effect.connection,
+                effect.method,
                 &digest,
                 &state.config.frontend_url,
             )
@@ -1407,6 +1412,10 @@ impl Permit {
         Box::pin(async move {
             self.revalidate(target).await?;
             self.reserve().await?;
+            #[cfg(test)]
+            if let Ok(barrier) = proposals::effects::BEFORE_SEND.try_with(Arc::clone) {
+                barrier.wait().await;
+            }
             let mut session = self.db.client().start_session().await?;
             session
                 .start_transaction()
@@ -1693,6 +1702,22 @@ impl Permit {
                 resume.fence(&self.db, session, dispatch).await?;
             }
             if dispatch {
+                // All covered proxy/MCP/specialized transports share this actual
+                // send barrier, even when no approval request was authored.
+                if !matches!(self.method.as_str(), "GET" | "HEAD" | "OPTIONS")
+                    && let Some(chat) = &self.chat
+                {
+                    proposals::effects::record(
+                        &self.db,
+                        session,
+                        chat,
+                        &self.binding.connection_id,
+                        &self.digest,
+                        &self.operation_id,
+                        &current.id,
+                    )
+                    .await?;
+                }
                 self.db
                     .collection::<Document>("approval_grants")
                     .update_one(
@@ -1896,7 +1921,7 @@ pub(crate) fn admit_http<'a>(
                 return Err(refused());
             }
         }
-        if method == "CONNECT"
+        let unsupported_transport = method == "CONNECT"
             || headers.contains_key(axum::http::header::UPGRADE)
             || (auth.api_key_purpose != crate::models::api_key::ApiKeyPurpose::General
                 && context.native.is_none())
@@ -1907,8 +1932,18 @@ pub(crate) fn admit_http<'a>(
                     || c.platform_thread
                     || c.channel_adapter_origin.is_some()
                     || c.confirmation_policy.is_some()
-            })
-        {
+            });
+        #[cfg(test)]
+        let unsupported_transport =
+            unsupported_transport || SUPERVISOR_LEGACY_TRANSPORT.try_with(|_| ()).is_ok();
+        if unsupported_transport {
+            #[cfg(test)]
+            let _ = SUPERVISOR_LEGACY_TRANSPORT.try_with(|observed| {
+                observed.store(
+                    if context.supervisor().is_some() { 2 } else { 1 },
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+            });
             context.observation.decide(diagnostics::Decision::new(
                 "legacy",
                 "legacy_unsupported_transport",

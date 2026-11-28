@@ -81,7 +81,7 @@ pub async fn assign_in_session(
     }
     destinations.truncate(engine::MAX_ALSO_DELIVER + 1);
     let assignment = Assignment {
-        org_use_revision: source.org_use_revision,
+        member_use: source.member_use,
         id: turn.turn_id.clone(),
         actor: source.user_id.clone(),
         source_agent: source
@@ -253,7 +253,7 @@ async fn source_result(
             &edge.actor,
             org,
             &edge.source_agent,
-            edge.org_use_revision,
+            edge.member_use,
         )
         .await?
     {

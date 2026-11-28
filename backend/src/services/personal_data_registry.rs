@@ -1659,6 +1659,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "encryption_key_evidence retains immutable admin-attributed lifecycle evidence across restore epochs.",
     },
     Entry {
+        collection: "encrypted_record_census_reports",
+        owner: OwnerSelector::NotPersonal,
+        erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
+        export: Export::Excluded(ExclusionReason::ErasureBookkeeping),
+        export_selector: ExportSelector::None,
+        why: "encrypted_record_census_reports holds encrypted row receipts, findings and dated manifests for seven days.",
+    },
+    Entry {
         collection: "encrypted_record_census_log",
         owner: OwnerSelector::NotPersonal,
         erasure: Erasure::Retained(RetainedCategory::ErasureBookkeeping),
@@ -2038,7 +2046,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::LocalInventory,
         export: Export::Excluded(ExclusionReason::SecretMaterial),
         export_selector: ExportSelector::None,
-        why: "mcp_sessions stores the person-owned mcp sessions record keyed by user_id; bounded local cleanup removes the row after the erasure admission fence.",
+        why: "mcp_sessions is removed by user_id, including absolute_expires_at and slot_recovery_revision. The session and its storage identity are excluded from export in both formats.",
     },
     Entry {
         collection: "mobile_social_deliveries",
@@ -3032,7 +3040,7 @@ pub static ENTRIES: &[Entry] = &[
         erasure: Erasure::NotPersonal("shared or coordination record"),
         export: Export::Excluded(ExclusionReason::NotPersonal),
         export_selector: ExportSelector::None,
-        why: "security_rollouts is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
+        why: "security_rollouts stores fleet coordination, including the MCP issuance fence revision and activation time. These rows contain no person or session identity.",
     },
     Entry {
         collection: "service_account_key_read_grants",

@@ -1037,7 +1037,7 @@ async fn setup_bytes(
     Ok(bytes)
 }
 
-fn stored_transport(source: &Document) -> AppResult<PlatformEntryGateway> {
+pub(in crate::services) fn stored_transport(source: &Document) -> AppResult<PlatformEntryGateway> {
     let row: PlatformEntryGateway = bson::from_document(source.clone()).map_err(|_| refused())?;
     if row
         .secret_context_versions
@@ -1083,7 +1083,7 @@ pub(super) async fn migrate_request(
     .await
 }
 
-fn sha256(bytes: &[u8]) -> String {
+pub(in crate::services) fn sha256(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("sha256:{:x}", Sha256::digest(bytes))
 }

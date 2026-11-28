@@ -346,7 +346,7 @@ POST /api/v1/integrations/openclaw/channel
 # Headers: X-OpenClaw-Signature (HMAC), X-OpenClaw-Webhook-Secret
 ```
 
-Each mapping has its own webhook secret (generated at creation, only shown once). No server-level env var needed.
+Each mapping has its own webhook secret (generated at creation, only shown once). No server-level env var needed. A channel user belongs to one NyxID user: creating a mapping for a channel user already mapped to someone else returns 409 Conflict, while repeating the request as that mapping's owner keeps the mapping and rotates its webhook secret.
 
 ### Node agent support
 

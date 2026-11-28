@@ -537,13 +537,18 @@ async fn run_member_with_work(
     let limit = team_pool_limit(state, owner).await + 1;
     let attempt = start_server_turn(state, owner, start, Pool::Team { owner, limit });
     let org_revision = if work.is_none() && agent.user_id != owner {
-        Some(
-            group
+        Some(crate::models::org_membership::MemberUse {
+            eligibility_revision: group
+                .pending_eligibility_revisions
+                .get(agent_id)
+                .copied()
+                .unwrap_or(0),
+            org_use_revision: group
                 .pending_org_use_revisions
                 .get(agent_id)
                 .copied()
                 .unwrap_or(0),
-        )
+        })
     } else {
         None
     };

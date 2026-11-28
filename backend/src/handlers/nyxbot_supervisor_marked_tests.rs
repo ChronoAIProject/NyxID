@@ -1273,12 +1273,20 @@ async fn supervisor_write_marked_application_error_200_keeps_failure_and_unconfi
         assert_eq!(p.state, if fault == 1 { "completed" } else { "unknown" });
         assert_eq!(
             terminal.activity_outcome.as_deref(),
-            if fault == 1 { Some("failed") } else { None }
+            if fault == 1 {
+                Some("failed")
+            } else if fault == 3 {
+                Some("pending")
+            } else {
+                None
+            }
         );
         assert_eq!(
             p.failure_code.as_deref(),
             Some(if fault == 1 {
                 "provider_application_rejected"
+            } else if fault == 3 {
+                "provider_completion_pending"
             } else {
                 "provider_application_unconfirmed"
             })
@@ -1969,6 +1977,90 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
             }
             remove_adapter(&j);
         }
+    }
+}
+
+#[tokio::test]
+async fn supervisor_write_marked_http_early_legacy_transport_refuses_before_any_authoring_or_send()
+{
+    for unsafe_body in [false, true] {
+        let j = Box::pin(marked_journey(true)).await;
+        let listing = marked_assign(
+            &j,
+            "Ask accountant for today's pending ledger rows",
+            "ws7-early-legacy-list",
+        )
+        .await;
+        let list = owner_text(
+            &tokio::time::timeout(Duration::from_secs(25), listing)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
+        assert_row_report(&list, &j, "Pending", 1);
+        j.stage.store(1, Ordering::SeqCst);
+        *j.script.review_fault.lock().unwrap() = Some(if unsafe_body {
+            ReviewFault::LegacyTransportUnsafeBody
+        } else {
+            ReviewFault::LegacyTransport
+        });
+        // This selects only the existing early-legacy classifier in corrected
+        // admission, while the actual marked HTTP request remains ordinary.
+        let result = marked_assign(&j, &j.script.selection(), "ws7-early-legacy-write").await;
+        let report = owner_text(
+            &tokio::time::timeout(Duration::from_secs(25), result)
+                .await
+                .unwrap_or_else(|_| panic!("early legacy refusal stalled: unsafe={unsafe_body}"))
+                .unwrap(),
+        );
+        assert_eq!(report, NO_CONFIRMATION);
+        let observed = j.observed.lock().await;
+        let classification = observed
+            .iter()
+            .find(|event| event["stage"] == "legacy_transport")
+            .expect("actual HTTP admission classifier observation");
+        assert_eq!(
+            classification["captured_at_legacy"],
+            if unsafe_body { 0 } else { 2 },
+            "a reviewable effect retains its mandatory DM origin before the legacy return; an unsupported body refuses before reaching that return"
+        );
+        let write = &observed
+            .iter()
+            .find(|event| event["stage"] == "write")
+            .expect("actual connected HTTP response")["result"];
+        assert_eq!(write["status"], 403);
+        assert!(write["body"].as_str().unwrap().contains(if unsafe_body {
+            "exact ledger-write review is unavailable"
+        } else {
+            "Execution permission is no longer valid for this operation"
+        }));
+        drop(observed);
+        for collection in ["approval_requests", "approval_grants"] {
+            assert_eq!(
+                j.state
+                    .db
+                    .collection::<Document>(collection)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "early refusal must create no ordinary approval, proposal or grant"
+            );
+        }
+        assert_no_write(&j);
+        assert_eq!(j.ledger.lock().unwrap().reads.len(), 2);
+        assert_eq!(
+            j._ledger_server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.method.as_str() == "PUT")
+                .count(),
+            0,
+            "the provider must see no attempted write"
+        );
+        remove_adapter(&j);
     }
 }
 

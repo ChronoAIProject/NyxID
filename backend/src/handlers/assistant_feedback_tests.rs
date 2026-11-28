@@ -116,6 +116,7 @@ mod fixtures {
 
     pub fn group(id: &str, owner: &str) -> AssistantGroup {
         AssistantGroup {
+            pending_eligibility_revisions: Default::default(),
             pending_org_use_revisions: Default::default(),
             collaboration: None,
             last_recipient_ids: Vec::new(),
@@ -835,6 +836,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<AssistantGroup>(GROUPS)
         .insert_one(AssistantGroup {
+            pending_eligibility_revisions: Default::default(),
             pending_org_use_revisions: Default::default(),
             collaboration: None,
             last_recipient_ids: Vec::new(),
@@ -938,6 +940,7 @@ async fn feedback_group_acl_rejects_non_participant_as_not_found() {
         .db
         .collection::<AssistantGroup>(GROUPS)
         .insert_one(AssistantGroup {
+            pending_eligibility_revisions: Default::default(),
             pending_org_use_revisions: Default::default(),
             collaboration: None,
             last_recipient_ids: Vec::new(),

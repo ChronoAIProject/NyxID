@@ -36,7 +36,7 @@ pub(crate) async fn encrypt(
     )
     .await
 }
-fn binding(row: &AgentKeyLoginRequest) -> AppResult<(&str, &str, &str)> {
+pub(super) fn binding(row: &AgentKeyLoginRequest) -> AppResult<(&str, &str, &str)> {
     Ok((
         row.approved_user_id.as_deref().ok_or_else(invalid)?,
         row.api_key_id.as_deref().ok_or_else(invalid)?,
@@ -69,7 +69,7 @@ pub(crate) async fn decrypt(
             .to_owned(),
     ))
 }
-fn row(source: &Document) -> AppResult<AgentKeyLoginRequest> {
+pub(super) fn row(source: &Document) -> AppResult<AgentKeyLoginRequest> {
     let row: AgentKeyLoginRequest = bson::from_document(source.clone()).map_err(|_| invalid())?;
     if row
         .delivery_context_version

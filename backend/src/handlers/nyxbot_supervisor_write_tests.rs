@@ -207,6 +207,8 @@ enum ReviewFault {
     WrappedBody,
     DuplicateField,
     PolicyRace,
+    LegacyTransport,
+    LegacyTransportUnsafeBody,
 }
 
 struct Script {
@@ -425,6 +427,30 @@ async fn model(
                     }
                 })
                 .await
+        } else if matches!(
+            fault,
+            Some(ReviewFault::LegacyTransport | ReviewFault::LegacyTransportUnsafeBody)
+        ) {
+            assert!(script.proxy);
+            let body = if matches!(fault, Some(ReviewFault::LegacyTransportUnsafeBody)) {
+                r#"{"body":{"fields":{"Status":"Approved"}}}"#
+            } else {
+                r#"{"fields":{"Status":"Approved"}}"#
+            };
+            let reached = Arc::new(AtomicUsize::new(0));
+            let result =
+                crate::services::execution_permission_dispatch::SUPERVISOR_LEGACY_TRANSPORT
+                    .scope(
+                        reached.clone(),
+                        raw_update(state, raw, &script.selected, body),
+                    )
+                    .await;
+            observed
+                .lock()
+                .await
+                .push(json!({"stage":"legacy_transport",
+                "captured_at_legacy":reached.load(Ordering::SeqCst)}));
+            result
         } else if let Some(fault) = fault {
             let body = match fault {
                 ReviewFault::UnsafeValue => {
@@ -537,6 +563,18 @@ async fn model(
         } else {
             tool_value(&written).is_some_and(|value| value["code"] == 0)
         };
+        // Consume the actual product tool result. Fixture state cannot label a
+        // write rejected, and the independent row observation cannot erase it.
+        let rejected = written["result"]["isError"] == true
+            && written["result"]["content"]
+                .as_array()
+                .is_some_and(|parts| {
+                    parts.iter().any(|part| {
+                        part["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains("The provider rejected this write"))
+                    })
+                });
         observed
             .lock()
             .await
@@ -562,7 +600,12 @@ async fn model(
             );
         }
         return format!(
-            "Before: {} After: {}",
+            "{}Before: {} After: {}",
+            if rejected {
+                "The provider rejected this write; these observations do not confirm this attempt. "
+            } else {
+                ""
+            },
             row_observation(&before, selected).unwrap_or_else(|| NO_CONFIRMATION.into()),
             row_observation(&after, selected).unwrap_or_else(|| NO_CONFIRMATION.into())
         );
@@ -1381,6 +1424,7 @@ async fn supervisor_write_connected_mcp_application_error_200_is_an_error_with_o
     );
     assert_row_report(&report, &j, "Pending", 2);
     assert_row_report(&report, &j, "Pending", 3);
+    assert!(report.contains("provider rejected this write"));
     assert!(!report.contains("Status = Approved"));
     let observations = j.observed.lock().await;
     let write = &observations

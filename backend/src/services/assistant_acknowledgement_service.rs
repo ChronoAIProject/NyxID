@@ -805,6 +805,8 @@ async fn record_auto_allowed_from_origin(
         meta_contexts: origin
             .map(|source| source.meta_contexts.clone())
             .unwrap_or_default(),
+        eligibility_revision: 0,
+        target_eligibility_revisions: Default::default(),
         org_maintenance_targets: Default::default(),
         org_maintain_revision: 0,
         activity_execution: None,
@@ -1456,7 +1458,7 @@ async fn notify_nyxbot_denied(
                     Some(&chat.agent_id),
                 ).for_invocation(chat.invocation_id.as_deref());
                 event.source_owner_id = Some(super::org_agent_service::ordinary_member_org(&conversation).unwrap_or(&conversation.user_id).to_owned());
-                event.source_org_use_revision = conversation.org_use_revision;
+                event.set_source_member_use(conversation.member_use);
                 super::assistant_nyxagent::append_events_in_session(
                     &db, &chat.user_id, &home, &[event], session,
                 ).await?;
@@ -1556,7 +1558,9 @@ pub async fn notify_nyxbot_request(
                     return Ok(None);
                 }
                 if access.as_ref().is_some_and(|a| {
-                    !a.can_maintain() || a.maintain_revision() != request.org_maintain_revision
+                    !a.can_maintain()
+                        || a.eligibility_revision() != request.eligibility_revision
+                        || a.maintain_revision() != request.org_maintain_revision
                 }) {
                     return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
                 }
@@ -1566,7 +1570,7 @@ pub async fn notify_nyxbot_request(
                         .unwrap_or(&conversation.user_id)
                         .to_owned(),
                 );
-                notice.source_org_use_revision = conversation.org_use_revision;
+                notice.set_source_member_use(conversation.member_use);
                 let pending = db
                     .collection::<bson::Document>(ACKS)
                     .find_one(doc! {"_id": &request.id, "user_id": &chat.user_id,
@@ -2634,6 +2638,7 @@ fn maintained_target<'a>(
 ) -> Option<&'a str> {
     let args = args?;
     match tool? {
+        super::assistant_agent_learning_review::TOOL => args["agent_id"].as_str(),
         "nyxid__update_subagent"
         | "nyxid__destroy_subagent"
         | "nyxid__grant_subagent"
@@ -2716,8 +2721,8 @@ async fn fence_card_target(
     tx: &mut ClientSession,
     actor: &str,
     id: &str,
-    expected: Option<i64>,
-) -> AppResult<Option<i64>> {
+    expected: Option<(i64, i64)>,
+) -> AppResult<Option<(i64, i64)>> {
     let Some(agent) = db
         .collection::<crate::models::assistant_agent::AssistantAgent>(
             crate::models::assistant_agent::COLLECTION_NAME,
@@ -2746,11 +2751,13 @@ async fn fence_card_target(
             Ok(None)
         };
     }
-    if expected.is_some_and(|rev| rev != agent.org_maintain_revision) {
+    let eligibility =
+        super::org_agent_service::fence_maintenance_revision(db, tx, actor, &agent).await?;
+    let revisions = (agent.org_maintain_revision, eligibility);
+    if expected.is_some_and(|rev| rev != revisions) {
         return Err(AppError::Forbidden(ORG_MAINTAINER_REQUIRED.into()));
     }
-    super::org_agent_service::fence_maintenance(db, tx, actor, &agent).await?;
-    Ok(Some(agent.org_maintain_revision))
+    Ok(Some(revisions))
 }
 
 async fn prepare_request_candidate(
@@ -2798,6 +2805,8 @@ async fn prepare_request_candidate(
     let orchestrated = !chat.is_orchestrator() && request.kind != "action";
     let candidate = AssistantAcknowledgement {
         meta_contexts: Vec::new(),
+        eligibility_revision: 0,
+        target_eligibility_revisions: Default::default(),
         org_maintenance_targets: if request.kind == "action" {
             Box::pin(card_targets(
                 db,
@@ -3005,6 +3014,7 @@ async fn request_candidate_inner(
     let mut row = candidate.clone();
     row.routing = routing;
     row.meta_contexts = selected.contexts;
+    row.eligibility_revision = access.as_ref().map_or(0, |a| a.eligibility_revision());
     row.org_maintain_revision = access.as_ref().map_or(0, |a| a.maintain_revision());
     row.org_maintenance_targets.clear();
     for id in candidate.org_maintenance_targets.keys() {
@@ -3014,7 +3024,11 @@ async fn request_candidate_inner(
         if let Some(revision) =
             Box::pin(fence_card_target(db, session, &chat.user_id, id, None)).await?
         {
-            row.org_maintenance_targets.insert(id.clone(), revision);
+            row.org_maintenance_targets.insert(id.clone(), revision.0);
+            if revision.1 != 0 {
+                row.target_eligibility_revisions
+                    .insert(id.clone(), revision.1);
+            }
         }
     }
     row.invocation_id = origin
@@ -3075,6 +3089,15 @@ async fn request_candidate_inner(
             bson::to_bson(&row.meta_contexts)
                 .map_err(|_| super::channel_meta_service::grants::incomplete())?,
         );
+    }
+    if !row.target_eligibility_revisions.is_empty() {
+        filter.insert(
+            "target_eligibility_revisions",
+            bson::to_bson(&row.target_eligibility_revisions).map_err(|_| not_found())?,
+        );
+    }
+    if row.eligibility_revision != 0 {
+        filter.insert("eligibility_revision", row.eligibility_revision);
     }
     if !row.org_maintenance_targets.is_empty() {
         filter.insert(
@@ -3743,7 +3766,13 @@ pub(crate) async fn decide_in_session(
             session,
             user,
             target,
-            Some(*revision),
+            Some((
+                *revision,
+                row.target_eligibility_revisions
+                    .get(target)
+                    .copied()
+                    .unwrap_or(0),
+            )),
         ))
         .await?;
     }
@@ -3839,7 +3868,8 @@ pub(crate) async fn decide_in_session(
     // cards created before delegation supported org specialists.
     let (_, key, access) = Box::pin(fence(db, &chat, session)).await?;
     if access.as_ref().is_some_and(|a| {
-        (by_nyxbot && !a.can_maintain())
+        a.eligibility_revision() != row.eligibility_revision
+            || (by_nyxbot && !a.can_maintain())
             || (a.shared().is_none()
                 && row.kind != "action"
                 && (!a.can_maintain() || a.maintain_revision() != row.org_maintain_revision))
@@ -4004,7 +4034,7 @@ pub(crate) async fn decide_in_session(
         Box::pin(super::assistant_invocation_service::decision_in_session(
             db,
             session,
-            target.org_use_revision,
+            target.member_use,
             &row,
         ))
         .await?
@@ -4185,7 +4215,7 @@ async fn consume_action_with_reason(
     let mut session = db.client().start_session().await?;
     session.start_transaction().and_run2(async move |session| {
         let operation = async {
-            let (conversation, _, _) = Box::pin(fence(&db, &chat, session)).await?;
+            let (conversation, _, access) = Box::pin(fence(&db, &chat, session)).await?;
             let mut filter = doc! {"_id": &id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
                     "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": &tool,
                     "arguments_digest": &digest,
@@ -4196,24 +4226,7 @@ async fn consume_action_with_reason(
             if let Some(reason) = reason.as_deref() {
                 filter.insert("confirmation.reason", reason);
             }
-            let mut revisions = std::collections::BTreeMap::new();
-            for target in maintenance.keys() {
-                if conversation.owns_agent(target) { continue; }
-                if let Some(revision) = Box::pin(fence_card_target(&db,session,&chat.user_id,target,None)).await? {
-                    revisions.insert(target, revision);
-                }
-            }
-            if revisions.is_empty() {
-                filter.insert("org_maintenance_targets", bson::Bson::Null);
-            } else {
-                let captured = bson::to_bson(&revisions).map_err(|_| not_found())?;
-                if revisions.values().all(|revision| *revision == 0) {
-                    // A legacy card stores only the digest. Re-evaluate its exact arguments at consumption.
-                    filter.insert("$or", bson::bson!([{"org_maintenance_targets":null},{"org_maintenance_targets":captured}]));
-                } else {
-                    filter.insert("org_maintenance_targets", captured);
-                }
-            }
+            Box::pin(bind_card_authority(&db, session, &chat.user_id, &conversation, access.as_deref(), &maintenance, &mut filter)).await?;
             let result = db.collection::<AssistantAcknowledgement>(ACKS).update_one(
                 filter,
                 doc! {"$set": {"status": "used", "activity_execution": bson::to_bson(&super::assistant_activity_decision::execution(&chat)).expect("execution metadata")}},
@@ -4227,6 +4240,46 @@ async fn consume_action_with_reason(
     }).await.map_err(mutations::map_transaction_error)
 }
 
+async fn bind_card_authority(
+    db: &Database,
+    session: &mut ClientSession,
+    actor: &str,
+    conversation: &AssistantConversation,
+    access: Option<&super::org_agent_service::RequestAccess>,
+    targets: &std::collections::BTreeMap<String, i64>,
+    filter: &mut bson::Document,
+) -> AppResult<()> {
+    if let Some(access) = access {
+        filter.insert("$expr", doc! {"$eq":[{"$ifNull":["$eligibility_revision",0_i64]},access.eligibility_revision()]});
+    }
+    let mut maintenance = std::collections::BTreeMap::new();
+    let mut eligibility = std::collections::BTreeMap::new();
+    for target in targets.keys().filter(|id| !conversation.owns_agent(id)) {
+        if let Some((policy, member)) =
+            Box::pin(fence_card_target(db, session, actor, target, None)).await?
+        {
+            maintenance.insert(target, policy);
+            if member != 0 {
+                eligibility.insert(target, member);
+            }
+        }
+    }
+    let captured = |value| bson::to_bson(value).map_err(|_| not_found());
+    if eligibility.is_empty() {
+        filter.insert("target_eligibility_revisions", bson::Bson::Null);
+    } else {
+        filter.insert("target_eligibility_revisions", captured(&eligibility)?);
+    }
+    if maintenance.is_empty() {
+        filter.insert("org_maintenance_targets", bson::Bson::Null);
+    } else if maintenance.values().all(|revision| *revision == 0) {
+        filter.insert("$or", bson::bson!([{"org_maintenance_targets":null},{"org_maintenance_targets":captured(&maintenance)?}]));
+    } else {
+        filter.insert("org_maintenance_targets", captured(&maintenance)?);
+    }
+    Ok(())
+}
+
 /// Consume inside the caller's durable effect transaction. Learning uses this
 /// to bind one human card to exactly one publication operation before egress.
 pub(crate) async fn consume_action_in_session(
@@ -4237,15 +4290,30 @@ pub(crate) async fn consume_action_in_session(
     arguments: &Value,
     session: &mut ClientSession,
 ) -> AppResult<bool> {
-    Box::pin(fence(db, chat, session)).await?;
-    let result = db
-        .collection::<AssistantAcknowledgement>(ACKS)
-        .update_one(
-            doc! {"_id": id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
-            "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": tool,
-            "arguments_digest": arguments_digest(arguments), "status": "allowed",
-            "invocation_id": &chat.invocation_id,
-            "decider": "user", "decided_by": {"$eq": "user", "$ne": "access_mode"}, "expires_at": {"$gt": bson::DateTime::now()}},
+    let (conversation, _, access) = Box::pin(fence(db, chat, session)).await?;
+    let targets = Box::pin(card_targets(
+        db,
+        Some(tool),
+        Some(arguments),
+        &chat.agent_id,
+    ))
+    .await?;
+    let mut filter = doc! {"_id": id, "user_id": &chat.user_id, "conversation_id": &chat.conversation_id,
+    "api_key_id": &chat.api_key_id, "kind": "action", "tool_name": tool,
+    "arguments_digest": arguments_digest(arguments), "status": "allowed",
+    "invocation_id": &chat.invocation_id,
+    "decider": "user", "decided_by": {"$eq":"user","$ne":"access_mode"}, "expires_at": {"$gt": bson::DateTime::now()}};
+    Box::pin(bind_card_authority(
+        db,
+        session,
+        &chat.user_id,
+        &conversation,
+        access.as_deref(),
+        &targets,
+        &mut filter,
+    ))
+    .await?;
+    let result = db.collection::<AssistantAcknowledgement>(ACKS).update_one(filter,
             doc! {"$set": {"status": "used", "activity_execution": bson::to_bson(&super::assistant_activity_decision::execution(chat)).expect("execution metadata")}},
         )
         .session(&mut *session)

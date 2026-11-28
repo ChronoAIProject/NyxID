@@ -17,7 +17,7 @@ fn invalid() -> AppError {
     AppError::Internal("Invalid OAuth client webhook credential storage".into())
 }
 
-fn owner(creator: Option<&str>) -> String {
+pub(super) fn owner(creator: Option<&str>) -> String {
     match creator {
         None => "registration:ownerless".into(),
         Some("system") => "registration:system".into(),
