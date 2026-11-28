@@ -8389,6 +8389,8 @@ For the admin endpoints that start and advance an encrypted-record census and
 read its dated report, see [Running a dated census](security/KEY_LIFECYCLE.md#running-a-dated-census). For retirement evaluation,
 request revisions and approval blockers, see [Evaluating retirement](security/KEY_LIFECYCLE.md#evaluating-retirement).
 
+Full admins change the admitted layout with `POST /api/v1/admin/key-lifecycle/rotation`. For its request fields, transitions and the isolated-rig evidence schema, see [Rolling and closing an enrolled rotation](security/KEY_LIFECYCLE.md#rolling-and-closing-an-enrolled-rotation).
+
 ```
 GET /api/v1/admin/security-readiness
 Authorization: Bearer <admin_or_operator_access_token>
