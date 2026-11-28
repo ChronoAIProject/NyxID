@@ -106,11 +106,18 @@ pub(super) async fn live_discovery(
     row: &AssistantConversation,
     bearer: axum::http::HeaderValue,
 ) -> Value {
+    // NyxAgent's NyxID toolbox forwards the model bearer key as x-api-key
+    // for MCP (docs/chat/08-nyxagent-engine.md, Upstream contract trace).
+    let api_key = bearer
+        .to_str()
+        .unwrap()
+        .strip_prefix("Bearer ")
+        .expect("the model callback uses bearer authentication");
     let request = |method, params| {
         axum::http::Request::builder()
             .method("POST")
             .uri("/mcp")
-            .header("authorization", bearer.clone())
+            .header("x-api-key", api_key)
             .header("content-type", "application/json")
             .body(Body::from(
                 json!({"jsonrpc":"2.0","id":1,"method":method,"params":params}).to_string(),
@@ -122,13 +129,29 @@ pub(super) async fn live_discovery(
         .oneshot(request("tools/list", json!({})))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let discovery = serde_json::from_slice::<Value>(
-        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap(),
+    let discovery =
+        discovery_response(response, api_key, "initial tools/list", StatusCode::OK).await;
+    // The model proxy uses bearer authentication separately. Its header cannot
+    // acquire MCP authority through raw-key bearer/session fallback.
+    let mut bearer_request = request("tools/list", json!({}));
+    bearer_request.headers_mut().remove("x-api-key");
+    bearer_request
+        .headers_mut()
+        .insert("authorization", bearer.clone());
+    let refusal = router.clone().oneshot(bearer_request).await.unwrap();
+    let refusal = discovery_response(
+        refusal,
+        api_key,
+        "raw-key bearer tools/list",
+        StatusCode::FORBIDDEN,
     )
-    .unwrap();
+    .await;
+    assert_eq!(refusal["error"]["code"], -32003);
+    assert_eq!(
+        refusal["error"]["message"],
+        "API key is missing the required scope for MCP access. Expected: proxy"
+    );
+    assert!(refusal.get("result").is_none());
     let search = router
         .clone()
         .oneshot(request(
@@ -137,13 +160,7 @@ pub(super) async fn live_discovery(
         ))
         .await
         .unwrap();
-    assert_eq!(search.status(), StatusCode::OK);
-    let search: Value = serde_json::from_slice(
-        &axum::body::to_bytes(search.into_body(), 1024 * 1024)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
+    let search = discovery_response(search, api_key, "native tool search", StatusCode::OK).await;
     assert_eq!(search["result"]["isError"], false, "{search}");
     let search: Value =
         serde_json::from_str(search["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -193,8 +210,35 @@ pub(super) async fn live_discovery(
         .oneshot(request("tools/list", json!({})))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    discovery_response(response, api_key, "restored tools/list", StatusCode::OK).await;
     discovery
+}
+
+async fn discovery_response(
+    response: axum::response::Response,
+    api_key: &str,
+    stage: &str,
+    expected: StatusCode,
+) -> Value {
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("mounted MCP response fits the fixture limit");
+    let body: Value = serde_json::from_slice(&bytes).expect("mounted MCP returns JSON");
+    // Retain actionable refusal details without logging credentials or the
+    // complete tool/result payload. Cover both JSON-RPC and HTTP error shapes.
+    let diagnostic = json!({
+        "code":body.pointer("/error/code").or_else(|| body.get("code")),
+        "error":body.get("error").and_then(Value::as_str),
+        "message":body.pointer("/error/message").or_else(|| body.get("message")),
+    })
+    .to_string()
+    .replace(api_key, "[redacted]");
+    assert_eq!(status, expected, "{stage}: {diagnostic}");
+    if expected.is_success() {
+        assert!(body.get("error").is_none(), "{stage}: {diagnostic}");
+    }
+    body
 }
 
 pub(super) async fn assertions(
