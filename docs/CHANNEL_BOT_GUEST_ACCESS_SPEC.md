@@ -114,6 +114,16 @@ owner's applicable approvals and check the resolved Google destination at send.
 Existing grants alone leave both operations unavailable on enrollment.
 [Reported Discord event workflow](https://github.com/ChronoAIProject/NyxID/issues/2704)
 
+Signed Slack `message` and `app_mention` events identify shared rooms through
+supported C/G channel IDs when `channel_type` is omitted. Explicit `group`
+also accepts C-prefixed private channels; `channel` requires C and `mpim`
+requires G. Private D-prefixed IMs, unknown IDs/types and contradictory facts
+supply no shared-write proof. Authenticated legacy X DM polling identifies a
+shared group by a single numeric conversation ID and a `MessageCreate` event
+(or its supported omitted type). One-to-one IDs must name the exact sender and
+receiving account and supply no shared-write proof. These classifications bind
+the provider's sender, message and destination before discovery or execution.
+
 Hosted guest discovery describes this restricted Sheets contract on both Google
 catalogs. Direct MCP `tools/list` and `nyx__search_tools` publish a bounded,
 tab-qualified read range (at most 32 columns and 2,000 cells), without `FORMULA`
@@ -222,6 +232,13 @@ Provider-verified actors match the provider sender identity; unverified followed
 actors match their event-scoped identity and retain only the authority
 of that bound event and source. Validation never substitutes another actor's
 ordinary lane or replaces the child's transcript ID.
+
+While an enrolled followed source waits for model setup, recovery validates
+the pending hosted authority against its original queued event and delivery.
+It requires no admitted turn or guest-work row at that stage. Live policy,
+assignment, organization authority, sender and source checks still apply.
+Turn admission then binds guest work and the event atomically; later delivery
+and tool calls require that admitted turn.
 
 Organization specialists enforce current use, maintenance and governance
 rights independently. Changing guest policy or pin authorizations requires

@@ -298,9 +298,15 @@ fn authenticated_facts<'a>(
                 sender_id,
                 event["channel_type"] == "im" && provider_id(chat_id, "D"),
             );
-            facts.shared_room_verified = match event["channel_type"].as_str() {
-                Some("channel") => provider_id(chat_id, "C"),
-                Some("group" | "mpim") => provider_id(chat_id, "G"),
+            facts.shared_room_verified = match event.get("channel_type") {
+                // Signed app mentions and message events can omit this field.
+                // Slack's C/G channel IDs still positively identify shared rooms.
+                None => provider_id(chat_id, "C") || provider_id(chat_id, "G"),
+                Some(Value::String(kind)) if kind == "channel" => provider_id(chat_id, "C"),
+                Some(Value::String(kind)) if kind == "group" => {
+                    provider_id(chat_id, "C") || provider_id(chat_id, "G")
+                }
+                Some(Value::String(kind)) if kind == "mpim" => provider_id(chat_id, "G"),
                 _ => false,
             };
             facts
@@ -347,7 +353,13 @@ fn authenticated_facts<'a>(
                 return unknown;
             }
             if account_id(chat_id) {
-                verified(sender_id, false)
+                let mut facts = verified(sender_id, false);
+                // The authenticated legacy DM poll normalizes one numeric ID
+                // as a group; one-to-one destinations use the exact pair above.
+                facts.shared_room_verified = raw
+                    .get("event_type")
+                    .is_none_or(|kind| kind.as_str() == Some("MessageCreate"));
+                facts
             } else {
                 unknown
             }

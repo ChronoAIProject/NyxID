@@ -40,23 +40,9 @@ pub(super) async fn start_guest_with_evidence(
     audience: AnswerAudience,
     shared_room_verified: bool,
 ) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
-    use crate::models::{
-        assistant_conversation::{
-            COLLECTION_NAME as CONVERSATIONS, ChannelOrigin, ChannelTurnContext, TurnOrigin,
-        },
-        channel_thread::ThreadSenderKind,
-    };
-    use crate::services::{
-        assistant_authority_tests::chat_for_row,
-        assistant_nyxagent::{self as engine, TurnRequest, TurnStart},
-        channel_guest_access::{self as guest, GuestAdmission, VerifiedGuestInput},
-    };
-    let db = &f.state.db;
-    let mode = guest::select_mode(db, "bot-1").await.unwrap();
-    let GuestAdmission::AddOn(turn) = guest::classify(
-        db,
-        mode,
-        VerifiedGuestInput {
+    Box::pin(start_guest_with_input(
+        f,
+        super::VerifiedGuestInput {
             bot_id: "bot-1",
             binding_id: "binding",
             platform: "discord",
@@ -67,9 +53,34 @@ pub(super) async fn start_guest_with_evidence(
             shared_room_verified,
             meta_grant_id: None,
         },
-    )
+    ))
     .await
-    .unwrap() else {
+}
+
+pub(super) async fn start_guest_with_input(
+    f: &crate::services::assistant_authority_tests::Fixture,
+    input: super::VerifiedGuestInput<'_>,
+) -> crate::services::assistant_acknowledgement_service::ChatAuthority {
+    use crate::models::{
+        assistant_conversation::{
+            COLLECTION_NAME as CONVERSATIONS, ChannelOrigin, ChannelTurnContext, TurnOrigin,
+        },
+        channel_thread::ThreadSenderKind,
+    };
+    use crate::services::{
+        assistant_authority_tests::chat_for_row,
+        assistant_nyxagent::{self as engine, TurnRequest, TurnStart},
+        channel_guest_access::{self as guest, GuestAdmission},
+    };
+    let db = &f.state.db;
+    let event = input.source_event_id;
+    let audience = input.audience;
+    let platform = input.platform;
+    let partition = input.conversation_id;
+    let bot_id = input.bot_id;
+    let binding_id = input.binding_id;
+    let mode = guest::select_mode(db, bot_id).await.unwrap();
+    let GuestAdmission::AddOn(turn) = guest::classify(db, mode, input).await.unwrap() else {
         panic!("expected the guest add-on admission");
     };
     let id = turn.hosted_conversation_id();
@@ -98,9 +109,9 @@ pub(super) async fn start_guest_with_evidence(
         org_execution: None,
         native_event_id: None,
         thread: None,
-        nyxbot_channel_id: "binding".into(),
-        partition: sender.into(),
-        platform: "discord".into(),
+        nyxbot_channel_id: binding_id.into(),
+        partition: partition.into(),
+        platform: platform.into(),
     });
     start.channel_context = Some(ChannelTurnContext {
         channel_guest: Some(*turn),
@@ -111,8 +122,8 @@ pub(super) async fn start_guest_with_evidence(
         conversation_label: None,
         followed: false,
         source_event_id: event.into(),
-        channel_id: "binding".into(),
-        channel_bot_id: "bot-1".into(),
+        channel_id: binding_id.into(),
+        channel_bot_id: bot_id.into(),
         conversation_kind: if audience == AnswerAudience::Private {
             "private"
         } else {

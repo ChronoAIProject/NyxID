@@ -366,21 +366,25 @@ async fn resume_inner(state: &AppState, event: &bson::Document) -> AppResult<Opt
         return Ok(Some(Inbound::Silent("refused_policy")));
     }
     if payload.origin.thread.is_some() {
-        let follow_conversation = if addon && payload.origin.org_execution.is_none() {
-            thread
-                .conversation_id
-                .as_deref()
-                .ok_or(AppError::AssistantTurnRequired)?
+        if let Some(guest) = guest {
+            // The hosted turn is still pending. Validate its exact source and
+            // live guest authority without requiring an already-bound turn.
+            crate::services::channel_thread_follow_service::validate_pending_hosted_delivery(
+                &state.db,
+                &actor,
+                &payload.origin,
+                guest,
+            )
+            .await?;
         } else {
-            &payload.conversation
-        };
-        crate::services::channel_thread_follow_service::validate_delivery(
-            &state.db,
-            &actor,
-            &payload.origin,
-            follow_conversation,
-        )
-        .await?;
+            crate::services::channel_thread_follow_service::validate_delivery(
+                &state.db,
+                &actor,
+                &payload.origin,
+                &payload.conversation,
+            )
+            .await?;
+        }
     }
     let expired = event
         .get_datetime("guest_setup_deadline")

@@ -626,6 +626,35 @@ pub async fn validate_delivery(
     origin: &ChannelOrigin,
     conversation: &str,
 ) -> AppResult<NyxbotThread> {
+    validate_delivery_bound(db, owner, origin, conversation, None).await
+}
+
+/// A source waiting for model setup has its original delivery and guest
+/// authority, but no admitted assistant turn or durable guest work yet.
+pub(crate) async fn validate_pending_hosted_delivery(
+    db: &Database,
+    owner: &str,
+    origin: &ChannelOrigin,
+    turn: &guest::GuestTurn,
+) -> AppResult<NyxbotThread> {
+    guest::revalidate(db, turn).await?;
+    validate_delivery_bound(
+        db,
+        owner,
+        origin,
+        &turn.hosted_conversation_id(),
+        Some(turn.clone()),
+    )
+    .await
+}
+
+async fn validate_delivery_bound(
+    db: &Database,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    pending_guest: Option<guest::GuestTurn>,
+) -> AppResult<NyxbotThread> {
     let db = db.clone();
     let owner = owner.to_owned();
     let conversation = conversation.to_owned();
@@ -640,12 +669,13 @@ pub async fn validate_delivery(
             let origin = &origin;
 
             transactions::transaction_result(
-                Box::pin(validate_in_session(
+                Box::pin(validate_bound(
                     db,
                     owner,
                     origin,
                     conversation,
                     true,
+                    pending_guest.as_ref(),
                     session,
                 ))
                 .await,

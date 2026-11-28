@@ -648,10 +648,11 @@ async fn cold_guest_model_setup(native: bool, addon: bool, followed: bool) {
     let observations: Calls = Default::default();
     let sink = observations.clone();
     let db = state.db.clone();
+    let setup_state = state.clone();
     let (_, mcp_router) = crate::routes::build_router_with_state(state.clone());
     let mcp_router = mcp_router.with_state(state.clone());
     let upstream=Router::new().route("/v1/responses",post(move |headers:HeaderMap,Json(body):Json<Value>| {
-        let callbacks=callbacks.clone();let sink=sink.clone();let db=db.clone();let mcp_router=mcp_router.clone();
+        let callbacks=callbacks.clone();let sink=sink.clone();let db=db.clone();let mcp_router=mcp_router.clone();let setup_state=setup_state.clone();
         async move {
             // Setup may stop its engine response as soon as model admission succeeds.
             // Let the simulated provider finish and record settlement after that disconnect.
@@ -659,6 +660,9 @@ async fn cold_guest_model_setup(native: bool, addon: bool, followed: bool) {
             let bearer=headers["authorization"].clone();
             let (_,key,_)=key_service::validate_api_key(&db,bearer.to_str().unwrap().strip_prefix("Bearer ").unwrap()).await.unwrap();
             let conversation=db.collection::<AssistantConversation>(CONVERSATIONS).find_one(doc!{"credential_api_key_id":&key.id}).await.unwrap().unwrap();
+            if followed && conversation.guest_model_setup {
+                Box::pin(enrolled_follow::pending_authority(&setup_state,&conversation)).await;
+            }
             let discovery = if followed && conversation.guest_turn {
                 enrolled_follow::live_discovery(mcp_router,&db,&conversation,bearer.clone()).await
             } else {Value::Null};
@@ -842,9 +846,14 @@ async fn cold_guest_model_setup(native: bool, addon: bool, followed: bool) {
     }
     let body = message("502", "Hello, first visitor");
     let response = body_text(respond(&state, &key, &body, "org-cold-first").await).await;
+    let diagnostic = if followed && !response.contains("Organization answer") {
+        enrolled_follow::diagnostic(&state, &row).await
+    } else {
+        Value::Null
+    };
     assert!(
         response.contains("Organization answer"),
-        "{response}; callbacks={:?}",
+        "{response}; authority={diagnostic}; callbacks={:?}",
         observations.lock().await
     );
     let mut seen = tokio::time::timeout(std::time::Duration::from_secs(10), async {

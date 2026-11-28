@@ -7,6 +7,99 @@ async fn enrolled_discord_org_follow_binds_hosted_admission_discovery_and_sender
     Box::pin(cold_guest_model_setup(true, true, true)).await;
 }
 
+pub(super) async fn pending_authority(state: &AppState, setup: &AssistantConversation) {
+    use crate::{
+        models::nyxbot_channel::WaitingGuest, services::channel_thread_follow_service as follow,
+    };
+    let event_id = setup
+        .channel
+        .as_ref()
+        .unwrap()
+        .native_event_id
+        .as_deref()
+        .unwrap();
+    let source = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = state
+                .db
+                .collection::<bson::Document>(EVENTS)
+                .find_one(doc! {"_id":event_id})
+                .await
+                .unwrap()
+                .unwrap();
+            if event.contains_key(event_record::CHANNEL_GUEST) {
+                break event;
+            }
+            assert_ne!(
+                event.get_str("status"),
+                Ok("refused"),
+                "source retired before setup dispatch"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the source waits for this model setup");
+    assert_eq!(source.get_str("status"), Ok("queued"));
+    assert!(
+        source
+            .get("turn_id")
+            .is_none_or(|id| id == &bson::Bson::Null)
+    );
+    let bytes = event_record::guest_setup(&state.encryption_keys, &source)
+        .await
+        .unwrap();
+    let payload: WaitingGuest = serde_json::from_slice(&bytes).unwrap();
+    let guest = payload
+        .channel_context
+        .as_ref()
+        .unwrap()
+        .channel_guest
+        .as_ref()
+        .unwrap();
+    assert_eq!(guest.source_event_id, event_id);
+    assert_eq!(guest.hosted_conversation_id(), payload.conversation);
+    assert!(guest.matches_sender("8"));
+    let actor = &payload.origin.org_execution.as_ref().unwrap().actor_id;
+    let child = follow::validate_pending_hosted_delivery(&state.db, actor, &payload.origin, guest)
+        .await
+        .unwrap();
+    assert_eq!(child.id, payload.origin.thread.as_ref().unwrap().child_id);
+    for mutation in ["sender", "source", "actor", "partition"] {
+        let mut wrong = payload.origin.clone();
+        match mutation {
+            "sender" => wrong.thread.as_mut().unwrap().sender_id = "9".into(),
+            "source" => wrong.thread.as_mut().unwrap().source_message_id = "other-source".into(),
+            "actor" => wrong.org_execution.as_mut().unwrap().actor_id = OWNER.into(),
+            _ => wrong.partition = "other-thread".into(),
+        }
+        assert!(
+            follow::validate_pending_hosted_delivery(&state.db, actor, &wrong, guest)
+                .await
+                .is_err(),
+            "{mutation}"
+        );
+    }
+    assert_eq!(
+        state
+            .db
+            .collection::<bson::Document>("channel_guest_work_v1")
+            .count_documents(doc! {"turn.source_event_id":event_id})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+pub(super) async fn diagnostic(state: &AppState, channel: &NyxbotChannel) -> Value {
+    let event=state.db.collection::<bson::Document>(EVENTS).find_one(doc!{"channel_id":&channel.id,"event_id":"discord:100:502"})
+        .projection(doc!{"status":1,"turn_id":1,"conversation_id":1,"channel_guest_admission":1,"delivery.state":1}).await.unwrap();
+    let setup=state.db.collection::<bson::Document>(crate::services::assistant_service_execution::COLLECTION)
+        .find_one(doc!{"kind":crate::services::assistant_guest_model_setup::KIND,"agent_id":&channel.agent_id})
+        .projection(doc!{"status":1,"reason":1,"failure_step":1}).await.unwrap();
+    json!({"event":event,"setup":setup})
+}
+
 pub(super) async fn live_discovery(
     router: Router,
     db: &mongodb::Database,

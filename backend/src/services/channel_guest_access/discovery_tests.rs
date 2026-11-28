@@ -525,6 +525,7 @@ async fn enrolled_sheets_discovery_guides_both_catalogs_and_preserves_ordinary_t
         }
     }
     assert_effective_approval(db, &f.owner, &catalog_ids).await;
+    Box::pin(super::transport_sheets_tests::exercise(&f)).await;
     Box::pin(super::sheets_runtime_tests::exercise(
         &f,
         &chat.conversation_id,

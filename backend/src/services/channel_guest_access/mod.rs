@@ -15,6 +15,8 @@ mod discovery_tests;
 mod sheets_runtime_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(test)]
+mod transport_sheets_tests;
 
 use mongodb::{
     ClientSession, Database,
