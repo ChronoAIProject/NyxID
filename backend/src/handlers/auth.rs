@@ -14,12 +14,12 @@ use mongodb::bson::doc;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+#[cfg(test)]
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{ACCESS_TOKEN_COOKIE_NAME, AuthUser, SESSION_COOKIE_NAME};
 use crate::mw::rate_limit::AuditIp;
 use crate::services::{
-    audit_service, auth_service, feature_flag_service, invite_code_service, role_service,
-    token_service,
+    audit_service, auth_service, feature_flag_service, invite_code_service, token_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 
@@ -1192,51 +1192,37 @@ pub async fn setup(
     headers: HeaderMap,
     Json(body): Json<SetupRequest>,
 ) -> AppResult<Json<SetupResponse>> {
-    body.validate()
-        .map_err(|e| AppError::ValidationError(e.to_string()))?;
-
-    // Guard: only allow setup when no users exist
-    let user_count = state
-        .db
-        .collection::<User>(USERS)
-        .count_documents(doc! {})
-        .await?;
-
-    if user_count > 0 {
+    use subtle::ConstantTimeEq;
+    let authorized = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split_once(' '))
+        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
+        .zip(state.config.admin_setup_secret_hash.as_ref())
+        .is_some_and(|((_, token), expected)| {
+            crate::crypto::token::hash_token(token)
+                .as_bytes()
+                .ct_eq(expected.as_bytes())
+                .into()
+        });
+    if !authorized {
         return Err(AppError::Forbidden(
-            "Setup has already been completed. Use the CLI --promote-admin flag to promote existing users.".to_string(),
+            "Initial admin setup requires the operator credential".into(),
         ));
     }
-
-    // Create the user via the normal registration flow
-    let result = auth_service::register_user(
+    body.validate()
+        .map_err(|e| AppError::ValidationError(e.to_string()))?;
+    let user_id = crate::services::admin_user_service::bootstrap_admin(
         &state.db,
         &body.email,
         &body.password,
         body.display_name.as_deref(),
-        None,
-        true, // Admin setup always auto-verifies
     )
     .await?;
 
-    // Promote to admin and mark email as verified. The RBAC membership is
-    // authoritative; the legacy flag is mirrored during the migration window.
-    let platform_role_ids = role_service::get_platform_role_ids(&state.db).await?;
-    let mut pipeline = role_service::set_platform_role_update(
-        crate::models::user::PlatformRole::Admin,
-        &platform_role_ids,
-        mongodb::bson::DateTime::from_chrono(chrono::Utc::now()),
-    );
-    pipeline.push(doc! { "$set": { "email_verified": true } });
-    state
-        .db
-        .collection::<User>(USERS)
-        .update_one(doc! { "_id": &result.user_id }, pipeline)
-        .await?;
-
     audit_service::log_async(
         state.db.clone(),
-        Some(result.user_id.clone()),
+        Some(user_id.clone()),
         "admin_setup".to_string(),
         Some(serde_json::json!({
             "email": body.email,
@@ -1247,12 +1233,12 @@ pub async fn setup(
         None,
         None,
     );
-    ensure_billing_wallet_after_user_create(&state, &result.user_id).await;
+    ensure_billing_wallet_after_user_create(&state, &user_id).await;
 
-    tracing::info!(user_id = %result.user_id, email = %body.email, "Initial admin created via bootstrap");
+    tracing::info!(user_id = %user_id, email = %body.email, "Initial admin created via bootstrap");
 
     Ok(Json(SetupResponse {
-        user_id: result.user_id,
+        user_id,
         message: "Admin account created successfully.".to_string(),
     }))
 }
@@ -1664,3 +1650,6 @@ fn auth_dto_debug_never_discloses_credentials_but_wire_format_is_preserved() {
         secret
     );
 }
+
+#[cfg(test)]
+mod setup_tests;
