@@ -82,16 +82,26 @@ pub struct Proposal {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OwnerContinuation {
     pub version: u32,
-    /// Complete original decision wake. Absent historical proofs never release.
+    /// Immutable original fresh-decision group. Missing historical proof never releases.
     #[serde(default)]
     pub batch: Option<Vec<String>>,
-    /// The server-admitted decision turn that atomically bound the full batch.
+    /// The server-admitted decision turn that atomically bound this group.
     #[serde(default)]
     pub batch_turn_id: Option<String>,
+    /// A separately fenced union; each member keeps its original decision proof.
+    #[serde(default)]
+    pub handoff: Option<OwnerContinuationHandoff>,
     #[serde(default)]
     pub blocked: bool,
     /// None is proven unreleased. A release is irreversible, even after a crash.
     pub released_turn_id: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerContinuationHandoff {
+    pub version: u32,
+    pub request_ids: Vec<String>,
+    pub turn_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

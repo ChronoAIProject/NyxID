@@ -486,29 +486,47 @@ resume does not decrypt another copy of it. Normal egress still requires the
 live conversation-key relationship; reusing the verified bytes does not bypass
 revocation of that relationship or the key.
 
-Every distinct request in a continuation batch must have a successful, available
-receipt and a version-2 pending `owner_continuation` marker. Before any provider
-dispatch, a worker-fenced transaction binds the sorted, distinct IDs and original
-admitted decision turn ID to every eligible actionable member, after continuation
-readiness is resolved. A wake containing an ordinary event binds blocked markers.
-Provider completion preserves this immutable proof and never replaces it with a
-smaller recovery wake. A marker alone is not success evidence: release requires
-every independently committed successful result with the same original batch,
-admitted turn, task, source, actor, conversation and credential.
+For a continuation handoff to release, every request has a successful, available
+receipt and a version-3 `owner_continuation` marker. Each marker retains its own
+original decision group (`batch` and `batch_turn_id`). Fresh decisions co-admitted
+with recovery events form their own group; they never rewrite an older group's
+proof. Before any provider dispatch, one worker-fenced transaction binds fresh
+groups and joins compatible unreleased groups into a separate `handoff` containing
+its version, sorted request IDs and the actual joining turn ID. The same
+transaction fences the marked root, live task, source, actor, conversation,
+credential, worker and lease, and validates every original group and any previous
+handoff before extending it. A crash cannot expose a newly bound group without
+the corresponding joined proof. A complete historical version-2 proof can be
+adopted under these fences while retaining its original decision group. Proof
+binding is independent of outcome readiness: denied or expired unsent decisions
+can retain their group proof, but never authorize execution or model release.
+Concurrent identical resumes reload proof state inside each transaction attempt;
+an already-bound identical group is a successful no-op, while the effect claim
+and provider-send fences still admit one operation.
 
 Only decisions actually present in the admitted wake enter executable resume.
 Stored sibling IDs are evidence-only reads. A partial wake observing another
 member still queued, preparing or dispatched leaves successful receipts pending;
 it neither sends the absent member nor permanently withholds a potentially valid
-all-approved batch. Bounded maintenance deterministically requeues undelivered
-successes through their existing receipt lifecycle. Once each member has genuinely
-succeeded on its own admitted path, a later eligible subset wake can reconcile
-the exact original batch and release the original task once. Denied, waiting,
-failed, unknown, missing or contradictory sibling proofs block the handoff; so
-does ordinary-event coalescence. Historical proofs without the original admitted
-turn ID remain receipt-only. Successful final settlement marks every receipt in
-the atomically released batch delivered, including successful members absent from
-that final wake, so maintenance cannot publish a duplicate sibling delivery.
+handoff. Bounded maintenance requeues undelivered successes through their existing
+receipt lifecycle. Recovered A from an original `[A]` wake can coalesce with newly
+approved B in either event order: A keeps `[A]`, B receives `[B]`, and their
+transactionally proven handoff covers `[A,B]`. Once every member has genuinely
+succeeded on its own admitted path, an eligible later subset wake can release the
+original task once. Different valid original groups are not a refusal reason.
+A concurrent, fenced handoff extension is observed again through recovery instead
+of being blocked using a stale smaller snapshot.
+
+Denied, waiting, failed, unknown, missing or contradictory original-group proofs
+block the handoff; so does ordinary-event coalescence. Fresh successes co-admitted
+with ordinary events acquire no eligible decision proof, and existing pending
+proofs are blocked. Already released or delivered observations cannot join a new
+launch; independent new proofs remain pending for their own recovery. Historical
+proofs without the original admitted turn ID remain receipt-only. Successful
+final settlement marks every receipt in the atomically released handoff delivered,
+including members absent from that final wake, so maintenance cannot publish a
+duplicate sibling delivery. Different task roots remain partitioned by normal
+admission; stale task snapshots are pruned before continuation.
 After normal model/context preparation, an atomic batch release fences the live
 worker, task, source, actor and key before the request can be sealed for model
 I/O. Release uses MongoDB time for turn/key expiry. An explicit turn lease must
@@ -542,11 +560,12 @@ and recovery preserves the classification without resending the effect. Other
 readable successful synchronous HTTP responses retain their normal success path.
 A mixed terminal wake durably blocks its still-pending success markers before
 publishing its receipt; the original batch proof also protects the earlier crash
-window. Historical receipts without a complete version-2 marker, unavailable
-results and released receipts remain receipt-only. Shared/group/org/platform/delegated/voice/external sources retain
-their existing receipt behavior. Release metadata contains only version, original
-decision request IDs and admitted turn ID, blocked state and the releasing turn ID; the encrypted
-receipt remains the single result copy.
+window. Historical receipts without a complete original decision/admitted-turn
+proof, unavailable results and released receipts remain receipt-only. Shared/group/org/platform/delegated/voice/external sources retain
+their existing receipt behavior. Release metadata contains only version,
+original decision request IDs and admitted turn ID, joined handoff IDs and turn,
+blocked state and the releasing turn ID; the encrypted receipt remains the single
+result copy.
 Private denied, expired, historical and released receipts remain readable after
 their task deadline. Owner-message source lookup applies only to a possible new
 dispatch or an undelivered eligible continuation marker, never to those terminal
@@ -556,19 +575,34 @@ an inconsistent record fails closed. Operational failures report the failing
 `permission_resume` or `permission_release` stage without provider data; live
 authority refusals at these boundaries settle as cancellation.
 
-Marker authoring and release require the optional fleet capability
-`permissions:execution-owner-continuation-v2`. It requires observed support from
-all serving readers, admission, dispatch, settlement and recovery workers; v1
-support does not satisfy it. Fresh effects retain receipt-only behavior until it
-is ready; pending marked continuations refuse on readiness loss. Version-1
-pending markers remain receipt-only on upgraded workers, and v2 markers cannot
-release through v1 readers. It adds no cohort prerequisite, feature flag,
-collection, index or backfill. Before binary rollback, disable effective execution
+Marker authoring, joining and release require the optional fleet capability
+`permissions:execution-owner-continuation-v3`. It requires observed support from
+all serving readers, admission, dispatch, settlement and recovery workers; v1/v2
+support does not satisfy it. The original-root evidence format and capacity remain
+v2. An authentic unmarked retained effect does not read optional continuation
+readiness, either during binding or before provider dispatch: its normal
+authoring/version/source/credential checks still govern one authorized send and
+its legacy receipt. Marked work retains its optional-readiness refusal. Fresh
+effects retain receipt-only behavior until it is ready; pending marked continuations refuse on readiness loss. Version-1
+pending markers remain receipt-only on upgraded workers. Version-3 handoff markers
+cannot release through v1/v2 readers. It adds no cohort prerequisite, feature flag,
+collection or backfill. The versioned release indexes are installed at startup. Before binary rollback, disable effective execution
 cohorts and drain/cancel pending owner continuations and marked original tasks on
 upgraded workers. Older binaries must not rejoin an activated fleet or continue
 those tasks: they cannot preserve batch proofs, complete dispatch evidence or the
 pending-release lifecycle. Keep released/uncertain claims intact and recover
 unfinished work through authenticated web history.
+
+Production startup installs the partial compound indexes
+`execution_owner_release_v1`, `execution_owner_release_v3` and
+`execution_owner_release_v4` on each assistant envelope's conversation and released
+turn. Each index selects that proposal version and a string released-turn ID. The
+production lookup explicitly combines `$eq` with `$type: "string"` for the turn,
+so the planner can use the partial indexes even with competing version/maintenance
+indexes. Both ordinary no-match lookups and historical/exact positive lookups are
+bounded to their conversation and turn, including a foreign release that must be
+refused. Startup installs these indexes before the new readiness capability is
+advertised. Historical rows remain readable without a data backfill.
 
 Group receipt publication includes only HTTP outcome, never raw provider account
 data. The original requester can read the bounded encrypted result on their

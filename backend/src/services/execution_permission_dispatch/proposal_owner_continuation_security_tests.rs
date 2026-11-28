@@ -665,13 +665,33 @@ async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_
                 (e.id == format!("execution-decision:{}", success.id)) == (sibling == "waiting")
             });
         let mut credential = load_credential(&f, &resumed).await;
-        let error = proposals::continuation::FAIL_AFTER_RECEIPT
+        let interrupted = proposals::continuation::FAIL_AFTER_RECEIPT
             .scope(
                 true,
                 execute_using_egress(&f, &resumed, &mut credential, &egress),
             )
-            .await
-            .unwrap_err();
+            .await;
+        if interrupted.is_ok() {
+            let saved = stored(&f, &success.id).await;
+            let p = proposals::proposal(&saved).unwrap();
+            let proof = p.owner_continuation.as_ref().map(|proof| {
+                (
+                    proof.version,
+                    proof.blocked,
+                    proof.batch.as_ref().map(Vec::len),
+                    proof.batch_turn_id.is_some(),
+                )
+            });
+            panic!(
+                "expected post-success receipt interruption: sibling={sibling}, status={}, state={}, activity={:?}, proof={proof:?}, provider_attempts={}, model_calls={}",
+                saved.status,
+                p.state,
+                saved.activity_outcome,
+                f.server.received_requests().await.unwrap().len(),
+                model.calls.lock().unwrap().len()
+            );
+        }
+        let error = interrupted.unwrap_err();
         assert_eq!(error.stage, "permission_resume");
         let committed = stored(&f, &success.id).await;
         let marker = proposals::proposal(&committed)
@@ -679,7 +699,7 @@ async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_
             .owner_continuation
             .as_ref()
             .unwrap();
-        assert_eq!(marker.version, 2);
+        assert_eq!(marker.version, 3);
         assert_eq!(marker.batch.as_ref().unwrap().len(), 2);
         assert!(!marker.blocked);
         assert!(marker.released_turn_id.is_none());
@@ -691,7 +711,7 @@ async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_
                 .as_ref()
                 .unwrap();
             assert_eq!(partner_marker.batch, marker.batch);
-            assert_eq!(partner_marker.version, 2);
+            assert_eq!(partner_marker.version, 3);
         }
         if sibling == "waiting" {
             assert_eq!(
@@ -1044,8 +1064,7 @@ async fn owner_permission_resume_mixed_ordinary_event_never_becomes_success_only
             .unwrap()
             .owner_continuation
             .as_ref()
-            .unwrap()
-            .blocked
+            .is_none_or(|proof| proof.blocked)
     );
     resumed
         .active_turn
@@ -1268,3 +1287,6 @@ async fn owner_permission_resume_optional_evidence_readiness_failure_keeps_ordin
     assert!(!root.contains_key("execution_dispatches"));
     f.cleanup().await;
 }
+
+#[path = "proposal_owner_continuation_recovery_tests.rs"]
+mod recovery_cases;

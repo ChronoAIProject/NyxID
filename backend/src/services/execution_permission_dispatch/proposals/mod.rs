@@ -20,6 +20,7 @@ use record::{Arm, Field, Slot};
 pub(crate) mod v2;
 pub(crate) mod v3;
 pub(crate) use continuation::ResumeOutcome;
+pub(crate) use effects::ensure_indexes as ensure_owner_continuation_indexes;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
 pub(crate) use presentation::delivery_notice;
 pub(crate) use resume::{Resume, result_for_human, resume_turn};
@@ -995,7 +996,7 @@ pub(super) async fn existing_effect(
         "execution_proposal.v1.task.epoch":task.epoch,"execution_proposal.v1.contract.binding.connection_id":connection,
         "execution_proposal.v1.prepared_digest":digest,
         "$or":[{"execution_proposal.v1.state":{"$ne":"completed"}},
-            {"execution_proposal.v1.owner_continuation.version":{"$in":[1,2]}},
+            {"execution_proposal.v1.owner_continuation.version":{"$in":[1,2,3]}},
             {"execution_proposal.v1.delivered_turn_id":null},
             {"execution_proposal.v1.source_turn_id":&chat.turn_id},
             {"execution_proposal.v1.resume_turn_id":&chat.turn_id}]
@@ -1019,7 +1020,7 @@ pub(super) async fn existing_effect(
                 && p.task.actor_user_id == task.actor_user_id
                 && row.activity_outcome.as_deref() == Some("completed")
                 && p.owner_continuation.as_ref().is_some_and(|marker| {
-                    matches!(marker.version, 1 | 2)
+                    matches!(marker.version, 1 | 2 | 3)
                         && !marker.blocked
                         && marker.released_turn_id.is_some()
                         && marker.released_turn_id == chat.turn_id

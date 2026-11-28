@@ -38,10 +38,7 @@ pub(in crate::services::execution_permission_dispatch) async fn record(
     // foreign release must never fall through as an ordinary unmarked request.
     let release = if let Some(turn) = &chat.turn_id {
         db.collection::<Document>(REQUESTS)
-            .find_one(assistant_selector(doc! {
-                "execution_proposal.v1.conversation_id":&chat.conversation_id,
-                "execution_proposal.v1.owner_continuation.released_turn_id":turn,
-            }))
+            .find_one(release_lookup(&chat.conversation_id, turn))
             .projection(doc! {"_id":1})
             .session(&mut *session)
             .await?
@@ -163,4 +160,33 @@ pub(super) async fn prior_dispatch(
         .projection(doc! {"_id": 1})
         .await?
         .is_some())
+}
+
+/// Equality on both indexed fields bounds ordinary misses and foreign releases.
+pub(in crate::services::execution_permission_dispatch) fn release_lookup(
+    conversation: &str,
+    turn: &str,
+) -> Document {
+    assistant_selector(doc! {
+        "execution_proposal.v1.conversation_id":conversation,
+        "execution_proposal.v1.owner_continuation.released_turn_id":{"$eq":turn,"$type":"string"},
+    })
+}
+
+/// Production startup installs the same versioned indexes exercised by the
+/// executionStats regression, including retained historical assistant envelopes.
+pub(crate) async fn ensure_indexes(db: &Database) -> mongodb::error::Result<()> {
+    use mongodb::{IndexModel, options::IndexOptions};
+    for version in AssistantVersion::ALL {
+        let prefix = format!("execution_proposal.v{}", version.number());
+        db.collection::<Document>(REQUESTS).create_index(IndexModel::builder()
+            .keys(doc! {format!("{prefix}.conversation_id"):1,
+                format!("{prefix}.owner_continuation.released_turn_id"):1})
+            .options(IndexOptions::builder()
+                .name(format!("execution_owner_release_v{}", version.number()))
+                .partial_filter_expression(doc! {"execution_proposal.version":version.number() as i32,
+                    format!("{prefix}.owner_continuation.released_turn_id"): {"$type":"string"}})
+                .build()).build()).await?;
+    }
+    Ok(())
 }

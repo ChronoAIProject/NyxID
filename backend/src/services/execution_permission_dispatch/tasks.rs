@@ -470,7 +470,7 @@ pub(crate) fn settle<'a>(
                     "execution_proposal.v1.task.epoch":task.epoch,
                     "execution_proposal.v1.task.actor_user_id":&task.actor_user_id,
                     "execution_proposal.v1.state":"completed",
-                    "execution_proposal.v1.owner_continuation.version":2,
+                    "execution_proposal.v1.owner_continuation.version":3,
                     "execution_proposal.v1.owner_continuation.batch_turn_id":{"$type":"string"},
                     "execution_proposal.v1.owner_continuation.released_turn_id":&turn.turn_id,
                     "execution_proposal.v1.delivered_turn_id":null,
@@ -513,7 +513,7 @@ pub(crate) fn settle<'a>(
                 {"execution_proposal.v1.state":{"$in":["pending","queued","preparing","dispatched","waiting"]}},
                 {"execution_proposal.v1.state":"completed",
                     "execution_proposal.v1.delivered_turn_id":null,
-                    "execution_proposal.v1.owner_continuation.version":{"$in":[1,2]},
+                    "execution_proposal.v1.owner_continuation.version":{"$in":[1,2,3]},
                     "execution_proposal.v1.owner_continuation.blocked":{"$ne":true},
                     "execution_proposal.v1.owner_continuation.released_turn_id":null}
             ],

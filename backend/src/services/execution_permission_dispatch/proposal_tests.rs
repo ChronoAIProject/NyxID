@@ -375,7 +375,20 @@ async fn execution_proposal_twenty_duplicate_decisions_and_resumes_send_once_eve
         (0..20).map(|_| proposals::decide(&f.state, &f.owner, &request.id, &input)),
     )
     .await;
-    assert!(results.iter().all(Result::is_ok));
+    let errors: Vec<_> = results
+        .iter()
+        .enumerate()
+        .filter_map(|(contender, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| (contender, error.status_code().as_u16(), error.error_code()))
+        })
+        .collect();
+    assert!(
+        results.iter().all(Result::is_ok),
+        "decide contenders (index,http,code): {errors:?}"
+    );
     assert_eq!(count(&f, "approval_grants").await, 1);
     let _ = f.call("/proxy/s/execution-fixture/status").await;
     assert!(
@@ -393,8 +406,22 @@ async fn execution_proposal_twenty_duplicate_decisions_and_resumes_send_once_eve
         (0..20).map(|_| proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential)),
     )
     .await;
-    assert!(results.iter().all(Result::is_ok));
-    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+    let errors: Vec<_> = results
+        .iter()
+        .enumerate()
+        .filter_map(|(contender, result)| {
+            result
+                .as_ref()
+                .err()
+                .map(|error| (contender, error.status_code().as_u16(), error.error_code()))
+        })
+        .collect();
+    let provider_attempts = f.server.received_requests().await.unwrap().len();
+    assert!(
+        results.iter().all(Result::is_ok),
+        "resume contenders (index,http,code): {errors:?}; provider_attempts={provider_attempts}"
+    );
+    assert_eq!(provider_attempts, 1);
     let _ = f.call("/proxy/s/execution-fixture/status").await;
     assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
     f.cleanup().await;

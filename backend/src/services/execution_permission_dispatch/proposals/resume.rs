@@ -145,8 +145,9 @@ pub(crate) async fn resume_turn(
     if requests.len() != batch.len() {
         return Err(missing());
     }
-    let batch_bound = continuation::bind_batch(state, row, &requests, &batch, typed_wake).await?;
-    if batch_bound {
+    let continuation_ready =
+        continuation::bind_batch(state, row, &requests, &batch, typed_wake).await?;
+    if continuation_ready == Some(true) {
         requests = state
             .db
             .collection::<ApprovalRequest>(REQUESTS)
@@ -157,7 +158,6 @@ pub(crate) async fn resume_turn(
             .await?;
     }
     let mut notes = Vec::new();
-    let mut continuation_ready = batch_bound.then_some(true);
     let mut owner_source = None;
     let mut reviews = presentation::ReviewNotes::default();
     let mut seen = std::collections::HashSet::new();
@@ -259,18 +259,9 @@ pub(crate) async fn resume_turn(
             );
             continue;
         }
-        // This optional readiness read precedes the provider attempt. A failure
-        // cannot discard a known provider success or strand its durable receipt.
-        if eligible && continuation_ready.is_none() {
-            continuation_ready = Some(
-                crate::services::security_readiness_service::serving_report(
-                    &state.db,
-                    continuation::READINESS,
-                )
-                .await?
-                .serving_ready,
-            );
-        }
+        // Optional continuation readiness is resolved only for a marked root
+        // by bind_batch. An authentic legacy retained effect keeps its send and
+        // receipt when that optional dependency is unavailable.
         if eligible && continuation_ready == Some(true) {
             let source = match owner_source {
                 Some(source) => source,
@@ -435,21 +426,6 @@ pub(crate) async fn resume_turn(
             "execution_proposal.v1.independent_card_id": independent_card,
         };
         let successful = state_name == "completed" && activity_outcome == Some("completed");
-        #[cfg(test)]
-        let release_pending = typed_wake
-            && eligible
-            && successful
-            && continuation_ready == Some(true)
-            && p.owner_continuation.as_ref().is_some_and(|marker| {
-                marker.version == 2
-                    && !marker.blocked
-                    && marker.released_turn_id.is_none()
-                    && marker.batch_turn_id.is_some()
-                    && marker
-                        .batch
-                        .as_ref()
-                        .is_some_and(|original| original.iter().any(|member| member == id))
-            });
         if p.owner_continuation.is_some() && (!typed_wake || !eligible || !successful) {
             set.insert("execution_proposal.v1.owner_continuation.blocked", true);
         }
@@ -472,7 +448,7 @@ pub(crate) async fn resume_turn(
             super::super::super::api_key_mutation_service::transaction_result(result)
         })).await.map_err(super::super::super::api_key_mutation_service::map_transaction_error)?;
         #[cfg(test)]
-        if release_pending
+        if successful
             && continuation::FAIL_AFTER_RECEIPT
                 .try_with(|fail| *fail)
                 .unwrap_or(false)

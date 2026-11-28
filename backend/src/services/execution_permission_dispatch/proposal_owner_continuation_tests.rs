@@ -64,6 +64,10 @@ impl Drop for Model {
 }
 
 async fn model(f: &Fixture, readback: bool) -> Model {
+    model_with_initial_reviews(f, readback, false).await
+}
+
+async fn model_with_initial_reviews(f: &Fixture, readback: bool, queue_readback: bool) -> Model {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let captured = calls.clone();
     let reads = Arc::new(Mutex::new(Vec::new()));
@@ -102,13 +106,17 @@ async fn model(f: &Fixture, readback: bool) -> Model {
                     assert!(refusal.get("request_id").is_none());
                 }
                 if !retained && status != StatusCode::OK {
+                    if queue_readback {
+                        assert_eq!(call(router.clone(), &raw, "GET").await.0, StatusCode::FORBIDDEN);
+                    }
                     "Review the requested write in NyxID.".into()
                 } else {
                     let result = input.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok())
                         .find(|value| value.get("request_ids").is_some())
                         .and_then(|value| value["result"].as_str().map(str::to_owned));
-                    let cells = result.and_then(|result| result.split_once('\n').and_then(|(_, body)| serde_json::from_str::<Value>(body).ok()))
-                        .filter(|body| body.get("values").is_some());
+                    let cells = result.and_then(|result| result.lines()
+                        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                        .find(|body| body.get("values").is_some()));
                     if let Some(cells) = cells.filter(|_| retained) {
                         let text = answer(&cells);
                         reads.lock().unwrap().push(cells);
