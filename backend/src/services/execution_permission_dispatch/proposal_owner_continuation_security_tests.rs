@@ -547,6 +547,29 @@ impl NyxAgentEgress for WaitForIndependentReview {
 async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_wake() {
     for sibling in ["denied", "waiting", "queued"] {
         let (f, row) = assistant("owner_resume_batch_crash").await;
+        eprintln!(
+            "WS3_PARTIAL_BATCH_COHORT sibling={sibling} database={}",
+            f.state.db.name()
+        );
+        // A separate tool review reads these defaults. Materialize them before
+        // the original authority snapshot; later review must preserve that row.
+        let defaults =
+            crate::services::notification_service::get_or_create_channel(&f.state.db, &f.owner)
+                .await
+                .unwrap();
+        assert!(
+            defaults.approval_required.is_none(),
+            "fixture delivery defaults must not author approval consent"
+        );
+        let notification_snapshot = f
+            .state
+            .db
+            .collection::<Document>("notification_channels")
+            .find_one(doc! {"_id":&defaults.id,"user_id":&f.owner})
+            .projection(doc! {"_id":1,"user_id":1,"approval_required":1})
+            .await
+            .unwrap()
+            .unwrap();
         set_task(&f, &row).await;
         sheet(&f, 200).await;
         let model = model(&f, false).await;
@@ -595,24 +618,41 @@ async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_w
                 .unwrap();
         }
         let mut resumed = event_turn(&f, &row).await;
-        let independent = crate::services::approval_service::create_tool_approval_request(
-            &f.state.db,
-            &f.state.config,
-            &f.state.http_client,
-            None,
-            None,
-            &f.owner,
-            "independent-review-fixture",
-            None,
-            None,
-            false,
-            "agent",
-            &f.key,
-            None,
-            Default::default(),
-        )
-        .await
-        .unwrap();
+        let independent = if sibling == "waiting" {
+            crate::services::approval_service::create_tool_approval_request(
+                &f.state.db,
+                &f.state.config,
+                &f.state.http_client,
+                None,
+                None,
+                &f.owner,
+                "independent-review-fixture",
+                None,
+                None,
+                false,
+                "agent",
+                &f.key,
+                None,
+                Default::default(),
+            )
+            .await
+            .unwrap()
+            .id
+        } else {
+            String::new()
+        };
+        assert_eq!(
+            f.state
+                .db
+                .collection::<Document>("notification_channels")
+                .find_one(doc! {"_id":&defaults.id,"user_id":&f.owner})
+                .projection(doc! {"_id":1,"user_id":1,"approval_required":1})
+                .await
+                .unwrap()
+                .unwrap(),
+            notification_snapshot,
+            "{sibling}: defaults in capture and revalidation must match"
+        );
         let egress = WaitForIndependentReview {
             inner: crate::handlers::assistant_nyxagent::http_egress(
                 f.state.clone(),
@@ -623,7 +663,7 @@ async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_w
             } else {
                 String::new()
             },
-            independent: independent.id,
+            independent,
         };
         // Prime the waiting branch first; the other branches crash before even
         // considering their sibling. All IDs are real admitted decision events.
@@ -636,15 +676,59 @@ async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_w
                 (e.id == format!("execution-decision:{}", success.id)) == (sibling == "waiting")
             });
         let mut credential = load_credential(&f, &resumed).await;
-        let error = proposals::continuation::FAIL_AFTER_RECEIPT
+        let interruptions = Arc::new(Mutex::new(Vec::new()));
+        let outcome = proposals::continuation::RECEIPT_INTERRUPTION
             .scope(
-                true,
-                execute_using_egress(&f, &resumed, &mut credential, &egress),
+                interruptions.clone(),
+                proposals::continuation::FAIL_AFTER_RECEIPT.scope(
+                    true,
+                    execute_using_egress(&f, &resumed, &mut credential, &egress),
+                ),
             )
-            .await
-            .unwrap_err();
-        assert_eq!(error.stage, "permission_resume");
+            .await;
         let committed = stored(&f, &success.id).await;
+        let committed_proposal = proposals::proposal(&committed).unwrap();
+        assert_eq!(
+            f.server.received_requests().await.unwrap().len(),
+            1,
+            "{sibling}: the interrupted admitted success must actually reach its provider once"
+        );
+        assert_eq!(
+            committed_proposal.state, "completed",
+            "{sibling}: durable success before interruption"
+        );
+        assert_eq!(committed.activity_outcome.as_deref(), Some("completed"));
+        let witness = interruptions.lock().unwrap().clone();
+        assert_eq!(
+            witness.len(),
+            1,
+            "{sibling}: exactly one persisted success crosses the interruption hook"
+        );
+        assert_eq!(witness[0].request_id, success.id);
+        assert_ne!(
+            witness[0].request_id, other.id,
+            "the denied/waiting/absent sibling cannot be the interruption witness"
+        );
+        assert_eq!(
+            Some(witness[0].claim_id.as_str()),
+            committed_proposal.claim_id.as_deref()
+        );
+        assert_eq!(
+            Some(witness[0].turn_id.as_str()),
+            committed_proposal.resume_turn_id.as_deref()
+        );
+        assert!(
+            resumed
+                .active_turn
+                .as_ref()
+                .unwrap()
+                .events
+                .iter()
+                .any(|event| event.kind == "permission_decided"
+                    && event.id == format!("execution-decision:{}", witness[0].request_id))
+        );
+        let error = outcome.unwrap_err();
+        assert_eq!(error.stage, "permission_resume");
         let marker = proposals::proposal(&committed)
             .unwrap()
             .owner_continuation
@@ -708,11 +792,24 @@ async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_w
         let recovered = event_turn(&f, &row).await;
         assert_eq!(recovered.active_turn.as_ref().unwrap().events.len(), 1);
         assert_eq!(
-            execute(&f, &recovered).await.unwrap().text,
+            proposals::continuation::RECEIPT_INTERRUPTION
+                .scope(
+                    interruptions.clone(),
+                    proposals::continuation::FAIL_AFTER_RECEIPT
+                        .scope(true, execute(&f, &recovered))
+                )
+                .await
+                .unwrap()
+                .text,
             proposals::result_for_human(&f.state, &committed)
                 .await
                 .unwrap()
                 .unwrap()
+        );
+        assert_eq!(
+            *interruptions.lock().unwrap(),
+            witness,
+            "{sibling}: receipt-only recovery must not cross a fresh-success hook or resend"
         );
         assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
         assert_eq!(model.calls.lock().unwrap().len(), 1);

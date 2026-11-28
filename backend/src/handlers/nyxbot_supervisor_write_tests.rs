@@ -489,15 +489,21 @@ async fn model(
         }
         let fault = *script.review_fault.lock().unwrap();
         let written = if matches!(fault, Some(ReviewFault::PolicyRace)) {
+            let witnessed = observed.clone();
             let hook: Arc<
                 dyn Fn(mongodb::Database) -> futures::future::BoxFuture<'static, ()> + Send + Sync,
-            > = Arc::new(|db| {
+            > = Arc::new(move |db| {
+                let witnessed = witnessed.clone();
                 Box::pin(async move {
                     let updated = db.collection::<Document>("service_approval_configs").update_one(
                     doc! {"user_id":OWNER,"default_effect":"auto_allow"},
                     doc! {"$set":{"default_effect":"require_approval","approval_required":true,"approval_mode":"per_request"}},
                 ).await.unwrap();
                     assert_eq!(updated.modified_count, 1);
+                    witnessed
+                        .lock()
+                        .await
+                        .push(json!({"stage":"policy_race_hook","modified":1}));
                 })
             });
             crate::services::execution_permission_dispatch::SUPERVISOR_POLICY_CLASSIFIED

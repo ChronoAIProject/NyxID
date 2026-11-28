@@ -70,6 +70,15 @@ tokio::task_local! {
     pub(crate) static FAIL_BEFORE_RELEASE: bool;
     pub(crate) static FAIL_AFTER_RELEASE: bool;
     pub(crate) static FAIL_AFTER_RECEIPT: bool;
+    pub(crate) static RECEIPT_INTERRUPTION: std::sync::Arc<std::sync::Mutex<Vec<ReceiptInterruption>>>;
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReceiptInterruption {
+    pub request_id: String,
+    pub turn_id: String,
+    pub claim_id: String,
 }
 
 pub(crate) enum ResumeOutcome {

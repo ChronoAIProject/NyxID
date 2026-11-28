@@ -822,6 +822,16 @@ pub(crate) async fn resume_turn(
                 .try_with(|fail| *fail)
                 .unwrap_or(false)
         {
+            let _ = continuation::RECEIPT_INTERRUPTION.try_with(|observed| {
+                observed
+                    .lock()
+                    .unwrap()
+                    .push(continuation::ReceiptInterruption {
+                        request_id: id.into(),
+                        turn_id: turn.turn_id.clone(),
+                        claim_id: claim_id.clone(),
+                    });
+            });
             return Err(AppError::Internal("Injected receipt interruption".into()));
         }
         if release_pending {

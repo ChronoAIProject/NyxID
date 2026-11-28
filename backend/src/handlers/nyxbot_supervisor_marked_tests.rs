@@ -23,6 +23,10 @@ async fn marked_journey(proxy: bool) -> Journey {
 }
 
 async fn full_access(j: &Journey) {
+    agent_mode(j, crate::models::assistant_settings::AccessMode::Autopilot).await;
+}
+
+async fn agent_mode(j: &Journey, mode: crate::models::assistant_settings::AccessMode) {
     let agent = j
         .state
         .db
@@ -43,9 +47,7 @@ async fn full_access(j: &Journey) {
         agent.get_str("_id").unwrap(),
         team::AgentPolicy {
             model: None,
-            access_mode_override: Some(Some(
-                crate::models::assistant_settings::AccessMode::Autopilot,
-            )),
+            access_mode_override: Some(Some(mode)),
         },
     )
     .await
@@ -1905,6 +1907,11 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
                 continue;
             }
             let j = Box::pin(marked_journey(proxy)).await;
+            let cohort = format!("{}:{control}", if proxy { "http" } else { "mcp" });
+            eprintln!(
+                "WS7_SUPERVISOR_COHORT {cohort} database={}",
+                j.state.db.name()
+            );
             let connection = j
                 .state
                 .db
@@ -1952,7 +1959,44 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
             .unwrap();
             if control.starts_with("ordinary") || control.starts_with("node_") {
                 full_access(&j).await;
+            } else if control == "gap" {
+                // Auto allows a routine Change. Ask every time establishes the
+                // independent access-mode gap this refusal cohort exercises.
+                agent_mode(
+                    &j,
+                    crate::models::assistant_settings::AccessMode::AskEveryTime,
+                )
+                .await;
             }
+            let live = j
+                .state
+                .db
+                .collection::<Document>("assistant_agents")
+                .find_one(doc! {"user_id":OWNER,"name":"accountant"})
+                .projection(doc! {"access_mode_override":1,"grants.service_ids":1})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                live.get_str("access_mode_override").unwrap(),
+                if control == "gap" {
+                    "ask_every_time"
+                } else if control == "policy_race" {
+                    "nyxmode"
+                } else {
+                    "autopilot"
+                },
+                "{cohort}: live specialist mode"
+            );
+            assert!(
+                live.get_document("grants")
+                    .unwrap()
+                    .get_array("service_ids")
+                    .unwrap()
+                    .iter()
+                    .any(|id| id.as_str() == connection.get_str("_id").ok()),
+                "{cohort}: the actual ledger connection must be granted"
+            );
             let listing = marked_assign(
                 &j,
                 "Ask accountant for today's pending ledger rows",
@@ -1979,6 +2023,47 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
                     .unwrap()
                     .unwrap(),
             );
+            let positive = control.starts_with("ordinary");
+            let writes = j.ledger.lock().unwrap().writes.len();
+            let provider_puts = j
+                ._ledger_server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.method.as_str() == "PUT")
+                .count();
+            assert_eq!(
+                writes,
+                usize::from(positive),
+                "{cohort}: provider write count before owner-text assertions"
+            );
+            assert_eq!(provider_puts, writes, "{cohort}: actual provider PUT count");
+            assert_eq!(
+                j.state
+                    .db
+                    .collection::<Document>("approval_grants")
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0,
+                "{cohort}: this cohort has no saved execution permit or grant"
+            );
+            if control == "policy_race" {
+                assert_eq!(
+                    j.observed
+                        .lock()
+                        .await
+                        .iter()
+                        .filter(|event| event["stage"] == "policy_race_hook")
+                        .count(),
+                    1,
+                    "{cohort}: the actual policy hook must tighten the live baseline once"
+                );
+                assert_eq!(j.state.db.collection::<Document>("service_approval_configs")
+                    .count_documents(doc! {"user_id":OWNER,"default_effect":"require_approval","approval_required":true})
+                    .await.unwrap(), 1, "{cohort}: live tightened policy");
+            }
             assert_eq!(
                 j.state
                     .db
@@ -2014,7 +2099,7 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
                     );
                 }
             } else {
-                assert_eq!(report, NO_CONFIRMATION);
+                assert_eq!(report, NO_CONFIRMATION, "{cohort}: refusal owner report");
                 assert_no_write(&j);
                 assert_eq!(
                     j._ledger_server
@@ -2036,6 +2121,14 @@ async fn supervisor_write_marked_autoallow_gap_and_policy_race_refuse_before_pro
                 } else {
                     tool_value(write).is_none()
                 });
+                if control == "gap" {
+                    assert!(
+                        write.to_string().contains(
+                            "cannot retain the required source under its current approval policy"
+                        ),
+                        "{cohort}: the genuine independent floor must reach the unsupported retained-source refusal"
+                    );
+                }
                 if control.starts_with("node_") {
                     assert!(
                         write
