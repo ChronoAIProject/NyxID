@@ -467,6 +467,7 @@ async fn execute(
             sender.guest_facts = crate::services::channel_guest_access::transport::TransportFacts {
                 sender_id: Some(account),
                 audience: AnswerAudience::Private,
+                shared_room_verified: false,
             };
         }
     }

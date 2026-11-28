@@ -189,6 +189,91 @@ pub(crate) fn sheets_endpoint_action(endpoint: &McpToolEndpoint) -> Option<&'sta
     }
 }
 
+fn sheets_guidance(action: &str) -> String {
+    let columns = google_sheets::MAX_COLUMNS;
+    if action == "read" {
+        format!(
+            "Read the exact authorized A1 cell or rectangle on a named tab, such as Sheet1!A1:H24, with up to {columns} columns and {} cells. Live grants, Google access and the effective approval policy must permit the read. Use FORMATTED_VALUE or UNFORMATTED_VALUE rendering.",
+            google_sheets::MAX_READ_CELLS
+        )
+    } else {
+        format!(
+            "Append exactly one nonempty row in body.values with valueInputOption=RAW and insertDataOption=INSERT_ROWS once each. In a verified shared room, use the authorized named tab and column range, such as Sheet1!A:H, with up to {columns} columns. The write needs an effective approval policy that permits it, live grants and Google access. Google chooses placement within the tab."
+        )
+    }
+}
+
+/// Project rendered guidance and schemas after MCP selects its argument wrapper.
+/// Put all guidance before the connection label so compact search retains it.
+/// Endpoint inputs stay intact for preparation and live execution checks.
+/// Call only for enrolled guest discovery, with the already filtered catalog.
+pub(crate) fn project_sheets_discovery(
+    services: &[McpToolService],
+    definitions: &mut [McpToolDefinition],
+) {
+    use serde_json::json;
+
+    for tool in definitions {
+        let Some((service, endpoint)) =
+            crate::services::mcp_service::resolve_tool_call(&tool.name, services)
+        else {
+            continue;
+        };
+        let Some(action) = sheets_endpoint_action(endpoint) else {
+            continue;
+        };
+        tool.description = format!("{} [{}]", sheets_guidance(action), service.service_name);
+        let columns = google_sheets::MAX_COLUMNS;
+        let properties = &mut tool.input_schema["properties"];
+        if action == "read" {
+            properties["range"]["description"] = json!(format!(
+                "Bounded A1 cell or rectangle on a named tab, e.g. Sheet1!A1:H24 or 'Sheet 1'!A1. Use the exact authorized range, up to {columns} columns and {} cells.",
+                google_sheets::MAX_READ_CELLS
+            ));
+            properties["valueRenderOption"]["enum"] =
+                json!(["FORMATTED_VALUE", "UNFORMATTED_VALUE"]);
+            continue;
+        }
+        properties["range"]["description"] = json!(format!(
+            "Named tab and column range, e.g. Sheet1!A:H or 'Sheet 1'!A:H, up to {columns} columns. Google locates a table and chooses placement within the tab. Supply the range without the :append suffix."
+        ));
+        properties["valueInputOption"]["enum"] = json!(["RAW"]);
+        properties["insertDataOption"]["enum"] = json!(["INSERT_ROWS"]);
+        properties["includeValuesInResponse"]["enum"] = json!([false]);
+        if let Some(properties) = properties.as_object_mut() {
+            properties.remove("responseValueRenderOption");
+            properties.remove("responseDateTimeRenderOption");
+        }
+        let body_name = crate::services::mcp_service::request_body_field_name(endpoint);
+        let Some(body) = properties.get_mut(&body_name) else {
+            continue;
+        };
+        *body = json!({
+            "type":"object", "additionalProperties":false,
+            "properties":{
+                "majorDimension":{"type":"string","enum":["ROWS"]},
+                "values":{
+                    "type":"array", "minItems":1, "maxItems":1,
+                    "description":format!("Exactly one nonempty row, with no more cells than the selected column range. The entire JSON body is at most {} bytes. Supply values and optionally majorDimension=ROWS.", google_sheets::MAX_APPEND_BYTES),
+                    "items":{
+                        "type":"array", "minItems":1, "maxItems":google_sheets::MAX_COLUMNS,
+                        "items":{"anyOf":[{"type":"string"},{"type":"number"},{"type":"boolean"}]}
+                    }
+                }
+            },
+            "required":["values"]
+        });
+        if let Some(required) = tool.input_schema["required"].as_array_mut() {
+            for name in ["valueInputOption", "insertDataOption", &body_name] {
+                if !required.contains(&json!(name)) {
+                    required.push(json!(name));
+                }
+            }
+        }
+        tool.input_schema["additionalProperties"] = json!(false);
+    }
+}
+
 pub(crate) async fn filter_catalog(
     db: &Database,
     turn: &GuestTurn,
@@ -534,6 +619,7 @@ mod tests {
                     assurance: GuestAssurance::ProviderVerified,
                 },
                 audience: AnswerAudience::Shared,
+                shared_room_verified: true,
                 policy_revision: 3,
                 activation_epoch: 2,
                 bot_revision: 1,

@@ -250,6 +250,7 @@ async fn skill_read_source_channel_guest_exact_file_preload_and_live_revocation(
             source_event_id: &event_id,
             sender_id: Some("verified-sender"),
             audience: AnswerAudience::Private,
+            shared_room_verified: false,
             meta_grant_id: None,
         },
     )
@@ -861,6 +862,7 @@ async fn channel_guest_skill_org_capability_uses_live_payer_and_maintainer() {
             source_event_id: &event_id,
             sender_id: Some("channel-visitor"),
             audience: AnswerAudience::Private,
+            shared_room_verified: false,
             meta_grant_id: None,
         },
     )

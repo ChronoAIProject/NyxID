@@ -2587,6 +2587,7 @@ async fn guest_history_routes_limit_live_admins_to_retained_guest_exchanges() {
             assurance: GuestAssurance::ProviderVerified,
         },
         audience: AnswerAudience::Private,
+        shared_room_verified: false,
         policy_revision: 1,
         activation_epoch: 1,
         bot_revision: 1,

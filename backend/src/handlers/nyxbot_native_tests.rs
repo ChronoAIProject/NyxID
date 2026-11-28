@@ -3,7 +3,7 @@ use super::*;
 #[path = "nyxbot_native_side_message_tests.rs"]
 mod side_message_tests;
 
-fn enable_thread_follow<'a>(state: &'a AppState) -> futures::future::BoxFuture<'a, ()> {
+pub(super) fn enable_thread_follow<'a>(state: &'a AppState) -> futures::future::BoxFuture<'a, ()> {
     Box::pin(async move {
         let collection = state
             .db
@@ -770,6 +770,42 @@ async fn native_discord_authenticated_reply_evidence_is_bound_and_fail_closed() 
         .await
         .unwrap();
     assert!(result.addressed);
+    assert!(result.guest_shared_room_verified);
+    assert!(result.guest_sender_verified);
+    for thread in [json!("202"), Value::Null] {
+        let mut wrong = a.clone();
+        wrong["conversation"]["thread_id"] = thread;
+        let result = native_discord::evidence(&state, &row, &wrong, "none")
+            .await
+            .unwrap();
+        assert!(
+            !result.addressed
+                && !result.guest_sender_verified
+                && !result.guest_shared_room_verified
+        );
+    }
+    let mut private = a.clone();
+    private["conversation"] = json!({"kind":"private","id":"201","thread_id":null});
+    let result = native_discord::evidence(&state, &row, &private, "none")
+        .await
+        .unwrap();
+    assert!(!result.guest_shared_room_verified);
+    assert!(
+        !native_discord::private_guest_facts(&state, &row, &private)
+            .await
+            .unwrap()
+            .shared_room_verified
+    );
+    // Missing REST evidence can retain the existing addressing fallback, but
+    // contributes neither a verified sender nor write-eligible room evidence.
+    let mut missing = a.clone();
+    missing["conversation"] = json!({"kind":"group","id":"999","thread_id":null});
+    missing["kind"]["mentions_bot"] = json!(true);
+    let result = native_discord::evidence(&state, &row, &missing, "none")
+        .await
+        .unwrap();
+    assert!(result.addressed);
+    assert!(!result.guest_sender_verified && !result.guest_shared_room_verified);
     let mut forged = a.clone();
     forged["actor"]["id"] = json!("8");
     forged["kind"]["mentions_bot"] = json!(true);
@@ -792,6 +828,70 @@ async fn native_discord_authenticated_reply_evidence_is_bound_and_fail_closed() 
 #[tokio::test]
 async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions() {
     Box::pin(native_discord_follow_reuses_members_expiry_stop_and_other_mentions_impl()).await;
+}
+
+#[tokio::test]
+async fn native_discord_private_and_ambiguous_room_evidence_keeps_read_only_scope() {
+    use crate::services::channel_guest_access::AnswerAudience;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+    let (state, _, upstream) = setup("native_discord_guest_room").await;
+    let (row, _) = native_channel(&state).await;
+    let http = MockServer::start().await;
+    crate::services::nyxbot_gateway_source::TEST_DISCORD_BASES
+        .lock()
+        .unwrap()
+        .insert(row.channel_bot_id.clone(), http.uri());
+    let _guard = NativeDiscordFixtureGuard(row.channel_bot_id.clone());
+    let request = native_event(&row, "800", "Hello");
+    let activity = &request["event_context"]["activity"];
+    for (channel, message_guild, private, shared) in [
+        (json!({"id":"200","type":1}), Value::Null, true, false),
+        (json!({"id":"200","type":3}), Value::Null, false, true),
+        (json!({"id":"200"}), Value::Null, false, false),
+        (
+            json!({"id":"200","type":3,"guild_id":"invalid"}),
+            Value::Null,
+            false,
+            false,
+        ),
+        (
+            json!({"id":"200","type":1,"guild_id":"300"}),
+            Value::Null,
+            false,
+            false,
+        ),
+        (json!({"id":"200","type":1}), json!("300"), false, false),
+    ] {
+        http.reset().await;
+        Mock::given(path("/channels/200/messages/800"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"id":"800","channel_id":"200","type":0,"guild_id":message_guild,
+                "author":{"id":"7","bot":false},"content":"Hello","mentions":[{"id":"100"}],
+                "mention_roles":[],"mention_everyone":false,"attachments":[]}),
+            ))
+            .mount(&http)
+            .await;
+        Mock::given(path("/channels/200"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(channel.clone()))
+            .mount(&http)
+            .await;
+        let facts = native_discord::private_guest_facts(&state, &row, activity)
+            .await
+            .unwrap();
+        assert_eq!(facts.sender_id, private.then_some("7"), "{channel}");
+        assert!(!facts.shared_room_verified);
+        if private {
+            assert_eq!(facts.audience, AnswerAudience::Private);
+        }
+        let mut group = activity.clone();
+        group["conversation"]["kind"] = json!("group");
+        let evidence = native_discord::evidence(&state, &row, &group, "none")
+            .await
+            .unwrap();
+        assert_eq!(evidence.guest_shared_room_verified, shared, "{channel}");
+    }
+    upstream.abort();
+    state.db.drop().await.unwrap();
 }
 
 async fn native_discord_follow_reuses_members_expiry_stop_and_other_mentions_impl() {

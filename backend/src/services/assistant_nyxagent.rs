@@ -2958,7 +2958,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         {
             return Err(AppError::Forbidden("Thread sender changed".into()));
         }
-        if let Some(guest) = channel_guest.filter(|_| origin.org_execution.is_none()) {
+        if let Some(guest) = channel_guest {
             Box::pin(super::channel_thread_follow_service::admit_hosted_turn(
                 db, user_id, origin, &id, guest, session,
             ))

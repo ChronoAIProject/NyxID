@@ -18,6 +18,7 @@ const MAX_RESOURCES_PER_RULE: usize = 64;
 pub(crate) struct GuestPolicySubject<'a> {
     pub guest_id: Option<&'a str>,
     pub private: bool,
+    pub shared_room_verified: bool,
     pub room_id: Option<&'a str>,
 }
 
@@ -276,7 +277,7 @@ fn evaluate(
     // model-derived tool arguments cannot be published to a shared spreadsheet.
     if request.source_id == google_sheets::SOURCE_ID
         && operation == GuestDataOperation::Create
-        && subject.private
+        && !subject.shared_room_verified
     {
         return GuestDataDecision::default();
     }
@@ -345,6 +346,7 @@ pub(crate) fn subject<'a>(turn: &'a GuestTurn, room_id: Option<&'a str>) -> Gues
     GuestPolicySubject {
         guest_id: verified.then_some(turn.actor.id.as_str()),
         private: verified && turn.audience == AnswerAudience::Private,
+        shared_room_verified: turn.allows_shared_sheets_write(),
         room_id: verified.then_some(room_id).flatten(),
     }
 }
@@ -387,7 +389,7 @@ pub(crate) fn has_sheets_grant(
     };
     let room_id = turn.verified_room_id();
     let subject = subject(turn, room_id.as_deref());
-    if operation == GuestDataOperation::Create && subject.private {
+    if operation == GuestDataOperation::Create && !subject.shared_room_verified {
         return false;
     }
     policy.rules.iter().any(|rule| {
@@ -424,6 +426,7 @@ mod tests {
                 assurance: GuestAssurance::ProviderVerified,
             },
             audience,
+            shared_room_verified: audience == AnswerAudience::Shared,
             policy_revision: 1,
             activation_epoch: 1,
             bot_revision: 1,
@@ -485,6 +488,7 @@ mod tests {
         assert!(authorize(&policy, &turn, &sheets_request("create", QUESTIONS)).is_ok());
         let private = GuestTurn {
             audience: AnswerAudience::Private,
+            shared_room_verified: false,
             ..turn.clone()
         };
         assert!(authorize(&policy, &private, &sheets_request("read", EVENT)).is_ok());
@@ -578,6 +582,45 @@ mod tests {
     }
 
     #[test]
+    fn sheets_write_requires_room_proof_and_legacy_reads_keep_their_scope() {
+        let policy = policy(vec![
+            sheets_rule(GuestAudience::AllGuests, GuestDataOperation::Read, EVENT),
+            sheets_rule(
+                GuestAudience::AllGuests,
+                GuestDataOperation::Create,
+                QUESTIONS,
+            ),
+        ]);
+        let proven = turn("guest-a", AnswerAudience::Shared);
+        assert!(authorize(&policy, &proven, &sheets_request("create", QUESTIONS)).is_ok());
+        let mut stored = serde_json::to_value(&proven).unwrap();
+        stored
+            .as_object_mut()
+            .unwrap()
+            .remove("shared_room_verified");
+        let legacy: GuestTurn = serde_json::from_value(stored).unwrap();
+        assert!(!legacy.shared_room_verified);
+        assert!(authorize(&policy, &legacy, &sheets_request("read", EVENT)).is_ok());
+        assert!(authorize(&policy, &legacy, &sheets_request("create", QUESTIONS)).is_err());
+        assert!(!has_sheets_grant(
+            &policy,
+            &legacy,
+            "connection-1",
+            "create"
+        ));
+        assert_ne!(
+            legacy.hosted_conversation_id(),
+            proven.hosted_conversation_id()
+        );
+        let mut refused = proven.clone();
+        refused.audience = AnswerAudience::Private;
+        assert!(authorize(&policy, &refused, &sheets_request("create", QUESTIONS)).is_err());
+        refused.audience = AnswerAudience::Shared;
+        refused.actor.assurance = GuestAssurance::Unverified;
+        assert!(authorize(&policy, &refused, &sheets_request("create", QUESTIONS)).is_err());
+    }
+
+    #[test]
     fn channel_guest_policy_own_record_fields_and_verified_private_destination() {
         let a = turn("guest-a", AnswerAudience::Private);
         let b = turn("guest-b", AnswerAudience::Private);
@@ -624,6 +667,7 @@ mod tests {
         request.fields = &["title"];
         let group = GuestTurn {
             audience: AnswerAudience::Shared,
+            shared_room_verified: true,
             ..a.clone()
         };
         assert!(authorize(&policy, &group, &request).is_err());

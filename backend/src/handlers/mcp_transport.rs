@@ -2542,6 +2542,9 @@ async fn handle_tools_list(
         }
         None => mcp_service::generate_tool_definitions(&services, None),
     };
+    if add_on.is_some() {
+        guest_tools::project_sheets_discovery(&services, &mut tool_defs);
+    }
 
     // Scoped API keys do not get SSH meta-tools. SSH invocations would
     // otherwise escape the service/node allow-list entirely.
@@ -2583,6 +2586,8 @@ async fn handle_tools_list(
                     definition.name.as_str(),
                     "nyx__search_tools" | "nyx__call_tool"
                 )
+                || (definition.name == crate::services::assistant_tool_result_service::TOOL_NAME
+                    && retained_results::chat(auth).is_some())
                 || mcp_service::resolve_tool_call(&definition.name, &services).is_some()
         });
         match Box::pin(guest_tools::definitions(
@@ -3329,6 +3334,8 @@ async fn dispatch_tools_call(
         }
         if !matches!(tool_name, "nyx__search_tools" | "nyx__call_tool")
             && !guest_sheets_tool_name(tool_name)
+            && !(tool_name == crate::services::assistant_tool_result_service::TOOL_NAME
+                && retained_results::chat(auth).is_some())
         {
             return guest_refused(request.id.clone());
         }
@@ -5823,7 +5830,9 @@ async fn handle_meta_call_tool(
         {
             return response;
         }
-        if !guest_sheets_tool_name(tool_name) || result_query.is_some() {
+        let retained_read = tool_name == crate::services::assistant_tool_result_service::TOOL_NAME
+            && retained_results::chat(auth).is_some();
+        if (!guest_sheets_tool_name(tool_name) && !retained_read) || result_query.is_some() {
             return guest_refused(request_id);
         }
     }
@@ -6477,17 +6486,33 @@ async fn handle_meta_search(
             .as_ref()
             .is_some_and(|chat| !chat.guest || !chat.is_orchestrator())
         {
-            candidates.push(crate::services::assistant_resource_service::definition());
+            if auth
+                .chat
+                .as_ref()
+                .is_some_and(|chat| chat.channel_guest.is_none())
+            {
+                candidates.push(crate::services::assistant_resource_service::definition());
+            }
             if retained_results::chat(auth).is_some() {
                 candidates.push(crate::services::assistant_tool_result_service::definition());
             }
         }
     }
-    let ranked_candidates = if exact_service_id_query {
+    let mut ranked_candidates = if exact_service_id_query {
         candidates
     } else {
         mcp_service::rank_search_candidates(candidates, query)
     };
+    if auth
+        .chat
+        .as_ref()
+        .is_some_and(|chat| chat.channel_guest.is_some())
+    {
+        crate::services::channel_guest_access::guest_tools::project_sheets_discovery(
+            &services,
+            &mut ranked_candidates,
+        );
+    }
     // Facts only for the services this search returns.
     let mut returned_ids = std::collections::HashSet::new();
     let returned: Vec<&mcp_service::McpToolService> = ranked_candidates

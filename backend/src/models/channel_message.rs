@@ -110,6 +110,8 @@ pub struct ChannelMessage {
     /// Positive provider-authenticated evidence for the stored inbound sender.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_transport_audience: Option<crate::services::channel_guest_access::AnswerAudience>,
+    #[serde(default)]
+    pub guest_transport_shared_room_verified: bool,
     /// Original admission for an external guest relay callback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guest_relay: Option<crate::services::channel_guest_access::GuestTurn>,
@@ -242,6 +244,7 @@ mod tests {
             text_completeness: None,
             effective_attachment_filenames: Vec::new(),
             guest_transport_audience: None,
+            guest_transport_shared_room_verified: false,
             guest_relay: None,
             hosted_guest_selector_unavailable: false,
             embedded_attachments: Vec::new(),
