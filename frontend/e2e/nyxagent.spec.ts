@@ -15,7 +15,7 @@ const GREETING = /^Good (morning|afternoon|evening), Dannick$/;
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/assistant/nyxagent/machines?**", (route) => route.fulfill({ json: [] }));
-  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [] } }));
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [], connections: [], next_cursor: null } }));
 });
 
 function homeHeading(page: Page) {
@@ -29,7 +29,10 @@ function nav(page: Page) {
 async function saveAgentDetails(page: Page) {
   const sheet = page.getByRole("dialog", { name: "Agent details" });
   await sheet.getByRole("button", { name: "Save changes", exact: true }).click();
-  await page.getByRole("dialog", { name: "Review changes" }).getByRole("button", { name: "Save changes", exact: true }).click();
+  const review = page.getByRole("dialog", { name: "Review changes" });
+  await review.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(review).toHaveCount(0);
+  await expect(sheet).toBeVisible();
   await expect(sheet.getByRole("region", { name: "Unsaved changes" })).toHaveCount(0);
 }
 
@@ -393,13 +396,13 @@ test("agents get a display name and persona, shown with their @handle everywhere
   await dialog.getByRole("textbox", { name: /Persona/ }).fill("Warm, concise.");
   await dialog.getByRole("button", { name: "Create agent" }).click();
   await expect(page).toHaveURL(/c=nyxa-[a-f0-9]{32}/);
-  await expect(page.getByRole("heading", { name: "Luna", exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: "Conversation controls" }).getByRole("heading", { name: "Luna", exact: true })).toBeVisible();
   await expect(page.getByRole("main").getByText("@writer", { exact: true })).toBeVisible();
   await expect(composerInput(page)).toHaveAttribute("data-placeholder", "Message Luna");
   await expect(nav(page).getByRole("button", { name: "Luna (@writer), specialist, Idle" })).toBeVisible();
 
   // The drawer edits both; they persist.
-  await page.getByRole("button", { name: "Agent details" }).click();
+  await page.getByRole("button", { name: "Agent details", exact: true }).and(page.getByTitle("Agent details", { exact: true })).click();
   const profile = page.getByRole("dialog", { name: "Agent details" }).getByRole("form", { name: "Profile" });
   await expect(profile.getByRole("textbox", { name: "Tone and style" })).toHaveValue("Warm, concise.");
   await profile.getByRole("textbox", { name: "Tone and style" }).fill("Playful.");
@@ -407,7 +410,7 @@ test("agents get a display name and persona, shown with their @handle everywhere
   await page.getByRole("dialog", { name: "Agent details" }).getByRole("button", { name: "Close agent details" }).click();
   await expect(page.getByRole("dialog", { name: "Agent details" })).toHaveCount(0);
   await page.reload();
-  await page.getByRole("button", { name: "Agent details" }).click();
+  await page.getByRole("button", { name: "Agent details", exact: true }).and(page.getByTitle("Agent details", { exact: true })).click();
   await expect(
     page.getByRole("dialog", { name: "Agent details" }).getByRole("textbox", { name: "Tone and style" }),
   ).toHaveValue("Playful.");

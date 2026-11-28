@@ -137,7 +137,7 @@ export function AgentDrawerSearch({
 }) {
   useUiTranslation();
   const context = useContext(DrawerSearchResultsContext)!;
-  const searchLabel = `Search ${title} agent details`;
+  const searchLabel = translateUi("Search {{agent}} agent details", { agent: title });
   const input = useRef<HTMLInputElement>(null);
   const toggle = useRef<HTMLButtonElement>(null);
   const [placeholder, setPlaceholder] = useState(searchLabel);
@@ -152,7 +152,7 @@ export function AgentDrawerSearch({
       const style = getComputedStyle(node);
       context.font = style.font;
       const width = node.clientWidth - parseFloat(style.paddingLeft || "0") - parseFloat(style.paddingRight || "0");
-      setPlaceholder([searchLabel, `Search ${title}`, "Search agent"].find((text) => context.measureText(text).width <= width) ?? "Search");
+      setPlaceholder([searchLabel, translateUi("Search {{agent}}", { agent: title }), translateUi("Search agent")].find((text) => context.measureText(text).width <= width) ?? translateUi("Search"));
     };
     measure();
     const observer = new ResizeObserver(measure);
@@ -215,7 +215,7 @@ export function AgentDrawerSearch({
         ].find((element) => element.dataset.drawerSearchTarget === pending.id);
       if (target?.isConnected && !target.closest("[hidden],[inert]")) {
         target.scrollIntoView?.({ block: "center", behavior: "instant" });
-        if (!target.hasAttribute("tabindex")) target.tabIndex = -1;
+        if (!target.matches("input, textarea, select, button, a[href], [tabindex]")) target.tabIndex = -1;
         target.focus({ preventScroll: true });
         setHighlighted(target);
         setPending(undefined);
@@ -360,7 +360,7 @@ export function AgentDrawerSearch({
                         <button
                           type="button"
                           className="flex min-h-11 w-full px-4 py-2.5 text-left focus-visible:outline-none"
-                          aria-label={`${entry.title} ${entry.breadcrumb ?? DRAWER_SEARCH_TABS[entry.tab]}`}
+                          aria-label={`${entry.title} ${entry.breadcrumb ?? translateUi(DRAWER_SEARCH_TABS[entry.tab])}`}
                           ref={(element) => {
                             if (element) buttons.current.set(entry.id, element);
                             else buttons.current.delete(entry.id);
@@ -377,7 +377,7 @@ export function AgentDrawerSearch({
                               <Match
                                 text={
                                   entry.breadcrumb ??
-                                  DRAWER_SEARCH_TABS[entry.tab]
+                                  translateUi(DRAWER_SEARCH_TABS[entry.tab])
                                 }
                                 query={query}
                               />

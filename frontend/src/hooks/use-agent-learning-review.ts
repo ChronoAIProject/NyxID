@@ -42,7 +42,17 @@ export function useAgentLearningReview(id: string, enabled = true) {
   const edit = useMutation({ mutationFn: ({ proposalId, revision, draft }: { proposalId: string; revision: number; draft: LearningDraftBody }) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/proposals/${encodeURIComponent(proposalId)}`, { method: "PUT", body: { revision, draft } }), onSuccess: invalidate });
   // Checks a draft against the proposal's validator without saving it.
   const validate = useMutation({ mutationFn: async ({ proposalId, draft }: { proposalId: string; draft: LearningDraftBody }) => skillDraftValidationSchema.parse(await assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/proposals/${encodeURIComponent(proposalId)}/validate`, { method: "POST", body: { draft } })) });
-  const configure = useMutation({ mutationFn: (body: { enabled: boolean; threshold: number }) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning`, { method: "PUT", body }), onSuccess: () => { void status.refetch(); void invalidate(); } });
+  const configure = useMutation({
+    mutationFn: async (body: { enabled: boolean; threshold: number }) => {
+      const accepted = learningStatusSchema.pick({ enabled: true, threshold: true }).required().parse(
+        await assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning`, { method: "PUT", body }),
+      );
+      client.setQueryData(["agent-learning-status", owner, id], (previous: typeof status.data) => previous ? { ...previous, ...accepted } : previous);
+      const latest = await status.refetch();
+      return { enabled: latest.data?.enabled ?? accepted.enabled, threshold: latest.data?.threshold ?? accepted.threshold };
+    },
+    onSuccess: invalidate,
+  });
   const consent = useMutation({ mutationFn: (enabled: boolean) => assistantJson(`/assistant/nyxagent/agents/${encodeURIComponent(id)}/learning/consent`, { method: "PUT", body: { enabled, threshold: 1 } }), onSuccess: () => void status.refetch() });
   return { ...query, status, run, reject, approve, reprepare, edit, validate, configure, consent };
 }

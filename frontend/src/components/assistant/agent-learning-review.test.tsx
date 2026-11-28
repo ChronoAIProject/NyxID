@@ -354,3 +354,70 @@ it("opens the linked automatically published proposal for inspection and discard
   fireEvent.click(screen.getByRole("button", { name: "Discard and detach" }));
   await waitFor(() => expect(mocks.reject).toHaveBeenCalledWith({ proposalId: "proposal", revision: 2 }));
 });
+
+it.each(["99", "1.5", "0", ""])("restores the saved threshold and reports invalid integer input %s", (attempted) => {
+  mocks.feature.mockReturnValue(true);
+  const review = mocks.review();
+  mocks.review.mockReturnValue({ ...review, status: { data: { enabled: true, threshold: 50 } }, configure: { ...review.configure, isSuccess: true } });
+  render(<AgentLearningReview agentId="agent" />);
+  const input = screen.getByRole("spinbutton", { name: "Eligible conversations before analysis" });
+  fireEvent.change(input, { target: { value: attempted } });
+  fireEvent.blur(input);
+  expect(input).toHaveValue(50);
+  expect(mocks.configure).not.toHaveBeenCalled();
+  expect(screen.getByRole("alert")).toHaveTextContent("Enter a whole number");
+  expect(screen.queryByText("Learning settings saved.")).not.toBeInTheDocument();
+});
+
+it("shows the accepted threshold even if the server's existing value is unchanged", () => {
+  mocks.feature.mockReturnValue(true);
+  const review = mocks.review();
+  mocks.review.mockReturnValue({ ...review, status: { data: { enabled: true, threshold: 50 } } });
+  mocks.configure.mockImplementationOnce((_body, options) => options.onSuccess({ enabled: true, threshold: 50 }));
+  render(<AgentLearningReview agentId="agent" />);
+  const input = screen.getByRole("spinbutton", { name: "Eligible conversations before analysis" });
+  fireEvent.change(input, { target: { value: "30" } });
+  fireEvent.blur(input);
+  expect(input).toHaveValue(50);
+});
+
+it("disables threshold editing while learning is off and restores the saved value after rejection", () => {
+  mocks.feature.mockReturnValue(true);
+  const review = mocks.review();
+  mocks.review.mockReturnValue({ ...review, status: { data: { enabled: false, threshold: 12 } } });
+  const view = render(<AgentLearningReview agentId="agent" />);
+  expect(screen.getByRole("spinbutton")).toBeDisabled();
+  mocks.review.mockReturnValue({ ...review, status: { data: { enabled: true, threshold: 12 } } });
+  mocks.configure.mockImplementationOnce((_body, options) => options.onError(new Error("Rejected")));
+  view.rerender(<AgentLearningReview agentId="agent" />);
+  const input = screen.getByRole("spinbutton");
+  fireEvent.change(input, { target: { value: "20" } });
+  fireEvent.blur(input);
+  expect(input).toHaveValue(12);
+});
+
+it("does not write learning settings when an unchanged threshold receives and loses focus", () => {
+  mocks.feature.mockReturnValue(true);
+  const review = mocks.review();
+  mocks.review.mockReturnValue({ ...review, status: { data: { enabled: true, threshold: 15 } } });
+  render(<AgentLearningReview agentId="agent" />);
+  const input = screen.getByRole("spinbutton");
+  fireEvent.focus(input);
+  fireEvent.blur(input);
+  expect(mocks.configure).not.toHaveBeenCalled();
+});
+
+it.each([false, true])("blocks writes until learning settings load (error: %s) and offers error recovery", (failed) => {
+  mocks.feature.mockReturnValue(true);
+  const review = mocks.review();
+  const refetch = vi.fn();
+  mocks.review.mockReturnValue({ ...review, status: { data: undefined, isPending: !failed, error: failed ? new Error("Read failed") : null, refetch } });
+  render(<AgentLearningReview agentId="agent" />);
+  expect(screen.queryByRole("switch", { name: "Enable automatic learning" })).not.toBeInTheDocument();
+  expect(screen.getByRole("spinbutton")).toBeDisabled();
+  expect(mocks.configure).not.toHaveBeenCalled();
+  if (failed) {
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(refetch).toHaveBeenCalledOnce();
+  } else expect(screen.getByText("Loading learning settings…")).toBeInTheDocument();
+});

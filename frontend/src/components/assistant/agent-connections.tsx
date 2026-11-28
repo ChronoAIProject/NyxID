@@ -55,7 +55,7 @@ export function AgentConnections({
           </>
         }
       >
-        <GroupedRow search={{ id: "manage-connections", title: "Manage connected accounts", breadcrumb: "Access › Connections" }} asChild interactive>
+        <GroupedRow search={{ id: "manage-connections", title: translateUi("Manage connected accounts"), breadcrumb: translateUi("Access") + " › " + translateUi("Connections") }} asChild interactive>
           <Link to="/keys">
             <span className="flex-1">{translateUi("Manage connected accounts")}</span>
             <ChevronRight aria-hidden className="size-[1.125em]" />
@@ -160,7 +160,7 @@ function ConnectionGroups({
             <div className="space-y-0">
               <ol aria-label={translateUi("{{value1}} connections", { value1: group.name })}>
                 {rows.map((key, index) => (
-                  <GroupedRow search={{ id: `connection-${key.id}`, title: key.label, breadcrumb: `Access › Connections › ${group.name}`, keywords: `${key.slug} ${connectionOwnerLabel(key)} ${connectionAvailable(key) ? "Available" : "Unavailable"}` }} asChild key={key.id}>
+                  <GroupedRow search={{ id: `connection-${key.id}`, title: key.label, breadcrumb: `${translateUi("Access")} › ${translateUi("Connections")} › ${group.name}`, keywords: `${key.slug} ${connectionOwnerLabel(key)} ${connectionAvailable(key) ? "Available" : "Unavailable"}` }} asChild key={key.id}>
                     <li>
                       <span className="min-w-0 flex-1 break-words">
                         <span className="block font-medium">{key.label}</span>
@@ -230,7 +230,7 @@ function ConnectionGroups({
                     <GroupedRow asChild interactive>
                       <button
                         type="button"
-                        aria-label={translateUi("Edit connection order")}
+                        aria-label={translateUi("Edit connection order · All my agents")}
                         disabled={disabled || Boolean(order.reason)}
                         title={order.reason}
                         onClick={() => order.start(group)}

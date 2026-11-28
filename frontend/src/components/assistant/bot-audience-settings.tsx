@@ -51,7 +51,7 @@ export function BotAudienceSettings({
   const searchTarget = useDrawerSearchTarget({
     id: searchId,
     title: translateUi("Who can talk to this bot"),
-    breadcrumb: `Channels › ${channel.bot_label}`,
+    breadcrumb: `${translateUi("Channels")} › ${channel.bot_label}`,
     keywords:
       "Guests guest access private chats audience Grants organization spending billing",
   });

@@ -10,6 +10,7 @@ import {
 import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { GroupedDetail } from "@/components/ui/grouped-detail";
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { useAgentLearningReview } from "@/hooks/use-agent-learning-review";
 import { useFeature } from "@/hooks/use-feature-flag";
@@ -43,15 +44,39 @@ export function AgentLearningReview({
   }, [proposalId, review.data]);
   const [cards, setCards] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [threshold, setThreshold] = useState(15);
+  const [threshold, setThreshold] = useState("15");
+  const [thresholdError, setThresholdError] = useState(false);
+  const [thresholdEdited, setThresholdEdited] = useState(false);
 
   const serverThreshold = review.status.data?.threshold;
   useEffect(() => {
-    if (serverThreshold !== undefined) setThreshold(serverThreshold);
+    if (serverThreshold !== undefined) setThreshold(String(serverThreshold));
   }, [serverThreshold]);
 
+  const configurationReady = Boolean(review.status.data) && !review.status.isPending && !review.status.error;
+  function configureLearning(nextEnabled: boolean) {
+    if (!configurationReady || review.configure.isPending) return;
+    const value = Number(threshold);
+    if (!Number.isInteger(value) || value < 1 || value > 50) {
+      review.configure.reset?.();
+      setThreshold(String(serverThreshold ?? 15));
+      setThresholdError(true);
+      return;
+    }
+    setThresholdError(false);
+    if (nextEnabled === review.status.data?.enabled && value === serverThreshold) {
+      setThreshold(String(value));
+      setThresholdEdited(false);
+      return;
+    }
+    review.configure.mutate({ enabled: nextEnabled, threshold: value }, {
+      onSuccess: (accepted) => { setThreshold(String(accepted.threshold)); setThresholdEdited(false); },
+      onError: () => { setThreshold(String(serverThreshold ?? 15)); setThresholdEdited(false); },
+    });
+  }
+
   useDrawerSearchEntries(enabled && (!readOnly || review.data) ? (review.data?.proposals ?? []).map((proposal) => ({
-    id: `learning-${proposal.id}`, title: proposal.draft?.name ?? "Learning proposal", breadcrumb: "Skills › Learning proposals",
+    id: `learning-${proposal.id}`, title: proposal.draft?.name ?? translateUi("Learning proposal"), breadcrumb: translateUi("Skills") + " › " + translateUi("Learning proposals"),
     keywords: `${proposal.status} ${proposal.source}`, pages: [`learning-${proposal.id}`], reveal: () => setOpen(proposal.id),
   })) : []);
   if (!enabled || (readOnly && !review.data)) {
@@ -70,7 +95,9 @@ export function AgentLearningReview({
           <>
             <p>{translateUi("Learning analyzes eligible conversations and may suggest a private skill draft, or find nothing to propose. Enabling learning does not publish learned drafts.")}</p>
             {!readOnly ? <p>{translateUi("Learning settings apply immediately. Discard in the drawer does not undo them.")}</p> : null}
-            {review.configure.isPending || review.consent?.isPending ? <p role="status">{translateUi("Saving learning settings…")}</p> : !review.configure.error && !review.consent?.error && (review.configure.isSuccess || review.consent?.isSuccess) ? <p role="status">{translateUi("Learning settings saved.")}</p> : null}
+            {review.status.error ? <div className="space-y-2"><p role="alert">{translateUi("Learning settings could not be loaded. Retry before changing them.")}</p><Button type="button" variant="outline" onClick={() => void review.status.refetch()}>{translateUi("Retry")}</Button></div> : null}
+            {thresholdError ? <p role="alert">{translateUi("Enter a whole number from 1 to 50. The saved threshold has been restored.")}</p> : null}
+            {review.configure.isPending || review.consent?.isPending ? <p role="status">{translateUi("Saving learning settings…")}</p> : configurationReady && !thresholdEdited && !thresholdError && !review.configure.error && !review.consent?.error && (review.configure.isSuccess || review.consent?.isSuccess) ? <p role="status">{translateUi("Learning settings saved.")}</p> : null}
             {review.run.isPending ? <p role="status">{translateUi("Analyzing eligible conversations…")}</p> : review.run.isSuccess ? <p role="status">{translateUi("Analysis requested. It may produce a proposal or find nothing to suggest.")}</p> : null}
             {review.error ? (
               <p role="alert" className="text-destructive">{translateUi("Automatic learning is unavailable.")}</p>
@@ -94,33 +121,24 @@ export function AgentLearningReview({
         }
       >
         <GroupedRow
-          search={{ id: "automatic-learning", title: translateUi("Automatic learning"), breadcrumb: "Skills › Learning proposals", keywords: learningEnabled ? "On" : "Off" }}
+          search={{ id: "automatic-learning", title: translateUi("Automatic learning"), breadcrumb: translateUi("Skills") + " › " + translateUi("Learning proposals"), keywords: learningEnabled ? "On" : "Off" }}
           title={translateUi("Automatic learning")}
           accessory={
-            readOnly ? (
-              learningEnabled ? (
-                "On"
-              ) : (
-                "Off"
-              )
+            !configurationReady ? <span role="status">{translateUi(review.status.error ? "Unavailable" : "Loading learning settings…")}</span> : readOnly ? (
+              translateUi(learningEnabled ? "On" : "Off")
             ) : (
               <Switch
                 aria-label={translateUi("Enable automatic learning")}
                 checked={learningEnabled}
                 disabled={review.configure.isPending}
-                onCheckedChange={(checked) =>
-                  review.configure.mutate({
-                    enabled: checked,
-                    threshold: Math.min(50, Math.max(1, threshold)),
-                  })
-                }
+                onCheckedChange={configureLearning}
               />
             )
           }
         />
         {!readOnly ? (
           <GroupedRow
-            search={{ id: "learning-threshold", title: translateUi("Analyze after eligible conversations"), breadcrumb: "Skills › Learning proposals", keywords: `Threshold ${threshold}` }}
+            search={{ id: "learning-threshold", title: translateUi("Analyze after eligible conversations"), breadcrumb: translateUi("Skills") + " › " + translateUi("Learning proposals"), keywords: `Threshold ${threshold}` }}
             title={translateUi("Analyze after")}
             description={translateUi("Distinct eligible conversations; each analysis may produce no proposal.")}
             accessory={
@@ -131,17 +149,17 @@ export function AgentLearningReview({
                 type="number"
                 min={1}
                 max={50}
-                disabled={review.configure.isPending}
+                step={1}
+                disabled={!configurationReady || !learningEnabled || review.configure.isPending}
                 value={threshold}
-                onChange={(event) =>
-                  setThreshold(Number(event.target.value) || 15)
-                }
+                onChange={(event) => {
+                  setThreshold(event.target.value);
+                  setThresholdEdited(true);
+                  setThresholdError(false);
+                }}
                 onBlur={() => {
                   if (learningEnabled)
-                    review.configure.mutate({
-                      enabled: true,
-                      threshold: Math.min(50, Math.max(1, threshold)),
-                    });
+                    configureLearning(true);
                 }}
               />
               <span>{translateUi("eligible conversations")}</span>

@@ -109,7 +109,7 @@ function MachineCapabilityPage(
   const machine = props.machine;
   const needsSelection = machine.selection_required === true || machine.mode === "selection_required";
   const searchId = `machine-detail-${machine.node_id}`;
-  useDrawerSearchEntries([{ id: searchId, title: machine.name, breadcrumb: "Access › Machine access",
+  useDrawerSearchEntries([{ id: searchId, title: machine.name, breadcrumb: translateUi("Access") + " › " + translateUi("Machine access"),
     keywords: `${needsSelection ? "Needs owner selection" : machine.mode === "separated" ? "Separate workspace and browser" : "Shared legacy access"} ${Object.keys(labels).map((key) => labels[key as keyof typeof labels]).join(" ")}`,
     pages: [searchId], reveal: () => setOpen(true),
   }]);

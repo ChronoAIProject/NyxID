@@ -51,7 +51,7 @@ export function ShareAgentDialog({
   return (
     <>
       <GroupedList title={translateUi("Sharing")}>
-        <GroupedDisclosure search={{ id: "share-agent", title: translateUi("Share agent"), breadcrumb: "Overview › Sharing" }} onClick={() => setOpen(true)}>{translateUi("Share agent")}</GroupedDisclosure>
+        <GroupedDisclosure search={{ id: "share-agent", title: translateUi("Share agent"), breadcrumb: translateUi("Overview") + " › " + translateUi("Sharing") }} onClick={() => setOpen(true)}>{translateUi("Share agent")}</GroupedDisclosure>
       </GroupedList>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="max-h-[85vh] overflow-y-auto bg-background">
@@ -294,7 +294,7 @@ function SharingEditor({
           )}
         </GroupedList>
         <GroupedFormActions
-          changes={() => [...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "enabled", label: "Sharing enabled" }, { key: "audience", label: "People and organizations", list: (value) => Array.isArray(value) ? value.map((person: SharingForm["audience"][number]) => `${audienceLabel(person)} · ${person.role === "manager" ? "Manager" : "User"}`) : [] }]), ...recordChanges(form.formState.defaultValues?.shared_access, form.getValues("shared_access"), (key) => `Service access · ${policy.services.find((service) => service.id === key)?.name ?? key}`, labelValue({ read: "Read", use: "Use", all: "All granted actions" }, "Withheld"))]}
+          changes={() => [...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "enabled", label: translateUi("Sharing enabled") }, { key: "audience", label: translateUi("People and organizations"), list: (value) => Array.isArray(value) ? value.map((person: SharingForm["audience"][number]) => `${audienceLabel(person)} · ${translateUi(person.role === "manager" ? "Manager" : "User")}`) : [] }]), ...recordChanges(form.formState.defaultValues?.shared_access, form.getValues("shared_access"), (key) => `${translateUi("Service access")} · ${policy.services.find((service) => service.id === key)?.name ?? key}`, labelValue({ read: translateUi("Read"), use: translateUi("Use"), all: translateUi("All granted actions") }, translateUi("Withheld")))]}
           disabled={!form.formState.isValid}
           label={translateUi("sharing")}
           dirty={form.formState.isDirty}
@@ -425,7 +425,7 @@ function NotesEditor({
         <ul>
           {value.notes.length ? (
             value.notes.map((n) => (
-              <GroupedRow search={{ id: `shared-note-${kind}-${n.id}`, title: n.text, breadcrumb: `Memory › ${title}` }} asChild key={n.id}>
+              <GroupedRow search={{ id: `shared-note-${kind}-${n.id}`, title: n.text, breadcrumb: `${translateUi("Agent memory")} › ${title}` }} asChild key={n.id}>
                 <li className="break-words">{n.text}</li>
               </GroupedRow>
             ))
@@ -473,7 +473,7 @@ function NotesEditor({
           </GroupedRow>
         </GroupedList>
         <GroupedFormActions
-          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "text", label: "Notes", list: changeLines }])}
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "text", label: translateUi("Notes"), list: changeLines }])}
           disabled={!form.formState.isValid}
           label={kind === "private-notes" ? translateUi("private notes") : translateUi("team memory")}
           dirty={form.formState.isDirty}
@@ -539,7 +539,7 @@ export function SharedConsentCards({
             </>
           }
         >
-          <GroupedRow search={{ id: `consent-${row.id}`, title: row.connection_name ?? "Use your connection", breadcrumb: "Access › Connection consent", keywords: `${row.operation} ${row.decision}` }} title={translateUi("Use your connection")} description={row.operation} />
+          <GroupedRow search={{ id: `consent-${row.id}`, title: row.connection_name ?? translateUi("Use your connection"), breadcrumb: translateUi("Access") + " › " + translateUi("Connection consent"), keywords: `${row.operation} ${row.decision}` }} title={translateUi("Use your connection")} description={row.operation} />
           {row.decision === "pending" ? (
             (["once", "always", "skip"] as const).map((decision) => (
               <GroupedRow key={decision} asChild interactive>
@@ -666,7 +666,7 @@ export function SharedAgentProfile({
           )}
         </GroupedList>
         <GroupedFormActions
-          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), PROFILE_FIELDS)}
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), PROFILE_FIELDS.map((field) => ({ ...field, label: translateUi(field.label) })))}
           label={translateUi("profile")}
           dirty={form.formState.isDirty}
           pending={update.isPending}

@@ -1536,6 +1536,9 @@ export class NyxAgentHttpFixtures {
         : failure(404, "Assistant route not found.");
     }
     const body = () => JSON.parse(String(init.body)) as Record<string, unknown>;
+    if (url.pathname === `${ROOT}/grant-services` && method === "GET") {
+      return json({ services: [{ id: "github", slug: "github", label: "GitHub", executable: true, catalog_slug: "github" }] });
+    }
     if (url.pathname === `${ROOT}/models` && method === "GET") {
       return json([
         { id: "nyxagent/chat", label: "Claude Sonnet 4.5", available: true },

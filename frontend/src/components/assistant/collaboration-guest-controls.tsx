@@ -108,7 +108,7 @@ export function CollaborationGuestControls({
           }
         >
           <GroupedRow
-            search={{ id: `group-guests-${row.group_id}`, title: "Guest replies", breadcrumb: `Access › Group ${row.group_id}`, keywords: row.enabled ? "Enabled" : "Disabled" }}
+            search={{ id: `group-guests-${row.group_id}`, title: translateUi("Guest replies"), breadcrumb: `${translateUi("Access")} › ${translateUi("Group")} ${row.group_id}`, keywords: row.enabled ? "Enabled" : "Disabled" }}
             title={translateUi("Guest replies")}
             accessory={row.enabled ? "Enabled" : "Disabled"}
           />

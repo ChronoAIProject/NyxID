@@ -417,6 +417,7 @@ export function ChannelBotSetup({
             platform={platform}
             label={label}
             orgId={targetOrgId}
+            expectedOwnerId={lockOrgScope ? defaultOrgId ?? undefined : undefined}
             form={form}
             fullPage={fullPage}
             stayInPlace={stayInPlace}

@@ -15,6 +15,15 @@ const ROOT = "/assistant/nyxagent";
 let fixture: NyxAgentHttpFixtures;
 let now: number;
 
+it("provides the live grant inventory shape for the preview Access editor", async () => {
+  const inventory = await call("GET", "/grant-services");
+  expect(inventory.body).toEqual({ services: [{ id: "github", slug: "github", label: "GitHub", executable: true, catalog_slug: "github" }] });
+  expect(getMockResponse("/saved-logins?available=true")).toEqual([]);
+  expect(getMockResponse("/service-preferences")).toEqual({ groups: [], version: 0, updated_at: null });
+  expect(getMockResponse("/triggers")).toEqual({ triggers: [] });
+
+});
+
 async function call(method: string, endpoint: string, body?: unknown) {
   const response = await fixture.handler({
     endpoint: `${ROOT}${endpoint}`,

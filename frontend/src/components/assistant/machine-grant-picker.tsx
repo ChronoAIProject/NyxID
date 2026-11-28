@@ -55,7 +55,7 @@ export function MachineGrantPicker({
   const allRows = [...rows, ...unknown];
   useDrawerSearchEntries(allRows.map((row) => ({
     id: `${kind}-${row.id}`, title: row.label,
-    breadcrumb: `Access › ${kind === "machines" ? "Machines" : "Saved logins"}`,
+    breadcrumb: `${translateUi("Access")} › ${translateUi(kind === "machines" ? "Machines" : "Saved logins")}`,
     keywords: value.includes(row.id) ? "Granted" : "Available", reveal: () => setSearch(""),
   })));
   const filtered = allRows.filter((row) =>

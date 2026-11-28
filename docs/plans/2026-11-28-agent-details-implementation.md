@@ -2,7 +2,7 @@
 
 **Owner/reviewer:** the primary Codex session. **Implementer:** one Heca Codex session using `gpt-6.1-sol`, `xhigh`, `full-access`. The primary reviewer performed its own implementation review. On the user’s subsequent explicit request, a separate fresh Heca Astra session reviews the flows and implementation before publication. Work takes place in this shared checkout. Packages below define independent boundaries so implementation and review can proceed in parallel without conflicting edits.
 
-**Status:** implementation packages A–H passed the original review and validation. A fresh independent Astra review and integration onto current `dev` are in progress before the user-requested draft PR and explanatory gist.
+**Status:** implementation packages A–H, integration onto `dev`, and fresh independent Astra review are complete. Approved for the user-requested draft PR and preview guide gist.
 
 **Source:** [converged feature map and review](2026-11-28-agent-details-feature-map-and-ux-review.md). The user authorized planning, implementation, direct review and repeated corrections through completion on 2026-11-28.
 
@@ -136,7 +136,6 @@ Acceptance: eligible organizations can be selected by name; existing audiences s
 | 1 | A/B and initial G changes | Correct main approval/publication changes. Requested accurate authored-policy aside, per-action learning result feedback, natural publication label, and nonduplicated organization labels | Closed: copy, success/error feedback and labels corrected; localized catalogs and regression coverage passed |
 | 2 | C/F integration and A/B/G verification | Found Device voice row children suppressing its eligibility description; requested correct hidden-Channels fallback breadcrumb and readable extracted forms | Closed: eligibility content retained, breadcrumb follows placement, extracted forms formatted; primary 38-test intermediate check and final integrated checks passed |
 | 3 | C/E navigation | Requested authoritative editor as first approval search result; identified organization registration scope mismatch that could return a newly created bot outside the target agent's eligible list | Summary indexing removed; contextual org scope locked; primary browser checks at 390/1280 confirm preserved grouped appearance, editable instructions, approval cross-link, retained profile draft and visible pinned save scope; regression and browser validation passed |
-
 | 4 | C/F failure and asynchronous state paths | Requested authoritative voice readback to clear stale creation errors, truthful unknown workspace-mode display, ordinary modified-link behavior and retained progress drafts when org Channels visibility resolves asynchronously | Implementer added retained portal form, unknown-mode states, readback-scoped error handling and ordinary-click interception; regressions and primary final review passed |
 | 5 | H localization/search review | Requested localized approval descriptions and static/dynamic help resolution. Reproduced a real helper failure for inherited object-property titles such as `toString` that can appear in arbitrary search metadata | Own-key lookup and localized static/dynamic resolution implemented; primary zh-CN/zh-TW runtime checks passed, including safe unknown metadata |
 | 6 | Final consistency and registration integration | Requested consistent shared-profile heading after Persona → Tone and style rename; checked reusable registration flow and its intended next step | Closed: Shared profile heading and scope help aligned; primary verified registration, selected-agent connection, owner verification as next step and retained profile draft |
@@ -183,12 +182,52 @@ Reproduce the Chromium run from `frontend/`:
 
 Final primary captures, retained in the ignored test output directory after automated runs completed:
 
-- [Overview, dark, 390px](../../frontend/test-results/agent-details-review/final-overview-dark-390.png)
-- [Access, dark, 390px](../../frontend/test-results/agent-details-review/final-access-dark-390.png)
-- [Connected registered bot and verification next step, dark, 390px](../../frontend/test-results/agent-details-review/final-registration-connected-dark-390.png)
+- Overview, dark, 390px: local-only capture `final-overview-dark-390.png`.
+- Access, dark, 390px: local-only capture `final-access-dark-390.png`.
+- Registered bot connected, dark, 390px: local-only capture `final-registration-connected-dark-390.png`.
 
-The implementation uses the existing grouped components, typography, theme tokens and five-tab shell. API field names, deep-link values, authority/role restrictions and feature flags retain their existing contracts. All direct-review findings were corrected and verified; no implementation follow-up is deferred.
+The implementation uses the existing grouped components, typography, theme tokens and five-tab shell. API field names, deep-link values, authority/role restrictions and feature flags retain their existing contracts. The initial implementation passed the direct-review checks above. The fresh review and validation after integration onto current `dev` are recorded below.
 
 ## Fresh review and publication
 
 The user subsequently requested a new Astra review of both flow and implementation, a draft PR after the review is clear, and a new GitHub gist describing the changes and organization. The reviewer is a fresh Heca `gpt-6.2-astra` session at `xhigh`. The checkout was 518 commits behind `origin/dev` at inspection; publication requires integrating the feature onto the current base, preserving upstream additions, rebuilding the embedded CLI wizard when its shared source closure changes, and rerunning affected checks. Review findings, resolutions, final base/commit and publication links will be recorded here.
+
+
+### Fresh review closure
+
+The feature was rebased onto `dev` at `fca745e13`, preserving the upstream avatar editor, built-in skills, organization governance, guest preflight and setup-completion callback. The repository’s official i18n adoption tool moved the feature’s entries to the split app catalogs.
+
+The fresh Heca `gpt-6.2-astra` / `xhigh` reviewer initially requested changes and approved the corrected flow, implementation and change guide after re-review. The reviewer used local fixtures and reported no remaining actionable findings.
+
+| Review finding | Resolution and evidence |
+| --- | --- |
+| Managed Telegram resumed a personal or other-organization request inside locked organization registration. | Immutable expected owner reaches the parent and action component. Mismatched saved requests and responses cannot change scope, launch, cancel or complete the contextual flow. Separate recovery and platform choice remain available. Matching/mismatched owner regressions and independent review passed. |
+| A non-maintainer organization member’s audience link had no registered Access target. | The readable grants branch registers the same navigation target; ordinary and modified click behavior is preserved. |
+| Learning could show an unaccepted threshold, write on unchanged blur, or overwrite unknown settings. | Read readiness and Retry, integer validation, off-state disabling, unchanged-write suppression, rejected-value restoration and authoritative concurrent readback. UI and hook regressions passed. |
+| Channels and approval descriptions overclaimed immediate settings or prompt-free reads. | Immediate channel operations are named; staged progress uses Save changes. Independent protected organization read policy is explicit. |
+| Chinese review labels, search prompts, fallback breadcrumbs and deeper fixed metadata were partly English. | Static producers and fallbacks are localized, including Agent memory; user titles, service names and note content remain verbatim. Runtime tests cover both Chinese locales. |
+| Section help rebuilt its full localized reverse map on every search lookup. | Canonical-key fast path and a finite cached reverse map invalidated on language/catalog changes. Arbitrary user titles are not cached. |
+| Skill feedback followed unrelated pins, removal retained stale detail, and Find skills lost input focus. | Feedback identifies its affected pin; removal returns to the list with focus; catalog search is the final navigation focus target. Unit and browser regressions passed. |
+| Eligibility/optional voice/progress timing guidance was imprecise. | Empty states reflect eligibility and role. Voice help is conditional; progress copy/spec measures five seconds from turn start with external work observed. |
+| Org demo registration lost its owner and the preview lacked current read contracts. | Demo owner is retained. Preview provides grant inventory, saved-logins, preference/trigger reads and scoped CMA origin pages on the actual consumer boundary. The real CMA consumer validates response shape, zero fetch and abort behavior. |
+| Screenshot links pointed into ignored test output and memory guidance overgeneralized immediacy. | Six stable PNG assets are committed under `docs/assets/agent-details`. Guide/spec distinguish staged memory Add/Edit from immediate Forget/Delete and provide a reproducible fresh-draft walkthrough. |
+
+Final primary verification:
+
+- Focused integration run: **25 files / 487 tests passed**. This extends the original command above with settings-content, current avatar/governance coverage, managed Telegram parent/child/resume, change descriptions and mock data.
+- Final transport/preview correction run: **3 files / 88 tests passed**: `cma-session-api.test.ts`, `nyxagent-http-fixtures.test.ts`, `mock-data.test.ts`.
+- Chromium: **8/8 passed** at 390px/1280px, including a permanent regression proving Find skills accepts keyboard input after deferred navigation focus settles. The display-name/persona test now scopes the upstream duplicate entry points and waits for the review modal to finish closing before interacting with the sheet.
+- Production build: TypeScript, Vite, credential acceptance, mock-footprint and the **92-page** public artifact gate passed.
+- Full lint: **0 errors**, with 58 warnings in unchanged files on the integrated base; typography and i18n checks passed. No touched-file warning remains.
+- Embedded CLI wizard rebuilt; the generated HTML, 216-module manifest and source hash are consistent. A separate SHA-256 readback using the exact committed freshness algorithm passed. Cargo is unavailable locally; the Rust freshness wrapper is left to the existing CI job.
+- `git diff --check` passed. Six captures were reviewed visually after transitions settled.
+
+Fresh independent evidence is separate from the primary checks: the reviewer passed **324 tests / 13 files**, then **88 tests / 3 transport/preview files**, and exercised 390px Chinese search/review/focus and 1280px registration/connection/Discard flows. Its final verdict is **APPROVE**.
+
+Final browser command from `frontend/`:
+
+```sh
+./node_modules/.bin/playwright test e2e/agent-details.spec.ts e2e/agent-connections.spec.ts e2e/nyxagent.spec.ts --grep 'Agent details retains|registration returns|Agent Details groups|Add context keeps|agents get a display name and persona|Find skills keeps'
+```
+
+The [change guide](2026-11-28-agent-details-change-guide.md) contains the current feature map, access improvements, save/action semantics, role behavior, walkthrough, local preview command and stable captures. The draft PR description links the standalone unlisted gist and revision-pinned preview assets. Publication is limited to the feature branch, draft PR and gist; no merge, deployment, live configuration or protection changes are part of this work.

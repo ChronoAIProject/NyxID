@@ -63,6 +63,7 @@
   "An active WhatsApp bot with a Phone Number ID and Meta App Secret is required. Check the bot’s credentials before preparing native gateway access.": "需要一个具有 Phone Number ID 和 Meta App Secret 的活跃 WhatsApp 机器人。在准备原生网关访问之前，请检查机器人的凭据。",
   "An administrator needs to configure a manager bot in Admin → Platform Credentials → Telegram — bot creation. You can use Telegram bot token to connect an existing bot.": "管理员需要在“管理 → 平台凭据 → Telegram — 机器人创建”中配置管理机器人。你也可以使用 Telegram 机器人令牌连接现有机器人。",
   "An agent route is configured. Confirm callback acceptance with a real incoming message.": "已配置智能体路由。请通过一条真实的传入消息确认回调能被接受。",
+  "An existing Telegram setup belongs to a different account or organization. Open it separately to manage it, or choose another platform here. This agent’s organization has not changed.": "现有的 Telegram 设置属于其他账号或组织。请单独打开进行管理，或在此选择其他平台。此智能体的组织未更改。",
   "Another administrator started this Telegram setup. Continue using the NyxID account that started it. This page will update when setup finishes.": "另一位管理员发起了此 Telegram 设置。请继续使用发起它的 NyxID 账号。设置完成后，此页面会更新。",
   "Answer prepared": "回复已准备好",
   "App ID + App Secret": "App ID + App Secret",

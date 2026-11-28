@@ -84,6 +84,7 @@
   "The service-account reference is missing.": "缺少服務帳號參照。",
   "This app will need to ask for consent again before it can act.": "此應用程式需要再次徵求同意才能執行操作。",
   "This bot's guest spend today, including earlier connections. The organization pays.": "此機器人今日的訪客花費，包括先前連線產生的費用，由組織支付。",
+  "This bot's saved limits exclude services listed for guests in the specialist's Access. An organization admin can review access for all linked bots in Access.": "此機器人的已儲存限制排除了智慧體「存取」中列出的部分訪客服務。組織管理員可在「存取」中檢查所有已連結機器人的存取權限。",
   "This bot's saved limits exclude services listed for guests in the specialist's Grants. An organization admin can review access for all linked bots in Grants.": "此機器人已儲存的限制排除了專家代理程式「授權」中列出的部分或全部訪客服務。組織管理員可在「授權」中檢視所有已連結機器人的訪客存取權限。",
   "This change revokes access and must be confirmed every time.": "此變更將撤銷存取權限，並且每次都必須確認。",
   "This connection is unavailable. Saved guest settings are kept; reconnect the same bot and specialist to use them again.": "此連線無法使用。已儲存的訪客設定會保留；重新連結同一個機器人和專屬代理程式即可再次使用。",

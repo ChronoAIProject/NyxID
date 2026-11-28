@@ -11,6 +11,7 @@ import { TelegramNew } from "./telegram-new";
 export function TelegramNewConnect({
   label,
   orgId,
+  expectedOwnerId,
   form,
   fullPage = false,
   stayInPlace = false,
@@ -33,7 +34,7 @@ export function TelegramNewConnect({
   const pending = useIsMutating({ mutationKey: ["telegram-new", actor] }) > 0;
   const saved = configuration.data?.request;
   const request =
-    saved && !["cancelled", "expired"].includes(saved.status)
+    saved && (!expectedOwnerId || saved.owner_user_id === expectedOwnerId) && !["cancelled", "expired"].includes(saved.status)
       ? saved
       : undefined;
   const savedOrgId =
@@ -127,11 +128,12 @@ export function TelegramNewConnect({
           : undefined,
       })}
       <TelegramNew
-        key={actor}
+        key={`${actor}:${expectedOwnerId ?? "any"}`}
         fullPage={fullPage}
         stayInPlace={stayInPlace}
         label={label}
         orgId={orgId}
+        expectedOwnerId={expectedOwnerId}
         requestId={requestId}
         onStarted={saveRequest}
         onCancelled={() => saveRequest()}

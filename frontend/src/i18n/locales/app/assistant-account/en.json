@@ -84,6 +84,7 @@
   "The service-account reference is missing.": "The service-account reference is missing.",
   "This app will need to ask for consent again before it can act.": "This app will need to ask for consent again before it can act.",
   "This bot's guest spend today, including earlier connections. The organization pays.": "This bot's guest spend today, including earlier connections. The organization pays.",
+  "This bot's saved limits exclude services listed for guests in the specialist's Access. An organization admin can review access for all linked bots in Access.": "This bot's saved limits exclude services listed for guests in the specialist's Access. An organization admin can review access for all linked bots in Access.",
   "This bot's saved limits exclude services listed for guests in the specialist's Grants. An organization admin can review access for all linked bots in Grants.": "This bot's saved limits exclude services listed for guests in the specialist's Grants. An organization admin can review access for all linked bots in Grants.",
   "This change revokes access and must be confirmed every time.": "This change revokes access and must be confirmed every time.",
   "This connection is unavailable. Saved guest settings are kept; reconnect the same bot and specialist to use them again.": "This connection is unavailable. Saved guest settings are kept; reconnect the same bot and specialist to use them again.",

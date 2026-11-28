@@ -76,3 +76,9 @@ it("posts the draft to the proposal's validate route and parses the result", asy
     { method: "POST", body: { draft } },
   );
 });
+
+it("returns authoritative readback when learning configuration changes concurrently", async () => {
+  assistantJson.mockImplementation(async (_path, init) => init?.method === "PUT" ? { enabled: true, threshold: 20 } : { enabled: true, threshold: 30 });
+  const { result } = renderHook(() => useAgentLearningReview("agent", false), { wrapper });
+  await expect(result.current.configure.mutateAsync({ enabled: true, threshold: 20 })).resolves.toEqual({ enabled: true, threshold: 30 });
+});

@@ -211,7 +211,7 @@ it.each([true, false])("explains when the saved list excludes guest services (mo
   mount();
   expect(await screen.findByText(/This bot's saved limits exclude services listed for guests/)).toBeVisible();
   expect(screen.getByText(modelOnly ? "Model-only chat" : /Calendar: Use/)).toBeVisible();
-  expect(screen.getByRole("link", { name: /Agent details → Grants/ })).toHaveAttribute(
+  expect(screen.getByRole("link", { name: /Agent details → Access/ })).toHaveAttribute(
     "href", "/assistant?agent=agent&details=grants",
   );
   expect(writes).toEqual([]);

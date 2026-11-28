@@ -1,4 +1,5 @@
-import "@/i18n";
+import { appI18n } from "@/i18n";
+import { translateUi } from "@/i18n/use-ui-translation";
 import { confirmChanges } from "@/test-helpers/confirm-changes";
 import type { ComponentProps } from "react";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
@@ -189,8 +190,9 @@ beforeEach(() => {
   };
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
+  await appI18n.changeLanguage("en");
   client.clear();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -1635,7 +1637,7 @@ it.each([
   agent = agentRow({ owner_kind: "org", owner_id: "team", can_use, can_maintain });
   renderSheet();
   expect(await screen.findByText(copy)).toBeVisible();
-  expect(screen.getByLabelText("Role", { selector: "textarea,input" })).toHaveProperty("disabled", !can_maintain);
+  expect(screen.getByLabelText("Instructions", { selector: "textarea,input" })).toHaveProperty("disabled", !can_maintain);
   expect(Boolean(screen.queryByRole("tab", { name: "Memory" }))).toBe(can_maintain);
   expect(screen.queryByRole("region", { name: "Member access" })).not.toBeInTheDocument();
 });
@@ -1644,7 +1646,7 @@ it("keeps legacy organization controls when projections are absent", async () =>
   agent = agentRow({ owner_kind: "org", owner_id: "team" });
   renderSheet();
   expect(await screen.findByText(/Maintained by Admins and Members/)).toBeVisible();
-  expect(screen.getByLabelText("Role", { selector: "textarea,input" })).toBeEnabled();
+  expect(screen.getByLabelText("Instructions", { selector: "textarea,input" })).toBeEnabled();
   expect(screen.queryByRole("region", { name: "Member access" })).not.toBeInTheDocument();
 });
 
@@ -1860,4 +1862,31 @@ it("guards unsaved avatar changes when returning to Overview and leaves profile 
   await user.click(within(sheet).getByRole("button", {name:"Edit avatar"}));
   expect(within(within(sheet).getByRole("form", {name:"Avatar"})).getByRole("button", {name:"Save avatar"})).toBeDisabled();
   expect(writes).toEqual([]);
+});
+
+it("registers readable service access as a navigation target for organization non-maintainers", async () => {
+  agent = agentRow({ owner_kind: "org", owner_id: "team", can_use: true, can_maintain: false });
+  renderSheet();
+  const search = await openSearch(userEvent.setup());
+  fireEvent.change(search, { target: { value: "Service and guest access" } });
+  fireEvent.click(await screen.findByRole("button", { name: "Service and guest access Access" }));
+  await waitFor(() => expect(screen.getByRole("tab", { name: "Access" })).toHaveAttribute("aria-selected", "true"));
+  expect(screen.getByRole("region", { name: "Access grants" })).toBeVisible();
+});
+
+it.each(["zh-CN", "zh-TW"])("localizes moved-field review labels and values in %s while preserving user text", async (language) => {
+  await appI18n.changeLanguage(language);
+  renderSheet();
+  const userText = "Instructions written by the user";
+  fireEvent.change(await screen.findByRole("textbox", { name: translateUi("Instructions") }), { target: { value: userText } });
+  await userEvent.click(await screen.findByRole("tab", { name: translateUi("Access") }));
+  await userEvent.click(await screen.findByRole("combobox", { name: translateUi("Agent approval behavior") }));
+  await userEvent.click(await screen.findByRole("option", { name: translateUi("Ask every time") }));
+  await userEvent.click(await screen.findByRole("tab", { name: translateUi("Channels") }));
+  await userEvent.click(await screen.findByRole("switch", { name: translateUi("Channel progress reply") }));
+  await userEvent.click(await screen.findByRole("button", { name: translateUi("Save changes") }));
+  const review = await screen.findByRole("dialog", { name: translateUi("Review changes") });
+  for (const key of ["Instructions", "Approval behavior", "Workspace setting", "Channel progress reply", "Off", "On"]) expect(review).toHaveTextContent(translateUi(key));
+  expect(review).toHaveTextContent(userText);
+  expect(review.textContent).not.toContain("Workspace setting");
 });

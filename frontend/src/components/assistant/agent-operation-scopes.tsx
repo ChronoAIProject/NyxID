@@ -75,8 +75,8 @@ export function AgentOperationScopes({
   const query = useAgentOperations(agentId, enabled && !disabled, guests);
   const searchId = (id: string) => `operations-${guests ? "guest-" : ""}${id}`;
   useDrawerSearchEntries(enabled && drillIn ? (query.data ?? []).map((service) => ({
-    id: searchId(service.service_id), title: `${service.service_name} · ${guests ? "Guest operations" : "Operations"}`,
-    breadcrumb: `Access › ${guests ? "Guest service operations" : "Service operations"}`,
+    id: searchId(service.service_id), title: `${service.service_name} · ${translateUi(guests ? "Guest operations" : "Operations")}`,
+    breadcrumb: `${translateUi("Access")} › ${translateUi(guests ? "Guest service operations" : "Service operations")}`,
     keywords: `${service.service_slug} ${service.all_operations ? "All operations" : "Selected operations"} ${service.operations.map((operation) => `${operation.summary ?? ""} ${operation.method} ${operation.path}`).join(" ")} ${service.rules.map((rule) => `${rule.method} ${rule.path_template}`).join(" ")}`,
     pages: [searchId(service.service_id)], reveal: () => {
       returnFocus.current = [...(root.current?.querySelectorAll<HTMLButtonElement>("[data-operation-link]") ?? [])].find((element) => element.dataset.operationLink === service.service_id) ?? null;
@@ -246,7 +246,7 @@ export function AgentOperationScopes({
               >
                 {service.service_name}
                 {guests ? translateUi(" · Guest operations") : translateUi(" · Operations")}
-                <SectionInfo title={`${service.service_name} · ${guests ? "Guest operations" : "Operations"}`}>{translateUi("Choose the allowed operations for this service. Permissions remain limited by the agent’s grant and save against the current service revision.")}</SectionInfo>
+                <SectionInfo title={`${service.service_name} · ${translateUi(guests ? "Guest operations" : "Operations")}`}>{translateUi("Choose the allowed operations for this service. Permissions remain limited by the agent’s grant and save against the current service revision.")}</SectionInfo>
               </h2>
             </div>
             <CompactScroll active={visible && active === service.service_id} level={1} className="assistant-scrollbar flex-1">

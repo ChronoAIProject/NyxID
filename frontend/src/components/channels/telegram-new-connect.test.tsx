@@ -17,16 +17,16 @@ vi.mock("@/components/channels/channel-connection-shell", () => ({ ChannelConnec
 vi.mock("@/hooks/use-telegram-new", () => ({ useTelegramNewConfiguration: (id?: string) => { mocks.requestIds.push(id); return { data: { request: mocks.request }, isPending: false }; } }));
 vi.mock("./telegram-new", () => ({ TelegramNew: ({ requestId, onStarted, onCancelled, onConnected }: { requestId?: string; onStarted: (id?: string) => void; onCancelled: () => void; onConnected: (id: string, username: string) => void }) => <div><span data-testid="request">{requestId ?? "current"}</span><button type="button" onClick={() => onStarted("11111111-1111-4111-8111-111111111111")}>Start</button><button type="button" onClick={onCancelled}>Cancel</button><button type="button" onClick={() => onConnected("bot-id", "ActualBot")}>Complete</button></div> }));
 
-function Flow({ stayInPlace = false, returnTo, initialRequestId }: { stayInPlace?: boolean; returnTo?: string; initialRequestId?: string }) {
-  const form = useAppForm<CreateChannelBotFormData>({ defaultValues: { platform: "telegram-new", label: "Support" } });
+function Flow({ stayInPlace = false, returnTo, initialRequestId, expectedOwnerId }: { stayInPlace?: boolean; returnTo?: string; initialRequestId?: string; expectedOwnerId?: string }) {
+  const form = useAppForm<CreateChannelBotFormData>({ defaultValues: { platform: "telegram-new", label: "Support", target_org_id: expectedOwnerId } });
   const [done, setDone] = useState(false);
-  return done ? <p>Connected</p> : <TelegramNewConnect platform="telegram-new" label="Support" orgId={null} form={form} fullPage={!stayInPlace} stayInPlace={stayInPlace} initialRequestId={initialRequestId} returnTo={returnTo} renderFields={() => null} onConnected={(...args) => { mocks.onConnected(...args); setDone(true); }}>{null}</TelegramNewConnect>;
+  return done ? <p>Connected</p> : <TelegramNewConnect platform="telegram-new" label="Support" orgId={expectedOwnerId ?? null} expectedOwnerId={expectedOwnerId} form={form} fullPage={!stayInPlace} stayInPlace={stayInPlace} initialRequestId={initialRequestId} returnTo={returnTo} renderFields={() => <output data-testid="scope">{form.watch("target_org_id")}:{form.watch("label")}</output>} onConnected={(...args) => { mocks.onConnected(...args); setDone(true); }}>{null}</TelegramNewConnect>;
 }
 vi.mock("@/components/channels/channel-bot-setup", () => ({ ChannelBotSetup: ({ returnTo }: { returnTo?: string }) => <Flow returnTo={returnTo} /> }));
 
-function mount(entry: string, inPlace = false, initialRequestId?: string) {
+function mount(entry: string, inPlace = false, initialRequestId?: string, expectedOwnerId?: string) {
   const root = createRootRoute({ component: Outlet });
-  const assistant = createRoute({ getParentRoute: () => root, path: "/assistant", component: () => <Flow stayInPlace initialRequestId={initialRequestId} /> });
+  const assistant = createRoute({ getParentRoute: () => root, path: "/assistant", component: () => <Flow stayInPlace initialRequestId={initialRequestId} expectedOwnerId={expectedOwnerId} /> });
   const setup = createRoute({ getParentRoute: () => root, path: "/channel-bots/connect/$platform", validateSearch: parseChannelBotSetupPageSearch, component: ChannelBotSetupPage });
   const router = createRouter({ routeTree: root.addChildren([assistant, setup]), history: createMemoryHistory({ initialEntries: [entry] }), rewrite: channelBotSetupRewrite });
   const client = new QueryClient();
@@ -95,4 +95,19 @@ it.each(["cancelled", "expired", "suspended"])("keeps Back to chat available in 
   mount(entry);
   const back = await screen.findByRole("link", { name: "Back to chat" });
   expect(back).toHaveAttribute("href", expect.stringContaining(target));
+});
+
+it.each(["owner", "org-b"])("preserves contextual org and label when the pending request belongs to %s", async (owner) => {
+  mocks.request = { id: "unrelated", status: "waiting_bot", label: "Other setup", owner_user_id: owner };
+  mount("/assistant", true, undefined, "org-a");
+  expect(await screen.findByTestId("scope")).toHaveTextContent("org-a:Support");
+  expect(screen.getByTestId("request")).toHaveTextContent("current");
+  expect(mocks.requestIds).not.toContain("unrelated");
+});
+
+it("adopts the saved request only when it matches the locked organization", async () => {
+  mocks.request = { id: "matching", status: "waiting_bot", label: "Org support", owner_user_id: "org-a" };
+  mount("/assistant", true, undefined, "org-a");
+  await waitFor(() => expect(screen.getByTestId("scope")).toHaveTextContent("org-a:Org support"));
+  expect(screen.getByTestId("request")).toHaveTextContent("matching");
 });

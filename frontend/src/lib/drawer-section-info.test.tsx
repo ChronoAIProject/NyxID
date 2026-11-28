@@ -48,3 +48,15 @@ it.each(["zh-CN", "zh-TW"])("renders translated headings, help and approval desc
   }
   expect(screen.getByLabelText(/Full access|完全访问|完整存取/)).toHaveAttribute("title", expect.stringMatching(/组织连接|組織連線/));
 });
+
+it("reuses the finite localized heading lookup and invalidates it when catalogs change", async () => {
+  await appI18n.changeLanguage("zh-CN");
+  drawerSectionInfo("An unknown user heading");
+  const lookup = vi.spyOn(appI18n, "t");
+  for (let i = 0; i < 10; i++) drawerSectionInfo(`User heading ${i}`);
+  expect(lookup.mock.calls.filter(([key]) => key === "Call instructions")).toHaveLength(0);
+  appI18n.addResource("zh-CN", "app", "Call instructions", "测试通话指引");
+  expect(drawerSectionInfo("测试通话指引")).toBeTruthy();
+  appI18n.addResource("zh-CN", "app", "Call instructions", "通话指引");
+  lookup.mockRestore();
+});

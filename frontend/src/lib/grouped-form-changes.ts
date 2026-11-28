@@ -1,3 +1,5 @@
+import { translateUi } from "@/i18n/use-ui-translation";
+
 export type FormChange =
   | { readonly label: string; readonly before: string; readonly after: string; readonly added?: never; readonly removed?: never }
   | { readonly label: string; readonly added: readonly string[]; readonly removed: readonly string[]; readonly before?: never; readonly after?: never };
@@ -10,8 +12,8 @@ export interface ChangeField<Key extends PropertyKey = string> {
 }
 
 export function changeValue(value: unknown): string {
-  if (typeof value === "boolean") return value ? "On" : "Off";
-  if (value === null || value === undefined || value === "") return "Empty";
+  if (typeof value === "boolean") return translateUi(value ? "On" : "Off");
+  if (value === null || value === undefined || value === "") return translateUi("Empty");
   return String(value);
 }
 
@@ -25,7 +27,7 @@ export function describeChanges<T extends object>(before: object | undefined, af
       const added = newList.filter((value) => !oldList.includes(value));
       const removed = oldList.filter((value) => !newList.includes(value));
       if (added.length || removed.length) return [{ get label() { return field.label; }, added, removed }];
-      if (oldList.join("\n") !== newList.join("\n")) return [{ get label() { return field.label; }, before: oldList.join(", ") || "Empty", after: newList.join(", ") || "Empty" }];
+      if (oldList.join("\n") !== newList.join("\n")) return [{ get label() { return field.label; }, before: oldList.join(", ") || translateUi("Empty"), after: newList.join(", ") || translateUi("Empty") }];
       return [];
     }
     const format = field.format ?? changeValue;

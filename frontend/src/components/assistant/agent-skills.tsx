@@ -2,7 +2,7 @@ import { Label } from "@/components/ui/label";
 import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { getFormattingLocale } from "@/lib/formatting-locale";
-import { DrawerNavigationContext, useDrawerSearchEntries } from "@/lib/drawer-search";
+import { DrawerNavigationContext, useDrawerSearchEntries, useDrawerSearchTarget } from "@/lib/drawer-search";
 import { Search } from "lucide-react";
 import {
   GroupedList,
@@ -206,7 +206,7 @@ function AttachedSkill({
   const versions = useSkillVersions(skill.skill_id);
   const latest = versions.data?.items[0]?.version;
   const searchId = `skill-${skill.skill_id}`;
-  useDrawerSearchEntries([{ id: searchId, title: skill.name, breadcrumb: `Skills › ${skill.name}`,
+  useDrawerSearchEntries([{ id: searchId, title: skill.name, breadcrumb: `${translateUi("Skills")} › ${skill.name}`,
     keywords: `${description ?? ""} ${skill.version} ${skill.disabled ? "Disabled" : "Enabled"} preload`,
     pages: [searchId], reveal: () => onOpenChange(true),
   }]);
@@ -348,13 +348,20 @@ export function AgentSkills({
   const search = useSkillSearch(query, page);
   const versions = useSkillVersions(selected?.id, versionPage);
   const preview = useSkillPreview(selected?.id, version);
+  const [feedbackSkill, setFeedbackSkill] = useState<string>();
+  const attachedList = useRef<HTMLElement>(null);
   const disabled = readOnly || write.isPending || !current.data;
   const save = (skills: AgentSkill[]) => {
     if (!current.data) return;
+    setFeedbackSkill(activeSkill ?? selected?.id);
     write.mutate(
       { expected_revision: current.data.revision, skills },
       {
         onSuccess: () => {
+          if (activeSkill && !skills.some((skill) => skill.skill_id === activeSkill)) {
+            setActiveSkill(undefined);
+            requestAnimationFrame(() => attachedList.current?.focus({ preventScroll: true }));
+          }
           setSelected(undefined);
           setVersion("");
         },
@@ -386,14 +393,15 @@ export function AgentSkills({
   const [activeSkill, setActiveSkill] = useState<string>();
   const navigate = useContext(DrawerNavigationContext);
   const skillSearchInput = useRef<HTMLInputElement>(null);
+  const findSkillsTarget = useDrawerSearchTarget({ id: "find-skills", title: translateUi("Find skills"), breadcrumb: "Skills", keywords: "Search Ornn catalog" });
   const [historyOpen, setHistoryOpen] = useState(false);
   useDrawerSearchEntries([
-    { id: "skill-history", title: translateUi("History"), breadcrumb: "Skills › History", keywords: "Skill activity", pages: ["skill-history"], reveal: () => setHistoryOpen(true) },
-    ...(!readOnly ? (search.data?.items ?? []).map((item) => ({ id: `catalog-skill-${item.id}`, title: item.name, breadcrumb: "Skills › Find skills", keywords: item.description ?? "",
+    { id: "skill-history", title: translateUi("History"), breadcrumb: translateUi("Skills") + " › " + translateUi("History"), keywords: "Skill activity", pages: ["skill-history"], reveal: () => setHistoryOpen(true) },
+    ...(!readOnly ? (search.data?.items ?? []).map((item) => ({ id: `catalog-skill-${item.id}`, title: item.name, breadcrumb: translateUi("Skills") + " › " + translateUi("Find skills"), keywords: item.description ?? "",
       pages: ["skill-version"], reveal: () => { setActiveSkill(undefined); choose(item.id, item.name); },
     })) : []),
-    ...(history.data?.items ?? []).map((item) => ({ id: `skill-history-${item.id}`, title: HISTORY_LABELS[item.event_type] ?? "Skill activity",
-      breadcrumb: "Skills › History", keywords: `${item.skills.map((pin) => `${pin.name} ${pin.version}`).join(" ")} ${item.created_at} Revision ${item.revision ?? ""}`,
+    ...(history.data?.items ?? []).map((item) => ({ id: `skill-history-${item.id}`, title: translateUi(HISTORY_LABELS[item.event_type] ?? "Skill activity"),
+      breadcrumb: translateUi("Skills") + " › " + translateUi("History"), keywords: `${item.skills.map((pin) => `${pin.name} ${pin.version}`).join(" ")} ${item.created_at} Revision ${item.revision ?? ""}`,
       pages: ["skill-history"], reveal: () => setHistoryOpen(true) })),
   ]);
   const errors = [
@@ -408,7 +416,8 @@ export function AgentSkills({
   return (
     <section
       id={id}
-      tabIndex={id ? -1 : undefined}
+      ref={attachedList}
+      tabIndex={-1}
       aria-label={translateUi("Skills")}
       className="space-y-6 outline-none"
     >
@@ -540,14 +549,14 @@ export function AgentSkills({
             error={
               selected
                 ? undefined
-                : errors.map((error) => error!.message).join(" ")
+                : errors.filter((error) => error !== write.error || feedbackSkill === skill.skill_id).map((error) => error!.message).join(" ")
             }
             description={current.data.metadata[skill.skill_id]?.description}
             size={current.data.metadata[skill.skill_id]?.size_bytes}
             disabled={disabled || improve.isPending}
             canDisable={canDisable}
-            pending={write.isPending}
-            saved={write.isSuccess}
+            pending={write.isPending && feedbackSkill === skill.skill_id}
+            saved={write.isSuccess && feedbackSkill === skill.skill_id}
             canEdit={canEdit && !readOnly}
             test={() => test(skill.skill_id)}
             testResult={testing === skill.skill_id ? tested : undefined}
@@ -644,7 +653,7 @@ export function AgentSkills({
         <>
           <GroupedList
             title={translateUi("Find skills")}
-            search={{ id: "find-skills", title: translateUi("Find skills"), breadcrumb: "Skills", keywords: "Search Ornn catalog" }}
+            search={false}
             footer={
               search.data?.items.length === 0
                 ? translateUi("No visible skills found.")
@@ -661,7 +670,7 @@ export function AgentSkills({
                 }}
               >
                 <GroupedInput
-                  ref={skillSearchInput}
+                  ref={(element) => { skillSearchInput.current = element; findSkillsTarget(element); }}
                   className="min-w-0 flex-1"
                   aria-label={translateUi("Search Ornn skills")}
                   placeholder={translateUi("Search Ornn skills")}

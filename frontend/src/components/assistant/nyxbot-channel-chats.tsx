@@ -333,9 +333,9 @@ export function ChannelChats({
 
   const searchId = `channel-chats-${channel.id}`;
   useDrawerSearchEntries([
-    { id: searchId, title: "Chats and posting", breadcrumb: `Channels › ${channel.bot_label}`, keywords: "Private chats posts members", pages: [searchId], reveal: () => setOpen(true) },
+    { id: searchId, title: translateUi("Chats and posting"), breadcrumb: `${translateUi("Channels")} › ${channel.bot_label}`, keywords: "Private chats posts members", pages: [searchId], reveal: () => setOpen(true) },
     ...rows.map((chat) => ({ id: `channel-chat-${chat.id}`, title: channelChatTitle(chat.kind, chat.title, channel.platform),
-      breadcrumb: `Channels › ${channel.bot_label} › Chats`, keywords: `${chat.kind ?? ""} ${chat.members ?? ""} Answered by Posts on its own`,
+      breadcrumb: `${translateUi("Channels")} › ${channel.bot_label} › ${translateUi("Chats")}`, keywords: `${chat.kind ?? ""} ${chat.members ?? ""} Answered by Posts on its own`,
       pages: [searchId], reveal: () => { setShown(rows.length); setOpen(true); },
     })),
   ]);

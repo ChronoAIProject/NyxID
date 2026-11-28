@@ -34,7 +34,7 @@ export const DRAWER_SEARCH_TABS: Record<DrawerSearchTab, string> = {
   overview: "Overview",
   grants: "Access",
   skills: "Skills",
-  memory: "Memory",
+  memory: "Agent memory",
   channels: "Channels",
 };
 export function normalizeDrawerSearch(text: string): string {
@@ -52,7 +52,7 @@ export function matchDrawerEntries(
     .flatMap((entry) => {
       const title = normalizeDrawerSearch(entry.title);
       const all = normalizeDrawerSearch(
-        `${entry.title} ${entry.breadcrumb ?? DRAWER_SEARCH_TABS[entry.tab]} ${entry.keywords ?? ""}`,
+        `${entry.title} ${entry.breadcrumb ?? translateUi(DRAWER_SEARCH_TABS[entry.tab])} ${entry.keywords ?? ""}`,
       );
       if (!words.every((word) => all.includes(word))) return [];
       const rank =
@@ -135,7 +135,7 @@ export function useDrawerSearchEntries(
   const inherited = useContext(DrawerSearchRevealContext);
   const currentEntries = entries.map((entry) => ({ ...inherited, ...entry,
     title: entry.title,
-    breadcrumb: entry.breadcrumb?.split(" › ").map((part, index) => index === 0 ? translateUi(part) : part).join(" › "),
+    breadcrumb: entry.breadcrumb?.split(" › ").map((part, index) => index === 0 ? translateUi(part === "Memory" ? "Agent memory" : part) : part).join(" › "),
     keywords: `${entry.title} ${entry.breadcrumb ?? ""} ${entry.keywords ?? ""} ${[entry.title, ...(entry.breadcrumb?.split(" › ") ?? [])].map((title) => drawerSectionInfo(title) ?? "").join(" ")}`,
   }));
   const id = useId();

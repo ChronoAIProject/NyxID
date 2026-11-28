@@ -1,4 +1,5 @@
 import { createContext } from "react";
+import { appI18n } from "@/i18n/instance";
 import { translateUi } from "@/i18n/use-ui-translation";
 
 /** Explicit drawer copy; dynamic service, chat and skill headings supply their own context. */
@@ -8,7 +9,7 @@ export const DRAWER_SECTION_INFO: Readonly<Record<string, string>> = {
   Profile: "Identity, purpose and working instructions. Tone and style shapes communication; Memory keeps facts and Skills provide reusable procedures.",
   Instructions: "Define the agent’s purpose and working behavior. These instructions do not grant permissions. Memory retains facts and preferences; Skills provide reusable procedures.",
   "Tone and style": "Set communication style and personality without changing permissions.",
-  "Call instructions": "Voice and phone guidance for new calls using this agent’s existing permissions. Optional Device voice setup is in Access.",
+  "Call instructions": "Voice and phone guidance for new calls using this agent’s existing permissions. When available, optional Device voice setup is in Access.",
   "Approval behavior": "Choose when the agent asks before acting within existing permissions. Inherit the workspace setting or set an agent override; protected organization connections can still require your instruction or approval.",
   "Channel progress reply": "An agent-wide short reply while external checks take time, followed by the completed answer in the same chat. This applies across the agent’s channels.",
   "Device voice": "Optional device integration. Create a voice connection, then check the device Agent Key’s existing service policy. All-services Keys may already permit it; creation alone does not prove device readiness.",
@@ -69,11 +70,17 @@ export const DRAWER_SECTION_INFO: Readonly<Record<string, string>> = {
   "Guest replies": "Review requests to reply to other people in this agent’s chats. Service permissions still apply.",
 };
 export const DrawerSectionInfoContext = createContext(false);
+let localizedTitles: Map<string, string> | undefined;
+const invalidateTitles = () => { localizedTitles = undefined; };
+appI18n.on("languageChanged loaded", invalidateTitles);
+appI18n.store.on("added", invalidateTitles);
+appI18n.store.on("removed", invalidateTitles);
 export function drawerSectionInfo(title: string): string | undefined {
   // Group headings already carry their localized display title. Resolve that
   // title for help only; operational IDs and search targets stay unchanged.
-  const localizedTitles = new Map(Object.keys(DRAWER_SECTION_INFO).map((key) => [translateUi(key), key]));
-  const key = Object.hasOwn(DRAWER_SECTION_INFO, title) ? title : localizedTitles.get(title);
+  if (Object.hasOwn(DRAWER_SECTION_INFO, title)) return translateUi(DRAWER_SECTION_INFO[title]!);
+  localizedTitles ??= new Map(Object.keys(DRAWER_SECTION_INFO).map((key) => [translateUi(key === "Memory" ? "Agent memory" : key), key]));
+  const key = localizedTitles.get(title);
   const matches = (template: string) => {
     const [before, after] = translateUi(template, { value1: "__value__" }).split("__value__");
     return after !== undefined && title.startsWith(before!) && title.endsWith(after);

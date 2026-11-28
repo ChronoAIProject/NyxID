@@ -48,7 +48,7 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
   return (
     <GroupedList title={translateUi("Automations")}>
       {rows.map((row) => (
-        <GroupedRow search={{ id: `automation-${row.id}`, title: row.label, breadcrumb: "Overview › Automations", keywords: `${row.source} ${row.status}` }} key={row.id} asChild interactive>
+        <GroupedRow search={{ id: `automation-${row.id}`, title: row.label, breadcrumb: translateUi("Overview") + " › " + translateUi("Automations"), keywords: `${row.source} ${row.status}` }} key={row.id} asChild interactive>
           <Link to="/assistant/automations" search={{ agent: agentId }}>
             <span className="min-w-0 flex-1 break-words">{row.label}</span>
             <span className="text-13 text-text-tertiary">
@@ -61,7 +61,7 @@ export function AgentAutomations({ agentId }: { readonly agentId: string }) {
           </Link>
         </GroupedRow>
       ))}
-      <GroupedRow search={{ id: "manage-automations", title: `Manage automations (${rows.length})`, breadcrumb: "Overview › Automations" }} asChild interactive>
+      <GroupedRow search={{ id: "manage-automations", title: `${translateUi("Manage automations (")}${rows.length})`, breadcrumb: translateUi("Overview") + " › " + translateUi("Automations") }} asChild interactive>
         <Link to="/assistant/automations" search={{ agent: agentId }}>
           <span className="flex-1">{translateUi("Manage automations (")}{rows.length})</span>
           <ChevronRight

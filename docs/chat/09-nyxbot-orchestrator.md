@@ -1793,8 +1793,8 @@ mode with `access_mode_override`.
 
 ### Progress replies during external checks
 
-In an agent’s Profile, **Channel progress reply** enables the optional
-`channel_checking_notice` boolean. A first-party human maintainer can also set
+In Agent details → Channels, **Channel progress reply** enables the optional
+`channel_checking_notice` boolean. When Channels is unavailable, its editor appears in Overview. The setting uses Review changes and Save changes. A first-party human maintainer can also set
 it through `PATCH /api/v1/assistant/nyxagent/agents/{id}`. Omitted fields preserve
 the current value; existing agents default to `false`. This applies to both
 NyxBot and specialists, including their authorized guest channel turns.

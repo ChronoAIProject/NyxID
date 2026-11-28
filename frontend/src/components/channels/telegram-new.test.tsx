@@ -47,7 +47,7 @@ const configuration = (value: TelegramNewRequest | null) => ({
 const replace = vi.fn();
 const close = vi.fn();
 
-function setup(requestId?: string) {
+function setup(requestId?: string, expectedOwnerId?: string) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -58,7 +58,8 @@ function setup(requestId?: string) {
     <QueryClientProvider client={client}>
       <TelegramNew
         label="Support"
-        orgId={null}
+        orgId={expectedOwnerId ?? null}
+        expectedOwnerId={expectedOwnerId}
         requestId={requestId}
         onStarted={onStarted}
         onCancelled={onCancelled}
@@ -578,4 +579,39 @@ it("keeps the primary form usable when an older replica omits username alternati
   setup();
   await userEvent.setup().click(await screen.findByRole("button", { name: "Open creation form" }));
   expect(replace).toHaveBeenCalledWith(creationUrl);
+});
+
+it.each(["waiting_telegram", "waiting_bot", "ready", "connected"] as const)("refuses another owner's %s request in organization registration", async (status) => {
+  mockGet.mockResolvedValue(configuration({ ...ready, status, channel_bot_id: status === "connected" ? "wrong-bot" : null }));
+  const view = setup(undefined, "org-a");
+  expect(await screen.findByText(/belongs to a different account or organization/)).toHaveAttribute("role", "status");
+  expect(screen.getByRole("link", { name: "Open existing Telegram setup" })).toHaveAttribute("href", "/channel-bots?connect=telegram-new");
+  expect(screen.queryByRole("button", { name: /Reopen Telegram|Continue in Telegram|Cancel setup|Finish saved connection/ })).toBeNull();
+  expect(mockPost).not.toHaveBeenCalled();
+  expect(mockDelete).not.toHaveBeenCalled();
+  expect(view.onConnected).not.toHaveBeenCalled();
+});
+
+it("resumes a matching organization request without creating another request", async () => {
+  const owned = { ...request, owner_user_id: "org-a" };
+  mockGet.mockResolvedValue(configuration(owned));
+  mockPost.mockResolvedValue({ request: owned, launch_url: "https://t.me/NyxSetupBot?start=matching" });
+  setup(undefined, "org-a");
+  fireEvent.click(await screen.findByRole("button", { name: "Reopen Telegram" }));
+  await waitFor(() => expect(replace).toHaveBeenCalledWith("https://t.me/NyxSetupBot?start=matching"));
+  expect(mockPost.mock.calls[0]?.[0]).toContain(`${request.id}/launch`);
+});
+
+it("rejects a mismatched owner returned by a new request before handoff or completion", async () => {
+  mockGet.mockResolvedValue(configuration(null));
+  mockPost.mockResolvedValue({ request, launch_url: "https://t.me/NyxSetupBot?start=wrong" });
+  const orgId = "11111111-1111-4111-8111-111111111111";
+  const view = setup(undefined, orgId);
+  fireEvent.click(await screen.findByRole("button", { name: "Continue in Telegram" }));
+  await screen.findByText(/belongs to a different account or organization/);
+  expect(mockPost).toHaveBeenCalledWith("/channel-bots/telegram-new", { label: "Support", target_org_id: orgId, auto_connect: true });
+  expect(replace).not.toHaveBeenCalled();
+  expect(close).toHaveBeenCalled();
+  expect(view.onStarted).not.toHaveBeenCalled();
+  expect(view.onConnected).not.toHaveBeenCalled();
 });

@@ -3,13 +3,13 @@ import { openAssistant } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   await page.route("**/api/v1/triggers", (route) => route.fulfill({ json: { triggers: [] } }));
-  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [] } }));
+  await page.route("**/api/v1/assistant/nyxagent/cma-sessions?**", (route) => route.fulfill({ json: { sessions: [], connections: [], next_cursor: null } }));
 });
 
 async function openResearcherDetails(page: Page) {
   await openAssistant(page, { faults: { nyxagentEnabled: true } });
   await page.getByRole("region", { name: "Your agents" }).getByRole("button", { name: "Chat with researcher" }).click();
-  await page.getByRole("button", { name: "Agent details", exact: true }).click();
+  await page.getByRole("button", { name: "Agent details", exact: true }).and(page.getByTitle("Agent details", { exact: true })).click();
   return page.getByRole("dialog", { name: "Agent details" });
 }
 
@@ -57,7 +57,7 @@ for (const width of [390, 1280]) {
     await expect(bar).toHaveCount(0);
     await sheet.getByRole("button", { name: "Close agent details" }).click();
     await page.reload();
-    await page.getByRole("button", { name: "Agent details", exact: true }).click();
+    await page.getByRole("button", { name: "Agent details", exact: true }).and(page.getByTitle("Agent details", { exact: true })).click();
     await expect(instructions).toHaveValue("Review urgent issues carefully.");
     await sheet.getByRole("tab", { name: "Access", exact: true }).click();
     await expect(sheet.getByRole("combobox", { name: "Agent approval behavior" })).toHaveText("Ask every time");
@@ -94,4 +94,20 @@ test("registration returns to the selected agent, preserves a draft on cancel, a
   await sheet.getByRole("button", { name: "Discard", exact: true }).click();
   await sheet.getByRole("tab", { name: "Channels", exact: true }).click();
   await expect(sheet.getByRole("list", { name: "Connected channel bots" })).toContainText("New review helper");
+});
+
+test("Find skills keeps keyboard focus on the catalog input after navigation settles", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  const sheet = await openResearcherDetails(page);
+  await sheet.getByRole("tab", { name: "Skills", exact: true }).click();
+  const shortcut = sheet.getByRole("button", { name: "Find skills", exact: true });
+  await shortcut.focus();
+  await page.keyboard.press("Enter");
+  await page.evaluate(async () => {
+    for (let frame = 0; frame < 3; frame++) await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+  });
+  const input = sheet.getByRole("textbox", { name: "Search Ornn skills" });
+  await expect(input).toBeFocused();
+  await page.keyboard.type("read me");
+  await expect(input).toHaveValue("read me");
 });

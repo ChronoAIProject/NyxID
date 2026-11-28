@@ -344,7 +344,7 @@ it("confirms destructive actions by default and saves only a changed access mode
   expect(mode).toHaveTextContent("Full access");
   expect(
     within(page).getByText(
-      /deletes keys, channel bots, services and\s+nodes and changes access without asking you first/,
+      "Automatically approves actions within the agent's existing permissions and records them in chat. Protected organization connections can still require your instruction or approval.",
     ),
   ).toBeVisible();
   const save = within(page).getByRole("button", { name: "Save changes" });
@@ -392,7 +392,7 @@ it("asks before every change in Ask every time and explains the specialist reque
   );
   expect(
     within(page).getByText(
-      "Asks before every action that changes something. Reading never asks.",
+      "Asks before every action that changes something. Protected organization connections can also require your instruction or approval for reads.",
     ),
   ).toBeVisible();
   await user.click(requests);

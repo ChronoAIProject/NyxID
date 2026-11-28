@@ -581,7 +581,7 @@ it("renders the Discord release safety explanation in Chinese without a retry bu
 it.each([false, true])("returns registration to connection setup for the intended agent (org: %s)", async (org) => {
   const orgId = "12345678-1234-4123-8123-123456789012";
   const specialist = assistantAgentSchema.parse({ id: "specialist", name: "Research", kind: "specialist", status: "idle", owner_kind: org ? "org" : "person", owner_id: org ? orgId : "owner", can_maintain: true, created_at: "2026-10-01T00:00:00Z", last_active_at: "2026-10-01T00:00:00Z" });
-  if (org) { data.orgChannels = true; data.orgs = [{ id: orgId, your_role: "admin" }]; }
+  if (org) { data.orgChannels = true; data.orgs = [{ id: orgId, your_role: "admin" }]; data.preview.mockResolvedValue({ ...(await data.preview.getMockImplementation()!()), bot_id: "new-bot", agent_id: "specialist", org_id: orgId }); }
   const view = render(<ChannelBotsManager agent={specialist} agents={[specialist]} />);
   await userEvent.click(screen.getByRole("button", { name: "Register a bot" }));
   expect(data.setupProps).toMatchObject({ defaultOrgId: org ? orgId : null, lockOrgScope: org, stayInPlace: true });
@@ -592,6 +592,7 @@ it.each([false, true])("returns registration to connection setup for the intende
   expect(screen.queryByRole("region", { name: "Registration" })).toBeNull();
   expect(screen.getByText("Registered; not connected", { exact: false })).toBeVisible();
   await userEvent.click(screen.getByRole("button", { name: "Connect New helper to Research" }));
+  if (org) await userEvent.click(within(await screen.findByRole("dialog", { name: "Connect organization bot" })).getByRole("button", { name: "Confirm connection" }));
   expect(data.connect).toHaveBeenCalledWith({ botId: "new-bot", agentId: "specialist" });
 });
 

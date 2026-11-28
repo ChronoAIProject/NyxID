@@ -45,20 +45,29 @@ function guard(ownerId: string, revision = getAssistantIdentityRevision()) {
     throw new DOMException("Account changed", "AbortError");
 }
 
-function request(
+async function request(
   ownerId: string,
   endpoint: string,
   signal: AbortSignal,
   stream = false,
 ) {
   const revision = getAssistantIdentityRevision();
+  const authorityGuard = () => {
+    signal.throwIfAborted();
+    guard(ownerId, revision);
+  };
+  if (import.meta.env.DEV && endpoint.startsWith("/assistant/nyxagent/cma-sessions?")) {
+    const { isMockMode, getMockResponse } = await import("@/lib/mock-data");
+    authorityGuard();
+    if (isMockMode()) {
+      const preview = getMockResponse(endpoint, "GET");
+      if (preview !== undefined) return Response.json(preview);
+    }
+  }
   return apiFetch(endpoint, {
     errorFormat: "cma",
     signal,
-    authorityGuard: () => {
-      signal.throwIfAborted();
-      guard(ownerId, revision);
-    },
+    authorityGuard,
     preserveSessionOn401: endpoint.startsWith("/proxy/s/"),
     headers: { Accept: stream ? "text/event-stream" : "application/json" },
   });

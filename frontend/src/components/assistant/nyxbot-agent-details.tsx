@@ -588,15 +588,7 @@ function AgentDetailsContent({
                           {agent.kind === "specialist" ? (
                             <>
                               {agent.owner_kind === "org" && agent.can_maintain === false ? (
-                                <section aria-label={translateUi("Grants")}>
-                                  <GroupedList title={translateUi("Services")}>
-                                    {agent.services.map((id) => <GroupedRow key={id} title={id} accessory={agent.org_role === "admin" ? agent.guest_access[id] : undefined} />)}
-                                  </GroupedList>
-                                  {Boolean(agent.machines?.length) && <GroupedList title={translateUi("Machines")}>
-                                    {agent.machines?.map((id) => <GroupedRow key={id} title={id} />)}
-                                  </GroupedList>}
-                                  <section aria-label={translateUi("Access authority")} className="p-4 type-secondary">{accessAuthorityCopy(agent, requestMode)}</section>
-                                </section>
+                                <ReadOnlyGrants agent={agent} requestMode={requestMode} />
                               ) : <GrantsForm
                                 agent={agent}
                                 requestMode={requestMode}
@@ -775,7 +767,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 control={form.control}
                 name="name"
                 render={({ field }) => (
-                  <GroupedRow search={{ id: "profile-name", title: translateUi("Name"), breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
+                  <GroupedRow search={{ id: "profile-name", title: translateUi("Name"), breadcrumb: translateUi("Overview") + " › " + translateUi("Profile"), keywords: String(field.value ?? "") }} asChild className="grouped-field">
                     <FormItem>
                       <FormLabel>{translateUi("Name")}</FormLabel>
                       <FormControl>
@@ -801,7 +793,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="display_name"
               render={({ field }) => (
-                <GroupedRow search={{ id: "profile-display_name", title: translateUi("Display name"), breadcrumb: "Overview › Profile", keywords: String(field.value ?? "") }} asChild className="grouped-field">
+                <GroupedRow search={{ id: "profile-display_name", title: translateUi("Display name"), breadcrumb: translateUi("Overview") + " › " + translateUi("Profile"), keywords: String(field.value ?? "") }} asChild className="grouped-field">
                   <FormItem>
                     <FormLabel>{translateUi("Display name")}</FormLabel>
                     <FormControl>
@@ -826,7 +818,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
                 control={form.control}
                 name="model"
                 render={({ field }) => (
-                  <GroupedRow search={{ id: "profile-model", title: translateUi("Model"), breadcrumb: "Overview › Profile", keywords: `${field.value ?? ""} ${models.data?.filter((model) => model.id === field.value).map(modelDisplayName).join(" ") ?? ""}` }} asChild className="grouped-field">
+                  <GroupedRow search={{ id: "profile-model", title: translateUi("Model"), breadcrumb: translateUi("Overview") + " › " + translateUi("Profile"), keywords: `${field.value ?? ""} ${models.data?.filter((model) => model.id === field.value).map(modelDisplayName).join(" ") ?? ""}` }} asChild className="grouped-field">
                     <FormItem>
                       <FormLabel>{translateUi("Model")}</FormLabel>
                       <ModelSelect
@@ -850,7 +842,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
               control={form.control}
               name="description"
               render={({ field }) => (
-                <GroupedRow search={{ id: "profile-description", title: translateUi("Instructions"), breadcrumb: "Overview › Profile", keywords: `Role purpose notes description ${field.value ?? ""}` }} asChild className="grouped-field">
+                <GroupedRow search={{ id: "profile-description", title: translateUi("Instructions"), breadcrumb: translateUi("Overview") + " › " + translateUi("Profile"), keywords: `Role purpose notes description ${field.value ?? ""}` }} asChild className="grouped-field">
                   <FormItem>
                     <FormLabel>{translateUi("Instructions")}</FormLabel>
                     <FormControl>
@@ -926,7 +918,7 @@ function ProfileForm({ agent }: { readonly agent: AssistantAgent }) {
           {deviceVoice && navigate ? <GroupedList><GroupedDisclosure onClick={() => void navigate("device-voice")}>{translateUi("Set up optional Device voice")}</GroupedDisclosure></GroupedList> : null}
           {readOnly ? null : (
             <GroupedFormActions
-          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "name", label: "Name" }, { key: "display_name", label: "Display name" }, { key: "description", label: "Instructions" }, { key: "persona", label: "Tone and style" }, { key: "voice_instructions", label: "Call instructions" }, { key: "model", label: "Model", format: (value) => models.data?.find((model) => model.id === value) ? modelDisplayName(models.data.find((model) => model.id === value)!) : String(value || "Default model") }])}
+          changes={() => describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "name", label: translateUi("Name") }, { key: "display_name", label: translateUi("Display name") }, { key: "description", label: translateUi("Instructions") }, { key: "persona", label: translateUi("Tone and style") }, { key: "voice_instructions", label: translateUi("Call instructions") }, { key: "model", label: translateUi("Model"), format: (value) => models.data?.find((model) => model.id === value) ? modelDisplayName(models.data.find((model) => model.id === value)!) : value ? String(value) : translateUi("Default model") }])}
               label={translateUi("profile")}
               dirty={form.formState.isDirty}
               pending={update.isPending}
@@ -1095,8 +1087,8 @@ function ApprovalBehaviorForm({ agent }: { readonly agent: AssistantAgent }) {
               describeChanges(form.formState.defaultValues, form.getValues(), [
                 {
                   key: "access_mode_override",
-                  label: "Approval behavior",
-                  format: labelValue(ACCESS_MODE_LABEL, "Workspace setting"),
+                  label: translateUi("Approval behavior"),
+                  format: labelValue(ACCESS_MODE_LABEL, translateUi("Workspace setting")),
                 },
               ])
             }
@@ -1188,7 +1180,7 @@ function ChannelProgressForm({
                       </div>
                       <FormDescription className="basis-full type-secondary text-text-tertiary">
                         {translateUi(
-                          "Applies across this agent’s channels. After five seconds of an external check, send a short progress reply; the completed answer follows in the same chat. Skill reads and tool discovery do not trigger it.",
+                          "Applies across this agent’s channels. When a turn has run for at least five seconds and external work has been observed, send a short progress reply; the completed answer follows in the same chat. Skill reads and tool discovery do not trigger it.",
                         )}
                       </FormDescription>
                     </FormItem>
@@ -1213,7 +1205,7 @@ function ChannelProgressForm({
                     [
                       {
                         key: "channel_checking_notice",
-                        label: "Channel progress reply",
+                        label: translateUi("Channel progress reply"),
                       },
                     ],
                   )
@@ -1251,6 +1243,19 @@ function ApprovalSummary({ agent }: { readonly agent: AssistantAgent }) {
       </span>
     </GroupedDisclosure>
   );
+}
+
+function ReadOnlyGrants({ agent, requestMode }: { readonly agent: AssistantAgent; readonly requestMode?: "denied" | "routed_to_nyxbot" }) {
+  const target = useDrawerSearchTarget({ id: "agent-service-access", title: translateUi("Service and guest access"), breadcrumb: "Access" });
+  return (<section ref={target} tabIndex={-1} aria-label={translateUi("Access grants")}>
+                                  <GroupedList title={translateUi("Services")}>
+                                    {agent.services.map((id) => <GroupedRow key={id} title={id} accessory={agent.org_role === "admin" ? agent.guest_access[id] : undefined} />)}
+                                  </GroupedList>
+                                  {Boolean(agent.machines?.length) && <GroupedList title={translateUi("Machines")}>
+                                    {agent.machines?.map((id) => <GroupedRow key={id} title={id} />)}
+                                  </GroupedList>}
+                                  <section aria-label={translateUi("Access authority")} className="p-4 type-secondary">{accessAuthorityCopy(agent, requestMode)}</section>
+                                </section>);
 }
 
 function GrantsForm({
@@ -1408,7 +1413,7 @@ function GrantsForm({
                       </>
                     }
                   >
-                    <GroupedRow search={{ id: "account-read", title: translateUi("Read my account"), breadcrumb: "Access › Account", keywords: field.value ? "On" : "Off" }}>
+                    <GroupedRow search={{ id: "account-read", title: translateUi("Read my account"), breadcrumb: translateUi("Access") + " › " + translateUi("Account"), keywords: field.value ? "On" : "Off" }}>
                       <div className="mr-auto">
                         <FormLabel className="text-foreground">{translateUi("Read my account")}</FormLabel>
                       </div>
@@ -1427,7 +1432,7 @@ function GrantsForm({
           ) : null}
           {readOnly ? null : (
             <GroupedFormActions
-          changes={() => [...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "services", label: "Services", list: (value) => changeList(value).map(serviceName) }, { key: "machines", label: "Machines", list: (value) => changeList(value).map((id) => nodes.data?.find((node) => node.id === id)?.name ?? id) }, { key: "logins", label: "Saved logins", list: (value) => changeList(value).map((id) => logins.data?.find((login) => login.id === id)?.label ?? id) }, { key: "account_read", label: "Read my account" }]), ...recordChanges(form.formState.defaultValues?.guest_access, form.getValues("guest_access"), (key) => `Guest access · ${serviceName(key)}`, labelValue(GUEST_ACCESS_LABEL, "Use but not change or delete"))]}
+          changes={() => [...describeChanges(form.formState.defaultValues, form.getValues(), [{ key: "services", label: translateUi("Services"), list: (value) => changeList(value).map(serviceName) }, { key: "machines", label: translateUi("Machines"), list: (value) => changeList(value).map((id) => nodes.data?.find((node) => node.id === id)?.name ?? id) }, { key: "logins", label: translateUi("Saved logins"), list: (value) => changeList(value).map((id) => logins.data?.find((login) => login.id === id)?.label ?? id) }, { key: "account_read", label: translateUi("Read my account") }]), ...recordChanges(form.formState.defaultValues?.guest_access, form.getValues("guest_access"), (key) => `${translateUi("Guest access")} · ${serviceName(key)}`, labelValue(GUEST_ACCESS_LABEL, translateUi("Use but not change or delete")))]}
               label={translateUi("grants")}
               dirty={form.formState.isDirty}
               pending={grants.isPending}
@@ -1485,7 +1490,7 @@ function GuestAccessList({
         {services.map((slug) => {
           const id = `guest-access-${slug}`;
           return (
-            <GroupedRow key={slug} role="listitem" search={{ id: `guest-${slug}`, title: slug, breadcrumb: "Access › Guest access", keywords: GUEST_ACCESS_LABEL[value[slug] ?? "use"] }}>
+            <GroupedRow key={slug} role="listitem" search={{ id: `guest-${slug}`, title: slug, breadcrumb: translateUi("Access") + " › " + translateUi("Guest access"), keywords: GUEST_ACCESS_LABEL[value[slug] ?? "use"] }}>
               <Label
                 htmlFor={id}
                 className="min-w-0 flex-1 break-words text-foreground"
@@ -1598,7 +1603,7 @@ function MemoryList({
               </>
             }
           >
-            <GroupedRow search={{ id: "memory-note", title: editing ? "Edit note" : "Add a note", breadcrumb: "Memory", keywords: memoryForm.watch("text") }} className="grouped-field">
+            <GroupedRow search={{ id: "memory-note", title: translateUi(editing ? "Edit note" : "Add a note"), breadcrumb: "Memory", keywords: memoryForm.watch("text") }} className="grouped-field">
               <Label
                 htmlFor="shared-memory-note"
               >
@@ -1621,7 +1626,7 @@ function MemoryList({
             </GroupedRow>
           </GroupedList>
           <GroupedFormActions
-            changes={() => describeChanges(memoryForm.formState.defaultValues, memoryForm.getValues(), [{ key: "text", label: "Note" }])}
+            changes={() => describeChanges(memoryForm.formState.defaultValues, memoryForm.getValues(), [{ key: "text", label: translateUi("Note") }])}
             label={translateUi("memory note")}
             dirty={memoryForm.formState.isDirty}
             pending={remember.isPending}
@@ -1756,7 +1761,7 @@ function Lifecycle({
           : translateUi("Stops its work, revokes its access and disconnects its channel bots. Its threads stay readable.")
       }
     >
-      <GroupedRow search={{ id: "lifecycle", title: destroyed ? "Delete permanently" : "Destroy", breadcrumb: "Overview" }} asChild interactive className="text-destructive">
+      <GroupedRow search={{ id: "lifecycle", title: translateUi(destroyed ? "Delete permanently" : "Destroy"), breadcrumb: "Overview" }} asChild interactive className="text-destructive">
         <button
           type="button"
           onClick={() => {

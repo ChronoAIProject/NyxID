@@ -3212,12 +3212,16 @@ export function getMockResponse(
     }
   }
   // Demo events never leave the local fixture.
+  if (method === "GET" && path === "/assistant/nyxagent/cma-sessions") return { sessions: [], connections: [], next_cursor: null };
+  if (method === "GET" && path === "/saved-logins") return [];
+  if (method === "GET" && path === "/service-preferences") return { groups: [], version: 0, updated_at: null };
+  if (method === "GET" && path === "/triggers") return { triggers: [] };
   if (path === "/users/me/analytics/events" && method === "POST") return null;
   const setup = mockSetupResponse(path, method, body);
   if (setup !== undefined) return setup;
   if (method === "GET" && path === "/channel-bots") {
     const registered = mockCreatedBots().map((bot) => ({
-      ...bot, user_id: MOCK_USER.id, is_active: true, webhook_registered: true,
+      ...bot, user_id: bot.demo_owner_id ?? MOCK_USER.id, is_active: true, webhook_registered: true,
       platform_bot_id: bot.id, conversations_count: 0,
       created_at: new Date().toISOString(), updated_at: new Date().toISOString(),
     }));

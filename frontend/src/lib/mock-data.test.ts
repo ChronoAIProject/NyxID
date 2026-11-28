@@ -133,3 +133,11 @@ describe("built-in skills admin mock", () => {
     expect(getMockResponse("/admin/assistant/system-skills")).toMatchObject({ revision: 1 });
   });
 });
+
+it("preserves the requested organization owner when listing a newly registered demo bot", () => {
+  sessionStorage.removeItem("nyxid.mock-setup-journeys.v1");
+  const created = getMockResponse("/channel-bots", "POST", { platform: "telegram", label: "Org helper", bot_token: "demo-token", target_org_id: "org-demo" }) as { id: string };
+  const listed = getMockResponse("/channel-bots") as { bots: { id: string; user_id: string }[] };
+  expect(listed.bots.find((bot) => bot.id === created.id)?.user_id).toBe("org-demo");
+  sessionStorage.removeItem("nyxid.mock-setup-journeys.v1");
+});

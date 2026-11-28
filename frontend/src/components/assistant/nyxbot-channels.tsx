@@ -272,7 +272,7 @@ export function ChannelBotsManager({
   const canRegister = !agent || (!agent.share_role && agent.status !== "destroyed" && agent.can_maintain !== false && (agent.owner_kind !== "org" || (orgChannels && adminOf(agent.owner_id))));
   const [search, setSearch] = useState("");
   useDrawerSearchEntries(available.map((bot) => ({ id: `available-bot-${bot.id}`, title: bot.label,
-    breadcrumb: "Channels › Available bots", keywords: channelPlatformName(bot.platform), pages: ["available-bots"],
+    breadcrumb: translateUi("Channels") + " › " + translateUi("Available bots"), keywords: channelPlatformName(bot.platform), pages: ["available-bots"],
     reveal: () => { setSearch(""); setAvailableOpen(true); },
   })));
   return (
@@ -366,7 +366,7 @@ export function ChannelBotsManager({
                   }
                 >
                   <GroupedRow
-                    search={{ id: `connected-bot-${row.id}`, title: row.bot_label, breadcrumb: "Channels › Connected bot", keywords: `${row.bot_username ?? ""} ${channelPlatformName(row.platform)} ${channelStatus[row.status] ?? "Unavailable"} ${row.org_specialist ? "Organization specialist" : row.owner_linked ? "Owner linked" : "Owner not linked"}` }}
+                    search={{ id: `connected-bot-${row.id}`, title: row.bot_label, breadcrumb: translateUi("Channels") + " › " + translateUi("Connected bot"), keywords: `${row.bot_username ?? ""} ${channelPlatformName(row.platform)} ${channelStatus[row.status] ?? "Unavailable"} ${row.org_specialist ? "Organization specialist" : row.owner_linked ? "Owner linked" : "Owner not linked"}` }}
                     title={
                       <>
                         {row.bot_label}
@@ -413,7 +413,7 @@ export function ChannelBotsManager({
                     <GroupedRow
                       asChild
                       interactive
-                      search={{ id: `retry-gateway-${row.id}`, title: translateUi("Retry native gateway now"), breadcrumb: `Channels › ${row.bot_label}`, keywords: "Discord gateway activation retry" }}
+                      search={{ id: `retry-gateway-${row.id}`, title: translateUi("Retry native gateway now"), breadcrumb: `${translateUi("Channels")} › ${row.bot_label}`, keywords: "Discord gateway activation retry" }}
                     >
                       <button type="button" disabled={busy || !row.owner_linked} onClick={() => void retryNative(row)}>{translateUi("Retry native gateway now")}</button>
                     </GroupedRow>
@@ -492,11 +492,11 @@ export function ChannelBotsManager({
         title={translateUi("Channel bots")}
         footer={
           <>
-          <p>{translateUi("Connecting, verification and channel settings apply immediately. Discard in the drawer does not undo them.")}</p>
+          <p>{translateUi("Connecting and disconnecting bots, account verification, audience changes and per-chat settings apply immediately. Discard in the drawer does not undo them. Channel progress reply uses Save changes.")}</p>
           {!available.length && !bots.isPending && !bots.error
-            ? bots.data?.length
-              ? translateUi("All your channel bots are connected to other agents. Move one here with its agent selector in NyxBot settings.")
-              : translateUi("Register a bot, connect it to this agent, then verify your chat account. Registration alone does not connect or verify it.")
+            ? canRegister
+              ? translateUi("No additional eligible bots. Register a bot here, or manage existing connections in NyxBot settings.")
+              : translateUi("No additional eligible bots. Ask the agent’s administrator to register or connect a bot.")
             : null}
           </>
         }

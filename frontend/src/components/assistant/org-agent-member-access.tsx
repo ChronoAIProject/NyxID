@@ -98,7 +98,7 @@ function PolicyEditor({ policy, orgId, replace, refresh, loadFailed }: {
         function open() { setQuery(""); setPage(field); }
         return <Fragment key={field}>
           <GroupedDisclosure data-drawer-page-trigger={searchId}
-            search={{ id: searchId, title: titles[field], breadcrumb: "Overview › Member access", keywords: summary(ids) }}
+            search={{ id: searchId, title: titles[field], breadcrumb: translateUi("Overview") + " › " + translateUi("Member access"), keywords: summary(ids) }}
             onClick={open} accessory={<span className="max-w-[45%] truncate type-secondary">{summary(ids)}</span>}>{title}</GroupedDisclosure>
           <GroupedDetail open={page === field} title={title} backLabel={translateUi("Member access")}
             searchPage={searchId} onReveal={open} onBack={() => setPage(undefined)}>
