@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ci_gate_reuse import strict_load_workflow
 from incremental_cache import ROOTS as INCREMENTAL_ROOTS
+from workflow_test_helpers import USES_WITH_TAG, load_workflow_with_action_tags
 
 
 CACHE_ACTION = "./.github/actions/ci-rust-cache"
@@ -19,10 +20,6 @@ INCREMENTAL_PATHS = (
     "target/debug/incremental",
     "target/llvm-cov-target/debug/incremental",
 )
-
-
-def load(name):
-    return strict_load_workflow(Path(name).read_text())
 
 
 def github_output(text):
@@ -98,18 +95,18 @@ def cache_lanes(workflow, action, coverage=None):
 class CacheWarmTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.ci = load(".github/workflows/ci.yml")
-        cls.backend = load(".github/workflows/backend-tests.yml")
-        cls.warm = load(".github/workflows/ci-cache-warm.yml")
-        cls.action = load(".github/actions/ci-rust-cache/action.yml")
-        cls.save = load(".github/actions/ci-rust-incremental-save/action.yml")
+        cls.ci = load_workflow_with_action_tags(".github/workflows/ci.yml")
+        cls.backend = load_workflow_with_action_tags(".github/workflows/backend-tests.yml")
+        cls.warm = load_workflow_with_action_tags(".github/workflows/ci-cache-warm.yml")
+        cls.action = load_workflow_with_action_tags(".github/actions/ci-rust-cache/action.yml")
+        cls.save = load_workflow_with_action_tags(".github/actions/ci-rust-incremental-save/action.yml")
         cls.action_text = Path(".github/actions/ci-rust-cache/action.yml").read_text()
         cls.warm_text = Path(".github/workflows/ci-cache-warm.yml").read_text()
 
     def test_warm_is_the_only_ordinary_rust_writer(self):
         self.assertEqual(self.action["inputs"]["save-if"]["default"], "false")
         for path in Path(".github/workflows").glob("*.yml"):
-            workflow = load(str(path))
+            workflow = load_workflow_with_action_tags(path)
             writer = path.name == "ci-cache-warm.yml"
             for job in workflow["jobs"].values():
                 for step in job.get("steps", []):
@@ -168,14 +165,14 @@ class CacheWarmTests(unittest.TestCase):
             key_expression,
         )
         restore = next(step for step in self.action["runs"]["steps"]
-                       if step.get("uses") == "actions/cache/restore@v4")
+                       if step.get(USES_WITH_TAG) == "actions/cache/restore@v4")
         self.assertEqual(restore["with"], {
             "path": "${{ steps.incremental-contract.outputs.path }}",
             "key": "${{ steps.incremental-contract.outputs.key }}",
             "restore-keys": "${{ steps.incremental-contract.outputs.restore-keys }}",
         })
         save = next(step for step in self.save["runs"]["steps"]
-                    if step.get("uses") == "actions/cache/save@v4")
+                    if step.get(USES_WITH_TAG) == "actions/cache/save@v4")
         self.assertEqual(save["with"], {"path": "${{ inputs.path }}", "key": "${{ inputs.key }}"})
         sample = (
             "v1-rust-graph-backend-build-Linux-X64-"
@@ -231,7 +228,7 @@ class CacheWarmTests(unittest.TestCase):
         self.assertEqual(guard['run'],
                          'python3 .github/scripts/backend_disk.py before-incremental --backend-reserve "$BACKEND_RESERVE"')
         for path in Path('.github/workflows').glob('*.yml'):
-            for job_id, job in load(str(path))['jobs'].items():
+            for job_id, job in load_workflow_with_action_tags(path)['jobs'].items():
                 steps = job.get('steps', [])
                 reserve = any(s.get('run') == 'bash .github/scripts/prepare-backend-runner.sh'
                               for s in steps)
@@ -295,7 +292,7 @@ class CacheWarmTests(unittest.TestCase):
                 if caches and reserves:
                     self.assertLess(caches[0], reserves[0])
         steps = self.action['runs']['steps']
-        restore = next(s for s in steps if s.get('uses') == 'actions/cache/restore@v4')
+        restore = next(s for s in steps if s.get(USES_WITH_TAG) == 'actions/cache/restore@v4')
         self.assertIn("steps.incremental-space.outputs.allowed == 'true'", restore['if'])
         guard = next(s for s in steps if s.get('id') == 'incremental-space')
         self.assertIn('backend_disk.py before-incremental', guard['run'])
@@ -312,7 +309,7 @@ class CacheWarmTests(unittest.TestCase):
             'RESTORE_ALLOWED': '${{ steps.incremental-space.outputs.allowed }}',
         })
         restore = next(s for s in self.action['runs']['steps'] if s.get('id') == 'incremental-restore')
-        self.assertEqual(restore['uses'], 'actions/cache/restore@v4')
+        self.assertEqual(restore.get(USES_WITH_TAG), 'actions/cache/restore@v4')
         for requested, producer, allowed, matched in itertools.product(
                 ('true', 'false'), ('true', 'false'), ('true', 'false', ''), ('', 'fallback-key')):
             with self.subTest(requested=requested, producer=producer, allowed=allowed, matched=matched), \
@@ -336,7 +333,7 @@ class CacheWarmTests(unittest.TestCase):
                 self.assertIn(f'[ci-incremental] enabled={int(enabled)} producer={producer} restored={matched} reason={reason}',
                               result.stdout)
                 self.assertEqual((root / 'marked').exists(), enabled)
-        dependency = next(s for s in self.action['runs']['steps'] if s.get('uses') == 'Swatinem/rust-cache@v2')
+        dependency = next(s for s in self.action['runs']['steps'] if s.get(USES_WITH_TAG) == 'Swatinem/rust-cache@v2')
         self.assertEqual(dependency['with']['prefix-key'],
                          "${{ inputs.incremental == 'true' && 'v1-rust-incremental' || 'v0-rust' }}")
 
@@ -442,7 +439,7 @@ class CacheWarmTests(unittest.TestCase):
                     self.assertIn("python3 .github/scripts/ci_resources.py ", run, job_id)
             self.assertTrue(saw_compile, job_id)
             upload = next(step for step in job["steps"]
-                          if step.get("uses") == "actions/upload-artifact@v4"
+                          if step.get(USES_WITH_TAG) == "actions/upload-artifact@v4"
                           and step.get("with", {}).get("path") == "${{ runner.temp }}/nyxid-ci-resources")
             self.assertEqual(upload["if"], "always()")
             self.assertTrue(upload.get("continue-on-error"))
@@ -470,9 +467,9 @@ class CacheWarmTests(unittest.TestCase):
         self.assertIn("cargo llvm-cov --package nyxid-cli --no-report", measure["run"])
         summary = jobs["coverage-cli-summary"]
         downloads = [s["with"]["name"] for s in summary["steps"]
-                     if s.get("uses") == "actions/download-artifact@v4"]
+                     if s.get(USES_WITH_TAG) == "actions/download-artifact@v4"]
         self.assertEqual(downloads, ["cli-coverage-head", "cli-base-report"])
-        upload = next(s for s in summary["steps"] if s.get("uses") == "actions/upload-artifact@v4")
+        upload = next(s for s in summary["steps"] if s.get(USES_WITH_TAG) == "actions/upload-artifact@v4")
         self.assertEqual(upload["with"]["name"], "coverage-cli")
         self.assertEqual(set(upload["with"]["path"].split()), {"coverage-cli.json", "coverage-cli.lcov"})
         self.assertIn("coverage-cli-summary", jobs["coverage-comment"]["needs"])
