@@ -277,8 +277,8 @@ function VoiceConversation({
     !!option &&
     !!nextVoice &&
     !option.voice.voices.some((row) => row.id === nextVoice);
-  // A live call keeps the source and voice it started with; the header toggle
-  // can still switch its listening mode.
+  // A live call keeps its source and voice; the inline selector changes only
+  // the current call's listening mode.
   const inputMode = callSelection?.preferences.input_mode ?? nextMode;
   const currentOption = callSelection?.option ?? option;
   const currentVoice = callSelection?.preferences.voice ?? nextVoice;
@@ -912,6 +912,47 @@ function VoiceConversation({
     ending;
   const returnToChat = confirmingEnd || uncertain || checking;
   const endDisabled = ending;
+  const canChangeInputMode =
+    !!callSelection &&
+    currentOption?.voice.protocol === "openai_live" &&
+    voice.connected &&
+    session?.state === "active" &&
+    focused &&
+    isConnected &&
+    !controlsBlocked &&
+    !restarting;
+  // A retained press must not change a later call or media attempt.
+  const inputModeScope = `${session?.id}:${voice.mediaAttempt}`;
+  const inputModeContext = useRef({
+    allowed: canChangeInputMode,
+    scope: inputModeScope,
+    mode: inputMode,
+  });
+  inputModeContext.current = {
+    allowed: canChangeInputMode,
+    scope: inputModeScope,
+    mode: inputMode,
+  };
+  function changeInputMode(mode: VoicePreferences["input_mode"]) {
+    const current = inputModeContext.current;
+    if (
+      !mounted.current ||
+      !current.allowed ||
+      endBusy.current ||
+      checkBusy.current ||
+      current.scope !== inputModeScope ||
+      current.mode === mode ||
+      !voice.setInputMode(mode)
+    )
+      return;
+    current.mode = mode;
+    setCallSelection((selection) =>
+      selection && {
+        ...selection,
+        preferences: { ...selection.preferences, input_mode: mode },
+      },
+    );
+  }
   const showRecovery =
     !ending && (confirmingEnd || !!conflict || uncertain || checking);
   const showPreCall = !active && !showRecovery && !ending && !confirmingEnd;
@@ -1101,6 +1142,35 @@ function VoiceConversation({
             </Text>
           </Pressable>
         </View>
+        {currentOption ? (
+          <View
+            accessibilityRole="radiogroup"
+            accessibilityLabel={translateApp("Listening mode for this call")}
+            style={styles.preferencesChoices}
+          >
+            {(["automatic", "push_to_talk"] as const).map((mode) => (
+              <Choice
+                key={mode}
+                label={translateApp(
+                  mode === "automatic" ? "Hands-free" : "Hold to talk",
+                )}
+                accessibilityLabel={translateApp(
+                  mode === "automatic"
+                    ? "Use hands-free for this call"
+                    : "Use Hold to talk for this call",
+                )}
+                selected={inputMode === mode}
+                disabled={!canChangeInputMode}
+                onPress={() => changeInputMode(mode)}
+              />
+            ))}
+          </View>
+        ) : null}
+        {currentOption?.voice.protocol === "xai_realtime" ? (
+          <Label muted style={styles.footnote}>
+            {translateApp("Grok supports Hold to talk.")}
+          </Label>
+        ) : null}
         {preferencesOpen === undefined ? (
           <Pressable
             accessibilityRole="button"
@@ -1597,11 +1667,13 @@ function IconButton({
 }
 function Choice({
   label,
+  accessibilityLabel = label,
   selected,
   disabled,
   onPress,
 }: {
   label: string;
+  accessibilityLabel?: string;
   selected: boolean;
   disabled: boolean;
   onPress: () => void;
@@ -1611,7 +1683,7 @@ function Choice({
   return (
     <Pressable
       accessibilityRole="radio"
-      accessibilityLabel={label}
+      accessibilityLabel={accessibilityLabel}
       accessibilityState={{ checked: selected, selected, disabled }}
       disabled={disabled}
       onPress={onPress}
@@ -1619,13 +1691,21 @@ function Choice({
         styles.choice,
         {
           backgroundColor: selected
-            ? colors.segmentSelected
+            ? colors.primaryTone.bg
             : colors.segmentTrack,
+          borderColor: selected
+            ? colors.primaryTone.border
+            : colors.composerBorder,
           opacity: disabled ? 0.45 : 1,
         },
       ]}
     >
-      <Text style={[styles.controlText, { color: colors.textPrimary }]}>
+      <Text
+        style={[
+          styles.controlText,
+          { color: selected ? colors.primaryTone.text : colors.textPrimary },
+        ]}
+      >
         {label}
       </Text>
     </Pressable>
@@ -1802,6 +1882,7 @@ const styles = StyleSheet.create({
   preferencesChoices: { flexDirection: "row", flexWrap: "wrap", gap: 7 },
   choice: {
     minHeight: 44,
+    borderWidth: 1,
     borderRadius: 15,
     justifyContent: "center",
     paddingHorizontal: 12,

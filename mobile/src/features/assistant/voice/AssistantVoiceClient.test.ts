@@ -451,6 +451,50 @@ test("automatic mode starts only when provider, authoritative session and input 
   await e.client.end();
 });
 
+test("OpenAI switches live modes, releases held input and keeps its existing session", async () => {
+  const e = setup();
+  await e.open("openai_live", "automatic");
+  assert.equal(e.media.input, true);
+  assert.equal(e.client.setInputMode("push_to_talk"), true);
+  assert.equal(e.media.input, false);
+  assert.equal(e.client.hold(true), true);
+  assert.equal(e.media.input, true);
+  assert.equal(e.client.setInputMode("automatic"), true);
+  assert.equal(e.media.holds.at(-1), false);
+  assert.equal(e.media.input, true);
+  assert.equal(e.starts.length, 1);
+  assert.equal(e.media.closed, 0);
+  assert.equal(e.socket.closed, 0);
+  await e.client.end();
+});
+
+test("live mode switches cannot override microphone mute or server input restrictions", async () => {
+  for (const restriction of [{ muted: true }, { input_muted: true }]) {
+    const e = setup();
+    await e.open("openai_live", "automatic");
+    e.snapshot(restriction);
+    assert.equal(e.client.setInputMode("push_to_talk"), true);
+    assert.equal(e.client.setInputMode("automatic"), true);
+    assert.equal(e.media.input, false);
+    assert.equal(e.client.hold(true), false);
+    await e.client.end();
+  }
+});
+
+test("Grok rejects a live hands-free switch and retains its explicit hold gate", async () => {
+  const e = setup();
+  await e.open("xai_realtime", "push_to_talk");
+  assert.equal(e.client.setInputMode("automatic"), false);
+  assert.equal(e.media.input, false);
+  assert.equal(e.client.hold(true), true);
+  assert.equal(e.media.input, true);
+  assert.equal(e.client.setInputMode("automatic"), false);
+  assert.equal(e.media.input, true);
+  assert.equal(e.client.hold(false), false);
+  assert.equal(e.media.input, false);
+  await e.client.end();
+});
+
 test("capture notifications follow the applied input gate through readiness, remote mute and End", async () => {
   const e = setup();
   await e.client.start({ ...preferences, input_mode: "automatic" });
