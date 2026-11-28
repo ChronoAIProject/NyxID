@@ -212,7 +212,9 @@ export function ChallengeCard({
             ) : context.join(" · ")}
           </Text>
           <Text style={styles.meta}>
-            {challenge.execution_proposal
+            {challenge.decision_destination === "originating_owner_chat"
+              ? (challenge.status === "PENDING" && !expired ? translateApp("Review this request in your original private chat with NyxBot.") : null)
+              : challenge.execution_proposal
               ? translateApp(
                   "Review the exact scope and duration in the web app.",
                 )
@@ -226,7 +228,7 @@ export function ChallengeCard({
         </View>
         {onPress ? <ChevronRight size={18} color={colors.textMuted} /> : null}
       </Pressable>
-      {challenge.execution_proposal ? (
+      {challenge.decision_destination === "originating_owner_chat" ? null : challenge.execution_proposal ? (
         <View style={styles.pairDivider}>
           <SettingsRow
             tone="action"

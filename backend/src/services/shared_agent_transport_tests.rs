@@ -939,6 +939,7 @@ async fn shared_transports_async_mcp_survives_settlement_and_two_replica_polling
                 automation_work: None,
                 automation_parent: None,
                 execution_enrollment: false,
+                supervisor_parent: None,
                 execution_parent: None,
                 channel_context: None,
                 capacity: None,

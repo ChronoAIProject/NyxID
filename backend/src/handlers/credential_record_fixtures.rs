@@ -28,7 +28,7 @@ pub(super) fn proxy_node_signing_secret() -> String {
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum BotSecret {
+pub(crate) enum BotSecret {
     Token,
     AppSecret,
     LarkVerificationToken,
@@ -107,7 +107,7 @@ impl BotSecret {
         }
     }
 
-    pub(super) async fn update(
+    pub(crate) async fn update(
         keys: &EncryptionKeys,
         id: &str,
         owner: &str,

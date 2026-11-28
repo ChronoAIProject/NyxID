@@ -384,6 +384,11 @@ fn ensure_proxy_request_id(headers: &mut axum::http::HeaderMap) -> String {
     generated
 }
 
+/// Only the HTTP entry handler can mark a correlation value as server generated.
+/// Caller headers, including caller-supplied UUIDs, cannot construct this marker.
+#[derive(Clone)]
+struct GeneratedProxyRequestId(String);
+
 fn apply_proxy_request_id_header(response: &mut Response, request_id: &str) {
     if !response.headers().contains_key("x-request-id")
         && let Ok(value) = axum::http::HeaderValue::from_str(request_id)
@@ -1027,8 +1032,13 @@ async fn proxy_request_unthrottled(
                 .insert(ProxyExchangeStartedAt(started_at));
             let generated_id = !request.headers().contains_key("x-request-id");
             let request_id = ensure_proxy_request_id(request.headers_mut());
-            if generated_id && let Some(context) = auth_user.execution_permission.as_ref() {
-                context.bind_generated_correlation(&request_id);
+            if generated_id {
+                request
+                    .extensions_mut()
+                    .insert(GeneratedProxyRequestId(request_id.clone()));
+                if let Some(context) = auth_user.execution_permission.as_ref() {
+                    context.bind_generated_correlation(&request_id);
+                }
             }
             if let Some(context) = &auth_user.execution_permission {
                 context.bind_cancellation(request_cancellation(&request));
@@ -1424,8 +1434,13 @@ async fn proxy_request_by_slug_unthrottled(
                 .insert(ProxyExchangeStartedAt(started_at));
             let generated_id = !request.headers().contains_key("x-request-id");
             let request_id = ensure_proxy_request_id(request.headers_mut());
-            if generated_id && let Some(context) = auth_user.execution_permission.as_ref() {
-                context.bind_generated_correlation(&request_id);
+            if generated_id {
+                request
+                    .extensions_mut()
+                    .insert(GeneratedProxyRequestId(request_id.clone()));
+                if let Some(context) = auth_user.execution_permission.as_ref() {
+                    context.bind_generated_correlation(&request_id);
+                }
             }
             if let Some(context) = &auth_user.execution_permission {
                 context.bind_cancellation(request_cancellation(&request));
@@ -4822,6 +4837,10 @@ async fn execute_resolved_proxy_inner<'a>(
         .map(strip_internal_query_params)
         .filter(|q| !q.is_empty());
     let mut all_headers = request.headers().clone();
+    let generated_request_id = request
+        .extensions()
+        .get::<GeneratedProxyRequestId>()
+        .cloned();
     let durable_grant_id = single_system_header(
         &all_headers,
         durable_operation_grant_service::DURABLE_GRANT_HEADER,
@@ -5199,6 +5218,27 @@ async fn execute_resolved_proxy_inner<'a>(
         );
     }
 
+    let marked_supervisor_operation = crate::services::supervisor_write::marked_chat(
+        auth_user.assistant_chat.as_deref(),
+        effective_owner_for_approval
+            .as_deref()
+            .unwrap_or(&approval_owner_user_id),
+    ) && crate::services::supervisor_write::operation_family(
+        target.catalog_slug.as_deref().unwrap_or_default(),
+        &method_str,
+        path,
+    );
+    if marked_supervisor_operation
+        && (invocation_diagnostic_probe
+            || channel_guest_sheets.is_some()
+            || is_ws_candidate
+            || shared_connect
+            || streaming_body.is_some())
+    {
+        return Err(AppError::Forbidden(
+            "The required original-chat write review is unavailable on this transport".into(),
+        ));
+    }
     // Only enrolled callers can carry coverage; skip body/header preparation
     // entirely for everyone else (admit_http would return immediately).
     if let Some(execution_permission) = auth_user.execution_permission.as_ref()
@@ -5528,10 +5568,17 @@ async fn execute_resolved_proxy_inner<'a>(
             let timeout_recipient = notify_user_ids.first().cloned().ok_or_else(|| {
                 AppError::Internal("approval recipient list unexpectedly empty".to_string())
             })?;
-            let channel =
-                notification_service::get_or_create_channel(&state.db, &timeout_recipient).await?;
-
-            let timeout_secs = channel.approval_timeout_secs;
+            let timeout_secs = if auth_user
+                .execution_permission
+                .as_ref()
+                .is_some_and(|c| c.supervisor().is_some())
+            {
+                notification_service::approval_timeout_secs(&state.db, &timeout_recipient).await?
+            } else {
+                notification_service::get_or_create_channel(&state.db, &timeout_recipient)
+                    .await?
+                    .approval_timeout_secs
+            };
             let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
                 &operation,
                 pending.resolution.grant_scope.clone(),
@@ -5554,7 +5601,61 @@ async fn execute_resolved_proxy_inner<'a>(
                 timeout_secs,
             )
             .await?;
-            let approval_request = box_proxy_future(|| {
+            let supervisor_effect = if node_route.is_none()
+                && streaming_body.is_none()
+                && !pending.resolution.from_org_policy
+            {
+                crate::services::supervisor_write::effect(
+                    target.catalog_slug.as_deref().unwrap_or_default(),
+                    &method_str,
+                    path,
+                    query.as_deref(),
+                    &body_bytes,
+                    !crate::services::supervisor_write::http_headers_allow_review(
+                        &all_headers,
+                        &[
+                            target.catalog_headers(),
+                            target.user_service_default_headers.as_slice(),
+                        ],
+                        generated_request_id
+                            .as_ref()
+                            .map(|id| id.0.as_str())
+                            .or_else(|| {
+                                auth_user
+                                    .execution_permission
+                                    .as_ref()
+                                    .and_then(|c| c.generated_request_id())
+                            }),
+                    ),
+                )
+            } else {
+                None
+            };
+            let supervisor = crate::services::supervisor_write::prepare(
+                &state.db,
+                auth_user.assistant_chat.as_deref(),
+                resolved_user_service_id.as_deref(),
+                &pending.primary_owner_user_id,
+                &pending.resolution.mode,
+                supervisor_effect,
+                &target.base_url,
+                service_id,
+            )
+            .await?;
+            if auth_user
+                .execution_permission
+                .as_ref()
+                .is_some_and(|c| c.supervisor().is_some())
+                && supervisor.is_none()
+            {
+                return Err(AppError::Forbidden(
+                    "The required original-chat write review is unavailable".into(),
+                ));
+            }
+            if let Some(review) = &supervisor {
+                request_operation.bind_supervisor_review(review.binding.clone(), timeout_secs);
+            }
+            let mut approval_request = box_proxy_future(|| {
                 approval_service::create_approval_request(
                     &state.db,
                     &state.config,
@@ -5577,6 +5678,17 @@ async fn execute_resolved_proxy_inner<'a>(
             })
             .await?;
 
+            if let Some(review) = &supervisor
+                && !crate::handlers::nyxbot::deliver_supervisor_review(
+                    state,
+                    &approval_request,
+                    review,
+                )
+                .await?
+            {
+                approval_request =
+                    approval_service::fallback_supervisor_review(state, &approval_request).await?;
+            }
             if let Some(chat) = auth_user.assistant_chat.as_deref() {
                 crate::services::assistant_activity_decision::approval(
                     &state.db,
@@ -5598,6 +5710,17 @@ async fn execute_resolved_proxy_inner<'a>(
                         &state.config.frontend_url,
                     )
                 })?;
+            if let Some(permit) =
+                crate::services::supervisor_write::Permit::from_request(&approval_request)
+            {
+                assistant_decision
+                    .admission
+                    .as_mut()
+                    .ok_or_else(|| {
+                        AppError::Forbidden("Exact write admission is unavailable".into())
+                    })?
+                    .bind_supervisor(Some(permit));
+            }
             if let Some(chat) = auth_user.assistant_chat.as_deref() {
                 crate::services::assistant_activity_decision::approval(
                     &state.db,

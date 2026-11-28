@@ -107,6 +107,9 @@ pub struct ExactServiceApprovalBinding {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRequest {
+    /// Dedicated originating-owner DM review; never a legacy grant or proposal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_write: Option<Box<SupervisorWrite>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_policy: Option<super::service_approval_config::OrgPolicyStamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -269,6 +272,7 @@ mod tests {
             activity_outcome: None,
             activity_execution: None,
             execution_proposal: None,
+            supervisor_write: None,
             assistant_group: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -549,5 +553,72 @@ mod tests {
         assert!(keys.contains(&"idempotency_key"));
         assert!(keys.contains(&"expires_at"));
         assert!(keys.contains(&"created_at"));
+    }
+}
+
+/// Server-created exact connected occurrence. No raw tool arguments or credentials.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SupervisorWrite {
+    pub version: u32,
+    /// Version 2 keeps this independent of execution-permission coverage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marked: Option<Box<SupervisorTask>>,
+    pub source: SupervisorSource,
+    pub catalog_service: String,
+    pub specialist_agent: String,
+    pub specialist_conversation: String,
+    pub specialist_turn: String,
+    pub specialist_key: String,
+    pub connection: String,
+    pub authority: String,
+    pub url_digest: String,
+    pub body_digest: String,
+    #[serde(default)]
+    pub effect_digest: Option<String>,
+    pub code_digest: String,
+    pub review_confirmed: bool,
+    pub dispatching: bool,
+    #[serde(default)]
+    pub dm_decision_receipt: Option<String>,
+}
+impl std::fmt::Debug for SupervisorWrite {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SupervisorWrite { [REDACTED] }")
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SupervisorSource {
+    pub channel: super::execution_permission_channel::ChannelSource,
+    pub assigning_turn: String,
+    #[serde(default, with = "super::bson_datetime::optional")]
+    pub reset_at: Option<DateTime<Utc>>,
+}
+
+/// Server-authored lineage retained inside the encrypted prepared effect.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SupervisorOrigin {
+    pub source: SupervisorSource,
+    pub agent: String,
+    pub conversation: String,
+    pub key: String,
+    pub connection: String,
+    pub catalog: String,
+    pub url_digest: String,
+    pub body_digest: String,
+    pub effect_digest: String,
+    pub marked: SupervisorTask,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SupervisorTask {
+    pub operation_id: String,
+    pub origin_turn: String,
+    pub task: super::execution_permission::TaskAdmission,
+}
+
+impl std::fmt::Debug for SupervisorOrigin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SupervisorOrigin { [REDACTED] }")
     }
 }

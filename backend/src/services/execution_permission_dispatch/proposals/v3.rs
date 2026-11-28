@@ -10,16 +10,19 @@ pub(crate) enum AssistantVersion {
     V1,
     V3,
     V4,
+    /// Independent supervisor DM floor; retains the v4 storage and AAD arm.
+    V5,
 }
 
 impl AssistantVersion {
-    pub(crate) const ALL: [Self; 3] = [Self::V1, Self::V3, Self::V4];
+    pub(crate) const ALL: [Self; 4] = [Self::V1, Self::V3, Self::V4, Self::V5];
 
     pub(crate) const fn number(self) -> u32 {
         match self {
             Self::V1 => 1,
             Self::V3 => 3,
             Self::V4 => 4,
+            Self::V5 => 5,
         }
     }
 
@@ -34,7 +37,7 @@ impl AssistantVersion {
         let (v1, v3, v4) = match self {
             Self::V1 => (Some(p), None, None),
             Self::V3 => (None, Some(p), None),
-            Self::V4 => (None, None, Some(p)),
+            Self::V4 | Self::V5 => (None, None, Some(p)),
         };
         ExecutionProposal {
             v4,
@@ -59,7 +62,7 @@ impl AssistantVersion {
         if self == Self::V3 {
             crate::services::security_readiness_service::require_serving(db, READINESS).await?;
         }
-        if self == Self::V4 {
+        if matches!(self, Self::V4 | Self::V5) {
             crate::services::security_readiness_service::require_serving(
                 db,
                 crate::services::execution_permission_channel::READINESS,
@@ -73,6 +76,8 @@ impl AssistantVersion {
 /// Rebase only static, server-authored query/update templates, never effect data.
 /// v2 uses this solely to retain the existing shared cancellation selector.
 pub(super) fn rebase(template: Document, version: u32) -> Document {
+    // v5 changes minimum reader semantics, not the retained field/AAD path.
+    let version = if version == 5 { 4 } else { version };
     fn value(v: bson::Bson, version: u32) -> bson::Bson {
         match v {
             bson::Bson::Document(d) => bson::Bson::Document(rebase(d, version)),
@@ -270,7 +275,14 @@ mod tests {
             "execution_proposal.v1.literal"
         );
         let both = assistant_selector(template.clone());
-        assert_eq!(both.get_array("$or").unwrap().len(), 3);
-        assert_eq!(source_selector(template).get_array("$or").unwrap().len(), 4);
+        assert_eq!(both.get_array("$or").unwrap().len(), 4);
+        assert_eq!(source_selector(template).get_array("$or").unwrap().len(), 5);
+        let required = AssistantVersion::V5.selector(doc! {"execution_proposal.v1.state":"queued"});
+        assert_eq!(required.get_i32("execution_proposal.version").unwrap(), 5);
+        assert_eq!(
+            required.get_str("execution_proposal.v4.state").unwrap(),
+            "queued"
+        );
+        assert!(!required.contains_key("execution_proposal.v5.state"));
     }
 }

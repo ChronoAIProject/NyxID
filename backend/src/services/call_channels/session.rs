@@ -449,6 +449,7 @@ pub async fn admit(
             automation_work: None,
             automation_parent: None,
         execution_enrollment: false,
+        supervisor_parent: None,
         execution_parent: None,
         channel_context: None,
         capacity: None,

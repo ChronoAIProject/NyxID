@@ -4053,8 +4053,16 @@ impl AutomaticReceipt {
     }
 }
 
-type ServiceApprovalWait =
-    Box<dyn FnOnce() -> futures::future::BoxFuture<'static, Result<(), String>> + Send + Sync>;
+type ServiceApprovalWait = Box<
+    dyn FnOnce(
+            Option<super::supervisor_write::Effect>,
+            String,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<Option<super::supervisor_write::Permit>, String>,
+        > + Send
+        + Sync,
+>;
 
 pub struct PreparedProxyCall {
     /// Create the connected approval only after this exact action passes assistant admission.
@@ -4085,8 +4093,13 @@ pub struct PreparedProxyCall {
 impl PreparedProxyCall {
     pub(crate) fn defer_service_approval(
         &mut self,
-        wait: impl FnOnce() -> futures::future::BoxFuture<'static, Result<(), String>>
-        + Send
+        wait: impl FnOnce(
+            Option<super::supervisor_write::Effect>,
+            String,
+        ) -> futures::future::BoxFuture<
+            'static,
+            Result<Option<super::supervisor_write::Permit>, String>,
+        > + Send
         + Sync
         + 'static,
     ) {
@@ -5941,6 +5954,7 @@ pub struct ToolResponse {
 enum ToolResponseBodyError {
     TooLarge,
     MalformedUtf8,
+    SupervisorWriteUnconfirmed,
 }
 
 #[derive(Debug)]
@@ -5986,6 +6000,10 @@ impl ToolResponse {
 
     pub(crate) fn is_policy_refusal(&self) -> bool {
         matches!(self.origin, ToolResponseOrigin::AssistantPolicy)
+    }
+
+    pub(crate) fn is_supervisor_write_unconfirmed(&self) -> bool {
+        self.body_error == Some(ToolResponseBodyError::SupervisorWriteUnconfirmed)
     }
 }
 
@@ -6835,14 +6853,53 @@ async fn execute_tool_resolved_inner(
                 ToolResponse::policy_refusal(refusal),
             ));
         }
-        if let Some(wait) = deferred
-            && let Err(message) = wait().await
+        let supervisor_permit = if let Some(wait) = deferred {
+            let effect = if node_route.is_none()
+                && prepared.managed_base.is_none()
+                && prepared.attachment_binding.is_none()
+                && prepared.async_submission.is_none()
+                && prepared.async_continuation.is_none()
+                && prepared.server_owned_headers.is_empty()
+            {
+                super::supervisor_write::effect(
+                    catalog_service_slug.unwrap_or_default(),
+                    prepared.method.as_str(),
+                    &prepared.path,
+                    prepared.query(),
+                    prepared.body.as_deref().unwrap_or_default(),
+                    !prepared.parameter_headers.is_empty(),
+                )
+            } else {
+                None
+            };
+            match wait(effect, target.base_url.clone()).await {
+                Ok(permit) => permit,
+                Err(message) => {
+                    return Ok(McpToolExecutionOutcome::Response(
+                        ToolResponse::policy_refusal(message),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        if target
+            .execution_request
+            .as_ref()
+            .is_some_and(|c| c.supervisor().is_some())
+            && supervisor_permit.is_none()
         {
-            return Ok(McpToolExecutionOutcome::Response(
-                ToolResponse::policy_refusal(message),
+            return Err(AppError::Forbidden(
+                "The independent original-chat write decision is required".into(),
+            ));
+        }
+        if supervisor_permit.is_some() && decision.admission.is_none() {
+            return Err(AppError::Forbidden(
+                "Exact write admission is unavailable".into(),
             ));
         }
         if let Some(mut admission) = decision.admission {
+            admission.bind_supervisor(supervisor_permit);
             if let Some(watch) = prepared.async_submission.as_deref() {
                 admission.bind_async_submission(db, watch, &target).await?;
             }
@@ -7955,6 +8012,21 @@ async fn execute_tool_resolved_inner(
                 None,
             ))
             .await?;
+
+        if egress_guard.as_ref().is_some_and(|guard| guard.has_supervisor()) {
+            use super::supervisor_write::{ProviderResult, provider_result};
+            match provider_result(&path, status, response.text.as_bytes()) {
+                ProviderResult::Succeeded => {}
+                ProviderResult::Rejected => {
+                    response.body_error = Some(ToolResponseBodyError::SupervisorWriteUnconfirmed);
+                    response.text = format!("The provider rejected this write (HTTP {status}); this attempt is not confirmed as successful. An independent read reports observed state only. Do not repeat the write.");
+                }
+                ProviderResult::Unconfirmed => {
+                    response.body_error = Some(ToolResponseBodyError::SupervisorWriteUnconfirmed);
+                    response.text = format!("The provider response (HTTP {status}) did not confirm this exact record update. The write outcome and final row state are unconfirmed. Do not repeat the write.");
+                }
+            }
+        }
 
         destination_audit.complete(status);
         if lark_fields {

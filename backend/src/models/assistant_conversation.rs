@@ -464,6 +464,12 @@ pub struct OutputPartLength {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActiveTurn {
+    /// Personal supervisor source captured transactionally at delegation admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor_source: Option<Box<super::approval_request::SupervisorSource>>,
+    /// Irreversible exact-effect send markers for this delegated turn only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supervisor_sends: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_guest: Option<super::channel_guest_access::GuestTurn>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

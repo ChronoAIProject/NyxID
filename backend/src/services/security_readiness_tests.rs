@@ -1520,3 +1520,20 @@ async fn stopped_fixture_heartbeat_cannot_restore_an_expired_observation() {
     assert!(report(&db, CAPABILITIES[0]).await.unwrap().serving_ready);
     stop_test_replica(&db).await;
 }
+
+#[test]
+fn owner_continuation_v2_requires_batch_and_effect_evidence_readers() {
+    let now = Utc::now();
+    let a = local("a", "a1", &["a", "b"], false);
+    let b = local("b", "b1", &["a", "b"], false);
+    let capability =
+        crate::services::execution_permission_dispatch::proposals::continuation::READINESS;
+    assert_eq!(capability, "permissions:execution-owner-continuation-v2");
+    let mut replicas = vec![row(&a, now), row(&b, now)];
+    assert!(assess(&replicas, &a, capability, false, now).ready);
+    replicas[1].capabilities.retain(|c| c != capability);
+    replicas[1]
+        .capabilities
+        .push("permissions:execution-owner-continuation-v1".into());
+    assert!(!assess(&replicas, &a, capability, false, now).ready);
+}

@@ -90,6 +90,35 @@ final class WatchServiceTests: XCTestCase {
     XCTAssertTrue(transport.requests.isEmpty)
   }
 
+  func testOwnerChatQueueAndDetailNeverSendADecision() async throws {
+    let transport = FakeTransport()
+    let id = "owner-chat"
+    let wire = Fixtures.approval(id: id, mode: "grant")
+      .replacingOccurrences(of: #""decision_channel":null"#,
+        with: #""decision_channel":null,"decision_destination":"originating_owner_chat""#)
+      .replacingOccurrences(of: "2026-11-16T10:05:00+00:00", with: "2099-01-01T00:00:00+00:00")
+    transport.on("GET", "/api/v1/approvals/requests", json: "{\"requests\":[\(wire)],\"total\":1}")
+    transport.on("GET", "/api/v1/approvals/requests/\(id)", json: wire)
+    let queued = try await service(transport).pendingApprovals()
+    let detail = try await service(transport).approval(id: id)
+    XCTAssertEqual(queued.count, 1)
+    for request in [queued[0], detail] {
+      XCTAssertFalse(request.canDecideOnWatch)
+      XCTAssertEqual(request.reviewCue, "Review in original NyxBot chat")
+      for allow in [false, true] {
+        do {
+          _ = try await service(transport).decide(request, approve: allow, idempotencyKey: "no-decision")
+          XCTFail("original owner chat is required")
+        } catch let error as WatchServiceError {
+          XCTAssertEqual(error, .reviewInOwnerChat)
+        }
+      }
+    }
+    XCTAssertEqual(transport.requests.count, 2)
+    XCTAssertTrue(transport.calls("POST", "/api/v1/approvals/requests/\(id)/decide").isEmpty)
+    XCTAssertTrue(transport.calls("GET", "/api/v1/notifications/settings").isEmpty)
+  }
+
   func testFeedIsOptional() async throws {
     let transport = FakeTransport()
     transport.on(

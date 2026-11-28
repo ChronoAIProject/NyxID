@@ -40,8 +40,13 @@ export function AssistantApprovalCard({
   }, []);
   const remaining = Date.parse(approval.expires_at) - now;
   const expired = !Number.isFinite(remaining) || remaining <= 0;
+  const ownerChat = approval.decision_destination === "originating_owner_chat";
+  const ownerChatStatus = approval.status === "approved" ? "Approved"
+    : approval.status === "rejected" ? "Request denied"
+    : approval.status === "expired" || remaining <= 0 ? "Request expired"
+    : !Number.isFinite(remaining) ? "Waiting for the server" : "Pending";
   async function decide(approved: boolean) {
-    if (lock.current || disabled || expired || decided !== undefined) return;
+    if (lock.current || disabled || expired || decided !== undefined || approval.decision_destination === "originating_owner_chat") return;
     lock.current = true;
     setBusy(true);
     setError(undefined);
@@ -64,13 +69,13 @@ export function AssistantApprovalCard({
     <Card>
       <View accessibilityLiveRegion="polite">
         <Label style={{ fontWeight: "600", fontSize: 13 }}>
-          {decided === true
+          {ownerChat && ownerChatStatus !== "Pending" ? translateApp(ownerChatStatus) : decided === true
             ? translateApp("Approved and sent")
             : decided === false
               ? translateApp("Request denied")
               : translateApp("Approval required")}
         </Label>
-        {decided === undefined ? (
+        {decided === undefined && (!ownerChat || ownerChatStatus === "Pending") ? (
           <Label muted>
             {translateApp(
               "Review the destination and access scope before this action runs.",
@@ -131,7 +136,9 @@ export function AssistantApprovalCard({
           )}
         </Label>
       ) : null}
-      {decided === undefined ? (
+      {decided === undefined && ownerChat ? (
+        ownerChatStatus === "Pending" ? <Label muted>{translateApp("Review this request in your original private chat with NyxBot.")}</Label> : null
+      ) : decided === undefined ? (
         <>
           <Label muted>
             {expired

@@ -25,7 +25,7 @@ impl Slot {
         match self {
             Self::Assistant(AssistantVersion::V1) => "v1",
             Self::Assistant(AssistantVersion::V3) => "v3",
-            Self::Assistant(AssistantVersion::V4) => "v4",
+            Self::Assistant(AssistantVersion::V4 | AssistantVersion::V5) => "v4",
             Self::V2 => "v2",
         }
     }
@@ -106,6 +106,7 @@ impl<'a> Arm<'a> {
             (2, None, Some(p), None, None) => Ok(Self::V2(p)),
             (3, None, None, Some(p), None) => Ok(Self::Assistant(AssistantVersion::V3, p)),
             (4, None, None, None, Some(p)) => Ok(Self::Assistant(AssistantVersion::V4, p)),
+            (5, None, None, None, Some(p)) => Ok(Self::Assistant(AssistantVersion::V5, p)),
             _ => Err(conflict()),
         }
     }
@@ -282,6 +283,12 @@ mod tests {
             ),
             (
                 Slot::Assistant(AssistantVersion::V4),
+                "v4",
+                "execution-proposal:v1:req:λ/%2F",
+                "execution-proposal:v1:req:λ/%2F:result",
+            ),
+            (
+                Slot::Assistant(AssistantVersion::V5),
                 "v4",
                 "execution-proposal:v1:req:λ/%2F",
                 "execution-proposal:v1:req:λ/%2F:result",

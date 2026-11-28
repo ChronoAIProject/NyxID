@@ -1601,6 +1601,7 @@
   "Review the observed Discord command before recovering this installation.": "在復原此安裝之前，請檢查觀察到的 Discord 指令。",
   "Review the retained gateway record before retrying its original setup. The record, request and credentials remain bound to this attempt.": "在重試其原始設定之前，請檢查保留的閘道記錄。該記錄、要求和憑證仍繫結於此次嘗試。",
   "Review this entry’s current credentials and transport before updating. Updating pauses both access modes and revokes prior chat authority. Owner routing remains closed; explicitly enable access after verification.": "更新前請檢查此入口目前的憑證和傳輸方式。更新會暫停兩種存取模式，並撤銷先前的聊天授權。擁有者路由維持關閉；驗證後請明確啟用存取。",
+  "Review this request in your original private chat with NyxBot.": "請在最初與 NyxBot 的私訊中審核此請求。",
   "Review transfer": "審閱轉移",
   "Revision ": "修訂版本 ",
   "Revision / policy revision": "修訂版本 / 原則修訂版本",

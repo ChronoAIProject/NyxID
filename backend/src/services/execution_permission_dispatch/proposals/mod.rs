@@ -9,6 +9,8 @@ use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+pub(crate) mod continuation;
+pub(in crate::services::execution_permission_dispatch) mod effects;
 mod lifecycle;
 mod presentation;
 pub(crate) mod record;
@@ -16,6 +18,7 @@ mod resume;
 use record::{Arm, Field, Slot};
 pub(crate) mod v2;
 pub(crate) mod v3;
+pub(crate) use continuation::ResumeOutcome;
 pub(crate) use lifecycle::{cancel_in_session, sweep};
 pub(crate) use presentation::delivery_notice;
 pub(crate) use resume::{Resume, result_for_human, resume_turn};
@@ -62,6 +65,16 @@ fn label(value: &str) -> String {
         .filter(|c| !c.is_control())
         .take(160)
         .collect()
+}
+fn operation_label(method: &str, path: &str) -> String {
+    // Proxy paths are relative. Display their HTTP spelling without changing
+    // the retained payload, digest or operation identity.
+    let path = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        format!("/{path}")
+    };
+    format!("{} {}", method, label(&path))
 }
 fn binary(bytes: Vec<u8>) -> bson::Binary {
     bson::Binary {
@@ -149,6 +162,7 @@ fn retain(effect: &Effect<'_>, context: &RequestContext) -> Result<PreparedEffec
         return Err("credential_header_not_retainable");
     }
     Ok(PreparedEffect {
+        supervisor: context.supervisor.get().cloned(),
         generated_correlation: context.generated_correlation.get().cloned(),
         connection: effect.connection.into(),
         catalog: effect.target.service.id.clone(),
@@ -387,7 +401,12 @@ pub(super) async fn create(
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
-    let version = v3::choose_version(db, &contract, reusable).await?;
+    let version = if retained.supervisor.is_some() {
+        AssistantVersion::V5.require_serving(db).await?;
+        AssistantVersion::V5
+    } else {
+        v3::choose_version(db, &contract, reusable).await?
+    };
     let (encrypted, payload_context_version) = Slot::Assistant(version)
         .seal(keys, &id, &chat.user_id, Field::Payload, &encoded)
         .await?;
@@ -402,6 +421,7 @@ pub(super) async fn create(
         choices.push(v3::choice(&contract)?);
     }
     let p = Proposal {
+        owner_continuation: None,
         revision: 1,
         gap_key: gap_key.clone(),
         effect_id: context.operation_id.clone(),
@@ -454,6 +474,7 @@ pub(super) async fn create(
     )
     .await?;
     let request = ApprovalRequest {
+        supervisor_write: None,
         org_policy: None,
         activity_outcome: None,
         activity_execution: None,
@@ -467,7 +488,7 @@ pub(super) async fn create(
         requester_type: "user".into(),
         requester_id: chat.user_id.clone(),
         requester_label: Some(label(&chat.agent_name)),
-        operation_summary: format!("{} {}", effect.method, label(effect.path)),
+        operation_summary: operation_label(effect.method, effect.path),
         action_description: Some("Review an execution permission for this task".into()),
         http_method: Some(effect.method.into()),
         resource: Some(label(effect.path)),
@@ -648,7 +669,7 @@ pub(crate) async fn decide(
     let row = state
         .db
         .collection::<ApprovalRequest>(REQUESTS)
-        .find_one(doc! {"_id":id,"user_id":actor,"execution_proposal.version":{"$in":[1,2,3,4]}})
+        .find_one(doc! {"_id":id,"user_id":actor,"execution_proposal.version":{"$in":[1,2,3,4,5]}})
         .await?
         .ok_or_else(missing)?;
     if row
@@ -840,7 +861,7 @@ pub(crate) fn legacy_refusal(row: &ApprovalRequest) -> AppResult<()> {
 }
 
 fn secret_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
+    let key = key.to_ascii_lowercase().replace('-', "_");
     [
         "password",
         "secret",
@@ -917,10 +938,10 @@ async fn review(
         serde_json::from_slice::<serde_json::Value>(effect.body).unwrap_or(serde_json::Value::Null);
     redact(&mut body);
     let inputs=serde_json::to_string(&json!({"query":query,"body":body,"headers":effect.headers.iter().map(|(k,v)|(k,if secret_key(k){"[redacted]"}else{v.as_str()})).collect::<std::collections::BTreeMap<_,_>>()})).map_err(encoding)?;
-    Ok(Review {
+    let mut displayed = Review {
         agent:label(&chat.agent_name),
         connection:format!("{} · {} · {}",label(&connection.slug),if effect.owner==chat.user_id{"your connection"}else{"shared connection"},effect.connection.chars().rev().take(8).collect::<String>().chars().rev().collect::<String>()),
-        operation:format!("{} {}",effect.method,label(effect.path)),
+        operation:operation_label(effect.method,effect.path),
         audience:if let Some(source)=chat.execution_task.as_ref().and_then(|t|t.channel_source.as_ref()) {format!("{} — the original channel chat/thread and everyone who can see it. Decide only in NyxID; the result will be replied there while its source is valid.",label(&source.audience_label))}else if chat.execution_group_id.is_some(){"This group and its current participants".into()}else{"This private conversation".into()},
         scope:if reusable{"Only this exact path, query and JSON input in this conversation"}else{"Only this retained operation, including its exact inputs and headers"}.into(),
         inputs:inputs.chars().filter(|c| !c.is_control()).take(12_000).collect(),
@@ -932,7 +953,17 @@ async fn review(
             _=>"A separate required review (not granted)",
         }).collect::<Vec<_>>().join("; "),
         reusable_unavailable:(!reusable).then(||"Only this operation is available: the headers, sensitive values or input size cannot be represented as a reusable permission".into()),
-    })
+    };
+    if chat
+        .execution_permission
+        .as_ref()
+        .is_some_and(|c| c.supervisor().is_some())
+    {
+        displayed.added_permission.push_str(
+            "; every write still requires its separate exact decision in the original owner chat",
+        );
+    }
+    Ok(displayed)
 }
 fn replay(row: &ApprovalRequest, input: &Decision) -> AppResult<ApprovalRequest> {
     let p = proposal(row)?;
@@ -960,29 +991,92 @@ pub(super) fn approve_url(frontend_url: &str) -> String {
 /// Pending/denied/uncertain effects remain task-bound. A completed receipt can
 /// authorize a new occurrence only in a different server-admitted turn after
 /// settlement delivered that receipt; retries of either original/resume turn join it.
+/// A released retained-owner turn also joins prior marked successes in the task,
+/// including later reviewed readbacks. Ordinary admitted follow-ups stay independent.
 pub(super) async fn existing_effect(
     db: &Database,
     context: &RequestContext,
     chat: &acks::ChatAuthority,
     connection: &str,
+    method: &str,
     digest: &str,
     frontend_url: &str,
 ) -> AppResult<()> {
     let task = chat.execution_task.as_ref().ok_or_else(refused)?;
-    if let Some(row)=db.collection::<ApprovalRequest>(REQUESTS).find_one(assistant_selector(doc!{
+    // Include the current turn's immutable release in the same bounded lookup.
+    // A first-time ordinary call still pays for one no-match proposal query.
+    let effect_filter = assistant_selector(doc! {
         "user_id":&chat.user_id,"execution_proposal.v1.key_id":&chat.api_key_id,
         "execution_proposal.v1.conversation_id":&chat.conversation_id,"execution_proposal.v1.task.task":bson::to_bson(&task.task).map_err(encoding)?,
         "execution_proposal.v1.task.epoch":task.epoch,"execution_proposal.v1.contract.binding.connection_id":connection,
         "execution_proposal.v1.prepared_digest":digest,
         "$or":[{"execution_proposal.v1.state":{"$ne":"completed"}},
+            {"execution_proposal.v1.owner_continuation.version":{"$in":[1,2]}},
             {"execution_proposal.v1.delivered_turn_id":null},
             {"execution_proposal.v1.source_turn_id":&chat.turn_id},
             {"execution_proposal.v1.resume_turn_id":&chat.turn_id}]
-    })).await? {
+    });
+    let filter = match continuation::release_filter(chat)? {
+        Some(release) => doc! {"$or":[effect_filter,release]},
+        None => effect_filter,
+    };
+    // A task has at most 32 assistant proposals, including the release anchor.
+    let rows: Vec<ApprovalRequest> = db
+        .collection::<ApprovalRequest>(REQUESTS)
+        .find(filter)
+        .limit(32)
+        .await?
+        .try_collect()
+        .await?;
+    let released = rows.iter().any(|row| {
+        proposal(row).is_ok_and(|p| {
+            row.status == "approved"
+                && p.state == "completed"
+                && p.task.actor_user_id == task.actor_user_id
+                && row.activity_outcome.as_deref() == Some("completed")
+                && p.owner_continuation.as_ref().is_some_and(|marker| {
+                    matches!(marker.version, 1 | 2)
+                        && !marker.blocked
+                        && marker.released_turn_id.is_some()
+                        && marker.released_turn_id == chat.turn_id
+                })
+        })
+    });
+    if released
+        && !matches!(method, "GET" | "HEAD" | "OPTIONS")
+        && effects::prior_dispatch(db, chat, connection, digest).await?
+    {
+        return Err(AppError::Conflict(
+            "This original task already dispatched this effect under its execution permission. It will not be repeated; review its outcome.".into(),
+        ));
+    }
+    let mut existing = None;
+    let mut marked = None;
+    for row in rows {
+        let p = proposal(&row)?;
+        if p.prepared_digest != digest || p.contract.binding.connection_id != connection {
+            continue;
+        }
+        if p.state != "completed"
+            || p.delivered_turn_id.is_none()
+            || Some(p.source_turn_id.as_str()) == chat.turn_id.as_deref()
+            || p.resume_turn_id == chat.turn_id
+        {
+            existing = Some(row);
+            break;
+        }
+        marked = Some(row);
+    }
+    if existing.is_none() && marked.is_some() && released {
+        existing = marked;
+    }
+    if let Some(row) = existing {
         if let Ok(p) = proposal(&row) {
             context.observation.replay(&row.status, &p.state);
         }
-        return Err(if row.status=="pending"&&row.expires_at>Utc::now(){AppError::ApprovalRequired{request_id:row.id}}else{
+        return Err(if row.status == "pending" && row.expires_at > Utc::now() {
+            AppError::ApprovalRequired { request_id: row.id }
+        } else {
             AppError::ApprovalFailed{request_id:row.id,reason:"This task already has a decision for this operation. Its retained effect will not be repeated; review its status.".into(),approve_url:approve_url(frontend_url)}
         });
     }

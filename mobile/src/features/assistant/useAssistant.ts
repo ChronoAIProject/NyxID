@@ -704,6 +704,8 @@ export function useAssistant(
       (item) => item.id === approvalId,
     );
     if (decisionLock.current) return;
+    if (row?.decision_destination === "originating_owner_chat")
+      throw localizedError("Review this request in your original private chat with NyxBot.");
     if (
       !id ||
       !mounted.current ||

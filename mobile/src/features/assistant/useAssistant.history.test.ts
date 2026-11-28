@@ -488,3 +488,18 @@ test("a live replacement of initial history exposes its own timeout and retry ac
   assert.equal(x.h.value().loading, false);
   assert.equal(x.h.value().error, undefined);
 });
+
+
+test("a parsed owner-chat approval cannot submit either decision from the mobile hook", async (context) => {
+  const x = setup();
+  context.after(x.h.unmount);
+  await x.h.settle();
+  const page = savedHistory();
+  const bound = {id: "owner-chat-review", service_name: "Ledger", summary: "Exact row write", expires_at: "2099-01-01", decision_destination: "originating_owner_chat"};
+  page.approvals = historySchema.parse({...page, approvals: [bound]}).approvals;
+  x.request(0).pending.resolve(page);
+  await x.h.settle();
+  assert.equal(x.h.value().history?.approvals[0]?.decision_destination, "originating_owner_chat");
+  for (const approved of [false,true]) await assert.rejects(x.h.value().decideApproval(bound.id, approved), /original private chat/);
+  assert.deepEqual(x.mutations, []);
+});

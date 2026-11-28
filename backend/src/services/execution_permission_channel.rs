@@ -238,6 +238,26 @@ pub(crate) async fn admit(
     row: &AssistantConversation,
     event: &str,
 ) -> AppResult<ChannelSource> {
+    capture(db, tx, row, event, true).await
+}
+
+/// Source provenance is shared; the supervisor path has no execution-permission enrollment.
+pub(crate) async fn admit_supervisor(
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &AssistantConversation,
+    event: &str,
+) -> AppResult<ChannelSource> {
+    capture(db, tx, row, event, false).await
+}
+
+async fn capture(
+    db: &Database,
+    tx: &mut ClientSession,
+    row: &AssistantConversation,
+    event: &str,
+    permission: bool,
+) -> AppResult<ChannelSource> {
     let r = rows(db, tx, &row.user_id, &row.id, event, true).await?;
     let agent = row.agent_id.as_deref().ok_or_else(refused)?;
     let expires = r
@@ -280,24 +300,31 @@ pub(crate) async fn admit(
                 r.settings.id.as_str(),
             ),
         )?,
-        audience_label: format!(
-            "{} · {} · {}",
-            r.channel.platform,
-            r.channel.bot_label,
-            r.thread
-                .title
-                .as_deref()
-                .or(r.settings.title.as_deref())
-                .unwrap_or("original chat/thread")
-        )
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(240)
-        .collect(),
+        audience_label: if permission {
+            format!(
+                "{} · {} · {}",
+                r.channel.platform,
+                r.channel.bot_label,
+                r.thread
+                    .title
+                    .as_deref()
+                    .or(r.settings.title.as_deref())
+                    .unwrap_or("original chat/thread")
+            )
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(240)
+            .collect()
+        } else {
+            String::new()
+        },
         policy_digest: policy_digest(&r)?,
         expires_at: expires,
     };
-    validate_inner(db, tx, &source, true, false).await?;
+    validate_inner(db, tx, &source, true, false, permission).await?;
+    if !permission {
+        return Ok(source);
+    }
     db.collection::<Document>("nyxbot_events")
         .update_one(
             doc! {"_id":event},
@@ -314,7 +341,16 @@ pub(crate) async fn validate(
     s: &ChannelSource,
     fence: bool,
 ) -> AppResult<SourceRows> {
-    validate_inner(db, tx, s, fence, true).await
+    validate_inner(db, tx, s, fence, true, true).await
+}
+
+pub(crate) async fn validate_supervisor(
+    db: &Database,
+    tx: &mut ClientSession,
+    s: &ChannelSource,
+    fence: bool,
+) -> AppResult<SourceRows> {
+    validate_inner(db, tx, s, fence, true, false).await
 }
 
 async fn validate_inner(
@@ -323,6 +359,7 @@ async fn validate_inner(
     s: &ChannelSource,
     fence: bool,
     conversation_exists: bool,
+    permission: bool,
 ) -> AppResult<SourceRows> {
     if s.version != 4
         || s.expires_at <= Utc::now()
@@ -331,7 +368,9 @@ async fn validate_inner(
     {
         return Err(refused());
     }
-    super::security_readiness_service::require_serving(db, READINESS).await?;
+    if permission {
+        super::security_readiness_service::require_serving(db, READINESS).await?;
+    }
     let r = rows(
         db,
         tx,
@@ -341,7 +380,8 @@ async fn validate_inner(
         fence,
     )
     .await?;
-    if (conversation_exists
+    if (permission
+        && conversation_exists
         && r.event
             .delivery
             .as_ref()
@@ -372,6 +412,15 @@ async fn validate_inner(
     .await?;
     if conversation_exists {
         let _:Document=load(db,tx,"assistant_conversations",doc!{"_id":&s.conversation_id,"user_id":&s.actor_user_id,"agent_id":&s.agent_id,"credential_api_key_id":&s.key_id,"agent_owner_id":null,"shared_agent_thread":{"$ne":true},"guest_turn":{"$ne":true}},fence).await?;
+    }
+    if !permission {
+        // A verified person in another private chat has no rights over this source.
+        if r.thread.kind.as_deref() != Some("private") || !r.thread.owner_chat
+            || r.settings.id != r.thread.id || r.event.delivery.as_ref().is_none_or(|d| d.origin.thread.is_some())
+            || db.collection::<Document>("assistant_agents").find_one(doc! {
+                "_id": &s.agent_id, "user_id": &s.actor_user_id, "kind": "nyxbot", "destroyed_at": null
+            }).session(&mut *tx).await?.is_none()
+        { return Err(refused()); }
     }
     let c = &r.channel;
     if fence {

@@ -25,6 +25,9 @@ impl std::fmt::Debug for ExecutionProposal {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Proposal {
+    /// Durable success-to-model handoff. Absent historical receipts never launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_continuation: Option<OwnerContinuation>,
     pub revision: i64,
     pub gap_key: String,
     pub effect_id: String,
@@ -76,6 +79,18 @@ pub struct Proposal {
     pub failure_code: Option<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OwnerContinuation {
+    pub version: u32,
+    /// Complete original decision wake. Absent historical proofs never release.
+    #[serde(default)]
+    pub batch: Option<Vec<String>>,
+    #[serde(default)]
+    pub blocked: bool,
+    /// None is proven unreleased. A release is irreversible, even after a crash.
+    pub released_turn_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Choice {
     pub id: String,
@@ -107,6 +122,10 @@ pub struct Review {
 /// Encrypted retention payload, not a public request type.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PreparedEffect {
+    /// Independent original-owner DM floor. Present only in a v5 envelope;
+    /// encrypted with the retained effect and never exposed in review DTOs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<Box<super::approval_request::SupervisorOrigin>>,
     #[serde(default)]
     pub generated_correlation: Option<String>,
     pub connection: String,

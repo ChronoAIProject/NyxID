@@ -1101,6 +1101,8 @@ pub struct CmaOperationResponse {
 }
 #[derive(Clone, Serialize)]
 pub struct ChatApprovalResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decision_destination: Option<crate::services::approval_service::DecisionDestination>,
     execution_proposal:
         Option<crate::services::execution_permission_dispatch::proposals::ProposalView>,
     status: String,
@@ -1117,6 +1119,7 @@ pub struct ChatApprovalResponse {
 impl From<engine::ChatApproval> for ChatApprovalResponse {
     fn from(row: engine::ChatApproval) -> Self {
         Self {
+            decision_destination: row.decision_destination,
             execution_proposal: row.execution_proposal,
             status: row.status,
             review_path: row.review_path,
@@ -2373,6 +2376,8 @@ impl crate::services::platform_manager_contract::NyxAgentEgress for HttpNyxAgent
         if row.user_id != self.auth.user_id.to_string() {
             return Err(AppError::AssistantTurnRequired);
         }
+        crate::services::supervisor_write::restore_resume_source(&self.state.db, row, &resume)
+            .await?;
         let key = self
             .state
             .db

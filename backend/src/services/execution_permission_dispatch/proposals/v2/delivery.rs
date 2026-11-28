@@ -123,6 +123,7 @@ pub(super) async fn claim_inner(
     }
     Ok(Some((
         Resume {
+            supervisor_assignment: false,
             connected_wait,
             version: 2,
             request_id: row.id.clone(),

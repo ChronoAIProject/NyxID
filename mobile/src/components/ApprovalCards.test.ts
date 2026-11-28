@@ -362,3 +362,15 @@ test("large-text history keeps its outcome inside the wide body below the summar
   const title = elements(body).find(n => n.props.children === request.title)!;
   assert.equal(title.props.numberOfLines, undefined);
 });
+
+
+test("owner-chat mobile queue keeps evidence without decisions or a web-review action", () => {
+  for (const [status, expires_at, live] of [["PENDING", "2099-01-01", true], ["PENDING", "2000-01-01", false], ["APPROVED", "2099-01-01", false], ["DENIED", "2099-01-01", false], ["EXPIRED", "2099-01-01", false]] as const) {
+    const tree = ChallengeCard({challenge: {...request, status, expires_at, decision_destination: "originating_owner_chat"},
+      onApprove: () => assert.fail("owner-chat approval from mobile"), onDeny: () => assert.fail("owner-chat denial from mobile")});
+    assert.equal(textContent(tree).includes("Review this request in your original private chat with NyxBot."), live);
+    assert.ok(textContent(tree).includes(request.summary));
+    assert.ok(elements(tree).every(e => e.props.accessibilityRole !== "link" && e.props.accessibilityLabel !== "Approve" && e.props.accessibilityLabel !== "Deny"));
+    assert.ok(elements(tree).every(e => (e.type as unknown as {name?: string}).name !== "ApprovalDecisionPair"));
+  }
+});

@@ -3887,6 +3887,28 @@ async fn start_chat_turn(
     } else {
         engine::question_key(text)
     };
+    if crate::services::supervisor_write::parse(text).is_some() {
+        if !exists
+            || !private
+            || guest
+            || had_media
+            || !sender.original_message
+            || !sender.owner_eligible
+            || sender.execution_kind() != crate::models::channel_thread::ThreadSenderKind::Human
+            || execution.is_some()
+            || row.org_specialist.is_some()
+            || row.bot_owner_id.is_some()
+        {
+            return Ok(Inbound::Reply(
+                "This ledger-write decision is unavailable in this chat.".into(),
+            ));
+        }
+        return Ok(Inbound::Reply(match crate::services::supervisor_write::decide(&state.db, &actor, &origin, sender.id, text).await {
+            Ok(Some(true)) => "Write approval saved for the original waiting request. The specialist must read the record before confirming its final value.".into(),
+            Ok(Some(false)) => "Write rejected. This decision authorizes no write.".into(),
+            _ => "This ledger-write decision is expired, already used, or unavailable. No new write is authorized.".into(),
+        }));
+    }
     // A chat app cannot show NyxID's confirmation cards: the verified owner
     // answers one in words (see `decide_reply` for which card it decides).
     // Nobody else can.
@@ -4057,6 +4079,7 @@ async fn start_chat_turn(
             && crate::services::execution_permission_enrollment::snapshot::channel_candidate(
                 &state.db, &actor,
             ),
+        supervisor_parent: None,
         execution_parent: None,
         channel_context: Some(source_context.clone()),
         capacity: None,
@@ -7100,6 +7123,67 @@ pub(super) async fn deliver_to_for_turn(
     let _ = deliver_from_source(state, row, origin, text, images, decision, source).await;
 }
 
+pub(crate) async fn deliver_supervisor_review(
+    state: &AppState,
+    request: &crate::models::approval_request::ApprovalRequest,
+    review: &crate::services::supervisor_write::PreparedReview,
+) -> AppResult<bool> {
+    use crate::services::supervisor_write;
+    supervisor_write::before_review(&state.db, request).await?;
+    let binding = request
+        .supervisor_write
+        .as_deref()
+        .ok_or(AppError::AssistantTurnRequired)?;
+    let text = supervisor_write::review_text(request, review);
+    match supervisor_review(state, &binding.source.channel, &request.id, &text).await {
+        Ok(()) => {}
+        Err(AppError::Conflict(reason)) if reason == "supervisor_review_not_sent" => {
+            supervisor_write::before_review(&state.db, request).await?;
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    }
+    supervisor_write::confirm_review(&state.db, request).await?;
+    Ok(true)
+}
+
+/// Complete reviews use a fixed authenticated event, never a latest-chat fallback.
+pub(crate) async fn supervisor_review(
+    state: &AppState,
+    source: &crate::models::execution_permission_channel::ChannelSource,
+    request_id: &str,
+    text: &str,
+) -> AppResult<()> {
+    let mut session = state.db.client().start_session().await?;
+    let rows = crate::services::execution_permission_channel::validate_supervisor(
+        &state.db,
+        &mut session,
+        source,
+        false,
+    )
+    .await?;
+    let origin = &rows
+        .event
+        .delivery
+        .as_ref()
+        .ok_or(AppError::AssistantTurnRequired)?
+        .origin;
+    let row = engine::get(&state.db, &source.actor_user_id, &source.conversation_id).await?;
+    let mut decision = supplemental::Decision::new(supplemental::Purpose::SupervisorReview);
+    decision.saved_result = true;
+    decision.supervisor_occurrence = Some(format!("supervisor-write-review:{request_id}"));
+    deliver_from_source(
+        state,
+        &row,
+        origin,
+        text,
+        None,
+        decision,
+        Some(crate::services::channel_supplemental_delivery::ResultSource::supervisor(source)),
+    )
+    .await
+}
+
 async fn deliver_from_source(
     state: &AppState,
     row: &crate::models::assistant_conversation::AssistantConversation,
@@ -7188,6 +7272,10 @@ async fn deliver_from_source(
                         }
                     }
                     Source::Missing => {
+                        decision.skip(supplemental::Reason::MissingAnchor);
+                        return Ok(());
+                    }
+                    Source::Unbound if decision.supervisor_occurrence.is_some() => {
                         decision.skip(supplemental::Reason::MissingAnchor);
                         return Ok(());
                     }
@@ -7309,6 +7397,33 @@ async fn deliver_from_source(
         })
         .await;
         decision.result(&result);
+        let result = if matches!(purpose, supplemental::Purpose::SupervisorReview)
+            && !decision.confirmed()
+        {
+            let previous = if let Some(occurrence) = decision.supervisor_occurrence.as_deref() {
+                crate::services::channel_text_delivery::load(&state.db, occurrence).await?
+            } else {
+                None
+            };
+            let possibly_sent = previous.is_some_and(|plan| {
+                plan.parts.iter().any(|part| {
+                    matches!(
+                        part.state,
+                        crate::models::channel_text_delivery::TextPartState::Sending
+                            | crate::models::channel_text_delivery::TextPartState::Sent
+                    )
+                })
+            });
+            if decision.not_sent() && !possibly_sent {
+                Err(AppError::Conflict("supervisor_review_not_sent".into()))
+            } else {
+                Err(AppError::Forbidden(
+                    "The complete ledger-write review was not confirmed delivered".into(),
+                ))
+            }
+        } else {
+            result
+        };
         if let Err(error) = &result {
             tracing::debug!(
                 error_code = error.error_code(),
@@ -8028,6 +8143,14 @@ pub use chats::{list_channel_chats, update_channel_chat};
 #[cfg(test)]
 #[path = "nyxbot_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(crate) fn watch_relay_callback_for_test(
+    channel_id: &str,
+    message_id: &str,
+) -> (impl Send, tokio::sync::oneshot::Receiver<()>) {
+    tests::watch_relay_callback(channel_id, message_id)
+}
 
 #[path = "nyxbot_images.rs"]
 pub(crate) mod images;

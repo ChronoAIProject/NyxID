@@ -313,6 +313,7 @@ pub mod staging_qr;
 mod startup_seed_service;
 #[cfg(test)]
 mod startup_seed_tests;
+pub(crate) mod supervisor_write;
 pub mod telegram_formatting;
 pub mod telegram_new_admin;
 pub mod telegram_new_api;

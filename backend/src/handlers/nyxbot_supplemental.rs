@@ -24,6 +24,7 @@ enum Outcome {
 
 pub struct Decision {
     pub(super) saved_result: bool,
+    pub(super) supervisor_occurrence: Option<String>,
     pub(crate) source: Option<sources::ResultSource>,
     pub(super) machine_control: Option<(String, i64)>,
     pub(super) native_route: Option<native_responses::SupplementalRoute>,
@@ -40,6 +41,7 @@ impl Decision {
     pub fn new(purpose: Purpose) -> Self {
         Self {
             saved_result: false,
+            supervisor_occurrence: None,
             source: None,
             machine_control: None,
             native_route: None,
@@ -89,6 +91,12 @@ impl Decision {
                 Ok(false)
             }
         }
+    }
+    pub(crate) fn not_sent(&self) -> bool {
+        matches!(self.egress, Egress::Skipped)
+    }
+    pub(crate) fn confirmed(&self) -> bool {
+        matches!(self.outcome, Outcome::Confirmed)
     }
     pub fn result(&mut self, result: &AppResult<()>) {
         if let Err(error) = result {
@@ -192,7 +200,7 @@ pub async fn relay(
     text: &str,
     decision: &mut Decision,
 ) -> AppResult<()> {
-    if !decision.purpose.result() {
+    if !decision.purpose.result() && decision.supervisor_occurrence.is_none() {
         if let Err(reason) = sources::reference_live(thread) {
             decision.skip(reason);
             return Ok(());
@@ -285,7 +293,25 @@ pub(super) async fn send_local(
     decision: &Decision,
 ) -> AppResult<()> {
     let send = direct_reply(state, channel, id, text, None);
-    if decision.saved_result {
+    if let Some(occurrence) = &decision.supervisor_occurrence {
+        sources::SAVED_RELAY_KEY
+            .scope(occurrence.clone(), send)
+            .await?;
+        let plan = crate::services::channel_text_delivery::load(&state.db, occurrence)
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Complete review delivery is unconfirmed".into()))?;
+        if plan.parts.is_empty()
+            || plan
+                .parts
+                .iter()
+                .any(|part| part.state != crate::models::channel_text_delivery::TextPartState::Sent)
+        {
+            return Err(AppError::Forbidden(
+                "Complete review delivery is unconfirmed".into(),
+            ));
+        }
+        Ok(())
+    } else if decision.saved_result {
         let turn = decision
             .turn
             .as_deref()
@@ -345,9 +371,24 @@ pub async fn native(
 ) -> AppResult<()> {
     decision.event = origin.native_event_id.clone();
     decision.anchor = Anchor::EventSource;
-    let outcome =
+    let outcome = if let Some(occurrence) = decision.supervisor_occurrence.clone() {
+        decision.require_side_message = true;
+        Some(
+            native_responses::send_occurrence(
+                state,
+                channel,
+                origin,
+                conversation,
+                text,
+                &occurrence,
+                decision,
+            )
+            .await?,
+        )
+    } else {
         native_responses::send_supplemental(state, channel, origin, conversation, text, decision)
-            .await?;
+            .await?
+    };
     if let Some(outcome) = outcome {
         decision.outcome(outcome);
     }

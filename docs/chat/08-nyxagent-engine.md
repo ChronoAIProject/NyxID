@@ -1751,6 +1751,7 @@ separate stable session instructions from volatile turn facts:
 | Current setup-handoff client capability | Input context |
 | Current upload listing, expired uploads and image fallback notices | Input context |
 | Event-turn payload and automatic continuation request | Input, as before |
+| Successful retained owner-operation continuation | Original human task input and quoted operation results; see [permission resume](../EXECUTION_PERMISSIONS.md#exact-resume-and-recovery) |
 | Bounded prior-history recap | Initial instructions after a reset only |
 
 First-party human clients advertise setup-card support on `POST /turns` through

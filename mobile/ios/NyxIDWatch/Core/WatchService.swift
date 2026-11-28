@@ -32,7 +32,10 @@ struct WatchService: Sendable {
   func decide(
     _ request: ApprovalRequest, approve: Bool, idempotencyKey: String
   ) async throws -> ApprovalDecisionResult {
-    guard request.executionProposal == nil else { throw WatchServiceError.reviewOnPhone }
+    if request.requiresOwnerChatReview { throw WatchServiceError.reviewInOwnerChat }
+    guard request.executionProposal == nil && request.decisionDestination == nil else {
+      throw WatchServiceError.reviewOnPhone
+    }
     var duration: Int?
     if approve, request.isGrant {
       let settings: NotificationSettings? = try? await api.get("/notifications/settings")
@@ -164,6 +167,7 @@ struct WatchService: Sendable {
 
 enum WatchServiceError: Error, Equatable {
   case reviewOnPhone
+  case reviewInOwnerChat
 }
 
 /// A server identifier used as one URL path segment.

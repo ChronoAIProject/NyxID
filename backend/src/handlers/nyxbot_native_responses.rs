@@ -1041,7 +1041,7 @@ fn supplemental_part_key(
             .machine_control
             .as_ref()
             .map(|request| side_message_key(&(decision.purpose, request), index)),
-        Purpose::PermissionResult => None,
+        Purpose::PermissionResult | Purpose::SupervisorReview => None,
     }
 }
 
@@ -1136,11 +1136,19 @@ async fn send_update_impl(
                 metadata: None,
             }]
         };
-        let saved_key = decision
-            .as_deref()
-            .filter(|decision| decision.saved_result)
-            .and_then(|decision| decision.turn.as_deref())
-            .map(|turn| supplemental_sources::saved_key(turn, origin));
+        let saved_key = decision.as_deref().and_then(|decision| {
+            decision.supervisor_occurrence.clone().or_else(|| {
+                decision
+                    .saved_result
+                    .then(|| {
+                        decision
+                            .turn
+                            .as_deref()
+                            .map(|turn| supplemental_sources::saved_key(turn, origin))
+                    })
+                    .flatten()
+            })
+        });
         if let Some(decision) = decision.as_deref_mut()
             && decision.needs_post_turn_claim()
             && !decision

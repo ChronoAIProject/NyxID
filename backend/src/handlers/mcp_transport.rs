@@ -549,7 +549,7 @@ async fn service_tool_content(
         String::new()
     };
     let status = response.status;
-    let is_error = !(200..300).contains(&status);
+    let is_error = !(200..300).contains(&status) || response.is_supervisor_write_unconfirmed();
     let guest_downstream_error = (400..600).contains(&status)
         && auth
             .chat
@@ -4617,13 +4617,14 @@ async fn authorize_mcp_operation(
         let state = state.clone();
         let auth = auth.clone();
         let operation = operation.clone();
-        prepared.defer_service_approval(move || {
+        prepared.defer_service_approval(move |effect, base| {
             Box::pin(async move {
-                wait_for_mcp_approval(&state, &auth, &target, &operation, &pending).await
+                wait_for_mcp_approval(&state, &auth, &target, &operation, &pending, effect, &base)
+                    .await
             })
         });
     } else {
-        wait_for_mcp_approval(state, auth, &target, operation, &pending)
+        wait_for_mcp_approval(state, auth, &target, operation, &pending, None, "")
             .await
             .map_err(|message| tool_result(request_id, &message, true))?;
     }
@@ -4636,7 +4637,9 @@ async fn wait_for_mcp_approval(
     target: &crate::services::mcp_approval::McpApprovalTarget,
     operation: &operation_descriptor::OperationDescriptor,
     pending: &approval_service::PendingApproval,
-) -> Result<(), String> {
+    effect: Option<crate::services::supervisor_write::Effect>,
+    base: &str,
+) -> Result<Option<crate::services::supervisor_write::Permit>, String> {
     let notify_user_ids = approval_service::approval_notification_recipients(
         &state.db,
         &auth.effective_approval_owner_user_id(),
@@ -4648,10 +4651,20 @@ async fn wait_for_mcp_approval(
         .first()
         .cloned()
         .ok_or_else(|| "Approval recipient list unexpectedly empty".to_owned())?;
-    let channel = notification_service::get_or_create_channel(&state.db, &timeout_recipient)
-        .await
-        .map_err(|e| format!("Approval channel lookup failed: {e}"))?;
-    let timeout_secs = channel.approval_timeout_secs;
+    let timeout_secs = if auth
+        .execution_permission
+        .as_ref()
+        .is_some_and(|c| c.supervisor().is_some())
+    {
+        notification_service::approval_timeout_secs(&state.db, &timeout_recipient)
+            .await
+            .map_err(|e| format!("Approval timeout lookup failed: {e}"))?
+    } else {
+        notification_service::get_or_create_channel(&state.db, &timeout_recipient)
+            .await
+            .map_err(|e| format!("Approval channel lookup failed: {e}"))?
+            .approval_timeout_secs
+    };
     let mut request_operation = approval_service::ApprovalRequestOperation::from_descriptor(
         operation,
         pending.resolution.grant_scope.clone(),
@@ -4675,7 +4688,34 @@ async fn wait_for_mcp_approval(
     )
     .await
     .map_err(|e| format!("Approval check failed: {e}"))?;
-    let approval_request = approval_service::create_approval_request(
+    let supervisor = if pending.resolution.from_org_policy {
+        None
+    } else {
+        crate::services::supervisor_write::prepare(
+            &state.db,
+            auth.chat.as_ref(),
+            target.connection_id.as_deref(),
+            &pending.primary_owner_user_id,
+            &pending.resolution.mode,
+            effect,
+            base,
+            &target.service_id,
+        )
+        .await
+        .map_err(|_| "The exact owner-chat write review is unavailable".to_owned())?
+    };
+    if auth
+        .execution_permission
+        .as_ref()
+        .is_some_and(|c| c.supervisor().is_some())
+        && supervisor.is_none()
+    {
+        return Err("The required original-chat write review is unavailable".into());
+    }
+    if let Some(review) = &supervisor {
+        request_operation.bind_supervisor_review(review.binding.clone(), timeout_secs);
+    }
+    let mut approval_request = approval_service::create_approval_request(
         &state.db,
         &state.config,
         &state.http_client,
@@ -4699,6 +4739,18 @@ async fn wait_for_mcp_approval(
         serde_json::json!({"error":"approval_creation_failed","code":"approval_creation_failed","status":"unavailable","message":"The approval request could not be created or verified. No waiting card is confirmed; check Approvals before retrying.","review_url":crate::services::assistant_links::AssistantPage::Approvals.url(&state.config.frontend_url)}).to_string()
     })?;
 
+    if let Some(review) = &supervisor
+        && !crate::handlers::nyxbot::deliver_supervisor_review(state, &approval_request, review)
+            .await
+            .map_err(|_| {
+                "The complete owner-chat write review was not delivered; no write is authorized"
+                    .to_owned()
+            })?
+    {
+        approval_request = approval_service::fallback_supervisor_review(state, &approval_request)
+            .await
+            .map_err(|_| "Review the pending request in Approvals".to_owned())?;
+    }
     if let Some(chat) = auth.chat.as_ref() {
         crate::services::assistant_activity_decision::approval(
             &state.db,
@@ -4735,7 +4787,9 @@ async fn wait_for_mcp_approval(
             .await
             .map_err(|_| "The originating invocation turn was stopped or replaced".to_owned())?;
     }
-    Ok(())
+    Ok(crate::services::supervisor_write::Permit::from_request(
+        &approval_request,
+    ))
 }
 
 // ---------------------------------------------------------------------------

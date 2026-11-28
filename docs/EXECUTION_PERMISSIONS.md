@@ -3,8 +3,10 @@
 **Status: default-off contract, dispatch, and assistant permission authoring.**
 The #2195 Part A flow below adds human permission updates and exact-effect resume
 for enrolled private owner, shared-recipient and collaboration chat turns using
-MCP or HTTP proxy. Other callers retain #2194 Gap → legacy prompts. #2196 legacy
-mapping is not included. Unmarked traffic gains no preparation or database reads.
+MCP or HTTP proxy. Other callers retain #2194 Gap → legacy prompts. The
+[#2196 legacy mapping](#legacy-mapping-and-admission-diagnostics-2196a) preserves
+existing authority without backfilling consent. Unmarked traffic gains no
+preparation or database reads.
 
 Flag enables and clear-that-enables require the same durable activation and live
 observed support as proposal creation/decisions, version selection, channel-source
@@ -50,6 +52,7 @@ control. Nothing in this release changes those gates.
 | --- | --- |
 | Access-mode risk prompts (Auto/Ask) | Yes, within the permission's complete scope. |
 | Personal service approval layer (Grant/PerRequest) | Yes, only for the acting person's own connection. |
+| Originating-owner DM decision for an eligible delegated personal Bitable write | **No.** This independent exact decision remains required for an eligible marked assigned write under required personal Grant or PerRequest policy, including implicit Writes only; unmarked work participates under PerRequest. |
 | Shared-agent connection consent | Yes, only that exact actor in the shared lane, their connection and bound agent behavior. |
 | Webhook/automation confirmation (untrusted input) | **No.** |
 | `machine_confirm` | **No.** |
@@ -316,7 +319,9 @@ agent behavior, authority and endpoint snapshots, prepared inputs and eligible
 floors. A keyed digest deduplicates matching pending gaps. Denial and uncertain
 outcomes stay task-bound. Duplicate calls from the original or resume turn return
 the same receipt; after its delivery, a different server-admitted turn can create
-a new occurrence under reusable permission. Identical calls within one server
+a new occurrence under reusable permission, except for the marked original-task
+owner continuations described in [Exact resume and recovery](#exact-resume-and-recovery).
+Identical calls within one server
 turn are conservatively one occurrence; a model request ID cannot override this.
 A task has at most 32 proposal rows. NyxID-generated proxy correlation IDs are excluded from gap/scope identity,
 while retention and send-time checks preserve their exact outbound bytes. Only
@@ -341,6 +346,8 @@ requires that human and accepts only:
 ```
 
 The client cannot author a connection, audience, scope, validity payload or task.
+The review displays the HTTP method and path with its leading slash; relative
+proxy storage does not change the displayed resource or the retained effect.
 Operation is the default. The immutable choices are this operation, this task,
 one displayed hour, and persistent until revoked/binding changes. These existing
 choices remain bound to the current conversation, including Persistent. Reusable
@@ -410,6 +417,11 @@ scope, audience, source and recent dispatch, and uses existing revocation. It
 never displays the persistent TTL sentinel as a permission expiry. Mobile and
 Telegram remain link-only, with generic notifications through existing configured
 channels and no input preview or legacy Allow/Deny action.
+Dashboard Approval History keeps each execution proposal's server-issued Review
+destination available for pending and terminal rows on desktop and mobile.
+Original-chat decision cues and expiry follow the
+[personal supervisor review contract](chat/09-nyxbot-orchestrator.md#personal-supervisor-ledger-write-review-2605).
+Ordinary legacy requests retain their Approve/Reject actions.
 
 ### Exact resume and recovery
 
@@ -429,6 +441,122 @@ pause the retained effect; their decisions retain their existing semantics.
 Cancellation, departure, source deletion and sharing narrowing fence queued work
 and purge private payloads. Operation permissions receive terminal retention in
 the same terminal update; reusable grants remain subject to their live binding.
+
+For personal owner message-root tasks in private conversations (v1/v3) and
+verified-owner channels (v4), a durably recorded successful HTTP effect with an
+unreleased owner continuation continues through the normal model runner on the same admitted task. The
+runner loads the original human request from that exact live root and supplies
+bounded, redacted operation receipts as quoted, untrusted tool data. It preserves
+the conversation key, selected model, billing lane, task/source audience and
+ordinary model and tool egress checks. The model continues the remaining task;
+the retained effect keeps its original operation identity. A server-owned retained
+owner turn joins earlier marked successes in that task, including during a later
+independent readback review. The current turn's durable continuation release
+establishes this context; a client-supplied receipt or an ordinary follow-up event
+does not. Ordinary distinct admitted follow-ups may use reusable authority for a
+new occurrence after receipt delivery.
+
+Covered writes also commit payload-free dispatch evidence on the existing original
+owner-message root at the shared final HTTP/MCP/specialized send transaction. Each
+entry binds task epoch, key, conversation, connection, prepared effect digest,
+operation ID, grant ID and sending turn. The root retains at most 128 write
+dispatches; exceeding the bound refuses before provider send. Only a fresh root
+admitted under v2 fleet readiness is marked as having complete evidence; an older
+root is never backfilled. An unmarked historical root cannot acquire a new
+continuation batch proof or release a model handoff. A released retained-owner turn consults this evidence
+even when the prior covered write created no approval row. A repeated digest
+returns a truthful conflict without an invented request/card handle. The final
+root update repeats the digest fence transactionally, so concurrent different
+operation IDs cannot both send the same effect. Released turns with incomplete
+historical root evidence refuse writes. Read-only operations keep their ordinary
+permission checks. A later independently admitted ordinary event and a genuinely
+new human root remain distinct occurrences under live reusable authority.
+
+Original/resume turn retries, pending and uncertain outcomes retain their
+existing deduplication. A separately gated readback
+may require its own review before continuing. A new human request has its own root
+and may execute the same reviewed effect.
+Redaction uses the runner's existing verified conversation credential; retained
+resume does not decrypt another copy of it. Normal egress still requires the
+live conversation-key relationship; reusing the verified bytes does not bypass
+revocation of that relationship or the key.
+
+Every distinct request in a batched wake must have a successful, available receipt
+and a version-2 pending `owner_continuation` marker. Before any provider dispatch,
+a worker-fenced transaction binds the sorted, distinct IDs of the complete
+original decision wake to every eligible actionable member, after continuation
+readiness is resolved. A wake containing an ordinary event binds blocked markers.
+Provider completion preserves this immutable batch proof and never replaces it
+with a smaller recovery wake. A marker alone is not success evidence: release
+also requires each committed successful result. Recovery must present the same
+complete batch, and every receipt must independently remain eligible. Stored
+sibling IDs establish evidence only: they never add executable decisions to an
+admitted wake. A partial recovery, mixed success/denial/waiting batch or a success
+co-admitted with an ordinary event cannot become a success-only model handoff,
+including a crash after the first success commit and before withholding the batch.
+After normal model/context preparation, an atomic batch release fences the live
+worker, task, source, actor and key before the request can be sealed for model
+I/O. Release uses MongoDB time for turn/key expiry. An explicit turn lease must
+be strictly in the future; null or missing leases use `started_at` plus the
+engine's active-turn TTL, with the same strict expiry. An explicit expired lease
+never falls back to a fresh start date. Stop and exact worker/epoch/claim fences
+remain required. The same transaction writes the exact live
+`assistant_agent_credentials` relationship for the original owner, conversation
+and key, serializing its revocation or rotation without decrypting redundant
+ciphertext. The original verified credential/key identity is required on every
+model attempt. A retained continuation cannot mint, adopt or use a successor on
+model credential rejection; unrelated ordinary recovery keeps its existing rules.
+Task snapshot predicates compare typed fields independently of
+BSON key order; absent optional parent/source fields match their null form,
+while required identities remain exact. Only one release wins. A crash before release leaves the completed effect
+recoverable without another provider send. Preparation failure leaves it pending;
+ordinary failed-turn settlement does not mark that receipt delivered or finish
+the root. Existing bounded maintenance can wake that exact unfinished task again.
+Release is irreversible: an ambiguous launch or lost model/settlement response
+cannot start another model task. Existing recovery of the same sealed model
+request retains its original lookup, idempotency and egress fences.
+
+Denied, expired, waiting, cancelled, failed HTTP, uncertain and operational-error
+outcomes do not establish continuation eligibility. HTTP 202 records
+`activity_outcome=pending`, retained state `unknown` and failure code
+`provider_completion_pending`, even with a readable response body. Its private
+receipt, immediate reply and recovered reply use the literal notice: “The provider
+accepted the operation (HTTP 202); completion is pending and unverified. It will
+not be sent again.” It cannot launch completion-dependent owner model work or
+readback, and recovery preserves the classification without resending the effect.
+The separately bound assigned-specialist observational read follows the
+[personal supervisor contract](chat/09-nyxbot-orchestrator.md#personal-supervisor-ledger-write-review-2605)
+and cannot establish completion or attribute observed state to that attempt. Other
+readable successful synchronous HTTP responses retain their normal success path.
+A mixed terminal wake durably blocks its still-pending success markers before
+publishing its receipt; the original batch proof also protects the earlier crash
+window. Historical receipts without a complete version-2 marker, unavailable
+results and released receipts remain receipt-only. Shared/group/org/platform/delegated/voice/external sources retain
+their existing receipt behavior. Release metadata contains only version, original
+decision request IDs, blocked state and the releasing turn ID; the encrypted
+receipt remains the single result copy.
+Private denied, expired, historical and released receipts remain readable after
+their task deadline. Owner-message source lookup applies only to a possible new
+dispatch or an undelivered eligible continuation marker, never to those terminal
+status paths. An expired task cannot dispatch or release a continuation.
+Encrypted-result retention removes the ciphertext and its context marker together;
+an inconsistent record fails closed. Operational failures report the failing
+`permission_resume` or `permission_release` stage without provider data; live
+authority refusals at these boundaries settle as cancellation.
+
+Marker authoring and release require the optional fleet capability
+`permissions:execution-owner-continuation-v2`. It requires observed support from
+all serving readers, admission, dispatch, settlement and recovery workers; v1
+support does not satisfy it. Fresh effects retain receipt-only behavior until it
+is ready; pending marked continuations refuse on readiness loss. Version-1
+pending markers remain receipt-only on upgraded workers, and v2 markers cannot
+release through v1 readers. It adds no cohort prerequisite, feature flag,
+collection, index or backfill. Before binary rollback, disable effective execution
+cohorts and drain/cancel pending owner continuations and marked original tasks on
+upgraded workers. Older binaries must not rejoin an activated fleet or continue
+those tasks: they cannot preserve batch proofs, complete dispatch evidence or the
+pending-release lifecycle. Keep released/uncertain claims intact and recover
+unfinished work through authenticated web history.
 
 Group receipt publication includes only HTTP outcome, never raw provider account
 data. The original requester can read the bounded encrypted result on their
@@ -880,6 +1008,84 @@ proposals. Reviews explicitly disclose the original channel audience; choices
 remain exact-conversation operation/task/window/persistent permissions. No
 across-private-conversations choice is offered. Review lasts at most ten minutes
 and is capped by the original task and reply-source deadline.
+
+The separate [personal supervisor ledger-write review](chat/09-nyxbot-orchestrator.md#personal-supervisor-ledger-write-review-2605)
+uses `yes write-<code>` for one eligible delegated personal Bitable write under
+the underlying personal policy: PerRequest for unmarked work, and required Grant
+or PerRequest for marked assigned work, including implicit Writes only. It applies
+to enrolled work with exact execution coverage and preserves the underlying
+policy's authority snapshot before any approval or legacy-return decision. Coverage can
+satisfy its declared personal-service layer; it never supplies this independent
+DM decision. A gap retains its required web decision and all other floors. Its
+typed retained resume must obtain a fresh exact decision in the original DM
+before sending. A DM decision never decides a proposal or creates reusable
+execution permission. Marked work retains enrollment/readiness, task, claim,
+expiry and final authority checks throughout; no failed delivery downgrades it
+to an ordinary approval or unmarked execution.
+For an assigned single-record Bitable update, the operation family selects this
+floor independently of review serialization. An unrenderable effect or ambiguous
+header/provenance binding refuses admission before coverage or proposal creation;
+it does not remove the DM requirement.
+The marked connected wait reads an existing timeout or its implicit default
+without creating notification settings after the permission's authority snapshot.
+Retained readback requires a typed `permission_decided` event with its matching
+durable assignment and task. The exact request's provider rejection remains
+explicit in readback, coalesced and terminal notices; observing a matching row
+does not convert a rejected attempt into a successful write.
+For this bound retained path, `completed` records a finished HTTP exchange.
+Success also requires a completed response with a unique JSON `code: 0` and the
+exact selected record receipt. HTTP 202 is provisional. A documented definite
+Feishu/Lark rejection records `activity_outcome: failed` with
+`provider_http_rejected` or `provider_application_rejected`, including HTTP 200
+with a nonzero application code. The classifier uses the same documented
+non-application code distinction as `lark_base_writes::classify`. Transient or
+unrecognized codes, 5xx, malformed or mismatched receipts and transport ambiguity
+remain unconfirmed; none proves rejection or successful application. Provider
+prose never supplies the result notice. Recovery preserves the exact receipt's
+failed activity and rejection attribution, including receipts predating the
+explicit rejection code. Independent reads prove observed state only.
+
+Retained effects with this independent requirement use envelope version 5 and
+the existing `v4` storage arm, record binding and historical AAD. Their encrypted
+payload also retains the admitted original assignment, specialist/key/task and
+effect occurrence; no code, raw review or second copy of row values is stored.
+Selection, deduplication, decision, resume, cancellation, purge and uncertainty
+use the same occurrence/state machine as v4. The shared credential-bearing resume
+API returns one typed outcome: terminal notices, a durable original-owner
+continuation, or a v5 assigned-specialist readback. The last variant requires one
+bound `permission_decided` event, the exact retained assignment/source and
+`report_to`, a fresh claimed dispatch and the specialist's live original task.
+The task-root proof stays bound to its stored task, and the assignment proof to
+its retained original assignment and restored specialist turn. Delegation from a
+later admitted Event can refer to a different authenticated message in the same
+owner chat. Cross-proof checks bind owner, NyxBot agent/conversation/key, channel,
+thread/settings, audience and policy revisions; event IDs, original/assigning
+turns, event-specific policy digests and source expiries remain independent.
+Both proofs and their deadlines are checked again after the provider receipt is
+durable, including the original task and assignment context reset. Display-only
+audience labels never supply authority. It creates no owner-continuation release
+marker and grants no owner or supervisor credentials;
+model/tool execution retains the specialist's own current grants. A newly uncertain
+attempt permits only a qualified observation; terminal or replayed receipts cannot
+start another readback. A terminal failed-HTTP receipt retains that failure
+attribution and the unconfirmed final-state qualification. Coalesced outcomes
+retain every request's status and never select a readback target. Readers that
+do not understand version 5 refuse it. A current reader refuses an older retained delegated write
+when the required original assignment proof is absent; missing metadata never
+implies consent. The original task/source deadlines cap the DM review. A
+positively unsent or uncertain marked review keeps its bound requirement visible
+and cannot be approved through the ordinary web fallback.
+
+Deployment requires every API dispatcher and resume worker serving this path
+to run the independent-floor implementation before it is used in an enrolled
+cohort. The existing `permissions:execution-dispatch-v1`,
+`permissions:execution-authoring-v1`, `permissions:execution-authoring-channel-v1`
+and execution-enrollment readiness checks remain required; those older
+capabilities alone do not attest this additional behavior on an older replica.
+A versioned retained row protects its own resume, not a direct covered call
+handled by an older API replica. Drain eligible calls and retained work, and
+cancel or finish their original task roots, before rollback to such a replica;
+enrollment is never disabled to bypass this floor.
 
 Post-review results have a separate `execution_permission_deliveries` occurrence,
 committed with the ordinary stored assistant message. The outbox retains only

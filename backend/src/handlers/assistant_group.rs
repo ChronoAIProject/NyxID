@@ -484,6 +484,7 @@ async fn run_member_with_work(
         automation_work: work.clone(),
         automation_parent: None,
         execution_enrollment: false,
+        supervisor_parent: None,
         execution_parent: None,
         channel_context: None,
         capacity: None,

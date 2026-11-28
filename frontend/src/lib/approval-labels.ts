@@ -1,5 +1,11 @@
 import type { ApprovalRequestItem } from "@/types/approvals";
 
+/** A bound review's deadline never creates another decision surface. */
+export function approvalStatus(request: ApprovalRequestItem, now = Date.now()): ApprovalRequestItem["status"] {
+  if (request.decision_destination === "originating_owner_chat" && request.status === "pending" && Date.parse(request.expires_at) <= now) return "expired";
+  return request.status;
+}
+
 export function isToolApproval(request: ApprovalRequestItem): boolean {
   return request.tool_name != null;
 }

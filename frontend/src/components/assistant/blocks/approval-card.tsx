@@ -227,6 +227,7 @@ function LegacyApprovalCard({
       Date.parse(block.expires_at) <= clickedAt ||
       block.decision !== null ||
       block.decision_submission != null ||
+      block.decision_destination === "originating_owner_chat" ||
       disabled ||
       pendingAction !== null ||
       clickedAt - lastClick.current < CLICK_THROTTLE_MS
@@ -249,12 +250,21 @@ function LegacyApprovalCard({
 
   if (block.decision !== null) {
     return <div className="space-y-2">
-      <DecidedCard block={block} onRequestAgain={onRequestAgain} disabled={disabled} />
+      <DecidedCard block={block} onRequestAgain={block.decision_destination === "originating_owner_chat" ? undefined : onRequestAgain} disabled={disabled} />
       {reviewPath ? <a className="type-row-title underline" href={reviewPath}>{translateUi("Open Approvals")}</a> : null}
     </div>;
   }
   if (block.decision_submission) {
     return <SubmittedCard block={block} />;
+  }
+  if (block.decision_destination === "originating_owner_chat") {
+    if (deadline <= now) return <DecidedCard block={{ ...block, decision: "expired" }} />;
+    return <section lang={language} className={pinned ? "p-4" : `${STATUS_CARD_MAX_W} rounded-xl border border-border p-4`}>
+      <h3 className="type-card-title">{translateUi("Pending")}</h3>
+      <p className="mt-2 type-body text-muted-foreground">{approvalBody(block, translateUi)}</p>
+      <ScopeRow block={block} />
+      <p className="mt-3 type-secondary text-muted-foreground">{translateUi(Number.isFinite(deadline) ? "Review this request in your original private chat with NyxBot." : "Waiting for the server")}</p>
+    </section>;
   }
 
   const remainingMs = new Date(block.expires_at).getTime() - now;
@@ -339,7 +349,7 @@ function LegacyApprovalCard({
 }
 
 export function ApprovalCard(props: Parameters<typeof LegacyApprovalCard>[0] & { readonly onExecutionChange?: () => void }) {
-  return props.block.execution_proposal
+  return props.block.execution_proposal && props.block.decision_destination !== "originating_owner_chat"
     ? <ExecutionPermissionCard requestId={props.block.approval_request_id} proposal={props.block.execution_proposal} disabled={props.disabled} onStateChange={props.onExecutionChange} />
     : <LegacyApprovalCard {...props} />;
 }

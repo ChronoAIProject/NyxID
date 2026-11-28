@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApprovalRequestItem } from "@/types/approvals";
@@ -126,6 +126,48 @@ beforeEach(() => {
 });
 
 describe("ApprovalHistoryPage", () => {
+  it.each(["pending", "approved", "rejected", "expired"] as const)(
+    "opens %s execution proposals at their supported review destination on desktop and mobile",
+    (status) => {
+      const reviewPath = "/assistant?c=original&card=request-execution";
+      fixtures.requests = [makeRequest({
+        id: "request-execution",
+        status,
+        execution_proposal: {
+          version: 4, supported: true, revision: 1, state: status === "pending" ? "pending" : status === "approved" ? "completed" : "cancelled",
+          can_decide: status === "pending", review_path: reviewPath, review: null,
+          choices: [], grant_id: null, failure_code: null,
+        },
+      })];
+      fixtures.total = 1;
+      render(<ApprovalHistoryPage />);
+      const links = screen.getAllByRole("link", { name: "Review" });
+      expect(links).toHaveLength(2);
+      for (const link of links) expect(link).toHaveAttribute("href", reviewPath);
+      expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+      expect(mockDecideMutateAsync).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps legacy decisions available alongside execution review links", async () => {
+    fixtures.requests = [makeRequest({
+      id: "execution", execution_proposal: {
+        version: 4, supported: true, revision: 1, state: "pending", can_decide: true,
+        review_path: "/assistant/approvals", review: null, choices: [], grant_id: null, failure_code: null,
+      },
+    }), makeRequest({ id: "legacy", service_name: "Legacy service" })];
+    fixtures.total = 2;
+    render(<ApprovalHistoryPage />);
+    expect(screen.getAllByRole("link", { name: "Review" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "Reject" })).toHaveLength(2);
+    await userEvent.click(screen.getAllByRole("button", { name: "Approve" })[0]!);
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Approve" }));
+    expect(mockDecideMutateAsync).toHaveBeenCalledWith({ requestId: "legacy", approved: true });
+  });
+
   it("can discover a new request after an empty page and refresh its expiry", async () => {
     const view = render(<ApprovalHistoryPage />);
     expect(screen.getByText("No Approval Requests")).toBeInTheDocument();
@@ -488,5 +530,148 @@ describe("ApprovalHistoryPage", () => {
     await waitFor(() => {
       expect(mockUseApprovalRequests).toHaveBeenLastCalledWith(2, 20, undefined);
     });
+  });
+});
+
+
+describe("owner-chat decision destination", () => {
+  it("expires mounted owner-chat rows at each deadline in compact and table layouts without a web action", async () => {
+    vi.useFakeTimers();
+    const start = Date.parse("2026-11-28T00:00:00Z");
+    vi.setSystemTime(start);
+    try {
+      const reviewPath = "/assistant?c=task&card=execution";
+      fixtures.requests = [
+        makeRequest({ id: "first", service_name: "First ledger", decision_destination: "originating_owner_chat", expires_at: new Date(start + 1_000).toISOString() }),
+        makeRequest({ id: "second", service_name: "Second ledger", decision_destination: "originating_owner_chat", expires_at: new Date(start + 2_000).toISOString() }),
+        makeRequest({ id: "ordinary", service_name: "Ordinary write" }),
+        makeRequest({ id: "execution", service_name: "Execution review", execution_proposal: {
+          version: 5, supported: true, revision: 1, state: "pending", can_decide: true,
+          review_path: reviewPath, review: null, choices: [], grant_id: null, failure_code: null,
+        } }),
+      ];
+      fixtures.total = fixtures.requests.length;
+      const view = render(<ApprovalHistoryPage />);
+      const check = (name: string, expired: boolean) => {
+        for (const [layout, selector] of [[view.container.querySelector<HTMLElement>(".md\\:hidden")!, "div.relative"], [screen.getByRole("table"), "tr"]] as const) {
+          const row = within(layout).getByText(name).closest(selector) as HTMLElement;
+          expect(within(row).getByText(expired ? "Expired" : "Pending")).toBeInTheDocument();
+          expect(within(row).queryByText("Review this request in your original private chat with NyxBot.") !== null).toBe(!expired);
+          expect(within(row).queryByRole("button")).not.toBeInTheDocument();
+          expect(within(row).queryByRole("link")).not.toBeInTheDocument();
+        }
+      };
+      check("First ledger", false);
+      check("Second ledger", false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      check("First ledger", true);
+      check("Second ledger", false);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+      check("First ledger", true);
+      check("Second ledger", true);
+      expect(screen.getAllByRole("link", { name: "Review" })).toHaveLength(2);
+      for (const link of screen.getAllByRole("link", { name: "Review" })) expect(link).toHaveAttribute("href", reviewPath);
+      expect(screen.getAllByRole("button", { name: "Approve" })).toHaveLength(2);
+      expect(screen.getAllByRole("button", { name: "Reject" })).toHaveLength(2);
+      expect(mockDecideMutateAsync).not.toHaveBeenCalled();
+      expect(mockRefetch).not.toHaveBeenCalled();
+      view.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["pending", "2099-01-01T00:00:00Z", "Pending", true],
+    ["pending", "2000-01-01T00:00:00Z", "Expired", false],
+    ["expired", "2099-01-01T00:00:00Z", "Expired", false],
+    ["approved", "2000-01-01T00:00:00Z", "Approved", false],
+    ["rejected", "2000-01-01T00:00:00Z", "Rejected", false],
+    ["pending", "invalid-server-deadline", "Pending", false],
+  ] as const)("keeps %s history factual in both layouts with no owner-chat decisions", (status, expires_at, label, live) => {
+    const reviewPath = "/assistant?c=execution-origin&card=proposal";
+    fixtures.requests = [
+      makeRequest({id: "dm", service_name: "Owner ledger", status, expires_at, decision_destination: "originating_owner_chat"}),
+      makeRequest({id: "ordinary", service_name: "Ordinary write"}),
+      makeRequest({id: "proposal", service_name: "Execution scope", status: "approved", execution_proposal: {
+        version: 5, supported: true, revision: 1, state: "completed", can_decide: false,
+        review_path: reviewPath, review: null, choices: [], grant_id: null, failure_code: null,
+      }}),
+    ];
+    fixtures.total = 3;
+    const view = render(<ApprovalHistoryPage />);
+    const mobile = view.container.querySelector(".md\\:hidden")!;
+    for (const [layout, selector] of [[mobile, "div.relative"], [screen.getByRole("table"), "tr"]] as const) {
+      const row = within(layout as HTMLElement).getByText("Owner ledger").closest(selector) as HTMLElement;
+      expect(within(row).getByText(label)).toBeInTheDocument();
+      expect(within(row).queryByRole("button")).not.toBeInTheDocument();
+      expect(within(row).queryByRole("link")).not.toBeInTheDocument();
+      expect(within(row).queryByText("Review this request in your original private chat with NyxBot.") !== null).toBe(live);
+      expect(within(row).queryByText("Waiting for the server") !== null).toBe(!Number.isFinite(Date.parse(expires_at)));
+      const ordinary = within(layout as HTMLElement).getByText("Ordinary write").closest(selector) as HTMLElement;
+      expect(within(ordinary).getByRole("button", {name: "Approve"})).toBeInTheDocument();
+      expect(within(ordinary).getByRole("button", {name: "Reject"})).toBeInTheDocument();
+      const proposal = within(layout as HTMLElement).getByText("Execution scope").closest(selector) as HTMLElement;
+      expect(within(proposal).queryByText("Review this request in your original private chat with NyxBot.")).not.toBeInTheDocument();
+      expect(within(proposal).getByRole("link", { name: "Review" })).toHaveAttribute("href", reviewPath);
+      expect(within(proposal).queryByRole("button")).not.toBeInTheDocument();
+    }
+    expect(mockDecideMutateAsync).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("integrated history action destinations", () => {
+  it.each([
+    ["mobile", "Approve", true],
+    ["mobile", "Reject", false],
+    ["desktop", "Approve", true],
+    ["desktop", "Reject", false],
+  ] as const)("routes only the legacy %s %s action to its decision endpoint", async (layout, action, approved) => {
+    const user = userEvent.setup();
+    const reviewPath = "/assistant?c=original-task&card=exact-execution";
+    fixtures.requests = [
+      makeRequest({ id: "bound", service_name: "Original-chat request", expires_at: "2099-01-01T00:00:00Z", decision_destination: "originating_owner_chat" }),
+      makeRequest({ id: "exact-execution", service_name: "Execution review", status: "expired", execution_proposal: {
+        version: 5, supported: true, revision: 1, state: "cancelled", can_decide: false,
+        review_path: reviewPath, review: null, choices: [], grant_id: null, failure_code: null,
+      } }),
+      makeRequest({ id: "ordinary", service_name: "Legacy decision" }),
+    ];
+    fixtures.total = fixtures.requests.length;
+    const view = render(<ApprovalHistoryPage />);
+    const surface = layout === "mobile"
+      ? view.container.querySelector<HTMLElement>(".md\\:hidden")!
+      : screen.getByRole("table");
+    const selector = layout === "mobile" ? "div.relative" : "tr";
+    const bound = within(surface).getByText("Original-chat request").closest(selector) as HTMLElement;
+    expect(within(bound).getByText("Review this request in your original private chat with NyxBot.")).toBeInTheDocument();
+    expect(within(bound).queryByRole("button")).not.toBeInTheDocument();
+    expect(within(bound).queryByRole("link")).not.toBeInTheDocument();
+    const execution = within(surface).getByText("Execution review").closest(selector) as HTMLElement;
+    expect(within(execution).getByRole("link", { name: "Review" })).toHaveAttribute("href", reviewPath);
+    expect(within(execution).queryByRole("button")).not.toBeInTheDocument();
+    expect(mockDecideMutateAsync).not.toHaveBeenCalled();
+    const ordinary = within(surface).getByText("Legacy decision").closest(selector) as HTMLElement;
+    await user.click(within(ordinary).getByRole("button", { name: action }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: action }));
+    await waitFor(() => expect(mockDecideMutateAsync).toHaveBeenCalledExactlyOnceWith({ requestId: "ordinary", approved }));
+  });
+
+  it.each(["pending", "approved", "rejected", "expired"] as const)("keeps the %s original-chat restriction authoritative even with execution metadata", (status) => {
+    fixtures.requests = [makeRequest({
+      status, decision_destination: "originating_owner_chat", expires_at: "2099-01-01T00:00:00Z",
+      execution_proposal: { version: 5, supported: true, revision: 1, state: "pending", can_decide: true,
+        review_path: "/assistant?c=original&card=restricted", review: null, choices: [], grant_id: null, failure_code: null },
+    })];
+    fixtures.total = 1;
+    render(<ApprovalHistoryPage />);
+    expect(screen.queryAllByText("Review this request in your original private chat with NyxBot.")).toHaveLength(status === "pending" ? 2 : 0);
+    expect(screen.queryByRole("columnheader", { name: "Actions" }) !== null).toBe(status === "pending");
+    expect(screen.queryByRole("link", { name: "Review" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+    expect(mockDecideMutateAsync).not.toHaveBeenCalled();
   });
 });

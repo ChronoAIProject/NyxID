@@ -46,9 +46,9 @@ export function formatGrantDuration(grantExpiryDays?: number): string {
 }
 
 export function getChallengeActionState(
-  challenge: Pick<ChallengeDetail, "status" | "expires_at" | "execution_proposal">,
+  challenge: Pick<ChallengeDetail, "status" | "expires_at" | "execution_proposal" | "decision_destination">,
 ): ChallengeActionState {
-  if (challenge.execution_proposal) {
+  if (challenge.execution_proposal && challenge.decision_destination !== "originating_owner_chat") {
     return {
       statusLabel: challenge.execution_proposal.state,
       canDecide: false,
@@ -104,6 +104,13 @@ export function getChallengeActionState(
     };
   }
 
+  if (challenge.decision_destination === "originating_owner_chat") {
+    return {
+      statusLabel: translateApp("Pending"),
+      canDecide: false,
+      reason: translateApp("Review this request in your original private chat with NyxBot."),
+    };
+  }
   return {
     statusLabel: translateApp("Pending"),
     canDecide: true,

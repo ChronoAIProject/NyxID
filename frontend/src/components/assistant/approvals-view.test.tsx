@@ -252,3 +252,14 @@ describe("ApprovalsView", () => {
     toastSpy.mockRestore();
   });
 });
+
+
+it("keeps an original-owner-chat request visible without web mutations", async () => {
+  mockApi({pending: [request({decision_destination: "originating_owner_chat"})]});
+  render(<ApprovalsView />, {wrapper: createWrapper()});
+  expect(await screen.findByText("Review this request in your original private chat with NyxBot.")).toBeInTheDocument();
+  expect(screen.getByText(PENDING.action_description!)).toBeInTheDocument();
+  expect(screen.queryByRole("button", {name: "Approve and send"})).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", {name: "Deny"})).not.toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+});

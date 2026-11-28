@@ -139,7 +139,30 @@ async fn resume(f: &Fixture, row: &AssistantConversation) -> String {
         f.state.clone(),
         test_utils::test_auth_user(&f.owner),
     );
-    proposals::resume_turn(&f.state, egress.as_ref(), row)
+    let credential = load_credential(f, row).await;
+    let outcome = proposals::resume_turn(&f.state, egress.as_ref(), row, &credential)
+        .await
+        .unwrap()
+        .unwrap();
+    // These are retained-effect tests, not model-runner acceptance. Consume
+    // the handoff so their explicit receipt settlement keeps its old meaning.
+    // The owner runner journeys exercise the actual model launch separately.
+    if let proposals::ResumeOutcome::Continue(continuation) = &outcome {
+        assert!(
+            continuation
+                .release(&f.state, row, &credential)
+                .await
+                .unwrap()
+        );
+    }
+    outcome.into_text()
+}
+
+async fn load_credential(
+    f: &Fixture,
+    row: &AssistantConversation,
+) -> credentials::AssistantCredential {
+    credentials::load_for_conversation(&f.state.db, &f.state.encryption_keys, &row.user_id, &row.id)
         .await
         .unwrap()
         .unwrap()
@@ -365,8 +388,9 @@ async fn execution_proposal_twenty_duplicate_decisions_and_resumes_send_once_eve
         f.state.clone(),
         test_utils::test_auth_user(&f.owner),
     );
+    let credential = load_credential(&f, &resumed).await;
     let results = futures::future::join_all(
-        (0..20).map(|_| proposals::resume_turn(&f.state, egress.as_ref(), &resumed)),
+        (0..20).map(|_| proposals::resume_turn(&f.state, egress.as_ref(), &resumed, &credential)),
     )
     .await;
     assert!(results.iter().all(Result::is_ok));

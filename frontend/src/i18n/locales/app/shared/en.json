@@ -1601,6 +1601,7 @@
   "Review the observed Discord command before recovering this installation.": "Review the observed Discord command before recovering this installation.",
   "Review the retained gateway record before retrying its original setup. The record, request and credentials remain bound to this attempt.": "Review the retained gateway record before retrying its original setup. The record, request and credentials remain bound to this attempt.",
   "Review this entry’s current credentials and transport before updating. Updating pauses both access modes and revokes prior chat authority. Owner routing remains closed; explicitly enable access after verification.": "Review this entry’s current credentials and transport before updating. Updating pauses both access modes and revokes prior chat authority. Owner routing remains closed; explicitly enable access after verification.",
+  "Review this request in your original private chat with NyxBot.": "Review this request in your original private chat with NyxBot.",
   "Review transfer": "Review transfer",
   "Revision ": "Revision ",
   "Revision / policy revision": "Revision / policy revision",

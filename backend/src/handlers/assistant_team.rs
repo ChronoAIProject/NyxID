@@ -41,6 +41,10 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+#[path = "assistant_team_settlement_test_observer.rs"]
+pub(crate) mod settlement_test_observer;
+
 /// The owner identity NyxID uses for turns it starts itself (specialist
 /// work, wake-ups, channel messages): the same person a browser turn acts for.
 pub(crate) fn owner_auth(owner: &str) -> AppResult<AuthUser> {
@@ -190,6 +194,7 @@ fn event_turn(conversation_id: &str) -> TurnStart {
         automation_work: None,
         automation_parent: None,
         execution_enrollment: false,
+        supervisor_parent: None,
         execution_parent: None,
         channel_context: None,
         capacity: None,
@@ -471,6 +476,19 @@ pub(crate) fn after_turn_boxed(
 /// work to the NyxBot thread that assigned it, drain queues, and deliver
 /// asynchronous replies of channel threads to their chat.
 pub(crate) async fn after_turn(
+    state: &AppState,
+    row: &AssistantConversation,
+    text: &str,
+    error: Option<&TurnError>,
+) {
+    after_turn_inner(state, row, text, error).await;
+    #[cfg(test)]
+    if let Some(turn) = &row.active_turn {
+        settlement_test_observer::completed(&state.db, &turn.turn_id);
+    }
+}
+
+async fn after_turn_inner(
     state: &AppState,
     row: &AssistantConversation,
     text: &str,
@@ -1089,6 +1107,7 @@ pub(crate) async fn assign(
             automation_parent: execution_parent
                 .and_then(crate::services::trigger_schedule::direct::parent),
             execution_enrollment: false,
+            supervisor_parent: execution_parent.and_then(crate::services::supervisor_write::parent),
             execution_parent: execution_parent
                 .and_then(crate::services::execution_permission_dispatch::tasks::parent),
             channel_context: None,

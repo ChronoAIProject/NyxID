@@ -3075,6 +3075,7 @@ async fn approval_wait_2705_history_surfaces_every_linked_proxy_card() {
         activity_outcome: None,
         activity_execution: None,
         execution_proposal: None,
+        supervisor_write: None,
         assistant_group: None,
         id: uuid::Uuid::new_v4().to_string(),
         user_id: OWNER.to_string(),

@@ -4,6 +4,7 @@ use super::*;
 /// It is deliberately not deserializable from HTTP headers or MCP arguments.
 #[derive(Clone)]
 pub struct Admission {
+    pub(super) supervisor_write: Option<crate::services::supervisor_write::Permit>,
     /// Installed only by the server-internal bound Ornn skill reader. It
     /// bypasses the specialist's ordinary Ornn grant while retaining the
     /// owner's exact-connection authority fence.
@@ -26,6 +27,12 @@ pub struct Admission {
     pub(super) chat: acks::ChatAuthority,
 }
 impl Admission {
+    pub(crate) fn bind_supervisor(
+        &mut self,
+        permit: Option<crate::services::supervisor_write::Permit>,
+    ) {
+        self.supervisor_write = permit;
+    }
     pub(crate) fn shared_execution(
         &self,
     ) -> AppResult<Option<crate::models::assistant_sharing::SharedExecution>> {

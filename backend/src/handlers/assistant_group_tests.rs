@@ -1461,6 +1461,7 @@ async fn followers_are_registered_with_the_post_bounded_by_the_take_and_expire()
             automation_work: None,
             automation_parent: None,
             execution_enrollment: false,
+            supervisor_parent: None,
             execution_parent: None,
             channel_context: None,
             capacity: None,
