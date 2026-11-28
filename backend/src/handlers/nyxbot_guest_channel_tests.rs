@@ -340,9 +340,9 @@ async fn channel_model_turns_for(
     let model = if deepseek {
         "deepseek-flash"
     } else if matches!(scenario, Scenario::Merchant) {
-        "gpt-5.6-sol"
+        "gpt-6.2-sol"
     } else {
-        "gpt-6-astra"
+        "gpt-6.2-astra"
     };
     // Turn keys belong to OWNER even if a channel sender also has a NyxID account.
     let guest_person = "87654321-4321-4321-8321-ba0987654321";
@@ -369,7 +369,7 @@ async fn channel_model_turns_for(
     }
     let provider = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::any()).respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
-        "id":"model-response","model":"gpt-6-astra","output":[],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}
+        "id":"model-response","model":model,"output":[],"usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}
     }))).mount(&provider).await;
     let (model_id, model_connection) = connection(
         &state,
@@ -735,7 +735,7 @@ async fn channel_model_turns_for(
                     .header("authorization",headers["authorization"].clone()).body(Body::empty()).unwrap()).await.unwrap();
                 assert_eq!(refusal.status(),StatusCode::FORBIDDEN,"setup must never use owner tools");
             }
-            let selected_model=if mapping.load(std::sync::atomic::Ordering::SeqCst) {"model-after-policy-change"}else if matches!(scenario,Scenario::ProfileChange) && row.model=="nyxagent/chat" {"gpt-5.6-sol"}else{model};
+            let selected_model=if mapping.load(std::sync::atomic::Ordering::SeqCst) {"model-after-policy-change"}else if matches!(scenario,Scenario::ProfileChange) && row.model=="nyxagent/chat" {"gpt-6.2-sol"}else{model};
             let generation=json!({"model":selected_model,"store":false,"stream":false,"input":body["input"],"instructions":body["instructions"],"tools":[{"type":"web_search"}],
                 "client_metadata":{"root_turn_id":Uuid::new_v4().to_string(),"session_id":Uuid::new_v4().to_string(),"thread_id":Uuid::new_v4().to_string(),
                     "turn_id":Uuid::new_v4().to_string(),"x-codex-installation-id":"test-installation","x-codex-turn-metadata":"{\"sandbox_mode\":\"read-only\"}","x-codex-window-id":Uuid::new_v4().to_string()}});

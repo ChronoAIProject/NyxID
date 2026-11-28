@@ -157,9 +157,9 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
         "v1/responses"
     };
     let model_name = match profile {
-        "research" => "gpt-6-astra",
+        "research" => "gpt-6.2-astra",
         "channel" => "deepseek-flash",
-        _ if bootstrap => "gpt-5.6-sol",
+        _ if bootstrap => "gpt-6.2-sol",
         _ => "test",
     };
     if profile != "chat" {
@@ -550,7 +550,10 @@ async fn guest_pipeline(nyxbot: bool, scenarios: &[&str]) {
                 "channel" => include_str!("../../specs/assistant/codex/0.165.0-channel.json"),
                 _ => include_str!("../../specs/assistant/codex/0.165.0-chat.json"),
             };
-            *model_input.lock().await = serde_json::from_str(fixture).unwrap();
+            // Replay the captured request shape with the model selected by today's policy.
+            let mut body: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            body["model"] = json!(model_name);
+            *model_input.lock().await = body;
         }
         f.state
             .db

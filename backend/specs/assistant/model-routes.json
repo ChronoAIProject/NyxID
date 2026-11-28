@@ -1,12 +1,12 @@
 {
   "nyxagent/chat": {
     "service_slug": "chrono-llm-public",
-    "model": "gpt-5.6-sol",
+    "model": "gpt-6.2-sol",
     "path": "responses"
   },
   "nyxagent/research": {
     "service_slug": "chrono-llm-public",
-    "model": "gpt-6-astra",
+    "model": "gpt-6.2-astra",
     "path": "responses"
   },
   "nyxagent/channel": {

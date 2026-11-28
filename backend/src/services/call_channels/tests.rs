@@ -484,7 +484,7 @@ async fn fixture_with_model(
         let authorization=headers.get("authorization").unwrap().clone();
         if platform_model.is_some() || setup {
             let response=proxy.clone().oneshot(Request::builder().method("POST").uri("/proxy/s/chrono-llm-public/responses").header("authorization",authorization.clone()).header("content-type","application/json").header("accept","*/*")
-                .body(Body::from(json!({"model":"gpt-5.6-sol","store":false,"input":if setup {crate::services::assistant_guest_model_setup::INSTRUCTION}else{"channel question"},"client_metadata":{"session_id":"fixture-session","thread_id":"fixture-thread","turn_id":"fixture-turn"}}).to_string())).unwrap()).await.unwrap();
+                .body(Body::from(json!({"model":"gpt-6.2-sol","store":false,"input":if setup {crate::services::assistant_guest_model_setup::INSTRUCTION}else{"channel question"},"client_metadata":{"session_id":"fixture-session","thread_id":"fixture-thread","turn_id":"fixture-turn"}}).to_string())).unwrap()).await.unwrap();
             let status=response.status();let bytes=axum::body::to_bytes(response.into_body(),65536).await.unwrap();
             if !status.is_success() {
                 assert_eq!(status,StatusCode::FORBIDDEN,"{}",String::from_utf8_lossy(&bytes));
