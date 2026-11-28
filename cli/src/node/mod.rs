@@ -4,6 +4,7 @@ pub mod credential_store;
 pub mod credentials;
 pub(crate) mod custody;
 pub mod daemon;
+pub mod destination;
 pub mod encryption;
 pub mod error;
 pub mod keychain;

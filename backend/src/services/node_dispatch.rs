@@ -2621,6 +2621,9 @@ fn encode_wire_failure(error: &AppError, dispatched: bool) -> WireFailure {
     let (code, max_bytes, error_code) = match error {
         AppError::NodeOffline(_) => (WireErrorCode::NodeOffline, None, None),
         AppError::NodeProxyTimeout => (WireErrorCode::NodeProxyTimeout, None, None),
+        AppError::NodeCredentialDestinationMismatch => {
+            (WireErrorCode::Internal, None, Some(error.error_code()))
+        }
         AppError::NodeHttpSignatureUnsupported => {
             (WireErrorCode::NodeHttpSignatureUnsupported, None, None)
         }
@@ -2651,6 +2654,9 @@ fn decode_wire_failure(failure: WireFailure) -> AppError {
     match failure.code {
         WireErrorCode::NodeOffline => AppError::NodeOffline("Node is unavailable".to_string()),
         WireErrorCode::NodeProxyTimeout => AppError::NodeProxyTimeout,
+        WireErrorCode::Internal if failure.error_code == Some(8014) => {
+            AppError::NodeCredentialDestinationMismatch
+        }
         WireErrorCode::NodeHttpSignatureUnsupported => AppError::NodeHttpSignatureUnsupported,
         WireErrorCode::NodeCredentialMissing => {
             AppError::NodeCredentialMissing("Node credential is unavailable".to_string())

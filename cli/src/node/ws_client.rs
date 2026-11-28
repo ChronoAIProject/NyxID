@@ -1020,6 +1020,7 @@ async fn connect_and_serve(
         #[serde(skip_serializing_if = "Option::is_none")]
         managed_runtime: Option<&'a nyxid_machine::managed::Binding>,
         retirement_v1: &'a RetiredSockets,
+        destination_binding_v1: bool,
     }
     if let Some(binding) = &config.managed_runtime {
         binding
@@ -1032,6 +1033,7 @@ async fn connect_and_serve(
         token: auth_token,
         managed_runtime: config.managed_runtime.as_ref(),
         retirement_v1: retired,
+        destination_binding_v1: true,
     })?;
     tokio::select! {
         result = ws_sink.send(Message::Text(auth_msg.into())) => {
@@ -1076,6 +1078,7 @@ async fn connect_and_serve(
         }) => response.map_err(|_| Error::AuthFailed("Timed out waiting for auth response".to_string()))??,
         _ = wait_for_shutdown(&mut shutdown) => return Ok(None),
     };
+    let destination_binding = parsed["capabilities"]["destination_binding_v1"] == true;
     let machine_execution_approval = parsed["capabilities"]["machine_execution_approval_v1"]
         .as_bool()
         .unwrap_or(false);
@@ -1520,6 +1523,19 @@ async fn connect_and_serve(
                 }
             }
             Some("proxy_request") => {
+                if destination_binding
+                    && parsed["target_id"].is_null()
+                    && parsed["signature_version"] != 3
+                {
+                    let _ = send_ws_message(
+                        &tx,
+                        proxy_executor::destination_refusal(
+                            parsed["request_id"].as_str().unwrap_or_default(),
+                        ),
+                    )
+                    .await;
+                    continue;
+                }
                 let tx_clone = tx.clone();
                 let creds = credentials.snapshot();
                 let secret = signing_secret.clone();
@@ -1588,6 +1604,16 @@ async fn connect_and_serve(
                 handle_ssh_tunnel_close(&parsed, &active_ssh_tunnels).await;
             }
             Some("web_terminal_open") => {
+                if destination_binding
+                    && parsed["auth_mode"] == "node_key"
+                    && signing_secret.is_none()
+                {
+                    let id = parsed["session_id"].as_str().unwrap_or_default();
+                    let _ =
+                        send_web_terminal_closed(&tx, id, Some("destination_signature_required"))
+                            .await;
+                    continue;
+                }
                 let tx_clone = tx.clone();
                 let ssh_config = config.ssh.clone();
                 let terminals = active_web_terminals.clone();
@@ -1647,6 +1673,20 @@ async fn connect_and_serve(
                 });
             }
             Some("ssh_node_exec_open") => {
+                if destination_binding
+                    && (signing_secret.is_none() || parsed["signature_version"] != 2)
+                {
+                    let id = parsed["request_id"].as_str().unwrap_or_default();
+                    let _ = send_ssh_node_exec_error(
+                        &tx,
+                        id,
+                        "destination_signature_required",
+                        Some(8014),
+                        0,
+                    )
+                    .await;
+                    continue;
+                }
                 let tx_clone = tx.clone();
                 let ssh_config = config.ssh.clone();
                 let config_path = config_path.to_path_buf();
@@ -1755,6 +1795,11 @@ async fn connect_and_serve(
                 );
             }
             Some("ws_proxy_open") => {
+                if destination_binding && signing_secret.is_none() {
+                    let id = parsed["session_id"].as_str().unwrap_or_default();
+                    let _ = send_ws_proxy_error(&tx, id, "destination_signature_required").await;
+                    continue;
+                }
                 let tx_clone = tx.clone();
                 let creds = credentials.snapshot();
                 let secret = signing_secret.clone();
@@ -2672,16 +2717,28 @@ fn load_ssh_node_key_entry(
     storage_backend: &str,
     service_slug: &str,
     principal: &str,
+    host: Option<&serde_json::Value>,
+    port: Option<&serde_json::Value>,
 ) -> Result<ssh_keys::SshKeyEntry> {
-    NodeConfig::load(config_path).and_then(|config| {
-        let backend = SecretBackend::from_storage_backend_str(storage_backend, config_dir)?;
-        match ssh_keys::config_find(&config, service_slug, principal) {
-            Some(stored) => ssh_keys::load_entry(stored, &backend),
-            None => Err(Error::Config(format!(
-                "SSH key missing for service '{service_slug}' principal '{principal}'"
-            ))),
-        }
-    })
+    let config = NodeConfig::load(config_path)?;
+    let stored = ssh_keys::config_find(&config, service_slug, principal).ok_or_else(|| {
+        Error::Config(format!(
+            "SSH key missing for service '{service_slug}' principal '{principal}'"
+        ))
+    })?;
+    if stored
+        .destination_binding_version
+        .is_some_and(|version| version != 1)
+        || host.is_some_and(|h| {
+            !h.as_str()
+                .is_some_and(|h| h.eq_ignore_ascii_case(&stored.target_host))
+        })
+        || port.is_some_and(|p| p.as_u64() != Some(u64::from(stored.target_port)))
+    {
+        return Err(Error::DestinationMismatch);
+    }
+    let backend = SecretBackend::from_storage_backend_str(storage_backend, config_dir)?;
+    ssh_keys::load_entry(stored, &backend)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2789,9 +2846,22 @@ async fn handle_ssh_node_exec_open(
             storage_backend,
             &service_slug,
             &principal,
+            parsed.get("target_host"),
+            parsed.get("target_port"),
         );
         match loaded {
             Ok(entry) => entry,
+            Err(Error::DestinationMismatch) => {
+                let _ = send_ssh_node_exec_error(
+                    &tx,
+                    &request_id,
+                    "node_credential_destination_mismatch",
+                    Some(8014),
+                    0,
+                )
+                .await;
+                return;
+            }
             Err(Error::Config(message)) if message.contains("SSH key missing") => {
                 let error = SshNodeExecError::missing_key(&service_slug, &principal);
                 tracing::warn!(
@@ -2850,39 +2920,6 @@ async fn handle_ssh_node_exec_open(
             }
         }
     };
-
-    if let Some(server_host) = parsed["target_host"]
-        .as_str()
-        .filter(|host| !host.is_empty())
-        && server_host != entry.target_host
-    {
-        // SECURITY: operator-provisioned (service_slug, principal) credentials
-        // are authoritative for host/port/host_key. Backend hints differing
-        // from the local store are logged and ignored to prevent a compromised
-        // backend from redirecting node SSH sessions to attacker-controlled hosts.
-        tracing::warn!(
-            request_id = %request_id,
-            service_slug = %service_slug,
-            principal = %principal,
-            server_host = %server_host,
-            local_host = %entry.target_host,
-            "Ignoring mismatched SSH node-key target host hint"
-        );
-    }
-    if let Some(server_port) = parsed["target_port"]
-        .as_u64()
-        .and_then(|value| u16::try_from(value).ok())
-        && server_port != entry.target_port
-    {
-        tracing::warn!(
-            request_id = %request_id,
-            service_slug = %service_slug,
-            principal = %principal,
-            server_port,
-            local_port = entry.target_port,
-            "Ignoring mismatched SSH node-key target port hint"
-        );
-    }
 
     if let Err(error) =
         validate_node_ssh_target(ssh_config, &entry.target_host, entry.target_port).await
@@ -3427,9 +3464,21 @@ async fn handle_node_key_web_terminal_open(
             storage_backend,
             &service_slug,
             &principal,
+            parsed.get("host"),
+            parsed.get("port"),
         );
         match loaded {
             Ok(entry) => entry,
+            Err(Error::DestinationMismatch) => {
+                let _ = send_web_terminal_closed_with_code(
+                    &tx,
+                    &session_id,
+                    Some("node_credential_destination_mismatch"),
+                    Some(8014),
+                )
+                .await;
+                return;
+            }
             Err(Error::Config(message)) if message.contains("SSH key missing") => {
                 let error = SshNodeExecError::missing_key(&service_slug, &principal);
                 tracing::warn!(
@@ -3456,19 +3505,6 @@ async fn handle_node_key_web_terminal_open(
             }
         }
     };
-
-    if let Some(server_host) = parsed["host"].as_str().filter(|host| !host.is_empty())
-        && server_host != entry.target_host
-    {
-        tracing::warn!(
-            session_id = %session_id,
-            service_slug = %service_slug,
-            principal = %principal,
-            server_host = %server_host,
-            local_host = %entry.target_host,
-            "Ignoring mismatched SSH node-key terminal target host hint"
-        );
-    }
 
     if let Err(error) =
         validate_node_ssh_target(ssh_config, &entry.target_host, entry.target_port).await
@@ -4408,6 +4444,10 @@ async fn handle_ws_proxy_open(
         _ => Vec::new(),
     };
 
+    if !credentials.permits_destination(&service_slug, base_url, path, true) {
+        let _ = send_ws_proxy_error(&tx, &session_id, "node_credential_destination_mismatch").await;
+        return;
+    }
     // Resolve credentials.
     let cred = match credentials.get(&service_slug) {
         Some(c) => c,
@@ -4473,6 +4513,10 @@ async fn handle_ws_proxy_open(
 
     let url = proxy_executor::credential_url(&ws_base, &normalized_path, query, cred);
 
+    if !credentials.permits_wire_url(&service_slug, &url, true) {
+        let _ = send_ws_proxy_error(&tx, &session_id, "node_credential_destination_mismatch").await;
+        return;
+    }
     // Build WS connect request with header injection.
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let mut ws_request = match url.as_str().into_client_request() {
@@ -5059,6 +5103,9 @@ fn install_ws_proxy_headers(
     if let Some(forwarded) = forwarded {
         let forwarded = forwarded.as_object().ok_or(())?;
         for (name, value) in forwarded {
+            if name.eq_ignore_ascii_case("host") {
+                continue;
+            }
             let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| ())?;
             let value = proxy_executor::sensitive_header_value(value.as_str().ok_or(())?)
                 .map_err(|_| ())?;
@@ -5360,6 +5407,79 @@ mod tests {
         assert_eq!(payload["session_id"], "sess-1");
         assert_eq!(payload["error"], "ws_proxy_control_buffer_full");
         assert!(active_ws_proxies.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn destination_binding_rejects_ws_before_secret_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::new("file", "node", dir.path()).unwrap();
+        let mut config = rci_test_config("ws://localhost".into());
+        config
+            .add_header_credential_via(
+                "svc",
+                "X-Fixture",
+                &uuid::Uuid::new_v4().to_string(),
+                Some("https://unit.example/api"),
+                &backend,
+            )
+            .unwrap();
+        config
+            .credential_generation_fences
+            .0
+            .entry("svc".into())
+            .or_default()
+            .insert("slot".into(), 1);
+        let store = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
+        let (tx, mut rx) = mpsc::channel(4);
+        handle_ws_proxy_open(
+            &serde_json::json!({"session_id":"fixture", "service_slug":"svc",
+            "base_url":"https://unit.example", "path":"/other"}),
+            &store,
+            tx,
+            Default::default(),
+            None,
+            replay_guard(),
+        )
+        .await;
+        let message: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.unwrap())).unwrap();
+        assert_eq!(message["error"], "node_credential_destination_mismatch");
+    }
+
+    #[test]
+    fn destination_binding_ssh_checks_target_before_reading_key_material() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = rci_test_config("ws://localhost".into());
+        config.ssh_keys.push(serde_json::from_value(serde_json::json!({
+            "service_slug":"router", "principal":"ops", "target_host":"router.example",
+            "target_port":22, "created_at":"2026-01-01T00:00:00Z", "private_key_pem_encrypted":"unavailable"
+        })).unwrap());
+        let path = dir.path().join("config.toml");
+        config.save(&path).unwrap();
+        for (host, port) in [("router.example", 2222), ("other.example", 22)] {
+            let result = load_ssh_node_key_entry(
+                &path,
+                dir.path(),
+                "file",
+                "router",
+                "ops",
+                Some(&serde_json::json!(host)),
+                Some(&serde_json::json!(port)),
+            );
+            assert!(matches!(result, Err(Error::DestinationMismatch)));
+        }
+        NodeConfig::rebind(
+            &path,
+            "router",
+            Some("ops"),
+            &["ssh://new.example:2222".into()],
+        )
+        .unwrap();
+        let saved = NodeConfig::load(&path).unwrap();
+        assert_eq!(saved.ssh_keys[0].target_host, "new.example");
+        assert_eq!(saved.ssh_keys[0].target_port, 2222);
+        assert_eq!(saved.ssh_keys[0].destination_binding_version, Some(1));
+        assert!(config.save(&path).is_err());
     }
 
     #[tokio::test]

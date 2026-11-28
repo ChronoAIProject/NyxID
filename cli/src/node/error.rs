@@ -4,6 +4,8 @@ pub type Result<T> = std::result::Result<T, self::Error>;
 
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Destination refused by node credential binding")]
+    DestinationMismatch,
     #[error(transparent)]
     Tls(#[from] crate::tls::TlsError),
 

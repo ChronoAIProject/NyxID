@@ -147,6 +147,7 @@ impl ServiceCredential {
 /// All values are decrypted at load time and held in memory.
 #[derive(Clone)]
 pub struct CredentialStore {
+    destinations: Arc<HashMap<String, (super::destination::DestinationBinding, Option<String>)>>,
     credentials: Arc<HashMap<String, ServiceCredential>>,
 }
 
@@ -283,9 +284,7 @@ impl CredentialStore {
             }
         }
 
-        Ok(Self {
-            credentials: Arc::new(map),
-        })
+        Ok(Self::with_routes(config, map))
     }
 
     /// Load credentials using the unified secret backend.
@@ -412,8 +411,48 @@ impl CredentialStore {
             }
         }
 
-        Ok(Self {
+        Ok(Self::with_routes(config, map))
+    }
+
+    fn with_routes(config: &NodeConfig, map: HashMap<String, ServiceCredential>) -> Self {
+        Self {
+            destinations: Arc::new(
+                config
+                    .credentials
+                    .iter()
+                    .filter_map(|(slug, row)| {
+                        Some((
+                            slug.clone(),
+                            (row.destination_binding.clone()?, row.target_url.clone()),
+                        ))
+                    })
+                    .collect(),
+            ),
             credentials: Arc::new(map),
+        }
+    }
+
+    pub fn destination_binding(
+        &self,
+        slug: &str,
+    ) -> Option<&super::destination::DestinationBinding> {
+        self.destinations.get(slug).map(|(binding, _)| binding)
+    }
+
+    pub fn permits_destination(&self, slug: &str, base: &str, path: &str, ws: bool) -> bool {
+        self.destinations.get(slug).is_none_or(|(binding, local)| {
+            let effective = if base.is_empty() {
+                local.as_deref().unwrap_or("")
+            } else {
+                base
+            };
+            binding.permits(effective, path, ws)
+        })
+    }
+
+    pub fn permits_wire_url(&self, slug: &str, url: &str, ws: bool) -> bool {
+        self.destinations.get(slug).is_none_or(|(binding, _)| {
+            url::Url::parse(url).is_ok_and(|url| binding.permits_url(url, ws))
         })
     }
 

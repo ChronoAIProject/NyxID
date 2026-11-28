@@ -223,8 +223,11 @@ async fn execute_proxy_request_inner(
     }
     if upload.is_none()
         && (target_selected || request.get("signature_version").is_some())
-        && (request["signature_version"].as_u64() != Some(2)
-            || signing_secret.is_none()
+        && (!(if target_selected {
+            request["signature_version"].as_u64() == Some(2)
+        } else {
+            request["signature_version"].as_u64() == Some(3)
+        }) || signing_secret.is_none()
             || request["signature"].as_str().is_none())
     {
         metrics.record_error();
@@ -232,7 +235,11 @@ async fn execute_proxy_request_inner(
             tx,
             proxy_error_response(
                 request_id,
-                "Target-selected requests require HTTP signature v2",
+                if target_selected {
+                    "Target-selected requests require HTTP signature v2"
+                } else {
+                    "Ordinary versioned requests require HTTP signature v3"
+                },
                 403,
                 false,
             ),
@@ -249,6 +256,16 @@ async fn execute_proxy_request_inner(
         return;
     }
 
+    if !credentials.permits_destination(
+        service_slug,
+        base_url,
+        request["path"].as_str().unwrap_or("/"),
+        false,
+    ) {
+        metrics.record_error();
+        let _ = send_ws_message(tx, destination_refusal(request_id)).await;
+        return;
+    }
     // 2. Look up credentials for this service
     let cred = match credentials.get(service_slug) {
         Some(c) => c,
@@ -435,6 +452,11 @@ async fn execute_proxy_request_inner(
         cred,
     );
 
+    if !credentials.permits_wire_url(service_slug, &url, false) {
+        metrics.record_error();
+        let _ = send_ws_message(tx, destination_refusal(request_id)).await;
+        return;
+    }
     let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
     let destination_client;
     let http_client = if target_selected || upload.as_ref().is_some_and(|upload| upload.git()) {
@@ -474,6 +496,9 @@ async fn execute_proxy_request_inner(
     let mut forwarded_headers = zeroize::Zeroizing::new(Vec::new());
     if let Some(headers) = request["headers"].as_object() {
         for (name, value) in headers {
+            if name.eq_ignore_ascii_case("host") {
+                continue;
+            }
             if let Some(v) = value.as_str() {
                 if is_aws_sigv4 {
                     let lower = name.to_ascii_lowercase();
@@ -585,7 +610,8 @@ async fn execute_proxy_request_inner(
     }
 
     // 7. Execute request
-    match req_builder.send().await {
+    let binding = credentials.destination_binding(service_slug).cloned();
+    match REDIRECT_BINDING.scope(binding, req_builder.send()).await {
         Ok(mut response) => {
             if nyxid_service_adapters::response_location::HEADERS
                 .iter()
@@ -711,8 +737,34 @@ fn build_target_http_client(builder: reqwest::ClientBuilder) -> Client {
         .expect("target HTTP client")
 }
 
+// reqwest evaluates its client-wide redirect policy while polling the individual request.
+tokio::task_local! { static REDIRECT_BINDING: Option<super::destination::DestinationBinding>; }
+
+fn node_redirect(attempt: reqwest::redirect::Attempt<'_>) -> reqwest::redirect::Action {
+    let next = attempt.url();
+    let same_origin = attempt
+        .previous()
+        .first()
+        .is_some_and(|initial| initial.origin() == next.origin());
+    let approved = REDIRECT_BINDING
+        .try_with(|binding| {
+            binding
+                .as_ref()
+                .is_none_or(|binding| binding.permits_url(next.clone(), false))
+        })
+        .unwrap_or(false);
+    if !same_origin || !approved || !next.username().is_empty() || next.password().is_some() {
+        attempt.stop()
+    } else if attempt.previous().len() > 10 {
+        attempt.error("Too many redirects")
+    } else {
+        attempt.follow()
+    }
+}
+
 pub fn build_http_client() -> Result<Client> {
     Ok(crate::tls::client_builder()?
+        .redirect(reqwest::redirect::Policy::custom(node_redirect))
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .build()?)
@@ -866,6 +918,16 @@ fn proxy_error_response(request_id: &str, error: &str, status: u16, retryable: b
 /// failure (e.g. a locally-missing credential) from generic node/proxy
 /// errors without string-matching. Older backends that don't know
 /// about the tag simply ignore the extra field.
+pub(super) fn destination_refusal(request_id: &str) -> String {
+    proxy_error_response_with_reason(
+        request_id,
+        "Destination refused by node credential binding",
+        403,
+        false,
+        Some("node_credential_destination_mismatch"),
+    )
+}
+
 fn proxy_error_response_with_reason(
     request_id: &str,
     error: &str,
@@ -1075,11 +1137,10 @@ mod tests {
         use super::*;
         use wiremock::{
             Mock, MockServer, ResponseTemplate,
-            matchers::{header, method, path},
+            matchers::{method, path},
         };
         let old = MockServer::start().await;
         let new = MockServer::start().await;
-        let secret = uuid::Uuid::new_v4().to_string();
         Mock::given(method("GET"))
             .and(path("/health"))
             .respond_with(ResponseTemplate::new(200))
@@ -1088,7 +1149,6 @@ mod tests {
             .await;
         Mock::given(method("GET"))
             .and(path("/health"))
-            .and(header("Authorization", secret.as_str()))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&new)
@@ -1100,13 +1160,7 @@ mod tests {
         }))
         .unwrap();
         config
-            .add_header_credential_via(
-                "monitor",
-                "Authorization",
-                &secret,
-                Some(&old.uri()),
-                &backend,
-            )
+            .set_no_auth_via("monitor", Some(&old.uri()), &backend)
             .unwrap();
         let credentials = CredentialStore::from_config_with_backend(&config, &backend).unwrap();
         let request = serde_json::json!({"request_id":uuid::Uuid::new_v4().to_string(), "service_slug":"monitor", "base_url":new.uri(), "method":"GET", "path":"/health", "headers":{}});
@@ -1127,6 +1181,102 @@ mod tests {
         };
         let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
         assert_eq!(frame["status"], 200);
+    }
+
+    #[tokio::test]
+    async fn destination_binding_checks_legacy_frames_and_stops_redirects() {
+        use super::super::{config::NodeConfig, secret_backend::SecretBackend};
+        use super::*;
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path},
+        };
+
+        let allowed = MockServer::start().await;
+        let other = MockServer::start().await;
+        let value = uuid::Uuid::new_v4().to_string();
+        let base = format!("{}/api", allowed.uri());
+        Mock::given(method("GET"))
+            .and(path("/api/ping"))
+            .and(header("X-Local", value.as_str()))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(2)
+            .mount(&allowed)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/redirect"))
+            .respond_with(ResponseTemplate::new(302).insert_header("Location", other.uri()))
+            .expect(1)
+            .mount(&allowed)
+            .await;
+        for (path_name, location) in [("inside", "/api/ping"), ("outside-prefix", "/outside")] {
+            Mock::given(method("GET"))
+                .and(path(format!("/api/{path_name}")))
+                .respond_with(ResponseTemplate::new(302).insert_header("Location", location))
+                .expect(1)
+                .mount(&allowed)
+                .await;
+        }
+        Mock::given(path("/outside"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&allowed)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let vault = SecretBackend::new("file", "node", dir.path()).unwrap();
+        let mut config = NodeConfig::new("ws://localhost".into(), "node".into(), "file".into());
+        config
+            .add_header_credential_via("monitor", "X-Local", &value, Some(&base), &vault)
+            .unwrap();
+        let store = CredentialStore::from_config_with_backend(&config, &vault).unwrap();
+        let client = build_http_client().unwrap();
+        let replay = tokio::sync::Mutex::new(ReplayGuard::new());
+        let metrics = NodeMetrics::new();
+        let check = async |store: &CredentialStore, base: &str, path: &str| {
+            let (tx, mut rx) = mpsc::channel(8);
+            let request = signed_test_request(&serde_json::json!({
+                "request_id": "local", "service_slug":"monitor", "base_url": base,
+                "method":"GET", "path":path, "headers":{}
+            }));
+            execute_proxy_request(
+                &request,
+                store,
+                Some(TEST_SIGNING_SECRET),
+                &replay,
+                &metrics,
+                &tx,
+                false,
+                &client,
+            )
+            .await;
+            let NodeWsMessage::Text(msg) = rx.recv().await.unwrap() else {
+                panic!("expected text")
+            };
+            serde_json::from_str::<serde_json::Value>(&msg).unwrap()
+        };
+        assert_eq!(check(&store, "", "/ping").await["status"], 204);
+        assert_eq!(check(&store, &base, "/redirect").await["status"], 302);
+        assert_eq!(check(&store, &base, "/inside").await["status"], 204);
+        assert_eq!(check(&store, &base, "/outside-prefix").await["status"], 302);
+        // Withhold the secret from this snapshot. A denial must precede missing-credential handling.
+        config
+            .credential_generation_fences
+            .0
+            .entry("monitor".into())
+            .or_default()
+            .insert("slot".into(), 1);
+        let fenced = CredentialStore::from_config_with_backend(&config, &vault).unwrap();
+        assert!(fenced.get("monitor").is_none());
+        for (base, path) in [
+            (other.uri(), "/ping"),
+            (allowed.uri(), "/outside"),
+            (allowed.uri().replacen("http:", "https:", 1), "/api/ping"),
+        ] {
+            let frame = check(&fenced, &base, path).await;
+            assert_eq!(frame["reason"], "node_credential_destination_mismatch");
+            assert_eq!(frame["retryable"], false);
+        }
+        assert!(other.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]

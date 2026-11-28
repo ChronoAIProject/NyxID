@@ -7,6 +7,8 @@ pub mod config;
 pub mod credential_store;
 #[path = "node/custody.rs"]
 pub(crate) mod custody;
+#[path = "node/destination.rs"]
+pub mod destination;
 #[path = "node/encryption.rs"]
 pub mod encryption;
 #[path = "node/error.rs"]
@@ -45,7 +47,7 @@ pub mod ws_client {
 
 pub use credential_store::CredentialStore;
 pub use metrics::NodeMetrics;
-pub use signing::ReplayGuard;
+pub use signing::{ReplayGuard, verify_request_signature};
 
 pub fn no_auth_credentials(service_slug: &str, target_url: &str) -> error::Result<CredentialStore> {
     test_credentials(service_slug, target_url, None)
@@ -101,6 +103,7 @@ fn test_credentials(
         pending_crypto_keys: std::collections::BTreeMap::new(),
         credential_generations: Default::default(),
         credential_generation_fences: Default::default(),
+        destination_revision: None,
     };
     CredentialStore::from_config_with_backend(&config, &backend)
 }

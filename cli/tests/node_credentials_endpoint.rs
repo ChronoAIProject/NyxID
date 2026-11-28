@@ -12,6 +12,7 @@ struct Harness {
     home: tempfile::TempDir,
     config_dir: PathBuf,
     node_id: String,
+    credential_value: String,
 }
 
 impl Harness {
@@ -34,6 +35,7 @@ impl Harness {
             home,
             config_dir,
             node_id,
+            credential_value: uuid::Uuid::new_v4().to_string(),
         };
         // Seed a real encrypted local credential without an owner login.
         let output = harness
@@ -47,7 +49,7 @@ impl Harness {
                 "Authorization",
                 "--value",
             ])
-            .arg(uuid::Uuid::new_v4().to_string())
+            .arg(&harness.credential_value)
             .output()
             .await
             .unwrap();
@@ -59,11 +61,16 @@ impl Harness {
     }
 
     fn command(&self, action: &str) -> Command {
+        let mut command = self.node_command("credentials");
+        command.arg(action);
+        command
+    }
+
+    fn node_command(&self, action: &str) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_nyxid"));
         command
-            .args(["node", "credentials", "--config"])
+            .args(["node", action, "--config"])
             .arg(&self.config_dir)
-            .arg(action)
             .env_clear()
             .env("HOME", self.home.path())
             .env("XDG_CONFIG_HOME", self.home.path())
@@ -80,6 +87,79 @@ impl Harness {
 
     fn config_bytes(&self) -> Vec<u8> {
         std::fs::read(self.config_dir.join("config.toml")).unwrap()
+    }
+}
+
+#[tokio::test]
+async fn agent_reports_legacy_credential_count_and_warns_once_at_start() {
+    let server = MockServer::start().await;
+    let harness = Harness::new(&server).await;
+    let mut config: serde_json::Value =
+        toml::from_str(std::str::from_utf8(&harness.config_bytes()).unwrap()).unwrap();
+    let bound = config["credentials"]["monitor"].clone();
+    // The encrypted fixture value also serves as the node's local test token.
+    config["node"]["auth_token_encrypted"] = bound["header_value_encrypted"].clone();
+    config["credentials"]["empty"] = bound.clone();
+    config["credentials"]["empty"]["destination_binding"]["destinations"] = json!([]);
+    let mut legacy = bound;
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("destination_binding");
+
+    for count in [0, 2] {
+        if count == 2 {
+            config["credentials"]["legacy-one"] = legacy.clone();
+            config["credentials"]["legacy-two"] = legacy.clone();
+        }
+        std::fs::write(
+            harness.config_dir.join("config.toml"),
+            toml::to_string(&config).unwrap(),
+        )
+        .unwrap();
+        let status = harness.node_command("agent-status").output().await.unwrap();
+        assert!(status.status.success());
+        let label = format!("{count} legacy (unbound)");
+        assert!(String::from_utf8(status.stdout).unwrap().contains(&label));
+
+        // Wait through a reconnect to catch warnings emitted on each connection.
+        let connections = Mock::given(path("/api/v1/nodes/ws"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(2..)
+            .mount_as_scoped(&server)
+            .await;
+        let mut agent = harness.node_command("start").spawn().unwrap();
+        tokio::time::timeout(Duration::from_secs(30), connections.wait_until_satisfied())
+            .await
+            .expect("agent must retry the local connection");
+        agent.start_kill().unwrap();
+        let output = agent.wait_with_output().await.unwrap();
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!log.contains(&harness.credential_value));
+        assert!(!log.contains(legacy["header_value_encrypted"].as_str().unwrap()));
+        let warnings: Vec<_> = log
+            .lines()
+            .filter(|line| line.contains("legacy (unbound)"))
+            .collect();
+        if count == 0 {
+            assert!(warnings.is_empty());
+        } else {
+            let [warning] = warnings.as_slice() else {
+                panic!("expected one legacy credential warning")
+            };
+            for text in [
+                "WARN",
+                &label,
+                "nyxid node credentials list",
+                "nyxid node credentials rebind --service <slug> --url <base>",
+            ] {
+                assert!(warning.contains(text));
+            }
+        }
     }
 }
 
@@ -184,4 +264,56 @@ async fn set_url_validates_locally_before_owner_auth_or_network() {
         before == harness.config_bytes(),
         "invalid target must not alter the config"
     );
+}
+
+#[tokio::test]
+async fn local_rebind_replaces_the_list_without_owner_login_or_secret_access() {
+    let server = MockServer::start().await;
+    let harness = Harness::new(&server).await;
+    let original: toml::Value =
+        toml::from_str(std::str::from_utf8(&harness.config_bytes()).unwrap()).unwrap();
+    // Install the representation written by an older binary.
+    let mut legacy = original.clone();
+    legacy["credentials"]["monitor"]
+        .as_table_mut()
+        .unwrap()
+        .remove("destination_binding");
+    std::fs::write(
+        harness.config_dir.join("config.toml"),
+        toml::to_string(&legacy).unwrap(),
+    )
+    .unwrap();
+    let list = harness.command("list").output().await.unwrap();
+    assert!(list.status.success());
+    assert!(
+        String::from_utf8(list.stdout)
+            .unwrap()
+            .contains("legacy (unbound)")
+    );
+    let result = harness
+        .command("rebind")
+        .args([
+            "--service",
+            "monitor",
+            "--url",
+            "https://new.example/api",
+            "--url",
+            "https://editor.example",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(result.status.success());
+    let list = harness.command("list").output().await.unwrap();
+    assert!(list.status.success());
+    let list = String::from_utf8(list.stdout).unwrap();
+    assert!(list.contains("https://editor.example/") && list.contains("https://new.example/api"));
+    let saved: toml::Value =
+        toml::from_str(std::str::from_utf8(&harness.config_bytes()).unwrap()).unwrap();
+    for field in ["target_url", "header_value_encrypted"] {
+        assert!(
+            saved["credentials"]["monitor"][field] == original["credentials"]["monitor"][field]
+        );
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

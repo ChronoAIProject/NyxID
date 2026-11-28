@@ -58,6 +58,23 @@ The node edits only target metadata and reloads the live credential store; file-
 
 The `node_managed_endpoint_updated` audit event contains the service ID, old/new hosts and sync status only. It contains no credential, URL path, query, or fragment. Changing the URL preserves identity-based grants but does not bypass exact execution-authority revalidation.
 
+### Node-local destination binding
+
+Each newly installed HTTP credential records a version 1 destination binding with its local file or keychain metadata. Each entry authorizes one scheme, host and effective port. A base path also restricts requests to that path and its descendants at a segment boundary. An HTTPS service uses WSS for WebSocket upgrades, and HTTP uses WS. Response streaming, signed streaming uploads and WebSocket handshakes use the same admission check. A target URL sync changes the routing hint. Only a local operator can replace the approved destinations with `nyxid node credentials rebind`.
+
+The node verifies the frame and checks the resolved destination before accessing the credential in its in-memory snapshot. It checks the constructed wire URL again after path or query injection. Ordinary HTTP follows redirects within the original origin and approved path scope. A redirect outside either boundary is returned to the caller. Target-selected HTTP and Git uploads stop at the first redirect. Forwarded headers cannot override the transport's Host header. A destination mismatch returns HTTP 403 and code 8014 on servers that support it.
+
+Records without a binding retain legacy routing until local setup or an explicit rebind. The node lists these as `legacy (unbound)`. Neither the first request nor a later server routing hint can establish local operator intent for those credentials. New pushed credentials with no target have an empty approved set and refuse use until locally bound. SSH node keys already store one destination per service and principal. Exec and terminal requests check their host and port against that record before loading the private key. The configured host-key pin still applies.
+
+| Server | Credential node | Enforcement |
+|---|---|---|
+| Current | Current | The node advertises `destination_binding_v1` on authentication. The socket owner acknowledges it and selects ordinary HTTP signature v3 and SSH node-key exec signature v2. The node requires those versions on this connection. Selected HTTP, streaming uploads, WebSocket opens and terminal opens use their existing signed destination fields. Local bindings apply on every route. |
+| Earlier | Current | The node accepts the earlier frame format and enforces local bindings. The ordinary HTTP signature covers method, path, query and body. Its service and base come from the frame. Selected HTTP and signed WebSocket opens also authenticate their destination. SSH checks the supplied target hints against its stored endpoint. |
+| Current | Earlier | The server sends the earlier wire format. The node enforces the protections in its release, including its local SSH target. |
+| Earlier | Earlier | Both peers use their existing protocol. |
+
+The ingress replica prepares the legacy and destination-bound signatures. The socket owner chooses the negotiated version for that exact connection. During a mixed-server rollout, an older ingress lacks the additional signature required by a negotiated socket. That request is refused before dispatch. If the node connects to an older socket owner, the connection uses legacy frames with node-local binding checks. Rollback to an earlier node binary removes enforcement of HTTP credential bindings.
+
 ### Ordinary credential delivery generations
 
 Ordinary `credential_update` and `credential_remove` frames include
@@ -876,7 +893,7 @@ or audit data.
 
 ### Signature Computation
 
-The server signs every `proxy_request` message with HMAC-SHA256 over a canonical string:
+The server signs ordinary HTTP requests on legacy connections with HMAC-SHA256 over the following canonical string. The negotiated encodings are specified in [the node wire protocol](NODE_PROXY_PROTOCOL.md#http-destination-signature-v2).
 
 ```
 HMAC-SHA256(
@@ -1063,8 +1080,8 @@ interrupts a blocked write, including a large proxy upload.
 
 Handles both standard and streaming proxy responses:
 
-1. Verify HMAC signature if signing is enabled
-2. Look up credentials for the target service slug
+1. Verify the negotiated request signature
+2. Check local destination authorization, then look up the service credential
 3. Build the downstream HTTP request with forwarded headers
 4. Inject credentials (header or query parameter)
 5. Attach the request body (base64-decoded)

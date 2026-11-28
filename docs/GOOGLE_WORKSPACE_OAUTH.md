@@ -482,8 +482,7 @@ metadata in the existing ephemeral connection-owner record, without migrating no
 credential identity. An incompatible node fails closed with code 8013,
 `node_http_signature_unsupported`. The node executor rejects a missing or empty selected origin with
 HTTP 502 and reason `target_base_url_missing`, before any fallback to a locally configured URL; the
-v2 verifier independently requires a normalized HTTPS origin. Non-target calls retain the legacy
-wire format and signature behavior.
+v2 verifier independently requires a normalized HTTPS origin. Ordinary HTTP uses the signature negotiated on the node connection. For a locally bound Drive or Workspace credential, approve the root API and each editor origin the node serves. See [node-local destination binding](NODE_PROXY_ARCHITECTURE.md#node-local-destination-binding).
 
 Served instance specs rewrite the proxy root and remove nested server overrides. A cycle-safe queue
 follows local Path Item, Callback, Response, and Link references without expansion or external
