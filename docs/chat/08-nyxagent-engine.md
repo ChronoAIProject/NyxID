@@ -1416,6 +1416,11 @@ supported; the model must not describe its contents before viewing it. A stopped
 turn cannot claim another attachment slot.
 Attachments are deleted with their conversation and in the admin user purge.
 
+Web tool-origin raster replies expose a one-click original download using the
+preview's authenticated object URL. The download uses `tool-image` with the
+verified-MIME extension (`png`, `jpg`, `gif` or `webp`). The tool label remains
+display text.
+
 ### Channel delivery of tool images
 
 NyxID reads the exact settled assistant message by conversation and turn ID and

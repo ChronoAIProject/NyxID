@@ -5,8 +5,10 @@ const FILE_BYTES = 8 * 1024 * 1024;
 const CACHE_BYTES = 32 * 1024 * 1024;
 const MAX_ENTRIES = 64;
 const IDLE_MS = 120_000;
+const MAX_TIMEOUT_MS = 2_147_483_647;
 interface Entry {
   readonly key: string;
+  readonly expiresAt?: number;
   readonly controller: AbortController;
   readonly ready: Promise<string>;
   readonly reservedBytes: number;
@@ -16,6 +18,7 @@ interface Entry {
   started: boolean;
   settled: boolean;
   url?: string;
+  idleUntil?: number;
   timer?: ReturnType<typeof setTimeout>;
 }
 const entries = new Map<string, Entry>();
@@ -25,9 +28,34 @@ function remove(entry: Entry) {
   if (entries.get(entry.key) !== entry) return;
   entries.delete(entry.key);
   clearTimeout(entry.timer);
+  entry.timer = undefined;
   entry.controller.abort();
   if (entry.url) URL.revokeObjectURL(entry.url);
   entry.reject(new DOMException("Attachment released", "AbortError"));
+}
+function removalDeadline(entry: Entry) {
+  return Math.min(
+    entry.expiresAt ?? Infinity,
+    entry.refs === 0 ? (entry.idleUntil ?? Infinity) : Infinity,
+  );
+}
+function scheduleRemoval(entry: Entry) {
+  clearTimeout(entry.timer);
+  entry.timer = undefined;
+  if (entries.get(entry.key) !== entry) return;
+  const remaining = removalDeadline(entry) - Date.now();
+  if (remaining <= 0) {
+    remove(entry);
+  } else if (Number.isFinite(remaining)) {
+    // Browser timers cap at ~24.85 days; a wakeup must recheck the real deadline.
+    entry.timer = setTimeout(
+      () => {
+        scheduleRemoval(entry);
+        pump();
+      },
+      Math.min(remaining, MAX_TIMEOUT_MS),
+    );
+  }
 }
 async function fetchBlob(entry: Entry) {
   const response = await assistantHttp(entry.key, {
@@ -57,6 +85,9 @@ async function fetchBlob(entry: Entry) {
   });
 }
 function pump() {
+  for (const entry of entries.values()) {
+    if (removalDeadline(entry) <= Date.now()) remove(entry);
+  }
   // Removed downloads keep their reservation until cancellation releases the body.
   const started = new Set([
     ...[...entries.values()].filter((entry) => entry.started),
@@ -84,6 +115,10 @@ function pump() {
       .then((blob) => {
         if (entries.get(entry.key) !== entry || entry.controller.signal.aborted)
           return;
+        if (removalDeadline(entry) <= Date.now()) {
+          remove(entry);
+          return;
+        }
         entry.url = URL.createObjectURL(blob);
         entry.resolve(entry.url);
       })
@@ -104,7 +139,14 @@ export function acquireGeneratedAttachment(
   expiresAt?: string,
   size?: number,
 ) {
+  const parsedExpiry = Date.parse(expiresAt ?? "");
+  const expiry = Number.isFinite(parsedExpiry) ? parsedExpiry : undefined;
   let entry = entries.get(endpoint);
+  // Retire old URLs on a changed declaration; authorize the replacement by GET.
+  if (entry && (entry.expiresAt !== expiry || removalDeadline(entry) <= Date.now())) {
+    remove(entry);
+    entry = undefined;
+  }
   if (!entry) {
     let resolve!: Entry["resolve"];
     let reject!: Entry["reject"];
@@ -114,6 +156,7 @@ export function acquireGeneratedAttachment(
     });
     entry = {
       key: endpoint,
+      expiresAt: expiry,
       reservedBytes:
         size !== undefined && Number.isSafeInteger(size) && size > 0 && size <= FILE_BYTES
           ? size
@@ -130,19 +173,10 @@ export function acquireGeneratedAttachment(
   }
   entries.delete(endpoint);
   entries.set(endpoint, entry);
-  clearTimeout(entry.timer);
   entry.refs += 1;
+  entry.idleUntil = undefined;
   const lease = entry;
-  const expiry = Date.parse(expiresAt ?? "");
-  if (Number.isFinite(expiry)) {
-    lease.timer = setTimeout(
-      () => {
-        remove(lease);
-        pump();
-      },
-      Math.min(Math.max(0, expiry - Date.now()), 2_147_483_647),
-    );
-  }
+  scheduleRemoval(lease);
   pump();
   let released = false;
   return {
@@ -151,23 +185,14 @@ export function acquireGeneratedAttachment(
       if (released) return;
       released = true;
       lease.refs -= 1;
+      if (entries.get(lease.key) !== lease) return;
       if (lease.refs === 0) {
-        clearTimeout(lease.timer);
         // Abort a fetch when nobody needs it. Completed files survive list remounts.
         if (!lease.settled) remove(lease);
-        else
-          lease.timer = setTimeout(
-            () => {
-              remove(lease);
-              pump();
-            },
-            Math.min(
-              IDLE_MS,
-              Number.isFinite(expiry)
-                ? Math.max(0, expiry - Date.now())
-                : IDLE_MS,
-            ),
-          );
+        else {
+          lease.idleUntil = Date.now() + IDLE_MS;
+          scheduleRemoval(lease);
+        }
         pump();
       }
     },

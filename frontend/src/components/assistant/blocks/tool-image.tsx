@@ -2,11 +2,19 @@ import { useUiTranslation } from "@/i18n/use-ui-translation";
 import { translateUi } from "@/i18n/use-ui-translation";
 import { useEffect, useState } from "react";
 import { ApiError } from "@/lib/api-client";
-import { ImageOff } from "lucide-react";
+import { Download, ImageOff } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { GeneratedAttachment } from "./generated-attachment";
 import { DocumentAttachment } from "./document-attachment";
 import { assistantHttp } from "@/lib/assistant/assistant-http";
 import type { ChatImage } from "@/lib/assistant/chat-types";
+
+const rasterExtensions = new Map([
+  ["image/png", "png"],
+  ["image/jpeg", "jpg"],
+  ["image/gif", "gif"],
+  ["image/webp", "webp"],
+]);
 
 /**
  * An image a tool returned during a turn. It is fetched through the
@@ -15,15 +23,15 @@ import type { ChatImage } from "@/lib/assistant/chat-types";
  */
 export function ToolImage({ image }: { readonly image: ChatImage }) {
   useUiTranslation();
-  if (image.origin === "generated_artifact" || (image.origin && !["tool", "user_upload"].includes(image.origin))) return <GeneratedAttachment attachment={image} />;
+  if (image.origin === "generated_artifact" || (image.origin && !["tool", "user_upload"].includes(image.origin))) return <GeneratedAttachment key={image.expiresAt} attachment={image} />;
   if (image.expired) return <ExpiredAttachment />;
-  return ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(image.contentType)
+  return rasterExtensions.has(image.contentType)
     ? <RasterAttachment image={image} />
     : <DocumentAttachment attachment={image} />;
 }
 
 function RasterAttachment({ image }: { readonly image: ChatImage }) {
-  useUiTranslation();
+  const { t } = useUiTranslation();
   const [url, setUrl] = useState<string>();
   const [failed, setFailed] = useState(false);
   const [expired, setExpired] = useState(false);
@@ -54,6 +62,7 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
 
   if (expired) return <ExpiredAttachment />;
   const alt = `Image from ${image.label}`;
+  const downloadName = `tool-image.${rasterExtensions.get(image.contentType)}`;
   if (failed) {
     return (
       <div
@@ -81,6 +90,14 @@ function RasterAttachment({ image }: { readonly image: ChatImage }) {
           className="max-h-80 max-w-full rounded-lg border border-hairline object-contain"
         />
       </a>
+      {image.origin === "tool" && (
+        <Button asChild variant="link" size="sm">
+          <a href={url} download={downloadName}>
+            <Download className="h-3.5 w-3.5" aria-hidden="true" />
+            {t("Download {{name}}", { name: downloadName })}
+          </a>
+        </Button>
+      )}
       {image.imageInput === "unavailable" && (
         <p role="status" className="max-w-sm text-13 text-muted-foreground">
           {image.imageInputReason === "model_text_only" || image.imageInputReason === "image_input_unsupported"
