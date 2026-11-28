@@ -25,6 +25,8 @@ pub use onboard::{
 };
 pub use poll::poll;
 
+pub const USER_CODE_READINESS: &str = "devices:user-code-hmac-v1";
+
 pub const DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD: u32 = 3;
 pub const DEVICE_CODE_LOCKOUT_SECS: i64 = 60 * 60;
 pub const DEVICE_CODE_EXPIRES_IN_SECS: i64 = 15 * 60;
@@ -399,6 +401,11 @@ pub(crate) mod tests_support {
     use ed25519_dalek::{Signer, SigningKey};
     use mongodb::Database;
 
+    pub(crate) fn hmac_key() -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(module_path!().as_bytes()).into()
+    }
+
     pub(crate) fn signing_key() -> SigningKey {
         SigningKey::from_bytes(&[77u8; 32])
     }
@@ -418,6 +425,7 @@ pub(crate) mod tests_support {
         let key = signing_key();
         let response = initiate(
             &db,
+            &hmac_key(),
             DeviceCodeInitiateInput {
                 device_pubkey: key.verifying_key().to_bytes(),
                 hw_id: "esp32-p4-cam-1".to_string(),
@@ -430,3 +438,6 @@ pub(crate) mod tests_support {
         Some((db, response, key))
     }
 }
+
+#[cfg(test)]
+mod user_code_tests;

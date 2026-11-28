@@ -7,23 +7,63 @@ use crate::models::device_code::{DeviceCode, UserCodeGen};
 
 use super::DEVICE_CODE_ROTATE_SECS;
 
+pub(super) fn lookup_hmac(key: &[u8], code: &str) -> String {
+    crate::services::auth_device_service::hmac_hex(
+        key,
+        format!("nyxid:device-code:approval:v1\0{code}").as_bytes(),
+    )
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CodeFormat<'a> {
+    Legacy,
+    Hmac { key: &'a [u8], device_code: &'a str },
+}
+
+impl CodeFormat<'_> {
+    pub(super) fn generate(
+        self,
+        now: DateTime<Utc>,
+        legacy_generator: impl FnOnce() -> String,
+    ) -> (String, UserCodeGen) {
+        match self {
+            Self::Legacy => {
+                let code = legacy_generator();
+                (
+                    code.clone(),
+                    UserCodeGen {
+                        code,
+                        display_nonce: None,
+                        generated_at: now,
+                    },
+                )
+            }
+            Self::Hmac { key, device_code } => {
+                let nonce = uuid::Uuid::new_v4().to_string();
+                let display = crate::crypto::device_code::derived_user_code(device_code, &nonce);
+                let generation = UserCodeGen {
+                    code: lookup_hmac(key, &display),
+                    display_nonce: Some(nonce),
+                    generated_at: now,
+                };
+                (display, generation)
+            }
+        }
+    }
+}
+
 pub(super) fn rotate_user_code_if_needed_with_generator<F>(
     row: &mut DeviceCode,
     now: DateTime<Utc>,
-    mut user_code_generator: F,
+    format: CodeFormat<'_>,
+    user_code_generator: F,
 ) -> AppResult<String>
 where
     F: FnMut() -> String,
 {
     if now.signed_duration_since(row.last_rotated_at) > Duration::seconds(DEVICE_CODE_ROTATE_SECS) {
-        let new_code = user_code_generator();
-        row.user_code_history.insert(
-            0,
-            UserCodeGen {
-                code: new_code.clone(),
-                generated_at: now,
-            },
-        );
+        let (new_code, generation) = format.generate(now, user_code_generator);
+        row.user_code_history.insert(0, generation);
         row.user_code_history.truncate(4);
         row.last_rotated_at = now;
         return Ok(new_code);
@@ -31,7 +71,12 @@ where
 
     row.user_code_history
         .first()
-        .map(|generation| generation.code.clone())
+        .map(|generation| match (format, &generation.display_nonce) {
+            (CodeFormat::Hmac { device_code, .. }, Some(nonce)) => {
+                crate::crypto::device_code::derived_user_code(device_code, nonce)
+            }
+            _ => generation.code.clone(),
+        })
         .ok_or_else(|| AppError::Internal("device code has no user code history".to_string()))
 }
 
@@ -51,6 +96,7 @@ mod tests {
             user_code_history: codes
                 .iter()
                 .map(|code| UserCodeGen {
+                    display_nonce: None,
                     code: (*code).to_string(),
                     generated_at: last_rotated_at,
                 })
@@ -80,8 +126,13 @@ mod tests {
         let now = Utc::now();
         let mut row = row_with_history(&["AAAA-BBBB-CCCC"], now);
 
-        let current =
-            rotate_user_code_if_needed_with_generator(&mut row, now, generate_user_code).unwrap();
+        let current = rotate_user_code_if_needed_with_generator(
+            &mut row,
+            now,
+            CodeFormat::Legacy,
+            generate_user_code,
+        )
+        .unwrap();
 
         assert_eq!(current, "AAAA-BBBB-CCCC");
         assert_eq!(row.user_code_history.len(), 1);
@@ -102,8 +153,13 @@ mod tests {
             old_rotated_at,
         );
 
-        let current =
-            rotate_user_code_if_needed_with_generator(&mut row, now, generate_user_code).unwrap();
+        let current = rotate_user_code_if_needed_with_generator(
+            &mut row,
+            now,
+            CodeFormat::Legacy,
+            generate_user_code,
+        )
+        .unwrap();
 
         assert_eq!(row.user_code_history.len(), 4);
         assert_eq!(row.user_code_history[0].code, current);
