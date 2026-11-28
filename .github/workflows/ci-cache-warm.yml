@@ -177,6 +177,7 @@ jobs:
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/clippy.log" --
           python3 .github/scripts/ci_resources.py clippy
+          python3 scripts/raw-aes/check.py dev
           cargo clippy --workspace --all-targets -- -D warnings
       - name: Release compile reserve before caching
         run: bash .github/scripts/prepare-backend-runner.sh --release
@@ -263,6 +264,8 @@ jobs:
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
       - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
+        with:
+          components: clippy
       - uses: ./.github/actions/ci-rust-cache
         id: rust-cache
         with:
@@ -280,6 +283,12 @@ jobs:
           --log-file "$RUNNER_TEMP/features-${{ matrix.variant }}.log" --
           python3 .github/scripts/ci_resources.py features-${{ matrix.variant }}
           cargo build -p nyxid --features "$FEATURES"
+      - name: Check compiler-resolved AES receivers with both KMS providers
+        if: matrix.variant == 'aws-and-gcp-kms'
+        timeout-minutes: 18
+        env:
+          CARGO_BUILD_JOBS: 1
+        run: python3 .github/scripts/ci_resources.py raw-aes-kms python3 scripts/raw-aes/check.py kms
       - name: Release compile reserve before caching
         run: bash .github/scripts/prepare-backend-runner.sh --release
       - name: Save incremental cache

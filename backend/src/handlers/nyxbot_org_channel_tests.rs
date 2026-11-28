@@ -744,10 +744,10 @@ async fn cold_guest_model_setup(native: bool, addon: bool, followed: bool) {
             ),
         );
         wiremock::Mock::given(wiremock::matchers::path("/channels/201"))
-            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"id":"201","type":11,"parent_id":"200","guild_id":"300","thread_metadata":{"archived":false,"locked":false}}))).mount(&discord).await;
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({"id":"201","type":11,"parent_id":"200","guild_id":"300","thread_metadata":{"archived":false,"locked":false}}))).mount(discord).await;
         wiremock::Mock::given(wiremock::matchers::path("/channels/201/messages"))
             .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!([])))
-            .mount(&discord)
+            .mount(discord)
             .await;
         wiremock::Mock::given(wiremock::matchers::path_regex("^/channels/201/messages/[0-9]+$"))
             .respond_with(|r:&wiremock::Request| {
@@ -755,7 +755,7 @@ async fn cold_guest_model_setup(native: bool, addon: bool, followed: bool) {
                 wiremock::ResponseTemplate::new(200).set_body_json(json!({"id":id,"channel_id":"201","type":0,
                     "author":{"id":"8","bot":false},"content":if id=="501" {"Hello without billing"} else {"Hello, first visitor"},
                     "mentions":[{"id":"100"}],"mention_roles":[],"mention_everyone":false,"attachments":[]}))
-            }).mount(&discord).await;
+            }).mount(discord).await;
         let parent = chats::record_chat(
             &state,
             &row,
