@@ -213,7 +213,15 @@ async fn inbound_impl_inner(
     }
     let sender = Sender {
         truncated_original_bytes,
-        guest_facts: Default::default(),
+        // Native followed events have no relay-message pointer. Reuse this
+        // exact retained source after binding its provider chat/sender/thread.
+        guest_facts: crate::services::channel_guest_access::transport::stored_facts(
+            &bot,
+            &source,
+            &facts.chat_id,
+            sender_id,
+            facts.native_thread_id.as_deref(),
+        ),
         guest_mode: None,
         native_discord_activity: None,
         original_kind: None,

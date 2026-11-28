@@ -4926,17 +4926,17 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         service_auth_method: None,
         service_auth_key_name: None,
         description: Some(
-            "LinkedIn profile and publishing tools for AI agents. Read the connected member profile and create posts with explicit approval.",
+            "LinkedIn profile, member text posting and company image publishing tools for AI agents. Company images are prepared, reviewed and explicitly approved in the originating NyxBot chat.",
         ),
         default_request_headers: Some(LINKEDIN_DEFAULT_HEADERS),
         service_category: "connection",
         requires_user_credential: true,
         homepage_url: Some("https://www.linkedin.com"),
         auth_notes: Some(
-            "Connect a LinkedIn account using your LinkedIn developer app. The profile tool uses OpenID Connect scopes; publishing also requires the w_member_social permission.",
+            "Use OpenID Connect scopes for profile reads and w_member_social for member text posts. Company image publishing requires a BYO LinkedIn app with Community Management approval and w_organization_social; optional post verification needs r_organization_social. NyxID first-party OAuth retains its restricted scope allowlist.",
         ),
         known_limitations: Some(
-            "LinkedIn may require app review and product approval before publishing permissions are granted. Only the hosted profile and post operations are typed; other LinkedIn APIs remain available through the generic proxy.",
+            "LinkedIn app review, product access and company-page authority govern organization publishing. The managed image tool is restricted to eligible live owner chats with server-held BYO bearer credentials; it always asks for publication approval. Readback permission is optional: a creation receipt can remain unverified. Mounted text and analytics operations are preserved.",
         ),
     },
     DefaultServiceSeed {

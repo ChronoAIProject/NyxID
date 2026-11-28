@@ -55,6 +55,9 @@ pub struct NodeConfig {
     /// saves it with the replacement. Completed high-water marks never reset.
     #[serde(default)]
     pub credential_generation_fences: CredentialGenerations,
+    /// Stale writers cannot undo an explicit change of destination policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_revision: Option<uuid::Uuid>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -139,6 +142,8 @@ fn default_ssh_io_timeout_secs() -> u64 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CredentialConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_binding: Option<super::destination::DestinationBinding>,
     /// "header" or "query_param"
     pub injection_method: String,
     /// Target URL for this service (e.g., "https://api.openai.com/v1").
@@ -241,6 +246,8 @@ impl std::fmt::Debug for OAuthRequestOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SshKeyConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_binding_version: Option<u8>,
     pub service_slug: String,
     pub principal: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -320,6 +327,7 @@ impl CredentialConfig {
         Self {
             injection_method: "header".to_string(),
             target_url,
+            destination_binding: None,
             target_revision: None,
             header_name: Some(header_name),
             header_value_encrypted,
@@ -348,6 +356,7 @@ impl CredentialConfig {
         Self {
             injection_method: "query_param".to_string(),
             target_url,
+            destination_binding: None,
             target_revision: None,
             header_name: None,
             header_value_encrypted: None,
@@ -378,6 +387,7 @@ impl CredentialConfig {
         Self {
             injection_method: "path_prefix".to_string(),
             target_url,
+            destination_binding: None,
             target_revision: None,
             header_name: Some(prefix),
             header_value_encrypted: credential_encrypted,
@@ -408,6 +418,7 @@ impl CredentialConfig {
         Self {
             injection_method: "none".to_string(),
             target_url,
+            destination_binding: None,
             target_revision: None,
             header_name: None,
             header_value_encrypted: None,
@@ -439,6 +450,7 @@ impl CredentialConfig {
         Self {
             injection_method: "aws_sigv4".to_string(),
             target_url,
+            destination_binding: None,
             target_revision: None,
             header_name: None,
             header_value_encrypted: credential_json_encrypted,
@@ -539,6 +551,7 @@ impl NodeConfig {
             pending_crypto_keys: BTreeMap::new(),
             credential_generations: Default::default(),
             credential_generation_fences: Default::default(),
+            destination_revision: None,
         }
     }
 
@@ -578,10 +591,88 @@ impl NodeConfig {
         Ok(config)
     }
 
-    /// Save config to a TOML file.
-    /// M1: Write to a temp file with correct permissions, then rename atomically
-    /// to avoid a window where the file has default permissions.
+    /// Serialize config publication with the local operator's explicit rebind.
+    fn writer_lock(path: &Path) -> Result<std::fs::File> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let lock = options.open(path.with_extension("toml.lock"))?;
+        lock.lock()?;
+        Ok(lock)
+    }
+
+    pub fn rebind(
+        path: &Path,
+        service: &str,
+        principal: Option<&str>,
+        urls: &[String],
+    ) -> Result<()> {
+        let _lock = Self::writer_lock(path)?;
+        let mut config = Self::load(path)?;
+        match principal {
+            Some(principal) => {
+                let [url] = urls else {
+                    return Err(Error::Validation(
+                        "An SSH key requires one ssh:// destination".into(),
+                    ));
+                };
+                let (host, port) = super::destination::DestinationBinding::ssh_endpoint(url)?;
+                let entry = config
+                    .ssh_keys
+                    .iter_mut()
+                    .find(|k| k.service_slug == service && k.principal == principal)
+                    .ok_or_else(|| Error::Validation("SSH credential is missing".into()))?;
+                entry.destination_binding_version = Some(1);
+                entry.target_host = host;
+                entry.target_port = port;
+            }
+            None => {
+                let record = config
+                    .credentials
+                    .get_mut(service)
+                    .ok_or_else(|| Error::Validation("Service credential is missing".into()))?;
+                record.destination_binding = Some(super::destination::DestinationBinding::new(
+                    urls.iter().map(String::as_str),
+                )?);
+            }
+        }
+        config.destination_revision = Some(uuid::Uuid::new_v4());
+        config.write_config(path)
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
+        let _lock = Self::writer_lock(path)?;
+        self.check_destination_revision(path)?;
+        self.write_config(path)
+    }
+
+    /// A local install or removal changes which credentials can authorize a destination.
+    pub fn save_local_credentials(&mut self, path: &Path) -> Result<()> {
+        let _lock = Self::writer_lock(path)?;
+        self.check_destination_revision(path)?;
+        self.destination_revision = Some(uuid::Uuid::new_v4());
+        self.write_config(path)
+    }
+
+    fn check_destination_revision(&self, path: &Path) -> Result<()> {
+        if path.try_exists()? {
+            let current = Self::load(path)?;
+            if current.node.id == self.node.id
+                && current.destination_revision != self.destination_revision
+            {
+                return Err(Error::Validation(
+                    "Local destination binding changed during the update".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn write_config(&self, path: &Path) -> Result<()> {
         let content = toml::to_string_pretty(self)?;
         #[cfg(unix)]
         {
@@ -701,6 +792,37 @@ impl NodeConfig {
         }
     }
 
+    /// Local setup may establish an old record's first explicit destination.
+    pub fn prepare_local_install(&mut self, slug: &str, target: Option<&str>) -> Result<()> {
+        let target = self.resolve_target_url(slug, target).ok_or_else(|| Error::Validation(
+            "A destination URL is required for credential setup. Supply --url or select a catalog endpoint.".into()
+        ))?;
+        let binding = super::destination::DestinationBinding::new([target.as_str()])?;
+        if let Some(row) = self.credentials.get_mut(slug) {
+            if let Some(existing) = row.destination_binding.as_ref() {
+                if !existing.permits(&target, "", false) {
+                    return Err(Error::Validation("Use credentials rebind to approve this destination before replacing the credential".into()));
+                }
+            } else {
+                row.destination_binding = Some(binding);
+            }
+        }
+        Ok(())
+    }
+
+    fn binding_for_write(
+        &self,
+        slug: &str,
+        target: Option<&str>,
+    ) -> Result<Option<super::destination::DestinationBinding>> {
+        if let Some(existing) = self.credentials.get(slug)
+            && (existing.destination_binding.is_some() || existing.injection_method != "none")
+        {
+            return Ok(existing.destination_binding.clone());
+        }
+        super::destination::DestinationBinding::new(target).map(Some)
+    }
+
     /// Add a header credential using the configured secret backend.
     pub fn add_header_credential_via(
         &mut self,
@@ -710,12 +832,13 @@ impl NodeConfig {
         target_url: Option<&str>,
         backend: &SecretBackend,
     ) -> Result<()> {
-        let encrypted = backend.store_credential_value(service_slug, header_value)?;
         let resolved_target_url = self.resolve_target_url(service_slug, target_url);
-        self.credentials.insert(
-            service_slug.to_string(),
-            CredentialConfig::new_header(header_name.to_string(), encrypted, resolved_target_url),
-        );
+        let binding = self.binding_for_write(service_slug, resolved_target_url.as_deref())?;
+        let encrypted = backend.store_credential_value(service_slug, header_value)?;
+        let mut record =
+            CredentialConfig::new_header(header_name.to_string(), encrypted, resolved_target_url);
+        record.destination_binding = binding;
+        self.credentials.insert(service_slug.to_string(), record);
         self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
@@ -734,8 +857,10 @@ impl NodeConfig {
             .unwrap_or_else(|| ifttt::BASE_URL.to_string());
         ifttt::validate_destination(&target)
             .map_err(|error| Error::Validation(error.to_string()))?;
+        let binding = self.binding_for_write(service_slug, Some(&target))?;
         let encrypted = backend.store_credential_value(service_slug, key)?;
         let mut config = CredentialConfig::new_header(String::new(), encrypted, Some(target));
+        config.destination_binding = binding;
         config.injection_method = ifttt::AUTH_METHOD.to_string();
         self.credentials.insert(service_slug.to_string(), config);
         self.credential_generation_fences.0.remove(service_slug);
@@ -751,16 +876,16 @@ impl NodeConfig {
         target_url: Option<&str>,
         backend: &SecretBackend,
     ) -> Result<()> {
-        let encrypted = backend.store_credential_value(service_slug, param_value)?;
         let resolved_target_url = self.resolve_target_url(service_slug, target_url);
-        self.credentials.insert(
-            service_slug.to_string(),
-            CredentialConfig::new_query_param(
-                param_name.to_string(),
-                encrypted,
-                resolved_target_url,
-            ),
+        let binding = self.binding_for_write(service_slug, resolved_target_url.as_deref())?;
+        let encrypted = backend.store_credential_value(service_slug, param_value)?;
+        let mut record = CredentialConfig::new_query_param(
+            param_name.to_string(),
+            encrypted,
+            resolved_target_url,
         );
+        record.destination_binding = binding;
+        self.credentials.insert(service_slug.to_string(), record);
         self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
@@ -774,12 +899,13 @@ impl NodeConfig {
         target_url: Option<&str>,
         backend: &SecretBackend,
     ) -> Result<()> {
-        let encrypted = backend.store_credential_value(service_slug, credential)?;
         let resolved_target_url = self.resolve_target_url(service_slug, target_url);
-        self.credentials.insert(
-            service_slug.to_string(),
-            CredentialConfig::new_path_prefix(prefix.to_string(), encrypted, resolved_target_url),
-        );
+        let binding = self.binding_for_write(service_slug, resolved_target_url.as_deref())?;
+        let encrypted = backend.store_credential_value(service_slug, credential)?;
+        let mut record =
+            CredentialConfig::new_path_prefix(prefix.to_string(), encrypted, resolved_target_url);
+        record.destination_binding = binding;
+        self.credentials.insert(service_slug.to_string(), record);
         self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
@@ -811,12 +937,12 @@ impl NodeConfig {
         target_url: Option<&str>,
         backend: &SecretBackend,
     ) -> Result<()> {
-        let encrypted = backend.store_credential_value(service_slug, credential_json)?;
         let resolved_target_url = self.resolve_target_url(service_slug, target_url);
-        self.credentials.insert(
-            service_slug.to_string(),
-            CredentialConfig::new_aws_sigv4(encrypted, resolved_target_url),
-        );
+        let binding = self.binding_for_write(service_slug, resolved_target_url.as_deref())?;
+        let encrypted = backend.store_credential_value(service_slug, credential_json)?;
+        let mut record = CredentialConfig::new_aws_sigv4(encrypted, resolved_target_url);
+        record.destination_binding = binding;
+        self.credentials.insert(service_slug.to_string(), record);
         self.credential_generation_fences.0.remove(service_slug);
         Ok(())
     }
@@ -837,10 +963,12 @@ impl NodeConfig {
         let had_secret = self.credentials.get(service_slug).is_some_and(|c| {
             c.header_value_encrypted.is_some() || c.param_value_encrypted.is_some()
         });
-        self.credentials.insert(
-            service_slug.to_string(),
-            CredentialConfig::new_no_auth(resolved_target_url),
-        );
+        let mut record = CredentialConfig::new_no_auth(resolved_target_url);
+        record.destination_binding = self
+            .credentials
+            .get(service_slug)
+            .and_then(|previous| previous.destination_binding.clone());
+        self.credentials.insert(service_slug.to_string(), record);
         if had_secret {
             // Best-effort: a stale secret left behind wouldn't be
             // injected (the new entry is injection_method="none"),

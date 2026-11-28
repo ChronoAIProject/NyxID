@@ -2958,7 +2958,7 @@ pub(crate) async fn begin_owner_turn_in_session(
         {
             return Err(AppError::Forbidden("Thread sender changed".into()));
         }
-        if let Some(guest) = channel_guest.filter(|_| origin.org_execution.is_none()) {
+        if let Some(guest) = channel_guest {
             Box::pin(super::channel_thread_follow_service::admit_hosted_turn(
                 db, user_id, origin, &id, guest, session,
             ))
@@ -8020,6 +8020,7 @@ pub async fn rename(
 /// Payload inventories shared by ordinary conversation retirement and the
 /// bounded Meta guest eraser. Credentials remain until parent retirement.
 pub(crate) const CONVERSATION_CHILD_COLLECTIONS: &[&str] = &[
+    crate::models::image_publication::COLLECTION_NAME,
     crate::models::async_service_operation::COLLECTION_NAME,
     crate::models::generated_artifact::COLLECTION_NAME,
     crate::models::generated_artifact::DELIVERIES,

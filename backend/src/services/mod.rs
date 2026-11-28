@@ -587,6 +587,7 @@ pub(crate) mod platform_faq_service;
 pub mod assistant_invocation_service;
 pub(crate) mod platform_native_reply_service;
 
+pub mod image_publication;
 pub mod lark_base_writes;
 pub mod session_authority;
 

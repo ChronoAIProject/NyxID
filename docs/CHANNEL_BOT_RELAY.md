@@ -826,6 +826,13 @@ Acquisition and renewal use serving readiness: recorded active capabilities
 continue through supported roster overlaps; hard readiness loss stops local ingress.
 Interaction-only bots require no change while the ingress flag stays off.
 
+Ordinary Discord normalization binds the message envelope to the authenticated
+channel, including its guild value. DM and group-DM messages require absent or
+null guild values in both records; guild messages require matching values.
+Contradictory records fail normalization. Enrolled guest discovery and execution
+also check the embedded channel against the verified room facts before using
+its private or shared audience evidence.
+
 1. In Developer Portal > Bot > Privileged Gateway Intents, enable **Message
    Content Intent**. Verified apps require Discord approval. NyxID requests
    `GUILDS`, `GUILD_MESSAGES`, `DIRECT_MESSAGES`, and `MESSAGE_CONTENT` (37377).

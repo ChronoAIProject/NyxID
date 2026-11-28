@@ -41,12 +41,12 @@ jobs:
     # archive and inventory are packaged and uploaded.
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         # A healthy but slow Ubuntu mirror can take over five minutes for indexes.
         timeout-minutes: 10
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
       - uses: ./.github/actions/ci-rust-cache
@@ -57,7 +57,7 @@ jobs:
           incremental: 'false'
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: ${{ inputs.coverage && 'cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146' || 'cargo-nextest@0.9.146' }}
       - name: Check RCI backend boundary
@@ -98,14 +98,14 @@ jobs:
           --profile ci --message-format json > test-inventory.json
       - name: Record build runner OS identity
         run: python3 .github/scripts/coverage_identity.py --record build-identity.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-archive
           path: backend-tests.tar.zst
           compression-level: 0
           if-no-files-found: error
           retention-days: 1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-inventory
           path: |
@@ -116,7 +116,7 @@ jobs:
       - name: Upload build resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ inputs.coverage && 'resources-coverage-backend-build' || 'resources-backend-test-build' }}
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -130,18 +130,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
       - name: Install system dependencies
         # A healthy but slow Ubuntu mirror can take over five minutes for indexes.
         timeout-minutes: 10
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
-      - uses: taiki-e/install-action@v2
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: cargo-nextest@0.9.146
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: backend-test-build-archive
       - name: Start transaction-capable MongoDB
@@ -159,7 +159,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-backend-billing-smoke
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -177,18 +177,18 @@ jobs:
         # Must agree with SHARD_COUNT; partitioning and verification share it.
         shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         # A healthy but slow Ubuntu mirror can take over five minutes for indexes.
         timeout-minutes: 10
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: ${{ inputs.coverage && 'llvm-tools-preview' || '' }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: ${{ inputs.coverage && 'cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146' || 'cargo-nextest@0.9.146' }}
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-archive
       - name: Start transaction-capable MongoDB
@@ -239,7 +239,7 @@ jobs:
           fi
       - name: Upload shard evidence
         if: always() && hashFiles('shard-evidence/junit.xml') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-${{ matrix.shard }}
           path: shard-evidence/
@@ -248,7 +248,7 @@ jobs:
       - name: Upload test resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-${{ inputs.coverage && 'coverage-backend' || 'backend-test' }}-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -262,53 +262,53 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ inputs.coverage && 'backend-coverage-build' || 'backend-test-build' }}-inventory
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: inputs.coverage
         with:
           name: backend-coverage-build-archive
       # Never merge-multiple here: LLVM's pooled filenames repeat per runner.
       # Preserve missing-evidence failures until the execution-result check and
       # inventory verifier can report the failed shard or missing directory.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-1
           path: results/shard-1
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-2
           path: results/shard-2
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-3
           path: results/shard-3
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-4
           path: results/shard-4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-5
           path: results/shard-5
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-6
           path: results/shard-6
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-7
           path: results/shard-7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-shard-8
@@ -320,7 +320,7 @@ jobs:
           --count "$SHARD_COUNT" --output backend-test-summary.json
       - name: Upload diagnostic evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ inputs.coverage && 'backend-coverage' || 'backend-test' }}-diagnostics
           path: |
@@ -347,22 +347,22 @@ jobs:
           --count "$SHARD_COUNT" --profiles target/llvm-cov-target
       - name: Publish test summary
         if: always()
-        uses: test-summary/action@v2.6
+        uses: test-summary/action@37b508cfee6d4d080eedd00b5bb240a6a784a6a5 # v2.6
         with:
           paths: results/*/junit.xml
           show: fail
       - name: Upload backend test results
         if: always() && !inputs.coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-results-backend
           path: target/nextest/ci/junit.xml
           if-no-files-found: warn
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         if: inputs.coverage
         with:
           components: llvm-tools-preview
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         if: inputs.coverage
         with:
           tool: cargo-llvm-cov@0.9.1
@@ -393,7 +393,7 @@ jobs:
         run: cp coverage-backend.raw.json coverage-backend.base.json
       - name: Publish exact-commit coverage baseline
         if: inputs.coverage && github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: backend-coverage-baseline
           path: |
@@ -404,7 +404,7 @@ jobs:
       - name: Cache reusable base report
         if: inputs.coverage && github.event_name != 'pull_request' && steps.coverage-identity.outputs.reusable == 'true'
         continue-on-error: true
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: coverage-backend.base.json
           key: coverage-backend-base-v2-${{ github.sha }}-${{ steps.coverage-identity.outputs.fingerprint }}
@@ -413,7 +413,7 @@ jobs:
         run: cargo llvm-cov report --nextest-archive-file backend-tests.tar.zst --package nyxid --fail-under-lines 73
       - name: Upload coverage artifact
         if: always() && inputs.coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ github.event_name == 'pull_request' && 'backend-coverage-head' || 'coverage-backend' }}
           path: |

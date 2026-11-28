@@ -1771,6 +1771,14 @@ pub static ENTRIES: &[Entry] = &[
         why: "groups is shared or coordination record and has no person-owned erasure path, so account deletion leaves it unchanged.",
     },
     Entry {
+        collection: "image_publications",
+        owner: OwnerSelector::Fields(&["user_id"]),
+        erasure: Erasure::LocalInventory,
+        export: Export::Section("assistant"),
+        export_selector: ExportSelector::Person("user_id"),
+        why: "image_publications stores the conversation owner’s company image drafts and post receipts. The owner can export publication outcomes, and account erasure removes the local records.",
+    },
+    Entry {
         collection: "invite_codes",
         owner: OwnerSelector::Fields(&["usages.user_id", "created_by"]),
         erasure: Erasure::Redacted,

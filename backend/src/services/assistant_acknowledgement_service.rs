@@ -826,6 +826,7 @@ async fn record_auto_allowed_from_origin(
         decided_by: Some("access_mode".into()),
         confirmation: Some(
             crate::models::assistant_acknowledgement::ActionConfirmation {
+                image_publication: None,
                 risk: auto.class.as_str().into(),
                 access_mode: Some(auto.mode),
                 reason: auto.reason.into(),
@@ -985,6 +986,19 @@ pub async fn confirm_action_with(
         None,
         Some(
             crate::models::assistant_acknowledgement::ActionConfirmation {
+                image_publication: if tool == "nyxid.service_execution" {
+                    args["operation"]["image_publication_review"]
+                        .as_object()
+                        .map(|_| {
+                            serde_json::from_value(
+                                args["operation"]["image_publication_review"].clone(),
+                            )
+                            .map_err(|_| AppError::BadRequest("Invalid publication review".into()))
+                        })
+                        .transpose()?
+                } else {
+                    None
+                },
                 risk: need.class.as_str().into(),
                 access_mode: need.mode,
                 reason: if need.org_instruction == OrgInstructionRequirement::Required {

@@ -1297,6 +1297,9 @@ fn preview_rules(
                                 _ => None,
                             },
                             private,
+                            // Simulate a supported verified room; live turns
+                            // take this evidence from authenticated ingress.
+                            shared_room_verified: !private,
                         },
                         &policy::GuestDataRequest {
                             source_id: &rule.source_id,

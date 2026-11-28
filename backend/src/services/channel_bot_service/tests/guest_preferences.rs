@@ -95,6 +95,7 @@ async fn prepare_turn(db: &mongodb::Database, bot_id: &str, event: &str) -> gues
             source_event_id: event,
             sender_id: Some("fixture-guest"),
             audience: AnswerAudience::Private,
+            shared_room_verified: false,
             meta_grant_id: None,
         },
     )

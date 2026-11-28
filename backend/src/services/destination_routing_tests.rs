@@ -34,6 +34,17 @@ impl Echo {
     }
 
     pub async fn start_with_denied_workbook(denied_workbook: Option<&'static str>) -> Self {
+        Self::start_with_response(denied_workbook, None).await
+    }
+
+    pub(crate) async fn start_with_sheets_values(values: Value) -> Self {
+        Self::start_with_response(None, Some(Arc::new(values.to_string()))).await
+    }
+
+    async fn start_with_response(
+        denied_workbook: Option<&'static str>,
+        sheets_values: Option<Arc<String>>,
+    ) -> Self {
         let _ = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().install_default();
         let key = rcgen::generate_simple_self_signed(vec![
             "docs.googleapis.com".into(),
@@ -72,6 +83,7 @@ impl Echo {
                 let acceptor = acceptor.clone();
                 let calls = captured.clone();
                 let force_failure = force_failure.clone();
+                let sheets_values = sheets_values.clone();
                 tokio::spawn(async move {
                     let mut connect = Vec::new();
                     while !connect.ends_with(b"\r\n\r\n") {
@@ -132,6 +144,11 @@ impl Echo {
                         json!({"error":{"code":403,"status":"PERMISSION_DENIED","message":"Fixture account has no access to this workbook"}}).to_string()
                     } else if append_failed {
                         json!({"error":{"code":500,"status":"INTERNAL"}}).to_string()
+                    } else if host == "sheets.googleapis.com"
+                        && value["request"].as_str().unwrap().starts_with("GET ")
+                        && sheets_values.is_some()
+                    {
+                        sheets_values.as_ref().unwrap().as_ref().clone()
                     } else {
                         value.to_string()
                     };

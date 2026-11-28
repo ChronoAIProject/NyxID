@@ -77,12 +77,12 @@ async fn validate_bound(
         return Err(not_found());
     }
     let mut child_filter = doc! {"_id":&b.child_id,"user_id":owner,"channel_id":&channel.id,"partition":&origin.partition,"record_scope":SCOPE};
-    let hosted = channel_access.is_none() && guest::is_hosted_conversation(conversation);
+    let hosted = guest::is_hosted_conversation(conversation);
     if channel_access.is_none() {
         if !hosted {
             child_filter.insert("conversation_id", conversation);
         }
-    } else {
+    } else if !hosted {
         let e = origin.org_execution.as_ref().ok_or_else(not_found)?;
         if db.collection::<bson::Document>(crate::models::org_channel::LANES).find_one(doc!{"conversation_id":conversation,
             "channel_id":&channel.id,"partition":&origin.partition,"actor_id":&e.actor_id,"agent_id":&e.agent_id,
@@ -324,6 +324,7 @@ async fn validate_hosted(
     };
     let assignment = turn.hosted_assignment.as_ref().ok_or_else(not_found)?;
     if !b.guest
+        || !turn.matches_sender(&b.sender_id)
         || child
             .conversation_id
             .as_deref()
@@ -346,6 +347,13 @@ async fn validate_hosted(
         || assignment.agent_id != b.agent_id
         || assignment.settings_generation != b.generation
         || assignment.channel_generation != b.channel_generation
+        || origin.org_execution.as_ref().is_some_and(|execution| {
+            !execution.guest
+                || execution.agent_id != assignment.agent_id
+                || execution.sender_hash
+                    != crate::services::org_channel_service::sender_identity(channel, &b.sender_id)
+                || assignment.org_binding_revision.as_deref() != Some(execution.revision.as_str())
+        })
     {
         return Err(not_found());
     }
@@ -618,6 +626,35 @@ pub async fn validate_delivery(
     origin: &ChannelOrigin,
     conversation: &str,
 ) -> AppResult<NyxbotThread> {
+    validate_delivery_bound(db, owner, origin, conversation, None).await
+}
+
+/// A source waiting for model setup has its original delivery and guest
+/// authority, but no admitted assistant turn or durable guest work yet.
+pub(crate) async fn validate_pending_hosted_delivery(
+    db: &Database,
+    owner: &str,
+    origin: &ChannelOrigin,
+    turn: &guest::GuestTurn,
+) -> AppResult<NyxbotThread> {
+    guest::revalidate(db, turn).await?;
+    validate_delivery_bound(
+        db,
+        owner,
+        origin,
+        &turn.hosted_conversation_id(),
+        Some(turn.clone()),
+    )
+    .await
+}
+
+async fn validate_delivery_bound(
+    db: &Database,
+    owner: &str,
+    origin: &ChannelOrigin,
+    conversation: &str,
+    pending_guest: Option<guest::GuestTurn>,
+) -> AppResult<NyxbotThread> {
     let db = db.clone();
     let owner = owner.to_owned();
     let conversation = conversation.to_owned();
@@ -632,12 +669,13 @@ pub async fn validate_delivery(
             let origin = &origin;
 
             transactions::transaction_result(
-                Box::pin(validate_in_session(
+                Box::pin(validate_bound(
                     db,
                     owner,
                     origin,
                     conversation,
                     true,
+                    pending_guest.as_ref(),
                     session,
                 ))
                 .await,

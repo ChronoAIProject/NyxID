@@ -17,7 +17,7 @@ runs:
         python3 .github/scripts/backend_disk.py before-save
     - name: Save incremental cache
       continue-on-error: true
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ${{ inputs.path }}
         key: ${{ inputs.key }}

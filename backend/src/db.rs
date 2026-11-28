@@ -249,6 +249,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
     ensure_lark_base_write_indexes(db).await?;
+    ensure_image_publication_indexes(db).await?;
     db.collection::<crate::models::assistant_skill_draft_attempt::AssistantSkillDraftAttempt>(
         crate::models::assistant_skill_draft_attempt::COLLECTION_NAME,
     )
@@ -309,6 +310,27 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     backfill_org_scope_sources(db).await?;
     purge_legacy_channel_message_content(db).await?;
 
+    Ok(())
+}
+
+pub(crate) async fn ensure_image_publication_indexes(
+    db: &Database,
+) -> Result<(), mongodb::error::Error> {
+    let indexes = [
+        IndexModel::builder()
+            .keys(doc! {"key": 1})
+            .options(IndexOptions::builder().unique(true).build())
+            .build(),
+        IndexModel::builder()
+            .keys(doc! {"user_id": 1, "conversation_id": 1})
+            .build(),
+        IndexModel::builder()
+            .keys(doc! {"state": 1, "lease_until": 1})
+            .build(),
+    ];
+    db.collection::<Document>(crate::models::image_publication::COLLECTION_NAME)
+        .create_indexes(indexes)
+        .await?;
     Ok(())
 }
 

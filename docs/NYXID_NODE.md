@@ -158,7 +158,8 @@ For node-routed provider-backed services, the OAuth token stays on the node. Nyx
 ```bash
 nyxid node credentials add \
   --service openai \
-  --header "Authorization: Bearer sk-proj-..."
+  --url https://api.openai.com/v1 \
+  --header Authorization --secret-format bearer
 ```
 
 ### Add a Credential (Query Parameter Injection)
@@ -166,8 +167,19 @@ nyxid node credentials add \
 ```bash
 nyxid node credentials add \
   --service stripe \
-  --query-param "api_key=sk_live_..."
+  --url https://api.stripe.com/v1 \
+  --query-param api_key
 ```
+
+### Approve a destination on the node
+
+Local setup binds a credential to its service URL. The scheme, host, effective port and optional path prefix apply to HTTP, streaming and WebSocket requests. To replace the authorized destinations, run the following command on the credential node. Repeat `--url` for each allowed origin or prefix when a service uses several.
+
+```bash
+nyxid node credentials rebind --service monitor --url https://monitor.internal/api
+```
+
+For an SSH node key, include `--principal` and one `ssh://host:port` URL. Rebinding preserves the host-key fingerprint. The agent reloads HTTP credentials on its normal config poll, every five seconds. SSH opens read the local record on each request.
 
 ### Move an existing node-managed endpoint
 
@@ -181,7 +193,7 @@ nyxid node credentials set-url --service monitor --url http://new-monitor:8080
 
 From another machine, use `nyxid service update <service-id> --endpoint-url <url>`, or `PUT /api/v1/keys/{service-id}` with only `{"endpoint_url":"http://new-monitor:8080"}`. The endpoint API accepts the equivalent `PUT /api/v1/endpoints/{endpoint-id}` with `{"url":"http://new-monitor:8080"}`. Both require owner/org write access to the affected services and nodes. IDs, grants, agent bindings and operation scopes stay attached to the same records. Exact execution approvals still revalidate the changed destination and may require new approval.
 
-A nonempty server URL is authoritative for proxy routing, even on older or offline nodes. Responses report `node_target_sync` per affected service: `synced`, `offline`, `unsupported`, or `unconfirmed` (with a metadata revision). Offline/unsupported/unconfirmed sync does not roll back that URL. Upgrade/reconnect the node and repeat the same endpoint-only PUT to retry local sync; it is not queued for automatic replay. `credentials add`, including `add --service <slug> --url <url>` on an existing credential, keeps its interactive auth-method/header/secret prompts and replaces the local credential without an owner login; its local `--url` does not override a nonempty server URL.
+A nonempty server URL selects the route. A bound credential requires local approval of that destination. Run `credentials rebind` on the node when moving the credential to a different origin or prefix. Responses report `node_target_sync` per affected service: `synced`, `offline`, `unsupported`, or `unconfirmed` (with a metadata revision). Offline/unsupported/unconfirmed sync does not roll back that URL. Upgrade/reconnect the node and repeat the same endpoint-only PUT to retry local sync; it is not queued for automatic replay. `credentials add`, including `add --service <slug> --url <url>` on an existing credential, keeps its interactive auth-method/header/secret prompts and replaces the local credential without an owner login; its local `--url` does not override a nonempty server URL.
 
 An explicit `set-url --service <slug> --url ""` is allowed. Clearing a node-managed URL to `""` would enable the local-target fallback. It therefore requires an online node advertising metadata-update support to acknowledge the local clear **before** the server commits. A failed clear leaves the server URL unchanged. Revision fences reject superseded endpoint writes and delayed metadata messages, including a delayed nonempty update after a clear. This does not change HTTP(S)/SSH URL validation or the legacy empty-URL behavior for services not undergoing a node-managed migration.
 
@@ -214,9 +226,11 @@ Output:
 
 ```
 Configured credentials:
-  openai: header (Authorization)
-  stripe: query_param (api_key)
+  openai: header (Authorization), https://api.openai.com/v1
+  stripe: query_param (api_key), https://api.stripe.com/v1
 ```
+
+Credentials installed before binding support display `legacy (unbound)` until locally rebound. The agent warns once at startup if any are unbound, and `nyxid node agent-status` shows the count. A new record with an empty approved set displays `no approved destination` and refuses proxy requests.
 
 ### Remove a Credential
 
@@ -233,7 +247,7 @@ The `--service` value must match the **slug** of the downstream service in NyxID
 ## Checking Status
 
 ```bash
-nyxid node status
+nyxid node agent-status
 ```
 
 Output:
@@ -246,6 +260,7 @@ Node Status
   Credentials: 2 configured
     - openai
     - stripe
+  Destination binding: 0 legacy (unbound)
 ```
 
 This is a local check only -- it reads the config file but does not connect to the server.
@@ -478,7 +493,7 @@ The agent requires an HMAC-SHA256 signature on every HTTP proxy request. Enable 
 
 ### Signed Fields
 
-The HMAC message is computed as:
+A negotiated ordinary HTTP request signs the service ID, slug and base URL along with its method, path, query and body. On a legacy connection the HMAC input is
 
 ```
 {timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body_base64}

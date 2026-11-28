@@ -93,11 +93,13 @@ pub(crate) async fn prepare(
         let grant = validate_meta_source(bot, metadata)?;
         facts.sender_id = Some(authority.sender_id.as_str());
         facts.audience = AnswerAudience::Private;
+        facts.shared_room_verified = false;
         Some(grant)
     } else {
         None
     };
     metadata.guest_transport_audience = facts.sender_id.map(|_| facts.audience);
+    metadata.guest_transport_shared_room_verified = facts.shared_room_verified;
     let Some(mode) = mode else {
         metadata.id = stable_source;
         metadata.hosted_guest_selector_unavailable = true;
@@ -135,6 +137,7 @@ pub(crate) async fn prepare(
             source_event_id: &event_id,
             sender_id: facts.sender_id,
             audience: facts.audience,
+            shared_room_verified: facts.shared_room_verified,
             meta_grant_id: meta_grant.as_ref().map(|grant| grant.grant_id.as_str()),
         },
         meta_grant.as_ref(),

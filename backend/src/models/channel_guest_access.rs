@@ -47,6 +47,10 @@ pub struct GuestTurn {
     pub source_event_id: String,
     pub actor: GuestActor,
     pub audience: AnswerAudience,
+    /// Positive authenticated shared-room evidence. Older Shared rows may have
+    /// represented an unknown destination and cannot authorize a Sheets write.
+    #[serde(default)]
+    pub shared_room_verified: bool,
     pub policy_revision: i64,
     pub activation_epoch: i64,
     #[serde(default)]

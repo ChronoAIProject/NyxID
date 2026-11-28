@@ -201,6 +201,7 @@ pub fn add_entry(
     .flatten();
 
     config.ssh_keys.push(SshKeyConfig {
+        destination_binding_version: Some(1),
         service_slug: entry.service_slug,
         principal: entry.principal,
         private_key_pem_encrypted,
@@ -373,6 +374,7 @@ mod tests {
     #[test]
     fn ssh_key_toml_roundtrip_without_algorithms_keeps_config_clean() {
         let config = SshKeyConfig {
+            destination_binding_version: None,
             service_slug: "routeros".to_string(),
             principal: "admin".to_string(),
             private_key_pem_encrypted: Some("encrypted-key".to_string()),
@@ -400,6 +402,7 @@ mod tests {
             mac: Some(vec!["hmac-sha2-256".to_string()]),
         };
         let config = SshKeyConfig {
+            destination_binding_version: None,
             service_slug: "routeros".to_string(),
             principal: "admin".to_string(),
             private_key_pem_encrypted: Some("encrypted-key".to_string()),

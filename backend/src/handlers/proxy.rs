@@ -90,6 +90,7 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::DurableOperationOutcomeUncertain => (409, 9016),
         AppError::NodeCredentialMissing(_) => (502, 8004),
         AppError::NodeHttpSignatureUnsupported => (502, 8013),
+        AppError::NodeCredentialDestinationMismatch => (403, 8014),
         AppError::WsProxyDownstream(_) => (502, 8005),
         AppError::ClientDisconnected => (499, 8012),
         AppError::WorkspaceDestinationsNotActivated => (503, 12300),
@@ -6787,6 +6788,30 @@ async fn execute_resolved_proxy_inner<'a>(
                         && !had_dispatched_failure
                     {
                         dispatch.transport_attempt(false);
+                    }
+                    if matches!(&result, Err(failure) if matches!(failure.error, AppError::NodeCredentialDestinationMismatch))
+                    {
+                        destination_audit.denied();
+                        if let Some(permit) = &target.execution_permission {
+                            permit.node_not_sent().await?;
+                        }
+                        if let Some(reservation) = &durable_reservation {
+                            durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                &state.db,
+                                reservation,
+                                "node credential destination refused",
+                            )
+                            .await;
+                        }
+                        state
+                            .billing
+                            .reject_before_send(
+                                &metered,
+                                "node_credential_destination_mismatch",
+                                had_dispatched_failure,
+                            )
+                            .await?;
+                        return Err(AppError::NodeCredentialDestinationMismatch);
                     }
                     if let Err(failure) = &result
                         && !failure.dispatched
