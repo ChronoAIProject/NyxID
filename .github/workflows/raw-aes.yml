@@ -1,0 +1,45 @@
+name: Raw AES compiler inventory
+
+on:
+  workflow_call:
+  schedule:
+    - cron: '43 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ github.event_name == 'push' && 20 || 240 }}
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 1
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      RUSTFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || 'dev' }}
+      - name: Install system dependencies
+        timeout-minutes: 5
+        run: bash .github/scripts/install-linux-build-deps.sh
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
+        with:
+          components: clippy
+      - uses: ./.github/actions/ci-rust-cache
+        with:
+          backend-reserve: 'true'
+          save-if: 'false'
+          shared-key: features-aws-and-gcp-kms-rust-features
+          incremental: 'true'
+      - name: Prepare backend memory reserve
+        run: bash .github/scripts/prepare-backend-runner.sh
+      - name: Check the feature-enabled server and its test targets
+        if: github.event_name == 'push'
+        run: python3 scripts/raw-aes/check.py kms
+      - name: Check every compiler configuration and both privacy probe modes
+        if: github.event_name != 'push'
+        run: python3 scripts/raw-aes/check.py all
