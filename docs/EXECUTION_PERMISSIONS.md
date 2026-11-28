@@ -453,13 +453,21 @@ establishes this context; a client-supplied receipt or an ordinary follow-up eve
 does not. Ordinary distinct admitted follow-ups may use reusable authority for a
 new occurrence after receipt delivery.
 
-Covered writes also commit payload-free dispatch evidence on the existing original
-owner-message root at the shared final HTTP/MCP/specialized send transaction. Each
+Covered writes on marked v2 roots also commit payload-free dispatch evidence on
+the existing original owner-message root at the shared final HTTP/MCP/specialized
+send transaction. Each
 entry binds task epoch, key, conversation, connection, prepared effect digest,
 operation ID, grant ID and sending turn. The root retains at most 128 write
-dispatches; exceeding the bound refuses before provider send. Only a fresh root
+dispatches; exceeding the bound refuses before provider send. The marker is read
+and required again in that same transaction. An ordinary unmarked root preserves
+its authentic covered dispatch, without appending evidence or enforcing the v2
+capacity/occurrence limit, including at an existing 128-entry historical array.
+A current-turn release is checked before this bypass: old, foreign or mismatched
+released authority still fails closed. Only an eligible fresh personal owner root
 admitted under v2 fleet readiness is marked as having complete evidence; an older
-root is never backfilled. An unmarked historical root cannot acquire a new
+root is never backfilled. Other lanes perform no optional evidence-readiness read.
+An optional readiness dependency failure leaves an eligible fresh root unmarked
+and preserves ordinary admission and coverage. An unmarked historical root cannot acquire a new
 continuation batch proof or release a model handoff. A released retained-owner turn consults this evidence
 even when the prior covered write created no approval row. A repeated digest
 returns a truthful conflict without an invented request/card handle. The final
@@ -478,19 +486,29 @@ resume does not decrypt another copy of it. Normal egress still requires the
 live conversation-key relationship; reusing the verified bytes does not bypass
 revocation of that relationship or the key.
 
-Every distinct request in a batched wake must have a successful, available receipt
-and a version-2 pending `owner_continuation` marker. Before any provider dispatch,
-a worker-fenced transaction binds the sorted, distinct IDs of the complete
-original decision wake to every eligible actionable member, after continuation
+Every distinct request in a continuation batch must have a successful, available
+receipt and a version-2 pending `owner_continuation` marker. Before any provider
+dispatch, a worker-fenced transaction binds the sorted, distinct IDs and original
+admitted decision turn ID to every eligible actionable member, after continuation
 readiness is resolved. A wake containing an ordinary event binds blocked markers.
-Provider completion preserves this immutable batch proof and never replaces it
-with a smaller recovery wake. A marker alone is not success evidence: release
-also requires each committed successful result. Recovery must present the same
-complete batch, and every receipt must independently remain eligible. Stored
-sibling IDs establish evidence only: they never add executable decisions to an
-admitted wake. A partial recovery, mixed success/denial/waiting batch or a success
-co-admitted with an ordinary event cannot become a success-only model handoff,
-including a crash after the first success commit and before withholding the batch.
+Provider completion preserves this immutable proof and never replaces it with a
+smaller recovery wake. A marker alone is not success evidence: release requires
+every independently committed successful result with the same original batch,
+admitted turn, task, source, actor, conversation and credential.
+
+Only decisions actually present in the admitted wake enter executable resume.
+Stored sibling IDs are evidence-only reads. A partial wake observing another
+member still queued, preparing or dispatched leaves successful receipts pending;
+it neither sends the absent member nor permanently withholds a potentially valid
+all-approved batch. Bounded maintenance deterministically requeues undelivered
+successes through their existing receipt lifecycle. Once each member has genuinely
+succeeded on its own admitted path, a later eligible subset wake can reconcile
+the exact original batch and release the original task once. Denied, waiting,
+failed, unknown, missing or contradictory sibling proofs block the handoff; so
+does ordinary-event coalescence. Historical proofs without the original admitted
+turn ID remain receipt-only. Successful final settlement marks every receipt in
+the atomically released batch delivered, including successful members absent from
+that final wake, so maintenance cannot publish a duplicate sibling delivery.
 After normal model/context preparation, an atomic batch release fences the live
 worker, task, source, actor and key before the request can be sealed for model
 I/O. Release uses MongoDB time for turn/key expiry. An explicit turn lease must
@@ -527,7 +545,7 @@ publishing its receipt; the original batch proof also protects the earlier crash
 window. Historical receipts without a complete version-2 marker, unavailable
 results and released receipts remain receipt-only. Shared/group/org/platform/delegated/voice/external sources retain
 their existing receipt behavior. Release metadata contains only version, original
-decision request IDs, blocked state and the releasing turn ID; the encrypted
+decision request IDs and admitted turn ID, blocked state and the releasing turn ID; the encrypted
 receipt remains the single result copy.
 Private denied, expired, historical and released receipts remain readable after
 their task deadline. Owner-message source lookup applies only to a possible new

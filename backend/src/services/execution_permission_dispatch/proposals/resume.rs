@@ -157,8 +157,6 @@ pub(crate) async fn resume_turn(
             .await?;
     }
     let mut notes = Vec::new();
-    let mut receipts = Vec::new();
-    let mut withheld = Vec::new();
     let mut continuation_ready = batch_bound.then_some(true);
     let mut owner_source = None;
     let mut reviews = presentation::ReviewNotes::default();
@@ -193,46 +191,6 @@ pub(crate) async fn resume_turn(
         }
         if p.state == "completed" {
             notes.push(if matches!(p.contract.context.audience,Audience::Group{..}) {"The operation completed. Its private result is available on your permission card.".into()}else{result_for_human(state,request).await?.unwrap_or_else(||"The operation completed; its retained result is no longer available.".into())});
-            if p.owner_continuation.as_ref().is_some_and(|release| {
-                matches!(release.version, 1 | 2)
-                    && !release.blocked
-                    && release.released_turn_id.is_none()
-            }) {
-                let receipt = continuation::Receipt {
-                    id: id.into(),
-                    version,
-                    claim_id: p.claim_id.clone().ok_or_else(conflict)?,
-                };
-                if eligible
-                    && p.owner_continuation
-                        .as_ref()
-                        .is_some_and(|release| release.version == 2)
-                    && p.owner_continuation
-                        .as_ref()
-                        .and_then(|release| release.batch.as_ref())
-                        == Some(&batch)
-                    && request.activity_outcome.as_deref() == Some("completed")
-                    && p.delivered_turn_id.is_none()
-                    && p.result.is_some()
-                {
-                    let source = match owner_source {
-                        Some(source) => source,
-                        None => {
-                            let source =
-                                continuation::original_owner_source(&state.db, row).await?;
-                            owner_source = Some(source);
-                            source
-                        }
-                    };
-                    if source {
-                        receipts.push(receipt);
-                    } else {
-                        withheld.push(receipt);
-                    }
-                } else {
-                    withheld.push(receipt);
-                }
-            }
             continue;
         }
         if p.state == "dispatched"
@@ -477,6 +435,7 @@ pub(crate) async fn resume_turn(
             "execution_proposal.v1.independent_card_id": independent_card,
         };
         let successful = state_name == "completed" && activity_outcome == Some("completed");
+        #[cfg(test)]
         let release_pending = typed_wake
             && eligible
             && successful
@@ -485,9 +444,13 @@ pub(crate) async fn resume_turn(
                 marker.version == 2
                     && !marker.blocked
                     && marker.released_turn_id.is_none()
-                    && marker.batch.as_ref() == Some(&batch)
+                    && marker.batch_turn_id.is_some()
+                    && marker
+                        .batch
+                        .as_ref()
+                        .is_some_and(|original| original.iter().any(|member| member == id))
             });
-        if p.owner_continuation.is_some() && !release_pending && state_name != "waiting" {
+        if p.owner_continuation.is_some() && (!typed_wake || !eligible || !successful) {
             set.insert("execution_proposal.v1.owner_continuation.blocked", true);
         }
         if let Some(version) = marker {
@@ -516,25 +479,12 @@ pub(crate) async fn resume_turn(
         {
             return Err(AppError::Internal("Injected receipt interruption".into()));
         }
-        if release_pending {
-            receipts.push(continuation::Receipt {
-                id: id.into(),
-                version,
-                claim_id,
-            });
-        }
         notes.push(text);
     }
     notes.extend(reviews.render());
     let text = notes.join("\n\n");
-    if typed_wake && withheld.is_empty() && receipts.len() == seen.len() && !receipts.is_empty() {
-        return Ok(Some(ResumeOutcome::Continue(
-            continuation::prepare(state, row, receipts, text).await?,
-        )));
-    }
-    receipts.extend(withheld);
-    if !receipts.is_empty() {
-        continuation::withhold(&state.db, &receipts).await?;
+    if let Some(continuation) = super::batch::reconcile(state, row, &batch, typed_wake).await? {
+        return Ok(Some(ResumeOutcome::Continue(continuation)));
     }
     Ok(Some(ResumeOutcome::Receipt(text)))
 }

@@ -163,7 +163,7 @@ async fn owner_permission_resume_private_covered_write_only_reviews_readback() {
 // Astra 1 / PM (c): two fresh operation IDs cannot race past the digest barrier.
 #[tokio::test]
 async fn owner_permission_resume_concurrent_digest_claim_and_historical_evidence() {
-    for evidence in ["complete", "historical", "at_limit"] {
+    for evidence in ["complete", "historical", "foreign", "at_limit"] {
         let historical = evidence == "historical";
         let (f, row) = assistant("owner_resume_atomic_effect").await;
         set_task(&f, &row).await;
@@ -201,6 +201,28 @@ async fn owner_permission_resume_concurrent_digest_claim_and_historical_evidence
             f.state.db.collection::<Document>("assistant_messages").update_one(doc! {"_id":root},
                 doc! {"$unset":{"execution_dispatch_evidence_version":"","execution_dispatches":""}})
                 .await.unwrap();
+        }
+        if evidence == "foreign" {
+            let request = f
+                .state
+                .db
+                .collection::<ApprovalRequest>("approval_requests")
+                .find_one(doc! {"user_id":&f.owner})
+                .await
+                .unwrap()
+                .unwrap();
+            let version = proposals::v3::AssistantVersion::of(&request).unwrap();
+            f.state
+                .db
+                .collection::<Document>("approval_requests")
+                .update_one(
+                    doc! {"_id":&request.id},
+                    version.update(
+                        doc! {"$set":{"execution_proposal.v1.key_id":Uuid::new_v4().to_string()}},
+                    ),
+                )
+                .await
+                .unwrap();
         }
         if evidence == "at_limit" {
             let roots = f.state.db.collection::<Document>("assistant_messages");
@@ -544,12 +566,19 @@ impl NyxAgentEgress for WaitForIndependentReview {
 // Astra 4 / PM (b): crash at the first success commit, before withhold. Batch IDs
 // remain evidence only, including a queued sibling that could otherwise dispatch.
 #[tokio::test]
-async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_wake() {
-    for sibling in ["denied", "waiting", "queued"] {
+async fn owner_permission_resume_partial_batch_crash_reconciles_success_without_expanding_wake() {
+    for sibling in [
+        "denied",
+        "waiting",
+        "queued",
+        "turn_drift",
+        "task_drift",
+        "credential_drift",
+    ] {
         let (f, row) = assistant("owner_resume_batch_crash").await;
         set_task(&f, &row).await;
         sheet(&f, 200).await;
-        let model = model(&f, false).await;
+        let model = model(&f, sibling == "queued").await;
         assert_eq!(
             call(f.router(), &f.raw, "PUT").await.0,
             StatusCode::FORBIDDEN
@@ -693,6 +722,25 @@ async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_w
                     "execution_proposal.v1.maintenance_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(1))}}))
                 .await.unwrap();
         }
+        if matches!(sibling, "turn_drift" | "task_drift" | "credential_drift") {
+            let version = proposals::v3::AssistantVersion::of(other).unwrap();
+            let changed = match sibling {
+                "turn_drift" => {
+                    doc! {"execution_proposal.v1.owner_continuation.batch_turn_id":Uuid::new_v4().to_string()}
+                }
+                "task_drift" => doc! {"execution_proposal.v1.task.epoch":2_i64},
+                _ => doc! {"execution_proposal.v1.key_id":Uuid::new_v4().to_string()},
+            };
+            f.state
+                .db
+                .collection::<Document>("approval_requests")
+                .update_one(
+                    doc! {"_id":&other.id},
+                    version.update(doc! {"$set":changed}),
+                )
+                .await
+                .unwrap();
+        }
         proposals::sweep(&f.state).await.unwrap();
         // Model a lost sibling queue entry after maintenance. Its stored batch
         // membership cannot authorize its dispatch or a success-only model run.
@@ -707,8 +755,12 @@ async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_w
             .unwrap();
         let recovered = event_turn(&f, &row).await;
         assert_eq!(recovered.active_turn.as_ref().unwrap().events.len(), 1);
+        run(&f, &recovered).await;
+        let messages = engine::messages(&f.state.db, &f.owner, &row.id, 20, None)
+            .await
+            .unwrap();
         assert_eq!(
-            execute(&f, &recovered).await.unwrap().text,
+            messages.last().unwrap().text,
             proposals::result_for_human(&f.state, &committed)
                 .await
                 .unwrap()
@@ -716,13 +768,14 @@ async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_w
         );
         assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
         assert_eq!(model.calls.lock().unwrap().len(), 1);
-        assert!(
+        assert_eq!(
             proposals::proposal(&stored(&f, &success.id).await)
                 .unwrap()
                 .owner_continuation
                 .as_ref()
                 .unwrap()
-                .blocked
+                .blocked,
+            sibling != "queued"
         );
         if sibling == "queued" {
             wiremock::Mock::given(wiremock::matchers::method("PUT"))
@@ -734,7 +787,6 @@ async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_w
                 )
                 .mount(&f.server)
                 .await;
-            finish(&f, &recovered, "Recorded the partial batch receipt.").await;
             let version = proposals::v3::AssistantVersion::of(other).unwrap();
             f.state.db.collection::<Document>("approval_requests").update_one(doc! {"_id":&other.id},
                 version.update(doc! {"$set":{"execution_proposal.v1.wake_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(1)),
@@ -743,13 +795,70 @@ async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_w
             proposals::sweep(&f.state).await.unwrap();
             let partner_turn = event_turn(&f, &row).await;
             assert_eq!(partner_turn.active_turn.as_ref().unwrap().events.len(), 1);
-            assert!(
-                execute(&f, &partner_turn)
-                    .await
-                    .unwrap()
-                    .text
-                    .contains("HTTP 200")
+            seed_for_chat(
+                &f.state,
+                &f.auth().await,
+                &f.connection,
+                &f.catalog,
+                "GET",
+                RANGE,
+            )
+            .await;
+            // Lose the model handoff after B's genuine provider success too.
+            // Both receipts must remain recoverable, with no new model call.
+            let error = proposals::continuation::FAIL_AFTER_RECEIPT
+                .scope(true, execute(&f, &partner_turn))
+                .await
+                .unwrap_err();
+            assert_eq!(error.stage, "permission_resume");
+            assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
+            assert_eq!(model.calls.lock().unwrap().len(), 1);
+            engine::finish_turn(
+                &f.state.db,
+                &partner_turn,
+                &f.key,
+                &Uuid::new_v4().to_string(),
+                &engine::TurnResult {
+                    text: String::new(),
+                    session_id: None,
+                    response_id: None,
+                    error: Some(error),
+                },
+            )
+            .await
+            .unwrap();
+            for request in [success, other] {
+                let version = proposals::v3::AssistantVersion::of(request).unwrap();
+                f.state.db.collection::<Document>("approval_requests").update_one(doc! {"_id":&request.id},
+                    version.update(doc! {"$set":{"execution_proposal.v1.wake_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(1)),
+                        "execution_proposal.v1.maintenance_at":bson::DateTime::from_chrono(Utc::now()-chrono::Duration::minutes(1))}}))
+                    .await.unwrap();
+            }
+            proposals::sweep(&f.state).await.unwrap();
+            let pending = engine::get(&f.state.db, &f.owner, &row.id).await.unwrap();
+            assert_eq!(pending.pending_events.len(), 2);
+            // Only A is admitted now. B's success is receipt evidence, never
+            // another executable effect or a second final channel delivery.
+            f.state.db.collection::<Document>("assistant_conversations").update_one(doc! {"_id":&row.id},
+                doc! {"$pull":{"pending_events":{"id":format!("execution-decision:{}", other.id)}}})
+                .await.unwrap();
+            let partner_turn = event_turn(&f, &row).await;
+            assert_eq!(partner_turn.active_turn.as_ref().unwrap().events.len(), 1);
+            run(&f, &partner_turn).await;
+            final_reply(&f, &partner_turn, 2, &model).await;
+            assert_eq!(*model.reads.lock().unwrap(), [values()]);
+            let messages = engine::messages(&f.state.db, &f.owner, &row.id, 20, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.role == "assistant" && message.text == ANSWER)
+                    .count(),
+                1
             );
+            assert_eq!(messages.last().unwrap().conversation_id, row.id);
+            assert_eq!(messages.last().unwrap().text, answer(&values()));
             let partner = stored(&f, &other.id).await;
             let partner_marker = proposals::proposal(&partner)
                 .unwrap()
@@ -757,11 +866,56 @@ async fn owner_permission_resume_partial_batch_crash_never_releases_or_expands_w
                 .as_ref()
                 .unwrap();
             assert_eq!(partner_marker.batch, marker.batch);
-            assert!(partner_marker.blocked);
+            assert!(!partner_marker.blocked);
+            assert_eq!(partner_marker.batch_turn_id, marker.batch_turn_id);
+            let final_turn = &partner_turn.active_turn.as_ref().unwrap().turn_id;
+            for id in [&success.id, &other.id] {
+                let receipt = stored(&f, id).await;
+                let receipt = proposals::proposal(&receipt).unwrap();
+                assert_eq!(
+                    receipt.delivered_turn_id.as_deref(),
+                    Some(final_turn.as_str())
+                );
+                assert_eq!(
+                    receipt
+                        .owner_continuation
+                        .as_ref()
+                        .unwrap()
+                        .released_turn_id
+                        .as_deref(),
+                    Some(final_turn.as_str())
+                );
+            }
             // This was its own real approved decision; it was not dispatched
             // by expanding the earlier success-only wake's stored IDs.
-            assert_eq!(f.server.received_requests().await.unwrap().len(), 2);
-            assert_eq!(model.calls.lock().unwrap().len(), 1);
+            assert_eq!(
+                f.server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|request| request.method.as_str())
+                    .collect::<Vec<_>>(),
+                ["PUT", "PUT", "GET"]
+            );
+            assert_eq!(model.calls.lock().unwrap().len(), 2);
+            proposals::sweep(&f.state).await.unwrap();
+            assert!(
+                engine::get(&f.state.db, &f.owner, &row.id)
+                    .await
+                    .unwrap()
+                    .pending_events
+                    .is_empty()
+            );
+            assert!(
+                execute(&f, &partner_turn)
+                    .await
+                    .unwrap()
+                    .text
+                    .contains("HTTP 200")
+            );
+            assert_eq!(model.calls.lock().unwrap().len(), 2);
+            assert_eq!(f.server.received_requests().await.unwrap().len(), 3);
         }
         drop(model);
         f.cleanup().await;
@@ -909,5 +1063,208 @@ async fn owner_permission_resume_mixed_ordinary_event_never_becomes_success_only
     assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
     assert_eq!(model.calls.lock().unwrap().len(), 1);
     drop(model);
+    f.cleanup().await;
+}
+
+// Round two: ordinary historical/readiness-off coverage has no v2 evidence cap.
+// Exercise the actual 129th provider request, plus the marked saturation control.
+#[tokio::test]
+async fn owner_permission_resume_evidence_capacity_only_applies_to_marked_roots() {
+    for kind in ["current", "legacy", "readiness_off"] {
+        let (f, mut row) = assistant("owner_evidence_capacity_scope").await;
+        if kind == "readiness_off" {
+            finish(&f, &row, "Fixture setup complete.").await;
+            // The default fixture heartbeat replaces its original capability
+            // list. Stop it before modeling a stable older serving replica.
+            crate::services::security_readiness_service::stop_test_replica(&f.state.db).await;
+            f.state
+                .db
+                .collection::<Document>("security_replicas")
+                .update_many(
+                    doc! {},
+                    doc! {"$pull":{"capabilities":proposals::continuation::READINESS}},
+                )
+                .await
+                .unwrap();
+            let request = engine::TurnRequest {
+                conversation_id: Some(row.id.clone()),
+                text: TASK.into(),
+                acknowledgement_id: None,
+                retry_of: None,
+                attachment_ids: vec![],
+                agent_id: None,
+                model: None,
+                access_mode: None,
+            };
+            let mut start: engine::TurnStart = (&request).into();
+            start.execution_enrollment = true;
+            row = engine::begin_turn(&f.state.db, &f.owner, start, &f.state.encryption_keys)
+                .await
+                .unwrap();
+        }
+        let task = row
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .execution_task
+            .as_ref()
+            .unwrap();
+        let roots = f.state.db.collection::<Document>("assistant_messages");
+        if kind == "legacy" {
+            roots
+                .update_one(
+                    doc! {"_id":&task.task.root_id},
+                    doc! {"$unset":{"execution_dispatch_evidence_version":""}},
+                )
+                .await
+                .unwrap();
+        }
+        let grant = seed_for_chat(
+            &f.state,
+            &f.auth().await,
+            &f.connection,
+            &f.catalog,
+            "PUT",
+            RANGE,
+        )
+        .await;
+        // Historical metadata at the old bound cannot enroll an unmarked root.
+        let old_evidence: Vec<_> = (0..128)
+            .map(|_| {
+                doc! {
+                    "version":1,"epoch":task.epoch,"key":&f.key,"conversation":&row.id,
+                    "connection":&f.connection,"digest":"historical-fixture-digest",
+                    "operation":Uuid::new_v4().to_string(),"grant":&grant.id,
+                    "turn":&row.active_turn.as_ref().unwrap().turn_id,
+                }
+            })
+            .collect();
+        if kind != "current" {
+            roots
+                .update_one(
+                    doc! {"_id":&task.task.root_id},
+                    doc! {"$set":{"execution_dispatches":&old_evidence}},
+                )
+                .await
+                .unwrap();
+            let saved = roots
+                .find_one(doc! {"_id":&task.task.root_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!saved.contains_key("execution_dispatch_evidence_version"));
+        }
+        let cells = sheet(&f, 200).await;
+        for number in 1..=128 {
+            if kind == "readiness_off" {
+                refresh_test_replica_heartbeat(&f.state.db).await;
+            }
+            assert_eq!(
+                call(f.router(), &f.raw, "PUT").await.0,
+                StatusCode::OK,
+                "{kind} ordinary covered write {number}"
+            );
+        }
+        assert_eq!(f.server.received_requests().await.unwrap().len(), 128);
+        let before = roots
+            .find_one(doc! {"_id":&task.task.root_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(before.get_array("execution_dispatches").unwrap().len(), 128);
+        if kind == "readiness_off" {
+            refresh_test_replica_heartbeat(&f.state.db).await;
+        }
+        let (status, _) = call(f.router(), &f.raw, "PUT").await;
+        assert_eq!(
+            status,
+            if kind == "current" {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::OK
+            }
+        );
+        assert_eq!(
+            f.server.received_requests().await.unwrap().len(),
+            if kind == "current" { 128 } else { 129 }
+        );
+        let after = roots
+            .find_one(doc! {"_id":&task.task.root_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.get("execution_dispatches"),
+            before.get("execution_dispatches")
+        );
+        assert_eq!(
+            after.get("execution_dispatch_evidence_version"),
+            before.get("execution_dispatch_evidence_version")
+        );
+        assert_eq!(*cells.lock().unwrap(), Some(values()));
+        assert_eq!(count(&f, "approval_requests").await, 0);
+        assert_eq!(count(&f, "assistant_acknowledgements").await, 0);
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+async fn owner_permission_resume_optional_evidence_readiness_failure_keeps_ordinary_admission() {
+    let (f, row) = assistant("owner_evidence_optional_readiness").await;
+    finish(&f, &row, "Fixture setup complete.").await;
+    readiness_dependency(&f, true).await;
+    let request = engine::TurnRequest {
+        conversation_id: Some(row.id.clone()),
+        text: TASK.into(),
+        acknowledgement_id: None,
+        retry_of: None,
+        attachment_ids: vec![],
+        agent_id: None,
+        model: None,
+        access_mode: None,
+    };
+    let mut start: engine::TurnStart = (&request).into();
+    start.execution_enrollment = true;
+    let fresh = engine::begin_turn(&f.state.db, &f.owner, start, &f.state.encryption_keys)
+        .await
+        .unwrap();
+    let task = fresh
+        .active_turn
+        .as_ref()
+        .unwrap()
+        .execution_task
+        .as_ref()
+        .unwrap();
+    let root = f
+        .state
+        .db
+        .collection::<Document>("assistant_messages")
+        .find_one(doc! {"_id":&task.task.root_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!root.contains_key("execution_dispatch_evidence_version"));
+    assert!(!root.contains_key("execution_dispatches"));
+    seed_for_chat(
+        &f.state,
+        &f.auth().await,
+        &f.connection,
+        &f.catalog,
+        "PUT",
+        RANGE,
+    )
+    .await;
+    sheet(&f, 200).await;
+    assert_eq!(call(f.router(), &f.raw, "PUT").await.0, StatusCode::OK);
+    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+    let root = f
+        .state
+        .db
+        .collection::<Document>("assistant_messages")
+        .find_one(doc! {"_id":&task.task.root_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!root.contains_key("execution_dispatches"));
     f.cleanup().await;
 }

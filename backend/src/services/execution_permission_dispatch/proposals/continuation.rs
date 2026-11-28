@@ -21,6 +21,10 @@ pub(in crate::services::execution_permission_dispatch) fn unexpired_turn() -> Do
 /// A null optional value also matches its previously readable missing form;
 /// required root/source identities retain their exact non-null values.
 fn current_task_filter(task: &TaskAdmission) -> AppResult<Document> {
+    task_filter("active_turn.execution_task", task)
+}
+
+fn task_filter(prefix: &str, task: &TaskAdmission) -> AppResult<Document> {
     fn fields(filter: &mut Document, prefix: &str, expected: Document) {
         for (field, value) in expected {
             let path = format!("{prefix}.{field}");
@@ -38,7 +42,7 @@ fn current_task_filter(task: &TaskAdmission) -> AppResult<Document> {
         expected.insert("channel_source", bson::Bson::Null);
     }
     let mut filter = Document::new();
-    fields(&mut filter, "active_turn.execution_task", expected);
+    fields(&mut filter, prefix, expected);
     Ok(filter)
 }
 
@@ -153,7 +157,9 @@ pub(super) async fn bind_batch(
                         "execution_proposal.v1.state":{"$in":["queued","preparing"]},
                         "execution_proposal.v1.owner_continuation":null,
                     }), version.update(doc! {"$set":{"execution_proposal.v1.owner_continuation":{
-                        "version":2, "batch":*batch, "blocked":!typed_wake,
+                        "version":2, "batch":*batch,
+                        "batch_turn_id":row.active_turn.as_ref().ok_or_else(refused)?.turn_id.as_str(),
+                        "blocked":!typed_wake,
                         "released_turn_id":bson::Bson::Null,
                     }}})).session(&mut *session).await?.matched_count != 1 {
                         return Err(conflict());
@@ -170,6 +176,7 @@ pub(super) struct Receipt {
     pub id: String,
     pub version: AssistantVersion,
     pub claim_id: String,
+    pub batch_turn_id: String,
 }
 
 /// Server-only, never serialized or logged. It carries no new execution authority.
@@ -180,14 +187,13 @@ pub(crate) struct OwnerContinuation {
     receipts: Vec<Receipt>,
 }
 
-pub(super) fn eligible(
+/// Optional v2 evidence is limited to the personal owner lanes that can use it.
+/// This predicate performs no readiness or database reads.
+pub(in crate::services::execution_permission_dispatch) fn owner_task(
     row: &AssistantConversation,
-    p: &Proposal,
-    version: AssistantVersion,
-) -> bool {
-    let Some(turn) = row.active_turn.as_ref() else {
-        return false;
-    };
+) -> Option<&TaskAdmission> {
+    let turn = row.active_turn.as_ref()?;
+    let task = turn.execution_task.as_ref()?;
     if row.guest_turn
         || row.shared_agent_thread
         || row.agent_owner_id.is_some()
@@ -198,13 +204,41 @@ pub(super) fn eligible(
         || row.invocation_controlled
         || row.voice_parent_conversation_id.is_some()
         || turn.voice_request_id.is_some()
+        || turn.automation_work.is_some()
         || turn.trigger_run_id.is_some()
         || turn.invocation_id.is_some()
         || turn.platform_origin.is_some()
         || turn.channel_adapter_origin.is_some()
-        || p.report_to.is_some()
+        || turn.report_to.is_some()
+        || task.task.root_kind != TaskRootKind::Message
+        || task.actor_user_id != row.user_id
+    {
+        return None;
+    }
+    match &task.channel_source {
+        Some(source) if source.conversation_id == row.id => Some(task),
+        None if row.channel.is_none()
+            && row.reply_channel.is_none()
+            && turn.asked_from.is_none()
+            && turn.also_deliver.is_empty() =>
+        {
+            Some(task)
+        }
+        _ => None,
+    }
+}
+
+pub(super) fn eligible(
+    row: &AssistantConversation,
+    p: &Proposal,
+    version: AssistantVersion,
+) -> bool {
+    let Some(task) = owner_task(row) else {
+        return false;
+    };
+    if p.report_to.is_some()
         || p.source_credential_id.is_some()
-        || p.task.task.root_kind != TaskRootKind::Message
+        || p.task != *task
         || p.contract.subject.lane != ExecutionLane::Owner
         || p.contract.subject.actor_user_id != row.user_id
         || !matches!(&p.contract.subject.principal, Principal::Agent(id) if row.agent_id.as_ref() == Some(id))
@@ -222,8 +256,6 @@ pub(super) fn eligible(
                 && user_id == &row.user_id
                 && row.channel.is_none()
                 && row.reply_channel.is_none()
-                && turn.asked_from.is_none()
-                && turn.also_deliver.is_empty()
         }
         _ => false,
     }
@@ -368,7 +400,8 @@ impl OwnerContinuation {
                     batch.sort();
                     batch.dedup();
                     for receipt in receipts.iter() {
-                        let filter = receipt.version.selector(doc! {
+                        let mut exact_task = task_filter("execution_proposal.v1.task", task)?;
+                        exact_task.extend(doc! {
                             "_id": &receipt.id, "user_id": &row.user_id, "status": "approved",
                             "activity_outcome": "completed",
                             "execution_proposal.v1.state": "completed",
@@ -382,9 +415,11 @@ impl OwnerContinuation {
                             "execution_proposal.v1.delivered_turn_id": null,
                             "execution_proposal.v1.owner_continuation.version": 2,
                             "execution_proposal.v1.owner_continuation.batch": &batch,
+                            "execution_proposal.v1.owner_continuation.batch_turn_id": &receipt.batch_turn_id,
                             "execution_proposal.v1.owner_continuation.blocked": {"$ne": true},
                             "execution_proposal.v1.owner_continuation.released_turn_id": null,
                         });
+                        let filter = receipt.version.selector(exact_task);
                         let update = receipt.version.update(doc! {"$set": {
                             "execution_proposal.v1.owner_continuation.released_turn_id": &turn.turn_id,
                         }});
@@ -405,28 +440,4 @@ impl OwnerContinuation {
             result => result,
         }
     }
-}
-
-/// A mixed wake is a terminal receipt, including if it crashes before settlement.
-pub(super) async fn withhold(db: &Database, receipts: &[Receipt]) -> AppResult<()> {
-    let mut session = db.client().start_session().await?;
-    session.start_transaction().await?;
-    for receipt in receipts {
-        db.collection::<Document>(REQUESTS)
-            .update_one(
-                receipt.version.selector(doc! {
-                    "_id": &receipt.id,
-                    "execution_proposal.v1.claim_id": &receipt.claim_id,
-                    "execution_proposal.v1.owner_continuation.version": {"$in": [1, 2]},
-                    "execution_proposal.v1.owner_continuation.released_turn_id": null,
-                }),
-                receipt.version.update(doc! {"$set": {
-                    "execution_proposal.v1.owner_continuation.blocked": true,
-                }}),
-            )
-            .session(&mut session)
-            .await?;
-    }
-    session.commit_transaction().await?;
-    Ok(())
 }

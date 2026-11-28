@@ -9,6 +9,7 @@ use chrono::Duration;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+mod batch;
 pub(crate) mod continuation;
 pub(in crate::services::execution_permission_dispatch) mod effects;
 mod lifecycle;

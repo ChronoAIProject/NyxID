@@ -85,6 +85,9 @@ pub struct OwnerContinuation {
     /// Complete original decision wake. Absent historical proofs never release.
     #[serde(default)]
     pub batch: Option<Vec<String>>,
+    /// The server-admitted decision turn that atomically bound the full batch.
+    #[serde(default)]
+    pub batch_turn_id: Option<String>,
     #[serde(default)]
     pub blocked: bool,
     /// None is proven unreleased. A release is irreversible, even after a crash.

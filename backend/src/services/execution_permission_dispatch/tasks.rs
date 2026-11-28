@@ -459,6 +459,23 @@ pub(crate) fn settle<'a>(
                         {"execution_proposal.v1.owner_continuation.released_turn_id":{"$ne":null}}],
                     "execution_proposal.v1.state":{"$in":["completed","not_sent","unknown","denied","expired","cancelled"]}}),
                     version.update(doc!{"$set":{"execution_proposal.v1.delivered_turn_id":&turn.turn_id}})).session(&mut *session).await?;
+                // A reconciled release can include successful receipts absent
+                // from this wake. Settle that exact atomically released batch,
+                // so maintenance cannot publish an extra sibling notice later.
+                db.collection::<Document>("approval_requests").update_many(version.selector(doc! {
+                    "user_id":&row.user_id,"status":"approved","activity_outcome":"completed",
+                    "execution_proposal.v1.conversation_id":&row.id,
+                    "execution_proposal.v1.key_id":&row.credential_api_key_id,
+                    "execution_proposal.v1.task.task":bson::to_bson(&task.task).map_err(encoding)?,
+                    "execution_proposal.v1.task.epoch":task.epoch,
+                    "execution_proposal.v1.task.actor_user_id":&task.actor_user_id,
+                    "execution_proposal.v1.state":"completed",
+                    "execution_proposal.v1.owner_continuation.version":2,
+                    "execution_proposal.v1.owner_continuation.batch_turn_id":{"$type":"string"},
+                    "execution_proposal.v1.owner_continuation.released_turn_id":&turn.turn_id,
+                    "execution_proposal.v1.delivered_turn_id":null,
+                }), version.update(doc! {"$set":{"execution_proposal.v1.delivered_turn_id":&turn.turn_id}}))
+                    .session(&mut *session).await?;
             }
         }
         let v2_receipts: Vec<_> = turn
@@ -685,22 +702,24 @@ pub(crate) async fn mark_effect_evidence(
     row: &AssistantConversation,
     message_id: &str,
 ) -> AppResult<()> {
-    let Some(task) = row
-        .active_turn
-        .as_ref()
-        .and_then(|turn| turn.execution_task.as_ref())
-    else {
+    let Some(task) = proposals::continuation::owner_task(row) else {
         return Ok(());
     };
-    if task.task.root_kind != TaskRootKind::Message || task.task.root_id != message_id {
+    if task.task.root_id != message_id
+        || row.active_turn.as_ref().is_none_or(|turn| {
+            !matches!(
+                turn.origin,
+                crate::models::assistant_conversation::TurnOrigin::User
+                    | crate::models::assistant_conversation::TurnOrigin::Channel
+            )
+        })
+    {
         return Ok(());
     }
-    if !super::super::security_readiness_service::serving_report(
-        db,
-        proposals::continuation::READINESS,
-    )
-    .await?
-    .serving_ready
+    // This capability is optional for ordinary admission. A dependency failure
+    // leaves the new root unmarked, with no automatic v2 continuation authority.
+    if !matches!(super::super::security_readiness_service::serving_report(
+        db, proposals::continuation::READINESS).await, Ok(report) if report.serving_ready)
     {
         return Ok(());
     }
