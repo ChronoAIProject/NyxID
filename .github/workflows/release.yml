@@ -59,7 +59,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -84,7 +84,7 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/dist" --version
       - name: Cache dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/dist
@@ -107,7 +107,7 @@ jobs:
         if: ${{ github.event.pull_request }}
         run: dist manifest --output-format=json --artifacts=local --target=x86_64-unknown-linux-gnu > /dev/null
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
@@ -142,7 +142,7 @@ jobs:
         run: |
           git config --global core.longpaths true
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive
@@ -174,7 +174,7 @@ jobs:
       # restores the dependency cache that release-cache.yml warms on `main`.
       # Keep the key inputs in sync with that workflow.
       - name: Restore Rust build cache
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: dist-${{ join(matrix.targets, '-') }}
           save-if: false
@@ -182,7 +182,7 @@ jobs:
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -225,7 +225,7 @@ jobs:
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: artifacts-build-local-${{ join(matrix.targets, '_') }}
           path: |
@@ -243,19 +243,19 @@ jobs:
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive
       - name: Install cached dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Get all the local artifacts for the global tasks to use (for e.g. checksums)
       - name: Fetch local artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -273,7 +273,7 @@ jobs:
 
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
       - name: "Upload artifacts"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: artifacts-build-global
           path: |
@@ -293,12 +293,12 @@ jobs:
       RELEASE_INTEGRITY_SIGNING_KEY: ${{ secrets.RELEASE_INTEGRITY_SIGNING_KEY }}
       RELEASE_INTEGRITY_PUBLISH_TOKEN: ${{ secrets.RELEASE_INTEGRITY_PUBLISH_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .node-version
           cache: npm
@@ -309,7 +309,7 @@ jobs:
           npm ci
           npm run build:credential-accept
       - name: Upload release integrity manifest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-integrity-manifest
           path: frontend/dist/release-integrity/releases.json
@@ -354,20 +354,20 @@ jobs:
       val: ${{ steps.host.outputs.manifest }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
           submodules: recursive
       - name: Install cached dist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: cargo-dist-cache
           path: ~/.cargo/bin/
       - run: chmod +x ~/.cargo/bin/dist
       # Fetch artifacts from scratch-storage
       - name: Fetch artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: artifacts-*
           path: target/distrib/
@@ -380,14 +380,14 @@ jobs:
           cat dist-manifest.json
           echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
       - name: "Upload dist-manifest.json"
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           # Overwrite the previous copy
           name: artifacts-dist-manifest
           path: dist-manifest.json
       # Create a GitHub Release while uploading all files to it
       - name: "Download GitHub Artifacts"
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: artifacts-*
           path: artifacts
@@ -397,7 +397,7 @@ jobs:
           # Remove the granular manifests
           rm -f artifacts/*-dist-manifest.json artifacts/dist-manifest.json
       - name: Attest release artifacts
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@ef244123eb79f2f7a7e75d99086184180e6d0018 # v1
         with:
           subject-path: artifacts/*
       - name: Generate changelog
@@ -462,7 +462,7 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       # Bumped from @v4 by hand to match repo convention; reapply if dist init regenerates.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
           submodules: recursive

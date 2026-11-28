@@ -27,12 +27,12 @@ jobs:
     outputs:
       languages: ${{ steps.matrix.outputs.languages }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           # The merge commit and both parents normally supply the complete diff.
           # paths-filter fetches the base SHA if it is not already available.
           fetch-depth: 2
-      - uses: dorny/paths-filter@v4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
         id: filter
         if: github.event_name == 'pull_request' && github.event.pull_request.base.sha != ''
         continue-on-error: true
@@ -73,7 +73,7 @@ jobs:
         language: ${{ fromJSON(needs.changes.outputs.languages || '["actions","javascript-typescript","python","rust"]') }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
 
       - name: Prepare Rust scope
         if: matrix.language == 'rust'
@@ -84,20 +84,20 @@ jobs:
             --event "$CODEQL_EVENT" --output target/codeql-rust.yml
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3
         with:
           languages: ${{ matrix.language }}
           config-file: ${{ matrix.language == 'rust' && './target/codeql-rust.yml' || './.github/codeql/codeql-config.yml' }}
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@74c1aea9df7c0f02e9b7bfe4a8935abf2e5e3aa6 # v3
 
       - name: Upload analysis scope
         if: always() && matrix.language == 'rust'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: codeql-rust-scope
           path: |

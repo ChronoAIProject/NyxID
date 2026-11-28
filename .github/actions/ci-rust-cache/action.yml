@@ -59,7 +59,7 @@ runs:
       if: runner.os == 'Linux' && inputs.backend-reserve == 'true'
       shell: bash
       run: python3 .github/scripts/backend_disk.py before-dependencies
-    - uses: Swatinem/rust-cache@v2
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # These affect metadata scheduling/runtime stacks, not compiled artifacts.
       # Pin them for the cache step so equivalent test jobs have identical keys.
       env:
@@ -120,7 +120,7 @@ runs:
     - name: Restore incremental build cache
       id: incremental-restore
       if: inputs.incremental == 'true' && steps.incremental-space.outputs.allowed == 'true'
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
       with:
         path: ${{ steps.incremental-contract.outputs.path }}
         key: ${{ steps.incremental-contract.outputs.key }}

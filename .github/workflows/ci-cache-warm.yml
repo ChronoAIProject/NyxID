@@ -62,11 +62,11 @@ jobs:
       LLVM_PROFILE_FILE_NAME: nyxid-%4m.profraw
       NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
       - uses: ./.github/actions/ci-rust-cache
         id: rust-cache
         with:
@@ -76,7 +76,7 @@ jobs:
           incremental: 'false'
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: cargo-nextest@0.9.146
       - name: Build ordinary test archive
@@ -91,7 +91,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-warm-backend-build
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -108,11 +108,11 @@ jobs:
       LLVM_PROFILE_FILE_NAME: nyxid-%4m.profraw
       NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: llvm-tools-preview
       - uses: ./.github/actions/ci-rust-cache
@@ -124,7 +124,7 @@ jobs:
           incremental: 'false'
       - name: Prepare backend memory reserve
         run: bash .github/scripts/prepare-backend-runner.sh
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
       - name: Clear coverage counters
@@ -141,7 +141,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-warm-coverage-backend-build
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -156,11 +156,11 @@ jobs:
       CARGO_BUILD_JOBS: 1
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: clippy
       - uses: ./.github/actions/ci-rust-cache
@@ -189,7 +189,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-warm-rust-clippy
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -206,11 +206,11 @@ jobs:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: clippy
       - uses: ./.github/actions/ci-rust-cache
@@ -239,7 +239,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-warm-rust-clippy-dev
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -258,11 +258,11 @@ jobs:
       CARGO_BUILD_JOBS: 2
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
       - uses: ./.github/actions/ci-rust-cache
         id: rust-cache
         with:
@@ -291,7 +291,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-warm-features-${{ matrix.variant }}
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -305,18 +305,18 @@ jobs:
     env:
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
       - uses: ./.github/actions/ci-rust-cache
         id: rust-cache
         with:
           save-if: 'true'
           shared-key: cli-cli-test
           incremental: 'true'
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: cargo-nextest@0.9.146
       - name: Build CLI
@@ -340,7 +340,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-warm-cli-test
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -354,13 +354,13 @@ jobs:
     env:
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: llvm-tools-preview
       - uses: ./.github/actions/ci-rust-cache
@@ -369,7 +369,7 @@ jobs:
           save-if: 'true'
           shared-key: coverage-cli-coverage-cli
           incremental: 'true'
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@073e1fd0bc889c9aee68dbaaa927cde1b5653a83 # v2
         with:
           tool: cargo-llvm-cov@0.9.1
       - name: Build CLI coverage
@@ -387,7 +387,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-warm-coverage-cli
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -401,8 +401,8 @@ jobs:
     env:
       CARGO_INCREMENTAL: 1
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
         with:
           components: rustfmt, clippy
       - uses: ./.github/actions/ci-rust-cache
@@ -432,7 +432,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-warm-permissions
           path: ${{ runner.temp }}/nyxid-ci-resources
@@ -444,11 +444,11 @@ jobs:
     continue-on-error: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install system dependencies
         timeout-minutes: 5
         run: bash .github/scripts/install-linux-build-deps.sh
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@01e2821fc38dbca62c2557c927b33938a2e005fd # 1.98.1
       - uses: ./.github/actions/ci-rust-cache
         id: rust-cache
         with:
@@ -468,7 +468,7 @@ jobs:
       - name: Upload resource samples
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: resources-warm-backend-image-inputs
           path: ${{ runner.temp }}/nyxid-ci-resources
