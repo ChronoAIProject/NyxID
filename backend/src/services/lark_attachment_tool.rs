@@ -33,6 +33,7 @@ pub struct AttachmentInput {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "provenance", content = "contract", rename_all = "snake_case")]
 pub enum Projection {
+    ImagePublication,
     Stored(AttachmentInput),
     Managed(ManagedOperation),
     Refused,

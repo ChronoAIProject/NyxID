@@ -7976,6 +7976,7 @@ pub async fn rename(
 /// Payload inventories shared by ordinary conversation retirement and the
 /// bounded Meta guest eraser. Credentials remain until parent retirement.
 pub(crate) const CONVERSATION_CHILD_COLLECTIONS: &[&str] = &[
+    crate::models::image_publication::COLLECTION_NAME,
     crate::models::async_service_operation::COLLECTION_NAME,
     crate::models::generated_artifact::COLLECTION_NAME,
     crate::models::generated_artifact::DELIVERIES,

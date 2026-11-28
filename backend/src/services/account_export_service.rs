@@ -448,6 +448,7 @@ fn export_spec(collection: &str) -> Option<(&'static str, &'static str)> {
         "generated_artifact_content_series" => {
             Some(("account", "generated_artifact_content_series"))
         }
+        "image_publications" => Some(("assistant", "image_publications")),
         "invite_codes" => Some(("account_activity", "invite_codes")),
         "invocation_diagnostics" => Some(("account_activity", "invocation_diagnostics")),
         "lark_base_write_photos" => Some(("account", "lark_base_write_photos")),
@@ -949,6 +950,17 @@ fn fields_for(collection: &str) -> Result<&'static [&'static str], ExportSpecErr
             "expires_at",
         ],
         "feature_flag_overrides" => &["created_at", "updated_at"],
+        "image_publications" => &[
+            "user_id",
+            "conversation_id",
+            "company",
+            "state",
+            "stage",
+            "post",
+            "verification",
+            "created_at",
+            "updated_at",
+        ],
         "invite_codes" => &[
             "usages.user_id",
             "usages.used_at",

@@ -15,7 +15,7 @@ export type PendingChatDecision =
   | { readonly id: string; readonly kind: "consent"; readonly request: SharedConsent };
 
 export function ownerConfirmationBypassed(row: NyxAgentAcknowledgement, accessMode?: NyxAgentAccessMode): boolean {
-  return accessMode === "autopilot" && row.decider === "user" &&
+  return !row.confirmation?.image_publication && accessMode === "autopilot" && row.decider === "user" &&
     !["org_connection", "delegation"].includes(row.confirmation?.reason ?? "");
 }
 

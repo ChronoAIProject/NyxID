@@ -211,6 +211,7 @@ Every declared registry export view has one subsection; a source collection may 
 | `assistant` | `assistant_voice_requests` | `user_id`, `conversation_id`, `state`, `created_at`, `expires_at` |
 | `assistant` | `async_service_operation_artifacts` | `user_id`, `filename`, `content_type`, `size`, `created_at`, `expires_at` |
 | `assistant` | `authored_group_messages` | `group_id`, `role`, `text`, `created_at` |
+| `assistant` | `image_publications` | `user_id`, `conversation_id`, `company`, `state`, `stage`, `post`, `verification`, `created_at`, `updated_at` |
 | `assistant` | `nyxbot_event_bindings` | `user_id`, `status`, `created_at`, `updated_at` |
 | `assistant` | `nyxbot_events` | `user_id`, `conversation_id`, `status`, `created_at`, `expires_at` |
 | `assistant` | `nyxbot_gateway_responses` | `user_id`, `conversation_id`, `created_at`, `expires_at` |

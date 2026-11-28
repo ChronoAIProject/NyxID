@@ -3,7 +3,7 @@
   "info": {
     "title": "LinkedIn API",
     "version": "v1.0-nyxid-overlay",
-    "description": "NyxID-hosted LinkedIn operations for connected members. Profile access uses LinkedIn OpenID Connect; publishing requires the w_member_social permission and LinkedIn app approval."
+    "description": "NyxID-hosted LinkedIn profile, member text posting and managed company image publishing. Company images use a BYO Community Management app, original chat attachments, readiness checks and explicit per-post human approval. Readback requires separate read permission."
   },
   "servers": [
     {
@@ -91,6 +91,124 @@
         "responses": {
           "201": {
             "description": "Post created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/nyxid/connector/image-publication": {
+      "post": {
+        "operationId": "publish_image_attachment",
+        "summary": "Prepare, review and publish an image attachment to a LinkedIn company page in this chat",
+        "x-aevatar-tool": {
+          "name": "publish_image_attachment",
+          "description": "Use in this same owner chat. preview uploads the original PNG/JPEG attachment and waits for organization-owned readiness. Show the returned page, full caption and original image. To edit, preview with draft_id and changed caption/image, invalidating old approval. publish with draft_id and exactly the same company, caption and attachment_id always asks the human, even Full access. cancel closes the draft. status needs only draft_id to report the saved outcome and check a known post receipt. Never retry publication after an unknown outcome. BYO organization permissions required; readback additionally needs r_organization_social.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "action"
+                ],
+                "properties": {
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "preview",
+                      "publish",
+                      "status",
+                      "cancel"
+                    ]
+                  },
+                  "draft_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "company": {
+                    "type": "string",
+                    "description": "Selected company organization URN; must match connection authority."
+                  },
+                  "caption": {
+                    "type": "string",
+                    "description": "Full literal visible caption; NyxID escapes LinkedIn little-text syntax.",
+                    "maxLength": 3000
+                  },
+                  "attachment_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Original PNG or JPEG in this conversation."
+                  },
+                  "request_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "Required for preview: choose one UUID per deliberate draft revision; reuse it for retries, pending processing or lost responses. Edits use a new request_id and the prior draft_id. Never create a new revision to retry an unknown publication."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ready preview, status, cancellation or replayed receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Post created, with verification status and any usable receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Image processing is pending and can resume",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Draft conflict, proven not-sent refusal or ambiguous publication outcome",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Concrete preparation or provider failure with stage and status",
             "content": {
               "application/json": {
                 "schema": {

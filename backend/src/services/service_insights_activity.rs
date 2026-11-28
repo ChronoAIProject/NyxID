@@ -714,6 +714,29 @@ impl RequestAudit {
         }
     }
 
+    /// A local receipt or a proven refusal before egress cannot certify a
+    /// successful provider operation or emit a real-work success signal.
+    pub(crate) fn not_dispatched(&mut self, status: u16) {
+        self.event["response_status"] = status.into();
+        self.event["outcome"] = "not_dispatched".into();
+        self.event["dispatch_state"] = "not_dispatched".into();
+        self.business = None;
+    }
+
+    pub(crate) fn connector_outcome(
+        &mut self,
+        state: &str,
+        stage: &str,
+        verification: &str,
+        provider_effect: bool,
+        provider_status: Option<u16>,
+    ) {
+        self.event["connector"] = serde_json::json!({
+            "state": state, "stage": stage, "verification": verification,
+            "provider_effect": provider_effect, "last_provider_status": provider_status,
+        });
+    }
+
     pub fn denied(&mut self, status: u16) {
         self.event["response_status"] = status.into();
         self.event["outcome"] = "denied".into();

@@ -499,6 +499,7 @@ backend/src/models/durable_operation_execution.rs: COLLECTION_NAME=durable_opera
 backend/src/models/durable_operation_grant.rs: COLLECTION_NAME=durable_operation_grants | created_by, user_id
 backend/src/models/feature_flag_definition.rs: COLLECTION_NAME=feature_flag_definitions | created_by
 backend/src/models/feature_flag_override.rs: COLLECTION_NAME=feature_flag_overrides | org_user_id
+backend/src/models/image_publication.rs: COLLECTION_NAME=image_publications | user_id
 backend/src/models/invite_code.rs: COLLECTION_NAME=invite_codes | created_by, email, user_id
 backend/src/models/lark_base_write.rs: COLLECTION_NAME=lark_base_writes | user_id
 backend/src/models/lark_base_write_photo.rs: COLLECTION_NAME=lark_base_write_photos | user_id
