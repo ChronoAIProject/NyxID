@@ -188,7 +188,9 @@ literal arguments, independent of direct, JSON-string, nested or flat universal
 wrappers. Dispatch and identity share JSON-string → nested → flat precedence;
 malformed preferred JSON refuses without falling back. A provider field named
 `arguments_json` retains its original type and string bytes. Outer `result_query`
-projection metadata binds separately from provider fields. Schedule creation
+projection metadata binds separately from provider fields, using the validated
+nonempty string with leading/trailing whitespace trimmed; explicit null is
+refused. Schedule creation
 alone omits its one-use acknowledgement handle; memory recovery omits its
 presentation link. Other provider/native arguments, routes, input types and
 arrays remain significant. Existing exact-effect and action-card rules remain.

@@ -29,12 +29,13 @@ fn business_call(params: &Value) -> Option<Value> {
     let name = args["tool_name"]
         .as_str()
         .filter(|name| !name.is_empty() && name.len() <= 200)?;
+    let query = crate::services::notion_evidence::validate_query(args.get("result_query")).ok()?;
     let inner = decode_arguments(&args).ok()?;
     let mut call = json!({"name":name,"arguments":inner});
-    if let Some(query) = args.get("result_query").filter(|value| !value.is_null()) {
+    if let Some(query) = query {
         // This is wrapper projection metadata, distinct from a provider field
         // named result_query inside the decoded business arguments.
-        call["result_query"] = query.clone();
+        call["result_query"] = json!(query);
     }
     Some(call)
 }
@@ -59,10 +60,16 @@ pub(super) fn digest(params: &Value) -> String {
     )
 }
 
-pub(super) fn provider_name(params: &Value) -> Option<String> {
-    business_call(params)
-        .and_then(|call| call["name"].as_str().map(str::to_owned))
-        .filter(|name| !super::native_activity_names().contains(name))
+pub(super) fn provider_name(params: &Value) -> Option<&str> {
+    let name = params["name"].as_str()?;
+    let name = if name == "nyx__call_tool" {
+        params["arguments"]["tool_name"]
+            .as_str()
+            .filter(|name| !name.is_empty() && name.len() <= 200)?
+    } else {
+        name
+    };
+    (!super::native_activity_names().contains(name)).then_some(name)
 }
 
 /// Old persisted activities retain their exact digests. Match the supplied form
@@ -129,7 +136,9 @@ mod tests {
         assert_eq!(digest(&direct), digest(&nested));
         assert_eq!(decode_arguments(&encoded["arguments"]).unwrap(), args);
         assert_eq!(decode_arguments(&nested["arguments"]).unwrap(), args);
-        assert_eq!(provider_name(&direct).as_deref(), Some("nyx-vendor__write"));
+        assert_eq!(provider_name(&direct), Some("nyx-vendor__write"));
+        assert_eq!(provider_name(&encoded), Some("nyx-vendor__write"));
+        assert_eq!(provider_name(&nested), Some("nyx-vendor__write"));
         for (field, value) in [
             ("arguments_json", json!({"provider":1})),
             ("arguments_json", json!("{ \"provider\":1}")),
@@ -152,6 +161,8 @@ mod tests {
         let invalid = json!({"name":"nyx__call_tool","arguments":{"tool_name":"nyx-vendor__write",
             "arguments_json":"{malformed","arguments":args}});
         assert!(decode_arguments(&invalid["arguments"]).is_err());
+        // Name extraction borrows just the name, independently of decoding.
+        assert_eq!(provider_name(&invalid), Some("nyx-vendor__write"));
         assert_ne!(digest(&invalid), digest(&direct));
         assert_eq!(
             digest(&json!({"name":"nyx-vendor__write"})),
@@ -170,7 +181,7 @@ mod tests {
                 inner
             );
         }
-        let flat = json!({"tool_name":"nyx-vendor__write","method":"POST","path":"/items","result_query":null,"arguments_json":false});
+        let flat = json!({"tool_name":"nyx-vendor__write","method":"POST","path":"/items","arguments_json":false});
         let expected = json!({"method":"POST","path":"/items"});
         assert_eq!(decode_arguments(&flat).unwrap(), expected);
         let wrapped = json!({"name":"nyx__call_tool","arguments":flat});
@@ -179,11 +190,30 @@ mod tests {
             digest(&json!({"name":"nyx-vendor__write","arguments":expected}))
         );
         let mut projected = encoded.clone();
-        projected["arguments"]["result_query"] = json!({"section":"a"});
+        projected["arguments"]["result_query"] = json!("Overview 中文");
         assert_ne!(digest(&projected), digest(&direct));
         let mut changed_projection = projected.clone();
-        changed_projection["arguments"]["result_query"]["section"] = json!("b");
+        changed_projection["arguments"]["result_query"] = json!("Approach 中文");
         assert_ne!(digest(&projected), digest(&changed_projection));
+        let mut padded_projection = projected.clone();
+        padded_projection["arguments"]["result_query"] = json!(" \tOverview 中文\n ");
+        assert_eq!(digest(&projected), digest(&padded_projection));
+        assert_eq!(
+            business_call(&projected).unwrap()["result_query"],
+            "Overview 中文"
+        );
+        for query in [
+            Value::Null,
+            json!({"section":"unsupported"}),
+            json!(7),
+            json!("   "),
+        ] {
+            let mut invalid_projection = projected.clone();
+            invalid_projection["arguments"]["result_query"] = query;
+            assert!(business_call(&invalid_projection).is_none());
+            assert_ne!(digest(&invalid_projection), digest(&projected));
+            assert_ne!(digest(&invalid_projection), digest(&direct));
+        }
         let mut literal_query = direct.clone();
         literal_query["arguments"]["result_query"] = projected["arguments"]["result_query"].clone();
         assert_ne!(digest(&projected), digest(&literal_query));

@@ -298,7 +298,7 @@ async fn retry_provider_argument_precedence_and_errors_do_not_dispatch_fallback(
     for wrapper in [
         json!({"tool_name":tool,"arguments_json":args.to_string(),"arguments":{"method":"DELETE"},"method":"DELETE"}),
         json!({"tool_name":tool,"arguments_json":false,"arguments":args,"method":"DELETE"}),
-        json!({"tool_name":tool,"arguments_json":false,"method":"POST","path":"/effect","body":{"value":"chosen"},"result_query":null}),
+        json!({"tool_name":tool,"arguments_json":false,"method":"POST","path":"/effect","body":{"value":"chosen"}}),
     ] {
         assert_eq!(
             result(
@@ -316,15 +316,32 @@ async fn retry_provider_argument_precedence_and_errors_do_not_dispatch_fallback(
     }
     // result_query remains an independently validated projection. Supplying it
     // for a write refuses before another provider effect is dispatched.
-    let projected = direct_call(
-        &f,
-        &auth,
-        "nyx__call_tool",
-        json!({"tool_name":tool,
-        "arguments_json":args.to_string(),"result_query":{"section":"unsupported"}}),
-    )
-    .await;
-    assert!(!tool_succeeded(&projected));
-    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    for (query, expected) in [
+        (Value::Null, "result_query must contain 1–256 characters"),
+        (
+            json!({"section":"unsupported"}),
+            "result_query must contain 1–256 characters",
+        ),
+        (
+            json!(" \tOverview 中文\n "),
+            "result_query requires a published Notion block-children GET",
+        ),
+    ] {
+        let projected = direct_call(
+            &f,
+            &auth,
+            "nyx__call_tool",
+            json!({"tool_name":tool,
+            "arguments_json":args.to_string(),"result_query":query}),
+        )
+        .await;
+        let raw = axum::body::to_bytes(projected.into_body(), 20_000)
+            .await
+            .unwrap();
+        let rpc: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(rpc["result"]["isError"], true, "{rpc}");
+        assert_eq!(rpc["result"]["content"][0]["text"], expected);
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    }
     f.state.db.drop().await.unwrap();
 }

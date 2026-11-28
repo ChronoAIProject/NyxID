@@ -3096,7 +3096,7 @@ async fn handle_tools_call_inner(
             &chat.conversation_id,
             chat.turn_id.as_deref().unwrap_or_default(),
             &identity,
-            provider.as_deref(),
+            provider,
             || retry_identity::matching_digests(params),
         )
         .await
