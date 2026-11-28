@@ -94,6 +94,8 @@ enum NodeMessage {
         managed_runtime: Option<nyxid_machine::managed::Binding>,
         #[serde(default)]
         retirement_v1: Option<RetirementAuth>,
+        #[serde(default)]
+        destination_binding_v1: bool,
     },
     #[serde(rename = "heartbeat_pong")]
     HeartbeatPong {
@@ -1035,7 +1037,7 @@ async fn handle_node_connection(
                             )
                             .await;
 
-                            return Some((node.id, node.user_id, false, None, None));
+                            return Some((node.id, node.user_id, false, None, None, false));
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "Node registration failed");
@@ -1066,6 +1068,7 @@ async fn handle_node_connection(
                     token,
                     managed_runtime,
                     retirement_v1,
+                    destination_binding_v1,
                 } => {
                     match node_service::validate_auth_token(&state.db, &token).await {
                         Ok(node) if node.id == node_id => {
@@ -1133,6 +1136,7 @@ async fn handle_node_connection(
                                 true,
                                 managed_runtime,
                                 negotiation,
+                                destination_binding_v1,
                             ));
                         }
                         Ok(_) => {
@@ -1225,7 +1229,14 @@ async fn handle_node_connection(
         return;
     };
 
-    let (node_id, owner_user_id, needs_auth_ok, managed_runtime, negotiation) = match auth_result {
+    let (
+        node_id,
+        owner_user_id,
+        needs_auth_ok,
+        managed_runtime,
+        negotiation,
+        destination_binding_v1,
+    ) = match auth_result {
         Ok(Some(pair)) => pair,
         _ => {
             // Timeout or auth failure -- close connection
@@ -1393,10 +1404,12 @@ async fn handle_node_connection(
         return;
     }
     let managed_window_tx = tx.clone();
-    let (_, mut close_rx) =
-        state
-            .node_ws_manager
-            .register_connection_with_id(&node_id, connection_id.clone(), tx);
+    let (_, mut close_rx) = state.node_ws_manager.register_negotiated_connection(
+        &node_id,
+        connection_id.clone(),
+        tx,
+        destination_binding_v1,
+    );
 
     let managed_runtime_window = if let Some(binding) = managed_runtime.as_ref() {
         match crate::services::remote_machine_runtime::signed_node_window(
@@ -1425,7 +1438,7 @@ async fn handle_node_connection(
             "type": "auth_ok",
             "node_id": &node_id,
             "heartbeat_interval_secs": state.config.node_heartbeat_interval_secs,
-            "capabilities": { "proxy_binary_chunks": true, "machine_execution_approval_v1": true },
+            "capabilities": { "proxy_binary_chunks": true, "machine_execution_approval_v1": true, "destination_binding_v1": destination_binding_v1 },
             "managed_runtime": managed_runtime,
             "managed_runtime_window": managed_runtime_window
         });
@@ -2475,6 +2488,108 @@ mod tests {
         })
         .await
         .expect("socket reservations must be released even when the client is idle");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires NYXID_PREVIOUS_NODE_CLI pointing to a previous release binary"]
+    async fn destination_binding_previous_release_node_exchanges_a_signed_request() {
+        use crate::services::billing::{
+            BillingIngress,
+            route_inventory::{BillingRoutePolicy, enforce_billing_egress_classification},
+        };
+        use nyxid_node_proxy_test::{config::NodeConfig, secret_backend::SecretBackend};
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{header, method, path},
+        };
+
+        let executable = std::env::var_os("NYXID_PREVIOUS_NODE_CLI").expect("previous release CLI");
+        let owner = uuid::Uuid::new_v4().to_string();
+        let token = uuid::Uuid::new_v4().to_string();
+        let signing_key = rand::random::<[u8; 32]>();
+        let db = test_db("node_previous_release").await;
+        let node = test_node(&owner, "previous-release", &token);
+        insert_user_and_node(&db, &owner, &node).await;
+        let mut state = test_app_state(db);
+        state.node_ws_manager = Arc::new(NodeWsManager::new(30, 1));
+        let (url, server) = start_node_ws_test_server(state.clone()).await;
+        let path_dir = tempfile::tempdir().unwrap();
+        let backend = SecretBackend::new("file", &node.id, path_dir.path()).unwrap();
+        let mut config = NodeConfig::new(url, node.id.clone(), "file".into());
+        backend.store_auth_token(&mut config, &token).unwrap();
+        backend
+            .store_signing_secret(&mut config, &hex::encode(signing_key))
+            .unwrap();
+        let downstream = MockServer::start().await;
+        let value = uuid::Uuid::new_v4().to_string();
+        config
+            .add_header_credential_via(
+                "service",
+                "X-Node-Fixture",
+                &value,
+                Some(&downstream.uri()),
+                &backend,
+            )
+            .unwrap();
+        config.save(&path_dir.path().join("config.toml")).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/ping"))
+            .and(header("X-Node-Fixture", value.as_str()))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&downstream)
+            .await;
+        let mut child = tokio::process::Command::new(executable)
+            .args(["node", "start", "--config"])
+            .arg(path_dir.path())
+            .current_dir(path_dir.path())
+            .env("HOME", path_dir.path())
+            .env("DO_NOT_TRACK", "1")
+            .env("NYXID_NO_UPDATE_CHECK", "1")
+            .env("NYXID_SKIP_SKILL_SELF_HEAL", "1")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while !state.node_ws_manager.is_connected(&node.id) {
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "previous CLI exited during authentication"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let permit = enforce_billing_egress_classification(
+            Some(BillingRoutePolicy::Metered(BillingIngress::Proxy)),
+            BillingIngress::Proxy,
+        )
+        .unwrap();
+        let result = state
+            .node_ws_manager
+            .send_proxy_request_classified(
+                &node.id,
+                NodeProxyRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    service_id: "service".into(),
+                    service_slug: "service".into(),
+                    base_url: downstream.uri(),
+                    method: "GET".into(),
+                    path: "/ping".into(),
+                    query: None,
+                    body: None,
+                    target_id: None,
+                    headers: Vec::new().into(),
+                },
+                Some(&signing_key),
+                permit,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, ProxyResponseType::Complete(response) if response.status == 204));
+        child.kill().await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]

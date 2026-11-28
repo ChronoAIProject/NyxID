@@ -7482,6 +7482,12 @@ async fn execute_tool_resolved_inner(
                         billing_egress_permit,
                     )
                     .await;
+                if matches!(&node_result, Err(failure) if matches!(failure.error, AppError::NodeCredentialDestinationMismatch)) {
+                    destination_audit.denied();
+                    if let Some(permit) = &target.execution_permission { permit.node_not_sent().await?; }
+                    billing.reject_before_send(&metered, "node_credential_destination_mismatch", false).await?;
+                    return Err(AppError::NodeCredentialDestinationMismatch);
+                }
                 if let Err(failure) = &node_result
                     && !failure.dispatched && !matches!(failure.error, AppError::NodeCredentialMissing(_)) {
                     if let Some(permit) = target.execution_permission.as_ref().filter(|permit| permit.single_dispatch()) {

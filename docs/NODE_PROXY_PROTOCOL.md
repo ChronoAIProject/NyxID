@@ -737,7 +737,13 @@ The HMAC-SHA256 input is compact UTF-8 JSON for this ordered array (strings thro
  target_id, base_url, method, path, query_or_empty, base64_body_or_empty]
 ```
 
-The usual timestamp and replay checks apply. The version tag separates the signature domain from legacy HTTP and WebSocket signatures. Service identity, target ID, and origin cannot be changed without invalidating the signature. Non-target HTTP calls retain the existing signature and wire shape, including compatibility with older nodes. Upgrade and verify every participating and failover node before starting a backend release that automatically activates Drive/Workspace editor routing. See the rollout prerequisites in [Google Workspace OAuth](GOOGLE_WORKSPACE_OAUTH.md).
+The usual timestamp and replay checks apply. The version tag separates the signature domain from legacy HTTP and WebSocket signatures. Service identity, target ID, and origin cannot be changed without invalidating the signature. Non-target HTTP calls use the signature negotiated on the authenticated socket. Upgrade and verify every participating and failover node before starting a backend release that automatically activates Drive/Workspace editor routing. See the rollout prerequisites in [Google Workspace OAuth](GOOGLE_WORKSPACE_OAUTH.md).
+
+### Local binding negotiation
+
+A node sends `destination_binding_v1: true` in its `auth` message. The server acknowledges the flag in `auth_ok.capabilities`. On that connection an ordinary HTTP proxy frame carries `signature_version: 3`. Its signature uses the same ordered JSON array as v2, with domain `nyxid-node-http.v3`, an empty target ID, and the exact base URL. The signed empty base selects the node's stored routing URL. The receiver checks the resulting destination against its local credential binding on both negotiated and legacy frames.
+
+For `ssh_node_exec_open`, version 2 authenticates the UTF-8 JSON array `["nyxid-node-ssh.v2", legacy_command_hmac_hex, target_host, target_port]` with the registration signing key. The node compares the target with its local service/principal record before accessing the private key. Signed WebSocket and web-terminal opens already cover their target fields. Streaming uploads authenticate their complete opening metadata. See the [peer compatibility matrix](NODE_PROXY_ARCHITECTURE.md#node-local-destination-binding).
 
 ## Machine protocol v1
 

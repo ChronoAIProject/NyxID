@@ -142,6 +142,7 @@ impl AppError {
             | Self::NodeOffline(_)
             | Self::NodeProxyTimeout
             | Self::NodeCredentialMissing(_)
+            | Self::NodeCredentialDestinationMismatch
             | Self::NodeHttpSignatureUnsupported
             | Self::WorkspaceDestinationsNotActivated
             | Self::WsProxyDownstream(_)
@@ -328,6 +329,7 @@ mod tests {
             AppError::NodeProxyTimeout,
             AppError::NodeCredentialMissing("synthetic".into()),
             AppError::NodeHttpSignatureUnsupported,
+            AppError::NodeCredentialDestinationMismatch,
             AppError::WorkspaceDestinationsNotActivated,
             AppError::WsProxyDownstream("synthetic".into()),
             AppError::ClientDisconnected,

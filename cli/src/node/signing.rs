@@ -92,36 +92,44 @@ pub fn verify_request_signature(
         {
             zeroize::Zeroizing::new([timestamp, nonce, method, path, query, body].join("\n"))
         }
-        Some(version) if version.as_u64() == Some(2) => {
-            let fields = [
-                "service_id",
-                "service_slug",
-                "target_id",
-                "base_url",
-                "method",
-                "path",
-                "timestamp",
-                "nonce",
-            ];
+        Some(version) if matches!(version.as_u64(), Some(2 | 3)) => {
+            let selected = version.as_u64() == Some(2);
+            let fields = ["service_id", "service_slug", "method", "timestamp", "nonce"];
             if fields
                 .iter()
                 .any(|field| request[*field].as_str().is_none_or(str::is_empty))
             {
                 return false;
             }
-            let origin = request["base_url"].as_str().unwrap();
-            if url::Url::parse(origin).ok().is_none_or(|url| {
-                url.scheme() != "https" || url.origin().ascii_serialization() != origin
-            }) {
+            let Some(origin) = request["base_url"].as_str() else {
+                return false;
+            };
+            if request["path"].as_str().is_none() {
+                return false;
+            }
+            if selected {
+                if request["path"].as_str().is_none_or(str::is_empty)
+                    || request["target_id"].as_str().is_none_or(str::is_empty)
+                    || url::Url::parse(origin).ok().is_none_or(|url| {
+                        url.scheme() != "https" || url.origin().ascii_serialization() != origin
+                    })
+                {
+                    return false;
+                }
+            } else if !request["target_id"].is_null() {
                 return false;
             }
             nyxid_service_adapters::secret_json::to_secret_string(&[
-                "nyxid-node-http.v2",
+                if selected {
+                    "nyxid-node-http.v2"
+                } else {
+                    "nyxid-node-http.v3"
+                },
                 timestamp,
                 nonce,
                 request["service_id"].as_str().unwrap(),
                 request["service_slug"].as_str().unwrap(),
-                request["target_id"].as_str().unwrap(),
+                request["target_id"].as_str().unwrap_or(""),
                 origin,
                 method,
                 path,
@@ -206,6 +214,30 @@ pub fn verify_ssh_node_exec_signature(
     let message = format!(
         "{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}\n{auth_mode}\n{command_hash}"
     );
+    if let Some(version) = request.get("signature_version") {
+        if version.as_u64() != Some(2) {
+            return false;
+        }
+        let Ok(key) = hex::decode(secret_hex).map(zeroize::Zeroizing::new) else {
+            return false;
+        };
+        let Ok(expected) = hex::decode(expected_signature) else {
+            return false;
+        };
+        let mut command = Hmac::<Sha256>::new_from_slice(&key).expect("HMAC key");
+        command.update(message.as_bytes());
+        let command = hex::encode(command.finalize().into_bytes());
+        let host = request["target_host"].as_str();
+        let port = request["target_port"]
+            .as_u64()
+            .and_then(|n| u16::try_from(n).ok());
+        if host.is_none_or(str::is_empty) || port.is_none() {
+            return false;
+        }
+        return nyxid_machine::signing::ssh_destination_mac(&key, &command, host, port)
+            .verify_slice(&expected)
+            .is_ok();
+    }
     verify_signature(secret_hex, expected_signature, &message)
 }
 
@@ -257,6 +289,21 @@ pub fn verify_ws_proxy_signature(
     let base_url = request["base_url"].as_str().unwrap_or("");
     let path = request["path"].as_str().unwrap_or("");
     let query = request["query"].as_str().unwrap_or("");
+
+    if [
+        timestamp,
+        nonce,
+        session_id,
+        service_slug,
+        base_url,
+        path,
+        query,
+    ]
+    .iter()
+    .any(|field| field.bytes().any(|byte| byte.is_ascii_control()))
+    {
+        return false;
+    }
 
     let message = zeroize::Zeroizing::new(
         [

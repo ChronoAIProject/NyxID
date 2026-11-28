@@ -4796,6 +4796,17 @@ pub enum NodeCredentialCommands {
         #[arg(long, hide = true)]
         value: Option<String>,
     },
+    /// Replace the destinations approved locally for this service
+    Rebind {
+        /// Select a node-key SSH credential by principal
+        #[arg(long)]
+        principal: Option<String>,
+        #[arg(long)]
+        service: String,
+        /// Allowed base URL, including an optional path prefix (repeatable)
+        #[arg(long, required = true)]
+        url: Vec<String>,
+    },
     /// Change a node-managed service's endpoint using your owner login, preserving its secret
     SetUrl {
         /// Existing service slug on this node
