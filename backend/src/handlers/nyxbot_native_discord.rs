@@ -59,6 +59,7 @@ pub(super) async fn private_guest_facts<'a>(
         || !matches!(message["type"].as_u64(), Some(0 | 19))
         || message["content"] != activity["kind"]["text"]
         || !message["edited_timestamp"].is_null()
+        || !message["guild_id"].is_null()
         || channel["id"] != chat
         || channel["type"] != 1
         || !channel["guild_id"].is_null()

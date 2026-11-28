@@ -103,7 +103,10 @@ shared room. Private, unknown and contradictory room evidence cannot authorize
 an append. A persisted `Shared` audience alone supplies no room proof, including
 legacy records whose sender was verified. Discord interactions bind a guild
 room to matching guild/member evidence, or a group DM to absent guild/member
-evidence. Native and relay ingress use the same room classification; native
+evidence. Private room evidence requires a DM channel and absent or null guild
+values in both the message or interaction envelope and the channel facts.
+Private interactions also require absent outer member evidence.
+Native and relay ingress use the same room classification; native
 thread IDs match the bot-authenticated destination exactly. Other transports
 require their explicit supported provider room classification. For both Google
 Workspace and the standalone Sheets catalog, bind each grant to the actual connection, enforce its

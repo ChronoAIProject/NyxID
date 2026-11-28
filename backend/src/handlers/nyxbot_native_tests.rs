@@ -844,21 +844,28 @@ async fn native_discord_private_and_ambiguous_room_evidence_keeps_read_only_scop
     let _guard = NativeDiscordFixtureGuard(row.channel_bot_id.clone());
     let request = native_event(&row, "800", "Hello");
     let activity = &request["event_context"]["activity"];
-    for (channel, private, shared) in [
-        (json!({"id":"200","type":1}), true, false),
-        (json!({"id":"200","type":3}), false, true),
-        (json!({"id":"200"}), false, false),
+    for (channel, message_guild, private, shared) in [
+        (json!({"id":"200","type":1}), Value::Null, true, false),
+        (json!({"id":"200","type":3}), Value::Null, false, true),
+        (json!({"id":"200"}), Value::Null, false, false),
         (
             json!({"id":"200","type":3,"guild_id":"invalid"}),
+            Value::Null,
             false,
             false,
         ),
-        (json!({"id":"200","type":1,"guild_id":"300"}), false, false),
+        (
+            json!({"id":"200","type":1,"guild_id":"300"}),
+            Value::Null,
+            false,
+            false,
+        ),
+        (json!({"id":"200","type":1}), json!("300"), false, false),
     ] {
         http.reset().await;
         Mock::given(path("/channels/200/messages/800"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
-                json!({"id":"800","channel_id":"200","type":0,
+                json!({"id":"800","channel_id":"200","type":0,"guild_id":message_guild,
                 "author":{"id":"7","bot":false},"content":"Hello","mentions":[{"id":"100"}],
                 "mention_roles":[],"mention_everyone":false,"attachments":[]}),
             ))

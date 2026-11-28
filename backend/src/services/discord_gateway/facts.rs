@@ -55,7 +55,7 @@ pub(super) fn normalize(
     if channel["id"].as_str() != Some(chat)
         || !matches!(kind, 0..=3 | 5 | 10..=13)
         || (matches!(kind, 1 | 3) != message.get("guild_id").is_none_or(Value::is_null))
-        || (!matches!(kind, 1 | 3) && channel["guild_id"] != message["guild_id"])
+        || channel["guild_id"] != message["guild_id"]
     {
         return Err(Failure::Protocol);
     }

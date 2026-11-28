@@ -796,7 +796,14 @@ async fn cold_guest_model_setup(native: bool, addon: bool, followed: bool) {
     };
     let unavailable = message("501", "Hello without billing");
     let reply = body_text(respond(&state, &key, &unavailable, "org-default-no-wallet").await).await;
-    assert!(reply.contains(org::UNAVAILABLE), "{reply}");
+    // Followed ingress maps an execution failure, including absent billing, to
+    // its existing typed StartFailure notice before native SSE serialization.
+    let expected = if followed {
+        Notice::StartFailure.text(Default::default())
+    } else {
+        org::UNAVAILABLE
+    };
+    assert!(reply.contains(expected), "{reply}");
     assert!(observations.lock().await.is_empty());
     assert!(provider.received_requests().await.unwrap().is_empty());
     for collection in [

@@ -129,10 +129,8 @@ pub(crate) fn discord_shared_room(kind: Option<u64>, guild_id: &Value) -> bool {
 }
 
 fn discord_audience(sender_id: &str, kind: Option<u64>) -> TransportFacts<'_> {
-    let mut facts = verified(sender_id, kind == Some(1));
     // The caller supplies the authenticated guild/group-DM relationship.
-    facts.shared_room_verified = false;
-    facts
+    verified(sender_id, kind == Some(1))
 }
 
 fn verified(sender_id: &str, private: bool) -> TransportFacts<'_> {
@@ -217,18 +215,24 @@ fn authenticated_facts<'a>(
             use crate::services::discord_gateway::valid_message_id as snowflake;
 
             if let Some(facts) = discord {
-                if raw["author"]["id"].as_str() != Some(sender_id) {
+                let Some(evidence) = facts.discord_gateway.as_ref() else {
+                    return unknown;
+                };
+                if raw["author"]["id"].as_str() != Some(sender_id)
+                    || raw["channel"]["id"].as_str() != Some(chat_id)
+                    || raw["channel"]["type"].as_u64() != Some(u64::from(evidence.channel_type))
+                    || raw["channel"]["guild_id"] != raw["guild_id"]
+                    || (matches!(evidence.channel_type, 1 | 3) && !raw["guild_id"].is_null())
+                {
                     return unknown;
                 }
                 let mut result =
                     discord_facts(bot_platform_id, chat_id, message_id, sender_id, facts);
                 result.shared_room_verified = result.sender_id.is_some()
-                    && facts.discord_gateway.as_ref().is_some_and(|evidence| {
-                        discord_shared_room(
-                            Some(u64::from(evidence.channel_type)),
-                            &raw["guild_id"],
-                        )
-                    });
+                    && discord_shared_room(
+                        Some(u64::from(evidence.channel_type)),
+                        &raw["channel"]["guild_id"],
+                    );
                 return result;
             }
             let user = if raw["guild_id"].is_null() {
@@ -250,13 +254,13 @@ fn authenticated_facts<'a>(
                 return unknown;
             }
             if raw["channel"]["id"].as_str() != Some(chat_id) {
-                let mut facts = verified(sender_id, false);
-                facts.shared_room_verified = false;
-                return facts;
+                return verified(sender_id, false);
             }
             let mut facts = discord_audience(sender_id, raw["channel"]["type"].as_u64());
             if facts.audience == AnswerAudience::Private
-                && (!raw["guild_id"].is_null() || !raw["member"].is_null())
+                && (!raw["guild_id"].is_null()
+                    || !raw["member"].is_null()
+                    || !raw["channel"]["guild_id"].is_null())
             {
                 return unknown;
             }
@@ -360,6 +364,16 @@ mod tests {
     };
     use serde_json::json;
     use std::sync::Arc;
+
+    fn discord_bot() -> ChannelBot {
+        bson::from_document(bson::doc! {
+            "_id":"bot", "user_id":"owner", "platform":"discord", "label":"Fixture",
+            "platform_bot_id":"999", "platform_bot_username":"fixture", "status":"active",
+            "is_active":true, "webhook_registered":true, "webhook_secret_hash":"fixture",
+            "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![]},
+            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
+        }).unwrap()
+    }
 
     async fn parsed(platform: &str, raw: &Value) -> InboundMessage {
         resolve_adapter(platform, &Arc::new(TokenExchangeCache::new()))
@@ -476,6 +490,97 @@ mod tests {
     }
 
     #[test]
+    fn discord_socket_guest_proof_rejects_conflicting_normalized_metadata() {
+        let bot = discord_bot();
+        for kind in [1, 3, 0, 11] {
+            let mut raw = json!({"id":"123","channel_id":"321","type":0,"author":{"id":"666","bot":false},
+                "content":"hello","mentions":[],"mention_roles":[],"mention_everyone":false});
+            let mut channel = json!({"id":"321","type":kind,"parent_id":"322"});
+            if !matches!(kind, 1 | 3) {
+                raw["guild_id"] = json!("444");
+                channel["guild_id"] = json!("444");
+            }
+            let (inbound, verified) = crate::services::discord_gateway::normalized_test_message(
+                &bot,
+                &json!({"d":raw}),
+                &channel,
+            );
+            let check = |message: &InboundMessage| {
+                let result = inbound_facts(&bot, message, Some(&verified));
+                (
+                    result.sender_id.is_some(),
+                    result.audience,
+                    result.shared_room_verified,
+                )
+            };
+            assert_eq!(
+                check(&inbound),
+                (
+                    true,
+                    if kind == 1 {
+                        AnswerAudience::Private
+                    } else {
+                        AnswerAudience::Shared
+                    },
+                    kind != 1
+                )
+            );
+            // Keep the real verifier's facts while altering their raw evidence.
+            // Neither private reads nor shared writes can borrow that proof.
+            for guild in [json!("445"), json!(false), json!({"id":"444"})] {
+                let mut bad = inbound.clone();
+                bad.raw_data["channel"]["guild_id"] = guild.clone();
+                assert_eq!(check(&bad), (false, AnswerAudience::Shared, false));
+                bad = inbound.clone();
+                bad.raw_data["guild_id"] = guild.clone();
+                assert_eq!(check(&bad), (false, AnswerAudience::Shared, false));
+                if matches!(kind, 1 | 3) {
+                    bad.raw_data["channel"]["guild_id"] = guild;
+                    assert_eq!(check(&bad), (false, AnswerAudience::Shared, false));
+                }
+            }
+            for field in ["id", "type"] {
+                let mut bad = inbound.clone();
+                bad.raw_data["channel"][field] = if field == "id" {
+                    json!("322")
+                } else {
+                    json!(99)
+                };
+                assert_eq!(check(&bad), (false, AnswerAudience::Shared, false));
+            }
+        }
+    }
+
+    #[test]
+    fn discord_private_interaction_requires_consistent_embedded_room() {
+        let base = json!({"type":2,"id":"123","application_id":"999","channel_id":"321",
+            "user":{"id":"666","bot":false},"channel":{"id":"321","type":1}});
+        let check = |raw: &Value| {
+            let result = authenticated_facts("discord", "999", raw, "321", "123", "666", None);
+            (
+                result.sender_id.is_some(),
+                result.audience,
+                result.shared_room_verified,
+            )
+        };
+        assert_eq!(check(&base), (true, AnswerAudience::Private, false));
+        let mut explicit_null = base.clone();
+        explicit_null["channel"]["guild_id"] = Value::Null;
+        assert_eq!(
+            check(&explicit_null),
+            (true, AnswerAudience::Private, false)
+        );
+        for guild in [json!("444"), json!(false), json!({"id":"444"})] {
+            let mut raw = base.clone();
+            raw["channel"]["guild_id"] = guild;
+            assert_eq!(check(&raw), (false, AnswerAudience::Shared, false));
+        }
+        let mut group = base.clone();
+        group["channel"]["type"] = json!(3);
+        assert_eq!(check(&group), (true, AnswerAudience::Shared, true));
+    }
+
+    #[test]
     fn shared_room_evidence_never_comes_from_the_private_fallback() {
         assert!(!verified("sender", false).shared_room_verified);
         for (platform, bot, chat, message, sender, raw, positive) in [
@@ -564,13 +669,7 @@ mod tests {
         let evidence = facts("discord", "999", &inbound);
         assert_eq!(evidence.sender_id, Some("666"));
         assert!(!evidence.shared_room_verified);
-        let bot: ChannelBot = bson::from_document(bson::doc! {
-            "_id":"bot", "user_id":"owner", "platform":"discord", "label":"Fixture",
-            "platform_bot_id":"999", "platform_bot_username":"fixture", "status":"active",
-            "is_active":true, "webhook_registered":true, "webhook_secret_hash":"fixture",
-            "bot_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:vec![]},
-            "created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()
-        }).unwrap();
+        let bot = discord_bot();
         let mut source: ChannelMessage = bson::from_document(bson::doc! {
             "_id":"source", "channel_bot_id":&bot.id, "user_id":&bot.user_id,
             "direction":"inbound", "platform":"discord", "conversation_id":"route",
