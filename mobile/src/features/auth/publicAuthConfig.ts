@@ -1,6 +1,6 @@
 import { localizedError } from "../../i18n/localizedError";
 import { z } from "zod";
-import type { SocialProvider } from "./socialCallback";
+import { isSocialProvider, socialProviders, type SocialProvider } from "../../lib/auth/socialProviders";
 
 const publicAuthConfigSchema = z.object({
   email_auth_enabled: z.boolean(),
@@ -11,10 +11,6 @@ export type PublicAuthConfig = {
   emailAuthEnabled: boolean;
   socialProviders: SocialProvider[];
 };
-
-function isSocialProvider(provider: string): provider is SocialProvider {
-  return provider === "google" || provider === "github" || provider === "apple";
-}
 
 export function parsePublicAuthConfig(payload: unknown): PublicAuthConfig {
   const result = publicAuthConfigSchema.safeParse(payload);
@@ -39,9 +35,7 @@ export function requireSocialProvider(
     throw localizedError("Sign-in options are not ready. Please wait or retry.");
   }
   if (!config.socialProviders.includes(provider)) {
-    const label = { google: "Google", github: "GitHub", apple: "Apple" }[
-      provider
-    ];
+    const label = socialProviders.find(({ id }) => id === provider)?.name ?? provider;
     throw localizedError("{{label}} sign-in is not enabled on this server. Choose another available sign-in method.", { label: label});
   }
 }

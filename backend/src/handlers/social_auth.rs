@@ -125,16 +125,14 @@ async fn start_social(
         AppError::SocialAuthFailed(format!("Unsupported provider: {provider_name}"))
     })?;
 
-    let base_secure = state.config.use_secure_cookies();
     let domain = state.config.cookie_domain();
-
-    // Apple's form_post callback is cross-origin, so cookies need SameSite=None.
-    // SameSite=None requires the Secure flag, but browsers treat localhost as a
-    // secure context even over plain HTTP, so we force Secure=true for Apple.
-    let (secure, same_site) = if provider == social_auth_service::SocialProvider::Apple {
-        (true, COOKIE_SAMESITE_NONE)
-    } else {
-        (base_secure, COOKIE_SAMESITE_LAX)
+    let flow = provider.browser_flow();
+    let (secure, same_site) = match flow {
+        social_auth_service::BrowserFlow::Query => {
+            (state.config.use_secure_cookies(), COOKIE_SAMESITE_LAX)
+        }
+        // Cross-origin form_post requires SameSite=None and Secure, including on localhost.
+        social_auth_service::BrowserFlow::FormPostWithNonce => (true, COOKIE_SAMESITE_NONE),
     };
 
     let is_mobile_client = query.client.as_deref() == Some(SOCIAL_CLIENT_MOBILE);
@@ -153,8 +151,8 @@ async fn start_social(
     } else {
         generate_random_token()
     };
-    let nonce_token =
-        (provider == social_auth_service::SocialProvider::Apple).then(generate_random_token);
+    let nonce_token = matches!(flow, social_auth_service::BrowserFlow::FormPostWithNonce)
+        .then(generate_random_token);
 
     let mobile_return = if is_mobile_client {
         let uri = query
