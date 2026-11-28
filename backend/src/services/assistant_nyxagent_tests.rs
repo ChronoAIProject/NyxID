@@ -1063,6 +1063,7 @@ fn recap_caps_each_activity_list_and_reserves_bounded_total_budget() {
                 memory_recovery: None,
                 decision: None,
                 retry_identity: None,
+                business_identity: None,
                 failure: None,
                 machine: None,
                 id: i.to_string(),
@@ -1147,6 +1148,7 @@ fn recap_v2_keeps_action_status_and_attachment_checkpoint() {
             memory_recovery: None,
             decision: None,
             retry_identity: None,
+            business_identity: None,
             failure: None,
             machine: None,
             id: "a".into(),
@@ -1222,6 +1224,7 @@ fn guest_recap_omits_owner_tool_metadata() {
             memory_recovery: None,
             decision: None,
             retry_identity: None,
+            business_identity: None,
             failure: None,
             machine: None,
             id: "owner-action".into(),
@@ -1297,6 +1300,7 @@ fn retry_recap_lists_completed_activity_ids_for_no_duplicate_replay() {
             memory_recovery: None,
             decision: None,
             retry_identity: None,
+            business_identity: None,
             failure: None,
             machine: None,
             id: "activity-42".into(),
@@ -1658,6 +1662,7 @@ fn stale_test_row(now: DateTime<Utc>) -> AssistantConversation {
             external_check_started: false,
             checking_notice_claimed: false,
             retry_digests: Vec::new(),
+            retry_match: None,
             retry_of: None,
             activity_count: None,
             running_response: None,
@@ -3646,6 +3651,8 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
         &old_turn_id,
         "stale__call",
         "stale-digest",
+        None,
+        None,
     )
     .await
     .unwrap();
@@ -3654,9 +3661,18 @@ async fn turn_activities_are_metadata_only_bounded_and_retained_on_the_reply() {
     assert_eq!(turn.activity_total, 1);
     assert_eq!(turn.activity_count, Some(1));
     assert_eq!(turn.activities.len(), 1);
-    record_retry_duplicate(&db, &owner, &row.id, &turn.turn_id, "$$ROOT", "$digest")
-        .await
-        .unwrap();
+    record_retry_duplicate(
+        &db,
+        &owner,
+        &row.id,
+        &turn.turn_id,
+        "$$ROOT",
+        "$digest",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let after_duplicate = get(&db, &owner, &row.id)
         .await
         .unwrap()

@@ -7,6 +7,9 @@ use crate::services::{
 use sha2::{Digest, Sha256};
 use std::io::Write;
 
+#[path = "assistant_system_skills_service_tests/source_defensive.rs"]
+mod source_defensive;
+
 const ID: &str = "00000000-0000-4000-8000-000000000001";
 const DEP: &str = "00000000-0000-4000-8000-000000000002";
 
@@ -512,6 +515,186 @@ async fn reads_dependencies_shadowing_hash_and_destroyed_agents() {
                 .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn skill_read_source_effective_builtins_and_explicit_roots_keep_exact_source() {
+    let registry = Registry::with_markdown(&"中文🙂\n".repeat(2000));
+    let mut system = resolved(system(&registry));
+    let mut agent = agent();
+    let first = skills::read(
+        &registry,
+        &read_view(&agent, Some(&system)),
+        ID,
+        None,
+        "/",
+        0,
+        None,
+    )
+    .await
+    .unwrap();
+    let source = first["source_fingerprint"].as_str().unwrap();
+    let mut root_next = None;
+    for dependency in [None, Some(DEP)] {
+        let first_file = skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            dependency,
+            "SKILL.md",
+            0,
+            Some(source),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_file["complete"], false);
+        let next = first_file["next_offset"].as_u64().unwrap() as usize;
+        assert_eq!(next, first_file["content"].as_str().unwrap().len());
+        assert!(next > 0);
+        if dependency.is_none() {
+            root_next = Some(next);
+        }
+        let page = skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            dependency,
+            "SKILL.md",
+            next,
+            Some(source),
+        )
+        .await
+        .unwrap();
+        assert_eq!(page["source_fingerprint"], source);
+        assert_eq!(page["archive_sha256"], registry.reference().sha256);
+    }
+    let root_next = root_next.unwrap();
+    // Platform/config revisions and unrelated pin edits retain identical content.
+    system.system.revision += 1;
+    agent.skills_revision += 1;
+    let mut unrelated = registry.reference();
+    unrelated.skill_id = uuid::Uuid::new_v4().to_string();
+    unrelated.name = "unrelated".into();
+    agent.skills.push(unrelated);
+    assert!(
+        skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            None,
+            "SKILL.md",
+            root_next,
+            Some(source)
+        )
+        .await
+        .is_ok()
+    );
+    system.system.skills[0].reference.dependencies[0].version = "1.1".into();
+    assert!(matches!(
+        skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            None,
+            "SKILL.md",
+            0,
+            Some(source)
+        )
+        .await,
+        Err(AppError::SkillRead(
+            crate::errors::skill_read::SkillReadReason::SourceChanged
+        ))
+    ));
+    // An explicit root with identical pins shadows the built-in and retains source.
+    agent.skills.push(registry.reference());
+    assert!(
+        skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            None,
+            "SKILL.md",
+            root_next,
+            Some(source)
+        )
+        .await
+        .is_ok()
+    );
+    agent.skills.last_mut().unwrap().disabled = true;
+    assert!(matches!(
+        skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            None,
+            "/",
+            0,
+            Some(source)
+        )
+        .await,
+        Err(AppError::SkillRead(
+            crate::errors::skill_read::SkillReadReason::SkillNotBound
+        ))
+    ));
+    agent.skills.pop();
+    agent.system_skill_overrides.insert(ID.into(), false);
+    assert!(
+        skills::read(
+            &registry,
+            &read_view(&agent, Some(&system)),
+            ID,
+            None,
+            "/",
+            0,
+            Some(source)
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn skill_read_source_exact_guids_precede_root_and_dependency_aliases() {
+    let registry = Registry::new();
+    let mut exact = registry.reference();
+    let mut alias = exact.clone();
+    alias.skill_id = uuid::Uuid::new_v4().to_string();
+    alias.name = exact.skill_id.clone();
+    alias.dependencies.clear();
+    let mut dependency_alias = exact.dependencies[0].clone();
+    dependency_alias.skill_id = uuid::Uuid::new_v4().to_string();
+    dependency_alias.name = DEP.into();
+    exact.dependencies.insert(0, dependency_alias);
+    let mut agent = agent();
+    agent.skills = vec![alias, exact.clone()];
+    assert_eq!(resolve(&agent, None, ID).unwrap().skill_id, ID);
+    let listing = skills::read(&registry, &agent, ID, None, "/", 0, None)
+        .await
+        .unwrap();
+    assert_eq!(listing["skill_id"], ID);
+    let dependency = skills::read(
+        &registry,
+        &agent,
+        ID,
+        Some(DEP),
+        "SKILL.md",
+        0,
+        listing["source_fingerprint"].as_str(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(dependency["skill_id"], DEP);
+    assert!(allows_download(
+        &exact,
+        &format!("/api/v1/skills/{DEP}/versions/1.0/download")
+    ));
+    agent.skills[1].disabled = true;
+    assert!(resolve(&agent, None, ID).is_none());
+    assert!(
+        skills::read(&registry, &agent, ID, None, "/", 0, None)
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -3031,6 +3214,7 @@ async fn read_resolved(
         dependency,
         path,
         offset,
+        None,
     )
     .await
 }

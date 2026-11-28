@@ -96,13 +96,54 @@ lists package files. Reuse already-read guidance within a session while current
 and fetch only the references needed for the task. Legacy guest turns omit skills.
 `nyxid__skill_read` reads only the live calling agent's attached root or pinned
 dependency, defaults to `SKILL.md`, and supports byte-offset paging at UTF-8
-boundaries. Serialized results remain below 10,000 characters. A file listing
-is available via `path: "/"`. Unavailable Ornn, missing access and integrity
+boundaries. Start with `path: "/"` for the file list and its
+`source_fingerprint`. Carry that fingerprint to every file and dependency read,
+including offset zero; continue each path with `offset = next_offset` until
+`complete: true` and `next_offset: null`. Join decoded `content` without separators.
+`total_bytes` and `sha256` describe the complete requested file (or newline-joined
+file list); `archive_sha256` identifies its verified archive. Pages fit 9,200
+UTF-8 bytes including both JSON escaping layers. Completion is per path, not
+proof that all package files or required dependencies have been read.
+
+The fingerprint binds the calling agent and exact root with its pinned closure,
+across paths and dependencies. Unrelated pin and preload edits do not invalidate
+it. Exact root and dependency GUIDs take precedence over name aliases. The
+bound download carries that selected root and closure through live revalidation.
+An effective built-in GUID is resolved before an attached UUID-shaped alias;
+ordinary file reads, outlines and download authority use that same selected root.
+Every call checks current attachment, access and archive integrity before
+comparing the fingerprint. Source changes return a content-free conflict with
+`details.reason: source_changed`, `complete: false`, `restart_required: true`
+and `next_offset: 0`. A nonzero offset without a fingerprint returns the same
+restart contract with `source_required`. Discard collected source and restart
+the root with `path: "/"`, offset zero and no dependency or fingerprint.
+Initial legacy calls remain supported; offset-only continuations fail explicitly.
+Older replicas reject the new argument, so upgrade every serving replica before
+relying on this continuation contract. Unavailable Ornn, missing access and integrity
 failures produce bounded tool errors and never prevent a turn from starting.
 Revocation/removal takes effect on the next read. The reader also carries any
 configured Ornn operation scope from the already loaded agent into proxy
 enforcement; attachment cannot bypass an explicit operation restriction. Other agents, guests, other
 owners and non-assistant callers cannot use this reader.
+
+Verify a known saved pin independently with
+`get_agent_skills {agent, skill_id: "<exact GUID>"}`. Its live targeted response
+fits the same budget and reports `complete: true`, `pin` (including a disabled
+attached pin), `provenance` (`attached`, `built_in`, or null), `effective` and
+matching `system_status`. A null pin means absent. An attached pin wins over a
+built-in with the same ID, including while disabled; the effective flag uses the
+same live built-in/attached resolver as the reader. Unrelated inventory is omitted.
+Each read enforces the existing target ACL; no snapshot of private target pins
+is retained. A single pin too large to fit returns an explicit incomplete-read
+error without clipping. Omitting `skill_id` preserves the existing full inventory
+response, which can exceed model context limits; it does not claim bounded
+completion. A source or saved-state read that cannot be completed leaves setup
+explicitly incomplete. Large onboarding source
+packages do not expand authored-draft limits or justify an incomplete private copy;
+see [Owner-requested authoring](#owner-requested-authoring).
+Specialists' reserved NyxBot selectors are refused before lookup can create a
+first-use personal NyxBot profile. Self and other ordinary selectors retain
+their existing lookup, liveness and ACL checks.
 
 Skills are external, untrusted guidance. They never alter grants, operation
 scopes, approvals, models or machine permissions. Bundled scripts are text;

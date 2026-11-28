@@ -405,6 +405,7 @@ impl Reader<'_> {
         BoundSkillReader {
             reader: self,
             agent,
+            root: None,
         }
     }
 
@@ -530,6 +531,7 @@ impl OrnnReader for AgentOwnerReader<'_> {
             return BoundSkillReader {
                 reader: self.reader,
                 agent: self.agent,
+                root: None,
             }
             .get(path)
             .await;
@@ -547,6 +549,7 @@ impl OrnnReader for AgentOwnerReader<'_> {
 struct BoundSkillReader<'a> {
     reader: &'a Reader<'a>,
     agent: &'a crate::models::assistant_agent::AssistantAgent,
+    root: Option<&'a crate::models::catalog_skill_revision::SkillReference>,
 }
 
 #[async_trait::async_trait]
@@ -567,7 +570,12 @@ impl skills::OrnnReader for BoundSkillReader<'_> {
         if method != http::Method::GET || !body.is_empty() {
             return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
         }
-        let root = if let Some(root) = system::download_root(self.agent, path) {
+        let root = if let Some(root) = self.root {
+            if !system::allows_download(root, path) {
+                return OrnnOutcome::LocalRefusal(OrnnLocalRefusal::OperationNotAllowed);
+            }
+            root.clone()
+        } else if let Some(root) = system::download_root(self.agent, path) {
             root.clone()
         } else {
             let system = match system::for_person(
@@ -1202,6 +1210,7 @@ pub async fn preview_attached(
             None,
             "SKILL.md",
             0,
+            None,
         )
         .await?;
         let text: String = page["content"]
@@ -1315,6 +1324,7 @@ async fn read_attached(
             args["dependency"].as_str(),
             args["path"].as_str().unwrap_or("SKILL.md"),
             offset,
+            args["source_fingerprint"].as_str(),
         )
         .await
     }
@@ -1462,13 +1472,20 @@ pub(crate) async fn dispatch(
                 scopes: Some(&agent.operation_scopes),
                 chat: Some(std::sync::Arc::new(chat.clone())),
             };
-            let system = if system::resolve(&agent, None, arg(args, "skill")).is_some() {
+            // A UUID-shaped alias must not hide an exact built-in GUID. Exact
+            // attachments and non-GUID attached aliases can skip this read.
+            let selector = arg(args, "skill");
+            let exact_attachment = agent.skills.iter().any(|pin| pin.skill_id == selector);
+            let system = if exact_attachment
+                || (uuid::Uuid::parse_str(selector).is_err()
+                    && system::resolve(&agent, None, selector).is_some())
+            {
                 None
             } else {
                 system::for_person(db, &chat.user_id, chat.guest).await?
             };
             let view = system::read_view(&agent, system.as_ref());
-            let bound = system::resolve(&agent, system.as_ref(), arg(args, "skill")).is_some();
+            let root = system::resolve(&agent, system.as_ref(), arg(args, "skill"));
             let outline = match args["section"].as_str() {
                 None => false,
                 Some("outline") => {
@@ -1482,21 +1499,30 @@ pub(crate) async fn dispatch(
                     return Err(AppError::ValidationError("section must be outline".into()));
                 }
             };
-            if !bound {
-                audit_skill_read_refusal(state, &chat.user_id, "skill_not_bound");
-                Box::pin(read_attached(&reader, &view, args, outline)).await
-            } else {
+            if let Some(root) = root {
                 Box::pin(read_attached(
-                    &reader.bound_skill(&agent),
+                    &BoundSkillReader {
+                        reader: &reader,
+                        agent: &agent,
+                        root: Some(root),
+                    },
                     &view,
                     args,
                     outline,
                 ))
                 .await
+            } else {
+                audit_skill_read_refusal(state, &chat.user_id, "skill_not_bound");
+                Box::pin(read_attached(&reader, &view, args, outline)).await
             }?
         }
         _ => {
             let target = args["agent"].as_str().unwrap_or("nyxbot");
+            // Reject creation-capable reserved selectors before lookup. Every
+            // ordinary selector still uses the established target ACL/liveness.
+            if !chat.is_orchestrator() && matches!(target.trim(), "" | "nyxbot" | "NyxBot") {
+                return Err(AppError::Forbidden("Specialists may read or request only their own skills; skills are managed for them".into()));
+            }
             let agent = if uuid::Uuid::parse_str(target).is_ok() {
                 team::agent(db, &chat.user_id, target).await?
             } else {
@@ -1507,6 +1533,50 @@ pub(crate) async fn dispatch(
                 return Err(AppError::Forbidden("Specialists may read or request only their own skills; skills are managed for them".into()));
             }
             if name == "get_agent_skills" {
+                if let Some(id) = args["skill_id"].as_str() {
+                    let id = uuid::Uuid::parse_str(id)
+                        .map_err(|_| {
+                            AppError::ValidationError("skill_id must be an exact GUID".into())
+                        })?
+                        .to_string();
+                    let context = system::for_person(db, &chat.user_id, false).await?;
+                    let attached = agent.skills.iter().find(|pin| pin.skill_id == id);
+                    let builtin = context.as_ref().and_then(|context| {
+                        context
+                            .system
+                            .skills
+                            .iter()
+                            .find(|entry| entry.reference.skill_id == id)
+                    });
+                    let pin = attached.or_else(|| builtin.map(|entry| &entry.reference));
+                    let provenance = if attached.is_some() {
+                        Some("attached")
+                    } else if builtin.is_some() {
+                        Some("built_in")
+                    } else {
+                        None
+                    };
+                    let status = context.as_ref().and_then(|context| {
+                        system::statuses(&agent, context)
+                            .into_iter()
+                            .find(|status| status.skill_id == id)
+                    });
+                    let effective = agent.destroyed_at.is_none()
+                        && match attached {
+                            Some(pin) => !pin.disabled,
+                            None => status.as_ref().is_some_and(|status| status.effective),
+                        };
+                    let value = json!({
+                        "agent_id": agent.id, "revision": agent.skills_revision,
+                        "skill_id": id, "complete": true, "pin": pin,
+                        "provenance": provenance, "system_status": status,
+                        "effective": effective,
+                    });
+                    if skills::wire_len(&value) > skills::PAGE_BUDGET {
+                        return Err(AppError::ValidationError("This pin cannot fit the targeted readback budget; saved-state verification is incomplete.".into()));
+                    }
+                    return Ok((value, false));
+                }
                 return Ok((
                     json!(system::response(db, &chat.user_id, agent).await?),
                     false,

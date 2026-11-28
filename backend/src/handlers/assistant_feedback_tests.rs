@@ -80,6 +80,7 @@ mod fixtures {
             memory_recovery: None,
             decision: None,
             retry_identity: None,
+            business_identity: None,
             failure: None,
             machine: None,
             id: uuid::Uuid::new_v4().to_string(),

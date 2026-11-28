@@ -10,6 +10,8 @@ pub enum SkillReadReason {
     OwnerConnectionUnavailable,
     OrnnPrincipalDenied,
     PinnedVersionMismatch,
+    SourceChanged,
+    SourceRequired,
 }
 
 impl SkillReadReason {
@@ -24,13 +26,28 @@ impl SkillReadReason {
             Self::PinnedVersionMismatch => AppError::ValidationError(
                 "Pinned skill version or SHA-256 mismatch; content refused".into(),
             ),
+            Self::SourceChanged | Self::SourceRequired => AppError::Conflict(
+                "Skill source cannot be continued. Discard collected source and restart with path /, offset 0 and no source_fingerprint.".into(),
+            ),
         }
     }
 
     pub fn error_key(self) -> &'static str {
         match self {
             Self::PinnedVersionMismatch => "validation_error",
+            Self::SourceChanged | Self::SourceRequired => "conflict",
             _ => "forbidden",
+        }
+    }
+
+    pub fn details(self) -> serde_json::Value {
+        match self {
+            Self::SourceChanged | Self::SourceRequired => serde_json::json!({
+                "reason": self, "complete": false, "restart_required": true,
+                "next_offset": 0,
+                "continuation_hint": "Restart the root with path /, offset 0, no dependency or source_fingerprint. Carry its fingerprint to all files and dependencies."
+            }),
+            _ => serde_json::json!({"reason": self}),
         }
     }
 }
@@ -66,6 +83,24 @@ mod tests {
                 body["message"],
                 reason.legacy_error().response_body().message
             );
+        }
+    }
+
+    #[test]
+    fn skill_read_source_errors_are_content_free_restart_contracts() {
+        for reason in [
+            SkillReadReason::SourceChanged,
+            SkillReadReason::SourceRequired,
+        ] {
+            let error = AppError::SkillRead(reason);
+            let body = serde_json::to_value(error.response_body()).unwrap();
+            assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+            assert_eq!(body["details"]["complete"], false);
+            assert_eq!(body["details"]["restart_required"], true);
+            assert_eq!(body["details"]["next_offset"], 0);
+            assert!(body.get("content").is_none());
+            assert!(body["details"].get("source_fingerprint").is_none());
+            assert!(body.to_string().len() < 1000);
         }
     }
 }

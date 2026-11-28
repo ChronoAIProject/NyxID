@@ -172,18 +172,83 @@ same canonical tool and arguments is refused as `retry_duplicate_action` before
 execution. This is a fence for known completed calls, not an exactly-once
 guarantee for unknown outcomes. Ordinary turns are unaffected. Pending
 acknowledgement cards keep their own expiry and are not re-presented by Retry.
+The closed native `get_agent_skills` and `get_agent_operations` readers may run
+again to verify saved setup, through their live target ACLs. Bound skill downloads
+and retained result reads keep the existing exact-call fence; a retained reference
+also expires with its original turn. Source recovery never replays a completed
+write. If a source read remains fenced or unavailable, request review and report
+setup incomplete. Ordinary new turns can read the enabled pin again using the
+[source continuation contract](../AGENT_SKILLS.md#packages-and-disclosure).
 The web client displays `retry_warning` and requires confirmation before retrying
 when actions are recorded or their outcomes are uncertain. Schedule creation uses
 `nyxid__create_schedule`; its UUID is generated server-side, outside the canonical
 tool arguments, so identical create calls are fenced even if no reply arrived.
-An additive activity `retry_identity` also ignores the one-use acknowledgement
-handle and direct/universal wrapper for schedule creation; the original `digest`
-is retained and checked for old replies/readers. All other arguments still bind.
-Older replicas retain exact-call protection; normalization requires upgraded
-writers and readers and cannot be reconstructed from legacy hashes.
-This does not deduplicate intentionally changed arguments. Refused duplicates
-retain their completed digest for ancestry and additive `retry_duplicate_action`
-activity metadata, so the outcome does not claim a second creation.
+An additive v2 activity `business_identity` binds the decoded business tool and
+literal arguments, independent of direct, JSON-string, nested or flat universal
+wrappers. Dispatch and identity share JSON-string → nested → flat precedence;
+malformed preferred JSON refuses without falling back. A provider field named
+`arguments_json` retains its original type and string bytes. Outer `result_query`
+projection metadata binds separately from provider fields, using the validated
+nonempty string with leading/trailing whitespace trimmed; explicit null is
+refused. Schedule creation
+alone omits its one-use acknowledgement handle; memory recovery omits its
+presentation link. Other provider/native arguments, routes, input types and
+arrays remain significant. Existing exact-effect and action-card rules remain.
+
+The legacy exact `digest` and normalized native `retry_identity` remain in the
+fields base readers consume. Schedule and memory writers persist the unprefixed
+normalized native hash even for nested/flat wrappers, alongside the v2 business
+identity. Base admission gathers `digest` and `retry_identity` into
+`retry_digests`; its direct/JSON native matcher still fences a changed or omitted
+one-use schedule handle or memory presentation link. Base readers cannot
+normalize a changed nested/flat Retry request. The additive v2 field may also be
+discarded when an older replica finalizes an activity. Upgrade every serving
+reader/writer before relying on cross-wrapper normalization or literal provider
+input distinctions; native compatibility evidence does not extend old readers'
+matching algorithm. New readers also accept persisted v2 identities in
+`retry_identity` from the initial v2 layout.
+
+Additive `retry_match` separates v2 identities from historical hashes, so modern
+matching preserves input distinctions that legacy parsing erased. It is built
+from the bounded ancestry during Retry admission; the existing point lookup
+checks it without an additional database call. Ordinary turns do not expand
+historical wrapper hashes. Historical derivations distinguish conclusive hashes
+from lossy ones. A direct provider field named `arguments_json` has ambiguous
+legacy preimages for every value type, including literal strings and their
+whitespace. A universal wrapper is conclusive only when the legacy parser's
+possible successful JSON-string and nested/flat interpretations bind the same
+business input. Type-faithful direct, nested and flat representations still fence
+proven completed calls across invocation forms. Solely lossy hash matches return
+`retry_evidence_requires_review`; they never create a completed v2 identity or
+an activity in the current turn. Later Retry retains the original ambiguous
+ancestor, including when the refused request changes type or literal bytes.
+Ignored historical wrapper decorations and retired handles in raw nested/flat
+native hashes cannot be reconstructed. Every historical native label retains
+ambiguity evidence, including `run_schedule_now` and tools whose effects depend
+on arguments. An unmatched request for that native tool, or an unmatched
+historical provider request for the same canonical provider tool, returns
+`retry_evidence_requires_review` before activity creation or dispatch. Changed
+arguments alone cannot establish new intent when that historical evidence is
+ambiguous. A provably different canonical tool remains eligible. Generic
+historical labels require review for unmatched provider calls and native writes.
+Only a current call recognized as a read by the closed native registry and
+argument-aware action classifier avoids ambiguity review; unknown calls require
+review. Established native reads remain eligible, subject to the existing exact-call
+fence and closed saved-state read exceptions. Native provenance uses the closed
+registry and action classifier, never a provider-name prefix or a guessed HTTP
+method. A Retry admitted by a base replica without additive matching evidence
+retains matching-hash protection and requires review for unmatched writes or
+provider calls. Unknown outcomes keep their existing admission review gate.
+
+Modern business identities distinguish intentionally changed arguments.
+Refused proven duplicates retain all three identities through activity
+finalization and chained Retry, with `retry_duplicate_action` metadata so the
+outcome does not claim a second creation. An ambiguous refusal creates no
+completed or unknown-effect activity and retains its historical ancestor's
+review requirement through later Retry. A later conclusive match can establish
+a truthful v2 identity for that completed effect. Subsequent Retry of that same
+semantic call returns `retry_duplicate_action`, even while ambiguous historical
+evidence remains in its ancestry.
 
 Normative NyxID 0.24.0 contract, verified against the read-only NxyAgent clone
 at commit `58f647e4`. The retained design records are
@@ -1417,8 +1482,9 @@ Part reads are native, read-only and idempotent: no downstream re-call, billing,
 or action card in any access mode. Specialist guests can read only their own
 original result; NyxBot guests remain unable to call tools. Encrypted snapshots
 bind the owner, authenticated actor, conversation, exact turn, key/authority fence,
-agent and guest lane. Reads recheck live authority and expiry before decryption
-and delivery. A Stop, ended/expired turn, changed key, removed participant or
+agent and guest lane. Reads check expiry before decryption and again immediately
+before delivery, after decryption and the final live/key checks; equality with
+the expiry time refuses. A Stop, ended/expired turn, changed key, removed participant or
 revoked guest access makes the reference unusable. **Retry creates a new turn and
 cannot recover an old reference**: request human review of a completed write,
 never resend it just to recover its response. Existing duplicate-action receipts

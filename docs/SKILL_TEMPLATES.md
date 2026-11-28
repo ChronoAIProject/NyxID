@@ -170,6 +170,12 @@ never grants permissions, approves actions or changes the access mode. Nothing
 is stored on the agent; the outline is read from the hash-verified package each
 time, and no audit or log entry contains outline text.
 
+Ordinary file and dependency reads use the separate
+[source fingerprint contract](AGENT_SKILLS.md#packages-and-disclosure), including
+when outlines are disabled. Carry the root file listing's `source_fingerprint`
+across files and dependencies; `outline_fingerprint` binds only rendered outline
+pages and cannot establish complete package coverage.
+
 ## Capability skills and skillsets
 
 Write reusable skills at three levels, none of them tied to a business:
