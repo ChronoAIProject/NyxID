@@ -26,6 +26,15 @@ function matchesLiveCreationRequest(
     && Date.parse(candidate.expires_at) > checkedAt);
 }
 
+function creationUrlForManager(url: string, managerUsername: string | null | undefined) {
+  if (!managerUsername || !/^[A-Za-z0-9_]{5,32}$/.test(managerUsername)) return undefined;
+  // Issued URLs have already passed telegramCreationLinkSchema. Change only
+  // the manager's public username, retaining the chosen bot name and query bytes.
+  const current = new URL(url);
+  current.pathname = current.pathname.replace(/^\/newbot\/[^/]+\//, `/newbot/${managerUsername}/`);
+  return current.toString();
+}
+
 export function TelegramNew({
   label,
   orgId,
@@ -46,7 +55,7 @@ export function TelegramNew({
   readonly onConnected: (id: string, username?: string | null) => void;
 }) {
   useUiTranslation();
-  const { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect, getCurrentRequest } =
+  const { configuration, begin, launch, creationLink, regenerateUsername, cancel, connect, getCurrentConfiguration } =
     useTelegramNew(requestId);
   const link = useChannelConnectLinkContext();
   const actor = useAuthStore((state) => state.user?.id);
@@ -60,6 +69,9 @@ export function TelegramNew({
     url: string;
   } | null>(null);
   const request = configuration.data?.request;
+  const managerUsername = configuration.data?.manager_username;
+  const recoveryReadsReady = configuration.isSuccess && configuration.data.available && !link?.recoveryUnavailable
+    && (!link?.isRecoveryCurrent || Boolean(request && link.isRecoveryCurrent(request.id, configuration.dataUpdatedAt)));
   const requestExpiresAt = request?.expires_at;
   const canOpenCreationForm = request?.can_open_creation_form;
   const [now, setNow] = useState(Date.now);
@@ -71,7 +83,8 @@ export function TelegramNew({
   }, [requestExpiresAt, canOpenCreationForm]);
   const recoveryUnexpired = Boolean(request && Date.parse(request.expires_at) > now);
   const [recovery, setRecovery] = useState<{ actor: string; requestId?: string; linkId?: string; id: string; revision: number; username?: string; url: string } | null>(null);
-  const recoveryMatchesRequest = recovery && request && !configuration.error
+  const currentRecoveryUrl = recovery && recoveryReadsReady ? creationUrlForManager(recovery.url, managerUsername) : undefined;
+  const recoveryMatchesRequest = recovery && request && currentRecoveryUrl
     && recovery.actor === actor && recovery.requestId === requestId && recovery.linkId === link?.id
     && recovery.id === request.id && recovery.revision === request.revision
     && (!recovery.username || request.username_suggestions?.includes(recovery.username))
@@ -170,7 +183,7 @@ export function TelegramNew({
 
   async function openCreationForm(index = 0) {
     if (!request?.can_open_creation_form || request.setup_notice || request.status !== "waiting_bot"
-      || pending || !actor || !(Date.parse(request.expires_at) > Date.now())) return;
+      || pending || !actor || !recoveryReadsReady || !managerUsername || !(Date.parse(request.expires_at) > Date.now())) return;
     const captured = request;
     const context = recoveryContext.current;
     const tab = window.open("about:blank", "_blank");
@@ -179,7 +192,8 @@ export function TelegramNew({
     setRecovery(null);
     try {
       const result = await creationLink.mutateAsync(captured.id);
-      const latest = getCurrentRequest();
+      const latestConfig = getCurrentConfiguration();
+      const latest = latestConfig?.request;
       const checkedAt = Date.now();
       if (!active.current || currentActor.current !== actor || recoveryContext.current !== context
         || !matchesLiveCreationRequest(latest, captured, checkedAt)
@@ -194,7 +208,11 @@ export function TelegramNew({
         tab?.close();
         return;
       }
-      const url = choice?.creation_url ?? result.creation_url;
+      const url = creationUrlForManager(choice?.creation_url ?? result.creation_url, latestConfig?.manager_username);
+      if (!url) {
+        tab?.close();
+        return;
+      }
       setRecovery({ actor, requestId, linkId: link?.id, id: captured.id, revision: captured.revision, username: choice?.username, url });
       if (tab && !tab.closed) tab.location.replace(url);
     } catch {
@@ -207,6 +225,11 @@ export function TelegramNew({
     creationLink.reset();
     setRecovery(null);
     try { await regenerateUsername.mutateAsync(request.id); } catch { /* Displayed below. */ }
+  }
+
+  async function checkProgress() {
+    await configuration.refetch();
+    await link?.refresh();
   }
 
   async function finishLegacyRequest() {
@@ -236,7 +259,7 @@ export function TelegramNew({
         <Button
           type="button"
           variant="outline"
-          onClick={() => void configuration.refetch()}
+          onClick={() => void checkProgress()}
         >{translateUi("Check progress")}</Button>
       </div>
     );
@@ -389,16 +412,16 @@ export function TelegramNew({
         </li>
       </ol>}
       {request && !request.setup_notice && ["waiting_telegram", "waiting_bot"].includes(request.status) && (
-        <TelegramPromptStatus request={request} recoveryUnexpired={recoveryUnexpired} pending={pending} recovering={creationLink.isPending}
+        <TelegramPromptStatus request={request} recoveryUnexpired={recoveryUnexpired} pending={pending || !recoveryReadsReady || !managerUsername} recovering={creationLink.isPending}
           onRecover={(index) => void openCreationForm(index)}
           onRegenerate={() => void regenerate()} regenerating={regenerateUsername.isPending}
-          recoveryUrl={recoveryMatchesRequest ? recovery.url : undefined} />
+          recoveryUrl={recoveryMatchesRequest ? currentRecoveryUrl : undefined} />
       )}
       {request && !terminal && !connected && (
         !fullPage || (!request.setup_notice && request.status === "waiting_bot" && request.can_open_creation_form && recoveryUnexpired)
       ) && (
         <Button type="button" variant="ghost" size="sm" disabled={pending || configuration.isFetching}
-          onClick={() => void configuration.refetch()}>{translateUi("Check progress")}</Button>
+          onClick={() => void checkProgress()}>{translateUi("Check progress")}</Button>
       )}
       {request && !request.auto_connect && !terminal && (
         <div className="space-y-2 rounded-lg border border-border p-3 text-13">

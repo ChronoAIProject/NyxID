@@ -8,6 +8,8 @@ export const ChannelConnectLinkContext = createContext<{
   id: string;
   telegramRequestId?: string;
   connectionId?: string;
+  recoveryUnavailable?: boolean;
+  isRecoveryCurrent?: (requestId: string, requestUpdatedAt: number) => boolean;
   refresh: () => Promise<string | null | void>;
 } | null>(null);
 
@@ -47,6 +49,15 @@ export function useChannelConnectLink(token: string, actor?: string) {
     }
     return current.data.connection_id;
   };
+  const isRecoveryCurrent = (requestId: string, requestUpdatedAt: number) => {
+    const current = client.getQueryState<ChannelConnectLink>(key);
+    // A hosted status failure also invalidates a previously successful Telegram
+    // read. Both queries must recover before another form can be issued or used.
+    return current?.status === "success" && !current.isInvalidated
+      && current.data?.status === "pending" && !current.data.telegram_requires_original_actor
+      && current.data.telegram_request_id === requestId
+      && requestUpdatedAt > current.errorUpdatedAt;
+  };
   const action = useMutation({
     mutationFn: async (name: "decline" | "retry") =>
       channelConnectLinkSchema.parse(
@@ -54,5 +65,7 @@ export function useChannelConnectLink(token: string, actor?: string) {
       ),
     onSuccess: (data) => client.setQueryData(key, data),
   });
-  return { preview, status, action, refresh };
+  return { preview, status, action, refresh, isRecoveryCurrent,
+    recoveryUnavailable: !status.isSuccess || status.data.status !== "pending" || Boolean(status.data.telegram_requires_original_actor),
+  };
 }
