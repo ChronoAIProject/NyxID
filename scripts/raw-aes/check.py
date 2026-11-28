@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 import receivers
 
@@ -23,8 +24,10 @@ TARGET = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")).resolve()
 def cargo(root, args, env=None, compiled=None):
     command = [CARGO, *args]
     print("+", *command, flush=True)
+    start = time.monotonic()
     proc = subprocess.run(command, cwd=root, env={**os.environ, "CARGO_TARGET_DIR": str(TARGET),
                           **(env or {})}, stdout=subprocess.PIPE, text=True)
+    print(f"Cargo phase {time.monotonic() - start:.1f}s, exit {proc.returncode}", flush=True)
     messages = []
     for line in proc.stdout.splitlines():
         event = json.loads(line)
@@ -44,16 +47,26 @@ def cargo(root, args, env=None, compiled=None):
     return proc.returncode, messages
 
 
-def inventory(root, conf, mode, options, compiled=None):
-    policy = ("disallowed-methods = " + json.dumps(sorted(receivers.METHODS))
-              + "\ndisallowed-types = " + json.dumps(sorted(receivers.TYPES)) + "\n")
-    (conf / "clippy.toml").write_text(policy)
-    # Clippy configuration participates even when an earlier check cached the target.
+def inventory(root, conf, mode, options, compiled=None, strict_command=None):
+    # Some manifest items only exist in a test or KMS build. Coverage below checks
+    # that the complete matrix reached every reviewed operation.
+    def items(definitions):
+        return "[" + ", ".join('{ path = "' + name + '", allow-invalid = true }'
+                               for name in sorted(definitions)) + "]"
+
+    policy = ("disallowed-methods = " + items(receivers.METHODS)
+              + "\ndisallowed-types = " + items(receivers.TYPES) + "\n")
+    config = conf / "clippy.toml"
+    if not config.is_file() or config.read_text() != policy:
+        config.write_text(policy)
     stamp = hashlib.sha256(policy.encode()).hexdigest()[:16]
-    code, messages = cargo(root, ["clippy", "--no-deps", "--locked", "-p", "nyxid", *options,
-                           "--message-format=json", "--", "--cfg", "aes_inventory_" + stamp,
-                           "--force-warn=clippy::disallowed_methods",
-                           "--force-warn=clippy::disallowed_types"], {"CLIPPY_CONF_DIR": str(conf)}, compiled)
+    # On full CI add the inventory lints to the workspace Clippy command itself.
+    # Leave its target selection, warning level, RUSTFLAGS and cache lane intact.
+    command = list(strict_command or ["clippy", "--locked", "--no-deps", "-p", "nyxid", *options, "--"])
+    command.insert(command.index("--"), "--message-format=json")
+    command.extend(["--cfg", "aes_inventory_" + stamp, "--force-warn=clippy::disallowed_methods",
+                    "--force-warn=clippy::disallowed_types"])
+    code, messages = cargo(root, command, {"CLIPPY_CONF_DIR": str(conf)}, compiled)
     uses = set()
     for msg in messages:
         if (msg["code"] or {}).get("code") in ("clippy::disallowed_methods", "clippy::disallowed_types"):
@@ -75,16 +88,32 @@ def inventory(root, conf, mode, options, compiled=None):
     return uses, blocked
 
 
-def check_inventory(root, conf):
-    # Cargo discovers unit, integration, example and bench targets and expands their macros.
+def check_inventory(root, conf, profile, strict_command=None):
     known = set()
     compiled = set()
-    for mode, options in [("normal", ["--bins"]), ("default-targets", ["--all-targets"]),
-                          ("kms-targets", ["--all-features", "--all-targets"])]:
-        uses, blocked = inventory(root, conf, mode, options, compiled)
+    modes = [("normal", ["--bins"]), ("default-targets", ["--all-targets"]),
+             ("kms-targets", ["--all-features", "--all-targets"])]
+    if profile == "dev":
+        modes = [("dev", ["--all-targets"])]
+    elif profile == "kms":
+        modes = [("kms-targets", ["--all-features", "--all-targets"])]
+    if profile != "dev":
+        import source_policy
+        if source_policy.needs_single_provider_builds(root):
+            modes.extend((feature, ["--features", feature, "--all-targets"])
+                         for feature in ("aws-kms", "gcp-kms"))
+    for mode, options in modes:
+        uses, blocked = inventory(root, conf, mode, options, compiled, strict_command=strict_command)
         if blocked:
             raise RuntimeError(f"{len(blocked)} unreviewed {mode} uses")
         known.update((receivers.reviewed_source(file, op), op) for file, _, _, op in uses)
+    # The default build omits the KMS implementations. The parallel combined-KMS
+    # lane checks dep-info coverage and the complete manifest.
+    if profile == "dev":
+        required = receivers.CENSUS_CALLERS.keys() | receivers.paths(receivers.KEYS, *receivers.RAW)
+        if not required <= {op for _, op in known}:
+            raise RuntimeError("default Clippy inventory did not reach the raw and census controls")
+        return
     candidates = re.compile(r"\b(?:EncryptionKeys|Aes\d+\w*|aes_gcm|encrypt|decrypt|rewrap|observe|(?:open|seal)_census_record|\w+_with_aad)\b")
     for file in (root / "backend").rglob("*.rs"):
         if file.resolve() not in compiled and candidates.search(file.read_text()):
@@ -263,13 +292,32 @@ def privacy(root, conf):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("check", choices=["inventory", "privacy", "all"], default="all", nargs="?")
+    parser.add_argument("check", choices=["pr", "dev", "kms", "inventory", "privacy", "all"], default="all", nargs="?")
+    parser.add_argument("command", nargs=argparse.REMAINDER, help="existing strict workspace Clippy command (dev)")
     args = parser.parse_args()
+    strict_command = None
+    if args.check == "dev":
+        command = args.command or ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]
+        if command[:2] != ["cargo", "clippy"] or "--" not in command:
+            parser.error("dev requires a Cargo Clippy command with lint arguments after --")
+        strict_command = command[1:]
+    elif args.command:
+        parser.error("only dev takes a Cargo command")
+    if args.check in ("pr", "dev"):
+        import source_policy
+        source_policy.check(ROOT)
+    if args.check == "pr":
+        return
+    if args.check in ("dev", "kms"):
+        conf = TARGET / "raw-aes-policy"
+        conf.mkdir(parents=True, exist_ok=True)
+        check_inventory(ROOT, conf, args.check, strict_command)
+        return
     with tempfile.TemporaryDirectory(prefix="nyxid-raw-aes-") as tmp:
         tmp = Path(tmp)
         if args.check != "privacy":
-            check_inventory(ROOT, tmp)
-        if args.check != "inventory":
+            check_inventory(ROOT, tmp, args.check)
+        if args.check in ("all", "privacy"):
             root = tmp / "source"
             copy_sources(root)
             privacy(root, tmp)

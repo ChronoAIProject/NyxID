@@ -514,8 +514,9 @@ jobs:
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/clippy.log" --
           python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --lib --bins --locked -- -D warnings
-      - name: Check raw AES receivers and Rust privacy
-        run: python3 scripts/raw-aes/check.py
+      - name: Check raw AES source policy
+        timeout-minutes: 5
+        run: python3 scripts/raw-aes/check.py pr
 
   rust-clippy:
     name: Rust Clippy
@@ -550,9 +551,8 @@ jobs:
         run: >-
           python3 .github/scripts/retry_incremental.py
           --log-file "$RUNNER_TEMP/clippy.log" --
-          python3 .github/scripts/ci_resources.py clippy cargo clippy --workspace --all-targets -- -D warnings
-      - name: Check raw AES receivers and Rust privacy
-        run: python3 scripts/raw-aes/check.py
+          python3 .github/scripts/ci_resources.py clippy python3 scripts/raw-aes/check.py dev
+          cargo clippy --workspace --all-targets -- -D warnings
       - name: Verify incremental cache and CodeQL Rust fixtures
         env:
           NYXID_REQUIRE_RUST_FIXTURES: '1'
@@ -868,6 +868,12 @@ jobs:
           path: ${{ runner.temp }}/nyxid-ci-resources
           if-no-files-found: ignore
           retention-days: 14
+
+  raw-aes-kms:
+    name: Raw AES receiver inventory
+    needs: changes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    uses: ./.github/workflows/raw-aes.yml
 
   # ---------------------------------------------------------------------------
   # Frontend: lint, type-check, test, build
@@ -1567,6 +1573,7 @@ jobs:
       - cli-test
       - machine-container
       - rust-features
+      - raw-aes-kms
       - frontend
       - frontend-dev
       - mobile
@@ -1623,6 +1630,7 @@ jobs:
             cli-test=${{ needs.cli-test.result }}
             machine-container=${{ needs.machine-container.result }}
             rust-features=${{ needs.rust-features.result }}
+            raw-aes-kms=${{ needs.raw-aes-kms.result }}
             frontend=${{ needs.frontend.result }}
             frontend-dev=${{ needs.frontend-dev.result }}
             mobile=${{ needs.mobile.result }}
