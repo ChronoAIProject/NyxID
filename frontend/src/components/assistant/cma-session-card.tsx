@@ -128,6 +128,7 @@ export function FloatingCmaSessions() {
         (match) =>
           [
             "/assistant",
+            "/assistant/learn",
             "/assistant/plugins",
             "/assistant/approvals",
             "/assistant/automations",

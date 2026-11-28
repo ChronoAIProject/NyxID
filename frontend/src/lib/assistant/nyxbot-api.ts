@@ -45,9 +45,9 @@ const groupPath = (id: string) => `${ROOT}/groups/${encodeURIComponent(id)}`;
 /** NyxBot agents, settings and channel-bot endpoints. The server owns all state. */
 export const nyxBotApi = {
   /** NyxBot first, then specialists; NyxBot is created on first use. */
-  async agents(includeDestroyed = true) {
+  async agents(includeDestroyed = true, authorityGuard?: () => void) {
     return assistantAgentListSchema.parse(
-      await assistantJson(`${ROOT}/agents?include_destroyed=${String(includeDestroyed)}`),
+      await assistantJson(`${ROOT}/agents?include_destroyed=${String(includeDestroyed)}`, { authorityGuard }),
     );
   },
   async activity(signal?: AbortSignal) {

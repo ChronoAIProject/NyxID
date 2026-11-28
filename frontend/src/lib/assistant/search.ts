@@ -38,6 +38,8 @@ export interface AssistantSearch extends AccountPanelSearch {
   readonly card?: string;
   readonly proposal?: string;
   readonly draft?: boolean;
+  readonly tour?: true;
+  readonly learnDraft?: string;
   readonly agent?: string;
   readonly details?: AgentDetailsTab;
   /** Focus one connection in the agent Channels tab. */
@@ -63,6 +65,10 @@ function parseChatSearch(
     ...(search.draft === true || search.draft === "true"
       ? { draft: true }
       : {}),
+    ...(search.tour === true || search.tour === "true" ? { tour: true as const } : {}),
+    ...((search.draft === true || search.draft === "true") && typeof search.learnDraft === "string" &&
+      /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/.test(search.learnDraft)
+      ? { learnDraft: search.learnDraft } : {}),
     ...(typeof search.agent === "string" && search.agent
       ? { agent: search.agent }
       : {}),

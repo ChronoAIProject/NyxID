@@ -1,0 +1,44 @@
+{
+  "research-paper-writing-rigor": {
+    "skillId": "a22344ff-4cf3-4ea7-a22e-2f0f98792c10",
+    "version": "2.0",
+    "sha256": "0820b8532ad9601d32749207469ebaaf15d66c49d5a077051f69a47ca845ad0e",
+    "title": "Strengthen a research paper"
+  },
+  "research-claim-fidelity-reviewer": {
+    "skillId": "be585a18-7c28-45e3-a8f4-e098904e3304",
+    "version": "0.1",
+    "sha256": "585d20211e65ae72f52c7d02f5b3517c121a927b313f4a08a059b99a403dcf27",
+    "title": "Audit research claims"
+  },
+  "source-grounded-research-announcement": {
+    "skillId": "47cb35ba-4230-4a7b-88df-1377b8cf6896",
+    "version": "0.1",
+    "sha256": "d74e3a08785a9e144b891eca70bc562239305480e74104d2636234f95a51cd9e",
+    "title": "Announce a research result"
+  },
+  "public-copy-release-guard": {
+    "skillId": "296dd304-8f24-4966-b0d9-7e1be2ee7c57",
+    "version": "0.2",
+    "sha256": "16a6b3eb91b35c20be92ac22f72fcbc46f929ac9a0a047072cef076c2b24575f",
+    "title": "Review copy before publishing"
+  },
+  "weekly-budget-variance-digest": {
+    "skillId": "e87baf06-c92d-440e-8858-63902175ba64",
+    "version": "1.1",
+    "sha256": "d36930f6546c6bd01bc0adcb86cf5d00e8f34bc8834ec7705e56cd46cf16b23d",
+    "title": "Explain weekly budget changes"
+  },
+  "saas-license-utilization-review": {
+    "skillId": "0d1cfcd6-1a40-44cf-89fc-6159f7e5f44d",
+    "version": "2.2",
+    "sha256": "341afbb26924ea80807a1dedad804d48424e8e2e82124aeaa717dae46e61de7b",
+    "title": "Review software license usage"
+  },
+  "release-readiness-review": {
+    "skillId": "1069f6b4-ebb4-49f8-85fd-20c83c7b4036",
+    "version": "2.1",
+    "sha256": "2279c82293318a29e4c81f2b41e4e017b5bedaaffd81a1a5bb951f17ac74e7cc",
+    "title": "Assess release readiness"
+  }
+}

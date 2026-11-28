@@ -974,14 +974,19 @@ function NyxAgentThreadPage() {
   const showSuggestions = useShowSuggestions();
   const [introOpen, setIntroOpen] = useState(false);
   const [touring, setTouring] = useState(false);
+  useEffect(() => {
+    if (!home || !search.tour || !onChatRoute) return;
+    setTouring(true);
+    void navigate({ to: "/assistant", search: (previous) => ({ ...previous, tour: undefined }), replace: true });
+  }, [home, navigate, onChatRoute, search.tour]);
   const introShown = useRef(false);
   const pendingStep = useRef<{ readonly step: NextStep; readonly at: number } | undefined>(undefined);
   useEffect(() => {
-    if (onboarding.data?.show_intro && home && !introShown.current) {
+    if (onboarding.data?.show_intro && home && !touring && !search.tour && !introShown.current) {
       introShown.current = true;
       setIntroOpen(true);
     }
-  }, [onboarding.data?.show_intro, home]);
+  }, [onboarding.data?.show_intro, home, touring, search.tour]);
   function startNextStep(step: NextStep) {
     if (chat.isStreaming) {
       toast.info(translateUi("NyxBot is still replying"), {
@@ -1596,7 +1601,7 @@ function NyxAgentThreadPage() {
             agentModel={selectedAgent?.model}
             voiceActive={voiceMounted && currentVoice?.active}
             voiceActivity={voiceMounted ? currentVoice?.activity : undefined}
-            key={`${user?.id}:${selectedId ?? headerAgent?.id ?? "draft"}`}
+            key={`${user?.id}:${selectedId ?? search.learnDraft ?? headerAgent?.id ?? "draft"}`}
             onVoice={
               voiceEnabled && !destroyed && !channelPlatform
                 ? async (id, preparation) => {
@@ -1625,9 +1630,11 @@ function NyxAgentThreadPage() {
             draftKey={
               selectedId
                 ? `conv:${selectedId}`
-                : headerAgent?.kind === "specialist"
-                  ? `screen:nyxagent:agent:${headerAgent.id}`
-                  : "screen:nyxagent:assistant"
+                : search.learnDraft
+                  ? `screen:nyxagent:learn:${search.learnDraft}`
+                  : headerAgent?.kind === "specialist"
+                    ? `screen:nyxagent:agent:${headerAgent.id}`
+                    : "screen:nyxagent:assistant"
             }
             focusRequest={focusRequest}
             agentOverride={agentOverride}

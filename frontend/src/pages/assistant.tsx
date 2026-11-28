@@ -41,6 +41,7 @@ import { parseAssistantSearch } from "@/lib/assistant/search";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { Conversation } from "@/types/assistant";
 
+const AssistantLearnPage = lazy(() => import("./assistant-learn").then((module) => ({ default: module.AssistantLearnPage })));
 const AssistantCmaSandboxesPage = lazy(() => import("./assistant-cma-sandboxes").then((module) => ({ default: module.AssistantCmaSandboxesPage })));
 const AssistantCmaSandboxDetailPage = lazy(() => import("./assistant-cma-sandbox-detail").then((module) => ({ default: module.AssistantCmaSandboxDetailPage })));
 const AssistantCmaAgentPage = lazy(() => import("./assistant-cma-agent").then((module) => ({ default: module.AssistantCmaAgentPage })));
@@ -120,6 +121,7 @@ function sidebarConversation(
 }
 
 type WorkspaceView =
+  | "learn"
   | "plugins"
   | "approvals"
   | "automations"
@@ -131,6 +133,7 @@ type WorkspaceView =
   | "machine-pair";
 
 const workspaceTitles: Record<WorkspaceView, string> = {
+  get learn() { return translateUi("Learn"); },
   plugins: "Plugins",
   approvals: "Approvals",
   automations: "Automations",
@@ -162,7 +165,9 @@ function WorkspaceContent({ view }: { readonly view: WorkspaceView }) {
           </p>
         }
       >
-        {view === "plugins" ? (
+        {view === "learn" ? (
+          <AssistantLearnPage />
+        ) : view === "plugins" ? (
           <PluginsView />
         ) : view === "approvals" ? (
           <ApprovalsView />

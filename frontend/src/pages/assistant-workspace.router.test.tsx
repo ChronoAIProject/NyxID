@@ -147,6 +147,9 @@ vi.mock("@/components/assistant/assistant-engine-sidebar", async () => {
     ),
   };
 });
+vi.mock("@/pages/assistant-learn", () => ({
+  AssistantLearnPage: () => <h2>Learn workspace content</h2>,
+}));
 vi.mock("@/pages/automations", () => ({
   AutomationsPage: () => <h2>Automation workspace content</h2>,
 }));
@@ -271,6 +274,7 @@ it("shows the preview placeholders in the Calvin server capability cohort", asyn
 
 for (const nyxagent of [true, false]) {
   it.each([
+    ["learn", "Learn", "Learn"],
     ["automations", "Automation", "Automations"],
     ["machines", "Machine", "Machines"],
     ["machines/new", "Setup", "Machines"],
@@ -291,6 +295,7 @@ for (const nyxagent of [true, false]) {
       );
       const expected = [
         "Home",
+        "Learn",
         "Automations",
         "Machines",
         "Plugins",
@@ -326,6 +331,17 @@ for (const nyxagent of [true, false]) {
   );
 }
 
+it("reaches Learn by keyboard from the signed-in workspace with skill runs off", async () => {
+  const router = await open("/assistant");
+  const sidebar = within(screen.getByTestId("sidebar-nyxagent"));
+  sidebar.getByRole("link", { name: "Home" }).focus();
+  await userEvent.tab();
+  expect(sidebar.getByRole("link", { name: "Learn" })).toHaveFocus();
+  await userEvent.keyboard("{Enter}");
+  expect(await screen.findByRole("heading", { name: "Learn workspace content" })).toBeVisible();
+  expect(router.state.location.pathname).toBe("/assistant/learn");
+});
+
 it("redirects the shipped automation URL preserving validated setup and agent", async () => {
   const setup = "11111111-1111-4111-8111-111111111111";
   const router = await open(
@@ -352,6 +368,7 @@ it("keeps desktop standalone and all assistant workspace routes under the shared
   ).not.toBeInTheDocument();
   const routes = appRouter.routesByPath;
   for (const path of [
+    "/assistant/learn",
     "/assistant/automations",
     "/assistant/machines",
     "/assistant/machines/new",

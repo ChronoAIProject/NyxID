@@ -6,6 +6,7 @@ import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { Command } from "cmdk";
 import {
   Bell,
+  BookOpen,
   Bot,
   Box,
   CalendarClock,
@@ -187,6 +188,7 @@ function SearchCommand({ onDone }: { readonly onDone: () => void }) {
     : [];
   const pages: Entry[] = [
     { id: "page:home", label: "Home", icon: House, run: () => go("/assistant") },
+    { id: "page:learn", label: translateUi("Learn"), icon: BookOpen, keywords: ["templates"], run: () => go("/assistant/learn") },
     { id: "page:plugins", label: "Plugins", icon: LayoutGrid, run: () => go("/assistant/plugins") },
     { id: "page:approvals", label: "Approvals", icon: ShieldCheck, run: () => go("/assistant/approvals") },
     { id: "page:automations", label: "Automations", icon: CalendarClock, keywords: ["schedule", "webhook", "trigger"], run: () => go("/assistant/automations") },
