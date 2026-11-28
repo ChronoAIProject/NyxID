@@ -116,6 +116,7 @@ pub(super) struct Receipt {
 
 /// Server-only, never serialized or logged. It carries no new execution authority.
 pub(crate) struct OwnerContinuation {
+    turn_authority: super::batch::TurnAuthority,
     pub original_request: String,
     pub tool_results: String,
     receipt_text: String,
@@ -211,6 +212,22 @@ fn source_filter(row: &AssistantConversation) -> AppResult<Document> {
     Ok(filter)
 }
 
+/// Stable original authority independent of whether its task can still execute.
+/// Receipt cancellation may cross the deadline, but cannot adopt a changed root.
+pub(super) fn original_task_filter(row: &AssistantConversation) -> AppResult<Document> {
+    let task = owner_task(row).ok_or_else(refused)?;
+    if task.version != VERSION || task.epoch < 1 || task.cancelled {
+        return Err(refused());
+    }
+    let mut filter = task_filter("execution_task", task)?;
+    filter.extend(doc! {
+        "_id": &task.task.root_id, "conversation_id": &row.id, "user_id": &row.user_id,
+        "role": "user", "author": "owner",
+        "origin": if task.channel_source.is_some() { "channel" } else { "user" },
+    });
+    Ok(filter)
+}
+
 /// A delegated child cannot borrow its parent's human message as its own source.
 pub(super) async fn original_owner_source(
     db: &Database,
@@ -250,6 +267,7 @@ pub(super) async fn prepare(
         json!({"request_ids": receipts.iter().map(|receipt| &receipt.id).collect::<Vec<_>>(), "result": result})
     );
     Ok(OwnerContinuation {
+        turn_authority: super::batch::TurnAuthority::capture(row)?,
         original_request: message.text,
         tool_results,
         receipt_text,
@@ -273,35 +291,25 @@ impl OwnerContinuation {
         crate::services::security_readiness_service::require_serving(&state.db, READINESS).await?;
         let turn = row.active_turn.as_ref().ok_or_else(refused)?;
         let task = turn.execution_task.as_ref().ok_or_else(refused)?;
-        if credential.api_key_id != row.credential_api_key_id || credential.raw_key.is_empty() {
+        if super::batch::TurnAuthority::capture(row)? != self.turn_authority
+            || credential.api_key_id != row.credential_api_key_id
+            || credential.raw_key.is_empty()
+        {
             return Err(refused());
         }
         let key_hash = crate::crypto::token::hash_token(credential.raw_key.as_str());
         let mut session = state.db.client().start_session().await?;
         let result = session.start_transaction().and_run(
-            (&state.db, row, turn, task, &self.receipts, &key_hash),
-            |session, (db, row, turn, task, receipts, key_hash)| Box::pin(async move {
+            (&state.db, row, turn, task, &self.receipts, &key_hash, &self.turn_authority),
+            |session, (db, row, turn, task, receipts, key_hash, authority)| Box::pin(async move {
                 let result: AppResult<bool> = async {
+                    authority.fence(db, session).await?;
                     tasks::fence(db, session, task).await?;
                     let mut root = source_filter(row)?;
                     root.insert("execution_dispatch_evidence_version", 2);
                     if db.collection::<Document>("assistant_messages").update_one(root,
                         doc! {"$inc":{"execution_dispatch_fence":1_i64}})
                         .session(&mut *session).await?.matched_count != 1 { return Err(refused()); }
-                    let mut filter = engine::WorkerFence::capture(row)?.filter();
-                    filter.extend(current_task_filter(task)?);
-                    filter.extend(doc! {
-                        "active_turn.stop_requested": false,
-                        "credential_api_key_id": &row.credential_api_key_id,
-                        "$expr": unexpired_turn(),
-                        "model": &row.model, "agent_id": &row.agent_id,
-                    });
-                    if db.collection::<Document>("assistant_conversations")
-                        .update_one(filter, doc! {"$inc": {"execution_dispatch_fence": 1_i64}})
-                        .session(&mut *session).await?.matched_count != 1
-                    {
-                        return Err(refused());
-                    }
                     // Rotation/revocation changes or removes this exact relationship.
                     // Writing it in the release transaction serializes those mutations
                     // without decrypting redundant ciphertext a second time.

@@ -1388,6 +1388,13 @@ async fn owner_permission_resume_evidence_capacity_only_applies_to_marked_roots(
                 )
                 .await
                 .unwrap();
+            let report = crate::services::security_readiness_service::serving_report(
+                &f.state.db,
+                proposals::continuation::READINESS,
+            )
+            .await
+            .expect("ordinary readiness-off report is valid");
+            assert!(!report.serving_ready);
             let request = engine::TurnRequest {
                 conversation_id: Some(row.id.clone()),
                 text: TASK.into(),
@@ -1474,6 +1481,12 @@ async fn owner_permission_resume_evidence_capacity_only_applies_to_marked_roots(
             .unwrap()
             .unwrap();
         assert_eq!(before.get_array("execution_dispatches").unwrap().len(), 128);
+        if kind != "current" {
+            assert!(
+                before.get("execution_dispatches") == Some(&bson::to_bson(&old_evidence).unwrap()),
+                "ordinary first 128 writes must preserve historical bytes"
+            );
+        }
         if kind == "readiness_off" {
             refresh_test_replica_heartbeat(&f.state.db).await;
         }
@@ -1510,65 +1523,106 @@ async fn owner_permission_resume_evidence_capacity_only_applies_to_marked_roots(
     }
 }
 
-#[tokio::test]
-async fn owner_permission_resume_optional_evidence_readiness_failure_keeps_ordinary_admission() {
-    let (f, row) = assistant("owner_evidence_optional_readiness").await;
-    finish(&f, &row, "Fixture setup complete.").await;
-    readiness_dependency(&f, true).await;
-    let request = engine::TurnRequest {
-        conversation_id: Some(row.id.clone()),
-        text: TASK.into(),
-        acknowledgement_id: None,
-        retry_of: None,
-        attachment_ids: vec![],
-        agent_id: None,
-        model: None,
-        access_mode: None,
-    };
-    let mut start: engine::TurnStart = (&request).into();
-    start.execution_enrollment = true;
-    let fresh = engine::begin_turn(&f.state.db, &f.owner, start, &f.state.encryption_keys)
-        .await
-        .unwrap();
-    let task = fresh
-        .active_turn
-        .as_ref()
-        .unwrap()
-        .execution_task
-        .as_ref()
-        .unwrap();
-    let root = f
-        .state
-        .db
-        .collection::<Document>("assistant_messages")
-        .find_one(doc! {"_id":&task.task.root_id})
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!root.contains_key("execution_dispatch_evidence_version"));
-    assert!(!root.contains_key("execution_dispatches"));
-    seed_for_chat(
-        &f.state,
-        &f.auth().await,
-        &f.connection,
-        &f.catalog,
-        "PUT",
-        RANGE,
+// Observe the dependency's actual result independently of the fixture operation.
+async fn optional_readiness_outcome(f: &Fixture, malformed: bool) {
+    if malformed {
+        readiness_dependency(f, true).await;
+    } else {
+        crate::services::security_readiness_service::stop_test_replica(&f.state.db).await;
+        f.state
+            .db
+            .collection::<Document>("security_replicas")
+            .update_many(
+                doc! {},
+                doc! {"$pull":{"capabilities":proposals::continuation::READINESS}},
+            )
+            .await
+            .unwrap();
+    }
+    let report = crate::services::security_readiness_service::serving_report(
+        &f.state.db,
+        proposals::continuation::READINESS,
     )
     .await;
-    sheet(&f, 200).await;
-    assert_eq!(call(f.router(), &f.raw, "PUT").await.0, StatusCode::OK);
-    assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
-    let root = f
-        .state
-        .db
-        .collection::<Document>("assistant_messages")
-        .find_one(doc! {"_id":&task.task.root_id})
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(!root.contains_key("execution_dispatches"));
-    f.cleanup().await;
+    if malformed {
+        assert!(
+            report.is_err(),
+            "malformed optional dependency must produce Err"
+        );
+    } else {
+        assert!(
+            !report
+                .expect("valid readiness report must be Ok")
+                .serving_ready
+        );
+    }
+}
+
+#[tokio::test]
+async fn owner_permission_resume_optional_evidence_readiness_failure_keeps_ordinary_admission() {
+    for malformed in [true, false] {
+        let (f, row) = assistant("owner_evidence_optional_readiness").await;
+        finish(&f, &row, "Fixture setup complete.").await;
+        optional_readiness_outcome(&f, malformed).await;
+        let request = engine::TurnRequest {
+            conversation_id: Some(row.id.clone()),
+            text: TASK.into(),
+            acknowledgement_id: None,
+            retry_of: None,
+            attachment_ids: vec![],
+            agent_id: None,
+            model: None,
+            access_mode: None,
+        };
+        let mut start: engine::TurnStart = (&request).into();
+        start.execution_enrollment = true;
+        let fresh = engine::begin_turn(&f.state.db, &f.owner, start, &f.state.encryption_keys)
+            .await
+            .unwrap();
+        let task = fresh
+            .active_turn
+            .as_ref()
+            .unwrap()
+            .execution_task
+            .as_ref()
+            .unwrap();
+        let root = f
+            .state
+            .db
+            .collection::<Document>("assistant_messages")
+            .find_one(doc! {"_id":&task.task.root_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!root.contains_key("execution_dispatch_evidence_version"));
+        assert!(!root.contains_key("execution_dispatches"));
+        seed_for_chat(
+            &f.state,
+            &f.auth().await,
+            &f.connection,
+            &f.catalog,
+            "PUT",
+            RANGE,
+        )
+        .await;
+        sheet(&f, 200).await;
+        let (status, body) = call(f.router(), &f.raw, "PUT").await;
+        assert_eq!(status, StatusCode::OK);
+        let response: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(response["updatedCells"], 2);
+        assert_eq!(count(&f, "approval_requests").await, 0);
+        assert_eq!(f.server.received_requests().await.unwrap().len(), 1);
+        let root = f
+            .state
+            .db
+            .collection::<Document>("assistant_messages")
+            .find_one(doc! {"_id":&task.task.root_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!root.contains_key("execution_dispatches"));
+        f.cleanup().await;
+    }
 }
 
 #[path = "proposal_owner_continuation_recovery_tests.rs"]

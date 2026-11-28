@@ -42,7 +42,7 @@ fn event_set(events: &[AgentEvent]) -> AppResult<Vec<Document>> {
 
 /// Server-only ownership captured from the admitted snapshot. Carry the same
 /// worker and event proof through preparation and the provider's send barrier.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub(super) struct TurnAuthority {
     filter: Document,
     events: Vec<Document>,
@@ -102,6 +102,27 @@ pub(super) async fn fence_turn(
     row: &AssistantConversation,
 ) -> AppResult<()> {
     TurnAuthority::capture(row)?.fence(db, session).await
+}
+
+pub(super) async fn fence_original_task(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+) -> AppResult<()> {
+    if db
+        .collection::<Document>("assistant_messages")
+        .update_one(
+            continuation::original_task_filter(row)?,
+            doc! {"$inc":{"execution_dispatch_fence":1_i64}},
+        )
+        .session(session)
+        .await?
+        .matched_count
+        != 1
+    {
+        return Err(refused());
+    }
+    Ok(())
 }
 
 /// Drop only invalid entries in the retained-execution event namespace. This
@@ -265,7 +286,10 @@ async fn stamp_fresh(
 ) -> AppResult<()> {
     let mut fresh: Vec<_> = requests
         .iter()
-        .filter(|request| proposal(request).is_ok_and(|p| p.owner_continuation.is_none()))
+        .filter(|request| {
+            !settled_success(row, request)
+                && proposal(request).is_ok_and(|p| p.owner_continuation.is_none())
+        })
         .map(|request| request.id.clone())
         .collect();
     fresh.sort();
@@ -277,7 +301,8 @@ async fn stamp_fresh(
             request.status == "approved" && matches!(p.state.as_str(), "queued" | "preparing");
         let unsent_decision = matches!(request.status.as_str(), "rejected" | "expired")
             && matches!(p.state.as_str(), "denied" | "expired" | "cancelled");
-        if p.owner_continuation.is_some()
+        if settled_success(row, request)
+            || p.owner_continuation.is_some()
             || !(blocked || actionable || unsent_decision)
             || !continuation::eligible(row, p, version)
         {
@@ -645,6 +670,30 @@ fn validate(
     Ok(state)
 }
 
+/// A current admitted worker may settle an exact expired/completed root without
+/// promoting continuation authority. Missing or changed roots are not this case.
+async fn terminal_task(
+    db: &Database,
+    session: &mut ClientSession,
+    row: &AssistantConversation,
+) -> AppResult<bool> {
+    let mut root = continuation::original_task_filter(row)?;
+    root.insert(
+        "$expr",
+        doc! {"$or":[
+            {"$lte":["$execution_task.hard_deadline","$$NOW"]},
+            {"$eq":["$execution_task_completed",true]},
+        ]},
+    );
+    Ok(db
+        .collection::<Document>("assistant_messages")
+        .update_one(root, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
+        .session(session)
+        .await?
+        .matched_count
+        == 1)
+}
+
 /// Verify admitted proofs and their joined handoff. Older already-admitted
 /// turns also persist refusal intent before sending; mixed wakes never need
 /// optional continuation readiness to retain that refusal.
@@ -695,8 +744,7 @@ pub(super) async fn admit(
             .filter(|proof| !proof.blocked && proof.released_turn_id.is_none())
             && let Some(group) = cohort(request)?
         {
-            work |= (proof.version == 2
-                || (proof.version == 3 && proof.admission_handoff != proof.handoff))
+            work |= matches!(proof.version, 2 | 3)
                 && request.status == "approved"
                 && p.delivered_turn_id.is_none()
                 && p.state == "completed"
@@ -742,29 +790,6 @@ pub(super) async fn admit(
     {
         return Ok(None);
     }
-    if !blocked {
-        let pending = requests.iter().any(|request| {
-            proposal(request).is_ok_and(|p| {
-                p.delivered_turn_id.is_none()
-                    && p.owner_continuation.as_ref().is_some_and(|proof| {
-                        matches!(proof.version, 2 | 3)
-                            && !proof.blocked
-                            && proof.released_turn_id.is_none()
-                    })
-            })
-        });
-        match crate::services::security_readiness_service::serving_report(
-            &state.db,
-            continuation::READINESS,
-        )
-        .await
-        {
-            Ok(report) if report.serving_ready => {}
-            Err(error) if pending => return Err(error),
-            _ if pending => return Err(AppError::SecurityReadinessUnavailable),
-            _ => return Ok(Some(false)),
-        }
-    }
     let mut session = state.db.client().start_session().await?;
     let bound = session
         .start_transaction()
@@ -782,22 +807,6 @@ pub(super) async fn admit(
                             }
                             return Err(error);
                         }
-                        tasks::fence(db, session, task).await?;
-                        let mut root = tasks::live_filter(task)?;
-                        root.extend(doc! {"user_id":&row.user_id,"conversation_id":&row.id});
-                        if !*blocked {
-                            root.insert("execution_dispatch_evidence_version", 2);
-                        }
-                        if db
-                            .collection::<Document>("assistant_messages")
-                            .update_one(root, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
-                            .session(&mut *session)
-                            .await?
-                            .matched_count
-                            != 1
-                        {
-                            return Err(refused());
-                        }
                         if request_ids(&row.active_turn.as_ref().ok_or_else(refused)?.events)
                             .as_slice()
                             != *admitted
@@ -811,6 +820,56 @@ pub(super) async fn admit(
                                 .any(|request| !proposal(request).is_ok_and(|p| p.task == **task))
                         {
                             return Err(refused());
+                        }
+                        let live_root: AppResult<()> = async {
+                            tasks::fence(db, session, task).await?;
+                            let mut root = tasks::live_filter(task)?;
+                            root.extend(doc! {"user_id":&row.user_id,"conversation_id":&row.id});
+                            if !*blocked {
+                                root.insert("execution_dispatch_evidence_version", 2);
+                            }
+                            if db
+                                .collection::<Document>("assistant_messages")
+                                .update_one(root, doc! {"$inc":{"execution_dispatch_fence":1_i64}})
+                                .session(&mut *session)
+                                .await?
+                                .matched_count
+                                != 1
+                            {
+                                return Err(refused());
+                            }
+                            Ok(())
+                        }
+                        .await;
+                        if let Err(error) = live_root {
+                            if error.is_forbidden() && terminal_task(db, session, row).await? {
+                                block_in(db, session, &current).await?;
+                                return Ok(true);
+                            }
+                            return Err(error);
+                        }
+                        if !*blocked {
+                            let pending = current.iter().any(|request| {
+                                proposal(request).is_ok_and(|p| {
+                                    p.delivered_turn_id.is_none()
+                                        && p.owner_continuation.as_ref().is_some_and(|proof| {
+                                            matches!(proof.version, 2 | 3)
+                                                && !proof.blocked
+                                                && proof.released_turn_id.is_none()
+                                        })
+                                })
+                            });
+                            match crate::services::security_readiness_service::serving_report(
+                                db,
+                                continuation::READINESS,
+                            )
+                            .await
+                            {
+                                Ok(report) if report.serving_ready => {}
+                                Err(error) if pending => return Err(error),
+                                _ if pending => return Err(AppError::SecurityReadinessUnavailable),
+                                _ => return Ok(false),
+                            }
                         }
                         // Retry contenders reload both effect claims and refusal intent.
                         // A concurrent winner cannot have its blocked proof overwritten.

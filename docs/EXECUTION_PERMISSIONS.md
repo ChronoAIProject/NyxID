@@ -519,8 +519,16 @@ conversation key, model/agent, Stop, database-time turn lease and complete store
 event set. Reordering and identical duplicate events do not create new authority.
 Worker/event loss is an error, including loss after batch admission; it cannot
 become the optional-readiness fallback or retire another worker's operation grant.
-Only an explicit disabled-enrollment result after this live authority check takes
-the normal not-sent cancellation path. The provider capability carries the same
+An explicit disabled-enrollment result or an exact original task that expires
+or completes after named-event admission takes the normal not-sent cancellation
+path only after this live authority check. The terminal-root check uses database
+time and preserves the original version, root, epoch, actor, audience, source,
+deadline and parent identity. A missing or changed root does not qualify. Optional
+model readiness cannot prevent this receipt settlement. Cancellation rechecks
+the original root and exact still-unsent proposal state/claim before atomically
+retiring its eligible one-use grant; it grants no execution or model release.
+A concurrent state change requires a fresh status check without another send.
+The provider capability carries the same
 captured authority through the actual send barrier. A pre-send refusal result
 also requires that authority and the exact preparing claim before retiring a grant.
 A known dispatched provider receipt retains its exact operation/claim/state fence
@@ -551,7 +559,10 @@ and also protects unmarked legacy roots without enrolling them in automatic
 continuation. Their approved operations retain the normal single-send receipt
 path. Unsupported source lanes retain their existing admission and resume paths.
 A known successful released or delivered observation stays outside a fresh
-continuation group. Its immutable earlier release cannot be joined or launched
+continuation group, including a delivered historical row without an owner marker
+already present in a queued or replayed wake. It receives no new marker and does
+not enter fresh membership; maintenance does not enqueue delivered rows. Its
+immutable earlier release cannot be joined or launched
 again, while independently approved new members can promote and complete their
 own proof even when admitted beside that observation. Their final settlement can
 publish the old receipt alongside the new result: each release ID is preserved,
@@ -571,7 +582,12 @@ and receipt delivery stay attributed to their actual releasing turn, independent
 of later messages in the same conversation.
 After normal model/context preparation, an atomic batch release fences the live
 worker, task, source, actor and key before the request can be sealed for model
-I/O. Release uses MongoDB time for turn/key expiry. An explicit turn lease must
+I/O. The continuation captures the complete turn authority when prepared and
+reuses that proof at release, including exact decision events and a legacy
+worker identity without an execution attempt. Supplying a later snapshot cannot
+rebind the prepared capability. Changed worker/events leave its release unused;
+an independently admitted legitimate recovery can prepare and release once.
+Release uses MongoDB time for turn/key expiry. An explicit turn lease must
 be strictly in the future; null or missing leases use `started_at` plus the
 engine's active-turn TTL, with the same strict expiry. An explicit expired lease
 never falls back to a fresh start date. Stop and exact worker/epoch/claim fences

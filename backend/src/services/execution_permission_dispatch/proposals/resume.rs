@@ -265,12 +265,22 @@ pub(crate) async fn resume_turn(
             {
                 return Err(error);
             }
+            let cancel_filter = doc! {
+                "_id":id,"user_id":&row.user_id,"status":"approved",
+                "execution_proposal.v1.conversation_id":&row.id,
+                "execution_proposal.v1.key_id":&row.credential_api_key_id,
+                "execution_proposal.v1.state":&p.state,
+                "execution_proposal.v1.claim_id":&p.claim_id,
+                "execution_proposal.v1.effect_id":&p.effect_id,
+                "execution_proposal.v1.grant_id":&p.grant_id,
+                "execution_proposal.v1.prepared_digest":&p.prepared_digest,
+            };
             let mut session = state.db.client().start_session().await?;
             let cancelled = session
                 .start_transaction()
                 .and_run(
-                    (&state.db, row, &p.task, id),
-                    |session, (db, row, task, id)| {
+                    (&state.db, row, &p.task, &cancel_filter),
+                    |session, (db, row, task, filter)| {
                         Box::pin(async move {
                             let result: AppResult<bool> = async {
                                 super::batch::fence_turn(db, session, row).await?;
@@ -286,10 +296,23 @@ pub(crate) async fn resume_turn(
                                             ) => {}
                                     Err(error) => return Err(error),
                                 }
+                                if continuation::owner_task(row).is_some() {
+                                    super::batch::fence_original_task(db, session, row).await?;
+                                }
+                                if db
+                                    .collection::<Document>(REQUESTS)
+                                    .find_one(assistant_selector((*filter).clone()))
+                                    .projection(doc! {"_id":1})
+                                    .session(&mut *session)
+                                    .await?
+                                    .is_none()
+                                {
+                                    return Ok(false);
+                                }
                                 lifecycle::cancel_in_session(
                                     db,
                                     session,
-                                    doc! {"_id":*id},
+                                    (*filter).clone(),
                                     "authority_or_task_unavailable",
                                 )
                                 .await?;
@@ -307,7 +330,7 @@ pub(crate) async fn resume_turn(
             notes.push(if cancelled {
                 "The operation was not sent because its authority or task is no longer available."
             } else {
-                "The operation remains queued for a fresh authority check; nothing was sent."
+                "The operation requires a fresh status check; no new operation was sent."
             }.into());
             continue;
         }
